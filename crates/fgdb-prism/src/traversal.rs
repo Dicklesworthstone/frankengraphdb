@@ -309,6 +309,8 @@ pub(crate) fn run<C>(
         | FnxAlgorithm::ClusteringCoefficient
         | FnxAlgorithm::Cdlp { .. }
         | FnxAlgorithm::DirectedClusteringCoefficient
+        | FnxAlgorithm::InDegreeCentrality
+        | FnxAlgorithm::OutDegreeCentrality
         | FnxAlgorithm::Foundation(_) => Err(FnxExecutionError::InvalidUpstreamResult),
     }
 }

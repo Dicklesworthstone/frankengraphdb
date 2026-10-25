@@ -273,6 +273,7 @@ fn execution_pass_work(call: &FnxCallSpec, graph: &SealedGraphView) -> Result<us
     if matches!(
         call.algorithm(),
         FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality)
+            | FnxAlgorithm::OutDegreeCentrality
     ) {
         // One admitted degree per vertex, initialization and completion.
         add(graph.node_count(), 2)
@@ -320,7 +321,51 @@ impl DegreeCentrality {
         Ok(())
     }
 
+    fn push_directed(&mut self, degree: Option<usize>) -> Result<()> {
+        let degree = degree.ok_or(ExecutionError::InvalidUpstreamResult)?;
+        if self.values.len() == self.nodes || degree > self.nodes {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        }
+        self.values.push(if self.nodes == 1 {
+            1.0
+        } else {
+            // The pinned directed routines divide, rather than multiply by a
+            // reciprocal. Preserve their bits, including self-loop degrees.
+            degree as f64 / (self.nodes - 1) as f64
+        });
+        Ok(())
+    }
+
     fn finish(self) -> Result<KernelOutput> {
+        self.finish_with_witness(
+            "degree_centrality",
+            0,
+            "O(|V|) admitted degree-directory reads",
+        )
+    }
+
+    fn finish_directed(self, incoming: bool, edges: usize) -> Result<KernelOutput> {
+        self.finish_with_witness(
+            if incoming {
+                "fgdb_in_degree_centrality"
+            } else {
+                "fgdb_out_degree_centrality"
+            },
+            edges,
+            if incoming {
+                "O(|V| log(1+H) + H log(1+|V|)) compressed row visits; H = retained incidences"
+            } else {
+                "O(|V|) admitted degree-directory reads"
+            },
+        )
+    }
+
+    fn finish_with_witness(
+        self,
+        algorithm: &str,
+        edges: usize,
+        complexity: &str,
+    ) -> Result<KernelOutput> {
         if self.values.len() != self.nodes {
             return Err(ExecutionError::InvalidUpstreamResult.into());
         }
@@ -328,10 +373,10 @@ impl DegreeCentrality {
             values: KernelValues::Scores(self.values),
             row_count: self.nodes,
             witness: ComplexityWitness {
-                algorithm: "degree_centrality".to_owned(),
-                complexity_claim: "O(|V|) admitted degree-directory reads".to_owned(),
+                algorithm: algorithm.to_owned(),
+                complexity_claim: complexity.to_owned(),
                 nodes_touched: self.nodes,
-                edges_scanned: 0,
+                edges_scanned: edges,
                 queue_peak: 0,
             },
         })
@@ -350,6 +395,46 @@ fn degree_centrality(
     }
     checkpoint()?;
     output.finish()
+}
+
+fn directed_degree_centrality(
+    graph: &impl Rows,
+    incoming: bool,
+    checkpoint: &mut impl FnMut() -> Result<()>,
+) -> Result<KernelOutput> {
+    checkpoint()?;
+    let n = graph.node_count();
+    let mut counts = reserve(if incoming { n } else { 0 })?;
+    let mut edges = 0usize;
+    if incoming {
+        for _ in 0..n {
+            checkpoint()?;
+            counts.push(0usize);
+        }
+        for source in 0..n {
+            checkpoint()?;
+            let mut row = graph.open(source)?;
+            while let Some((target, _)) = row.next()? {
+                checkpoint()?;
+                let count = counts
+                    .get_mut(target)
+                    .ok_or(ExecutionError::InvalidUpstreamResult)?;
+                *count = add(*count, 1)?;
+                edges = add(edges, 1)?;
+            }
+        }
+    }
+    let mut output = DegreeCentrality::new(n)?;
+    for vertex in 0..n {
+        checkpoint()?;
+        output.push_directed(if incoming {
+            counts.get(vertex).copied()
+        } else {
+            graph.degree(vertex)
+        })?;
+    }
+    checkpoint()?;
+    output.finish_directed(incoming, edges)
 }
 
 fn pagerank(
@@ -551,6 +636,8 @@ impl FnxCallSpec {
                 | FnxAlgorithm::Triangles
                 | FnxAlgorithm::ClusteringCoefficient
                 | FnxAlgorithm::DirectedClusteringCoefficient
+                | FnxAlgorithm::InDegreeCentrality
+                | FnxAlgorithm::OutDegreeCentrality
                 | FnxAlgorithm::Foundation(
                     FoundationAlgorithm::DegreeCentrality
                         | FoundationAlgorithm::ClosenessCentrality
@@ -683,6 +770,23 @@ impl FnxCallSpec {
         }
         let pass = execution_pass_work(self, graph)?;
         let (kernel, estimated_work, workspace, source) = match self.algorithm() {
+            FnxAlgorithm::InDegreeCentrality | FnxAlgorithm::OutDegreeCentrality => {
+                admission.rows(n)?;
+                let incoming = matches!(self.algorithm(), FnxAlgorithm::InDegreeCentrality);
+                (
+                    if incoming {
+                        "fgdb-prism/sealed-in-degree-v1"
+                    } else {
+                        "fgdb-prism/sealed-out-degree-directory-v1"
+                    },
+                    pass,
+                    mul(
+                        n,
+                        size_of::<f64>() + if incoming { size_of::<usize>() } else { 0 },
+                    )?,
+                    None,
+                )
+            }
             FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality) => {
                 admission.rows(n)?;
                 (
@@ -760,6 +864,13 @@ impl FnxCallSpec {
         let rows = SealedRows { cx, graph };
         let mut control = || checkpoint(cx);
         let output = match self.algorithm() {
+            FnxAlgorithm::InDegreeCentrality | FnxAlgorithm::OutDegreeCentrality => {
+                directed_degree_centrality(
+                    &rows,
+                    matches!(self.algorithm(), FnxAlgorithm::InDegreeCentrality),
+                    &mut control,
+                )?
+            }
             FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality) => {
                 degree_centrality(&rows, &mut control)?
             }
@@ -1026,6 +1137,7 @@ fn finish_encoded_bfs(
             FnxAlgorithm::Triangles
                 | FnxAlgorithm::ClusteringCoefficient
                 | FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality)
+                | FnxAlgorithm::OutDegreeCentrality
         )
     {
         witness

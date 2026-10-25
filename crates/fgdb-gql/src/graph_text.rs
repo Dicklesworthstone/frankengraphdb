@@ -727,6 +727,11 @@ struct Edge<'a> {
     relation: Option<Name<'a>>,
     /// The further types of an alternation `:A|B|:C`, after `relation`.
     alternatives: Vec<Name<'a>>,
+    /// The relationship type tests a WHERE writes on this edge, one per
+    /// top-level conjunct, each a set of alternatives (`r:T`, `type(r) =
+    /// 'T'`, `type(r) IN [...]`). They intersect with the written type, and
+    /// a type no catalog names matches nothing (fgdb-fj106 design 1).
+    type_tests: Vec<Vec<Name<'a>>>,
     direction: GlaDirection,
     destination: Name<'a>,
     walk: Option<crate::GraphWalkBounds>,

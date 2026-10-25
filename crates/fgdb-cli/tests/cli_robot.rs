@@ -2922,6 +2922,22 @@ fn buffered_prism_cli_preserves_analytics_projection_history_and_delivery() {
         ),
         ("directed", "CALL fnx.cdlp(2) YIELD vertex,component"),
         (
+            "directed",
+            "CALL fnx.in_degree_centrality() YIELD vertex,score",
+        ),
+        (
+            "directed",
+            "CALL fnx.out_degree_centrality() YIELD vertex,score",
+        ),
+        (
+            "reversed",
+            "CALL fnx.in_degree_centrality() YIELD vertex,score",
+        ),
+        (
+            "reversed",
+            "CALL fnx.out_degree_centrality() YIELD vertex,score",
+        ),
+        (
             "reversed",
             "CALL fnx.single_source_shortest_path_length($source) YIELD vertex,distance",
         ),
@@ -2952,6 +2968,15 @@ fn buffered_prism_cli_preserves_analytics_projection_history_and_delivery() {
         args.extend_from_slice(&["--direction", direction, call]);
         let output = buffered_analytics_matches_decoded(&db, &args);
         assert_eq!(output.sequence("rows"), basis);
+        if call.contains("_degree_centrality") {
+            let sealed = sealed_analytics_matches_decoded(&db, &args);
+            assert_eq!(sealed.events, output.events);
+            let mut cooperative = vec!["--sealed", "--sealed-quantum", "1"];
+            cooperative.extend_from_slice(&args);
+            let cooperative = db.command("query", &cooperative);
+            cooperative.success();
+            assert_eq!(cooperative.events, output.events);
+        }
         if call == dijkstra {
             let distances: BTreeMap<_, f64> = output
                 .events

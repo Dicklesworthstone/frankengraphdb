@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 14;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 15;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -352,7 +352,25 @@ const SIGNATURES: &[FnxSignature] = &[
         complexity: crate::directed_clustering::COMPLEXITY,
         execution_kernel: "fgdb-prism/directed-clustering-oriented-multiplicity-v2",
     },
+    directed_degree("fnx.in_degree_centrality", "fgdb-prism/in-degree-csr-v1"),
+    directed_degree("fnx.out_degree_centrality", "fgdb-prism/out-degree-csr-v1"),
 ];
+
+const fn directed_degree(name: &'static str, execution_kernel: &'static str) -> FnxSignature {
+    FnxSignature {
+        name,
+        graph_input_arity: 1,
+        parameters: &[],
+        outputs: &[FnxOutput::Vertex, FnxOutput::Score],
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Directed,
+        numeric_profile: "fnx-directed-degree-f64-division-v1",
+        rng_policy: "none",
+        graph_laws: "explicit directed simple projection; unweighted; self-loops count once; selected in/out degree divided by (|V|-1); a single vertex scores 1; isolates retained",
+        complexity: "O(|V| + |E|)",
+        execution_kernel,
+    }
+}
 
 /// A catalog row: one undirected, unweighted, parameter-free graph input
 /// over the admitted decoded projection, with results in VId order. Its
@@ -639,6 +657,8 @@ pub enum FnxAlgorithm {
     },
     /// Directed arcs among the union of each vertex's in/out neighbors.
     DirectedClusteringCoefficient,
+    InDegreeCentrality,
+    OutDegreeCentrality,
 }
 impl FnxAlgorithm {
     pub fn signature(self) -> &'static FnxSignature {
@@ -654,6 +674,8 @@ impl FnxAlgorithm {
             Self::Foundation(algorithm) => 8 + algorithm as usize,
             Self::Cdlp { .. } => 14,
             Self::DirectedClusteringCoefficient => 15,
+            Self::InDegreeCentrality => 16,
+            Self::OutDegreeCentrality => 17,
         }]
     }
 }
@@ -1020,6 +1042,8 @@ impl FnxCallSpec {
                 FnxAlgorithm::Foundation(FoundationAlgorithm::EigenvectorCentrality)
             }
             "fnx.core_number" => FnxAlgorithm::Foundation(FoundationAlgorithm::CoreNumber),
+            "fnx.in_degree_centrality" => FnxAlgorithm::InDegreeCentrality,
+            "fnx.out_degree_centrality" => FnxAlgorithm::OutDegreeCentrality,
             "fnx.cdlp" => {
                 let max_iter = match arguments[0] {
                     FnxArgument::Integer(value) if value >= 0 => usize::try_from(value).ok(),

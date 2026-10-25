@@ -5,7 +5,7 @@
 
 use fgdb_prism::*;
 use fgdb_types::{CommitSeq, EId, VId, ids::ObjectId};
-use fnx_classes::Graph;
+use fnx_classes::{Graph, digraph::DiGraph};
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 
@@ -15,6 +15,15 @@ use std::convert::Infallible;
 const PATH: [u128; 4] = [40, 10, 30, 20];
 
 fn view(vertices: &[u128], edges: &[(u128, u128)], loops: SelfLoopPolicy) -> SnapshotGraphView {
+    view_direction(vertices, edges, loops, Directedness::Undirected)
+}
+
+fn view_direction(
+    vertices: &[u128],
+    edges: &[(u128, u128)],
+    loops: SelfLoopPolicy,
+    directedness: Directedness,
+) -> SnapshotGraphView {
     let vertices: Vec<VId> = vertices.iter().map(|&id| VId(id)).collect();
     let edges: Vec<ProjectionEdge> = edges
         .iter()
@@ -34,7 +43,7 @@ fn view(vertices: &[u128], edges: &[(u128, u128)], loops: SelfLoopPolicy) -> Sna
         &vertices,
         &edges,
         ProjectionSpec {
-            directedness: Directedness::Undirected,
+            directedness,
             parallel_edges: ParallelEdgePolicy::Reject,
             self_loops: loops,
         },
@@ -54,6 +63,175 @@ fn path() -> SnapshotGraphView {
         &[(PATH[0], PATH[1]), (PATH[1], PATH[2]), (PATH[2], PATH[3])],
         SelfLoopPolicy::Keep,
     )
+}
+
+#[test]
+fn directed_degrees_match_pinned_fnx_and_independent_counts() {
+    // Full-width identities, all 512 three-vertex directed topologies, including
+    // loops, isolates, reciprocals and unequal incoming/outgoing degrees.
+    let vertices = [u128::MAX, 0, 1 << 100];
+    for mask in 0usize..512 {
+        let edges: Vec<_> = (0..9)
+            .filter(|bit| mask & (1 << bit) != 0)
+            .map(|bit| (vertices[bit / 3], vertices[bit % 3]))
+            .collect();
+        check_directed_degrees(&vertices, &edges);
+    }
+    check_directed_degrees(&[], &[]);
+    check_directed_degrees(&[u128::MAX], &[]);
+    check_directed_degrees(&[u128::MAX], &[(u128::MAX, u128::MAX)]);
+    // Division and multiplication by the reciprocal differ for 5/6.
+    check_directed_degrees(
+        &[0, 1, 2, 3, 4, 5, 6],
+        &[(0, 1), (0, 2), (0, 3), (0, 4), (0, 5)],
+    );
+}
+
+fn check_directed_degrees(vertices: &[u128], edges: &[(u128, u128)]) {
+    let graph = view_direction(
+        vertices,
+        edges,
+        SelfLoopPolicy::Keep,
+        Directedness::Directed,
+    );
+    let mut reference = DiGraph::strict();
+    for &vertex in vertices {
+        reference.add_node(vertex.to_string());
+    }
+    for &(source, target) in edges {
+        reference
+            .add_edge(source.to_string(), target.to_string())
+            .unwrap();
+    }
+    for (name, incoming, oracle) in [
+        (
+            "in_degree_centrality",
+            true,
+            fnx_algorithms::in_degree_centrality(&reference),
+        ),
+        (
+            "out_degree_centrality",
+            false,
+            fnx_algorithms::out_degree_centrality(&reference),
+        ),
+    ] {
+        let expected: BTreeMap<_, _> = vertices
+            .iter()
+            .map(|&vertex| {
+                let degree = edges
+                    .iter()
+                    .filter(|&&(source, target)| {
+                        if incoming {
+                            target == vertex
+                        } else {
+                            source == vertex
+                        }
+                    })
+                    .count();
+                let score = if vertices.len() == 1 {
+                    1.0
+                } else {
+                    degree as f64 / (vertices.len() - 1) as f64
+                };
+                (VId(vertex), score.to_bits())
+            })
+            .collect();
+        let foundation: BTreeMap<_, _> = oracle
+            .into_iter()
+            .map(|row| (VId(row.node.parse().unwrap()), row.score.to_bits()))
+            .collect();
+        assert_eq!(foundation, expected, "independent count: {name}");
+        let actual = run(name, &graph);
+        assert_eq!(degree_bits(&actual), expected, "{name}: {edges:?}");
+        assert_eq!(
+            actual,
+            run(name, &graph),
+            "deterministic call and certificate"
+        );
+        assert_eq!(
+            actual.certificate.witness.edges_scanned,
+            if incoming { edges.len() } else { 0 }
+        );
+        assert!(actual.certificate.witness.algorithm.starts_with("fgdb_"));
+    }
+}
+
+#[test]
+fn directed_degree_graph_laws_limits_and_live_arithmetic_cancellation() {
+    let n = 5000usize;
+    let vertices: Vec<_> = (0..n as u128).collect();
+    let edges: Vec<_> = (1..n as u128).map(|target| (0, target)).collect();
+    let graph = view_direction(
+        &vertices,
+        &edges,
+        SelfLoopPolicy::Keep,
+        Directedness::Directed,
+    );
+    let allowed = FnxExecutionLimits {
+        max_result_rows: n,
+        ..limits(1 << 30)
+    };
+    for (name, poll) in [("in_degree_centrality", 3), ("out_degree_centrality", 2)] {
+        let procedure = call(name);
+        let mut meter = NativeControl {
+            stop: Some(NativeStop::Poll(poll)),
+            ..NativeControl::default()
+        };
+        assert!(
+            matches!(procedure.execute(&graph, allowed, &mut meter), Err(FnxExecutionError::Cancelled(NativeStop::Poll(at))) if at == poll)
+        );
+        // No row delivery has started. For incoming degree, poll three is in
+        // the real hub-row gather, after the count vector was initialized.
+        assert_eq!(meter.units, n + 1);
+        let result = procedure
+            .execute(&graph, allowed, &mut NativeControl::default())
+            .unwrap();
+        assert_eq!(result.rows.len(), n);
+        let work = result.certificate.estimated_work;
+        assert_eq!(
+            work,
+            if name == "in_degree_centrality" {
+                3 * n + edges.len()
+            } else {
+                n
+            }
+        );
+        assert!(matches!(
+            procedure.execute(
+                &graph,
+                FnxExecutionLimits {
+                    max_estimated_work: work - 1,
+                    ..allowed
+                },
+                &mut NativeControl::default()
+            ),
+            Err(FnxExecutionError::LimitExceeded {
+                resource: "estimated work",
+                ..
+            })
+        ));
+        assert!(matches!(
+            procedure.execute(
+                &graph,
+                FnxExecutionLimits {
+                    max_result_rows: n - 1,
+                    ..allowed
+                },
+                &mut NativeControl::default()
+            ),
+            Err(FnxExecutionError::LimitExceeded {
+                resource: "result rows",
+                ..
+            })
+        ));
+        assert!(matches!(
+            procedure.execute(&path(), allowed, &mut NativeControl::default()),
+            Err(FnxExecutionError::GraphKind {
+                required: FnxGraphKind::Directed
+            })
+        ));
+        assert!(FnxCallSpec::bind(&format!("CALL fnx.{name}(1)"), &FnxParameters::new()).is_err());
+    }
 }
 fn limits(max_estimated_work: usize) -> FnxExecutionLimits {
     FnxExecutionLimits {

@@ -45,6 +45,10 @@ struct Parsed<'a> {
     /// `v:L` label predicates. Valid only as top-level AND conjuncts, where
     /// each is the label `(v:L)` writes inline in this scope.
     labels: Vec<(Name<'a>, Name<'a>)>,
+    /// Relationship type tests on this clause's edges (relation_type_test),
+    /// each an edge and its admitted types. Valid only as top-level AND
+    /// conjuncts, as labels are.
+    relations: Vec<(Name<'a>, Vec<Name<'a>>)>,
 }
 impl<'a> Parsed<'a> {
     fn push(&mut self, item: SyntaxItem<'a>, at: usize) -> Result<(), GraphPatternTextError> {
@@ -65,6 +69,7 @@ impl<'a> Parser<'a> {
             correlations: Vec::new(),
             comparisons: Vec::new(),
             labels: Vec::new(),
+            relations: Vec::new(),
         };
         self.boolean_or(0, &mut parsed)?;
         if let Some(&(variable, _)) = parsed.labels.first() {
@@ -79,6 +84,29 @@ impl<'a> Parser<'a> {
                 ));
             }
             self.syntax.labels.extend(parsed.labels.iter().copied());
+        }
+        if let Some(&(variable, _)) = parsed.relations.first() {
+            // A type test is not a Boolean leaf: flat, it narrows its edge.
+            if parsed.extended {
+                return Err(error(
+                    variable.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "a relationship type test only as a top-level AND conjunct",
+                    ),
+                ));
+            }
+            for (variable, types) in parsed.relations.drain(..) {
+                let edge = self
+                    .syntax
+                    .edges
+                    .iter_mut()
+                    .find(|edge| {
+                        edge.walk.is_none()
+                            && edge.variable.is_some_and(|name| name.text == variable.text)
+                    })
+                    .expect("relation_type_test admits only this clause's edges");
+                edge.type_tests.push(types);
+            }
         }
         if let Some(&(_, _, _, at)) = parsed.correlations.first() {
             // Under OR, NOT or parentheses the equality is no longer a join
@@ -233,6 +261,9 @@ impl<'a> Parser<'a> {
             parsed.comparisons.push(comparison);
             return Ok(());
         }
+        if self.relation_type_test(parsed)? {
+            return Ok(());
+        }
         if self.starts_scalar_predicate()? {
             self.admit_compound_leaf()?;
             let (columns, program) = self.boolean_scalar_expression()?;
@@ -326,6 +357,164 @@ impl<'a> Parser<'a> {
             .expect("one positive predicate was just parsed");
         parsed.extended |= matches!(filter, Filter::VertexNull { .. });
         parsed.push(SyntaxItem::Atom(filter), at)
+    }
+
+    /// A relationship type test on a fixed-length edge of this clause
+    /// (fgdb-fj106 design 1): `r:T` (each further `:T` another test),
+    /// `type(r) = 'T'`, `'T' = type(r)` or `type(r) IN ['A', 'B']`, which
+    /// the comparison's end must follow. No program item: the edge's type
+    /// narrows to the tested ones (boolean_predicates). Anything else
+    /// consumes nothing and parses as before.
+    fn relation_type_test(
+        &mut self,
+        parsed: &mut Parsed<'a>,
+    ) -> Result<bool, GraphPatternTextError> {
+        if let TokenKind::Word(word) = self.current.kind
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b':'))
+            && self.clause_edge(word)
+        {
+            let variable = self.name()?;
+            while self.take(b':')? {
+                self.capacity(
+                    self.predicates,
+                    MAX_PATTERN_PREDICATES,
+                    crate::algebra::PatternLimitDimension::Predicates,
+                )?;
+                parsed.relations.push((variable, vec![self.schema_name()?]));
+                self.predicates += 1;
+            }
+            return Ok(true);
+        }
+        let snapshot = (self.lexer.clone(), self.current);
+        if let Some(test) = self.type_function_test()? {
+            self.capacity(
+                self.predicates,
+                MAX_PATTERN_PREDICATES,
+                crate::algebra::PatternLimitDimension::Predicates,
+            )?;
+            parsed.relations.push(test);
+            self.predicates += 1;
+            return Ok(true);
+        }
+        (self.lexer, self.current) = snapshot;
+        Ok(false)
+    }
+
+    /// Whether `word` names a fixed-length relationship of this clause that
+    /// no comprehension local shadows: the edges whose type a test narrows.
+    fn clause_edge(&self, word: &str) -> bool {
+        !self.elements.contains(&word)
+            && self.syntax.edges.iter().any(|edge| {
+                edge.walk.is_none() && edge.variable.is_some_and(|name| name.text == word)
+            })
+    }
+
+    /// `type(r) = 'T'`, `'T' = type(r)` or `type(r) IN [...]`, read on the
+    /// parser itself; `None` when the text is not one (the caller restores
+    /// the lexer).
+    fn type_function_test(
+        &mut self,
+    ) -> Result<Option<(Name<'a>, Vec<Name<'a>>)>, GraphPatternTextError> {
+        if let Some(literal) = self.type_literal()? {
+            if !self.take(b'=')? || self.is_punct(b'~') {
+                return Ok(None);
+            }
+            let Some(variable) = self.type_call()? else {
+                return Ok(None);
+            };
+            return Ok(self.type_test_ends()?.then(|| (variable, vec![literal])));
+        }
+        let Some(variable) = self.type_call()? else {
+            return Ok(None);
+        };
+        let types = if self.take(b'=')? {
+            if self.is_punct(b'~') {
+                return Ok(None);
+            }
+            let Some(literal) = self.type_literal()? else {
+                return Ok(None);
+            };
+            vec![literal]
+        } else if self.take_word("IN")? {
+            if !self.take(b'[')? {
+                return Ok(None);
+            }
+            let mut types = Vec::new();
+            if !self.take(b']')? {
+                loop {
+                    let Some(literal) = self.type_literal()? else {
+                        return Ok(None);
+                    };
+                    types.push(literal);
+                    if self.take(b']')? {
+                        break;
+                    }
+                    if !self.take(b',')? {
+                        return Ok(None);
+                    }
+                }
+            }
+            types
+        } else {
+            return Ok(None);
+        };
+        Ok(self.type_test_ends()?.then(|| (variable, types)))
+    }
+
+    /// `type(r)` over a fixed-length edge of this clause.
+    fn type_call(&mut self) -> Result<Option<Name<'a>>, GraphPatternTextError> {
+        if !self.is_word("TYPE")
+            || !matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+        {
+            return Ok(None);
+        }
+        self.advance()?;
+        self.advance()?;
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(None);
+        };
+        if !self.clause_edge(word) {
+            return Ok(None);
+        }
+        let variable = Name {
+            text: word,
+            at: self.current.at,
+        };
+        self.advance()?;
+        Ok(self.take(b')')?.then_some(variable))
+    }
+
+    /// A quoted type name with no escape, as the name it spells.
+    fn type_literal(&mut self) -> Result<Option<Name<'a>>, GraphPatternTextError> {
+        let TokenKind::Quoted(raw) = self.current.kind else {
+            return Ok(None);
+        };
+        let delimiter = raw.as_bytes()[0];
+        let body = &raw[1..raw.len() - 1];
+        if body.contains('\\') || body.as_bytes().contains(&delimiter) {
+            return Ok(None);
+        }
+        let name = Name {
+            text: body,
+            at: self.current.at + 1,
+        };
+        self.advance()?;
+        Ok(Some(name))
+    }
+
+    /// Whether the type test ends here: at a Boolean connective, a closing
+    /// bracket, a comprehension's `|`, a clause keyword or the end.
+    fn type_test_ends(&self) -> Result<bool, GraphPatternTextError> {
+        Ok(match self.current.kind {
+            TokenKind::End | TokenKind::Punct(b')' | b'}' | b']' | b'|') => true,
+            TokenKind::Word(word) => {
+                ["AND", "OR", "XOR"]
+                    .iter()
+                    .any(|connective| word.eq_ignore_ascii_case(connective))
+                    || Self::ends_where(word, None)
+            }
+            _ => false,
+        })
     }
 
     /// `q.v = m` or `m = q.v`, where `m` is a bare imported row column after
