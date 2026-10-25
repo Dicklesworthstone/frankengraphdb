@@ -153,8 +153,15 @@ checker registries, implementing entry points, regression sources and live
 tracker were investigated against the twenty goals below. The plan's
 full-strength targets remain the measuring stick. This is not a claim to have
 line-read every byte of its 1.74 MB, all archived alternative designs, or all
-2,297 Rust files. Historical reports and peer receipts are attributed to their
-own cuts; they are not fresh execution of this cut.
+2,297 crate Rust files and 43 tooling Rust files. Historical reports and peer
+receipts are attributed to their own cuts; they are not fresh execution of this cut.
+
+During the run, concurrent work advanced shared `main` through `80bfe7269`
+(graph-element comparison; its commit explicitly says its tests were not run),
+then `50ee0b2d8` and `ae353d937` committed portions of this report. The four-path
+semantic delta was inspected separately and preserved. None of this cut's
+runtime receipts qualifies that later implementation or turns a report commit
+into a passing landing proof.
 
 ### Twenty testable vision goals
 
@@ -226,9 +233,19 @@ The source difference from the previous frozen audit spans 233 files, with
   retained ANN links and a rebuild need not produce the same candidates.
   `fgdb-t38fv`'s residual acceptance was refined without reimplementing this
   connection or granting masked reads a global corpus.
-- Served subscription retirement has a 129-cycle source test; fixed
+- Served subscription retirement has a freshly passing 129-cycle loopback
+  test (one of 36 tests, not 129 additional test cases); fixed
   maintenance/recovery and gate FD/include-discovery repairs also landed.
   A test's presence or an older passing cut is not a fresh complete verdict.
+- Read caches now belong to one opened database with explicit independent
+  allowances and weak exact-snapshot keys (`query_read_cache.rs`/`live.rs`).
+  Contention is polled with cancellation rather than silently deciding
+  retention. Bridge `.9`'s blanket process-global-cache diagnosis is stale;
+  complete RSS, active builders and caller-held clones remain separate costs.
+- Server read admission can upgrade a weak published view during D1/D2 without
+  taking the writer lock (`recovery.rs::read_view`). A failed weak upgrade
+  still falls back to the database lock and can wait during derived publication.
+  Bridge `.8` now separates the landed improvement from that remaining boundary.
 - ctutils 0.4.5 is retained on the existing dependency path. The affected
   0.4.2 security result from the prior audit is not a fresh red on this lock.
 
@@ -266,6 +283,13 @@ and one newer-database scalar conflict. It proposed 20 source-only creates
 and one update while preserving 27 DB-only records. No preview was applied,
 no conflict was force-resolved and no database/WAL was replaced. The old
 duplicate-comment-ID diagnosis alone no longer describes this blocker.
+
+The relation conflicts comprise 31 labels/comments, 33 comments-only,
+35 labels-only, one labels/dependencies/comments and four dependencies/comments
+differences. Fifteen contain removed relation identities in the preview's
+before/after comparison. These are conflicts to review, not authorized
+deletions; no relation delta was applied. The classification is retained as
+`reconcile-classification.json` and appended to existing bridge `.21`.
 
 ### Dependency-ordered bridge and concrete acceptance
 
@@ -345,9 +369,10 @@ integration dependency.
 The skill's frozen generation/refinement requirements were applied to the
 existing granular tasks. No duplicate task or completion-count padding was
 needed. Through `br` only, this audit appended current source, rationale,
-implementation boundaries and executable acceptance to `.16`, `.21`, `.24`,
-`.29`, `.30` and `fgdb-t38fv`. No task status or structural dependency was changed, and no
-issue was closed. Peer-assigned `.23`, `.25` and `.27` work was preserved.
+implementation boundaries and executable acceptance to `.8`, `.9`, `.16`, `.21`,
+`.24`, `.25`, `.27`, `.29`, `.30`, `.34` and `fgdb-t38fv`. No task status or
+structural dependency was changed, and no issue was closed. Peer assignments
+and implementation work were preserved.
 
 Three ambition passes strengthened the existing bridge in place:
 (1) reusable persistent generations rather than repeated resident derivatives;
@@ -355,10 +380,12 @@ Three ambition passes strengthened the existing bridge in place:
 (3) independent semantic/complexity/resource evidence across modes rather
 than broader labels on narrow mechanisms.
 
-Five refinement passes checked current-source omissions and stale diagnoses;
+Six refinement passes checked current-source omissions and stale diagnoses;
 duplicate ownership and real blocking edges; complete positive/error/fault/
 cancellation and quota tests; source/platform/proof-class boundaries; and
-whole-plan consistency without deleting features. The final examined-scope
+whole-plan consistency without deleting features. Follow-up source tracing
+also corrected the stale maintained-index, cache-owner and read-admission
+diagnoses in their existing tasks. The final examined-scope
 read-back found no further task-scope change. This does not assert that every
 historical issue is optimal or independently accepted.
 
@@ -370,6 +397,13 @@ the six deferred records; it does not include the 27 DB-only records. Its first
 recommendation is the historically stale
 seven-crate topology issue despite current registry validity: robot ranking
 is navigation, not evidence that a feature is broken or finished.
+
+After the duplicate report-tree gate was stopped and released its landing
+lease, `scripts/br_sync.sh` was retried with exactly these eleven record IDs.
+It exited 65: 43 dirty DB records cannot fit eleven declared IDs. No export
+ran, no peer record was added to the declared set, and tracked JSONL remains
+unchanged. The refinements are live DB notes, not a git-published work-graph
+landing; attributable convergence remains with `.21`.
 
 ### Executed evidence and remaining qualification
 
@@ -383,15 +417,25 @@ is navigation, not evidence that a feature is broken or finished.
 | Remote tags and releases | Both queries succeed; zero tags, releases `[]`. No release/installability qualification follows from source binaries. |
 | Tracker reconciliation | Read-only preview exits 6 with the 105 conflicts above; no apply. |
 | Native/robot work-graph validation | Active native cycles and three tracked-JSONL `bv` commands exit 0, with the distinct scopes/denominators above. |
-| Frozen Linux workspace engine tests | Dispatched with all features, locked dependencies, no-fail-fast and explicit Linux target; registry-check intentionally excluded from this remote-only probe because its corpus must be checked locally. Final verdict is recorded below when terminal evidence is available. This is not the complete mandatory gate. |
-| Frozen runnable embedded example | Separate exact-base `open_a_database` invocation dispatched; final terminal evidence is recorded below. |
-| Frozen canonical local proof | Original `scripts/local_proof.sh` / `scripts/check.sh` dispatched on the clean exact tree with strict remote offloading for heavy Cargo work. Final manifest/verifier verdict is recorded below. |
+| Frozen Linux workspace engine tests | Wrapper exit 1 after SSH timeout at 7,230 seconds; remote process group SIGKILLed and verified dead. No test-run headers or result summaries were reached. Same-wrapper recovery exits 0, acknowledges terminal ownership and records delivery exit 255 without replay. Runtime assertions are UNRUN, not passed or wrong-answer findings. All features, locked dependencies, no-fail-fast and explicit Linux target were retained; registry-check was excluded only because its corpus must be checked locally. Retrieved crashpack directory is empty. This does not satisfy the mandatory whole-workspace test gate. |
+| Additional frozen core-library probe | `fgdb` and `fgdb-gql` library tests, all features, locked Linux target. Stopped after more than seventy minutes compiling, before any test-run header or result. Cancellation API exits 1 on a daemon-response deadline; original wrapper exits 1 with completion unconfirmed. Supported same-wrapper recovery then exits 0, acknowledges terminal ownership and records delivery exit 255 without replay. Runtime coverage is UNRUN; this is not an oracle failure or a passing subset. The audit did not extend timeouts, change recursion limits or restart the shared daemon. |
+| Frozen runnable embedded example | Exit 0 with terminal acknowledged and exact clean-overlay commit/tree receipt. Three vertices/two edges commit at sequence 1; adjacency and native GQL agree before/after compaction and after every handle is dropped and the database reopened under the production runtime. Not a scale, crash-matrix or performance qualification. |
+| Frozen CLI/server public targets | Exit 0 with exact clean-overlay receipt: `fgdb-cli --test cli_robot` 48 passed and `fgdb-server --test loopback` 36 passed; zero failed/ignored/filtered. Real process-contract and loopback TCP assertions, not all transport/security/HA profiles. |
+| Separate frozen strict Clippy | Exit 0, workspace/all-target/all-feature locked Linux check with `-D warnings` and exact clean-overlay receipt. The separate test build emitted Send-solver future-compatibility warnings in simulation/benchmark code-generation contexts; this Clippy pass does not erase those warnings or prove a completed runtime suite. |
+| Frozen dependency-policy child gate | Exit 0, six passed/zero failed/unrun: current lock audit and all-feature/dev dependency graph plus planted vulnerable-release, foundation-license, registry-source and removed-serde-wrapper controls. This confirms the retained ctutils repair's policy acceptance, not complete protected-crypto or product acceptance. |
+| Frozen canonical local proof | Exit 1, `tree_stable=true`, `verdict=red`; independent bundle verification exits 0 and authenticates that red result and exact Git objects. Core: five pass, three red, one unrun out of nine. Registered: ten pass, thirty unrun out of forty. Original wrapper check/Clippy encountered source-ownership/SSH completion failures; workspace tests were offloader-refused; UBS ratchet was red. Separate successful Clippy and public tests do not rewrite this manifest. |
+| Canonical checker details | Executed original claims, spine, topology, tree-stability and other scripts pass. Threat/unsafe/determinism checks were environment-refused; crypto code generation is unrun on Darwin outside its witnessed ELF target set. UBS's panic/comparison ratchets remain red. The four newly reported security sites were source-adjudicated: `fgdb-cli/tests/native_unwind.rs:22` and `csv_scalar_import.rs:120` use time only in temporary-directory names; `fgdb-protocol/tests/protocol.rs:509–510` are FGP request-header/type-state validation assertions, not HTTP response writes. Those four are false positives, not four vulnerabilities. This scoped review does not adjudicate all other findings or clear the ratchet; no baseline/threshold changed. |
+| Original failed-check recovery | Supported same-wrapper recovery exits 0 with terminal acknowledged, but the recovered delivery exit is 255 versus the earlier daemon 130. Recovery reconciles ownership; it establishes no successful Cargo check and replays no work. |
+| Shared report-tree wrapper attempt | Exit 1; all child verdicts voided after tracked input movement, with zero of nine core and zero of forty registered gates finally attributed as executed. This moving/edited-tree attempt is not a product verdict. The frozen proof above is the stable attribution. |
+| Duplicate report-tree wrapper after substantive edits | Cancelled with exit 143 at 05:49 UTC after repeated admission refusals. Its seven completed core checks include file coverage, shell/verdict/domain closure, fmt, Cargo check and strict Clippy; UBS is red, workspace tests were offloader-refused, two registered binaries were refused, and the remaining registered phase was interrupted. This is not a completed whole-tree verdict or a green landing proof. Its transcript, cancellation receipt and eighteen child logs are retained. No gate was changed; stopping this duplicate released the shared landing lease while the admitted frozen test jobs continued. |
 | Current full TCK, §17 comparisons, external-authority/HA, installer/Python acceptance | Not rerun by the local static checks above. Historical results are not current results. |
 
-Pending terminal evidence is not a passing gate. The audit changes only this
-existing report and append-only notes on the six existing tasks; it changes
-no engine, test expectation, gate, baseline, registry activation or normative
-requirement.
+Both frozen test jobs have terminal ownership acknowledged after recovery;
+neither supplied a full runtime verdict. The stable canonical red bundle
+remains the whole-tree proof result. Report refinements remain local and are
+not a qualified landing. The audit changes only this existing report and
+append-only notes on the eleven existing tasks; it changes no engine, test
+expectation, gate, baseline, registry activation or normative requirement.
 
 ## Current delta — 2026-10-23
 
