@@ -1084,3 +1084,70 @@ fn public_return_cancellation_and_bad_tail_never_publish_a_successful_prefix() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// A write's MATCH WHERE that the graph predicate cannot hold (a label test
+/// under NOT or OR) reads as it does in a read: as the row filter of an
+/// implicit `WITH *`, exactly as `MATCH ... WITH * WHERE ...` would. It used
+/// to refuse with "a label predicate only as a top-level AND conjunct".
+/// `MATCH (n) WHERE NOT n:Seen SET n:Seen` is the everyday form.
+#[test]
+fn a_write_match_where_over_label_tests_filters_its_rows() {
+    let ((), report) = run_async_under_lab(0xa071_0009, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = seed();
+        batch.create_vertex(VId(3), vec![K], vec![(P, CanonicalScalar::Int(9))]);
+        db.write(&commit, batch).await.unwrap();
+        let write = async |db: &mut Database<_>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(10, 10, 0),
+                no_allocate,
+            )
+            .await
+        };
+        let id = |db: &Database<fgdb::MemVfs>, vid: u128| {
+            db.vertex(VId(vid))
+                .unwrap()
+                .unwrap()
+                .props
+                .into_iter()
+                .find(|(key, _)| *key == ID)
+                .map(|(_, value)| value)
+        };
+        // NOT: the two L vertices, not the K one.
+        write(&mut db, "MATCH (n) WHERE NOT n:K SET n.id = 0")
+            .await
+            .unwrap();
+        assert_eq!(id(&db, 1), Some(CanonicalScalar::Int(0).into()));
+        assert_eq!(id(&db, 2), Some(CanonicalScalar::Int(0).into()));
+        assert_eq!(id(&db, 3), None);
+        // OR with a comparison, a label write and RETURN.
+        let labelled = write(
+            &mut db,
+            "MATCH (n) WHERE n:K OR n.p = 4 SET n:K RETURN n.p AS p ORDER BY p",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(labelled, &["p"]), vec![vec![int(4)], vec![int(9)]]);
+        assert_eq!(db.vertex(VId(1)).unwrap().unwrap().labels, vec![L, K]);
+        // DELETE of the vertices still without K: only vertex 2.
+        write(&mut db, "MATCH (n) WHERE NOT n:K DELETE n")
+            .await
+            .unwrap();
+        let mut left: Vec<_> = db.vertices().unwrap().into_iter().map(|v| v.vid).collect();
+        left.sort();
+        assert_eq!(left, [VId(1), VId(3)]);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

@@ -253,13 +253,18 @@ fn classify(
         };
     }
     let matched = parser.is_word("MATCH");
-    if matched {
-        parser.parse_match_prefix()?;
-    }
+    // A WHERE the graph predicate cannot hold (a label test under OR or
+    // NOT) reads as `MATCH ... WITH * WHERE ...`.
+    let deferred = matched && parser.write_match_prefix()?;
     // MATCH ... WITH ... CREATE/SET/REMOVE/DELETE: the write reads the WITH
     // row (fgdb-sl4ym).
-    if matched && parser.is_word("WITH") {
-        parser.write_row_prefix().map_err(|source| {
+    if matched && (deferred || parser.is_word("WITH")) {
+        let prefix = if deferred {
+            parser.implicit_write_row_prefix()
+        } else {
+            parser.write_row_prefix()
+        };
+        prefix.map_err(|source| {
             let kind = match source.kind {
                 crate::GraphSetTextErrorKind::Pattern(kind) => kind,
                 _ => GraphPatternTextErrorKind::Expected("a bounded WITH before a write clause"),

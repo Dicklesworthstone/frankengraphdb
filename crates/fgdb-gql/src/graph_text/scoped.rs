@@ -698,6 +698,32 @@ impl<'a> Parser<'a> {
         Ok(optional)
     }
 
+    /// The MATCH prefix of a write. A WHERE the graph predicate cannot hold
+    /// (a label test under OR or NOT, a predicate over list values) is
+    /// deferred as in a read, so the write reads its rows exactly as `MATCH
+    /// ... WITH * WHERE ...` would. When it is deferred the parser stands at
+    /// that WHERE again, for the caller's implicit row prefix, and this
+    /// returns true.
+    pub(super) fn write_match_prefix(&mut self) -> Result<bool, GraphPatternTextError> {
+        self.defer_where = true;
+        let parsed = self.parse_match_prefix();
+        self.defer_where = false;
+        parsed?;
+        Ok(self.resume_deferred_where())
+    }
+
+    /// Stand at a WHERE that parse_match_prefix deferred, if it did.
+    pub(super) fn resume_deferred_where(&mut self) -> bool {
+        match self.deferred_where.take() {
+            Some((lexer, at_where)) => {
+                self.lexer = lexer;
+                self.current = at_where;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Whether the WHERE at the current token needs the value language
     /// (fgdb-1c29d): a list quantifier, a list comprehension, a list or path
     /// function, `type(r)`, IN over a computed list, or a list or map value

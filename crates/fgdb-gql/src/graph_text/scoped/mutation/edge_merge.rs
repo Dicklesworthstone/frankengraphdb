@@ -259,9 +259,10 @@ impl PreparedGraphEdgeMergeText {
     {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones());
-        parser.parse_match_prefix()?;
-        if parser.is_word("WITH") {
-            return Self::prepare_after_with(parser, statement, resolve, returning);
+        // A WHERE the graph predicate cannot hold reads as `WITH * WHERE`.
+        let deferred = parser.write_match_prefix()?;
+        if deferred || parser.is_word("WITH") {
+            return Self::prepare_after_with(parser, statement, resolve, returning, deferred);
         }
         let parsed = parser.edge_merge_pattern()?;
         let mut projections = Vec::new();
@@ -428,11 +429,16 @@ impl PreparedGraphEdgeMergeText {
         statement: &'a str,
         resolve: &mut R,
         returning: bool,
+        deferred: bool,
     ) -> Result<(Self, Option<EdgeMergeReturnTemplate>), GraphEdgeMergeTextError>
     where
         R: GraphSymbolResolver + ?Sized,
     {
-        let (head, stages, schema) = parser.write_row_prefix()?;
+        let (head, stages, schema) = if deferred {
+            parser.implicit_write_row_prefix()?
+        } else {
+            parser.write_row_prefix()?
+        };
         let ((parsed, source, destination, parsed_return), _) =
             Self::row_merge(&mut parser, &schema, Some(returning))?;
         let read = parser.finish_write_row_prefix(statement, head, stages)?;
@@ -534,7 +540,9 @@ impl PreparedGraphEdgeMergeText {
                 parser.write_graph_row_prefix(statement, declarations, resolve.time_zones())?;
             (None, Some(source), schema)
         } else {
-            parser.parse_match_prefix()?;
+            // A WHERE the graph predicate cannot hold is the row filter
+            // of the implicit `WITH *` below.
+            parser.write_match_prefix()?;
             let (head, stages, schema) = if parser.is_word("WITH") {
                 parser.write_row_prefix()?
             } else {

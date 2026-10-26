@@ -2564,7 +2564,9 @@ impl PreparedGraphVertexMergeRowsText {
                         (parser, schema, None, Some((unwound, stages)))
                     }
                 } else if parser.is_word("MATCH") {
-                    parser.parse_match_prefix()?;
+                    // A WHERE the graph predicate cannot hold is the row
+                    // filter of the implicit `WITH *` below.
+                    parser.write_match_prefix()?;
                     let (head, stages, schema) = if parser.is_word("WITH") {
                         parser.write_row_prefix()?
                     } else {

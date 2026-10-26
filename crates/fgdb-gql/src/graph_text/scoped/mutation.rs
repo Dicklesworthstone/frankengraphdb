@@ -913,16 +913,31 @@ impl PreparedGraphMutationText {
         } else {
             None
         };
-        let optional_root = unwound.is_none() && parser.parse_mutation_match_prefix()?;
+        // A WHERE the graph predicate cannot hold (a label test under OR or
+        // NOT, a predicate over list values) reads as `MATCH ... WITH *
+        // WHERE ...`.
+        let (optional_root, deferred) = if unwound.is_none() {
+            parser.defer_where = true;
+            let optional = parser.parse_mutation_match_prefix();
+            parser.defer_where = false;
+            (optional?, parser.resume_deferred_where())
+        } else {
+            (false, false)
+        };
         // MATCH ... WITH ... SET/REMOVE/DELETE (fgdb-sl4ym): the write reads
         // the read pipeline's row through its last WITH stage, and only it.
-        let row_prefix = if unwound.is_none() && !optional_root && parser.is_word("WITH") {
-            let prefix = parser.write_row_prefix()?;
-            parser.write_row_scope = true;
-            Some(prefix)
-        } else {
-            None
-        };
+        let row_prefix =
+            if unwound.is_none() && !optional_root && (deferred || parser.is_word("WITH")) {
+                let prefix = if deferred {
+                    parser.implicit_write_row_prefix()?
+                } else {
+                    parser.write_row_prefix()?
+                };
+                parser.write_row_scope = true;
+                Some(prefix)
+            } else {
+                None
+            };
         let row = match (&unwound, &row_prefix) {
             (Some((_, schema)), _) | (None, Some((_, _, schema))) => Some(schema.clone()),
             (None, None) => None,
@@ -1580,7 +1595,9 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
     {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones());
-        parser.parse_match_prefix()?;
+        // A WHERE the graph predicate cannot hold is the row filter of the
+        // implicit `WITH *` below.
+        parser.write_match_prefix()?;
         let (head, stages, schema) = if parser.is_word("WITH") {
             parser.write_row_prefix()?
         } else {
