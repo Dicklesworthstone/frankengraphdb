@@ -882,8 +882,9 @@ fn map_rows_drive_create_properties() {
 }
 
 /// fgdb-k3nub, the write half: SET writes a List value as the stored List it
-/// is. A literal, a concatenation, a copy of another element's stored List
-/// and a `+=` entry all read back exactly. A map at any depth refuses typed,
+/// is. A literal, a concatenation, a copy of another element's stored List,
+/// a `+=` entry and a declared List parameter (in SET, MERGE and CREATE) all
+/// read back exactly. A map at any depth refuses typed,
 /// as CREATE's does, and two rows assigning different Lists to one field
 /// conflict. Each refusal commits nothing.
 #[test]
@@ -1042,6 +1043,55 @@ fn set_writes_list_values_as_stored_lists() {
             ]
         );
         assert_eq!(people[6], vec![text("h"), list([text("m"), text("n")])]);
+        // CREATE writes a declared List parameter as the stored List it is,
+        // as SET does: the parameterized form of `CREATE (n {p: [..]})`.
+        let program = PreparedGraphWriteScript::prepare_with_parameter_types(
+            "CREATE (n:Person {name: 'i', first: $tags})",
+            R,
+            &[("tags", GqlParameterType::List)],
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&tags)
+        .unwrap();
+        db.execute_graph_write_program_returning_autocommit_engine_governed(
+            &txn,
+            &cx,
+            &commit,
+            &program,
+            GraphWriteProgramPolicy::new(policy(), 100_000, 100_000, 100_000),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first(&db)[7], vec![text("i"), list([text("p"), text("q")])]);
+        // A List argument that holds a map refuses at execution, as a list
+        // literal holding one does, and creates nothing.
+        let nested = GqlParameters::new()
+            .with_list(
+                "tags",
+                vec![GraphValue::map(vec![("k".into(), int(1))]).unwrap()],
+            )
+            .unwrap();
+        let program = PreparedGraphWriteScript::prepare_with_parameter_types(
+            "CREATE (n:Person {name: 'j', first: $tags})",
+            R,
+            &[("tags", GqlParameterType::List)],
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&nested)
+        .unwrap();
+        let refused = db
+            .execute_graph_write_program_returning_autocommit_engine_governed(
+                &txn,
+                &cx,
+                &commit,
+                &program,
+                GraphWriteProgramPolicy::new(policy(), 100_000, 100_000, 100_000),
+            )
+            .await;
+        assert!(refused.is_err());
+        assert_eq!(first(&db).len(), 8, "the refused CREATE created nothing");
     });
 }
 

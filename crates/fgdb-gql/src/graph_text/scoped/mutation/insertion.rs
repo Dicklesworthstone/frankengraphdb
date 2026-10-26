@@ -368,11 +368,12 @@ impl<'a> Parser<'a> {
         let types = self.insertion_input_types(imports, inputs);
         let kind = value.column_type(&types, &self.syntax.parameters);
         let admitted = match value {
-            // A parameter binds a scalar argument only; a list parameter is
-            // not yet a written List.
-            ReadValueTemplate::Parameter { .. } => {
-                matches!(kind, GraphSetColumnType::Scalar | GraphSetColumnType::Any)
-            }
+            // A parameter binds a scalar argument, or a List argument written
+            // as the stored List it is; a map argument is never a property.
+            ReadValueTemplate::Parameter { .. } => matches!(
+                kind,
+                GraphSetColumnType::Scalar | GraphSetColumnType::List | GraphSetColumnType::Any
+            ),
             _ => matches!(
                 kind,
                 GraphSetColumnType::Scalar
@@ -486,6 +487,13 @@ impl<'a> Parser<'a> {
                 // the value language, as a row-fed CREATE does
                 // (fgdb-txbg9, fgdb-o5o9t). So is a list literal, which a
                 // stored List property may now be (fgdb-k3nub).
+                let value = self.insertion_source_value(inputs, &[])?;
+                self.scalar_property_value(value, at, &[], inputs)?
+            } else if matches!(self.current.kind, TokenKind::Parameter(name)
+                if self.parameter_types.get(name) == Some(&GqlParameterType::List))
+            {
+                // A list argument is a stored List property, as a list
+                // literal is and as `SET n.p = $list` writes one.
                 let value = self.insertion_source_value(inputs, &[])?;
                 self.scalar_property_value(value, at, &[], inputs)?
             } else if matches!(self.current.kind, TokenKind::Parameter(name)
@@ -770,6 +778,19 @@ fn bind_fields(
         let value = match value {
             ReadValueTemplate::Column(column) => GraphMutationValue::Column(*column),
             ReadValueTemplate::Literal(value) => GraphMutationValue::Literal(value.clone()),
+            // A List argument is written as the stored List it is, as a list
+            // literal is (fgdb-k3nub); any other argument binds a scalar.
+            ReadValueTemplate::Parameter { index, .. }
+                if matches!(
+                    values.unwrap_or(shape).get(*index),
+                    Some(GqlParameterValue::List(_))
+                ) =>
+            {
+                GraphMutationValue::Composite(return_projection::bind_read_value(
+                    value,
+                    values.unwrap_or(shape),
+                )?)
+            }
             ReadValueTemplate::Parameter { index, at, .. } => {
                 let value = match values {
                     Some(values) => scalar(values[*index].clone(), *at)?,
