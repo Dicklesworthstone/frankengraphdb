@@ -282,6 +282,24 @@ fn reads() -> Vec<(&'static str, &'static str, Vec<Vec<&'static str>>)> {
             vec![vec!["'Bach'", "1"], vec!["'Rust'", "1"]],
         ),
         (
+            "IC5",
+            "MATCH (person:Person {id: 1})-[:KNOWS*1..2]-(friend)
+             WHERE NOT person = friend
+             WITH DISTINCT friend
+             MATCH (friend)<-[membership:HAS_MEMBER]-(forum)
+             WHERE membership.joinDate > 500
+             WITH forum, collect(friend) AS friends
+             OPTIONAL MATCH (friend)<-[:HAS_CREATOR]-(post)<-[:CONTAINER_OF]-(forum)
+             WHERE friend IN friends
+             WITH forum, count(post) AS postCount
+             RETURN forum.title AS forumName, postCount
+             ORDER BY postCount DESC, forum.id ASC
+             LIMIT 20",
+            // Persons 2 and 3 are members of forum 50, which holds one post
+            // by each.
+            vec![vec!["'Group for Bach'", "2"]],
+        ),
+        (
             "IC6",
             "MATCH (knownTag:Tag {name: 'Bach'})
              WITH knownTag.id AS knownTagId

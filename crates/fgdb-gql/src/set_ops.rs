@@ -427,6 +427,9 @@ enum SetNode {
         left: Box<PreparedGraphSet>,
         right: Box<PreparedGraphSet>,
         imports: Vec<usize>,
+        /// A left occurrence whose body yields no row still emits one row,
+        /// NULL in every body column (openCypher OPTIONAL MATCH).
+        optional: bool,
     },
     Join {
         left: Box<PreparedGraphSet>,
@@ -804,6 +807,27 @@ impl PreparedGraphSet {
     /// This is the bounded relational Apply operator, not CALL syntax or a
     /// claim of spill/incremental support.
     pub fn apply(self, right: Self, imports: Vec<usize>) -> Result<Self, GraphSetBuildError> {
+        self.apply_with(right, imports, false)
+    }
+
+    /// As [`Self::apply`], except that a left occurrence whose body yields
+    /// no row emits one row with NULL in every body column: an OPTIONAL
+    /// MATCH whose WHERE reads the incoming row filters inside the body,
+    /// before that null extension.
+    pub fn optional_apply(
+        self,
+        right: Self,
+        imports: Vec<usize>,
+    ) -> Result<Self, GraphSetBuildError> {
+        self.apply_with(right, imports, true)
+    }
+
+    fn apply_with(
+        self,
+        right: Self,
+        imports: Vec<usize>,
+        optional: bool,
+    ) -> Result<Self, GraphSetBuildError> {
         if imports.len() > crate::algebra::MAX_PATTERN_VERTICES {
             return Err(GraphSetBuildError::TooManyArguments {
                 limit: crate::algebra::MAX_PATTERN_VERTICES,
@@ -837,6 +861,7 @@ impl PreparedGraphSet {
                 left: Box::new(self),
                 right: Box::new(right),
                 imports,
+                optional,
             },
             columns,
             types,
@@ -1105,9 +1130,15 @@ impl PreparedGraphSet {
                 left,
                 right,
                 imports,
+                optional,
             } => {
                 bytes.push(0xff);
-                bytes.extend_from_slice(b"fgdb:set:apply:v1\0");
+                let tag: &[u8] = if *optional {
+                    b"fgdb:set:optional-apply:v1\0"
+                } else {
+                    b"fgdb:set:apply:v1\0"
+                };
+                bytes.extend_from_slice(tag);
                 left.append_transcript(bytes);
                 right.append_transcript(bytes);
                 bytes.extend_from_slice(&(imports.len() as u64).to_be_bytes());

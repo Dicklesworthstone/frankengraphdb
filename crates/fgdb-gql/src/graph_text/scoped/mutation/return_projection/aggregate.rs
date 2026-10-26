@@ -331,7 +331,9 @@ impl PreparedGraphPipelineAggregateText {
         //   predicate cannot place (hoist_existence_reads);
         // - a later MATCH clause that read a name its child scope cannot
         //   see (an earlier relationship or an imported column) starts a
-        //   new part at an implicit `WITH *`.
+        //   new part at an implicit `WITH *`;
+        // - failing both, an OPTIONAL continuation's WHERE filters inside
+        //   an optional Apply (multipart_optional_apply).
         // The prefix resolves no symbol, so a re-read never repeats a
         // catalog call.
         let (mut parser, (head, mut stages, schema, depth)) = match prefix(&[], &[]) {
@@ -354,6 +356,11 @@ impl PreparedGraphPipelineAggregateText {
                             .filter(|at| !implicit.contains(at))
                     {
                         implicit.push(at);
+                    } else if let Some(at) =
+                        crate::set_text::multipart::optional_where_at(&tokens, offset)
+                            .filter(|at| !deferred.contains(at))
+                    {
+                        deferred.push(at);
                     } else {
                         break;
                     }

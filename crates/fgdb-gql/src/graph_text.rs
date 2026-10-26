@@ -914,6 +914,10 @@ struct Parser<'a> {
     /// Inside an inline CALL body. Its terminal RETURN may aggregate the
     /// body's rows, once per outer row, as a row-domain aggregate stage.
     call_body: bool,
+    /// The next graph part is an optional Apply's body: it ends at its
+    /// deferred WHERE and exports only its own bindings
+    /// (multipart_optional_apply).
+    optional_body: bool,
     /// A read statement's host reads element values at the statement's cut,
     /// so a carried vertex's `n.p` past its boundary's scope (after an UNWIND
     /// or a later WITH) reads through that element reader (fgdb-xnd7x). A
@@ -1095,6 +1099,7 @@ impl<'a> Parser<'a> {
             resolved_entries: false,
             call_element_reads: false,
             call_body: false,
+            optional_body: false,
             read_elements: false,
             elements: Vec::new(),
             lets: None,

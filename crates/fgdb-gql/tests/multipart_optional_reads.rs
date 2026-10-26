@@ -629,8 +629,6 @@ fn unsupported_optional_scopes_and_graph_functions_refuse_before_catalog() {
         "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) RETURN SIZE(labels(a)) AS size",
         "MATCH (a) WITH a.score AS a OPTIONAL MATCH (a) RETURN a",
         "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) } RETURN b",
-        "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE b.score = a.score + 10 OR b.score = 40 RETURN b",
-        "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE NOT b.score = a.score + 10 RETURN b",
         "MATCH (a) WITH a OPTIONAL RETURN a",
     ] {
         let mut calls = 0;
@@ -643,6 +641,43 @@ fn unsupported_optional_scopes_and_graph_functions_refuse_before_catalog() {
             "{text}"
         );
         assert_eq!(calls, 0, "{text}");
+    }
+    // An OPTIONAL clause's WHERE over a computed operand filters inside its
+    // optional Apply (multipart_optional_apply): each a keeps the b the WHERE
+    // holds for, or one NULL row.
+    let score = |n: u128| n as i64 * 10;
+    let optional = |keep: &dyn Fn(u128, u128) -> bool| {
+        let mut expected: Vec<_> = (1..=4)
+            .flat_map(|a| {
+                let kept: Vec<_> = (1..=4)
+                    .filter(|&b| keep(a, b))
+                    .map(|b| vertices(&[Some(b)]))
+                    .collect();
+                if kept.is_empty() {
+                    vec![vertices(&[None])]
+                } else {
+                    kept
+                }
+            })
+            .collect();
+        expected.sort();
+        expected
+    };
+    let next_or_top = |a: u128, b: u128| score(b) == score(a) + 10 || score(b) == 40;
+    let not_next = |a: u128, b: u128| score(b) != score(a) + 10;
+    for (text, keep) in [
+        (
+            "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE b.score = a.score + 10 OR b.score = 40 RETURN b",
+            &next_or_top as &dyn Fn(u128, u128) -> bool,
+        ),
+        (
+            "MATCH (a) WITH a OPTIONAL MATCH (b) WHERE NOT b.score = a.score + 10 RETURN b",
+            &not_next,
+        ),
+    ] {
+        let mut answered = rows(text);
+        answered.sort();
+        assert_eq!(answered, optional(keep), "{text}");
     }
     assert_eq!(
         rows(

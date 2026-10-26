@@ -18,6 +18,9 @@ pub(crate) enum BoundContinuationOperation {
     Apply {
         body: Box<BoundReadInput>,
         imports: Vec<usize>,
+        /// An OPTIONAL MATCH whose WHERE reads the incoming row: a row the
+        /// body leaves empty is null-extended (PreparedGraphSet::optional_apply).
+        optional: bool,
     },
 }
 
@@ -109,6 +112,18 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
 /// re-reads such a WHERE after an implicit `WITH *` when the graph predicate
 /// refused it.
 pub(crate) fn continuation_where_at(tokens: &[TextToken<'_>], offset: usize) -> Option<usize> {
+    imported_where_at(tokens, offset, false)
+}
+
+/// As [`continuation_where_at`] for a top-level OPTIONAL MATCH. Its WHERE,
+/// when the graph predicate refused it and no implicit `WITH *` placed it,
+/// is re-read inside an optional Apply, before the clause's null extension
+/// (multipart_optional_apply).
+pub(crate) fn optional_where_at(tokens: &[TextToken<'_>], offset: usize) -> Option<usize> {
+    imported_where_at(tokens, offset, true)
+}
+
+fn imported_where_at(tokens: &[TextToken<'_>], offset: usize, optional: bool) -> Option<usize> {
     const CLAUSES: [&str; 9] = [
         "WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "UNION", "CALL", "ORDER", "SKIP",
     ];
@@ -136,7 +151,7 @@ pub(crate) fn continuation_where_at(tokens: &[TextToken<'_>], offset: usize) -> 
                     }
                     eligible = with
                         && token.word("MATCH")
-                        && !previous.is_some_and(|previous| previous.word("OPTIONAL"));
+                        && previous.is_some_and(|previous| previous.word("OPTIONAL")) == optional;
                     with |= token.word("WITH");
                 } else if eligible && token.word("WHERE") {
                     predicate = Some(token.at);
@@ -364,8 +379,12 @@ impl BoundReadInput {
                         bytes.push(0);
                         join.append_template_transcript(bytes);
                     }
-                    BoundContinuationOperation::Apply { body, imports } => {
-                        bytes.push(1);
+                    BoundContinuationOperation::Apply {
+                        body,
+                        imports,
+                        optional,
+                    } => {
+                        bytes.push(if *optional { 2 } else { 1 });
                         bytes.extend_from_slice(&(imports.len() as u64).to_be_bytes());
                         for &column in imports {
                             bytes.extend_from_slice(&(column as u64).to_be_bytes());

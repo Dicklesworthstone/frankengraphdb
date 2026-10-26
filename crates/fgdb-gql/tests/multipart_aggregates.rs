@@ -269,8 +269,8 @@ fn candidate_input_counts_only_real_graph_sources_and_preserves_occurrences() {
 /// computed graph operand against an imported column, filters after an
 /// implicit `WITH *` before an aggregate RETURN too (fgdb-c6hvm): the same
 /// template and rows as the explicit `WITH *` spelling. An OPTIONAL
-/// continuation's WHERE belongs to its left join and still refuses before
-/// any catalog call.
+/// continuation's WHERE belongs to its left join: it filters inside an
+/// optional Apply, before the null extension.
 #[test]
 fn an_aggregate_reads_a_refused_continuation_where_after_the_join() {
     let template = |text: &str| {
@@ -307,18 +307,18 @@ fn an_aggregate_reads_a_refused_continuation_where_after_the_join() {
             .collect();
         assert_eq!(observed, expected, "{implicit}");
     }
-    let mut calls = 0;
-    assert!(
-        PreparedGraphPipelineAggregateText::prepare(
-            "MATCH (a) WITH a.p AS e OPTIONAL MATCH (b) WHERE b.p * 1 = e RETURN COUNT(*) AS rows",
-            |kind, name| {
-                calls += 1;
-                symbols(kind, name)
-            },
-        )
-        .is_err()
+    // An OPTIONAL clause's WHERE over a computed graph operand filters inside
+    // an optional Apply: each incoming row counts its surviving matches, or
+    // its one NULL extension.
+    let rows = execute(
+        "MATCH (a) WITH a.p AS e OPTIONAL MATCH (b) WHERE b.p * 1 = e RETURN COUNT(*) AS rows",
     );
-    assert_eq!(calls, 0);
+    let expected: u64 = SCORES
+        .iter()
+        .map(|&e| SCORES.iter().filter(|&&p| p == e).count().max(1) as u64)
+        .sum();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values()[0].as_count(), Some(expected));
 }
 
 #[test]
@@ -716,6 +716,27 @@ fn illegal_aliases_aggregate_stages_and_total_depth_refuse_before_catalog() {
 /// can only come from the streamed range: the counting fold and the row
 /// executor both read it. Below the bound it equals the materialized list,
 /// and a materialized range is still bounded.
+/// An OPTIONAL MATCH whose WHERE reads the incoming row counts each row's
+/// surviving matches, and zero where only the NULL extension stands
+/// (fgdb-2ht8c, LDBC SNB IC5).
+#[test]
+fn an_optional_match_where_over_imported_values_counts_surviving_matches() {
+    let score = |vid: VId| SCORES[vid.0 as usize - 1];
+    let rows = execute(
+        "MATCH (s) WHERE s.p = 2 WITH collect(s) AS ss MATCH (a) WITH a, ss \
+         OPTIONAL MATCH (a)-[:R]->(b) WHERE b IN ss RETURN a, COUNT(b) AS n ORDER BY a",
+    );
+    assert_eq!(rows.len(), 4);
+    for (row, a) in rows.iter().zip(1..=4) {
+        let surviving = EDGES
+            .iter()
+            .filter(|&&(start, _, end)| start == VId(a) && score(end) == 2)
+            .count();
+        assert_eq!(row.keys(), &[GraphValue::Vertex(VId(a))]);
+        assert_eq!(row.values()[0].as_count(), Some(surviving as u64));
+    }
+}
+
 #[test]
 fn unwind_range_streams_past_the_list_value_bound() {
     let rows = execute("UNWIND range(1, 70000) AS i RETURN COUNT(*) AS rows");

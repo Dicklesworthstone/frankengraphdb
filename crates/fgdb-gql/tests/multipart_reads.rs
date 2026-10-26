@@ -772,8 +772,9 @@ fn a_top_level_where_equality_with_an_imported_column_is_the_property_map_join()
 /// computed graph operand against an imported column (TCK Comparison1
 /// [1]-[3]: `WITH ... AS expected MATCH (n) WHERE toInteger(n.id) =
 /// expected`), is that part's `WITH * WHERE`: the same template, so the same
-/// rows. An OPTIONAL continuation's WHERE belongs to its left join, and a
-/// computed operand there still refuses before any catalog call.
+/// rows. An OPTIONAL continuation's WHERE belongs to its left join: a
+/// computed operand there filters inside an optional Apply, before the null
+/// extension.
 #[test]
 fn a_continuation_where_over_a_computed_graph_operand_filters_after_the_join() {
     let template = |text: &str| {
@@ -807,17 +808,35 @@ fn a_continuation_where_over_a_computed_graph_operand_filters_after_the_join() {
             .map(|(value, vid)| scalar_vertex(value, vid))
             .to_vec()
     );
-    let text = "MATCH (n) WITH max(n.p) AS m MATCH (a) OPTIONAL MATCH (a)-[:R]->(q) \
-                WHERE q.p + 0 = m RETURN a, q";
-    let mut calls = 0;
-    assert!(
-        PreparedGraphSetText::prepare(text, |kind, name| {
-            calls += 1;
-            symbols(kind, name)
+    // An OPTIONAL clause's WHERE over a computed graph operand filters inside
+    // an optional Apply, after the implicit `WITH *` before the clause: each
+    // a keeps its out-edges to a q with q.p = m, or one NULL extension.
+    let p = |n: u128| [1, 2, 2, 3][n as usize - 1];
+    let m = (1..=4).map(p).max().unwrap();
+    let pair = |a: u128, q: GraphValue| {
+        GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(a)), q])
+    };
+    let mut expected: Vec<_> = (1..=4)
+        .flat_map(|a| {
+            let ends: Vec<_> = EDGES
+                .iter()
+                .filter(|&&(start, _, end)| start == VId(a) && p(end.0) == m)
+                .map(|&(_, _, end)| pair(a, GraphValue::Vertex(end)))
+                .collect();
+            if ends.is_empty() {
+                vec![pair(a, GraphValue::Scalar(CanonicalScalar::Null))]
+            } else {
+                ends
+            }
         })
-        .is_err()
+        .collect();
+    expected.sort();
+    let mut rows = execute(
+        "MATCH (n) WITH max(n.p) AS m MATCH (a) OPTIONAL MATCH (a)-[:R]->(q) \
+         WHERE q.p + 0 = m RETURN a, q",
     );
-    assert_eq!(calls, 0);
+    rows.sort();
+    assert_eq!(rows, expected);
 }
 
 /// `MATCH (a) WITH a MATCH (b) WHERE a = b` correlates `b` with the carried
@@ -1839,5 +1858,61 @@ fn existence_tests_read_as_values() {
                 .map(|n| vertices(&[n]))
                 .collect()
         )
+    );
+}
+
+/// `OPTIONAL MATCH ... WHERE w`, where `w` reads the incoming row in a way the
+/// graph predicate cannot place, filters inside an optional Apply: each
+/// incoming row keeps the matches `w` holds for, or gets one NULL extension
+/// when none does. A filter after the left join would drop such a row
+/// instead (fgdb-2ht8c, LDBC SNB IC5's `WHERE friend IN friends`).
+#[test]
+fn an_optional_match_where_over_imported_values_filters_before_null_extension() {
+    let p = |n: u128| [1, 2, 2, 3][n as usize - 1];
+    let sorted = |mut rows: Vec<GraphValueRow>| {
+        rows.sort();
+        rows
+    };
+    let pair = |a: u128, b: Option<u128>| {
+        GraphValueRow::from_owned_values(vec![
+            GraphValue::Vertex(VId(a)),
+            b.map_or(GraphValue::Scalar(CanonicalScalar::Null), |b| {
+                GraphValue::Vertex(VId(b))
+            }),
+        ])
+    };
+    // Each of a's out-edge ends that `keep` admits, or one NULL extension.
+    let expected = |keep: &dyn Fn(u128, u128) -> bool| {
+        sorted(
+            (1..=4)
+                .flat_map(|a| {
+                    let ends: Vec<_> = EDGES
+                        .iter()
+                        .filter(|&&(start, _, end)| start == VId(a) && keep(a, end.0))
+                        .map(|&(_, _, end)| pair(a, Some(end.0)))
+                        .collect();
+                    if ends.is_empty() {
+                        vec![pair(a, None)]
+                    } else {
+                        ends
+                    }
+                })
+                .collect(),
+        )
+    };
+    // Membership in a collected list of the vertices with p = 2.
+    assert_eq!(
+        sorted(execute(
+            "MATCH (s) WHERE s.p = 2 WITH collect(s) AS ss MATCH (a) WITH a, ss \
+             OPTIONAL MATCH (a)-[:R]->(b) WHERE b IN ss RETURN a, b"
+        )),
+        expected(&|_, b| p(b) == 2)
+    );
+    // A computed operand against a carried property.
+    assert_eq!(
+        sorted(execute(
+            "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) WHERE b.p + 0 > a.p RETURN a, b"
+        )),
+        expected(&|a, b| p(b) > p(a))
     );
 }

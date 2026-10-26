@@ -479,6 +479,7 @@ where
             left,
             right,
             imports,
+            optional,
         } => {
             let left = run(left, source, meter, operand)?;
             let right_operand = *operand;
@@ -517,7 +518,20 @@ where
                 let inner = run(right, source, meter, &mut inner_operand);
                 // Restore the enclosing frame on errors and cancellation too.
                 meter.arguments.pop();
-                for right_row in inner? {
+                let inner = inner?;
+                if *optional && inner.is_empty() {
+                    let nulls = GraphValueRow::from_owned_values(
+                        right
+                            .types
+                            .iter()
+                            .map(|_| GraphValue::Scalar(fgdb_types::CanonicalScalar::Null))
+                            .collect(),
+                    );
+                    output.push(copy_cross_pair(row, &nulls, &mut |event| {
+                        meter.event(event)
+                    })?);
+                }
+                for right_row in inner {
                     output.push(copy_cross_pair(row, &right_row, &mut |event| {
                         meter.event(event)
                     })?);

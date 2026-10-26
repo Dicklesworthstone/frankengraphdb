@@ -22,6 +22,7 @@ enum UnresolvedContinuationOperation<'a> {
     Apply {
         body: Box<UnresolvedReadInput<'a>>,
         imports: Vec<usize>,
+        optional: bool,
     },
 }
 
@@ -164,12 +165,15 @@ impl<'a> UnresolvedReadInput<'a> {
                     UnresolvedContinuationOperation::Match(join) => {
                         BoundContinuationOperation::Match(join)
                     }
-                    UnresolvedContinuationOperation::Apply { body, imports } => {
-                        BoundContinuationOperation::Apply {
-                            body: Box::new(body.resolve(resolve)?),
-                            imports,
-                        }
-                    }
+                    UnresolvedContinuationOperation::Apply {
+                        body,
+                        imports,
+                        optional,
+                    } => BoundContinuationOperation::Apply {
+                        body: Box::new(body.resolve(resolve)?),
+                        imports,
+                        optional,
+                    },
                 },
             });
         }
@@ -226,8 +230,11 @@ impl PreparedGraphText {
         // clause's relationship (`MATCH (a)-[r]->(b) MATCH (b)-[s]->(c)
         // WHERE r.w < s.w`) or an imported column, means what it means after
         // an explicit `WITH *`: openCypher keeps relationship uniqueness per
-        // clause, so the boundary changes no row. Re-read one refusal at a
-        // time. A statement still refused reports its first error.
+        // clause, so the boundary changes no row. Failing both, an OPTIONAL
+        // continuation's refused WHERE filters inside an optional Apply,
+        // before the clause's null extension (multipart_optional_apply).
+        // Re-read one refusal at a time. A statement still refused reports
+        // its first error.
         let (mut deferred, mut implicit) = (Vec::new(), Vec::new());
         let mut offset = error.offset;
         loop {
@@ -240,6 +247,10 @@ impl PreparedGraphText {
                 .filter(|at| !implicit.contains(at))
             {
                 implicit.push(at);
+            } else if let Some(at) = crate::set_text::multipart::optional_where_at(tokens, offset)
+                .filter(|at| !deferred.contains(at))
+            {
+                deferred.push(at);
             } else {
                 break;
             }
@@ -538,6 +549,15 @@ impl<'a> Parser<'a> {
                 if !self.is_word("MATCH") {
                     return Err(expected(self.current.at, "MATCH after WITH or OPTIONAL"));
                 }
+                if kind == RowJoinKind::Left && self.clause_where_deferred()? {
+                    let (part, next, done) =
+                        self.multipart_optional_apply(statement, &incoming, aggregate, call_depth)?;
+                    result.continuations.push(part);
+                    incoming = next;
+                    terminal = done;
+                    self.admit_multipart_size(&result)?;
+                    continue;
+                }
                 let (input, next, done, join) = self.multipart_graph_part(
                     statement,
                     &incoming,
@@ -757,11 +777,123 @@ impl<'a> Parser<'a> {
                 operation: UnresolvedContinuationOperation::Apply {
                     body: Box::new(body),
                     imports,
+                    optional: false,
                 },
             },
             next,
             terminal,
         ))
+    }
+
+    /// `OPTIONAL MATCH ... WHERE w`, where `w` reads the incoming row in a way
+    /// the graph predicate cannot place (`WHERE friend IN friends`, LDBC SNB
+    /// IC5): an optional Apply. Per incoming row, its body matches the clause
+    /// as a required continuation correlated on the carried bindings and keeps
+    /// the matches `w` holds for, read after an implicit `WITH *`; a row left
+    /// with none gets one NULL extension. A filter after the left join would
+    /// instead drop the null-extended rows. The body exports the clause's own
+    /// bindings, which the clauses after it read as a CALL's exports.
+    fn multipart_optional_apply(
+        &mut self,
+        statement: &'a str,
+        incoming: &RowSchema<'a>,
+        aggregate: bool,
+        call_depth: usize,
+    ) -> Result<(UnresolvedContinuation<'a>, RowSchema<'a>, bool), GraphSetTextError> {
+        let at = self.current.at;
+        let imports: Vec<usize> = (0..incoming.len()).collect();
+        self.boundary_reads = None;
+        self.projected_sources = None;
+        self.optional_body = true;
+        let body =
+            self.multipart_parts_with_input(statement, false, incoming.clone(), call_depth, false);
+        self.optional_body = false;
+        let (body, exports) = body?;
+        self.read_row_bindings.clear();
+        self.boundary_reads = None;
+        self.projected_sources = None;
+        let mut combined = incoming.clone();
+        for &(name, kind) in &exports {
+            self.capacity(
+                combined.len(),
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
+            combined.push((name, kind));
+        }
+        let projection = combined
+            .iter()
+            .enumerate()
+            .map(|(column, (name, _))| ReadProjectionTemplate {
+                name: name.text.to_owned(),
+                value: ReadValueTemplate::Column(column),
+            })
+            .collect();
+        let types = combined.iter().map(|(_, kind)| *kind).collect();
+        // The clause's bindings are real typed identities after the Apply, as
+        // a CALL's exports are; later clauses read their properties through
+        // the governed element reader.
+        self.call_element_reads = true;
+        let (pipeline, next, terminal) = self.multipart_row_tail(combined, aggregate)?;
+        let mut syntax = self.take_part_syntax()?;
+        syntax.return_at = at;
+        Ok((
+            UnresolvedContinuation {
+                input: UnresolvedGraphText {
+                    statement,
+                    syntax,
+                    projection: Some(projection),
+                    pipeline,
+                    singleton: true,
+                    leading: Vec::new(),
+                    leading_types: types,
+                    correlations: Vec::new(),
+                    row_fields: Vec::new(),
+                },
+                operation: UnresolvedContinuationOperation::Apply {
+                    body: Box::new(body),
+                    imports,
+                    optional: true,
+                },
+            },
+            next,
+            terminal,
+        ))
+    }
+
+    /// Whether the clause starting at this MATCH has a top-level WHERE the
+    /// composition entry re-reads (deferred_wheres). Nothing is consumed.
+    fn clause_where_deferred(&self) -> Result<bool, GraphPatternTextError> {
+        const CLAUSES: [&str; 10] = [
+            "WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "CALL", "UNION", "ORDER", "SKIP",
+            "LIMIT",
+        ];
+        let mut lexer = self.lexer.clone();
+        let mut previous = self.current.kind;
+        let mut depth = 0_usize;
+        loop {
+            let token = lexer.next()?;
+            match token.kind {
+                TokenKind::End => return Ok(false),
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                TokenKind::Word(word)
+                    if depth == 0 && !matches!(previous, TokenKind::Punct(b'.')) =>
+                {
+                    if word.eq_ignore_ascii_case("WHERE") {
+                        return Ok(self.deferred_wheres.contains(&token.at));
+                    }
+                    if CLAUSES
+                        .iter()
+                        .any(|clause| word.eq_ignore_ascii_case(clause))
+                    {
+                        return Ok(false);
+                    }
+                }
+                _ => {}
+            }
+            previous = token.kind;
+        }
     }
 
     /// The legacy importing WITH accepts only a list of outer names. Inspect
@@ -916,6 +1048,7 @@ impl<'a> Parser<'a> {
     > {
         let at = self.current.at;
         let optional = kind == Some(RowJoinKind::Left);
+        let optional_body = core::mem::take(&mut self.optional_body);
         self.read_row_bindings = incoming.iter().map(|(name, _)| *name).collect();
         self.read_comparisons = Some(Vec::new());
         // A carried vertex whose property a required part reads (`WITH a
@@ -950,6 +1083,18 @@ impl<'a> Parser<'a> {
         let row_comparisons = self.read_comparisons.take().unwrap_or_default();
         parsed?;
         self.refuse_call_write(call_depth)?;
+        // An OPTIONAL clause's WHERE over the incoming row filters inside
+        // its optional Apply (multipart_optional_apply). After the left join
+        // it would drop the null-extended rows.
+        if optional && deferred.is_some() {
+            return Err(expected(
+                at,
+                "an OPTIONAL MATCH WHERE inside its optional Apply",
+            ));
+        }
+        if optional_body && deferred.is_none() {
+            return Err(expected(at, "the optional Apply's deferred WHERE"));
+        }
         // Wrapping several independently scoped clauses in one left join
         // would move their null-extension boundary. Keep this continuation a
         // positive pattern; another WITH may begin the next required/optional
@@ -1105,6 +1250,8 @@ impl<'a> Parser<'a> {
         // graph_projection_head numbers its graph inputs from zero; a
         // continuation head places them after the incoming row columns.
         let offset = if kind.is_none() { 0 } else { incoming.len() };
+        // The `WITH *` columns, before any hidden read.
+        let visible = head.outputs.len();
         if !implicit_star {
             self.hoist_boundary_reads(&mut head, offset)?;
         }
@@ -1148,7 +1295,30 @@ impl<'a> Parser<'a> {
             None
         };
         let mut terminal = !head.with;
-        let (mut pipeline, mut next) = if head.with {
+        let (mut pipeline, mut next) = if optional_body {
+            // The optional Apply's body ends with its WHERE and exports the
+            // clause's own bindings; the clauses after it are the caller's.
+            let at = self.current.at;
+            let mut stages = Vec::new();
+            let mut depth = 2;
+            self.word("WHERE")?;
+            self.row_selection(&schema, &mut stages, &mut depth, at)?;
+            let exports: RowSchema<'a> = schema[incoming.len()..visible].to_vec();
+            stages.push(ReadStageTemplate::Project {
+                at,
+                projection: (incoming.len()..visible)
+                    .map(|column| ReadProjectionTemplate {
+                        name: schema[column].0.text.to_owned(),
+                        value: ReadValueTemplate::Column(column),
+                    })
+                    .collect(),
+                quantifier: GraphSetQuantifier::All,
+            });
+            self.boundary_reads = None;
+            self.projected_sources = None;
+            terminal = true;
+            (stages, exports)
+        } else if head.with {
             let (pipeline, schema, _) = self.row_pipeline_prefix(schema)?;
             (pipeline, schema)
         } else {
@@ -1433,13 +1603,22 @@ impl BoundReadInput {
         let mut input = self.first.bind_values(values)?;
         for part in &self.continuations {
             let source = &part.input;
-            if let BoundContinuationOperation::Apply { body, imports } = &part.operation {
-                input = input
-                    .apply(body.bind_values(values)?, imports.clone())
-                    .map_err(|kind| GraphSetTextError {
-                        offset: source.return_at,
-                        kind: GraphSetTextErrorKind::SetBuild(kind),
-                    })?;
+            if let BoundContinuationOperation::Apply {
+                body,
+                imports,
+                optional,
+            } = &part.operation
+            {
+                let body = body.bind_values(values)?;
+                input = if *optional {
+                    input.optional_apply(body, imports.clone())
+                } else {
+                    input.apply(body, imports.clone())
+                }
+                .map_err(|kind| GraphSetTextError {
+                    offset: source.return_at,
+                    kind: GraphSetTextErrorKind::SetBuild(kind),
+                })?;
                 if let Some(projection) = &source.projection {
                     input = super::super::bind_projection(
                         input,
