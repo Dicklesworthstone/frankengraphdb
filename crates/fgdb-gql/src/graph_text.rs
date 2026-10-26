@@ -968,6 +968,12 @@ struct Parser<'a> {
     /// hidden list column of its graph head (hoist_comprehension): the head's
     /// row width and each comprehension's (source start, source end, column).
     comprehension_reads: Option<HoistedReads>,
+    /// The patterns (comprehensions, counts, existence tests) that the scope
+    /// after a later grouping WITH reads over that WITH's bare keys alone,
+    /// each a hidden column of the graph head before it (hoist_boundary_reads):
+    /// the head's row width and each one's (source start, source end,
+    /// column). The grouping WITH carries each as a hidden key.
+    grouped_comprehensions: Option<HoistedReads>,
     /// The rand() calls read so far: the next call's site (fgdb-13l85).
     random_sites: u32,
     /// An aggregate function's argument is being read. openCypher refuses a
@@ -1117,6 +1123,7 @@ impl<'a> Parser<'a> {
             projected_sources: None,
             existence_reads: None,
             comprehension_reads: None,
+            grouped_comprehensions: None,
             random_sites: 0,
             aggregate_argument: false,
             percentile_leaf: false,

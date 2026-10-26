@@ -73,9 +73,30 @@ pub(in crate::graph_text::scoped::mutation) fn ends_boundary_scope(
 /// read from the token after its WITH. A grouping WITH keeps none: its rows
 /// are groups. Either kind still reads them in its own items.
 fn later_with_keeps<'a>(
-    mut lexer: Lexer<'a>,
+    lexer: Lexer<'a>,
     carried: &[&'a str],
 ) -> Result<Vec<&'a str>, GraphPatternTextError> {
+    let (kept, grouping) = later_with_items(lexer, carried)?;
+    Ok(if grouping { Vec::new() } else { kept })
+}
+
+/// The aliases of `carried` a later grouping WITH keeps as bare grouping
+/// keys (`WITH a, b AS b, count(*) AS c` keeps `a` and `b`), or None for a
+/// plain WITH.
+fn later_grouping_keys<'a>(
+    lexer: Lexer<'a>,
+    carried: &[&'a str],
+) -> Result<Option<Vec<&'a str>>, GraphPatternTextError> {
+    let (kept, grouping) = later_with_items(lexer, carried)?;
+    Ok(grouping.then_some(kept))
+}
+
+/// The aliases of `carried` a later WITH projects under their own names, and
+/// whether an item calls an aggregate function.
+fn later_with_items<'a>(
+    mut lexer: Lexer<'a>,
+    carried: &[&'a str],
+) -> Result<(Vec<&'a str>, bool), GraphPatternTextError> {
     const ENDS: [&str; 19] = [
         "WHERE",
         "ORDER",
@@ -101,6 +122,7 @@ fn later_with_keeps<'a>(
     let mut item: Vec<TokenKind<'a>> = Vec::new();
     let mut depth = 0_usize;
     let mut first = true;
+    let mut grouping = false;
     loop {
         let token = lexer.next()?;
         let previous = item.last().copied();
@@ -109,7 +131,7 @@ fn later_with_keeps<'a>(
             && super::with_aggregate::function(word).is_some()
             && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
-            return Ok(Vec::new());
+            grouping = true;
         }
         let ends = match token.kind {
             TokenKind::End => true,
@@ -152,7 +174,7 @@ fn later_with_keeps<'a>(
                 }
             }
             if ends {
-                return Ok(kept);
+                return Ok((kept, grouping));
             }
             item.clear();
             continue;
@@ -471,6 +493,7 @@ impl<'a> Parser<'a> {
         head: &mut GraphProjectionHead<'a>,
         offset: usize,
     ) -> Result<(), GraphSetTextError> {
+        self.grouped_comprehensions = None;
         if !head.with {
             return Ok(());
         }
@@ -492,6 +515,17 @@ impl<'a> Parser<'a> {
         // its own items, which still read the incoming row, end.
         let mut carried: Option<Vec<&'a str>> = None;
         let mut pending: Option<Vec<&'a str>> = None;
+        // When the first later WITH groups, its bare keys (`WITH a, b,
+        // count(*) AS c` keeps `a` and `b`), from the end of its items on. A
+        // pattern the scope after it reads over those keys alone is a
+        // function of the group: this head gathers it and that WITH carries
+        // it as a hidden key (grouped_comprehensions; LDBC SNB IC7's `NOT
+        // ((liker)-[:KNOWS]-(person))` after `WITH liker, ..., person`).
+        // `ungrouped` is every other visible binding.
+        let mut grouping: Option<Vec<&'a str>> = None;
+        let mut pending_grouping: Option<Vec<&'a str>> = None;
+        let mut ungrouped: Vec<&'a str> = Vec::new();
+        let mut grouped = Vec::new();
         // Otherwise the token after the projection list is not scanned. If it
         // already ends the scope (MATCH ...), there is none. A WITH that keeps
         // no carried element, grouping or not, still reads them in its own
@@ -512,6 +546,7 @@ impl<'a> Parser<'a> {
                 return Ok(());
             }
             let incoming: Vec<&'a str> = head.outputs.iter().map(|(name, _)| name.text).collect();
+            pending_grouping = later_grouping_keys(self.lexer.clone(), &incoming)?;
             pending = Some(later_with_keeps(self.lexer.clone(), &incoming)?);
         }
         let visible = head.outputs.len();
@@ -563,6 +598,13 @@ impl<'a> Parser<'a> {
                 && let Some(kept) = pending.take()
             {
                 carried = Some(kept);
+                grouping = pending_grouping.take();
+                if let Some(keys) = &grouping {
+                    ungrouped = (self.visible_graph_bindings())
+                        .map(|binding| binding.text)
+                        .filter(|name| !keys.contains(name) || !carries_own(head, offset, name))
+                        .collect();
+                }
             }
             if let TokenKind::Word(word) = token.kind
                 && !after_dot
@@ -604,6 +646,28 @@ impl<'a> Parser<'a> {
             {
                 skip_until = span.1;
                 comprehensions.push(span);
+                window = [window[1], window[2], Some(TokenKind::Punct(b']'))];
+                continue;
+            }
+            if (hoist_candidate(token.kind, after_dot) || bare)
+                && grouping.is_some()
+                && pending.is_none()
+                && !self.syntax.distinct
+                && let Some(span) = self.hoist_comprehension(
+                    &lexer,
+                    token,
+                    &mut head.outputs,
+                    &mut head.inputs,
+                    offset,
+                    HoistGuard {
+                        names: &BOUNDARY_READ_NAMES,
+                        locals: &locals,
+                        refused: &ungrouped,
+                    },
+                )?
+            {
+                skip_until = span.1;
+                grouped.push(span);
                 window = [window[1], window[2], Some(TokenKind::Punct(b']'))];
                 continue;
             }
@@ -660,6 +724,9 @@ impl<'a> Parser<'a> {
                     // The dropped MATCH bindings the first WITH's own WHERE
                     // and pages read are out of scope from here on.
                     before_return = false;
+                    if carried.is_none() {
+                        pending_grouping = later_grouping_keys(lexer.clone(), &incoming)?;
+                    }
                     pending = Some(later_with_keeps(lexer.clone(), &incoming)?);
                 }
                 TokenKind::Word(word)
@@ -867,6 +934,8 @@ impl<'a> Parser<'a> {
         if !comprehensions.is_empty() {
             self.comprehension_reads = Some((head.outputs.len(), comprehensions));
         }
+        self.grouped_comprehensions =
+            (!grouped.is_empty()).then_some((head.outputs.len(), grouped));
         Ok(())
     }
 

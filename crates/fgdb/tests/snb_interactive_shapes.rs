@@ -318,6 +318,27 @@ fn reads() -> Vec<(&'static str, &'static str, Vec<Vec<&'static str>>)> {
             vec![vec!["'Rust'", "1"]],
         ),
         (
+            "IC7",
+            "MATCH (person:Person {id: 2})<-[:HAS_CREATOR]-(message:Message)<-[like:LIKES]-(liker:Person)
+             WITH liker, message, like.creationDate AS likeTime, person
+             ORDER BY likeTime DESC, toInteger(message.id) ASC
+             WITH liker, head(collect({msg: message, likeTime: likeTime})) AS latestLike, person
+             RETURN liker.id AS personId, liker.firstName AS personFirstName,
+               liker.lastName AS personLastName, latestLike.likeTime AS likeCreationDate,
+               latestLike.msg.id AS commentOrPostId,
+               coalesce(latestLike.msg.content, latestLike.msg.imageFile) AS commentOrPostContent,
+               toInteger(floor(toFloat(latestLike.likeTime - latestLike.msg.creationDate) / 1000.0) / 60.0) AS minutesLatency,
+               NOT ((liker)-[:KNOWS]-(person)) AS isNew
+             ORDER BY likeCreationDate DESC, toInteger(personId) ASC
+             LIMIT 20",
+            // Persons 3 and 1 liked Bob's post 60, at 1310 and 1300; both
+            // know Bob, and each like came under a minute after the post.
+            vec![
+                vec!["3", "'Ann'", "'Cole'", "1310", "60", "'hello'", "0", "false"],
+                vec!["1", "'Ann'", "'Abel'", "1300", "60", "'hello'", "0", "false"],
+            ],
+        ),
+        (
             "IC8",
             "MATCH (start:Person {id: 2})<-[:HAS_CREATOR]-(:Message)<-[:REPLY_OF]-(comment:Comment)
                -[:HAS_CREATOR]->(person:Person)

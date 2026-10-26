@@ -1773,6 +1773,73 @@ fn a_carried_element_reads_its_properties_past_an_unwind() {
     assert_eq!(sorted(execute("MATCH (n) WITH n RETURN n.p AS p")), every);
 }
 
+/// A pattern that the scope after a grouping WITH reads over that WITH's
+/// bare keys alone is a function of each group: the graph head before the
+/// WITH gathers it and the WITH carries it as a hidden key, so the groups and
+/// their counts are unchanged (LDBC SNB IC7's `NOT ((liker)-[:KNOWS]-(person))
+/// AS isNew` after `WITH liker, ..., person`). It takes the bare spelling in
+/// a Boolean position, `exists(...)` and `COUNT { ... }`.
+#[test]
+fn a_pattern_over_grouping_keys_reads_past_the_grouping_with() {
+    let int = |n: i64| GraphValue::Scalar(CanonicalScalar::Int(n));
+    let out = |n: u128| EDGES.iter().filter(|&&(s, _, _)| s == VId(n)).count() as i64;
+    // Every (a, b) an edge joins, with its number of parallel edges.
+    let mut paths: std::collections::BTreeMap<(u128, u128), i64> = Default::default();
+    for &(a, _, b) in &EDGES {
+        *paths.entry((a.0, b.0)).or_default() += 1;
+    }
+    let as_int = |rows: Vec<GraphValueRow>| {
+        let mut rows: Vec<GraphValueRow> = rows
+            .into_iter()
+            .map(|row| {
+                GraphValueRow::from_owned_values(
+                    row.values()
+                        .iter()
+                        .map(|cell| match cell.as_scalar() {
+                            Some(CanonicalScalar::Int(n)) => int(*n),
+                            _ => cell.clone(),
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    };
+    let expected = |value: &dyn Fn(u128, u128) -> GraphValue| {
+        as_int(
+            paths
+                .iter()
+                .map(|(&(a, b), &n)| {
+                    GraphValueRow::from_owned_values(vec![
+                        GraphValue::Vertex(VId(a)),
+                        GraphValue::Vertex(VId(b)),
+                        int(n),
+                        value(a, b),
+                    ])
+                })
+                .collect(),
+        )
+    };
+    // Vertex 4 has no out-edge; every other end vertex has one.
+    let sink = expected(&|_, b| GraphValue::Scalar(CanonicalScalar::Bool(out(b) == 0)));
+    for text in [
+        "MATCH (a)-[:R]->(b) WITH a, b ORDER BY b.p WITH a, b, count(*) AS n \
+         RETURN a, b, n, NOT ((b)-[:R]->()) AS sink",
+        "MATCH (a)-[:R]->(b) WITH a, b ORDER BY b.p WITH a, b, count(*) AS n \
+         RETURN a, b, n, NOT exists((b)-[:R]->()) AS sink",
+    ] {
+        assert_eq!(as_int(execute(text)), sink, "{text}");
+    }
+    assert_eq!(
+        as_int(execute(
+            "MATCH (a)-[:R]->(b) WITH a, b WITH a, b, count(*) AS n \
+             RETURN a, b, n, COUNT { (b)-[:R]->() } AS out"
+        )),
+        expected(&|_, b| int(out(b)))
+    );
+}
+
 /// An existence test read as a value, `exists((n)-->())` or `EXISTS { ... }`:
 /// the size of the pattern's witness list being positive, as `COUNT { ... }`
 /// reads its size. It answers in a RETURN, a WITH item, a CASE condition,

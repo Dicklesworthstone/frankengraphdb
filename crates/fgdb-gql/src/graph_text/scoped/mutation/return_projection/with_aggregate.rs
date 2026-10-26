@@ -246,6 +246,60 @@ impl<'a> Parser<'a> {
         Ok(column)
     }
 
+    /// LDBC SNB IC7: `WITH a, b, count(*) AS c RETURN NOT ((a)-[:K]-(b))`.
+    /// Each pattern the scope after this grouping reads over its bare keys
+    /// alone, gathered by the graph head before it (grouped_comprehensions),
+    /// becomes one more hidden key: a function of keys, so the groups, their
+    /// multiplicity and DISTINCT are unchanged. Returns each pattern's
+    /// (source start, source end, output column), which that scope reads
+    /// where the pattern stands (comprehension_read).
+    fn grouped_pattern_keys(
+        &mut self,
+        schema: &pipeline::RowSchema<'a>,
+        inputs: &mut Vec<ReadProjectionTemplate>,
+        keys: &mut Vec<usize>,
+        returned: &mut Vec<(Name<'a>, Output, GraphSetColumnType)>,
+    ) -> Result<Vec<(usize, usize, usize)>, GraphSetTextError> {
+        let Some((_, spans)) = self
+            .grouped_comprehensions
+            .take()
+            .filter(|(width, _)| *width == schema.len())
+        else {
+            return Ok(Vec::new());
+        };
+        let mut reads = Vec::new();
+        for (start, end, column) in spans {
+            self.capacity(
+                returned.len(),
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
+            let input = self.input_slot(inputs, ReadValueTemplate::Column(column))?;
+            let key = match keys.iter().position(|&key| key == input) {
+                Some(key) => key,
+                None => {
+                    keys.push(input);
+                    keys.len() - 1
+                }
+            };
+            let name = graph::HIDDEN_NAMES
+                .iter()
+                .copied()
+                .find(|name| returned.iter().all(|(output, _, _)| output.text != *name))
+                .ok_or_else(|| expected(start, "bounded grouping pattern reads"))?;
+            returned.push((
+                Name {
+                    text: name,
+                    at: start,
+                },
+                Output::Key(key),
+                schema[column].1,
+            ));
+            reads.push((start, end, returned.len() - 1));
+        }
+        Ok(reads)
+    }
+
     /// fgdb-ezgeq: `WITH p, count(f) AS c RETURN p.name, c`. Each property the
     /// scope after this grouping reads through a kept binding (`grouped`, found
     /// by the graph head) becomes one more hidden key. The graph head keeps
@@ -719,6 +773,11 @@ impl<'a> Parser<'a> {
         } else {
             self.grouped_keys(schema, &mut inputs, &mut keys, &mut returned)?
         };
+        let spans = if returning {
+            Vec::new()
+        } else {
+            self.grouped_pattern_keys(schema, &mut inputs, &mut keys, &mut returned)?
+        };
         if inputs.is_empty() {
             // COUNT(*) needs occurrences, not an invented graph source or a
             // guessed cardinality. A constant projection preserves those rows.
@@ -764,7 +823,8 @@ impl<'a> Parser<'a> {
                 (name.text.to_owned(), column, kind)
             })
             .collect();
-        self.boundary_reads = (!reads.is_empty()).then(|| BoundaryReads {
+        // Hidden keys stay until the scope after this stage ends.
+        self.boundary_reads = (!reads.is_empty() || !spans.is_empty()).then(|| BoundaryReads {
             visible,
             width: output_schema.len(),
             reads,
@@ -773,6 +833,9 @@ impl<'a> Parser<'a> {
             scoped: Vec::new(),
         });
         self.projected_sources = (!sources.is_empty()).then_some((output_schema.len(), sources));
+        if !spans.is_empty() {
+            self.comprehension_reads = Some((output_schema.len(), spans));
+        }
         Ok((
             ReadStageTemplate::Aggregate {
                 at,
