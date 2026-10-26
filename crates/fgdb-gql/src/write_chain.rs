@@ -61,6 +61,8 @@ pub struct PreparedGraphWriteChainText {
     pub(crate) steps: Vec<ChainTextStep>,
     /// A terminal native read over the final write's private occurrence bag.
     pub(crate) read: Option<crate::set_text::multipart::BoundReadInput>,
+    /// The property keys that read names on carried elements (`n.key`).
+    pub(crate) read_keys: Vec<fgdb_delta_types::PropertyKeyId>,
 }
 
 impl PreparedGraphWriteChainText {
@@ -385,6 +387,8 @@ pub struct PreparedGraphWriteChain {
     /// input. Hosts execute it against the complete post-write overlay under
     /// the same rollback workspace, capability and cumulative allowance.
     pub(crate) read: Option<crate::PreparedGraphSet>,
+    /// The property keys the terminal read names on carried elements.
+    pub(crate) read_keys: Vec<fgdb_delta_types::PropertyKeyId>,
 }
 
 impl core::fmt::Debug for PreparedGraphWriteChain {

@@ -571,6 +571,15 @@ impl<V: Vfs + Clone> Database<V> {
                 fgdb_gql::GraphSetExecutionError::InputSchema { operand: 0 },
             )));
         }
+        // A terminal read's explicitly named field is a textual read, refused
+        // out of scope like a field named in a write's RETURN.
+        if chain
+            .read_element_keys()
+            .iter()
+            .any(|key| !scope.allows_property(*key))
+        {
+            return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
+        }
         // Whole-program admission precedes even the first engine ID. The
         // chain is compiler-owned, but its unsupported family is not authority.
         let mut reads = chain.returns_rows() || continuation.is_some();

@@ -37,15 +37,18 @@ trait EdgeMergeOutput: Sized {
     fn result_rows(&self) -> u64;
 }
 
-/// Each endpoint pair's resolved edges, with each edge's own endpoints.
-type ResolvedPairEdges = std::collections::BTreeMap<(VId, VId), Vec<(EId, (VId, VId))>>;
+/// Resolved edges, each with its own endpoints.
+type ResolvedEdges = Vec<(EId, (VId, VId))>;
+
+/// Each endpoint pair's resolved edges.
+type ResolvedPairEdges = std::collections::BTreeMap<(VId, VId), ResolvedEdges>;
 
 /// The RETURN owner's resolution (fgdb-at06q): every edge each endpoint pair
 /// resolved to, in canonical pair and identity order, with its endpoints.
 #[derive(Default)]
 struct EdgeMergeRows {
     edges: ResolvedPairEdges,
-    occurrences: std::collections::BTreeMap<usize, Vec<(EId, (VId, VId))>>,
+    occurrences: std::collections::BTreeMap<usize, ResolvedEdges>,
     resolved: u64,
     /// Every resolved edge's outcome and the created edges, in canonical
     /// pair and identity order: a chain step's receipt (fgdb-cpny9).

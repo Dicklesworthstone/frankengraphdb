@@ -41,6 +41,16 @@ impl PreparedGraphWriteChain {
         ))
     }
 
+    /// The property keys the statement's own terminal read names on carried
+    /// elements (`RETURN n.key`, `WHERE n.key = ...`). An authorized host
+    /// refuses an out-of-scope one before any write, as it refuses an
+    /// explicitly named field in a write's RETURN; whole-map reads such as
+    /// `properties(n)` keep the source's masking.
+    #[must_use]
+    pub fn read_element_keys(&self) -> &[fgdb_delta_types::PropertyKeyId] {
+        &self.read_keys
+    }
+
     /// Admit a continuation before any write: it must consume exactly one
     /// owned input with this chain's complete ordered names and types. Cloning
     /// the input into two subtrees or omitting it refuses, even under LIMIT 0.

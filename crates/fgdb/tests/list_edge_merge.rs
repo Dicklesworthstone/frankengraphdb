@@ -163,7 +163,7 @@ fn nested_list_keys_create_match_numeric_peers_and_survive_reopen() {
                 .unwrap();
             let expected = list(vec![int(1), list(vec![int(2)]), list(vec![])]);
             assert_eq!(stats.created_edges, 1);
-            assert_eq!(rows.value[0].values(), &[expected.clone()]);
+            assert_eq!(rows.value[0].values(), std::slice::from_ref(&expected));
             assert_eq!(
                 db.edges().unwrap()[0].props,
                 vec![(KEY, stored(expected.clone()))]

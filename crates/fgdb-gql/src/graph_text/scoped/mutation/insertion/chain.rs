@@ -427,6 +427,8 @@ impl PreparedGraphWriteChainText {
             after
         };
         let mut read = None;
+        // The property keys the terminal read names on carried elements.
+        let mut read_keys = Vec::new();
         while let Some(from) = next {
             // The continuation is at the next write's or terminal read's clause.
             let mut lexer = Lexer {
@@ -441,11 +443,18 @@ impl PreparedGraphWriteChainText {
                 let parser = Parser::new_with_parameter_types(body, declarations)?
                     .with_zones(resolve.time_zones())
                     .resume_after(from.boundary, &from.parameters, from.at)?;
-                let mut input = parser
-                    .write_read_continuation(body, from.row)?
-                    .resolve(&mut resolve)?;
+                let unresolved = parser.write_read_continuation(body, from.row)?;
+                let slots = unresolved.element_key_slots();
+                let mut input = unresolved.resolve(&mut resolve)?;
                 input.first.owned = Some(Box::new((columns, types)));
                 read = Some(input);
+                read_keys = slots
+                    .iter()
+                    .filter_map(|slot| match slot.bind() {
+                        crate::GraphElementKey::Property(key) => Some(key),
+                        crate::GraphElementKey::Unbound | crate::GraphElementKey::Missing => None,
+                    })
+                    .collect();
                 break;
             }
             // A SET, REMOVE or DELETE: a RETURN or the end of the statement
@@ -534,6 +543,7 @@ impl PreparedGraphWriteChainText {
             statement: statement.to_owned(),
             steps,
             read,
+            read_keys,
         };
         // Each step skipped the unused-declaration check, since another step
         // may read a declaration; every one must name a parameter some step
@@ -873,6 +883,7 @@ impl PreparedGraphWriteChainText {
             steps,
             initial_rows: None,
             read,
+            read_keys: self.read_keys.clone(),
         };
         if let Some(read) = chain.read_continuation()
             && !chain.accepts_read_continuation(read)

@@ -31,6 +31,20 @@ pub(crate) struct UnresolvedReadInput<'a> {
 }
 
 impl UnresolvedReadInput<'_> {
+    /// Every element property slot the read's parts recorded. The slots are
+    /// shared with their parts, so they read each key once it resolves.
+    pub(in crate::graph_text) fn element_key_slots(&self) -> Vec<crate::set_text::ElementKeySlot> {
+        core::iter::once(&self.first)
+            .chain(self.continuations.iter().map(|part| &part.input))
+            .flat_map(|part| {
+                part.syntax
+                    .element_keys
+                    .iter()
+                    .map(|(_, slot)| slot.clone())
+            })
+            .collect()
+    }
+
     pub(in crate::graph_text) fn from_first(
         first: UnresolvedGraphText<'_>,
     ) -> UnresolvedReadInput<'_> {
@@ -420,6 +434,9 @@ impl<'a> Parser<'a> {
             .syntax
             .element_keys
             .append(&mut self.syntax.element_keys);
+        // Like every chain step, the read leaves the unused-declaration check
+        // to the chain, since an earlier write may read a declaration.
+        self.chain_write = true;
         self.end()?;
         result.share_parameters(&self.syntax.parameters, &self.syntax.parameter_offsets);
         self.admit_multipart_size(&result)?;

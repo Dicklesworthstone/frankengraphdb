@@ -1111,9 +1111,10 @@ mod write_return_tests {
                 ("CREATE (n:Copy) RETURN n; CREATE (m)", false),
                 ("CREATE (n:Copy); CREATE (m) RETURN m", false),
                 // CREATE ... SET ... RETURN is a chain step since 29157210
-                // (fgdb-cpny9); the chain parser refuses a write after it.
+                // (fgdb-cpny9), and a write may follow the SET since
+                // fgdb-k7d0q; the last step's unknown RETURN variable refuses.
                 (
-                    "MATCH (n) CREATE (copy:Copy) SET copy.p=1 CREATE (x) RETURN copy",
+                    "MATCH (n) CREATE (copy:Copy) SET copy.p=1 CREATE (x) RETURN copy, nope",
                     true,
                 ),
             ] {
@@ -1141,8 +1142,8 @@ mod write_return_tests {
                         "{text}"
                     );
                     // A chain prepares step by step, so the label and the
-                    // SET's property key are looked up before the CREATE
-                    // after the SET is refused (measured: `Copy`, then `p`).
+                    // SET's property key are looked up before the last
+                    // step's RETURN is refused (`Copy`, then `p`).
                     // A lookup is a pure catalog read; nothing is written.
                     assert_eq!(
                         looked_up,

@@ -1043,17 +1043,33 @@ fn vertex_merge_steps_run_over_a_leading_unwind_and_return_rows() {
         .await
         .unwrap();
         assert_eq!(rows(carried), [vec![int(11), int(11)]]);
-        // RETURN *, a NULL UNWIND value and a non-scalar one refuse and
-        // publish nothing.
+        // RETURN * and a NULL UNWIND value refuse and publish nothing.
         let frontier = db.frontier().unwrap();
         for refused in [
             "UNWIND [1] AS x MERGE (n:Person {p: x}) RETURN *",
             "UNWIND [null] AS x MERGE (n:Person {p: x})",
-            "UNWIND [[1]] AS x MERGE (n:Person {p: x})",
         ] {
             assert!(write(&mut db, refused).await.is_err(), "{refused}");
         }
         assert_eq!(db.frontier().unwrap(), frontier);
+        // A List key merges as a stored List (fgdb-fc7cx): a second MERGE
+        // binds the vertex the first created.
+        let list = CanonicalPropertyValue::List(
+            fgdb_types::CanonicalList::try_new(vec![CanonicalScalar::Int(1).into()]).unwrap(),
+        );
+        for _ in 0..2 {
+            write(&mut db, "UNWIND [[1]] AS x MERGE (n:Person {p: x})")
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            db.vertices()
+                .unwrap()
+                .iter()
+                .filter(|vertex| vertex.props == vec![(P, list.clone())])
+                .count(),
+            1
+        );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -1489,13 +1505,30 @@ fn vertex_merge_steps_compute_values_from_the_row() {
         let frontier = db.frontier().unwrap();
         for refused in [
             "UNWIND [{q: 1}] AS m MERGE (n:Source {p: m.p})",
-            "UNWIND [{p: [1]}] AS m MERGE (n:Source {p: m.p})",
             "WITH 9223372036854775807 AS y MERGE (n:Source {p: y + 1})",
             "UNWIND [{p: 50}] AS m MERGE (n:Source {p: m.p}) SET n.q = m",
         ] {
             assert!(write(&mut db, refused).await.is_err(), "{refused}");
         }
         assert_eq!(db.frontier().unwrap(), frontier);
+        // A List field merges as a stored List (fgdb-fc7cx): the second run
+        // binds the vertex the first created.
+        let list = CanonicalPropertyValue::List(
+            fgdb_types::CanonicalList::try_new(vec![CanonicalScalar::Int(1).into()]).unwrap(),
+        );
+        for _ in 0..2 {
+            write(&mut db, "UNWIND [{p: [1]}] AS m MERGE (n:Source {p: m.p})")
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            db.vertices()
+                .unwrap()
+                .iter()
+                .filter(|vertex| vertex.props == vec![(P, list.clone())])
+                .count(),
+            1
+        );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
