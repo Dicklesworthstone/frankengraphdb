@@ -227,28 +227,33 @@ impl<'a> Parser<'a> {
         let relation = self.schema_name()?;
         // Share literal/parameter, duplicate-key and field-count admission
         // with plain MERGE. The map is part of the match identity, not SET.
-        let properties = self.merge_property_map().map_err(|refusal| match refusal {
-            super::merge::MergeMapError::Pattern(error) => GraphEdgeUpsertTextError::from(error),
-            super::merge::MergeMapError::TooManyFields { at, observed } => {
-                merge_error(GraphEdgeMergeTextError {
-                    offset: at,
-                    kind: crate::GraphEdgeMergeTextErrorKind::Build(
-                        crate::GraphEdgeMergeBuildError::TooManyProperties {
-                            limit: crate::MAX_GRAPH_EDGE_MERGE_PROPERTIES,
-                            observed,
-                        },
-                    ),
-                })
-            }
-            super::merge::MergeMapError::DuplicateProperty { at } => {
-                merge_error(GraphEdgeMergeTextError {
-                    offset: at,
-                    kind: crate::GraphEdgeMergeTextErrorKind::Build(
-                        crate::GraphEdgeMergeBuildError::DuplicateProperty,
-                    ),
-                })
-            }
-        })?;
+        let properties = self
+            .merge_property_map(false)
+            .map_err(|refusal| match refusal {
+                super::merge::MergeMapError::Pattern(error) => {
+                    GraphEdgeUpsertTextError::from(error)
+                }
+                super::merge::MergeMapError::Value(error) => GraphEdgeUpsertTextError::from(error),
+                super::merge::MergeMapError::TooManyFields { at, observed } => {
+                    merge_error(GraphEdgeMergeTextError {
+                        offset: at,
+                        kind: crate::GraphEdgeMergeTextErrorKind::Build(
+                            crate::GraphEdgeMergeBuildError::TooManyProperties {
+                                limit: crate::MAX_GRAPH_EDGE_MERGE_PROPERTIES,
+                                observed,
+                            },
+                        ),
+                    })
+                }
+                super::merge::MergeMapError::DuplicateProperty { at } => {
+                    merge_error(GraphEdgeMergeTextError {
+                        offset: at,
+                        kind: crate::GraphEdgeMergeTextErrorKind::Build(
+                            crate::GraphEdgeMergeBuildError::DuplicateProperty,
+                        ),
+                    })
+                }
+            })?;
         self.punct(b']', "]")?;
         self.punct(b'-', "-")?;
         let outgoing = self.take(b'>')?;

@@ -137,8 +137,8 @@ pub enum GraphVertexMergeError<E, A> {
         limit: u64,
         observed: u128,
     },
-    /// A MERGE over input rows read NULL or a non-scalar from its row for a
-    /// property value (openCypher refuses a null MERGE property).
+    /// A MERGE over input rows read NULL or a value that cannot be written
+    /// as a scalar or bounded stored list (openCypher refuses a null key).
     RowValue {
         row: usize,
         column: usize,
@@ -165,8 +165,8 @@ pub enum GraphVertexMergeError<E, A> {
         property: usize,
         source: crate::GraphIntegerError,
     },
-    /// A property value a MERGE over input rows computes from its row was
-    /// NULL or no scalar (openCypher refuses a null MERGE property).
+    /// A computed MERGE key was NULL or could not be written as a scalar
+    /// or bounded stored list.
     RowExpressionValue {
         row: usize,
         property: usize,
@@ -197,7 +197,7 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
             }
             Self::RowValue { row, column } => write!(
                 f,
-                "MERGE row {row} column {column} is not a non-null scalar property value"
+                "MERGE row {row} column {column} is not a non-null scalar or bounded list property value"
             ),
             Self::RowMerge { row, source } => write!(f, "MERGE row {row}: {source}"),
             Self::InputRelation(error) => write!(f, "MERGE input rows: {error}"),
@@ -217,7 +217,7 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
             } => write!(f, "MERGE row {row} property {property}: {source}"),
             Self::RowExpressionValue { row, property } => write!(
                 f,
-                "MERGE row {row} property {property} is not a non-null scalar property value"
+                "MERGE row {row} property {property} is not a non-null scalar or bounded list property value"
             ),
         }
     }
@@ -682,8 +682,90 @@ impl PreparedGraphVertexMergeRows {
         Ok(tuple)
     }
 
+    /// The stored property tuple for one input occurrence. This widens tuple
+    /// with list keys while leaving its scalar API available to existing
+    /// callers. Every collection copy is admitted before ownership changes;
+    /// maps at any depth, graph elements and top-level NULL are refused.
+    #[allow(clippy::type_complexity)]
+    pub fn stored_tuple<E, A, C>(
+        &self,
+        at: usize,
+        row: &GraphValueRow,
+        control: &mut impl FnMut(
+            crate::GlaExecutionEvent,
+        )
+            -> Result<(), crate::GqlQueryError<GraphVertexMergeError<E, A>, C>>,
+    ) -> Result<
+        Vec<fgdb_types::CanonicalPropertyValue>,
+        crate::GqlQueryError<GraphVertexMergeError<E, A>, C>,
+    > {
+        fn written<C>(
+            value: &crate::algebra::GraphValue,
+            control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), C>,
+        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, C> {
+            use crate::algebra::GraphValue;
+            if value.is_null() {
+                return Ok(None);
+            }
+            if matches!(value, GraphValue::Scalar(_)) {
+                return Ok(value.to_written_property());
+            }
+            if !matches!(value, GraphValue::List(_))
+                || !value.validate_bounds()
+                || value
+                    .canonical_byte_len()
+                    .ok()
+                    .is_none_or(|bytes| bytes > crate::algebra::MAX_SCALAR_PREDICATE_BYTES)
+            {
+                return Ok(None);
+            }
+            for _ in 0..value.payload_units() {
+                control(crate::GlaExecutionEvent::Work)?;
+                control(crate::GlaExecutionEvent::ScratchEntry)?;
+            }
+            Ok(value.to_written_property())
+        }
+
+        let mut tuple = Vec::with_capacity(self.properties.len());
+        for (property, (_, value)) in self.properties.iter().enumerate() {
+            let value = match value {
+                GraphVertexMergeRowValue::Bound(value) => {
+                    fgdb_types::CanonicalPropertyValue::Scalar(value.value().clone())
+                }
+                GraphVertexMergeRowValue::Column(column) => {
+                    let invalid = || {
+                        crate::GqlQueryError::Source(GraphVertexMergeError::RowValue {
+                            row: at,
+                            column: *column,
+                        })
+                    };
+                    let value = row.values().get(*column).ok_or_else(invalid)?;
+                    written(value, control)?.ok_or_else(invalid)?
+                }
+                GraphVertexMergeRowValue::Computed(value) => {
+                    let value = crate::set_ops::evaluate_value(value, row, property, control)
+                        .map_err(|failure| match failure {
+                            crate::set_ops::ProjectionFailure::Control(error) => error,
+                            crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
+                                crate::GqlQueryError::Source(GraphVertexMergeError::RowExpression {
+                                    row: at,
+                                    property,
+                                    source: error,
+                                })
+                            }
+                        })?;
+                    written(&value, control)?.ok_or(crate::GqlQueryError::Source(
+                        GraphVertexMergeError::RowExpressionValue { row: at, property },
+                    ))?
+                }
+            };
+            tuple.push(value);
+        }
+        Ok(tuple)
+    }
+
     /// The ON/SET clauses, if any. With clauses, every row runs its own
-    /// MERGE; without, rows with equal tuples share one.
+    /// MERGE; without, rows with equal scalar tuples share one.
     #[must_use]
     pub fn actions(&self) -> Option<&GraphVertexMergeRowActions> {
         self.actions.as_deref()

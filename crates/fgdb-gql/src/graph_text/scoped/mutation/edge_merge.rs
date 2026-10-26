@@ -114,19 +114,22 @@ impl<'a> Parser<'a> {
         };
         self.punct(b':', ":")?;
         let relation = self.schema_name()?;
-        let properties = self.merge_property_map().map_err(|refusal| match refusal {
-            super::merge::MergeMapError::Pattern(error) => error.into(),
-            super::merge::MergeMapError::TooManyFields { at, observed } => build_error(
-                at,
-                crate::GraphEdgeMergeBuildError::TooManyProperties {
-                    limit: crate::MAX_GRAPH_EDGE_MERGE_PROPERTIES,
-                    observed,
-                },
-            ),
-            super::merge::MergeMapError::DuplicateProperty { at } => {
-                build_error(at, crate::GraphEdgeMergeBuildError::DuplicateProperty)
-            }
-        })?;
+        let properties = self
+            .merge_property_map(false)
+            .map_err(|refusal| match refusal {
+                super::merge::MergeMapError::Pattern(error) => error.into(),
+                super::merge::MergeMapError::Value(error) => error.into(),
+                super::merge::MergeMapError::TooManyFields { at, observed } => build_error(
+                    at,
+                    crate::GraphEdgeMergeBuildError::TooManyProperties {
+                        limit: crate::MAX_GRAPH_EDGE_MERGE_PROPERTIES,
+                        observed,
+                    },
+                ),
+                super::merge::MergeMapError::DuplicateProperty { at } => {
+                    build_error(at, crate::GraphEdgeMergeBuildError::DuplicateProperty)
+                }
+            })?;
         self.punct(b']', "]")?;
         self.punct(b'-', "-")?;
         let outgoing = self.take(b'>')?;
@@ -843,6 +846,15 @@ impl PreparedGraphEdgeMergeText {
                 crate::mutation_text::VertexMergeValueTemplate::Bound(value) => value.clone(),
                 crate::mutation_text::VertexMergeValueTemplate::Parameter { index, at } => {
                     scalar(values[*index].clone(), *at)?
+                }
+                crate::mutation_text::VertexMergeValueTemplate::Stored { at, .. } => {
+                    return Err(error(
+                        *at,
+                        GraphPatternTextErrorKind::Expected(
+                            "scalar literal or parameter relationship MERGE property value",
+                        ),
+                    )
+                    .into());
                 }
             };
             properties.push((*key, value));

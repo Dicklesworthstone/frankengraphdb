@@ -745,7 +745,7 @@ impl WriteTxn {
                 used.evaluator.work_units = observed as u64;
                 Ok(())
             };
-            let mut resolved: std::collections::BTreeMap<Vec<CanonicalScalar>, Vec<VId>> =
+            let mut resolved: std::collections::BTreeMap<Vec<CanonicalPropertyValue>, Vec<VId>> =
                 std::collections::BTreeMap::new();
             let mut outcomes = Vec::new();
             let mut created = Vec::new();
@@ -755,12 +755,35 @@ impl WriteTxn {
             let memoized = merge.actions().is_none();
             for (at, row) in rows.iter().enumerate() {
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-                let tuple = merge.tuple(at, row, &mut |event| evaluate(&mut used, event))?;
+                let tuple = merge.stored_tuple(at, row, &mut |event| evaluate(&mut used, event))?;
+                let collections = tuple.iter().any(CanonicalPropertyValue::is_collection);
+                if collections && let Some(held) = frozen.take() {
+                    // Frozen candidate buckets are scalar-only. Materialize
+                    // the already-held ordered prefix before a collection key
+                    // uses the normal native matcher. The enclosing workspace
+                    // still owns rollback if this or any later row refuses.
+                    let batches = core::mem::take(held).into_batches();
+                    for batch in &batches {
+                        cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                        database
+                            .admit_write_values(batch)
+                            .map_err(WriteTxnError::Write)
+                            .map_err(infrastructure)?;
+                    }
+                    if !batches.is_empty() {
+                        self.write_ordered(database, batches)
+                            .map_err(infrastructure)?;
+                    }
+                }
+                // Identical storage encodings need not compare TRUE:
+                // [1, NULL] = [1, NULL] is UNKNOWN. Every list occurrence
+                // therefore uses the shared native equality predicate.
+                let memoized = memoized && !collections;
                 // Whether this row's MERGE created its vertex.
                 let mut created_here = false;
                 if !memoized || !resolved.contains_key(&tuple) {
                     scratch(&mut used)?;
-                    let single = merge.merge_for(&tuple).map_err(|source| {
+                    let single = merge.merge_for_stored(&tuple).map_err(|source| {
                         GqlQueryError::Source(GraphVertexMergeError::RowMerge {
                             row: at,
                             source: Box::new(source),
@@ -805,7 +828,10 @@ impl WriteTxn {
                                 )),
                             )?;
                             frozen.matching(
-                                merge.property_keys().next().zip(tuple.first()),
+                                merge
+                                    .property_keys()
+                                    .next()
+                                    .zip(tuple.first().and_then(CanonicalPropertyValue::as_scalar)),
                                 &predicates,
                             )
                         }
@@ -902,6 +928,22 @@ impl WriteTxn {
                             matched.into_iter().collect()
                         }
                     };
+                    // The retained lookup key owns another collection copy.
+                    // Admit that payload before cloning, even though list
+                    // keys deliberately do not take the memoized fast path.
+                    for value in tuple.iter().filter(|value| value.is_collection()) {
+                        point_payload_admission(value, &mut |event| {
+                            evaluate(
+                                &mut used,
+                                match event {
+                                    crate::gql_exec::source::SourceEvent::ScratchEntry => {
+                                        GlaExecutionEvent::ScratchEntry
+                                    }
+                                    _ => GlaExecutionEvent::Work,
+                                },
+                            )
+                        })?;
+                    }
                     resolved.insert(tuple.clone(), vertices);
                 }
                 if let Some(actions) = merge.actions() {

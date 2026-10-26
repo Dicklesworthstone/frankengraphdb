@@ -20,7 +20,7 @@ use fgdb_gql::{
     GraphVertexUpsertAction, GraphWriteChainError, GraphWriteChainStep,
     PreparedGraphVertexMergeRows,
 };
-use fgdb_types::{CanonicalScalar, QueryCx, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, QueryCx, VId};
 use fgdb_warden::{Error, PlannerPredicates};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -475,7 +475,7 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
             evaluator: selected.evaluator,
             created_vertices: 0,
         };
-        let mut resolved: BTreeMap<Vec<CanonicalScalar>, Vec<VId>> = BTreeMap::new();
+        let mut resolved: BTreeMap<Vec<CanonicalPropertyValue>, Vec<VId>> = BTreeMap::new();
         let mut pairs = Vec::new();
         let mut effects = 0_u64;
         let memoized = merge.actions().is_none();
@@ -484,11 +484,23 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
             let tuple = {
                 let controls = RefCell::new(&mut *execution);
                 merge
-                    .tuple(at, row, &mut |kind| {
+                    .stored_tuple(at, row, &mut |kind| {
                         event(cx, &controls, private.query, &mut used.evaluator, kind)
                     })
                     .map_err(chained)?
             };
+            let collections = tuple.iter().any(CanonicalPropertyValue::is_collection);
+            if collections && let Some(held) = frozen.take() {
+                // The held prefix has already passed original-intent
+                // admission. Use its existing finish owner so flushing it
+                // neither skips nor repeats authority/effect accounting.
+                super::finish_frozen(transaction, database, cx, core::mem::take(held), execution)
+                    .map_err(source)
+                    .map_err(chained)?;
+            }
+            // A list containing NULL is not equal to itself. Keep every
+            // collection occurrence on the governed, masked native matcher.
+            let memoized = memoized && !collections;
             let mut created_here = false;
             let vertices: &[VId] = if !memoized || !resolved.contains_key(&tuple) {
                 {
@@ -502,7 +514,7 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
                     )
                     .map_err(chained)?;
                 }
-                let single = merge.merge_for(&tuple).map_err(|error| {
+                let single = merge.merge_for_stored(&tuple).map_err(|error| {
                     chained(GqlQueryError::Source(GraphVertexMergeError::RowMerge {
                         row: at,
                         source: Box::new(error),
@@ -515,7 +527,10 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
                         let controls = RefCell::new(&mut *execution);
                         held_matches(
                             held,
-                            merge.property_keys().next().zip(tuple.first()),
+                            merge
+                                .property_keys()
+                                .next()
+                                .zip(tuple.first().and_then(CanonicalPropertyValue::as_scalar)),
                             &predicates,
                             scope,
                             cx,

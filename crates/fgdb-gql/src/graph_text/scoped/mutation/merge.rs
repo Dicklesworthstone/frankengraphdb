@@ -26,7 +26,7 @@ use mutation_query::{ReturnLeaves, ReturnMapInput};
 
 pub(super) struct MergeProperty<'a> {
     pub(super) key: Name<'a>,
-    filter: Number,
+    filter: Option<Number>,
     pub(super) value: VertexMergeValueTemplate,
 }
 
@@ -34,12 +34,18 @@ pub(super) struct MergeProperty<'a> {
 /// error type: too many fields, a repeated key, or a malformed value.
 pub(super) enum MergeMapError {
     Pattern(GraphPatternTextError),
+    Value(crate::GraphSetTextError),
     TooManyFields { at: usize, observed: usize },
     DuplicateProperty { at: usize },
 }
 impl From<GraphPatternTextError> for MergeMapError {
     fn from(error: GraphPatternTextError) -> Self {
         Self::Pattern(error)
+    }
+}
+impl From<crate::GraphSetTextError> for MergeMapError {
+    fn from(error: crate::GraphSetTextError) -> Self {
+        Self::Value(error)
     }
 }
 
@@ -161,20 +167,23 @@ impl<'a> Parser<'a> {
             }
             labels.push(label);
         }
-        let properties = self.merge_property_map().map_err(|refusal| match refusal {
-            MergeMapError::Pattern(error) => error.into(),
-            MergeMapError::TooManyFields { at, observed } => insert_error(
-                at,
-                GraphInsertBuildError::TooManyFields {
-                    limit: crate::insertion::MAX_GRAPH_INSERT_FIELDS,
-                    observed,
-                },
-            ),
-            MergeMapError::DuplicateProperty { at } => insert_error(
-                at,
-                GraphInsertBuildError::DuplicateProperty { declaration: 0 },
-            ),
-        })?;
+        let properties = self
+            .merge_property_map(true)
+            .map_err(|refusal| match refusal {
+                MergeMapError::Pattern(error) => error.into(),
+                MergeMapError::Value(error) => error.into(),
+                MergeMapError::TooManyFields { at, observed } => insert_error(
+                    at,
+                    GraphInsertBuildError::TooManyFields {
+                        limit: crate::insertion::MAX_GRAPH_INSERT_FIELDS,
+                        observed,
+                    },
+                ),
+                MergeMapError::DuplicateProperty { at } => insert_error(
+                    at,
+                    GraphInsertBuildError::DuplicateProperty { declaration: 0 },
+                ),
+            })?;
         self.punct(b')', ")")?;
         Ok((variable, labels, properties))
     }
@@ -182,7 +191,10 @@ impl<'a> Parser<'a> {
     /// An optional `{key: value, ...}` MERGE property map: one or more
     /// distinct keys, each a non-null literal or a parameter. The same values
     /// are the MERGE's exact-equality predicates and its creation fields.
-    pub(super) fn merge_property_map(&mut self) -> Result<Vec<MergeProperty<'a>>, MergeMapError> {
+    pub(super) fn merge_property_map(
+        &mut self,
+        lists: bool,
+    ) -> Result<Vec<MergeProperty<'a>>, MergeMapError> {
         let mut properties = Vec::new();
         if self.take(b'{')? {
             if self.is_punct(b'}') {
@@ -207,7 +219,7 @@ impl<'a> Parser<'a> {
                     return Err(MergeMapError::DuplicateProperty { at: key.at });
                 }
                 self.punct(b':', ":")?;
-                let (filter, value) = self.merge_property_value()?;
+                let (filter, value) = self.merge_property_value(lists)?;
                 properties.push(MergeProperty { key, filter, value });
                 if !self.take(b',')? {
                     break;
@@ -222,8 +234,18 @@ impl<'a> Parser<'a> {
     /// exact-equality filter and the creation field.
     fn merge_property_value(
         &mut self,
-    ) -> Result<(Number, VertexMergeValueTemplate), MergeMapError> {
+        lists: bool,
+    ) -> Result<(Option<Number>, VertexMergeValueTemplate), MergeMapError> {
         let at = self.current.at;
+        if lists && self.set_value_is_list()? {
+            return Ok((
+                None,
+                VertexMergeValueTemplate::Stored {
+                    value: Box::new(self.read_row_value(&[], 0)?),
+                    at,
+                },
+            ));
+        }
         let operand = self.mutation_operand(&mut Vec::new())?;
         Ok(match operand {
             Operand::Literal(value) => {
@@ -235,7 +257,7 @@ impl<'a> Parser<'a> {
                     .into());
                 }
                 (
-                    Number::Literal(GqlParameterValue::Scalar(value.clone())),
+                    Some(Number::Literal(GqlParameterValue::Scalar(value.clone()))),
                     VertexMergeValueTemplate::Bound(value),
                 )
             }
@@ -249,12 +271,12 @@ impl<'a> Parser<'a> {
                     .into());
                 }
                 (
-                    Number::Literal(value),
+                    Some(Number::Literal(value)),
                     VertexMergeValueTemplate::Bound(scalar),
                 )
             }
             Operand::Number(Number::Parameter(index)) => (
-                Number::Parameter(index),
+                Some(Number::Parameter(index)),
                 VertexMergeValueTemplate::Parameter { index, at },
             ),
             Operand::Column(_) | Operand::Integer { .. } => {
@@ -874,7 +896,7 @@ fn merge_template(
     (parameters, parameter_offsets): (Vec<GqlParameterSpec>, Vec<usize>),
     variable: Name<'_>,
     resolved_labels: &[(LabelId, usize)],
-    resolved: Vec<(PropertyKeyId, Number, VertexMergeValueTemplate)>,
+    resolved: Vec<(PropertyKeyId, Option<Number>, VertexMergeValueTemplate)>,
 ) -> Result<PreparedGraphVertexMergeText, GraphVertexMergeTextError> {
     let at = statement.len();
     let mut builder = GraphPatternBuilder::new();
@@ -890,12 +912,14 @@ fn merge_template(
     let mut filters = Vec::new();
     let mut properties = Vec::new();
     for (key, filter, value) in resolved {
-        filters.push(BoundFilter::Property {
-            variable: variable.text.to_owned(),
-            key,
-            comparison: IntegerComparison::Equal,
-            value: filter,
-        });
+        if let Some(filter) = filter {
+            filters.push(BoundFilter::Property {
+                variable: variable.text.to_owned(),
+                key,
+                comparison: IntegerComparison::Equal,
+                value: filter,
+            });
+        }
         properties.push((key, value));
     }
     labels.sort_unstable();
@@ -936,13 +960,83 @@ fn merge_template(
     })
 }
 
+/// Admit one stored key once, then use exactly that value in the native
+/// equality predicate and the ordinary insertion collector. Maps remain
+/// unavailable as written properties, including maps nested inside a list.
+fn stored_merge_field(
+    builder: &mut GraphPatternBuilder,
+    variable: &str,
+    key: PropertyKeyId,
+    value: &fgdb_types::CanonicalPropertyValue,
+    at: usize,
+) -> Result<GraphMutationValue, GraphVertexMergeTextError> {
+    use crate::algebra::{GraphBooleanExpression, GraphBooleanOp, GraphBooleanOperand, GraphValue};
+    let refused = || {
+        error(
+            at,
+            GraphPatternTextErrorKind::Expected(
+                "non-null scalar or bounded list MERGE property value",
+            ),
+        )
+    };
+    if let fgdb_types::CanonicalPropertyValue::Scalar(value) = value {
+        if matches!(value, CanonicalScalar::Null) {
+            return Err(refused().into());
+        }
+        let literal = crate::GqlScalarParameter::new(value.clone())
+            .map_err(|_| error(at, GraphPatternTextErrorKind::ScalarLiteral))?;
+        let predicate =
+            crate::algebra::ScalarPredicate::new(value.clone(), IntegerComparison::Equal)
+                .map_err(|_| error(at, GraphPatternTextErrorKind::ScalarLiteral))?;
+        built(
+            at,
+            builder.filter(variable, VertexPredicate::ScalarProperty { key, predicate }),
+        )?;
+        return Ok(GraphMutationValue::Literal(literal));
+    }
+    // StoredLiteral checks the complete canonical size and nesting before
+    // copying. Its comparison is the same governed three-valued comparison
+    // used by MATCH, including exact Int/Float peers inside nested lists.
+    let expression = GraphBooleanExpression::prepare(&[GraphBooleanOp::Compare {
+        left: GraphBooleanOperand::Property { variable, key },
+        comparison: IntegerComparison::Equal,
+        right: GraphBooleanOperand::StoredLiteral(value),
+    }])
+    .map_err(|_| error(at, GraphPatternTextErrorKind::ScalarLiteral))?;
+    let value = GraphValue::from_property_value(value).ok_or_else(refused)?;
+    if value.to_written_property().is_none() {
+        return Err(refused().into());
+    }
+    built(at, builder.filter_boolean(&expression))?;
+    Ok(GraphMutationValue::Composite(crate::GraphSetValue::Value(
+        value,
+    )))
+}
+
 fn bind_merge_values(
     template: &PreparedGraphVertexMergeText,
     values: &[GqlParameterValue],
 ) -> Result<PreparedGraphVertexMerge, GraphVertexMergeTextError> {
+    let mut selection = template.selection.clone();
+    let variable = selection.columns[0].variable.clone();
     let mut fields = Vec::new();
     for (key, value_template) in &template.properties {
         let value = match value_template {
+            VertexMergeValueTemplate::Stored { value, at } => {
+                let value = Parser::constant_written_value(value, values)?.ok_or_else(|| {
+                    error(
+                        *at,
+                        GraphPatternTextErrorKind::Expected(
+                            "non-null scalar or bounded list MERGE property value",
+                        ),
+                    )
+                })?;
+                fields.push((
+                    *key,
+                    stored_merge_field(&mut selection.builder, &variable, *key, &value, *at)?,
+                ));
+                continue;
+            }
             VertexMergeValueTemplate::Bound(value) => value.clone(),
             VertexMergeValueTemplate::Parameter { index, at } => {
                 let value = scalar(values[*index].clone(), *at)?;
@@ -958,7 +1052,7 @@ fn bind_merge_values(
         };
         fields.push((*key, GraphMutationValue::Literal(value)));
     }
-    let selection = template.selection.bind_values(values)?;
+    let selection = selection.bind_values(values)?;
     let creation = PreparedGraphInsert::prepare_standalone(
         template.relation,
         vec![GraphInsertVertex {
@@ -1845,11 +1939,12 @@ impl<'a> Parser<'a> {
                     }
                     _ => {
                         let (_, value) =
-                            self.merge_property_value()
+                            self.merge_property_value(true)
                                 .map_err(|refusal| match refusal {
                                     MergeMapError::Pattern(error) => {
                                         GraphVertexMergeTextError::from(error)
                                     }
+                                    MergeMapError::Value(error) => error.into(),
                                     MergeMapError::TooManyFields { at, observed } => insert_error(
                                         at,
                                         GraphInsertBuildError::TooManyFields {
@@ -1909,11 +2004,14 @@ impl<'a> Parser<'a> {
         };
         if !matches!(
             row[column].1,
-            GraphSetColumnType::Scalar | GraphSetColumnType::Stored | GraphSetColumnType::Any
+            GraphSetColumnType::Scalar
+                | GraphSetColumnType::Stored
+                | GraphSetColumnType::List
+                | GraphSetColumnType::Any
         ) {
             return Err(error(
                 self.current.at,
-                GraphPatternTextErrorKind::Expected("a scalar row value in a MERGE map"),
+                GraphPatternTextErrorKind::Expected("a scalar or list row value in a MERGE map"),
             ));
         }
         self.advance()?;
@@ -2759,6 +2857,16 @@ impl PreparedGraphVertexMergeRowsText {
                     RowValueTemplate::Value(VertexMergeValueTemplate::Bound(value)) => {
                         GraphVertexMergeRowValue::Bound(value.clone())
                     }
+                    RowValueTemplate::Value(VertexMergeValueTemplate::Stored { value, at }) => {
+                        GraphVertexMergeRowValue::Computed(
+                            return_projection::bind_read_value(value, &values).map_err(
+                                |error| GraphVertexMergeTextError {
+                                    offset: *at,
+                                    ..GraphVertexMergeTextError::from(error)
+                                },
+                            )?,
+                        )
+                    }
                     RowValueTemplate::Value(VertexMergeValueTemplate::Parameter { index, at }) => {
                         let value = scalar(values[*index].clone(), *at)?;
                         if matches!(value.value(), CanonicalScalar::Null) {
@@ -2825,7 +2933,7 @@ impl crate::PreparedGraphVertexMergeRows {
                 .map_err(|_| error(0, GraphPatternTextErrorKind::ScalarLiteral))?;
             resolved.push((
                 *key,
-                Number::Literal(GqlParameterValue::Scalar(value.clone())),
+                Some(Number::Literal(GqlParameterValue::Scalar(value.clone()))),
                 VertexMergeValueTemplate::Bound(value),
             ));
         }
@@ -2839,6 +2947,64 @@ impl crate::PreparedGraphVertexMergeRows {
             resolved,
         )?;
         bind_merge_values(&template, &[])
+    }
+
+    /// The single MERGE for a scalar or list tuple. Scalar-only callers keep
+    /// the existing scalar plan and canonical bytes through merge_for.
+    /// A collection's native Boolean predicate stays inside the selection;
+    /// creation never substitutes canonical storage identity for query equality.
+    pub fn merge_for_stored(
+        &self,
+        tuple: &[fgdb_types::CanonicalPropertyValue],
+    ) -> Result<PreparedGraphVertexMerge, GraphVertexMergeTextError> {
+        if tuple.len() != self.properties.len() {
+            return Err(error(
+                0,
+                GraphPatternTextErrorKind::Expected("one MERGE value per property key"),
+            )
+            .into());
+        }
+        if tuple
+            .iter()
+            .any(|value| matches!(value.as_scalar(), Some(CanonicalScalar::Null)))
+        {
+            return Err(error(
+                0,
+                GraphPatternTextErrorKind::Expected("non-null MERGE property value"),
+            )
+            .into());
+        }
+        if tuple.iter().all(|value| value.as_scalar().is_some()) {
+            let scalars = tuple
+                .iter()
+                .filter_map(|value| value.as_scalar().cloned())
+                .collect::<Vec<_>>();
+            return self.merge_for(&scalars);
+        }
+        let mut builder = GraphPatternBuilder::new();
+        built(0, builder.vertex("n"))?;
+        for label in &self.labels {
+            built(0, builder.filter("n", VertexPredicate::HasLabel(*label)))?;
+        }
+        let mut fields = Vec::with_capacity(tuple.len());
+        for ((key, _), value) in self.properties.iter().zip(tuple) {
+            fields.push((*key, stored_merge_field(&mut builder, "n", *key, value, 0)?));
+        }
+        let selection = built(
+            0,
+            builder.prepare_values(&[GraphColumn::vertex("_merge_target", "n")], 0, None),
+        )?;
+        let creation = PreparedGraphInsert::prepare_standalone(
+            self.relation,
+            vec![GraphInsertVertex {
+                labels: self.labels.clone(),
+                properties: fields,
+            }],
+            Vec::new(),
+        )
+        .map_err(|source| insert_error(0, source))?;
+        PreparedGraphVertexMerge::prepare(selection, self.relation, 0, creation)
+            .map_err(|source| merge_error(0, source))
     }
 }
 

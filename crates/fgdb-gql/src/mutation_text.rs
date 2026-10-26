@@ -419,7 +419,16 @@ impl core::error::Error for GraphDeleteTextError {}
 #[derive(Clone)]
 pub(crate) enum VertexMergeValueTemplate {
     Bound(GqlScalarParameter),
-    Parameter { index: usize, at: usize },
+    Parameter {
+        index: usize,
+        at: usize,
+    },
+    /// A vertex MERGE's constant list expression or declared list parameter.
+    /// Binding retains the same stored value for selection and creation.
+    Stored {
+        value: Box<crate::set_text::ReadValueTemplate>,
+        at: usize,
+    },
 }
 
 /// A map value of a vertex MERGE step (fgdb-cpny9): a literal or parameter,
