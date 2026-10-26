@@ -355,6 +355,8 @@ impl PreparedNativeRead {
     /// One native row plus its canonical encoding and the decoded source remain
     /// outside the spill pool. This is not a Warden grant, durable result, or a
     /// claim that every GQL operator or the underlying database is out-of-core.
+    /// The returned future proves Send here, so callers do not recursively
+    /// re-prove every source, transformation and spill-write future.
     #[allow(clippy::too_many_arguments)]
     pub fn spool_ordered<'q, V, A, B>(
         &self,
@@ -370,7 +372,7 @@ impl PreparedNativeRead {
         max_row_bytes: usize,
         max_input_rows: u64,
         max_sort_work: u64,
-    ) -> impl Future<Output = Result<(NativeResultSpool, u64)>> + 'q + use<'q, V, A, B>
+    ) -> crate::SendFuture<'q, Result<(NativeResultSpool, u64)>>
     where
         V: Vfs + Clone,
         A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
@@ -380,7 +382,7 @@ impl PreparedNativeRead {
             .read_session()
             .map_err(|e| QueryError::Stream(GqlQueryError::Source(VertexScanError::Source(e))))
             .and_then(|view| open(self, &view, cx, params, policy, max_input_rows));
-        async move {
+        Box::pin(async move {
             let opened = opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
             execute_opened(
                 opened,
@@ -396,7 +398,7 @@ impl PreparedNativeRead {
                 max_sort_work,
             )
             .await
-        }
+        })
     }
 
     /// The same query-owned external order/window at this already-pinned view.
@@ -416,13 +418,13 @@ impl PreparedNativeRead {
         max_row_bytes: usize,
         max_input_rows: u64,
         max_sort_work: u64,
-    ) -> impl Future<Output = Result<(NativeResultSpool, u64)>> + 'q + use<'q, A, B>
+    ) -> crate::SendFuture<'q, Result<(NativeResultSpool, u64)>>
     where
         A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
         B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
     {
         let opened = open(self, view, cx, params, policy, max_input_rows);
-        async move {
+        Box::pin(async move {
             let opened = opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
             execute_opened(
                 opened,
@@ -438,7 +440,7 @@ impl PreparedNativeRead {
                 max_sort_work,
             )
             .await
-        }
+        })
     }
 }
 

@@ -775,6 +775,7 @@ mod tests {
         );
         let index = PackIndex {
             dir: PathBuf::new(),
+            cache_reads: true,
             table: RwLock::new(table),
             resident: Mutex::new(0),
             whole_reads: std::sync::atomic::AtomicUsize::new(0),
