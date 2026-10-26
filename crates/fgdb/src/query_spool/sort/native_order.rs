@@ -63,14 +63,14 @@ fn validate_spill_limits(
     Ok(())
 }
 
-struct OpenedOrder<I> {
-    columns: Vec<String>,
-    input: I,
-    tail: ScanSortTail,
+pub(crate) struct OpenedOrder<I> {
+    pub(crate) columns: Vec<String>,
+    pub(crate) input: I,
+    pub(crate) tail: ScanSortTail,
     // A unary relation first finishes its native graph leaf, including that
     // leaf's own order and page. The shared spill stages then consume those
     // exact rows; projecting in identity order would change failure ordinals.
-    stages: Option<(AsyncSpillSetPlan, EmbeddedReadView)>,
+    pub(crate) stages: Option<(AsyncSpillSetPlan, EmbeddedReadView)>,
 }
 
 fn open<'q>(
@@ -293,7 +293,7 @@ impl<'s> AsyncSpillElementSource for ResidentElements<'s> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn execute_opened<I, A, B>(
+pub(crate) async fn execute_opened<I, A, B>(
     opened: OpenedOrder<I>,
     cx: &QueryCx,
     policy: GqlQueryPolicy,
