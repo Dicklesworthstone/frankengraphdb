@@ -536,7 +536,7 @@ fn indexed_overlay_membership_and_refused_attempts_survive_later_success() {
                 3 => concurrent.add_edge(EId(3), VId(10), VId(30), vec![]),
                 4 => concurrent.delete_edge(EId(1)),
                 _ => unreachable!(),
-            }
+            };
             let mut writer = db.begin(&txcx).unwrap();
             writer.write(&mut db, concurrent).unwrap();
             writer.commit(&mut db, &commit).await.unwrap();

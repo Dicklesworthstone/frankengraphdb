@@ -279,7 +279,7 @@ mod write_overlay {
         records: u64,
         scoped: bool,
         hidden: bool,
-    ) -> Result<ResultGraph, Fault> {
+    ) -> Result<ResultGraph, Box<Fault>> {
         let (txn, query, commit) = (contexts.txn(), contexts.query(), contexts.commit());
         let issuer = authority();
         let token = issuer.issue_at(&grant(scoped), 100).unwrap();
@@ -325,7 +325,7 @@ mod write_overlay {
                     before,
                     "a late refusal must not publish the earlier statement"
                 );
-                Err(error)
+                Err(Box::new(error))
             }
         }
     }
