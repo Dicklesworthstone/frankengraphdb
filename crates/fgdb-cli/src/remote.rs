@@ -51,6 +51,8 @@ struct RemoteOptions {
     csv_types: Option<batch::CsvSchema>,
     /// Typed JSONL input, one fresh prepared autocommit per physical record.
     prepared_jsonl: Option<PathBuf>,
+    /// Explicit prepared write output profile; each record still commits once.
+    write_mode: prepared_writes::WriteMode,
 }
 
 struct RemoteTls {
@@ -71,6 +73,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     let mut rows_file = None;
     let mut csv_types = None;
     let mut prepared_jsonl = None;
+    let mut write_mode = None;
     let mut at = 0;
     while at < args.len() {
         let flag = args[at].as_str();
@@ -93,6 +96,13 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
             "--rows-file" if rows_file.is_none() => rows_file = Some(PathBuf::from(value()?)),
             "--prepared-jsonl" if prepared_jsonl.is_none() => {
                 prepared_jsonl = Some(PathBuf::from(value()?));
+            }
+            "--write-mode" if write_mode.is_none() => {
+                write_mode = Some(match value()?.as_str() {
+                    "stats" => prepared_writes::WriteMode::Stats,
+                    "returning" => prepared_writes::WriteMode::Returning,
+                    _ => return Err(Failure::usage("--write-mode needs stats or returning")),
+                });
             }
             "--csv-types" if csv_types.is_none() => {
                 csv_types = Some(batch::CsvSchema::parse(&value()?)?);
@@ -180,6 +190,11 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
             "--prepared-jsonl applies only to write and cannot combine with --rows-file, --csv-types or --param",
         ));
     }
+    if write_mode.is_some() && (mode != ExecuteMode::Write || prepared_jsonl.is_none()) {
+        return Err(Failure::usage(
+            "--write-mode requires remote write --prepared-jsonl",
+        ));
+    }
     let tls = match (tls_server_name, tls_ca_file) {
         (Some(server_name), Some(ca_file)) => Some(RemoteTls {
             server_name,
@@ -215,6 +230,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         rows_file,
         csv_types,
         prepared_jsonl,
+        write_mode: write_mode.unwrap_or_default(),
     })
 }
 
@@ -447,8 +463,13 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
         return runtime.block_on(async {
             // Invalid or empty first input cannot read credentials or connect.
             // Later records follow each confirmed, fully flushed completion.
-            let writes =
-                prepared_writes::PreparedWrites::open(&cx, path, &options.statement).await?;
+            let writes = prepared_writes::PreparedWrites::open(
+                &cx,
+                path,
+                &options.statement,
+                options.write_mode,
+            )
+            .await?;
             let mut client = connect(&cx, &options).await?;
             client
                 .select(&cx, &options.database)

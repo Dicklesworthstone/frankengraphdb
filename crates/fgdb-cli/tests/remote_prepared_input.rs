@@ -48,3 +48,27 @@ fn prepared_jsonl_empty_invalid_and_oversized_first_records_never_read_credentia
         assert!(!stdout.contains("missing-token"));
     }
 }
+
+#[test]
+fn prepared_returning_first_input_is_admitted_before_credentials() {
+    let (path, token) = input(b"{\"name\":\"invalid:secret\"}\n");
+    let output = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+        .args(["--robot", "remote", "--addr", "127.0.0.1:9", "--token-file"])
+        .arg(&token)
+        .args(["--database", "social", "--prepared-jsonl"])
+        .arg(&path)
+        .args([
+            "--write-mode",
+            "returning",
+            "write",
+            "CREATE (n:Person {name:$name}) RETURN n.name",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains(r#""class":"usage""#));
+    assert!(!stdout.contains(r#""event":"result""#));
+    assert!(!stdout.contains("secret"));
+    assert!(!stdout.contains("missing-token"));
+}

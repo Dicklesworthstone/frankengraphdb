@@ -1,7 +1,7 @@
 //! Real FGP client/decoder proofs for the prepared JSONL CLI adapter.
 //! Input reads and server replies are gated on completed output flushes.
 
-use super::super::prepared_writes::PreparedWrites;
+use super::super::prepared_writes::{PreparedWrites, WriteMode};
 use super::*;
 use fgdb_protocol::body::{
     ExecutePrepared, Prepare, PrepareMode, Prepared, PreparedExecutionMode, PreparedHandle,
@@ -133,6 +133,18 @@ fn prepared_jsonl_flags_make_per_record_autocommit_explicit() {
         Some(PathBuf::from("records.jsonl"))
     );
     assert!(accepted.rows_file.is_none());
+    assert_eq!(accepted.write_mode, WriteMode::Stats);
+    for (name, expected) in [
+        ("stats", WriteMode::Stats),
+        ("returning", WriteMode::Returning),
+    ] {
+        let accepted = options(
+            "write",
+            &["--prepared-jsonl", "records.jsonl", "--write-mode", name],
+        )
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(accepted.write_mode, expected);
+    }
     for verb in ["query", "subscribe"] {
         assert_eq!(
             options(verb, &["--prepared-jsonl", "records.jsonl"])
@@ -150,6 +162,17 @@ fn prepared_jsonl_flags_make_per_record_autocommit_explicit() {
         vec!["--prepared-jsonl", "a", "--param", "name=text:Ada"],
         vec!["--prepared-jsonl", "a", "--read-mode", "buffered"],
         vec!["--prepared-jsonl", "a", "--max-batches", "1"],
+        vec!["--prepared-jsonl", "a", "--write-mode"],
+        vec!["--prepared-jsonl", "a", "--write-mode", "unknown"],
+        vec![
+            "--prepared-jsonl",
+            "a",
+            "--write-mode",
+            "stats",
+            "--write-mode",
+            "returning",
+        ],
+        vec!["--write-mode", "returning"],
     ] {
         assert_eq!(options("write", &flags).err().unwrap().code, 2);
     }
@@ -169,7 +192,7 @@ fn prepared_jsonl_uses_one_template_and_flushes_each_distinct_native_outcome() {
                 Arc::clone(&flushes),
             );
             let started = Arc::clone(&source.started);
-            let writes = PreparedWrites::from_reader(&cx, source, STATEMENT)
+            let writes = PreparedWrites::from_reader(&cx, source, STATEMENT, WriteMode::Stats)
                 .await
                 .unwrap_or_else(|error| panic!("{}", error.message));
             assert_eq!(started.load(Ordering::SeqCst), 1);
@@ -245,7 +268,7 @@ fn prepared_jsonl_late_input_errors_stop_before_sending_a_bad_record() {
                 Arc::clone(&flushes),
             );
             let started = Arc::clone(&source.started);
-            let writes = PreparedWrites::from_reader(&cx, source, STATEMENT)
+            let writes = PreparedWrites::from_reader(&cx, source, STATEMENT, WriteMode::Stats)
                 .await
                 .unwrap_or_else(|error| panic!("{}", error.message));
             let mut replies = vec![prepared()];
@@ -297,7 +320,7 @@ fn prepared_jsonl_refusal_type_drift_and_unknown_completion_never_replay_or_adva
                 Arc::clone(&flushes),
             );
             let started = Arc::clone(&source.started);
-            let writes = PreparedWrites::from_reader(&cx, source, STATEMENT)
+            let writes = PreparedWrites::from_reader(&cx, source, STATEMENT, WriteMode::Stats)
                 .await
                 .unwrap_or_else(|error| panic!("{}", error.message));
             let mut replies = vec![prepared()];
@@ -358,7 +381,7 @@ fn prepared_jsonl_output_failure_preserves_known_completion_and_stops_input() {
             Arc::clone(&flushes),
         );
         let started = Arc::clone(&source.started);
-        let writes = PreparedWrites::from_reader(&cx, source, STATEMENT)
+        let writes = PreparedWrites::from_reader(&cx, source, STATEMENT, WriteMode::Stats)
             .await
             .unwrap_or_else(|error| panic!("{}", error.message));
         let mut replies = vec![prepared()];
@@ -385,6 +408,313 @@ fn prepared_jsonl_output_failure_preserves_known_completion_and_stops_input() {
         );
         assert_eq!(started.load(Ordering::SeqCst), 1);
         assert_executions(&written.lock().unwrap(), 1);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+fn returning_end(request: u64, seq: u64, changed: bool, rows: u64) -> Frame {
+    result(
+        FrameKind::SnapshotResultEnd,
+        request,
+        &ResultEnd {
+            outcome: if changed {
+                Outcome::WriteCommitted { seq, statements: 1 }
+            } else {
+                Outcome::ReadClosed { seq, statements: 1 }
+            },
+            rows,
+        },
+    )
+}
+
+fn assert_returning_executions(written: &[u8], expected: usize) {
+    let frames = sent_frames(written);
+    let prepares: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame.header().kind() == FrameKind::Prepare)
+        .collect();
+    assert_eq!(prepares.len(), 1);
+    let request = Prepare::decode(prepares[0].payload()).unwrap();
+    assert_eq!(request.mode, PrepareMode::WriteReturning);
+    assert_eq!(
+        request.statement,
+        "CREATE (n:Person {name:$name}) RETURN n.name"
+    );
+    let executions: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame.header().kind() == FrameKind::ExecutePrepared)
+        .map(|frame| ExecutePrepared::decode(frame.payload()).unwrap())
+        .collect();
+    assert_eq!(executions.len(), expected);
+    for execution in &executions {
+        assert_eq!(execution.mode, PreparedExecutionMode::WriteReturning);
+        assert_eq!(execution.handle, HANDLE);
+    }
+    assert_eq!(
+        executions[0].parameters,
+        [("name".into(), WireValue::Text("Ada".into()))]
+    );
+    if expected > 1 {
+        assert_eq!(
+            executions[1].parameters,
+            [("name".into(), WireValue::Text("Bob".into()))]
+        );
+    }
+    assert!(!frames.iter().any(|frame| matches!(
+        frame.header().kind(),
+        FrameKind::Execute | FrameKind::ExecuteBatch | FrameKind::ExecutePreparedBatch
+    )));
+}
+
+#[test]
+fn prepared_returning_jsonl_streams_rows_and_empty_results_before_next_record() {
+    let ((), report) = run_async_under_lab(0x79a0_0771, |cx| async move {
+        for robot in [false, true] {
+            let flushes = Arc::new(AtomicUsize::new(0));
+            let source = Rows::new(
+                &["{\"name\":\"text:Ada\"}\n", "{\"name\":\"text:Bob\"}"],
+                Arc::clone(&flushes),
+            );
+            let started = Arc::clone(&source.started);
+            let writes = PreparedWrites::from_reader(
+                &cx,
+                source,
+                "CREATE (n:Person {name:$name}) RETURN n.name",
+                WriteMode::Returning,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.message));
+            let mut replies = vec![prepared()];
+            replies.extend([
+                (
+                    chunk(
+                        5,
+                        Some(vec!["name".into()]),
+                        vec![vec![WireValue::Text("Ada".into())]],
+                    ),
+                    0,
+                ),
+                (
+                    chunk(5, None, vec![vec![WireValue::Text("Grace".into())]]),
+                    2,
+                ),
+                (returning_end(5, 7, true, 2), 3),
+                (chunk(6, Some(vec!["name".into()]), vec![]), 4),
+                (returning_end(6, 7, false, 0), 5),
+            ]);
+            let io = script(replies, Arc::clone(&flushes));
+            let written = Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&cx, io, vec![1]).await.unwrap();
+            client.select(&cx, "social").await.unwrap();
+            let mut out = Output {
+                bytes: vec![],
+                flushes,
+                fail_on: None,
+            };
+            writes
+                .execute(&cx, &mut client, robot, &mut out)
+                .await
+                .unwrap_or_else(|error| panic!("{}", error.message));
+            assert_eq!(out.flushes.load(Ordering::SeqCst), 6);
+            assert_eq!(started.load(Ordering::SeqCst), 2);
+            let rendered = String::from_utf8(out.bytes).unwrap();
+            let lines: Vec<_> = rendered.lines().collect();
+            assert_eq!(lines.len(), 6);
+            if robot {
+                assert_eq!(
+                    lines[0],
+                    r#"{"v":1,"event":"columns","stream":true,"columns":["name"]}"#
+                );
+                assert!(lines[1].contains(r#""type":"text","value":"Ada""#));
+                assert!(lines[2].contains(r#""type":"text","value":"Grace""#));
+                assert_eq!(
+                    lines[3],
+                    r#"{"v":1,"event":"result","kind":"written","seq":7,"statements":1,"records":1,"count":2,"stream":true}"#
+                );
+                assert_eq!(
+                    lines[5],
+                    r#"{"v":1,"event":"result","kind":"read_closed","seq":7,"statements":1,"records":1,"count":0,"stream":true}"#
+                );
+            } else {
+                assert_eq!(lines[0], "name");
+                assert_eq!(
+                    lines[3],
+                    "record 1: 2 row(s), 1 statement(s) committed at seq 7"
+                );
+                assert_eq!(
+                    lines[5],
+                    "record 2: 0 row(s), 1 statement(s) completed without changes at seq 7"
+                );
+            }
+            assert_returning_executions(&written.lock().unwrap(), 2);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn prepared_returning_late_refusal_or_eof_keeps_completed_prefix_without_replay() {
+    let ((), report) = run_async_under_lab(0x79a0_0772, |cx| async move {
+        for terminal in [
+            Some(ErrorCode::PermissionDenied),
+            Some(ErrorCode::OutcomeUnknown),
+            None,
+        ] {
+            let flushes = Arc::new(AtomicUsize::new(0));
+            let source = Rows::new(
+                &[
+                    "{\"name\":\"text:Ada\"}\n",
+                    "{\"name\":\"text:Bob\"}\n",
+                    "{\"name\":\"text:never read\"}\n",
+                ],
+                Arc::clone(&flushes),
+            );
+            let started = Arc::clone(&source.started);
+            let writes = PreparedWrites::from_reader(
+                &cx,
+                source,
+                "CREATE (n:Person {name:$name}) RETURN n.name",
+                WriteMode::Returning,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.message));
+            let mut replies = vec![prepared()];
+            replies.extend([
+                (chunk(5, Some(vec!["name".into()]), vec![]), 0),
+                (returning_end(5, 7, true, 0), 1),
+                (
+                    chunk(
+                        6,
+                        Some(vec!["name".into()]),
+                        vec![vec![WireValue::Text("Bob".into())]],
+                    ),
+                    2,
+                ),
+            ]);
+            if let Some(code) = terminal {
+                replies.push((refusal(6, code), 4));
+            }
+            let io = script(replies, Arc::clone(&flushes));
+            let written = Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&cx, io, vec![1]).await.unwrap();
+            client.select(&cx, "social").await.unwrap();
+            let mut out = Output {
+                bytes: vec![],
+                flushes,
+                fail_on: None,
+            };
+            let error = writes
+                .execute(&cx, &mut client, true, &mut out)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.code,
+                if terminal == Some(ErrorCode::PermissionDenied) {
+                    3
+                } else {
+                    5
+                }
+            );
+            assert!(error.message.starts_with("JSONL record 2:"));
+            assert!(
+                error
+                    .message
+                    .contains("1 earlier record(s) already completed through seq 7")
+            );
+            assert!(
+                error
+                    .message
+                    .contains("completion was not confirmed; do not replay automatically")
+            );
+            assert_eq!(started.load(Ordering::SeqCst), 2);
+            let rendered = String::from_utf8(out.bytes).unwrap();
+            assert_eq!(
+                rendered
+                    .lines()
+                    .filter(|line| line.contains(r#""event":"result""#))
+                    .count(),
+                1
+            );
+            assert_returning_executions(&written.lock().unwrap(), 2);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn prepared_returning_output_failures_stop_input_and_distinguish_confirmed_completion() {
+    let ((), report) = run_async_under_lab(0x79a0_0773, |cx| async move {
+        for fail_on in 1..=3 {
+            let flushes = Arc::new(AtomicUsize::new(0));
+            let source = Rows::new(
+                &[
+                    "{\"name\":\"text:Ada\"}\n",
+                    "{\"name\":\"text:never read\"}\n",
+                ],
+                Arc::clone(&flushes),
+            );
+            let started = Arc::clone(&source.started);
+            let writes = PreparedWrites::from_reader(
+                &cx,
+                source,
+                "CREATE (n:Person {name:$name}) RETURN n.name",
+                WriteMode::Returning,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.message));
+            let mut replies = vec![prepared(), (chunk(5, Some(vec!["name".into()]), vec![]), 0)];
+            if fail_on > 1 {
+                replies.push((chunk(5, None, vec![vec![WireValue::Text("Ada".into())]]), 1));
+            }
+            if fail_on < 3 {
+                replies.push((refusal(5, ErrorCode::Cancelled), fail_on));
+            } else {
+                replies.push((returning_end(5, 7, true, 1), 2));
+            }
+            let io = script(replies, Arc::clone(&flushes));
+            let written = Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&cx, io, vec![1]).await.unwrap();
+            client.select(&cx, "social").await.unwrap();
+            let mut out = Output {
+                bytes: vec![],
+                flushes,
+                fail_on: Some(fail_on),
+            };
+            let error = writes
+                .execute(&cx, &mut client, true, &mut out)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, 5);
+            assert_eq!(started.load(Ordering::SeqCst), 1);
+            if fail_on < 3 {
+                assert!(
+                    error
+                        .message
+                        .contains("completion was not confirmed; do not replay automatically")
+                );
+                assert!(
+                    !String::from_utf8(out.bytes)
+                        .unwrap()
+                        .contains(r#""event":"result""#)
+                );
+            } else {
+                assert!(error.message.contains("record 1 completed at seq 7"));
+                assert!(
+                    error
+                        .message
+                        .contains("output delivery failed; do not replay it")
+                );
+            }
+            let frames = sent_frames(&written.lock().unwrap());
+            assert_eq!(
+                frames
+                    .iter()
+                    .filter(|frame| frame.header().kind() == FrameKind::QueryCancel)
+                    .count(),
+                usize::from(fail_on < 3)
+            );
+            assert_returning_executions(&written.lock().unwrap(), 1);
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

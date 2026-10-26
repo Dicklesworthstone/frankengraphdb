@@ -19,6 +19,23 @@ use std::path::Path;
 const MAX_RECORD_BYTES: usize = CLIENT_MAX_FRAME as usize;
 const READ_BYTES: usize = 8192;
 
+/// The output profile is explicit so unsupported peers refuse before execution.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum WriteMode {
+    #[default]
+    Stats,
+    Returning,
+}
+
+impl WriteMode {
+    fn prepare(self) -> PrepareMode {
+        match self {
+            Self::Stats => PrepareMode::Write,
+            Self::Returning => PrepareMode::WriteReturning,
+        }
+    }
+}
+
 struct Record {
     number: usize,
     parameters: Vec<(String, WireValue)>,
@@ -162,12 +179,18 @@ fn after_completed(mut error: Failure, completed: Option<(usize, u64)>) -> Failu
 /// argument bag. The server alone binds the typed script and authorizes effects.
 pub(super) struct PreparedWrites<R> {
     statement: String,
+    mode: WriteMode,
     input: JsonLines<R>,
     first: Record,
 }
 
 impl PreparedWrites<asupersync::fs::File> {
-    pub(super) async fn open(cx: &Cx, path: &Path, statement: &str) -> Result<Self, Failure> {
+    pub(super) async fn open(
+        cx: &Cx,
+        path: &Path,
+        statement: &str,
+        mode: WriteMode,
+    ) -> Result<Self, Failure> {
         cx.checkpoint().map_err(Failure::io)?;
         let named = asupersync::fs::metadata(path)
             .await
@@ -186,27 +209,33 @@ impl PreparedWrites<asupersync::fs::File> {
         {
             return Err(Failure::usage("--prepared-jsonl must be a regular file"));
         }
-        Self::from_reader(cx, file, statement).await
+        Self::from_reader(cx, file, statement, mode).await
     }
 }
 
 impl<R: AsyncRead + Unpin> PreparedWrites<R> {
     /// First-record and preparation-envelope admission precede credential
     /// access and connection. Empty input never creates a prepared handle.
-    pub(super) async fn from_reader(cx: &Cx, reader: R, statement: &str) -> Result<Self, Failure> {
+    pub(super) async fn from_reader(
+        cx: &Cx,
+        reader: R,
+        statement: &str,
+        mode: WriteMode,
+    ) -> Result<Self, Failure> {
         let mut input = JsonLines::new(reader);
         let first = input
             .next(cx)
             .await?
             .ok_or_else(|| Failure::usage("--prepared-jsonl needs at least one argument object"))?;
         let request = Prepare {
-            mode: PrepareMode::Write,
+            mode: mode.prepare(),
             statement: statement.to_owned(),
             parameters: first.parameters.clone(),
         };
         admit_frame(&request).map_err(|error| at_record(first.number, error))?;
         Ok(Self {
             statement: request.statement,
+            mode,
             input,
             first,
         })
@@ -221,14 +250,24 @@ impl<R: AsyncRead + Unpin> PreparedWrites<R> {
     ) -> Result<(), Failure> {
         let Self {
             statement,
+            mode,
             mut input,
             first,
         } = self;
         cx.checkpoint().map_err(Failure::io)?;
-        let handle = client
-            .prepare_write(cx, &statement, first.parameters.clone())
-            .await
-            .map_err(|error| at_record(first.number, failure(error)))?;
+        let prepared = match mode {
+            WriteMode::Stats => {
+                client
+                    .prepare_write(cx, &statement, first.parameters.clone())
+                    .await
+            }
+            WriteMode::Returning => {
+                client
+                    .prepare_write_returning(cx, &statement, first.parameters.clone())
+                    .await
+            }
+        };
+        let handle = prepared.map_err(|error| at_record(first.number, failure(error)))?;
         drop(statement);
         let mut current = first;
         let mut completed = None;
@@ -237,27 +276,20 @@ impl<R: AsyncRead + Unpin> PreparedWrites<R> {
             cx.checkpoint().map_err(|error| {
                 after_completed(at_record(number, Failure::io(error)), completed)
             })?;
-            let outcome = client
-                .execute_prepared_write(cx, handle, current.parameters)
-                .await
-                .map_err(|error| {
-                    let error = match error {
-                        error @ ClientError::Server { .. } => {
-                            let mut mapped = failure(error);
-                            if mapped.code == 5 {
-                                mapped.message = format!(
-                                    "{}; completion was not confirmed; do not replay automatically",
-                                    mapped.message
-                                );
-                            }
-                            mapped
-                        }
-                        error => Failure::io(format!(
-                            "completion was not confirmed; do not replay automatically: {error}"
-                        )),
-                    };
-                    after_completed(at_record(number, error), completed)
-                })?;
+            let execution = match mode {
+                WriteMode::Stats => client
+                    .execute_prepared_write(cx, handle, current.parameters)
+                    .await
+                    .map(|outcome| (outcome, None))
+                    .map_err(execution_failure),
+                WriteMode::Returning => {
+                    execute_returning(cx, client, handle, current.parameters, robot, out)
+                        .await
+                        .map(|(outcome, count)| (outcome, Some(count)))
+                }
+            };
+            let (outcome, count) =
+                execution.map_err(|error| after_completed(at_record(number, error), completed))?;
             let (kind, seq, statements) = match outcome {
                 Outcome::WriteCommitted { seq, statements } => ("written", seq, statements),
                 Outcome::ReadClosed { seq, statements } => ("read_closed", seq, statements),
@@ -274,10 +306,13 @@ impl<R: AsyncRead + Unpin> PreparedWrites<R> {
                 }
             };
             let delivered = if robot {
+                let rows = count.map_or_else(String::new, |count| {
+                    format!(r#","count":{count},"stream":true"#)
+                });
                 emit(
                     out,
                     &format!(
-                        r#"{{"v":1,"event":"result","kind":"{kind}","seq":{seq},"statements":{statements},"records":1}}"#
+                        r#"{{"v":1,"event":"result","kind":"{kind}","seq":{seq},"statements":{statements},"records":1{rows}}}"#
                     ),
                 )
             } else {
@@ -286,10 +321,11 @@ impl<R: AsyncRead + Unpin> PreparedWrites<R> {
                 } else {
                     "completed without changes"
                 };
+                let rows = count.map_or_else(String::new, |count| format!("{count} row(s), "));
                 emit(
                     out,
                     &format!(
-                        "record {number}: {statements} statement(s) {completion} at seq {seq}"
+                        "record {number}: {rows}{statements} statement(s) {completion} at seq {seq}"
                     ),
                 )
             };
@@ -312,6 +348,76 @@ impl<R: AsyncRead + Unpin> PreparedWrites<R> {
         // failure never reconnects, reparses, falls back, or replays any record.
         Ok(())
     }
+}
+
+fn execution_failure(error: ClientError) -> Failure {
+    match error {
+        error @ ClientError::Server { .. } => {
+            let mut mapped = failure(error);
+            if mapped.code == 5 {
+                mapped.message = format!(
+                    "{}; completion was not confirmed; do not replay automatically",
+                    mapped.message
+                );
+            }
+            mapped
+        }
+        error => Failure::io(format!(
+            "completion was not confirmed; do not replay automatically: {error}"
+        )),
+    }
+}
+
+/// Reuse the ordinary row encoder without collecting an answer. Cancellation
+/// after output fails stops delivery; it cannot roll back committed effects.
+async fn execute_returning(
+    cx: &Cx,
+    client: &mut Client,
+    handle: PreparedHandle,
+    parameters: Vec<(String, WireValue)>,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(Outcome, u64), Failure> {
+    let sink = std::sync::Mutex::new(super::ReadOutput {
+        out,
+        robot,
+        width: None,
+        sent: 0,
+        failed: None,
+    });
+    let lock = || {
+        sink.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    let result = client
+        .execute_prepared_write_returning_streaming(
+            cx,
+            handle,
+            parameters,
+            |columns| lock().columns(cx, columns),
+            |row| lock().row(cx, &row),
+        )
+        .await;
+    let sink = sink
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(error) = sink.failed {
+        return Err(Failure::io(format!(
+            "result delivery failed after {} row(s); completion was not confirmed; do not replay automatically: {}",
+            sink.sent, error.message
+        )));
+    }
+    let outcome = result.map_err(|error| {
+        let mut mapped = execution_failure(error);
+        if sink.width.is_some() && mapped.code != 5 {
+            mapped.message = format!(
+                "{}; result delivery stopped after {} row(s); completion was not confirmed; do not replay automatically",
+                mapped.message, sink.sent
+            );
+        }
+        mapped
+    })?;
+    Ok((outcome, sink.sent))
 }
 
 #[cfg(test)]
@@ -402,7 +508,7 @@ mod tests {
     fn jsonl_refuses_empty_blank_oversized_and_invalid_records_before_execution() {
         let ((), report) = run_async_under_lab(0x79a0_0752, |cx| async move {
             assert!(
-                PreparedWrites::from_reader(&cx, Bytes::new(b"", 1), "CREATE ()")
+                PreparedWrites::from_reader(&cx, Bytes::new(b"", 1), "CREATE ()", WriteMode::Stats)
                     .await
                     .is_err()
             );
@@ -416,11 +522,15 @@ mod tests {
                 "{\"\":\"int:1\"}\n",
                 "{\"x\":\"int:secret\"}\n",
             ] {
-                let failure =
-                    PreparedWrites::from_reader(&cx, Bytes::new(bad.as_bytes(), 1), "CREATE ()")
-                        .await
-                        .err()
-                        .expect("invalid first input must refuse");
+                let failure = PreparedWrites::from_reader(
+                    &cx,
+                    Bytes::new(bad.as_bytes(), 1),
+                    "CREATE ()",
+                    WriteMode::Stats,
+                )
+                .await
+                .err()
+                .expect("invalid first input must refuse");
                 assert_eq!(failure.code, 2);
                 assert!(!failure.message.contains("secret"));
             }
