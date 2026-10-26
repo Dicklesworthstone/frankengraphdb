@@ -60,13 +60,22 @@ impl ReadAggregateStage {
         values: &[GqlParameterValue],
         at: usize,
     ) -> Result<PreparedGraphSet, GraphSetTextError> {
-        let input = bind_projection(
-            input,
-            &self.inputs,
-            crate::GraphSetQuantifier::All,
-            values,
-            at,
-        )?;
+        // These are compiler-private aggregate arguments, evaluated over the
+        // already selected child sequence. Canonicalizing their tuples here
+        // would discard an earlier ORDER BY before COLLECT observes it.
+        let mut inputs = Vec::with_capacity(self.inputs.len());
+        for output in &self.inputs {
+            inputs.push(GraphSetProjection::new(
+                output.name.clone(),
+                bind_read_value(&output.value, values)?,
+            ));
+        }
+        let input = input
+            .project_aggregate_input(inputs)
+            .map_err(|kind| GraphSetTextError {
+                offset: at,
+                kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+            })?;
         let input = input
             .group_by(&self.keys, &declarations(&self.aggregates))
             .map_err(|kind| aggregate_error(at, kind))?;

@@ -1985,6 +1985,39 @@ fn an_optional_match_where_over_imported_values_filters_before_null_extension() 
 }
 
 #[test]
+fn ordered_collect_arguments_preserve_selected_child_rows_and_parallel_values() {
+    let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+    for (head, ids) in [
+        ("MATCH (n) WITH n ORDER BY n DESC", vec![4, 3, 2, 1]),
+        (
+            "MATCH (n) WITH n ORDER BY n.p + 10 DESC,n DESC SKIP 1 LIMIT 2",
+            vec![3, 2],
+        ),
+    ] {
+        let statement = format!(
+            "{head} WITH collect(n) AS nodes,collect(n.p + 10) AS values RETURN nodes,values"
+        );
+        let expected = GraphValueRow::from_owned_values(vec![
+            GraphValue::List(ids.iter().map(|&id| GraphValue::Vertex(VId(id))).collect()),
+            GraphValue::List(
+                ids.iter()
+                    .map(|&id| int([1, 2, 2, 3][id as usize - 1] + 10))
+                    .collect(),
+            ),
+        ]);
+        assert_eq!(execute(&statement), vec![expected], "{statement}");
+    }
+    // An unordered computed input retains its ordinary canonical projection
+    // contract. Only a completed explicit ordering survives argument binding.
+    assert_eq!(
+        execute("MATCH (n) WITH n WITH collect(-n.p) AS values RETURN values"),
+        vec![GraphValueRow::from_owned_values(vec![GraphValue::List(
+            [-3, -2, -2, -1].into_iter().map(int).collect(),
+        )])]
+    );
+}
+
+#[test]
 fn row_scope_graph_predicates_preserve_collected_occurrences_and_local_pages() {
     let head = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x";
     for predicate in [

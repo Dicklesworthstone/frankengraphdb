@@ -817,6 +817,36 @@ impl PreparedGraphSet {
         })
     }
 
+    /// Bind compiler-private aggregate arguments without erasing a completed
+    /// explicit ordering. Unordered inputs keep ordinary projection semantics.
+    pub(crate) fn project_aggregate_input(
+        self,
+        projection: Vec<GraphSetProjection>,
+    ) -> Result<Self, GraphSetProjectionError> {
+        if self.retains_explicit_order() {
+            self.project_ordered_output(projection)
+        } else {
+            self.project(projection, GraphSetQuantifier::All)
+        }
+    }
+
+    fn retains_explicit_order(&self) -> bool {
+        if !self.order.is_empty() {
+            return true;
+        }
+        match &self.node {
+            SetNode::Scope(input)
+            | SetNode::Filter { input, .. }
+            | SetNode::Project {
+                input,
+                quantifier: GraphSetQuantifier::All,
+                preserve_order: true,
+                ..
+            } => input.retains_explicit_order(),
+            _ => false,
+        }
+    }
+
     /// Remove compiler-private ranking cells while keeping the selected
     /// sequence. Ordinary RETURN projections retain their canonical-order
     /// contract; this method is only the output half of one ordering stage.
