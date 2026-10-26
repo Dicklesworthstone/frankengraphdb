@@ -288,6 +288,9 @@ fn label_tests_under_or_and_not_are_three_valued_label_membership() {
             assert_eq!(vertices(&text), expected, "{text}");
             let text = format!("MATCH (a) WHERE {test} RETURN count(*) AS c");
             assert_eq!(count(&db, cx, &text), expected.len() as u64, "{text}");
+            // labels() in a WHERE that feeds an aggregate (fgdb-fnkvp).
+            let text = format!("MATCH (a) WHERE {spelled} RETURN count(*) AS c");
+            assert_eq!(count(&db, cx, &text), expected.len() as u64, "{text}");
         }
         let mut union = vertices("MATCH (a:A) RETURN a");
         union.extend(vertices("MATCH (a:B) RETURN a"));
