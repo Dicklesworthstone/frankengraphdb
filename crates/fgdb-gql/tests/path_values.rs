@@ -831,4 +831,21 @@ fn match_where_over_list_values_filters_after_the_match() {
         rows(&format!("{path} WITH * WHERE size(nodes(p)) > 2 {joined}"))
     );
     assert_eq!(deferred.len(), 4);
+    // A list literal of elements (LDBC SNB IC3's `country IN [countryX,
+    // countryY]`) is compared by the row filter too. The two edges each meet
+    // four vertices d: d IN [a, c] keeps two per edge, its negation the other
+    // two, and `d IN [a] OR d.name = 'b'` keeps d = 1 and 2 for 1 -> 2, and
+    // d = 2 for 2 -> 3.
+    let pair = "MATCH (a)-[:R]->(c), (d)";
+    for (predicate, count) in [
+        ("d IN [a, c]", 4),
+        ("NOT d IN [a, c]", 4),
+        ("d IN [a] OR d.name = 'b'", 3),
+        ("d IN [a, c] AND d.name = 'b'", 2),
+    ] {
+        let deferred = rows(&format!("{pair} WHERE {predicate} RETURN a, c, d"));
+        let explicit = rows(&format!("{pair} WITH * WHERE {predicate} RETURN a, c, d"));
+        assert_eq!(deferred, explicit, "{predicate}");
+        assert_eq!(deferred.len(), count, "{predicate}");
+    }
 }

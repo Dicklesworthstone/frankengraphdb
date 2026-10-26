@@ -809,6 +809,18 @@ impl<'a> Parser<'a> {
                 {
                     return Ok(true);
                 }
+                // A list literal that holds a graph element (`b IN [a, c]`,
+                // LDBC SNB IC3's `country IN [countryX, countryY]`): the
+                // pattern filter compares scalars only, so the row filter
+                // compares the elements.
+                TokenKind::Word(word)
+                    if !key
+                        && word.eq_ignore_ascii_case("IN")
+                        && matches!(next, TokenKind::Punct(b'['))
+                        && self.list_names_element(ahead.clone())? =>
+                {
+                    return Ok(true);
+                }
                 // A list literal, subscript or slice, or a map literal
                 // compared, that is no relationship bracket, IN's literal
                 // list or subquery body: the pattern filter compares scalars
@@ -874,6 +886,41 @@ impl<'a> Parser<'a> {
             match token.kind {
                 TokenKind::Punct(b'{') => braces += 1,
                 TokenKind::Punct(b'}') => braces = braces.saturating_sub(1),
+                _ => {}
+            }
+            previous = Some(token.kind);
+        }
+    }
+
+    /// Whether the list literal `lexer` starts in (just past its `[`) holds
+    /// a bare vertex, relationship or path binding: not a property read
+    /// (`a.p`), a call (`f(a)`), a label or a map key.
+    fn list_names_element(&self, mut lexer: Lexer<'a>) -> Result<bool, GraphPatternTextError> {
+        let mut depth = 1_usize;
+        let mut previous: Option<TokenKind<'a>> = None;
+        loop {
+            let token = lexer.next()?;
+            match token.kind {
+                TokenKind::End => return Ok(false),
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(false);
+                    }
+                }
+                TokenKind::Word(word)
+                    if !matches!(previous, Some(TokenKind::Punct(b'.' | b':')))
+                        && !matches!(
+                            lexer.clone().next()?.kind,
+                            TokenKind::Punct(b'.' | b'(' | b':')
+                        )
+                        && (self.syntax.variables.iter().any(|name| name.text == word)
+                            || self.syntax.visible_edge(word).is_some()
+                            || self.syntax.names_path(word)) =>
+                {
+                    return Ok(true);
+                }
                 _ => {}
             }
             previous = Some(token.kind);
