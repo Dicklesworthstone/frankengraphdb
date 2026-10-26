@@ -106,41 +106,7 @@ impl PreparedBatch {
         for (index, record) in records.into_iter().enumerate() {
             checkpoint()?;
             let at = index + 1;
-            let Json::Object(fields) = record else {
-                return Err(Failure::usage(format!(
-                    "argument set {at} must be an object"
-                )));
-            };
-            if fields.len() > MAX_PARAMETERS {
-                return Err(Failure::usage(format!(
-                    "argument set {at} exceeds {MAX_PARAMETERS} parameters"
-                )));
-            }
-            let mut parameters = Vec::new();
-            parameters
-                .try_reserve_exact(fields.len())
-                .map_err(Failure::io)?;
-            // The shared JSON decoder rejects duplicate keys and owns a
-            // BTreeMap: its order is already canonical UTF-8 name order.
-            for (name, value) in fields {
-                checkpoint()?;
-                if name.is_empty() || name.len() > MAX_NAME_BYTES {
-                    return Err(Failure::usage(format!(
-                        "argument set {at} has an empty or oversized parameter name"
-                    )));
-                }
-                let Json::String(typed) = value else {
-                    return Err(Failure::usage(format!(
-                        "argument set {at} values must be typed strings, such as text:Ada or int:7"
-                    )));
-                };
-                let value = parameter(&typed).map_err(|_| {
-                    // Do not echo a source value, source path or bearer token.
-                    Failure::usage(format!("argument set {at} has an invalid typed parameter"))
-                })?;
-                parameters.push((name, value));
-            }
-            argument_sets.push(parameters);
+            argument_sets.push(parameters(record, at, &mut checkpoint)?);
         }
         Self::admit(statement, argument_sets, checkpoint)
     }
@@ -388,6 +354,49 @@ impl PreparedBatch {
         // No extra release round trip is needed after the final flushed answer.
         Ok(())
     }
+}
+
+/// The array and streaming JSONL adapters share exactly the typed operand
+/// grammar. Values remain data; diagnostics never quote their payloads.
+pub(super) fn parameters(
+    record: Json,
+    at: usize,
+    checkpoint: &mut impl FnMut() -> Result<(), Failure>,
+) -> Result<Vec<(String, WireValue)>, Failure> {
+    let Json::Object(fields) = record else {
+        return Err(Failure::usage(format!(
+            "argument set {at} must be an object"
+        )));
+    };
+    if fields.len() > MAX_PARAMETERS {
+        return Err(Failure::usage(format!(
+            "argument set {at} exceeds {MAX_PARAMETERS} parameters"
+        )));
+    }
+    let mut parameters = Vec::new();
+    parameters
+        .try_reserve_exact(fields.len())
+        .map_err(Failure::io)?;
+    // The shared JSON decoder rejects duplicate keys and owns a BTreeMap:
+    // its order is already canonical UTF-8 parameter-name order.
+    for (name, value) in fields {
+        checkpoint()?;
+        if name.is_empty() || name.len() > MAX_NAME_BYTES {
+            return Err(Failure::usage(format!(
+                "argument set {at} has an empty or oversized parameter name"
+            )));
+        }
+        let Json::String(typed) = value else {
+            return Err(Failure::usage(format!(
+                "argument set {at} values must be typed strings, such as text:Ada or int:7"
+            )));
+        };
+        let value = parameter(&typed).map_err(|_| {
+            Failure::usage(format!("argument set {at} has an invalid typed parameter"))
+        })?;
+        parameters.push((name, value));
+    }
+    Ok(parameters)
 }
 
 fn csv_wire(value: GqlParameterValue) -> Result<WireValue, Failure> {

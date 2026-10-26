@@ -10,6 +10,7 @@
 //! transport failures or an unknown commit outcome are I/O failures (5).
 
 mod batch;
+mod prepared_writes;
 
 use super::refusal::Code;
 use super::{Failure, emit, float_text, hex, render_row_body, render_rows};
@@ -48,6 +49,8 @@ struct RemoteOptions {
     rows_file: Option<PathBuf>,
     /// Explicit CSV column types; absent means the typed JSON file format.
     csv_types: Option<batch::CsvSchema>,
+    /// Typed JSONL input, one fresh prepared autocommit per physical record.
+    prepared_jsonl: Option<PathBuf>,
 }
 
 struct RemoteTls {
@@ -67,6 +70,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     let mut tls_ca_file = None;
     let mut rows_file = None;
     let mut csv_types = None;
+    let mut prepared_jsonl = None;
     let mut at = 0;
     while at < args.len() {
         let flag = args[at].as_str();
@@ -87,6 +91,9 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
             "--token-file" if token_file.is_none() => token_file = Some(PathBuf::from(value()?)),
             "--database" if database.is_none() => database = Some(value()?),
             "--rows-file" if rows_file.is_none() => rows_file = Some(PathBuf::from(value()?)),
+            "--prepared-jsonl" if prepared_jsonl.is_none() => {
+                prepared_jsonl = Some(PathBuf::from(value()?));
+            }
             "--csv-types" if csv_types.is_none() => {
                 csv_types = Some(batch::CsvSchema::parse(&value()?)?);
             }
@@ -163,6 +170,16 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     if csv_types.is_some() && rows_file.is_none() {
         return Err(Failure::usage("--csv-types requires --rows-file"));
     }
+    if prepared_jsonl.is_some()
+        && (mode != ExecuteMode::Write
+            || rows_file.is_some()
+            || csv_types.is_some()
+            || !parameters.is_empty())
+    {
+        return Err(Failure::usage(
+            "--prepared-jsonl applies only to write and cannot combine with --rows-file, --csv-types or --param",
+        ));
+    }
     let tls = match (tls_server_name, tls_ca_file) {
         (Some(server_name), Some(ca_file)) => Some(RemoteTls {
             server_name,
@@ -197,6 +214,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         tls,
         rows_file,
         csv_types,
+        prepared_jsonl,
     })
 }
 
@@ -425,6 +443,22 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
     let options = parse(args)?;
     let runtime = fgdb::runtime_builder().build().map_err(Failure::io)?;
     let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    if let Some(path) = &options.prepared_jsonl {
+        return runtime.block_on(async {
+            // Invalid or empty first input cannot read credentials or connect.
+            // Later records follow each confirmed, fully flushed completion.
+            let writes =
+                prepared_writes::PreparedWrites::open(&cx, path, &options.statement).await?;
+            let mut client = connect(&cx, &options).await?;
+            client
+                .select(&cx, &options.database)
+                .await
+                .map_err(failure)?;
+            writes.execute(&cx, &mut client, robot, out).await?;
+            let _ = client.close(&cx).await;
+            Ok(())
+        });
+    }
     if let Some(path) = &options.rows_file {
         return runtime.block_on(async {
             // Complete file/value/wire admission precedes credential access

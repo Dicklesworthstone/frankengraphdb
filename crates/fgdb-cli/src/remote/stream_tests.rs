@@ -2,6 +2,9 @@
 #[path = "batch_wire_tests.rs"]
 mod batch_tests;
 
+#[path = "prepared_write_tests.rs"]
+mod prepared_write_tests;
+
 use super::*;
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::lab::run_async_under_lab;
