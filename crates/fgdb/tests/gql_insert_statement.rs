@@ -2243,3 +2243,178 @@ fn a_write_after_a_mutation_reads_its_post_write_rows() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// A CREATE after a write's WITH tail may start with a MATCH: `... WITH p
+/// UNWIND $tagIds AS tagId MATCH (t:Tag {id: tagId}) CREATE (p)-[:HAS_TAG]->(t)`,
+/// the shape of LDBC SNB Interactive IU1, IU4, IU6 and IU7. The MATCH joins
+/// the previous write's rows by its correlations, as a MATCH after a leading
+/// UNWIND does, and reads the graph the earlier writes staged. A MATCH that
+/// ends at RETURN is still the terminal read.
+#[test]
+fn a_chained_create_may_match_against_the_previous_writes_rows() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4ac, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = fresh(&commit, true).await;
+        let mut next = 100u128;
+        let mut write = async |db: &mut Database<MemVfs>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    next += 1;
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                    })
+                },
+            )
+            .await
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        // The vertex a CREATE made, by its label and `p`.
+        let made = |db: &Database<MemVfs>, label: LabelId, p: i64| {
+            let found: Vec<VId> = db
+                .vertices()
+                .unwrap()
+                .into_iter()
+                .filter(|vertex| {
+                    vertex.labels == vec![label]
+                        && vertex.props.contains(&(P, CanonicalScalar::Int(p).into()))
+                })
+                .map(|vertex| vertex.vid)
+                .collect();
+            assert_eq!(found.len(), 1, "{found:?}");
+            found[0]
+        };
+        // The (source, relation, destination, q) of every edge from `from`.
+        let out = |db: &Database<MemVfs>, from: VId| {
+            let mut edges: Vec<_> = db
+                .edges()
+                .unwrap()
+                .into_iter()
+                .filter(|edge| edge.entry.src == from)
+                .map(|edge| {
+                    let q = edge
+                        .props
+                        .iter()
+                        .find(|(key, _)| *key == Q)
+                        .map(|(_, value)| value.clone());
+                    (edge.entry.relation, edge.entry.dst, q)
+                })
+                .collect();
+            edges.sort();
+            edges
+        };
+
+        // IU1's shape: a key without a match (99) adds no row.
+        write(
+            &mut db,
+            "MATCH (s:Source {p: 10}) CREATE (a:Person {p: 1})-[:R]->(s) \
+             WITH a UNWIND [10, 20, 99] AS k MATCH (t:Source {p: k}) CREATE (a)-[:T]->(t)",
+        )
+        .await
+        .unwrap();
+        let person = made(&db, PERSON, 1);
+        assert_eq!(
+            out(&db, person),
+            [(R, VId(10), None), (T, VId(10), None), (T, VId(20), None)]
+        );
+
+        // The MATCH sees the vertex the first step just created.
+        write(
+            &mut db,
+            "CREATE (a:Copy {p: 5}) WITH a UNWIND [5] AS k \
+             MATCH (c:Copy {p: k}) CREATE (a)-[:T]->(c)",
+        )
+        .await
+        .unwrap();
+        let copy = made(&db, COPY, 5);
+        assert_eq!(out(&db, copy), [(T, copy, None)]);
+
+        // Uncorrelated, the MATCH multiplies the rows: one edge per Source.
+        write(
+            &mut db,
+            "CREATE (a:Person {p: 2}) WITH a MATCH (s:Source) CREATE (a)-[:T]->(s)",
+        )
+        .await
+        .unwrap();
+        let person = made(&db, PERSON, 2);
+        assert_eq!(out(&db, person), [(T, VId(10), None), (T, VId(20), None)]);
+
+        // Three steps; a computed key (`w[0]`) correlates, the row feeds a
+        // property, and RETURN reads the matched vertex.
+        let returned = write(
+            &mut db,
+            "MATCH (s:Source {p: 20}) CREATE (a:Person {p: 3})-[:R]->(s) \
+             WITH a UNWIND [[10, 7]] AS w MATCH (t:Source {p: w[0]}) \
+             CREATE (a)-[:T {q: w[1]}]->(t) \
+             WITH a UNWIND [10, 20] AS k MATCH (u:Source {p: k}) CREATE (a)-[:R]->(u) \
+             RETURN u.p AS p ORDER BY p",
+        )
+        .await
+        .unwrap();
+        let QueryResult::Rows { columns, rows } = returned else {
+            unreachable!("a chain with RETURN answers rows")
+        };
+        assert_eq!(columns, ["p"]);
+        let int = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        assert_eq!(rows, [vec![int(10)], vec![int(20)]]);
+        let person = made(&db, PERSON, 3);
+        assert_eq!(
+            out(&db, person),
+            [
+                (R, VId(10), None),
+                (R, VId(20), None),
+                (R, VId(20), None),
+                (T, VId(10), Some(CanonicalScalar::Int(7).into())),
+            ]
+        );
+
+        // A MATCH that ends at RETURN is the terminal read, not a write's.
+        let counted = write(
+            &mut db,
+            "CREATE (a:Person {p: 4}) WITH a MATCH (s:Source) RETURN count(s) AS c",
+        )
+        .await
+        .unwrap();
+        let QueryResult::Rows { rows, .. } = counted else {
+            unreachable!("a terminal read answers rows")
+        };
+        assert_eq!(rows.len(), 1);
+
+        // A failing matched step publishes none of the earlier ones.
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        assert!(
+            write(
+                &mut db,
+                "CREATE (a:Person {p: 5}) WITH a UNWIND [10] AS k \
+                 MATCH (t:Source {p: k}) CREATE (a)-[:T {q: 1 / 0}]->(t)",
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap()
+            ),
+            before
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

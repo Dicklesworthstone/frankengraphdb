@@ -265,6 +265,43 @@ impl PreparedGraphWriteChainText {
         }
     }
 
+    /// Whether the MATCH clauses at `lexer` are the prefix of a later CREATE
+    /// (`... WITH p UNWIND $ids AS id MATCH (t {id: id}) CREATE ...`) rather
+    /// than a terminal read: the first clause after them is CREATE or
+    /// INSERT. Property keys, labels, aliases, map entries and `STARTS WITH`
+    /// / `ENDS WITH` are not clauses.
+    fn match_feeds_create(mut lexer: Lexer<'_>) -> Result<bool, GraphPatternTextError> {
+        const READS: [&str; 15] = [
+            "OPTIONAL", "WITH", "RETURN", "UNWIND", "MERGE", "SET", "DELETE", "DETACH", "REMOVE",
+            "CALL", "UNION", "ORDER", "SKIP", "LIMIT", "FOREACH",
+        ];
+        let mut depth = 0_usize;
+        let mut previous: Option<TokenKind<'_>> = None;
+        loop {
+            let token = script::next_script_token(&mut lexer)?;
+            match token.kind {
+                TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                TokenKind::Word(word)
+                    if depth == 0
+                        && !matches!(previous, Some(TokenKind::Punct(b'.' | b':')))
+                        && !matches!(previous, Some(TokenKind::Word(prior))
+                            if ["AS", "STARTS", "ENDS"].iter().any(|not| prior.eq_ignore_ascii_case(not))) =>
+                {
+                    if word.eq_ignore_ascii_case("CREATE") || word.eq_ignore_ascii_case("INSERT") {
+                        return Ok(true);
+                    }
+                    if READS.iter().any(|read| word.eq_ignore_ascii_case(read)) {
+                        return Ok(false);
+                    }
+                }
+                _ => {}
+            }
+            previous = Some(token.kind);
+        }
+    }
+
     pub fn prepare(
         statement: &str,
         relation: RelationId,
@@ -436,8 +473,12 @@ impl PreparedGraphWriteChainText {
                 at: from.at,
                 tokens: 0,
             };
-            if matches!(lexer.clone().next()?.kind, TokenKind::Word(word)
-                if word.eq_ignore_ascii_case("MATCH") || word.eq_ignore_ascii_case("OPTIONAL"))
+            // A MATCH that ends at a CREATE is that CREATE's prefix, joined
+            // to these rows; any other MATCH starts the terminal read.
+            let clause = lexer.clone().next()?.kind;
+            if matches!(clause, TokenKind::Word(word) if word.eq_ignore_ascii_case("OPTIONAL"))
+                || (matches!(clause, TokenKind::Word(word) if word.eq_ignore_ascii_case("MATCH"))
+                    && !Self::match_feeds_create(lexer.clone())?)
             {
                 let (columns, types) = from.owned_columns();
                 let parser = Parser::new_with_parameter_types(body, declarations)?

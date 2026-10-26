@@ -48,9 +48,10 @@ fn field_path<'a>(
 }
 
 impl<'a> Parser<'a> {
-    /// Consume an imported binding and any static map selectors. A bare
-    /// binding keeps its original ordinal and template bytes. Computed keys
-    /// occupy a private suffix of the leading row until the join completes.
+    /// Consume an imported binding and any static map selectors or integer
+    /// subscripts (`row.key`, LDBC SNB IU1's `s[0]`). A bare binding keeps
+    /// its original ordinal and template bytes. Computed keys occupy a
+    /// private suffix of the leading row until the join completes.
     pub(super) fn imported_row_field(&mut self) -> Result<Option<usize>, GraphPatternTextError> {
         let TokenKind::Word(name) = self.current.kind else {
             return Ok(None);
@@ -63,7 +64,7 @@ impl<'a> Parser<'a> {
             return Ok(None);
         };
         self.advance()?;
-        if !self.is_punct(b'.') {
+        if !self.is_punct(b'.') && !self.is_punct(b'[') {
             return Ok(Some(row));
         }
         self.capacity(
@@ -73,15 +74,37 @@ impl<'a> Parser<'a> {
         )?;
         let mut value = ReadValueTemplate::Column(row);
         let mut depth = 0;
-        while self.take(b'.')? {
+        while self.is_punct(b'.') || self.is_punct(b'[') {
             if depth == GraphValue::MAX_LIST_DEPTH {
                 return Err(error(
                     self.current.at,
                     GraphPatternTextErrorKind::Expected("bounded imported row field path"),
                 ));
             }
-            let key = self.schema_name()?;
-            value = self.map_get(value, key.text);
+            value = if self.take(b'[')? {
+                let at = self.current.at;
+                let Number::Literal(GqlParameterValue::Int64(index)) =
+                    self.number(GqlParameterType::Int64)?
+                else {
+                    return Err(error(
+                        at,
+                        GraphPatternTextErrorKind::Expected(
+                            "an integer literal subscript of an imported value",
+                        ),
+                    ));
+                };
+                self.punct(b']', "]")?;
+                let index = crate::GqlScalarParameter::new(fgdb_types::CanonicalScalar::Int(index))
+                    .map_err(|_| error(at, GraphPatternTextErrorKind::ScalarLiteral))?;
+                ReadValueTemplate::Index {
+                    list: Box::new(value),
+                    index: Box::new(ReadValueTemplate::Literal(index)),
+                }
+            } else {
+                self.advance()?;
+                let key = self.schema_name()?;
+                self.map_get(value, key.text)
+            };
             depth += 1;
         }
         let column = self.read_row_bindings.len() + self.read_row_fields.len();

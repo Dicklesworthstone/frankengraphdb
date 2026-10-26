@@ -223,7 +223,6 @@ fn terminal_read_parameters_rebind_without_catalog_reentry_or_template_mutation(
 fn terminal_read_keeps_dropped_scope_and_refuses_another_write_or_missing_return() {
     for text in [
         "CREATE (n {p:1}) WITH n.p AS p MATCH (m) RETURN n.p",
-        "CREATE (n) WITH n MATCH (m) CREATE (x) RETURN x",
         "CREATE (n) WITH n MATCH (m)",
         "CREATE (n) WITH n OPTIONAL MATCH (m) MERGE (x) RETURN x",
     ] {
@@ -236,6 +235,14 @@ fn terminal_read_keeps_dropped_scope_and_refuses_another_write_or_missing_return
             "{text}"
         );
     }
+    // A MATCH that ends at CREATE is no terminal read but that CREATE's
+    // prefix (LDBC SNB IU1's shape), so this chain prepares.
+    let text = "CREATE (n) WITH n MATCH (m) CREATE (x) RETURN x";
+    assert!(PreparedGraphWriteChainText::is_chain(text).unwrap());
+    assert!(
+        PreparedGraphWriteChainText::prepare(text, RelationId(1), text_symbols).is_ok(),
+        "{text}"
+    );
     for text in [
         "CREATE (n {p:'MATCH (x) RETURN x'}) RETURN n",
         "MERGE (n) ON MATCH SET n.p=1 RETURN n",

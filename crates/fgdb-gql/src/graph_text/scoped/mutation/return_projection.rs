@@ -3685,69 +3685,78 @@ impl BoundSetTextInput {
         &self,
         values: &[GqlParameterValue],
     ) -> Result<PreparedGraphSet, GraphSetTextError> {
-        let mut input = if let Some((columns, types)) = self.owned.as_deref() {
+        let owned = self
+            .owned
+            .as_deref()
+            .map(|(columns, types)| PreparedGraphSet::owned(columns.clone(), types.clone()));
+        let mut input = match owned {
             // A chained write reads the previous write's rows, filled by the
             // executing host; there is no graph source to bind.
-            PreparedGraphSet::owned(columns.clone(), types.clone())
-        } else if self.leading.is_empty() && !self.singleton {
-            self.selection
+            Some(owned) if self.selection.is_none() => owned,
+            None if self.leading.is_empty() && !self.singleton => self
+                .selection
                 .as_ref()
                 .expect("graph source")
                 .bind_values(values)?
-                .into()
-        } else {
-            let mut leading = bind_stages(PreparedGraphSet::singleton(), &self.leading, values)?;
-            if let Some(selection) = &self.selection {
-                let imported_width = leading.column_types().len();
-                leading = self.bind_row_fields(leading, values)?;
-                let width = leading.column_types().len();
-                leading = leading
-                    .cross_join(selection.bind_values(values)?.into())
-                    .map_err(|kind| GraphSetTextError {
-                        offset: self.return_at,
-                        kind: GraphSetTextErrorKind::SetBuild(kind),
-                    })?;
-                let mut code = Vec::new();
-                for &(left, right) in &self.correlations {
-                    code.push(crate::GraphSetPredicateOp::Compare {
-                        left: crate::GraphSetOperand::Column(left),
-                        comparison: IntegerComparison::Equal,
-                        right: crate::GraphSetOperand::Column(width + right),
-                    });
-                    if code.len() > 1 {
-                        code.push(crate::GraphSetPredicateOp::And);
+                .into(),
+            // A chained write's MATCH (`WITH p UNWIND $ids AS id MATCH (t {id:
+            // id}) CREATE (p)-[:R]->(t)`) joins the previous write's rows as
+            // a leading UNWIND's rows join one.
+            owned => {
+                let start = owned.unwrap_or_else(PreparedGraphSet::singleton);
+                let mut leading = bind_stages(start, &self.leading, values)?;
+                if let Some(selection) = &self.selection {
+                    let imported_width = leading.column_types().len();
+                    leading = self.bind_row_fields(leading, values)?;
+                    let width = leading.column_types().len();
+                    leading = leading
+                        .cross_join(selection.bind_values(values)?.into())
+                        .map_err(|kind| GraphSetTextError {
+                            offset: self.return_at,
+                            kind: GraphSetTextErrorKind::SetBuild(kind),
+                        })?;
+                    let mut code = Vec::new();
+                    for &(left, right) in &self.correlations {
+                        code.push(crate::GraphSetPredicateOp::Compare {
+                            left: crate::GraphSetOperand::Column(left),
+                            comparison: IntegerComparison::Equal,
+                            right: crate::GraphSetOperand::Column(width + right),
+                        });
+                        if code.len() > 1 {
+                            code.push(crate::GraphSetPredicateOp::And);
+                        }
+                    }
+                    if !code.is_empty() {
+                        leading = leading.filter(&code).map_err(|kind| GraphSetTextError {
+                            offset: self.return_at,
+                            kind: GraphSetTextErrorKind::FilterBuild(kind),
+                        })?;
+                    }
+                    if !self.row_fields.is_empty() {
+                        let projection = (0..imported_width)
+                            .chain(width..leading.column_types().len())
+                            .enumerate()
+                            .map(|(output, column)| {
+                                // The preexisting cross product permits names
+                                // shared by its children. These are private input
+                                // cells, so give them unique compiler names before
+                                // the public projection restores user aliases.
+                                GraphSetProjection::new(
+                                    format!("__fg_match_input_{output}"),
+                                    GraphSetValue::Column(column),
+                                )
+                            })
+                            .collect();
+                        leading = leading.project_ordered_output(projection).map_err(|kind| {
+                            GraphSetTextError {
+                                offset: self.return_at,
+                                kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                            }
+                        })?;
                     }
                 }
-                if !code.is_empty() {
-                    leading = leading.filter(&code).map_err(|kind| GraphSetTextError {
-                        offset: self.return_at,
-                        kind: GraphSetTextErrorKind::FilterBuild(kind),
-                    })?;
-                }
-                if !self.row_fields.is_empty() {
-                    let projection = (0..imported_width)
-                        .chain(width..leading.column_types().len())
-                        .enumerate()
-                        .map(|(output, column)| {
-                            // The preexisting cross product permits names
-                            // shared by its children. These are private input
-                            // cells, so give them unique compiler names before
-                            // the public projection restores user aliases.
-                            GraphSetProjection::new(
-                                format!("__fg_match_input_{output}"),
-                                GraphSetValue::Column(column),
-                            )
-                        })
-                        .collect();
-                    leading = leading.project_ordered_output(projection).map_err(|kind| {
-                        GraphSetTextError {
-                            offset: self.return_at,
-                            kind: GraphSetTextErrorKind::ProjectionBuild(kind),
-                        }
-                    })?;
-                }
+                leading
             }
-            leading
         };
         if let Some(projection) = &self.projection {
             input = bind_projection(input, projection, self.quantifier, values, self.return_at)?;

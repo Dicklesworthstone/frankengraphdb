@@ -79,6 +79,17 @@ pub(crate) type InsertStep<'a> = (
     Option<ChainContinuation<'a>>,
 );
 
+/// The rows a CREATE runs over, before its MATCH prefix joins them: leading
+/// WITH/UNWIND stages over the unit row, a MATCH-first UNWIND's read, or
+/// (`owned`) the previous chain step's rows. `schema` is their row.
+struct InsertRows<'a> {
+    leading: Vec<ReadStageTemplate>,
+    schema: Vec<(Name<'a>, GraphSetColumnType)>,
+    matched: bool,
+    read_source: Option<crate::graph_text::parameters::UnresolvedGraphText<'a>>,
+    owned: bool,
+}
+
 impl<'a> Parser<'a> {
     /// CREATE clauses over a WITH row, then its RETURN or WITH head. A
     /// chained tail stops at the next write, which is the continuation;
@@ -914,7 +925,7 @@ impl PreparedGraphInsertText {
         returning: bool,
         chain: bool,
     ) -> Result<InsertStep<'a>, GraphInsertTextError> {
-        let mut resolve = InsertionResolver {
+        let resolve = InsertionResolver {
             inner: resolve,
             symbols: BTreeMap::new(),
         };
@@ -937,9 +948,44 @@ impl PreparedGraphInsertText {
         } else {
             None
         };
-        let row_input = read_source.is_some() || !leading.is_empty();
+        let rows = InsertRows {
+            leading,
+            schema: row_schema,
+            matched,
+            read_source,
+            owned: false,
+        };
+        Self::prepare_over_rows(parser, statement, relation, resolve, returning, rows)
+    }
+
+    /// The CREATE clauses after a statement's (or chain step's) row source
+    /// and MATCH prefix, their RETURN or WITH head, and the input relation.
+    fn prepare_over_rows<'a, R: GraphSymbolResolver>(
+        mut parser: Parser<'a>,
+        statement: &'a str,
+        relation: RelationId,
+        mut resolve: InsertionResolver<R>,
+        returning: bool,
+        rows: InsertRows<'a>,
+    ) -> Result<InsertStep<'a>, GraphInsertTextError> {
+        let InsertRows {
+            leading,
+            schema: row_schema,
+            matched,
+            read_source,
+            owned,
+        } = rows;
+        let row_input = read_source.is_some() || !leading.is_empty() || owned;
         let at = parser.current.at;
         let mut parsed = parser.insertion_clauses(row_input.then_some(row_schema.as_slice()))?;
+        // A chain step's head follows its clauses, as insertion_over_row
+        // reads it: a WITH head, a RETURN, or the implicit `WITH *` directly
+        // before the next write.
+        let returning = returning
+            || (owned
+                && (parser.is_word("WITH")
+                    || parser.is_word("RETURN")
+                    || parser.at_chained_write()?));
         let returning = if returning {
             Some(parser.insertion_return(&mut parsed, &row_schema)?)
         } else {
@@ -1029,9 +1075,19 @@ impl PreparedGraphInsertText {
             // and pages stay one native input. An empty MATCH is never replaced
             // with a unit row, nor is its occurrence bag deduplicated here.
             Some(source.resolve(crate::graph_text::LentResolver(&mut resolve))?)
-        } else if leading.is_empty() {
+        } else if leading.is_empty() && !owned {
             None
         } else {
+            // A chain step's rows are the previous write's, which the host
+            // fills into one owned leaf; a statement's are its leading stages
+            // over the unit row.
+            let owned = owned.then(|| {
+                let (columns, types) = row_schema
+                    .iter()
+                    .map(|(name, kind)| (name.text.to_owned(), *kind))
+                    .unzip();
+                Box::new((columns, types))
+            });
             let input = BoundSetTextInput {
                 selection: None,
                 parameters: syntax.parameters.clone(),
@@ -1040,11 +1096,11 @@ impl PreparedGraphInsertText {
                 projection: None,
                 quantifier: crate::GraphSetQuantifier::All,
                 pipeline: Vec::new(),
-                singleton: true,
+                singleton: owned.is_none(),
                 leading,
                 correlations: Vec::new(),
                 row_fields,
-                owned: None,
+                owned,
             };
             // Compile all source and property expression shapes before any
             // catalog callback, including statically unreachable empty lists.
@@ -1344,6 +1400,25 @@ impl PreparedGraphInsertText {
             .with_zones(resolve.time_zones())
             .resume_after(from.boundary, &from.parameters, from.at)?;
         parser.chain_write = true;
+        // `... WITH p UNWIND $tags AS tag MATCH (t:Tag {id: tag}) CREATE
+        // (p)-[:HAS_TAG]->(t)` (LDBC SNB IU1, IU4, IU6, IU7): the MATCH joins
+        // the previous write's rows by its correlations and reads the graph
+        // the earlier writes staged, as a MATCH after a leading UNWIND does.
+        if parser.is_word("MATCH") {
+            let resolve = InsertionResolver {
+                inner: resolve,
+                symbols: BTreeMap::new(),
+            };
+            let matched = parser.insertion_match_prefix(&from.row)?;
+            let rows = InsertRows {
+                leading: Vec::new(),
+                schema: from.row,
+                matched,
+                read_source: None,
+                owned: true,
+            };
+            return Self::prepare_over_rows(parser, statement, relation, resolve, false, rows);
+        }
         let at = parser.current.at;
         let schema = from.row;
         // A chained write without RETURN ends the statement; with a WITH head
