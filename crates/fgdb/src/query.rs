@@ -1142,12 +1142,13 @@ mod write_return_tests {
                         "{text}"
                     );
                     // A chain prepares step by step, so the label and the
-                    // SET's property key are looked up before the last
-                    // step's RETURN is refused (`Copy`, then `p`).
-                    // A lookup is a pure catalog read; nothing is written.
+                    // SET step's property key are looked up before the last
+                    // step's RETURN is refused (measured: `Copy`, then `p`
+                    // twice). A lookup is a pure catalog read; nothing is
+                    // written.
                     assert_eq!(
                         looked_up,
-                        ["Copy", "p"],
+                        ["Copy", "p", "p"],
                         "lookups that precede the refusal: {text}"
                     );
                 } else {
