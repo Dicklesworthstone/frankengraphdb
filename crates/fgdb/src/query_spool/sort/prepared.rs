@@ -6,7 +6,7 @@ use super::*;
 #[path = "native_order.rs"]
 mod native_order;
 pub use native_order::PreparedBufferedOrder;
-pub(crate) use native_order::ordered_input;
+pub(crate) use native_order::{ordered_input, ordered_stages};
 
 impl PreparedNativeRead {
     /// Evaluate a native pull query and externally order its selected result.

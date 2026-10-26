@@ -3,11 +3,12 @@
 //! cross the narrowed session boundary; only live-admitted final rows do.
 
 use super::*;
-use crate::query::view::{SpoolInput, SpoolRow, ordered_input};
+use crate::query::view::{SpoolInput, SpoolRow, ordered_input, ordered_stages};
 use crate::{NativeSpoolCursor, NativeSpoolError};
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use fgdb_gql::edge_stream::{EdgeScanCursor, EdgeScanSource, EdgeScanState};
 use fgdb_gql::scan_stream::{ScanKind, ScanSortTail, ScanState};
+use fgdb_gql::spill_set::{AsyncSpillElementSource, AsyncSpillSetPlan};
 use fgdb_gql::{GlaExecutionStats, GqlExecutionBudget, GqlExecutionStats};
 use fgdb_strata::tiered::memory::{SpillError, SpillFile, TrackedBytes};
 use std::future::{Future, poll_fn};
@@ -416,13 +417,15 @@ fn compile_ordered(
     }
 }
 /// A bound ordered plan: the physical input, its sort tail, its cut, the
-/// output columns and, for a pulled set, the projection each row takes first.
+/// source columns and either the proven pull projection or the unary stages
+/// that execute only after the graph leaf's complete native order and page.
 type BoundOrder = (
     RowPlan,
     ScanSortTail,
     CommitSeq,
     Vec<String>,
     Option<GraphSetRowPull>,
+    Option<AsyncSpillSetPlan>,
 );
 
 fn bind_projected_order(
@@ -430,19 +433,29 @@ fn bind_projected_order(
     at: CommitSeq,
     facade: crate::NativeReadClass,
 ) -> core::result::Result<BoundOrder, QueryError> {
-    let (pull, tail) = query
-        .ordered_row_pull()
-        .ok_or(QueryError::StreamingUnsupported { facade })?;
-    let RowPlan::Vertex(plan) = compile(pull.pattern())? else {
-        unreachable!("an ordered row pull is rooted at its one vertex scan")
-    };
-    Ok((
-        RowPlan::Vertex(plan),
-        tail,
-        at,
-        query.columns().to_vec(),
-        Some(pull),
-    ))
+    if let Some((pull, tail)) = query.ordered_row_pull() {
+        let RowPlan::Vertex(plan) = compile(pull.pattern())? else {
+            unreachable!("an ordered row pull is rooted at its one vertex scan")
+        };
+        return Ok((
+            RowPlan::Vertex(plan),
+            tail,
+            at,
+            query.columns().to_vec(),
+            Some(pull),
+            None,
+        ));
+    }
+    let unsupported = || QueryError::StreamingUnsupported { facade };
+    let stages = AsyncSpillSetPlan::compile(query).map_err(|_| unsupported())?;
+    // A unary program retains one ordinary scoped graph source. Its canonical
+    // order/page must finish before the first stage evaluates a row, including
+    // property-only projections whose failure ordinals differ from VId order.
+    // Binary, source-free, aggregate and procedure roots have separate owners.
+    let pattern = stages.source_pattern().ok_or_else(unsupported)?;
+    let (plan, tail) = compile_ordered(pattern)?;
+    let columns = pattern.columns().to_vec();
+    Ok((plan, tail, at, columns, None, Some(stages)))
 }
 
 fn bind_ordered(
@@ -485,13 +498,14 @@ fn bind_ordered(
         }
     };
     let (plan, tail) = compile_ordered(&query)?;
-    Ok((plan, tail, at, query.columns().to_vec(), None))
+    Ok((plan, tail, at, query.columns().to_vec(), None, None))
 }
 
 struct OpenedOrder<'q, C> {
     input: OrderedInput<'q>,
     tail: ScanSortTail,
     columns: Vec<String>,
+    stages: Option<AsyncSpillSetPlan>,
     at: CommitSeq,
     policy: GqlQueryPolicy,
     execution: Shared<'q, C>,
@@ -539,7 +553,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send> AuthorizedReadSession<'_,
             params,
             *policy,
             bind_ordered,
-            |(plan, tail, at, columns, pull), view, cx, execution, policy| {
+            |(plan, tail, at, columns, pull, stages), view, cx, execution, policy| {
                 execution.borrow_mut().reserve_work(limits.max_sort_work)?;
                 let input_policy = GqlQueryPolicy {
                     rows: match policy.rows.max_snapshot_records() {
@@ -583,16 +597,25 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send> AuthorizedReadSession<'_,
                     }
                 };
                 execution.borrow_mut().checkpoint()?;
-                Ok((OrderedInput(input), tail, columns, at, policy, execution))
+                Ok((
+                    OrderedInput(input),
+                    tail,
+                    columns,
+                    stages,
+                    at,
+                    policy,
+                    execution,
+                ))
             },
         );
         match result {
-            Ok((input, tail, columns, at, policy, execution)) => {
+            Ok((input, tail, columns, stages, at, policy, execution)) => {
                 guard.armed = false;
                 Ok(OpenedOrder {
                     input,
                     tail,
                     columns,
+                    stages,
                     at,
                     policy,
                     execution,
@@ -607,8 +630,47 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send> AuthorizedReadSession<'_,
     }
 }
 
-// The whole private phase is pre-reserved, so synchronous comparisons cannot
-// overrun the signed budget. Fresh live checks surround EVERY poll, including
+// Every ordinary property capture comes from the masked graph leaf. Opaque
+// element values need a separately scoped lookup owner; this path retains the
+// native reached-operand refusal rather than opening a privileged reader.
+struct NoElementReads;
+impl AsyncSpillElementSource for NoElementReads {
+    type Error = NativeSpoolError;
+    type Property = fgdb_types::CanonicalPropertyValue;
+
+    async fn element_property(
+        &mut self,
+        _: fgdb_delta_types::ElementId,
+        _: fgdb_delta_types::PropertyKeyId,
+    ) -> Option<Result<Option<Self::Property>>> {
+        None
+    }
+}
+
+// These stages have no buffered graph source. Preserve the authorized set
+// error surface for data and controls, including its original row ordinal.
+fn stage_error(error: NativeSpoolError) -> NativeSpoolError {
+    let error = match error {
+        NativeSpoolError::SetExecution(error) => {
+            GqlQueryError::Source(error.map_source(|never| match never {}))
+        }
+        NativeSpoolError::BufferedExecute(error) => match *error {
+            GqlQueryError::Source(error) => {
+                return NativeSpoolError::BufferedExecute(Box::new(GqlQueryError::Source(error)));
+            }
+            GqlQueryError::Rows(error) => GqlQueryError::Rows(error),
+            GqlQueryError::Evaluator(error) => GqlQueryError::Evaluator(error),
+            GqlQueryError::Interrupted(error) => GqlQueryError::Interrupted(error),
+            GqlQueryError::IdentifiedEdgesRequired => GqlQueryError::IdentifiedEdgesRequired,
+            GqlQueryError::Data(error) => GqlQueryError::Data(error),
+        },
+        error => return error,
+    };
+    authorized(QueryError::Set(error))
+}
+
+// Physical sort/encoding work is pre-reserved; native stage evaluation charges
+// the same live permit per event. Fresh checks surround EVERY poll, including
 // Pending and errors. A bounded synchronous section is not preempted midway.
 async fn checked_future<T>(
     guard: &mut PinGuard<'_>,
@@ -651,6 +713,11 @@ where
     /// vertices, fixed-edge joins and admitted probes use the same masked
     /// native sources as authorized streams. Unsupported profiles refuse before
     /// input demand, including under LIMIT 0; no eager fallback is attempted.
+    /// Unary Set/TemporalSet projections, scopes, filters and UNWIND complete
+    /// each native order/DISTINCT/window barrier before the next stage runs.
+    /// Stages consume the same signed work permit and cumulative native budget;
+    /// ordinary property captures stay masked, while reached opaque element
+    /// property lookups retain their native unsupported-expression refusal.
     ///
     /// Opening binds and admits the exact snapshot synchronously; a refusal
     /// returns immediately without creating a future. The successful future
@@ -682,32 +749,81 @@ where
         } = self;
         let limits = *limits;
         let opened = session.open_ordered(cx, prepared, params, limits)?;
-        let columns = opened.columns.clone();
+        let columns = opened.stages.as_ref().map_or_else(
+            || opened.columns.clone(),
+            |stages| stages.columns().to_vec(),
+        );
         let at = opened.at;
         let future = Box::pin(async move {
             let OpenedOrder {
                 input,
                 tail,
                 columns,
+                stages,
                 at,
                 policy,
                 execution,
                 mut guard,
             } = opened;
-            let future = ordered_input(
-                cx,
-                columns,
-                input,
-                tail,
-                policy,
-                scratch,
-                destination,
-                limits.run_rows,
-                limits.max_runs,
-                limits.page_bytes,
-                limits.max_row_bytes,
-                limits.max_sort_work,
-            );
+            let stage_execution = execution.clone();
+            let future = async {
+                let source_policy = if stages.is_some() {
+                    GqlQueryPolicy {
+                        rows: match policy.rows.max_snapshot_records() {
+                            Some(records) => {
+                                GqlExecutionBudget::new(records, limits.max_input_rows)
+                            }
+                            None => GqlExecutionBudget::result_rows(limits.max_input_rows),
+                        },
+                        evaluator: policy.evaluator,
+                    }
+                } else {
+                    policy
+                };
+                let (spool, work) = ordered_input(
+                    cx,
+                    columns,
+                    input,
+                    tail,
+                    source_policy,
+                    scratch,
+                    destination,
+                    limits.run_rows,
+                    limits.max_runs,
+                    limits.page_bytes,
+                    limits.max_row_bytes,
+                    limits.max_sort_work,
+                )
+                .await?;
+                let Some(stages) = stages else {
+                    return Ok((spool, work));
+                };
+                ordered_stages(
+                    stages,
+                    spool,
+                    &mut NoElementReads,
+                    &mut || {
+                        stage_execution
+                            .borrow_mut()
+                            .checkpoint()
+                            .map_err(authorized)
+                    },
+                    cx,
+                    policy,
+                    scratch,
+                    destination,
+                    limits.run_rows,
+                    limits.max_runs,
+                    limits.page_bytes,
+                    limits.max_row_bytes,
+                    limits.max_input_rows,
+                    limits.max_sort_work,
+                    work,
+                    None,
+                )
+                .await
+                .map_err(stage_error)
+            };
             let (spool, _) =
                 checked_future(&mut guard, || execution.borrow_mut().checkpoint(), future).await?;
             guard.armed = true;

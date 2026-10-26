@@ -20,6 +20,7 @@ mod cross;
 mod relational_join;
 #[path = "staged.rs"]
 mod staged;
+pub(crate) use staged::execute_with_controls as ordered_stages;
 
 fn input_policy(policy: GqlQueryPolicy, max_input_rows: u64) -> GqlQueryPolicy {
     GqlQueryPolicy {

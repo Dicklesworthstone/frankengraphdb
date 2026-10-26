@@ -27,7 +27,7 @@ pub use spool::{
     NativeAggregateSpoolError, NativeAggregateSpoolRow, NativeResultSpool, NativeSpoolCursor,
     NativeSpoolDifference, NativeSpoolError, PreparedBufferedAggregate, PreparedBufferedOrder,
 };
-pub(crate) use spool::{SpoolInput, SpoolRow, ordered_input};
+pub(crate) use spool::{SpoolInput, SpoolRow, ordered_input, ordered_stages};
 
 impl EmbeddedReadView {
     /// Execute a native read at this view's immutable frontier. The same native

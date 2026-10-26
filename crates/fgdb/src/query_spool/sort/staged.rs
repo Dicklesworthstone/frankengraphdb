@@ -310,8 +310,58 @@ where
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_with_elements<A, B, S>(
     plan: AsyncSpillSetPlan,
+    input: NativeResultSpool,
+    elements: &mut S,
+    cx: &QueryCx,
+    policy: GqlQueryPolicy,
+    scratch: &mut SpillFile<A>,
+    destination: &mut SpillFile<B>,
+    run_rows: usize,
+    max_runs: usize,
+    page_bytes: usize,
+    max_row_bytes: usize,
+    max_input_rows: u64,
+    max_sort_work: u64,
+    prior_work: u64,
+    resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
+) -> Result<(NativeResultSpool, u64)>
+where
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    S: AsyncSpillElementSource<Error = NativeSpoolError>,
+{
+    execute_with_controls(
+        plan,
+        input,
+        elements,
+        &mut || Ok(()),
+        cx,
+        policy,
+        scratch,
+        destination,
+        run_rows,
+        max_runs,
+        page_bytes,
+        max_row_bytes,
+        max_input_rows,
+        max_sort_work,
+        prior_work,
+        resolver,
+    )
+    .await
+}
+
+/// Continue native stages under a host's live work admission. The callback
+/// precedes each native work/scratch event, including element reads, and may
+/// retain an authority refusal. It never admits result rows: final delivery
+/// remains the caller's separate owner. Source and stage native statistics
+/// and physical work remain cumulative across every materialization barrier.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_with_controls<A, B, S>(
+    plan: AsyncSpillSetPlan,
     mut input: NativeResultSpool,
     elements: &mut S,
+    checkpoint: &mut (dyn FnMut() -> Result<()> + Send),
     cx: &QueryCx,
     policy: GqlQueryPolicy,
     scratch: &mut SpillFile<A>,
@@ -366,6 +416,7 @@ where
                 &mut work,
                 resolver,
                 elements,
+                checkpoint,
             )
             .await?
         } else {
@@ -381,6 +432,7 @@ where
                 &mut work,
                 resolver,
                 elements,
+                checkpoint,
             )
             .await?
         };
@@ -411,6 +463,7 @@ async fn run_stage<A, B, S>(
     work: &mut Work<'_>,
     resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
     elements: &mut S,
+    checkpoint: &mut (dyn FnMut() -> Result<()> + Send),
 ) -> Result<NativeResultSpool>
 where
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
@@ -428,6 +481,7 @@ where
         work,
         resolver,
         elements,
+        checkpoint,
     )
     .await?;
     if let Some(requested) = stage.order()
@@ -520,6 +574,7 @@ async fn transform<A, B, S>(
     work: &mut Work<'_>,
     resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
     elements: &mut S,
+    checkpoint: &mut (dyn FnMut() -> Result<()> + Send),
 ) -> Result<NativeResultSpool>
 where
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
@@ -556,6 +611,9 @@ where
                 row,
                 row_index,
                 &mut |event| {
+                    if event != GlaExecutionEvent::ResultRow {
+                        checkpoint()?;
+                    }
                     native_event(work.cx, policy, evaluator, event)?;
                     if event == GlaExecutionEvent::ScratchEntry {
                         let bytes = 8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
@@ -593,6 +651,9 @@ where
             let next = state
                 .0
                 .next_with_control(&mut |event| {
+                    if event != GlaExecutionEvent::ResultRow {
+                        checkpoint()?;
+                    }
                     native_event(work.cx, policy, evaluator, event)?;
                     if event == GlaExecutionEvent::ScratchEntry {
                         let bytes = 8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
