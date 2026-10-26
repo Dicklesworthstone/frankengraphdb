@@ -458,7 +458,7 @@ impl<'a> Parser<'a> {
         } else {
             return Ok(None);
         };
-        Ok(self.type_test_ends()?.then(|| (variable, types)))
+        Ok(self.type_test_ends()?.then_some((variable, types)))
     }
 
     /// `type(r)` over a fixed-length edge of this clause.
