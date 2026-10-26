@@ -268,6 +268,194 @@ fn legacy_sources_refuse_enumeration_before_consuming_inputs_even_for_limit_zero
     }
 }
 
+fn assert_vertex_property_source_refusal(text: &str) {
+    let pattern = PreparedGraphText::prepare_with_resolver(text, Catalog("p"))
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+    let populated = [VId(1), VId(2)];
+    for (identified, ids) in [
+        (false, populated.as_slice()),
+        (true, populated.as_slice()),
+        (false, &[]),
+        (true, &[]),
+    ] {
+        let reads = Cell::new(0);
+        let touch = || reads.set(reads.get() + 1);
+        let vertices = ids.iter().copied().inspect(|_| touch());
+        let test_vertex = |_, _: &[_]| {
+            touch();
+            Ok::<_, GraphIntegerError>(true)
+        };
+        let property = |_, _| {
+            touch();
+            Ok::<_, GraphIntegerError>(None)
+        };
+        let control = |_| {
+            touch();
+            Ok::<_, GraphIntegerError>(())
+        };
+        let result = if identified {
+            pattern.plan().execute_with_identified_properties_control(
+                vertices,
+                [(EId(11), VId(1), R, VId(2))]
+                    .into_iter()
+                    .inspect(|_| touch()),
+                test_vertex,
+                property,
+                control,
+            )
+        } else {
+            pattern.plan().execute_with_properties_control(
+                vertices,
+                [(VId(1), R, VId(2))].into_iter().inspect(|_| touch()),
+                test_vertex,
+                property,
+                control,
+            )
+        };
+        let error = result.expect_err(text);
+        assert_eq!(
+            error.kind,
+            GraphIntegerErrorKind::ElementSourceRequired,
+            "{text}"
+        );
+        assert_eq!(
+            reads.get(),
+            0,
+            "{text}, identified={identified}, ids={ids:?}"
+        );
+    }
+}
+
+#[test]
+fn vertex_property_sources_refuse_element_projections_before_consuming_inputs() {
+    for suffix in ["", " LIMIT 0"] {
+        for text in [
+            "MATCH (n) RETURN labels(n) AS labels",
+            "MATCH (a)-[r:R]->(b) RETURN type(r) AS type",
+            "MATCH (a)-[r:R]->(b) RETURN r.p AS p",
+        ] {
+            assert_vertex_property_source_refusal(&format!("{text}{suffix}"));
+        }
+    }
+}
+
+#[test]
+fn vertex_property_sources_refuse_captured_edge_predicates_instead_of_empty_rows() {
+    let source = Fixture::new();
+    assert_eq!(
+        source.rows("MATCH (a)-[r:R]->(b) WHERE r.p = 11 RETURN a"),
+        vec![vec![GraphValue::Vertex(VId(1))]],
+    );
+    assert_eq!(
+        source.rows("MATCH (a)-[r:R]->(b) WHERE r.p >= 11 RETURN a"),
+        vec![vec![GraphValue::Vertex(VId(1))]; 2],
+    );
+    for suffix in ["", " LIMIT 0"] {
+        for text in [
+            "MATCH (a)-[r:R]->(b) WHERE r.p = 11 RETURN a",
+            "MATCH (a)-[r:R]->(b) WHERE r.p >= 11 RETURN a",
+        ] {
+            assert_vertex_property_source_refusal(&format!("{text}{suffix}"));
+        }
+    }
+}
+
+#[test]
+fn vertex_property_and_full_element_sources_keep_their_supported_answers() {
+    let source = Fixture::new();
+    let node_label = GraphValue::Scalar(CanonicalScalar::ucs_basic_text("L").unwrap());
+    let labels = [node_label.clone()];
+    let edge_type = CanonicalScalar::ucs_basic_text("R").unwrap();
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    let cases = [
+        (
+            "MATCH (n) RETURN n, n.p AS p",
+            vec![
+                vec![GraphValue::Vertex(VId(1)), integer(1)],
+                vec![GraphValue::Vertex(VId(2)), null],
+            ],
+        ),
+        (
+            "MATCH (n) RETURN n, labels(n) AS labels",
+            vec![
+                vec![
+                    GraphValue::Vertex(VId(1)),
+                    GraphValue::List(vec![node_label].into()),
+                ],
+                vec![GraphValue::Vertex(VId(2)), GraphValue::List(vec![].into())],
+            ],
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) RETURN type(r) AS type",
+            vec![vec![GraphValue::Scalar(edge_type.clone())]; 2],
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) RETURN r.p AS p",
+            vec![vec![integer(11)], vec![integer(12)]],
+        ),
+    ];
+    for (text, expected) in cases {
+        let pattern = PreparedGraphText::prepare_with_resolver(text, Catalog("p"))
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let rows = pattern
+            .plan()
+            .execute_with_element_properties_control(
+                source.vertices.keys().copied(),
+                source.edges.iter().copied(),
+                |_, _| Ok::<_, GraphIntegerError>(true),
+                |vid, key| Ok(source.vertex_values.get(&(vid, key))),
+                |eid, key| Ok(source.edge_values.get(&(eid, key))),
+                |vid| Ok(Some(if vid == VId(1) { &labels[..] } else { &[] })),
+                |_| Ok(Some(&edge_type)),
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.values().to_vec())
+                .collect::<Vec<_>>(),
+            expected,
+            "{text}"
+        );
+        if text == "MATCH (n) RETURN n, n.p AS p" {
+            for identified in [false, true] {
+                let rows = if identified {
+                    pattern.plan().execute_with_identified_properties_control(
+                        source.vertices.keys().copied(),
+                        source.edges.iter().copied(),
+                        |_, _| Ok::<_, GraphIntegerError>(true),
+                        |vid, key| Ok(source.vertex_values.get(&(vid, key))),
+                        |_| Ok(()),
+                    )
+                } else {
+                    pattern.plan().execute_with_properties_control(
+                        source.vertices.keys().copied(),
+                        source
+                            .edges
+                            .iter()
+                            .map(|&(_, src, rel, dst)| (src, rel, dst)),
+                        |_, _| Ok::<_, GraphIntegerError>(true),
+                        |vid, key| Ok(source.vertex_values.get(&(vid, key))),
+                        |_| Ok(()),
+                    )
+                }
+                .unwrap();
+                assert_eq!(
+                    rows.iter()
+                        .map(|row| row.values().to_vec())
+                        .collect::<Vec<_>>(),
+                    expected,
+                    "identified={identified}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn maps_follow_optional_and_with_scope_without_exposing_private_columns() {
     let source = Fixture::new();

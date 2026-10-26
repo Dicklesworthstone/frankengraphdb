@@ -635,7 +635,9 @@ mod publication_metadata {
             assert_eq!(&bytes[..4], b"FGPK");
             let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
             let members: Vec<_> = bytes[12..12 + count * 44]
-                .chunks_exact(44)
+                .as_chunks::<44>()
+                .0
+                .iter()
                 .map(|row| {
                     (
                         ObjectId(row[..32].try_into().unwrap()),

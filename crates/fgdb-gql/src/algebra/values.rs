@@ -1512,9 +1512,27 @@ pub(super) fn collect_values_with_paths<'a, E: From<crate::GraphIntegerError>>(
         collected,
         projected,
         property,
-        &mut |_, _| panic!("edge properties require an explicit edge property source"),
-        &mut |_| panic!("vertex labels require an explicit label source"),
-        &mut |_| panic!("edge type requires an explicit edge source"),
+        &mut |_, _| {
+            Err(crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::ElementSourceRequired,
+            }
+            .into())
+        },
+        &mut |_| {
+            Err(crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::ElementSourceRequired,
+            }
+            .into())
+        },
+        &mut |_| {
+            Err(crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::ElementSourceRequired,
+            }
+            .into())
+        },
         control,
     )
 }
@@ -1542,8 +1560,20 @@ pub(super) fn collect_values_with_element_properties<'a, E: From<crate::GraphInt
         edge_property,
         vertex_labels,
         edge_type,
-        &mut |_| panic!("property maps require an enumerating vertex source"),
-        &mut |_| panic!("property maps require an enumerating edge source"),
+        &mut |_| {
+            Err(crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::PropertyMapSourceRequired,
+            }
+            .into())
+        },
+        &mut |_| {
+            Err(crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::PropertyMapSourceRequired,
+            }
+            .into())
+        },
         control,
     )
 }

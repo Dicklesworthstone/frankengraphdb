@@ -223,7 +223,7 @@ fn inline_collection_literals_and_parameters_use_native_value_equality() {
     let template = PreparedGraphText::prepare_with_parameter_types(
         "MATCH (a {n: $wanted}) RETURN a",
         &[("wanted", GqlParameterType::List)],
-        |kind, name| {
+        |kind: GraphSymbolKind, name: &str| {
             catalog_calls.set(catalog_calls.get() + 1);
             symbols(kind, name)
         },

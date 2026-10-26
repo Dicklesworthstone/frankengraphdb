@@ -747,7 +747,13 @@ impl BoundBooleanExpression {
             bindings,
             &[],
             property,
-            &mut |_, _| panic!("edge properties require an explicit edge property source"),
+            &mut |_, _| {
+                Err(crate::GraphIntegerError {
+                    instruction: 0,
+                    kind: crate::GraphIntegerErrorKind::ElementSourceRequired,
+                }
+                .into())
+            },
             control,
         )
     }
@@ -1114,7 +1120,7 @@ mod tests {
             make(Arg::StoredLiteral(&stored_scalar)).template_bytes()
         );
         let value = CanonicalPropertyValue::List(
-            fgdb_types::CanonicalList::try_new(vec![scalar.into()]).unwrap(),
+            fgdb_types::CanonicalList::try_new(vec![scalar.clone().into()]).unwrap(),
         );
         let program = make(Arg::StoredLiteral(&value));
         assert!(program.supports_vertex_bindings(1));
