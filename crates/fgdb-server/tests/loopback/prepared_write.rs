@@ -288,3 +288,313 @@ fn fgp_prepared_merge_uses_current_state_and_preparation_preserves_authority_bud
         task.join(cx).await.unwrap();
     });
 }
+
+#[test]
+fn fgp_prepared_returning_covers_all_native_write_families() {
+    run(async |cx| {
+        let (addr, shutdown, mut task) = start(cx, "prepared-returning-families").await;
+        let mut client = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        client.select(cx, "social").await.unwrap();
+        let args = |name: &str, age| {
+            vec![
+                ("name".into(), text(name)),
+                ("age".into(), WireValue::Int(age)),
+            ]
+        };
+        let insert = client
+            .prepare_write_returning(
+                cx,
+                "CREATE (n:Person {name:$name,age:$age}) RETURN n.name AS name,n.age AS age",
+                args("sample", 99),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            server_code(
+                client
+                    .execute_prepared_write(cx, insert, args("wrong", 0))
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Statement
+        );
+        assert_eq!(
+            server_code(
+                client
+                    .execute_prepared_batch(cx, insert, vec![args("wrong", 0)])
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Statement
+        );
+        assert_eq!(
+            server_code(
+                client
+                    .execute_prepared(cx, insert, args("wrong", 0))
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Statement
+        );
+        for (seq, name, age) in [(1, "Ada", 1), (2, "Bob", 2)] {
+            let answer = client
+                .execute_prepared_write_returning(cx, insert, args(name, age))
+                .await
+                .unwrap();
+            assert_eq!(answer.columns, ["name", "age"]);
+            assert_eq!(answer.rows, [vec![text(name), WireValue::Int(age)]]);
+            assert_eq!(
+                answer.outcome,
+                Outcome::WriteCommitted { seq, statements: 1 }
+            );
+        }
+        let mutation = client
+            .prepare_write_returning(
+                cx,
+                "MATCH (n:Person {name:$name}) SET n.age=$age RETURN n.age AS age",
+                args("sample", 99),
+            )
+            .await
+            .unwrap();
+        let answer = client
+            .execute_prepared_write_returning(cx, mutation, args("Ada", 3))
+            .await
+            .unwrap();
+        assert_eq!(answer.rows, [vec![WireValue::Int(3)]]);
+        assert_eq!(
+            answer.outcome,
+            Outcome::WriteCommitted {
+                seq: 3,
+                statements: 1
+            }
+        );
+
+        let merge = client.prepare_write_returning(
+            cx,
+            "MERGE (n:Person {name:$name}) ON CREATE SET n.age=$age ON MATCH SET n.age=n.age+$age RETURN n.age AS age",
+            args("sample", 99),
+        ).await.unwrap();
+        for (seq, name, age, expected) in [(4, "Ada", 1, 4), (5, "Carl", 5, 5)] {
+            let answer = client
+                .execute_prepared_write_returning(cx, merge, args(name, age))
+                .await
+                .unwrap();
+            assert_eq!(answer.rows, [vec![WireValue::Int(expected)]]);
+            assert_eq!(
+                answer.outcome,
+                Outcome::WriteCommitted { seq, statements: 1 }
+            );
+        }
+
+        let edge_args = |name: &str, age| {
+            vec![
+                ("edge".into(), text(name)),
+                ("age".into(), WireValue::Int(age)),
+            ]
+        };
+        let edge = client.prepare_write_returning(
+            cx,
+            "MATCH (a:Person {name:'Ada'}),(b:Person {name:'Bob'}) MERGE (a)-[r:KNOWS {name:$edge,age:$age}]->(b) RETURN r.name AS name",
+            edge_args("sample", 99),
+        ).await.unwrap();
+        for changed in [true, false] {
+            let answer = client
+                .execute_prepared_write_returning(cx, edge, edge_args("friend", 1))
+                .await
+                .unwrap();
+            assert_eq!(answer.rows, [vec![text("friend")]]);
+            assert_eq!(
+                answer.outcome,
+                if changed {
+                    Outcome::WriteCommitted {
+                        seq: 6,
+                        statements: 1,
+                    }
+                } else {
+                    Outcome::ReadClosed {
+                        seq: 6,
+                        statements: 1,
+                    }
+                }
+            );
+        }
+
+        let upsert = client.prepare_write_returning(
+            cx,
+            "MATCH (a:Person {name:'Ada'}),(b:Person {name:'Bob'}) MERGE (a)-[r:KNOWS {name:$edge}]->(b) ON CREATE SET r.age=$age ON MATCH SET r.age=r.age+$age RETURN r.age AS age",
+            edge_args("sample", 99),
+        ).await.unwrap();
+        let answer = client
+            .execute_prepared_write_returning(cx, upsert, edge_args("friend", 2))
+            .await
+            .unwrap();
+        assert_eq!(answer.rows, [vec![WireValue::Int(3)]]);
+        assert_eq!(
+            answer.outcome,
+            Outcome::WriteCommitted {
+                seq: 7,
+                statements: 1
+            }
+        );
+
+        let chain_args = |first: &str, second: &str| {
+            vec![
+                ("first".into(), text(first)),
+                ("second".into(), text(second)),
+            ]
+        };
+        let chain = client.prepare_write_returning(
+            cx,
+            "CREATE (a:Person {name:$first}) WITH a CREATE (b:Person {name:$second}) RETURN a.name AS first,b.name AS second",
+            chain_args("sample", "other sample"),
+        ).await.unwrap();
+        let answer = client
+            .execute_prepared_write_returning(cx, chain, chain_args("Dora", "Eve"))
+            .await
+            .unwrap();
+        assert_eq!(answer.columns, ["first", "second"]);
+        assert_eq!(answer.rows, [vec![text("Dora"), text("Eve")]]);
+        assert_eq!(
+            answer.outcome,
+            Outcome::WriteCommitted {
+                seq: 8,
+                statements: 1
+            }
+        );
+        let stored = client
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n:Person) RETURN n.name AS name ORDER BY name",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            stored.rows,
+            ["Ada", "Bob", "Carl", "Dora", "Eve"].map(|name| vec![text(name)])
+        );
+        assert_eq!(stored.outcome, Outcome::Rows { seq: 8 });
+        client.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}
+
+#[test]
+fn fgp_prepared_returning_cancellation_only_stops_delivery_and_authority_stays_live() {
+    run(async |cx| {
+        let (addr, shutdown, mut task) = start(cx, "prepared-returning-delivery").await;
+        let mut client = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        client.select(cx, "social").await.unwrap();
+        let handle = client.prepare_write_returning(
+            cx,
+            "UNWIND [1,2,3,4,5,6] AS x CREATE (n:Person {age:x}) RETURN x AS value ORDER BY value",
+            vec![],
+        ).await.unwrap();
+        let mut delivered = 0;
+        let error = client
+            .execute_prepared_write_returning_streaming(
+                cx,
+                handle,
+                vec![],
+                |_| Ok(()),
+                |_| {
+                    delivered += 1;
+                    Err(ClientError::Protocol("consumer stopped"))
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ClientError::Protocol("consumer stopped")));
+        assert_eq!(delivered, 1);
+        let read = "MATCH (n:Person) RETURN n.age AS age ORDER BY age";
+        let stored = client
+            .execute(cx, ExecuteMode::Read, read, vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            stored.rows,
+            (1..=6)
+                .map(|age| vec![WireValue::Int(age)])
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(stored.outcome, Outcome::Rows { seq: 1 });
+
+        let mut reader = Client::connect(cx, addr, token(&grant(Rights::Read)))
+            .await
+            .unwrap();
+        reader.select(cx, "social").await.unwrap();
+        assert_eq!(
+            server_code(
+                reader
+                    .prepare_write_returning(cx, "malformed syntax", vec![])
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::PermissionDenied,
+            "Write authority is checked before syntax"
+        );
+        let mut tiny = grant(Rights::ReadWrite);
+        tiny.limits.max_work = 1;
+        let mut limited = Client::connect(cx, addr, token(&tiny)).await.unwrap();
+        limited.select(cx, "social").await.unwrap();
+        assert_eq!(
+            server_code(
+                limited
+                    .prepare_write_returning(cx, "CREATE (n) RETURN n", vec![])
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Budget
+        );
+        let mut no_rows = grant(Rights::ReadWrite);
+        no_rows.limits.max_rows = 0;
+        limited
+            .refresh_authority(cx, token(&no_rows))
+            .await
+            .unwrap();
+        let limited_handle = limited
+            .prepare_write_returning(cx, "CREATE (n:Person {age:99}) RETURN n.age AS age", vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            server_code(
+                limited
+                    .execute_prepared_write_returning(cx, limited_handle, vec![])
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Budget
+        );
+        let after = reader
+            .execute(cx, ExecuteMode::Read, read, vec![])
+            .await
+            .unwrap();
+        assert_eq!(after.rows, stored.rows);
+        assert_eq!(after.outcome, stored.outcome);
+        client
+            .refresh_authority(cx, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        assert_eq!(
+            server_code(
+                client
+                    .execute_prepared_write_returning(cx, handle, vec![])
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Statement,
+            "AUTH_REFRESH discards returning handles too"
+        );
+        limited.close(cx).await.unwrap();
+        reader.close(cx).await.unwrap();
+        client.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}

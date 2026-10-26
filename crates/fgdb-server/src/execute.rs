@@ -571,103 +571,142 @@ pub(crate) enum Returning {
     EdgeUpsert(Box<PreparedGraphEdgeUpsertQuery>),
 }
 
+/// Immutable parser/catalog bindings. Representative values never survive
+/// preparation; each execution constructs one fresh native write definition.
+pub(crate) enum ReturningTemplate {
+    Chain(Box<PreparedGraphWriteChainText>),
+    Insert(Box<PreparedGraphInsertQueryText>),
+    Mutation(Box<PreparedGraphMutationQueryText>),
+    Merge(Box<PreparedGraphVertexUpsertQueryText>),
+    EdgeMerge(Box<PreparedGraphEdgeMergeQueryText>),
+    EdgeUpsert(Box<PreparedGraphEdgeUpsertQueryText>),
+}
+
+fn returning_template_refusal(error: &dyn core::fmt::Display) -> Refusal {
+    Refusal::new(ErrorCode::Statement, format!("statement: {error}"))
+}
+
+impl ReturningTemplate {
+    pub(crate) fn prepare(
+        db: &Served,
+        text: &str,
+        parameters: &fgdb_gql::GqlParameters,
+    ) -> Result<Option<Self>, Refusal> {
+        refuse_element_identity(text)?;
+        let declarations: Vec<_> = parameters.parameter_types().collect();
+        let refusal = returning_template_refusal;
+        // Whole-chain classification wins over any single-write prefix.
+        if PreparedGraphWriteChainText::is_chain(text).map_err(|e| refusal(&e))? {
+            return PreparedGraphWriteChainText::prepare_with_parameter_types(
+                text,
+                db.write_relation,
+                &declarations,
+                db.symbols.clone(),
+            )
+            .map(|template| Some(Self::Chain(Box::new(template))))
+            .map_err(|e| refusal(&e));
+        }
+        if PreparedGraphInsertQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
+            return PreparedGraphInsertQueryText::prepare_with_parameter_types(
+                text,
+                db.write_relation,
+                &declarations,
+                db.symbols.clone(),
+            )
+            .map(|template| Some(Self::Insert(Box::new(template))))
+            .map_err(|e| refusal(&e));
+        }
+        if PreparedGraphMutationQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
+            return PreparedGraphMutationQueryText::prepare_with_parameter_types(
+                text,
+                db.write_relation,
+                &declarations,
+                db.symbols.clone(),
+            )
+            .map(|template| Some(Self::Mutation(Box::new(template))))
+            .map_err(|e| refusal(&e));
+        }
+        if PreparedGraphVertexUpsertQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
+            return PreparedGraphVertexUpsertQueryText::prepare_with_parameter_types(
+                text,
+                db.write_relation,
+                &declarations,
+                db.symbols.clone(),
+            )
+            .map(|template| Some(Self::Merge(Box::new(template))))
+            .map_err(|e| refusal(&e));
+        }
+        // An ON/SET upsert binding error is terminal, never a plain-MERGE retry.
+        if PreparedGraphEdgeUpsertQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
+            return PreparedGraphEdgeUpsertQueryText::prepare_with_parameter_types(
+                text,
+                db.write_relation,
+                &declarations,
+                db.symbols.clone(),
+            )
+            .map(|template| Some(Self::EdgeUpsert(Box::new(template))))
+            .map_err(|e| refusal(&e));
+        }
+        if PreparedGraphEdgeMergeQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
+            return PreparedGraphEdgeMergeQueryText::prepare_with_parameter_types(
+                text,
+                db.write_relation,
+                &declarations,
+                db.symbols.clone(),
+            )
+            .map(|template| Some(Self::EdgeMerge(Box::new(template))))
+            .map_err(|e| refusal(&e));
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn returns_rows(&self) -> bool {
+        match self {
+            Self::Chain(template) => template.returns_rows(),
+            _ => true,
+        }
+    }
+
+    pub(crate) fn bind(&self, parameters: &fgdb_gql::GqlParameters) -> Result<Returning, Refusal> {
+        let refusal = returning_template_refusal;
+        match self {
+            Self::Chain(template) => template
+                .bind_parameters(parameters)
+                .map(|query| Returning::Chain(Box::new(query)))
+                .map_err(|e| refusal(&e)),
+            Self::Insert(template) => template
+                .bind_parameters(parameters)
+                .map(|query| Returning::Insert(Box::new(query)))
+                .map_err(|e| refusal(&e)),
+            Self::Mutation(template) => template
+                .bind_parameters(parameters)
+                .map(|query| Returning::Mutation(Box::new(query)))
+                .map_err(|e| refusal(&e)),
+            Self::Merge(template) => template
+                .bind_parameters(parameters)
+                .map(|query| Returning::Merge(Box::new(query)))
+                .map_err(|e| refusal(&e)),
+            Self::EdgeMerge(template) => template
+                .bind_parameters(parameters)
+                .map(|query| Returning::EdgeMerge(Box::new(query)))
+                .map_err(|e| refusal(&e)),
+            Self::EdgeUpsert(template) => template
+                .bind_parameters(parameters)
+                .map(|query| Returning::EdgeUpsert(Box::new(query)))
+                .map_err(|e| refusal(&e)),
+        }
+    }
+}
+
 impl Returning {
     pub(crate) fn prepare(
         db: &Served,
         text: &str,
         parameters: &fgdb_gql::GqlParameters,
     ) -> Result<Option<Self>, Refusal> {
-        // Other adapters may retain this definition until a later PULL.
-        // Preparing it directly must not bypass the shared identity fence.
-        refuse_element_identity(text)?;
-        let declarations: Vec<_> = parameters.parameter_types().collect();
-        let refusal = |error: &dyn core::fmt::Display| {
-            Refusal::new(ErrorCode::Statement, format!("statement: {error}"))
-        };
-        // Classify the whole chain before any single-write parser can claim
-        // its prefix. Both private WITH rows and public RETURN rows belong to
-        // the same authorized workspace and sole completion boundary.
-        if PreparedGraphWriteChainText::is_chain(text).map_err(|e| refusal(&e))? {
-            let template = PreparedGraphWriteChainText::prepare_with_parameter_types(
-                text,
-                db.write_relation,
-                &declarations,
-                db.symbols.clone(),
-            )
-            .map_err(|e| refusal(&e))?;
-            return template
-                .bind_parameters(parameters)
-                .map(|chain| Some(Self::Chain(Box::new(chain))))
-                .map_err(|e| refusal(&e));
-        }
-        if PreparedGraphInsertQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
-            let template = PreparedGraphInsertQueryText::prepare_with_parameter_types(
-                text,
-                db.write_relation,
-                &declarations,
-                db.symbols.clone(),
-            )
-            .map_err(|e| refusal(&e))?;
-            return template
-                .bind_parameters(parameters)
-                .map(|query| Some(Self::Insert(Box::new(query))))
-                .map_err(|e| refusal(&e));
-        }
-        if PreparedGraphMutationQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
-            let template = PreparedGraphMutationQueryText::prepare_with_parameter_types(
-                text,
-                db.write_relation,
-                &declarations,
-                db.symbols.clone(),
-            )
-            .map_err(|e| refusal(&e))?;
-            return template
-                .bind_parameters(parameters)
-                .map(|query| Some(Self::Mutation(Box::new(query))))
-                .map_err(|e| refusal(&e));
-        }
-        if PreparedGraphVertexUpsertQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
-            let template = PreparedGraphVertexUpsertQueryText::prepare_with_parameter_types(
-                text,
-                db.write_relation,
-                &declarations,
-                db.symbols.clone(),
-            )
-            .map_err(|e| refusal(&e))?;
-            return template
-                .bind_parameters(parameters)
-                .map(|query| Some(Self::Merge(Box::new(query))))
-                .map_err(|e| refusal(&e));
-        }
-        // ON/SET relationship upserts have their own native classifier. A
-        // binding failure stays terminal, never retried as plain MERGE.
-        if PreparedGraphEdgeUpsertQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
-            let template = PreparedGraphEdgeUpsertQueryText::prepare_with_parameter_types(
-                text,
-                db.write_relation,
-                &declarations,
-                db.symbols.clone(),
-            )
-            .map_err(|e| refusal(&e))?;
-            return template
-                .bind_parameters(parameters)
-                .map(|query| Some(Self::EdgeUpsert(Box::new(query))))
-                .map_err(|e| refusal(&e));
-        }
-        if PreparedGraphEdgeMergeQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
-            let template = PreparedGraphEdgeMergeQueryText::prepare_with_parameter_types(
-                text,
-                db.write_relation,
-                &declarations,
-                db.symbols.clone(),
-            )
-            .map_err(|e| refusal(&e))?;
-            return template
-                .bind_parameters(parameters)
-                .map(|query| Some(Self::EdgeMerge(Box::new(query))))
-                .map_err(|e| refusal(&e));
-        }
-        Ok(None)
+        ReturningTemplate::prepare(db, text, parameters)?
+            .map(|template| template.bind(parameters))
+            .transpose()
     }
 
     pub(crate) fn columns(&self) -> &[String] {

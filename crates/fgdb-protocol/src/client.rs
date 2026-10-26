@@ -377,6 +377,19 @@ impl Client {
             .await
     }
 
+    /// Prepare a native write with RETURN without executing it or retaining
+    /// operand values. Each execution binds new operands and uses fresh Write
+    /// authority. This profile is separate from stats-only scripts and batches.
+    pub async fn prepare_write_returning(
+        &mut self,
+        cx: &Cx,
+        statement: &str,
+        parameters: Vec<(String, WireValue)>,
+    ) -> Result<PreparedHandle, ClientError> {
+        self.prepare(cx, PrepareMode::WriteReturning, statement, parameters)
+            .await
+    }
+
     async fn prepare(
         &mut self,
         cx: &Cx,
@@ -494,9 +507,12 @@ impl Client {
         on_columns: impl FnMut(&[String]) -> Result<(), ClientError>,
         on_row: impl FnMut(Vec<WireValue>) -> Result<(), ClientError>,
     ) -> Result<Outcome, ClientError> {
-        if mode == PreparedReadMode::Write {
+        if matches!(
+            mode,
+            PreparedReadMode::Write | PreparedReadMode::WriteReturning
+        ) {
             return Err(ClientError::Protocol(
-                "a prepared read cannot request Write mode",
+                "a prepared read cannot request a write mode",
             ));
         }
         if self.selected.is_none() {
@@ -568,6 +584,76 @@ impl Client {
         if unexpected_columns || matches!(outcome, Outcome::Rows { .. }) {
             return Err(ClientError::Protocol(
                 "a stats-only prepared write returned a query result",
+            ));
+        }
+        Ok(outcome)
+    }
+
+    /// Execute a prepared write with RETURN, collecting its admitted answer.
+    /// A transport failure can follow a committed write; this never retries.
+    pub async fn execute_prepared_write_returning(
+        &mut self,
+        cx: &Cx,
+        handle: PreparedHandle,
+        parameters: Vec<(String, WireValue)>,
+    ) -> Result<Answer, ClientError> {
+        let mut columns = Vec::new();
+        let mut rows = Vec::new();
+        let outcome = self
+            .execute_prepared_write_returning_streaming(
+                cx,
+                handle,
+                parameters,
+                |names| {
+                    columns = names.to_vec();
+                    Ok(())
+                },
+                |row| {
+                    rows.push(row);
+                    Ok(())
+                },
+            )
+            .await?;
+        Ok(Answer {
+            columns,
+            rows,
+            outcome,
+        })
+    }
+
+    /// Deliver a prepared write's RETURN rows under ordinary FGP flow credit.
+    /// The server computes and admits the complete bounded answer before the
+    /// sole native completion; callbacks receive it only after that boundary.
+    /// Refusing a callback cancels and drains delivery, NOT the committed
+    /// effects. No disconnect, cancellation or unknown outcome is replayed.
+    pub async fn execute_prepared_write_returning_streaming(
+        &mut self,
+        cx: &Cx,
+        handle: PreparedHandle,
+        mut parameters: Vec<(String, WireValue)>,
+        on_columns: impl FnMut(&[String]) -> Result<(), ClientError>,
+        on_row: impl FnMut(Vec<WireValue>) -> Result<(), ClientError>,
+    ) -> Result<Outcome, ClientError> {
+        if self.selected.is_none() {
+            return Err(ClientError::Protocol("select a database first"));
+        }
+        parameters.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let request = self
+            .send(
+                cx,
+                FrameKind::ExecutePrepared,
+                StreamId::CONTROL,
+                &ExecutePrepared {
+                    handle,
+                    mode: PreparedReadMode::WriteReturning,
+                    parameters,
+                },
+            )
+            .await?;
+        let outcome = self.receive_result(cx, request, on_columns, on_row).await?;
+        if matches!(outcome, Outcome::Rows { .. }) {
+            return Err(ClientError::Protocol(
+                "prepared write RETURN returned a read outcome",
             ));
         }
         Ok(outcome)
@@ -1746,6 +1832,200 @@ mod tests {
                 Err(ProtocolError::InvalidBinding),
             );
         }
+    }
+
+    #[test]
+    fn prepared_returning_clients_preserve_results_and_never_retry_completion() {
+        let ((), report) = run_async_under_lab(0x79a0_0331, |root| async move {
+            for scenario in 0..5 {
+                let handle = PreparedHandle([0x51; 16]);
+                let mut replies = vec![rpc(
+                    FrameKind::Prepared,
+                    4,
+                    StreamId::CONTROL,
+                    &Prepared { handle },
+                )];
+                match scenario {
+                    0 | 1 | 4 => {
+                        replies.push(rpc(
+                            FrameKind::SnapshotResultChunk,
+                            5,
+                            StreamId([5; 16]),
+                            &ResultChunk {
+                                columns: Some(vec!["value".into()]),
+                                rows: vec![vec![WireValue::Int(23)]],
+                            },
+                        ));
+                        replies.push(rpc(
+                            FrameKind::SnapshotResultEnd,
+                            5,
+                            StreamId([5; 16]),
+                            &ResultEnd {
+                                outcome: match scenario {
+                                    0 => Outcome::WriteCommitted {
+                                        seq: 8,
+                                        statements: 1,
+                                    },
+                                    1 => Outcome::ReadClosed {
+                                        seq: 7,
+                                        statements: 1,
+                                    },
+                                    _ => Outcome::Rows { seq: 7 },
+                                },
+                                rows: 1,
+                            },
+                        ));
+                    }
+                    2 => replies.push(rpc(
+                        FrameKind::Error,
+                        5,
+                        StreamId([5; 16]),
+                        &ErrorBody {
+                            code: ErrorCode::OutcomeUnknown,
+                            message: "write outcome unknown; do not replay".into(),
+                        },
+                    )),
+                    _ => {}
+                }
+                let io = script(replies);
+                let written = std::sync::Arc::clone(&io.written);
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "test").await.unwrap();
+                let prepared = client
+                    .prepare_write_returning(
+                        &root,
+                        "CREATE (n) RETURN $value AS value",
+                        vec![("value".into(), WireValue::Int(99))],
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(prepared, handle);
+                assert!(matches!(
+                    client
+                        .execute_prepared_streaming(
+                            &root,
+                            PreparedReadMode::WriteReturning,
+                            handle,
+                            vec![],
+                            |_| Ok(()),
+                            |_| Ok(()),
+                        )
+                        .await,
+                    Err(ClientError::Protocol(_))
+                ));
+                let result = client
+                    .execute_prepared_write_returning(
+                        &root,
+                        handle,
+                        vec![("value".into(), WireValue::Int(23))],
+                    )
+                    .await;
+                match scenario {
+                    0 | 1 => {
+                        let answer = result.unwrap();
+                        assert_eq!(answer.columns, ["value"]);
+                        assert_eq!(answer.rows, [vec![WireValue::Int(23)]]);
+                        assert_eq!(
+                            answer.outcome,
+                            if scenario == 0 {
+                                Outcome::WriteCommitted {
+                                    seq: 8,
+                                    statements: 1,
+                                }
+                            } else {
+                                Outcome::ReadClosed {
+                                    seq: 7,
+                                    statements: 1,
+                                }
+                            }
+                        );
+                    }
+                    2 => assert!(matches!(
+                        result,
+                        Err(ClientError::Server {
+                            code: ErrorCode::OutcomeUnknown,
+                            ..
+                        })
+                    )),
+                    3 => assert!(matches!(result, Err(ClientError::Closed))),
+                    _ => assert!(matches!(result, Err(ClientError::Protocol(_)))),
+                }
+                let frames = sent_frames(&written.lock().unwrap());
+                assert_eq!(frames.len(), 5, "no fallback, reprepare or write replay");
+                let prepare = Prepare::decode(frames[3].payload()).unwrap();
+                assert_eq!(prepare.mode, PrepareMode::WriteReturning);
+                let execution = ExecutePrepared::decode(frames[4].payload()).unwrap();
+                assert_eq!(execution.mode, PreparedReadMode::WriteReturning);
+                assert_eq!(execution.handle, handle);
+                assert_eq!(execution.parameters, [("value".into(), WireValue::Int(23))]);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn prepared_returning_callback_refusal_drains_delivery_before_next_request() {
+        let ((), report) = run_async_under_lab(0x79a0_0332, |root| async move {
+            let handle = PreparedHandle([0x52; 16]);
+            let io = script(vec![
+                rpc(
+                    FrameKind::Prepared,
+                    4,
+                    StreamId::CONTROL,
+                    &Prepared { handle },
+                ),
+                result_chunk(5, &[10, 11, 12]),
+                rpc(
+                    FrameKind::SnapshotResultEnd,
+                    5,
+                    StreamId([5; 16]),
+                    &ResultEnd {
+                        outcome: Outcome::WriteCommitted {
+                            seq: 8,
+                            statements: 1,
+                        },
+                        rows: 3,
+                    },
+                ),
+                result_chunk(7, &[20]),
+                result_end(7, 1),
+            ]);
+            let written = std::sync::Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "test").await.unwrap();
+            client
+                .prepare_write_returning(&root, "CREATE (n) RETURN n", vec![])
+                .await
+                .unwrap();
+            let mut seen = 0;
+            let result = client
+                .execute_prepared_write_returning_streaming(
+                    &root,
+                    handle,
+                    vec![],
+                    |_| Ok(()),
+                    |_| {
+                        seen += 1;
+                        Err(ClientError::Protocol("consumer stopped"))
+                    },
+                )
+                .await;
+            assert!(matches!(
+                result,
+                Err(ClientError::Protocol("consumer stopped"))
+            ));
+            assert_eq!(seen, 1);
+            let next = client
+                .execute(&root, ExecuteMode::Read, "RETURN 20", vec![])
+                .await
+                .unwrap();
+            assert_eq!(next.rows, [vec![WireValue::Int(20)]]);
+            let frames = sent_frames(&written.lock().unwrap());
+            assert_eq!(frames.len(), 7);
+            assert_eq!(frames[5].header().kind(), FrameKind::QueryCancel);
+            assert_eq!(frames[6].header().kind(), FrameKind::Execute);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]

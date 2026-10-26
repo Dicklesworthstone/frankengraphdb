@@ -988,18 +988,19 @@ impl PreparedHandle {
 }
 
 /// The requested operation ceiling, checked against the native statement class.
-/// A read preparation can never admit a write. Write preparation admits only
-/// the stats-only native write-script profile; it does not execute the script.
+/// A read preparation can never admit a write. Stats-only scripts and native
+/// writes with RETURN have distinct profiles; neither preparation executes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrepareMode {
     Read,
     Write,
+    WriteReturning,
 }
 
 /// PREPARE retains an ephemeral native template. Representative parameters
 /// declare structural operand types; their values are never execution defaults.
-/// Read keeps the original wire encoding. Write appends the canonical tag 1,
-/// which older peers reject as trailing bytes before installing any template.
+/// Read keeps the original wire encoding. Write and WriteReturning append
+/// canonical tags 1 and 2, which older peers reject before installing a template.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Prepare {
     pub mode: PrepareMode,
@@ -1027,10 +1028,13 @@ pub enum PreparedExecutionMode {
     /// Execute a write template as one atomic, stats-only autocommit. Read
     /// templates and RETURN profiles refuse; no mode silently changes class.
     Write,
+    /// Execute a native write with RETURN. All projected values and wire
+    /// representation are admitted before its one atomic completion.
+    WriteReturning,
 }
 
 /// Compatibility name for the original prepared read delivery selector.
-/// Read-only client methods reject `Write` before sending a request.
+/// Read-only client methods reject both write modes before sending a request.
 pub type PreparedReadMode = PreparedExecutionMode;
 
 /// Rebind and execute at the current visible frontier under live authority.
@@ -1176,8 +1180,10 @@ body!(
         check_len(s.statement.len(), MAX_STATEMENT_BYTES)?;
         out.text(&s.statement);
         put_parameters(&mut out, &s.parameters)?;
-        if s.mode == PrepareMode::Write {
-            out.u8(1);
+        match s.mode {
+            PrepareMode::Read => {}
+            PrepareMode::Write => out.u8(1),
+            PrepareMode::WriteReturning => out.u8(2),
         }
     },
     |input| {
@@ -1185,12 +1191,14 @@ body!(
         let parameters = get_parameters(&mut input)?;
         let mode = if input.at == input.bytes.len() {
             PrepareMode::Read
-        } else if input.u8()? == 1 {
-            PrepareMode::Write
         } else {
-            // Preserve the legacy read profile's structural error for every
-            // suffix except the explicitly admitted write extension.
-            return Err(BodyError::TrailingBytes);
+            match input.u8()? {
+                1 => PrepareMode::Write,
+                2 => PrepareMode::WriteReturning,
+                // Preserve the legacy read profile's structural error for
+                // every suffix outside the admitted write extensions.
+                _ => return Err(BodyError::TrailingBytes),
+            }
         };
         Prepare {
             mode,
@@ -1223,6 +1231,7 @@ body!(
             PreparedReadMode::SourceStream => 1,
             PreparedReadMode::OrderedStream => 2,
             PreparedReadMode::Write => 3,
+            PreparedReadMode::WriteReturning => 4,
         });
         put_parameters(&mut out, &s.parameters)?;
     },
@@ -1234,6 +1243,7 @@ body!(
             1 => PreparedReadMode::SourceStream,
             2 => PreparedReadMode::OrderedStream,
             3 => PreparedReadMode::Write,
+            4 => PreparedReadMode::WriteReturning,
             _ => return Err(BodyError::Noncanonical),
         };
         ExecutePrepared {
@@ -1974,6 +1984,7 @@ mod tests {
             (PreparedReadMode::SourceStream, 1),
             (PreparedReadMode::OrderedStream, 2),
             (PreparedReadMode::Write, 3),
+            (PreparedReadMode::WriteReturning, 4),
         ] {
             let execution = ExecutePrepared {
                 handle,
@@ -1987,7 +1998,7 @@ mod tests {
             assert_eq!(ExecutePrepared::decode(&bytes).unwrap(), execution);
             every_prefix_refuses::<ExecutePrepared>(&bytes);
         }
-        for tag in [4, u8::MAX] {
+        for tag in [5, u8::MAX] {
             let mut unknown_mode = vec![0x31; 16];
             unknown_mode.extend_from_slice(&[tag, 0, 0, 0, 0]);
             assert_eq!(
@@ -2057,6 +2068,31 @@ mod tests {
     }
 
     #[test]
+    fn prepared_returning_has_a_distinct_canonical_preparation_profile() {
+        let request = Prepare {
+            mode: PrepareMode::WriteReturning,
+            statement: "x".into(),
+            parameters: vec![],
+        };
+        let bytes = request.encode().unwrap();
+        assert_eq!(bytes, [0, 0, 0, 1, b'x', 0, 0, 0, 0, 2]);
+        assert_eq!(Prepare::decode(&bytes).unwrap(), request);
+        let mut legacy = In::new(&bytes);
+        assert_eq!(legacy.text(MAX_STATEMENT_BYTES).unwrap(), "x");
+        assert!(get_parameters(&mut legacy).unwrap().is_empty());
+        assert_eq!(legacy.finish(), Err(BodyError::TrailingBytes));
+        let mut duplicate = bytes.clone();
+        duplicate.push(2);
+        assert_eq!(Prepare::decode(&duplicate), Err(BodyError::TrailingBytes));
+        let mut different = bytes;
+        *different.last_mut().unwrap() = 1;
+        assert_eq!(
+            Prepare::decode(&different).unwrap().mode,
+            PrepareMode::Write
+        );
+    }
+
+    #[test]
     fn prepared_write_mode_is_canonical_and_fails_closed_with_legacy_decoding() {
         let request = Prepare {
             mode: PrepareMode::Write,
@@ -2079,7 +2115,7 @@ mod tests {
         assert_eq!(legacy.finish(), Err(BodyError::TrailingBytes));
         let prefix = &bytes[..bytes.len() - 1];
         assert_eq!(Prepare::decode(prefix).unwrap().mode, PrepareMode::Read);
-        for tag in [0, 2, u8::MAX] {
+        for tag in [0, 3, u8::MAX] {
             let mut invalid = prefix.to_vec();
             invalid.push(tag);
             assert_eq!(Prepare::decode(&invalid), Err(BodyError::TrailingBytes));

@@ -446,3 +446,418 @@ fn prepared_source_cursors_and_templates_keep_recovery_and_live_authority_fences
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn prepared_returning_rebinds_without_defaults_and_never_changes_execution_class() {
+    let ((), report) = run_async_under_lab(0x79a0_0431, |root| async move {
+        let (server, token, _) = served(&root, "prepared-returning-rebind").await;
+        let db = &server.databases["test"];
+        let definition = ok(prepare_statement(
+            &root,
+            db,
+            &token,
+            &Prepare {
+                mode: PrepareMode::WriteReturning,
+                statement: "CREATE (n) RETURN $value AS value".into(),
+                parameters: vec![("value".into(), WireValue::Int(99))],
+            },
+        )
+        .await);
+        let mut cache = PreparedStatements::default();
+        let (handle, _) = ok(cache.insert(&root, definition));
+        let definition = ok(cache.get(handle));
+        assert!(definition.read().is_none());
+        assert_eq!(
+            db.db.read(&root).await.unwrap().frontier().unwrap(),
+            CommitSeq(0)
+        );
+        for mode in [
+            PreparedExecutionMode::Buffered,
+            PreparedExecutionMode::SourceStream,
+            PreparedExecutionMode::OrderedStream,
+            PreparedExecutionMode::Write,
+        ] {
+            assert_eq!(
+                run_prepared(&root, db, &token, &definition, mode, &[])
+                    .await
+                    .err()
+                    .unwrap()
+                    .code,
+                ErrorCode::Statement
+            );
+        }
+        assert_eq!(
+            run_prepared_batch(&root, db, &token, &definition, &[vec![]])
+                .await
+                .err()
+                .unwrap()
+                .code,
+            ErrorCode::Statement,
+            "a returning handle cannot be used by the stats-only batch owner"
+        );
+        for (seq, value) in [(1, 11), (2, 23)] {
+            let answer = ok(run_prepared(
+                &root,
+                db,
+                &token,
+                &definition,
+                PreparedExecutionMode::WriteReturning,
+                &[("value".into(), WireValue::Int(value))],
+            )
+            .await);
+            assert_eq!(answer.columns, ["value"]);
+            assert_eq!(answer.rows, [vec![WireValue::Int(value)]]);
+            assert_eq!(
+                answer.outcome,
+                Outcome::WriteCommitted { seq, statements: 1 }
+            );
+        }
+        for parameters in [
+            vec![],
+            vec![("value".into(), WireValue::Text("wrong type".into()))],
+        ] {
+            assert_eq!(
+                run_prepared(
+                    &root,
+                    db,
+                    &token,
+                    &definition,
+                    PreparedExecutionMode::WriteReturning,
+                    &parameters,
+                )
+                .await
+                .err()
+                .unwrap()
+                .code,
+                ErrorCode::Statement
+            );
+        }
+        assert_eq!(
+            db.db.read(&root).await.unwrap().frontier().unwrap(),
+            CommitSeq(2)
+        );
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn prepared_returning_retains_recovery_and_live_authority_fences() {
+    let ((), report) = run_async_under_lab(0x79a0_0432, |root| async move {
+        let (server, token, _) = served(&root, "prepared-returning-fences").await;
+        let db = &server.databases["test"];
+        let request = Prepare {
+            mode: PrepareMode::WriteReturning,
+            statement: "CREATE (n) RETURN 7 AS value".into(),
+            parameters: vec![],
+        };
+        let definition = ok(prepare_statement(&root, db, &token, &request).await);
+        let mut cache = PreparedStatements::default();
+        let (handle, _) = ok(cache.insert(&root, definition));
+        let retained = ok(cache.get(handle));
+        fail_after_marker(&root, db, 99).await;
+        assert_eq!(
+            settled(db).await,
+            crate::DatabaseStatus::Ready { generation: 2 }
+        );
+        assert_eq!(
+            run_prepared(
+                &root,
+                db,
+                &token,
+                &retained,
+                PreparedExecutionMode::WriteReturning,
+                &[],
+            )
+            .await
+            .err()
+            .unwrap()
+            .code,
+            ErrorCode::DatabaseRecovering
+        );
+        assert!(cache.get(handle).is_err());
+        assert_eq!(cache.source_bytes, 0);
+        let current = ok(prepare_statement(&root, db, &token, &request).await);
+        assert!(db.authority.retire());
+        assert_eq!(
+            run_prepared(
+                &root,
+                db,
+                &token,
+                &current,
+                PreparedExecutionMode::WriteReturning,
+                &[],
+            )
+            .await
+            .err()
+            .unwrap()
+            .code,
+            ErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            db.db.read(&root).await.unwrap().frontier().unwrap(),
+            CommitSeq(1)
+        );
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn prepared_returning_failure_before_output_admission_never_publishes() {
+    let ((), report) = run_async_under_lab(0x79a0_0433, |root| async move {
+        let (server, token, _) = served(&root, "prepared-returning-rollback").await;
+        let db = &server.databases["test"];
+        for text in [
+            "MATCH (n) RETURN n",
+            "CREATE (n)",
+            "CREATE (a) WITH a CREATE (b)",
+        ] {
+            assert_eq!(
+                prepare_statement(
+                    &root,
+                    db,
+                    &token,
+                    &Prepare {
+                        mode: PrepareMode::WriteReturning,
+                        statement: text.into(),
+                        parameters: vec![]
+                    },
+                )
+                .await
+                .err()
+                .unwrap()
+                .code,
+                ErrorCode::Statement
+            );
+        }
+        assert_eq!(
+            prepare_statement(
+                &root,
+                db,
+                &token,
+                &Prepare {
+                    mode: PrepareMode::WriteReturning,
+                    statement: "CREATE (n) RETURN id(n)".into(),
+                    parameters: vec![],
+                },
+            )
+            .await
+            .err()
+            .unwrap()
+            .code,
+            ErrorCode::PermissionDenied
+        );
+        let definition = ok(prepare_statement(
+            &root,
+            db,
+            &token,
+            &Prepare {
+                mode: PrepareMode::WriteReturning,
+                statement: "CREATE (n) RETURN 1/$divisor AS value".into(),
+                parameters: vec![("divisor".into(), WireValue::Int(1))],
+            },
+        )
+        .await);
+        assert!(
+            run_prepared(
+                &root,
+                db,
+                &token,
+                &definition,
+                PreparedExecutionMode::WriteReturning,
+                &[("divisor".into(), WireValue::Int(0))],
+            )
+            .await
+            .is_err()
+        );
+        let limited = db
+            .authority
+            .issue_at(
+                &fgdb_warden::Grant {
+                    branch: crate::TRUNK.into(),
+                    labels: fgdb_warden::Scope::All,
+                    relations: fgdb_warden::Scope::All,
+                    properties: fgdb_warden::Scope::All,
+                    rights: fgdb_warden::Rights::ReadWrite,
+                    limits: fgdb_warden::QueryLimits {
+                        max_nodes: 1_000_000,
+                        max_work: 100_000_000,
+                        max_rows: 0,
+                    },
+                    expires_at_ms: u64::MAX / 2,
+                },
+                crate::unix_millis(),
+            )
+            .unwrap();
+        assert_eq!(
+            run_prepared(
+                &root,
+                db,
+                &limited,
+                &definition,
+                PreparedExecutionMode::WriteReturning,
+                &[("divisor".into(), WireValue::Int(1))],
+            )
+            .await
+            .err()
+            .unwrap()
+            .code,
+            ErrorCode::Budget,
+            "signed output admission runs while the write can still roll back"
+        );
+        assert_eq!(
+            db.db.read(&root).await.unwrap().frontier().unwrap(),
+            CommitSeq(0)
+        );
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn prepared_returning_binding_and_native_execution_share_one_signed_work_ceiling() {
+    let ((), report) = run_async_under_lab(0x79a0_0434, |root| async move {
+        let (server, token, _) = served(&root, "prepared-returning-work-debit").await;
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), vertex(1))
+            .await
+            .unwrap();
+        let statement = "MERGE (n) RETURN 7 AS value";
+        let definition = ok(prepare_statement(
+            &root,
+            db,
+            &token,
+            &Prepare {
+                mode: PrepareMode::WriteReturning,
+                statement: statement.into(),
+                parameters: vec![],
+            },
+        )
+        .await);
+
+        // Measure the existing native checked owner's exact admission
+        // threshold on an unchanged graph. Every accepted probe is a read
+        // close, so the source, row and representation work remain identical.
+        let mut low = 0;
+        let mut high = 1_000_000;
+        while low + 1 < high {
+            let work = low + (high - low) / 2;
+            let scoped = token
+                .attenuate(fgdb_warden::Restriction::MaxWork(work))
+                .unwrap();
+            let bound = ok(crate::execute::Returning::prepare(
+                db,
+                statement,
+                &fgdb_gql::GqlParameters::new(),
+            ))
+            .unwrap();
+            match crate::execute::write_returning_checked(
+                &root,
+                db,
+                &scoped,
+                bound,
+                None,
+                |_, rows, _| Ok(rows),
+            )
+            .await
+            {
+                Ok(answer) => {
+                    assert_eq!(
+                        answer.outcome,
+                        Outcome::ReadClosed {
+                            seq: 1,
+                            statements: 1
+                        }
+                    );
+                    high = work;
+                }
+                Err(error) => {
+                    assert_eq!(error.code, ErrorCode::Budget, "{}", error.message);
+                    low = work;
+                }
+            }
+        }
+        for (work, succeeds) in [(high, false), (high + 1, true)] {
+            let scoped = token
+                .attenuate(fgdb_warden::Restriction::MaxWork(work))
+                .unwrap();
+            let result = run_prepared(
+                &root,
+                db,
+                &scoped,
+                &definition,
+                PreparedExecutionMode::WriteReturning,
+                &[],
+            )
+            .await;
+            if succeeds {
+                let answer = ok(result);
+                assert_eq!(answer.rows, [vec![WireValue::Int(7)]]);
+                assert_eq!(
+                    answer.outcome,
+                    Outcome::ReadClosed {
+                        seq: 1,
+                        statements: 1
+                    }
+                );
+            } else {
+                assert_eq!(
+                    result.err().unwrap().code,
+                    ErrorCode::Budget,
+                    "one binding unit cannot disappear when the native owner begins"
+                );
+            }
+        }
+        let creating = ok(prepare_statement(
+            &root,
+            db,
+            &token,
+            &Prepare {
+                mode: PrepareMode::WriteReturning,
+                statement: "CREATE (n) RETURN 7 AS value".into(),
+                parameters: vec![],
+            },
+        )
+        .await);
+        let mut full = token.clone();
+        for _ in 0..fgdb_warden::MAX_CAVEATS {
+            match full.attenuate(fgdb_warden::Restriction::MaxWork(u64::MAX)) {
+                Ok(next) => full = next,
+                Err(fgdb_warden::Error::TooLarge) => break,
+                Err(error) => panic!("{error}"),
+            }
+        }
+        assert!(matches!(
+            full.attenuate(fgdb_warden::Restriction::MaxWork(u64::MAX)),
+            Err(fgdb_warden::Error::TooLarge)
+        ));
+        assert_eq!(
+            run_prepared(
+                &root,
+                db,
+                &full,
+                &creating,
+                PreparedExecutionMode::WriteReturning,
+                &[],
+            )
+            .await
+            .err()
+            .unwrap()
+            .code,
+            ErrorCode::Budget,
+            "a full attenuation envelope refuses before creating a vertex"
+        );
+        assert_eq!(
+            db.db.read(&root).await.unwrap().frontier().unwrap(),
+            CommitSeq(1)
+        );
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

@@ -20,11 +20,18 @@ pub(crate) struct PreparedWrite {
     source_bytes: usize,
 }
 
+pub(crate) struct PreparedReturning {
+    template: ReturningTemplate,
+    generation: Generation,
+    source_bytes: usize,
+}
+
 /// The compiler determines a handle's class once. Client delivery modes can
 /// select a compatible executor, but can never promote a read into a write.
 pub(crate) enum PreparedDefinition {
     Read(PreparedRead),
     Write(PreparedWrite),
+    WriteReturning(PreparedReturning),
 }
 
 impl PreparedDefinition {
@@ -32,6 +39,7 @@ impl PreparedDefinition {
         match self {
             Self::Read(definition) => &definition.generation,
             Self::Write(definition) => &definition.generation,
+            Self::WriteReturning(definition) => &definition.generation,
         }
     }
 
@@ -39,13 +47,14 @@ impl PreparedDefinition {
         match self {
             Self::Read(definition) => definition.source_bytes,
             Self::Write(definition) => definition.source_bytes,
+            Self::WriteReturning(definition) => definition.source_bytes,
         }
     }
 
     pub(crate) fn read(&self) -> Option<&PreparedRead> {
         match self {
             Self::Read(definition) => Some(definition),
-            Self::Write(_) => None,
+            Self::Write(_) | Self::WriteReturning(_) => None,
         }
     }
 }
@@ -69,6 +78,9 @@ pub(crate) async fn prepare_statement(
         PrepareMode::Write => prepare_write(cx, db, token, request)
             .await
             .map(PreparedDefinition::Write),
+        PrepareMode::WriteReturning => {
+            prepare_write_returning(cx, db, token, request).map(PreparedDefinition::WriteReturning)
+        }
     }
 }
 
@@ -192,6 +204,60 @@ async fn prepare_write(
     })
 }
 
+fn prepare_write_returning(
+    cx: &Cx,
+    db: &Served,
+    token: &CapabilityToken,
+    request: &Prepare,
+) -> Result<PreparedReturning, Refusal> {
+    let generation = db.db.generation().map_err(Refusal::from)?;
+    let _operation = generation.enter().map_err(Refusal::from)?;
+    let now = unix_millis();
+    let capability = db
+        .authority
+        .verify_at(token, TRUNK, now)
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    let mut permit = capability
+        .begin_write_at(TRUNK, now)
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    // Admit bounded definition work before parameter conversion, parsing or
+    // catalog resolution. Preparation retains no workspace or live permit.
+    permit
+        .charge_work_at(
+            now,
+            request.statement.len() as u64 + request.parameters.len() as u64 + 1,
+        )
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    let query = crate::query_cx(&contexts);
+    query
+        .checkpoint()
+        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+    let definition = query.with_restriction(|| {
+        let parameters = convert::parameters(&request.parameters, None)
+            .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
+        let template = ReturningTemplate::prepare(db, &request.statement, &parameters)?
+            .filter(ReturningTemplate::returns_rows)
+            .ok_or_else(mode_refusal)?;
+        // Validate representative types/constant expressions, then discard
+        // their values. They can never become an execution's implicit defaults.
+        drop(template.bind(&parameters)?);
+        Ok::<_, Refusal>(template)
+    });
+    permit
+        .checkpoint_at(unix_millis())
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    query
+        .checkpoint()
+        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+    generation.check().map_err(Refusal::from)?;
+    Ok(PreparedReturning {
+        template: definition?,
+        generation,
+        source_bytes: request.statement.len(),
+    })
+}
+
 fn mode_refusal() -> Refusal {
     Refusal::new(
         ErrorCode::Statement,
@@ -220,6 +286,11 @@ pub(crate) fn run_prepared<'a>(
                 PreparedParameters::Single(parameters),
             ))
         }
+        (PreparedDefinition::WriteReturning(prepared), PreparedExecutionMode::WriteReturning) => {
+            Box::pin(write_returning_prepared(
+                cx, db, token, prepared, parameters,
+            ))
+        }
         _ => Box::pin(async { Err(mode_refusal()) }),
     }
 }
@@ -241,8 +312,78 @@ pub(crate) fn run_prepared_batch<'a>(
             prepared,
             PreparedParameters::Batch(argument_sets),
         )),
-        PreparedDefinition::Read(_) => Box::pin(async { Err(mode_refusal()) }),
+        PreparedDefinition::Read(_) | PreparedDefinition::WriteReturning(_) => {
+            Box::pin(async { Err(mode_refusal()) })
+        }
     }
+}
+
+async fn write_returning_prepared(
+    cx: &Cx,
+    db: &Served,
+    token: &CapabilityToken,
+    prepared: &PreparedReturning,
+    parameters: &[(String, WireValue)],
+) -> Result<Answer, Refusal> {
+    let _operation = prepared.generation.enter().map_err(Refusal::from)?;
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    let query = crate::query_cx(&contexts);
+    let (bound, execution_token) = {
+        let now = unix_millis();
+        let capability = db
+            .authority
+            .verify_at(token, TRUNK, now)
+            .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+        let mut permit = capability
+            .begin_write_at(TRUNK, now)
+            .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+        permit
+            .charge_work_at(now, parameters.len() as u64 + 1)
+            .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+        query
+            .checkpoint()
+            .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+        let bound = query.with_restriction(|| {
+            let parameters = convert::parameters(parameters, None)
+                .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
+            prepared.template.bind(&parameters)
+        });
+        permit
+            .checkpoint_at(unix_millis())
+            .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+        query
+            .checkpoint()
+            .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+        prepared.generation.check().map_err(Refusal::from)?;
+        let bound = bound?;
+        // Carry the definition debit into the native owner's signed ceiling.
+        // Appending a restriction can only narrow this verified capability.
+        let remaining = permit.predicates().limits().max_work - permit.usage().work;
+        let execution_token = token
+            .attenuate(fgdb_warden::Restriction::MaxWork(remaining))
+            .map_err(|error| {
+                let code = if matches!(error, fgdb_warden::Error::TooLarge) {
+                    ErrorCode::Budget
+                } else {
+                    warden_code(error)
+                };
+                Refusal::new(code, error.to_string())
+            })?;
+        (bound, execution_token)
+    };
+    // Reuse the existing checked native owner: effect selection, RETURN,
+    // final wire admission and publication share its cumulative allowance.
+    // The original generation is checked again after waiting for the writer.
+    // No conversion, new authority check or retry follows native completion.
+    write_returning_checked(
+        cx,
+        db,
+        &execution_token,
+        bound,
+        Some((&prepared.generation, fgdb_types::CommitSeq(0))),
+        |_, rows, _| Ok(rows),
+    )
+    .await
 }
 
 enum PreparedParameters<'a> {
