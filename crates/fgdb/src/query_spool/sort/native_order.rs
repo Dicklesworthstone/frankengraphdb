@@ -5,6 +5,7 @@ use super::*;
 use fgdb_gql::algebra::GlaOperator;
 use fgdb_gql::edge_stream::{EdgeScanCursor, EdgeScanError, EdgeScanPlan};
 use fgdb_gql::scan_stream::ScanSortTail;
+use fgdb_gql::spill_set::{AsyncSpillElementSource, AsyncSpillSetPlan};
 use fgdb_gql::stream::{VertexScanCursor, VertexScanPlan};
 use fgdb_gql::{GqlBudgetDimension, GqlExecutionBudget};
 
@@ -58,6 +59,16 @@ fn validate_spill_limits(
     Ok(())
 }
 
+struct OpenedOrder<I> {
+    columns: Vec<String>,
+    input: I,
+    tail: ScanSortTail,
+    // A unary relation first finishes its native graph leaf, including that
+    // leaf's own order and page. The shared spill stages then consume those
+    // exact rows; projecting in identity order would change failure ordinals.
+    stages: Option<AsyncSpillSetPlan>,
+}
+
 fn open<'q>(
     prepared: &PreparedNativeRead,
     view: &EmbeddedReadView,
@@ -65,24 +76,67 @@ fn open<'q>(
     params: &GqlParameters,
     policy: GqlQueryPolicy,
     max_input_rows: u64,
-) -> core::result::Result<(Vec<String>, impl SpoolInput + 'q + use<'q>, ScanSortTail), QueryError> {
-    let (query, as_of) = match prepared {
-        PreparedNativeRead::Pattern(template) => (
+) -> core::result::Result<OpenedOrder<impl SpoolInput + 'q + use<'q>>, QueryError> {
+    let bound_set = match prepared {
+        PreparedNativeRead::Set(template) => Some((
             template
                 .bind_parameters(params)
-                .map_err(QueryError::PatternText)?,
+                .map_err(QueryError::SetText)?,
             view.frontier(),
-        ),
-        PreparedNativeRead::TemporalPattern(template) => {
+        )),
+        PreparedNativeRead::TemporalSet(template) => {
             let bound = template
                 .bind_parameters(params)
-                .map_err(QueryError::TemporalText)?;
-            (bound.pattern().clone(), bound.as_of())
+                .map_err(QueryError::TemporalSetText)?;
+            Some((bound.query().clone(), bound.as_of()))
         }
-        _ => {
-            return Err(QueryError::StreamingUnsupported {
-                facade: prepared.facade_class(),
-            });
+        _ => None,
+    };
+    let mut projection = None;
+    let mut projected_tail = None;
+    let mut projected_columns = None;
+    let mut stages = None;
+    let unsupported = || QueryError::StreamingUnsupported {
+        facade: prepared.facade_class(),
+    };
+    let (query, as_of) = if let Some((set, as_of)) = bound_set {
+        // Admit a bound historical cut before choosing its physical profile,
+        // including when that profile will be refused without opening a scan.
+        view.snapshot.check_frontier(as_of).map_err(|error| {
+            QueryError::Stream(GqlQueryError::Source(VertexScanError::Source(error)))
+        })?;
+        if let Some((pull, tail)) = set.ordered_row_pull() {
+            // This compiler proof permits projection directly in source order.
+            // In particular, it also covers a constant over a zero-column
+            // pattern without manufacturing a public identity column.
+            let pattern = pull.pattern().clone();
+            projection = Some(pull);
+            projected_tail = Some(tail);
+            projected_columns = Some(set.columns().to_vec());
+            (pattern, as_of)
+        } else {
+            let plan = AsyncSpillSetPlan::compile(&set).map_err(|_| unsupported())?;
+            // Binary products, groups and procedure sources require their own
+            // physical owners. A unary chain retains exactly one graph leaf.
+            let pattern = plan.source_pattern().ok_or_else(unsupported)?.clone();
+            stages = Some(plan);
+            (pattern, as_of)
+        }
+    } else {
+        match prepared {
+            PreparedNativeRead::Pattern(template) => (
+                template
+                    .bind_parameters(params)
+                    .map_err(QueryError::PatternText)?,
+                view.frontier(),
+            ),
+            PreparedNativeRead::TemporalPattern(template) => {
+                let bound = template
+                    .bind_parameters(params)
+                    .map_err(QueryError::TemporalText)?;
+                (bound.pattern().clone(), bound.as_of())
+            }
+            _ => return Err(unsupported()),
         }
     };
     // Exact-cut admission precedes physical compilation, as for ordinary scans.
@@ -113,21 +167,132 @@ fn open<'q>(
         let source = view
             .vertex_scan_source(cx, as_of)
             .map_err(|e| QueryError::Stream(GqlQueryError::Source(VertexScanError::Source(e))))?;
-        let (plan, tail) = VertexScanPlan::compile_sort_input(query.plan())
-            .map_err(|e| QueryError::Stream(GqlQueryError::Source(VertexScanError::Plan(e))))?;
+        let (plan, tail) = match projected_tail {
+            Some(tail) => VertexScanPlan::compile(query.plan()).map(|plan| (plan, tail)),
+            None => VertexScanPlan::compile_sort_input(query.plan()),
+        }
+        .map_err(|e| QueryError::Stream(GqlQueryError::Source(VertexScanError::Plan(e))))?;
         cx.with_restriction(|| cx.checkpoint())
             .map_err(|e| QueryError::Stream(GqlQueryError::Interrupted(e)))?;
-        (
-            ScanCursor::Vertex(VertexScanCursor::new(
-                source,
-                plan,
-                input_policy(policy, max_input_rows),
-                move || cx.with_restriction(|| cx.checkpoint()),
-            )),
-            tail,
-        )
+        let cursor = VertexScanCursor::new(
+            source,
+            plan,
+            input_policy(policy, max_input_rows),
+            move || cx.with_restriction(|| cx.checkpoint()),
+        );
+        let cursor = match projection {
+            Some(pull) => ScanCursor::ProjectedVertex(Box::new((cursor, pull))),
+            None => ScanCursor::Vertex(cursor),
+        };
+        (cursor, tail)
     };
-    Ok((query.columns().to_vec(), cursor, tail))
+    Ok(OpenedOrder {
+        columns: projected_columns.unwrap_or_else(|| query.columns().to_vec()),
+        input: cursor,
+        tail,
+        stages,
+    })
+}
+
+// Ordinary property references are captured by the governed graph leaf. A
+// property reached through an opaque element value needs a separately metered
+// lookup source, which this owner path does not yet provide. Preserve the native
+// reached-operand refusal, including CASE/coalesce short-circuit semantics.
+struct NoElementReads;
+
+impl AsyncSpillElementSource for NoElementReads {
+    type Error = NativeSpoolError;
+    type Property = fgdb_types::CanonicalPropertyValue;
+
+    async fn element_property(
+        &mut self,
+        _: fgdb_delta_types::ElementId,
+        _: fgdb_delta_types::PropertyKeyId,
+    ) -> Option<Result<Option<Self::Property>>> {
+        None
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_opened<I, A, B>(
+    opened: OpenedOrder<I>,
+    cx: &QueryCx,
+    policy: GqlQueryPolicy,
+    scratch: &mut SpillFile<A>,
+    destination: &mut SpillFile<B>,
+    run_rows: usize,
+    max_runs: usize,
+    page_bytes: usize,
+    max_row_bytes: usize,
+    max_input_rows: u64,
+    max_sort_work: u64,
+) -> Result<(NativeResultSpool, u64)>
+where
+    I: SpoolInput,
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+{
+    let source_policy = if opened.stages.is_some() {
+        input_policy(policy, max_input_rows)
+    } else {
+        policy
+    };
+    let (input, work) = ordered_input(
+        cx,
+        opened.columns,
+        opened.input,
+        opened.tail,
+        source_policy,
+        scratch,
+        destination,
+        run_rows,
+        max_runs,
+        page_bytes,
+        max_row_bytes,
+        max_sort_work,
+    )
+    .await?;
+    let Some(plan) = opened.stages else {
+        return Ok((input, work));
+    };
+    staged::execute_with_elements(
+        plan,
+        input,
+        &mut NoElementReads,
+        cx,
+        policy,
+        scratch,
+        destination,
+        run_rows,
+        max_runs,
+        page_bytes,
+        max_row_bytes,
+        max_input_rows,
+        max_sort_work,
+        work,
+        None,
+    )
+    .await
+    .map_err(resident_stage_error)
+}
+
+// Shared stages have no buffered source on this path. Preserve the owner's
+// public execution-error accessor for controls; never disguise a source error.
+fn resident_stage_error(error: NativeSpoolError) -> NativeSpoolError {
+    let NativeSpoolError::BufferedExecute(error) = error else {
+        return error;
+    };
+    let error = match *error {
+        GqlQueryError::Source(error) => {
+            return NativeSpoolError::BufferedExecute(Box::new(GqlQueryError::Source(error)));
+        }
+        GqlQueryError::Rows(error) => GqlQueryError::Rows(error),
+        GqlQueryError::Evaluator(error) => GqlQueryError::Evaluator(error),
+        GqlQueryError::Interrupted(error) => GqlQueryError::Interrupted(error),
+        GqlQueryError::IdentifiedEdgesRequired => GqlQueryError::IdentifiedEdgesRequired,
+        GqlQueryError::Data(error) => GqlQueryError::Data(error),
+    };
+    NativeSpoolError::Execute(Box::new(error))
 }
 
 impl PreparedNativeRead {
@@ -151,8 +316,14 @@ impl PreparedNativeRead {
     /// orientations remain distinct input occurrences; only explicit DISTINCT
     /// can collapse equal complete output rows. Traversal state is proportional
     /// to the admitted fixed hop count, not the number of matches.
-    /// Relational/aggregate plans, optional/variable-length joins and
-    /// unsupported physical instructions refuse. There is no fallback.
+    /// Unary Set and TemporalSet relations over one admitted pattern use the
+    /// same external Project/Filter/Scope/UNWIND stages as buffered reads.
+    /// Every source and intermediate order, DISTINCT and window finishes
+    /// before the next expression runs. Computed property-only output therefore
+    /// keeps native ordering and source-row error coordinates. Properties are
+    /// captured by that governed pattern; opaque element-property lookups keep
+    /// their native reached-operand refusal. Binary/group/procedure sources and
+    /// unsupported physical instructions refuse before execution.
     ///
     /// Opening binds parameters and pins the exact source synchronously. The
     /// future borrows ONLY cx and the two scratch files; writer/template/params
@@ -165,7 +336,7 @@ impl PreparedNativeRead {
     /// by the input cursor's ResultRows error). policy.rows.max_result_rows is
     /// enforced on the FINAL selected rows, including zero, before acceptance.
     /// The returned spool reports source snapshot records, final result count
-    /// and the original source evaluator statistics. The second returned value
+    /// and cumulative source/stage evaluator statistics. The second returned value
     /// is ADDITIONAL sort/window work under max_sort_work: neither the sort nor
     /// the final window resets that allowance. Spill buffers/catalogs are byte-
     /// charged to their existing pools; source logical scratch remains separate.
@@ -210,13 +381,10 @@ impl PreparedNativeRead {
             .map_err(|e| QueryError::Stream(GqlQueryError::Source(VertexScanError::Source(e))))
             .and_then(|view| open(self, &view, cx, params, policy, max_input_rows));
         async move {
-            let (columns, cursor, tail) =
-                opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
-            ordered_input(
+            let opened = opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
+            execute_opened(
+                opened,
                 cx,
-                columns,
-                cursor,
-                tail,
                 policy,
                 scratch,
                 destination,
@@ -224,6 +392,7 @@ impl PreparedNativeRead {
                 max_runs,
                 page_bytes,
                 max_row_bytes,
+                max_input_rows,
                 max_sort_work,
             )
             .await
@@ -254,13 +423,10 @@ impl PreparedNativeRead {
     {
         let opened = open(self, view, cx, params, policy, max_input_rows);
         async move {
-            let (columns, cursor, tail) =
-                opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
-            ordered_input(
+            let opened = opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
+            execute_opened(
+                opened,
                 cx,
-                columns,
-                cursor,
-                tail,
                 policy,
                 scratch,
                 destination,
@@ -268,6 +434,7 @@ impl PreparedNativeRead {
                 max_runs,
                 page_bytes,
                 max_row_bytes,
+                max_input_rows,
                 max_sort_work,
             )
             .await

@@ -201,6 +201,63 @@ fn native_property_order_and_window_match_eager_execution_beyond_the_pool() {
 }
 
 #[test]
+fn computed_property_relations_spill_results_larger_than_the_pool() {
+    let ((), report) = run_async_under_lab(0x50ed_0017, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = seed(&c.commit(), 36).await;
+        let view = db.read_session().unwrap();
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        let params = GqlParameters::new();
+        let prepared =
+            plan("MATCH (n:L) RETURN n.p + 1 AS p,n.q AS payload ORDER BY p DESC NULLS LAST");
+        let PreparedNativeRead::Set(template) = &prepared else {
+            panic!("computed relation");
+        };
+        let expected: Vec<_> = view
+            .execute_graph_set_governed_at(
+                &cx,
+                &template.bind_parameters(&params).unwrap(),
+                view.frontier(),
+                policy(),
+            )
+            .unwrap()
+            .value
+            .into_iter()
+            .map(|row| row.canonical_bytes().unwrap())
+            .collect();
+        assert!(expected.iter().map(Vec::len).sum::<usize>() > pool.limit());
+        let (mut scratch, _) = file(&cx, &pool).await;
+        let (mut destination, backing) = file(&cx, &pool).await;
+        let (spool, _) = prepared
+            .spool_ordered(
+                &db,
+                &cx,
+                &params,
+                GqlQueryPolicy::new(36, 36, 100_000_000, 10_000_000),
+                &mut scratch,
+                &mut destination,
+                3,
+                12,
+                127,
+                4096,
+                36,
+                100_000_000,
+            )
+            .await
+            .unwrap();
+        assert_eq!(spool.row_stats().snapshot_records, 36);
+        assert_eq!(spool.row_count(), 36);
+        assert_eq!(spool.columns(), &["p", "payload"]);
+        assert!(backing.0.lock().unwrap().bytes.get_ref().len() > pool.limit());
+        assert_eq!(pool.used(), 0);
+        assert_eq!(contents(&spool, &mut destination, &cx).await, expected);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn paging_never_selects_the_first_source_rows_before_ordering() {
     let ((), report) = run_async_under_lab(0x50ed_0002, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);

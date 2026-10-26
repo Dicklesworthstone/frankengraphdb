@@ -258,7 +258,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute<V, A, B>(
     plan: AsyncSpillSetPlan,
-    mut input: NativeResultSpool,
+    input: NativeResultSpool,
     view: &mut BufferedReadView<V>,
     cx: &QueryCx,
     policy: GqlQueryPolicy,
@@ -278,6 +278,58 @@ where
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
 {
+    let mut elements = ElementSource {
+        view,
+        cx,
+        as_of: input.snapshot_seq(),
+    };
+    execute_with_elements(
+        plan,
+        input,
+        &mut elements,
+        cx,
+        policy,
+        scratch,
+        destination,
+        run_rows,
+        max_runs,
+        page_bytes,
+        max_row_bytes,
+        max_input_rows,
+        max_sort_work,
+        prior_work,
+        resolver,
+    )
+    .await
+}
+
+/// Continue the same native stage program over an already completed source.
+/// The host supplies only exact-cut element reads; evaluation, every semantic
+/// barrier, spill ownership and cumulative allowances remain shared with the
+/// buffered executor. A resident source never needs a synthetic buffered view.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn execute_with_elements<A, B, S>(
+    plan: AsyncSpillSetPlan,
+    mut input: NativeResultSpool,
+    elements: &mut S,
+    cx: &QueryCx,
+    policy: GqlQueryPolicy,
+    scratch: &mut SpillFile<A>,
+    destination: &mut SpillFile<B>,
+    run_rows: usize,
+    max_runs: usize,
+    page_bytes: usize,
+    max_row_bytes: usize,
+    max_input_rows: u64,
+    max_sort_work: u64,
+    prior_work: u64,
+    resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
+) -> Result<(NativeResultSpool, u64)>
+where
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    S: AsyncSpillElementSource<Error = NativeSpoolError>,
+{
     if plan.stages().is_empty() || input.columns() != plan.source_columns() {
         return Err(SpillError::InvalidRun.into());
     }
@@ -294,11 +346,6 @@ where
         limit: max_sort_work,
     };
     let mut evaluator = input.evaluator_stats();
-    let mut elements = ElementSource {
-        view,
-        cx,
-        as_of: input.snapshot_seq(),
-    };
     let mut in_destination = true;
     for (ordinal, stage) in plan.stages().iter().enumerate() {
         let budget = if ordinal + 1 == plan.stages().len() {
@@ -318,7 +365,7 @@ where
                 &mut evaluator,
                 &mut work,
                 resolver,
-                &mut elements,
+                elements,
             )
             .await?
         } else {
@@ -333,7 +380,7 @@ where
                 &mut evaluator,
                 &mut work,
                 resolver,
-                &mut elements,
+                elements,
             )
             .await?
         };
