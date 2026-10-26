@@ -242,6 +242,138 @@ fn historical_differences_preserve_bags_endpoints_and_prepared_rebinding() {
 }
 
 #[test]
+fn staged_historical_difference_streams_complete_endpoints_over_fgp_windows() {
+    run(async |cx| {
+        let (address, shutdown, mut task, directory) =
+            start_ordered(cx, "historical-difference-stages", 100).await;
+        let mut owner = connect(cx, address, &grant(Rights::ReadWrite)).await;
+        insert(cx, &mut owner, &[1, 1, 2, 4]).await;
+        let mut scope = grant(Rights::Read);
+        scope.labels = Scope::only([LabelId(1)]);
+        scope.properties = Scope::only([PropertyKeyId(2)]);
+        // Five changed tuples, despite six UNWIND occurrences at each cut.
+        // Their multiplicities and private endpoint rows consume no extra
+        // signed result allowance.
+        scope.limits.max_rows = 5;
+        let mut reader = connect(cx, address, &scope).await;
+        let query = "MATCH (n:Person) WITH n AS person, n.age AS age \
+                     ORDER BY age DESC LIMIT 3 \
+                     UNWIND [[person][0].age, [person][0].age + $shift] AS value \
+                     RETURN value * 2 AS doubled, [person][0].name AS hidden \
+                     ORDER BY doubled SKIP 1 LIMIT 4";
+        let parameters = |shift| vec![("shift".into(), WireValue::Int(shift))];
+        let prepared = reader
+            .prepare_read(cx, query, parameters(99))
+            .await
+            .unwrap();
+        owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (n:Person) WHERE n.age=1 SET n.age=3,n.name='private revision'",
+                vec![],
+            )
+            .await
+            .unwrap();
+        // A later generation must not replace either explicitly chosen cut.
+        insert(cx, &mut owner, &[77]).await;
+        let expected = [(-1, 4), (1, 6), (-1, 22), (-1, 24), (2, 26)]
+            .into_iter()
+            .map(|(weight, value)| (weight, vec![WireValue::Int(value), WireValue::Null]))
+            .collect::<Vec<_>>();
+        let mut schemas = 0;
+        let mut columns = Vec::new();
+        let mut entries = Vec::new();
+        let end = reader
+            .execute_diff_streaming(
+                cx,
+                DiffMode::OrderedStream,
+                1,
+                2,
+                query,
+                parameters(10),
+                |names| {
+                    schemas += 1;
+                    columns = names.to_vec();
+                    Ok(())
+                },
+                |weight, row| {
+                    entries.push((weight, row));
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(schemas, 1);
+        assert_eq!(columns, ["doubled", "hidden"]);
+        assert_eq!(entries, expected);
+        assert_eq!(
+            end,
+            DiffResultEnd {
+                before: 1,
+                after: 2,
+                rows: 5
+            }
+        );
+        // start_ordered admits two result rows per transport window. Five
+        // tuples therefore need multiple WINDOW_UPDATEs and a final EOF pull.
+        empty_scratch(&directory).await;
+
+        let prepared_result = reader
+            .execute_prepared_diff(cx, prepared, DiffMode::OrderedStream, 1, 2, parameters(10))
+            .await
+            .unwrap();
+        assert_eq!(prepared_result.columns, columns);
+        assert_eq!(prepared_result.entries, expected);
+        assert_eq!(prepared_result.end, end);
+        let rebound = reader
+            .execute_prepared_diff(cx, prepared, DiffMode::OrderedStream, 1, 2, parameters(20))
+            .await
+            .unwrap();
+        assert_eq!(
+            rebound.entries,
+            [(-1, 4), (1, 6), (-1, 42), (-1, 44), (2, 46)]
+                .into_iter()
+                .map(|(weight, value)| (weight, vec![WireValue::Int(value), WireValue::Null]))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(rebound.end, end);
+        let equal = reader
+            .execute_prepared_diff(cx, prepared, DiffMode::OrderedStream, 2, 2, parameters(10))
+            .await
+            .unwrap();
+        assert_eq!(equal.columns, columns);
+        assert!(equal.entries.is_empty());
+        assert_eq!(
+            equal.end,
+            DiffResultEnd {
+                before: 2,
+                after: 2,
+                rows: 0
+            }
+        );
+        // Reusing this connection also proves each preceding stream consumed
+        // its terminal frame rather than leaving a row/chunk queued behind it.
+        let latest = reader
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n:Person) RETURN count(*) AS n",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(latest.rows, [vec![WireValue::Count(5)]]);
+        empty_scratch(&directory).await;
+        reader.release_prepared(cx, prepared).await.unwrap();
+        reader.close(cx).await.unwrap();
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}
+
+#[test]
 fn historical_differences_mask_both_cuts_and_charge_only_changed_tuples() {
     run(async |cx| {
         let (address, shutdown, mut task, directory) =

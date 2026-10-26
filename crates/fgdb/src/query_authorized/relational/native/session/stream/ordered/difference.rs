@@ -11,109 +11,7 @@ type PendingInput<'q> = Box<dyn FnOnce(GqlQueryPolicy) -> OrderedInput<'q> + Sen
 struct Endpoint<'q> {
     input: PendingInput<'q>,
     tail: ScanSortTail,
-    columns: Vec<String>,
     stages: Option<(AsyncSpillSetPlan, EmbeddedReadView)>,
-    at: CommitSeq,
-}
-
-struct CompletedEndpoint {
-    spool: NativeResultSpool,
-    work: u64,
-    // Stage spools retain their source's row statistics. Carried element
-    // lookups have their own governed counter, which must also reduce the
-    // second endpoint's allowance rather than disappear at a spill barrier.
-    snapshot_records: u64,
-}
-
-// Complete the same source order/page and unary stage program as an ordinary
-// ordered read. Both endpoints append to the same two private files; finishing
-// the second endpoint never replaces the first endpoint's completed run.
-#[allow(clippy::too_many_arguments)]
-async fn complete_endpoint<'q, C, A, B>(
-    endpoint: Endpoint<'q>,
-    cx: &'q QueryCx,
-    execution: Shared<'q, C>,
-    policy: GqlQueryPolicy,
-    scratch: &mut SpillFile<A>,
-    destination: &mut SpillFile<B>,
-    limits: AuthorizedSortLimits,
-    max_sort_work: u64,
-) -> Result<CompletedEndpoint>
-where
-    C: FnMut() -> u64 + Send,
-    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
-    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
-{
-    let Endpoint {
-        input,
-        tail,
-        columns,
-        stages,
-        at,
-    } = endpoint;
-    let mut source_policy = policy;
-    if stages.is_some() {
-        source_policy.rows = match policy.rows.max_snapshot_records() {
-            Some(records) => GqlExecutionBudget::new(records, limits.max_input_rows),
-            None => GqlExecutionBudget::result_rows(limits.max_input_rows),
-        };
-    }
-    let (spool, work) = ordered_input(
-        cx,
-        columns,
-        input(source_policy),
-        tail,
-        source_policy,
-        scratch,
-        destination,
-        limits.run_rows,
-        limits.max_runs,
-        limits.page_bytes,
-        limits.max_row_bytes,
-        max_sort_work,
-    )
-    .await?;
-    let snapshot_records = spool.row_stats().snapshot_records;
-    let Some((stages, view)) = stages else {
-        return Ok(CompletedEndpoint {
-            spool,
-            work,
-            snapshot_records,
-        });
-    };
-    let mut elements = ScopedElements {
-        view: &view,
-        cx,
-        at,
-        execution: execution.clone(),
-        budget: policy.rows,
-        records: snapshot_records,
-    };
-    let (spool, work) = ordered_stages(
-        stages,
-        spool,
-        &mut elements,
-        &mut || execution.borrow_mut().checkpoint().map_err(authorized),
-        cx,
-        policy,
-        scratch,
-        destination,
-        limits.run_rows,
-        limits.max_runs,
-        limits.page_bytes,
-        limits.max_row_bytes,
-        limits.max_input_rows,
-        max_sort_work,
-        work,
-        None,
-    )
-    .await
-    .map_err(stage_error)?;
-    Ok(CompletedEndpoint {
-        spool,
-        work,
-        snapshot_records: elements.records,
-    })
 }
 
 fn pending<'q, C: FnMut() -> u64 + Send>(
@@ -172,10 +70,10 @@ fn pending<'q, C: FnMut() -> u64 + Send>(
     }
 }
 
-fn private_policy(mut policy: GqlQueryPolicy) -> GqlQueryPolicy {
+fn private_policy(mut policy: GqlQueryPolicy, max_input_rows: u64) -> GqlQueryPolicy {
     policy.rows = match policy.rows.max_snapshot_records() {
-        Some(records) => GqlExecutionBudget::snapshot_records(records),
-        None => GqlExecutionBudget::UNLIMITED,
+        Some(records) => GqlExecutionBudget::new(records, max_input_rows),
+        None => GqlExecutionBudget::result_rows(max_input_rows),
     };
     policy
 }
@@ -184,18 +82,20 @@ fn remainder(limit: u64, used: u64) -> Result<u64> {
         .checked_sub(used)
         .ok_or(NativeSpoolError::IncompleteCursor)
 }
-fn after_policy(mut policy: GqlQueryPolicy, first: &CompletedEndpoint) -> Result<GqlQueryPolicy> {
+fn after_policy(mut policy: GqlQueryPolicy, first: &NativeResultSpool) -> Result<GqlQueryPolicy> {
     if let Some(limit) = policy.rows.max_snapshot_records() {
-        policy.rows =
-            GqlExecutionBudget::snapshot_records(remainder(limit, first.snapshot_records)?);
+        policy.rows = GqlExecutionBudget::new(
+            remainder(limit, first.row_stats().snapshot_records)?,
+            policy.rows.max_result_rows().unwrap_or(u64::MAX),
+        );
     }
     policy.evaluator.max_work_units = remainder(
         policy.evaluator.max_work_units,
-        first.spool.evaluator_stats().work_units,
+        first.evaluator_stats().work_units,
     )?;
     policy.evaluator.max_scratch_entries = remainder(
         policy.evaluator.max_scratch_entries,
-        first.spool.evaluator_stats().scratch_entries,
+        first.evaluator_stats().scratch_entries,
     )?;
     Ok(policy)
 }

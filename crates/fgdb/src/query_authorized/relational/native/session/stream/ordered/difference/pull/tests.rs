@@ -235,7 +235,7 @@ fn staged_relations_and_projected_pulls_complete_each_endpoint_before_delivery()
         let (db, cuts) = history(&contexts.commit()).await;
         let authority = authority();
         let pool = MemoryPool::new(262_144, 0).unwrap();
-        let (mut scoped, _, _) = session(&db, &cx, &authority, &pool).await;
+        let (mut scoped, a, b) = session(&db, &cx, &authority, &pool).await;
         let params = GqlParameters::new();
         for text in [
             "MATCH (n) RETURN n.p + 1 AS value ORDER BY value LIMIT 0",
@@ -248,6 +248,23 @@ fn staged_relations_and_projected_pulls_complete_each_endpoint_before_delivery()
                     .5
                     .is_some()
             );
+            let before_io = [&a, &b].map(|backing| {
+                let state = backing.0.lock().unwrap();
+                (state.reads, state.writes, state.bytes.get_ref().len())
+            });
+            let execution = scoped
+                .difference_stream(&cx, &prepared, &params, cuts[0], cuts[1])
+                .unwrap();
+            assert_eq!(execution.columns(), ["value"]);
+            assert_eq!((execution.before(), execution.after()), (cuts[0], cuts[1]));
+            drop(execution);
+            for (backing, before) in [&a, &b].into_iter().zip(before_io) {
+                let state = backing.0.lock().unwrap();
+                assert_eq!(
+                    (state.reads, state.writes, state.bytes.get_ref().len()),
+                    before
+                );
+            }
             let execution = scoped
                 .difference_stream(&cx, &prepared, &params, cuts[0], cuts[1])
                 .unwrap();

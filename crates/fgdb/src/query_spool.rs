@@ -191,6 +191,15 @@ impl NativeResultSpool {
     pub fn row_stats(&self) -> GqlExecutionStats {
         self.rows
     }
+    /// Retain already-admitted carried-element reads alongside the source scan.
+    /// A following endpoint must inherit their spent native allowance.
+    pub(crate) fn with_snapshot_records(mut self, records: u64) -> Result<Self, NativeSpoolError> {
+        if records < self.rows.snapshot_records {
+            return Err(NativeSpoolError::IncompleteCursor);
+        }
+        self.rows.snapshot_records = records;
+        Ok(self)
+    }
     pub fn evaluator_stats(&self) -> GlaExecutionStats {
         self.evaluator
     }

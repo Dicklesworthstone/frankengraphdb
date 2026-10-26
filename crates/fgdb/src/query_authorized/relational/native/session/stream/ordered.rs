@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::query::view::{SpoolInput, SpoolRow, ordered_input, ordered_stages};
-use crate::{NativeSpoolCursor, NativeSpoolError};
+use crate::{NativeResultSpool, NativeSpoolCursor, NativeSpoolError};
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use fgdb_delta_types::ElementId;
 use fgdb_gql::edge_stream::{EdgeScanCursor, EdgeScanSource, EdgeScanState};
@@ -843,6 +843,87 @@ fn stage_error(error: NativeSpoolError) -> NativeSpoolError {
     authorized(QueryError::Set(error))
 }
 
+// Ordinary delivery and each difference endpoint complete the same native
+// source and unary stages. The host supplies the remaining cumulative budget;
+// neither an endpoint nor a stage creates another signed permit.
+#[allow(clippy::too_many_arguments)]
+async fn complete_ordered_input<'q, C, A, B>(
+    cx: &'q QueryCx,
+    input: OrderedInput<'q>,
+    tail: ScanSortTail,
+    columns: Vec<String>,
+    stages: Option<(AsyncSpillSetPlan, EmbeddedReadView)>,
+    policy: GqlQueryPolicy,
+    execution: Shared<'q, C>,
+    scratch: &mut SpillFile<A>,
+    destination: &mut SpillFile<B>,
+    limits: AuthorizedSortLimits,
+) -> Result<(NativeResultSpool, u64)>
+where
+    C: FnMut() -> u64 + Send,
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+{
+    let source_policy = if stages.is_some() {
+        GqlQueryPolicy {
+            rows: match policy.rows.max_snapshot_records() {
+                Some(records) => GqlExecutionBudget::new(records, limits.max_input_rows),
+                None => GqlExecutionBudget::result_rows(limits.max_input_rows),
+            },
+            evaluator: policy.evaluator,
+        }
+    } else {
+        policy
+    };
+    let (spool, work) = ordered_input(
+        cx,
+        columns,
+        input,
+        tail,
+        source_policy,
+        scratch,
+        destination,
+        limits.run_rows,
+        limits.max_runs,
+        limits.page_bytes,
+        limits.max_row_bytes,
+        limits.max_sort_work,
+    )
+    .await?;
+    let Some((stages, view)) = stages else {
+        return Ok((spool, work));
+    };
+    let mut elements = ScopedElements {
+        view: &view,
+        cx,
+        at: spool.snapshot_seq(),
+        execution: execution.clone(),
+        budget: policy.rows,
+        records: spool.row_stats().snapshot_records,
+    };
+    let (spool, work) = ordered_stages(
+        stages,
+        spool,
+        &mut elements,
+        &mut || execution.borrow_mut().checkpoint().map_err(authorized),
+        cx,
+        policy,
+        scratch,
+        destination,
+        limits.run_rows,
+        limits.max_runs,
+        limits.page_bytes,
+        limits.max_row_bytes,
+        limits.max_input_rows,
+        limits.max_sort_work,
+        work,
+        None,
+    )
+    .await
+    .map_err(stage_error)?;
+    Ok((spool.with_snapshot_records(elements.records)?, work))
+}
+
 // Physical sort/encoding work is pre-reserved; native stage evaluation charges
 // the same live permit per event. Fresh checks surround EVERY poll, including
 // Pending and errors. A bounded synchronous section is not preempted midway.
@@ -940,73 +1021,18 @@ where
                 execution,
                 mut guard,
             } = opened;
-            let stage_execution = execution.clone();
-            let future = async {
-                let source_policy = if stages.is_some() {
-                    GqlQueryPolicy {
-                        rows: match policy.rows.max_snapshot_records() {
-                            Some(records) => {
-                                GqlExecutionBudget::new(records, limits.max_input_rows)
-                            }
-                            None => GqlExecutionBudget::result_rows(limits.max_input_rows),
-                        },
-                        evaluator: policy.evaluator,
-                    }
-                } else {
-                    policy
-                };
-                let (spool, work) = ordered_input(
-                    cx,
-                    columns,
-                    input,
-                    tail,
-                    source_policy,
-                    scratch,
-                    destination,
-                    limits.run_rows,
-                    limits.max_runs,
-                    limits.page_bytes,
-                    limits.max_row_bytes,
-                    limits.max_sort_work,
-                )
-                .await?;
-                let Some((stages, view)) = stages else {
-                    return Ok((spool, work));
-                };
-                let mut elements = ScopedElements {
-                    view: &view,
-                    cx,
-                    at,
-                    execution: stage_execution.clone(),
-                    budget: policy.rows,
-                    records: spool.row_stats().snapshot_records,
-                };
-                ordered_stages(
-                    stages,
-                    spool,
-                    &mut elements,
-                    &mut || {
-                        stage_execution
-                            .borrow_mut()
-                            .checkpoint()
-                            .map_err(authorized)
-                    },
-                    cx,
-                    policy,
-                    scratch,
-                    destination,
-                    limits.run_rows,
-                    limits.max_runs,
-                    limits.page_bytes,
-                    limits.max_row_bytes,
-                    limits.max_input_rows,
-                    limits.max_sort_work,
-                    work,
-                    None,
-                )
-                .await
-                .map_err(stage_error)
-            };
+            let future = complete_ordered_input(
+                cx,
+                input,
+                tail,
+                columns,
+                stages,
+                policy,
+                execution.clone(),
+                scratch,
+                destination,
+                limits,
+            );
             let (spool, _) =
                 checked_future(&mut guard, || execution.borrow_mut().checkpoint(), future).await?;
             guard.armed = true;
