@@ -4628,17 +4628,14 @@ impl<V: Vfs + Clone> Database<V> {
             capsule.template_digest.0,
             CommittedMarker::attest(marker_ref, cx),
         );
-        // The delta index and statement versions are TAKEN from the fenced
-        // handle, not cloned (a clone copied every retained batch and version
-        // on every commit). The handle has been fenced since before this fold,
-        // and `make_mut` copies only a snapshot a pinned read view still
-        // shares, so that view keeps its own unchanged generation. The
-        // versions are the handle's own, so a pinned view never copies them.
-        let previous = Arc::make_mut(&mut self.snapshot);
-        let mut next_delta_index = std::mem::take(&mut previous.delta_index);
-        let mut new_versions = std::mem::take(&mut self.heads.versions);
-        next_delta_index
-            .insert(batch)
+        // Validate the successor without mutating the published snapshot.
+        // Arc::make_mut would dissociate an otherwise unpinned weak read view,
+        // making new server readers wait through every remaining publication
+        // fsync. Keep the old graph AND delta window intact until the final
+        // synchronous snapshot replacement, after all publication I/O.
+        self.snapshot
+            .delta_index
+            .check_insert(&batch)
             .map_err(|error| WriteError::CommittedNeedsRecovery {
                 recovery,
                 source: Box::new(RebuildError::Index {
@@ -4647,6 +4644,8 @@ impl<V: Vfs + Clone> Database<V> {
                 }),
             })?;
         Self::fail_publication_if_requested(recovery, publication_failure)?;
+        // Version heads belong only to the fenced writer, not to read views.
+        let mut new_versions = std::mem::take(&mut self.heads.versions);
         let mut exact_counts = self.snapshot.exact_counts.clone();
         let mut folded =
             std::mem::replace(&mut self.writer, BlockWriter::new(GRAPH, BRANCH, PARTITION));
@@ -4905,6 +4904,22 @@ impl<V: Vfs + Clone> Database<V> {
                 source: Box::new(RebuildError::Slot(error)),
             })?;
         self.slot_generation = next_generation;
+
+        // There are no further awaits before the graph/delta generation swap.
+        // Only now may make_mut dissociate a weak view, or copy metadata for a
+        // real pinned reader. An idle server still retains no strong snapshot
+        // pin and therefore causes no history-sized copy on each commit.
+        let previous = Arc::make_mut(&mut self.snapshot);
+        let mut next_delta_index = std::mem::take(&mut previous.delta_index);
+        next_delta_index
+            .insert(batch)
+            .map_err(|error| WriteError::CommittedNeedsRecovery {
+                recovery,
+                source: Box::new(RebuildError::Index {
+                    commit_seq: frontier.0,
+                    error,
+                }),
+            })?;
 
         // Refresh the snapshot without re-reading the partition: carry forward
         // the decoded blocks whose references are unchanged, and decode the new

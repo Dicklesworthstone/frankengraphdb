@@ -406,15 +406,11 @@ impl LocalDeltaBatchIndex {
         Ok(())
     }
 
-    /// Insert a batch AND advance the frontier — one transition, or neither.
-    ///
-    /// This is the only way to add anything, deliberately. Separate
-    /// `put_entry` and `advance_frontier` operations would permit a state where
-    /// a commit exists and its batch is not yet reachable, which plan:397 says
-    /// must never exist ("no separate Local delta-publish command or unrooted
-    /// interval"). Every check runs before anything mutates, so a refusal
-    /// leaves the index exactly as it was.
-    pub fn insert(&mut self, batch: LogicalDeltaBatch) -> Result<(), IndexError> {
+    /// Check whether `batch` can extend this exact window, without changing or
+    /// copying it. A publisher can reject an invalid successor before I/O while
+    /// keeping the old generation available to readers. This is not a permit:
+    /// [`Self::insert`] repeats the checks against its then-current window.
+    pub fn check_insert(&self, batch: &LogicalDeltaBatch) -> Result<(), IndexError> {
         let commit_seq = batch.commit_seq();
 
         // Once the persisted frontier is MAX, every attempted mutation is the
@@ -426,7 +422,7 @@ impl LocalDeltaBatchIndex {
         // A local batch must agree with itself before the index will agree with
         // it: its marker must name its own sequence, and its frontier must be
         // that sequence. Both are cheap here and impossible to check later.
-        Self::validate_batch(&batch)?;
+        Self::validate_batch(batch)?;
 
         // Duplicate is checked before gap so the diagnostic names the right
         // problem: a sequence at or below the frontier is not "a gap of
@@ -454,6 +450,20 @@ impl LocalDeltaBatchIndex {
             });
         }
 
+        Ok(())
+    }
+
+    /// Insert a batch AND advance the frontier — one transition, or neither.
+    ///
+    /// This is the only way to add anything, deliberately. Separate
+    /// `put_entry` and `advance_frontier` operations would permit a state where
+    /// a commit exists and its batch is not yet reachable, which plan:397 says
+    /// must never exist ("no separate Local delta-publish command or unrooted
+    /// interval"). Every check runs before anything mutates, so a refusal
+    /// leaves the index exactly as it was.
+    pub fn insert(&mut self, batch: LogicalDeltaBatch) -> Result<(), IndexError> {
+        self.check_insert(&batch)?;
+        let commit_seq = batch.commit_seq();
         self.entries.insert(commit_seq.0, Arc::new(batch));
         self.frontier = commit_seq;
         Ok(())
@@ -678,6 +688,71 @@ mod shared_batch_tests {
             labels.as_ptr() as usize,
             props.as_ptr() as usize,
         ]
+    }
+
+    #[test]
+    fn insertion_preflight_preserves_the_window_and_matches_every_refusal() {
+        for frontier in [0, 1, 7, u64::MAX - 1, u64::MAX] {
+            let index = LocalDeltaBatchIndex::empty_at(CommitSeq(frontier));
+            for seq in [0, 1, 2, 7, 8, u64::MAX - 1, u64::MAX] {
+                for (marker_seq, batch_frontier) in [(seq, seq), (seq ^ 1, seq), (seq, seq ^ 1)] {
+                    let offered = LogicalDeltaBatch::from_parts_for_test(
+                        vec![],
+                        [0; 32],
+                        MarkerRef {
+                            marker_oid: ObjectId([1; 32]),
+                            commit_seq: CommitSeq(marker_seq),
+                        },
+                        CommitSeq(seq),
+                        CommitSeq(batch_frontier),
+                    );
+                    let before = index.clone();
+                    let checked = index.check_insert(&offered);
+                    assert_eq!(index, before, "preflight changed the published window");
+                    let mut next = index.clone();
+                    assert_eq!(checked, next.insert(offered));
+                    if checked.is_err() {
+                        assert_eq!(next, before, "a refusal changed the candidate window");
+                    } else {
+                        next.verify().unwrap();
+                        assert_eq!(next.frontier(), CommitSeq(seq));
+                        assert_eq!(next.len(), 1);
+                    }
+                }
+            }
+        }
+
+        // Even an incoherent decoder-shaped map cannot replace an existing
+        // entry above its declared frontier after a successful-looking check.
+        let index = LocalDeltaBatchIndex::from_parts_for_test(
+            CommitSeq(0),
+            CommitSeq(1),
+            vec![(CommitSeq(2), batch(2))],
+        );
+        assert_eq!(
+            index.check_insert(&batch(2)),
+            Err(IndexError::Duplicate {
+                frontier: CommitSeq(1),
+                found: CommitSeq(2),
+            })
+        );
+    }
+
+    #[test]
+    fn insertion_preflight_does_not_authorize_a_later_changed_window() {
+        let mut index = LocalDeltaBatchIndex::new();
+        let offered = batch(1);
+        index.check_insert(&offered).unwrap();
+        index.insert(batch(1)).unwrap();
+        let before = index.clone();
+        assert_eq!(
+            index.insert(offered),
+            Err(IndexError::Duplicate {
+                frontier: CommitSeq(1),
+                found: CommitSeq(1),
+            })
+        );
+        assert_eq!(index, before);
     }
 
     #[test]

@@ -296,12 +296,13 @@ impl DatabaseSlot {
 
     /// Pin one published graph/frontier and its recovery fence together.
     ///
-    /// During D1/D2 the writer still owns the old immutable snapshot, so a
+    /// Throughout commit publication I/O the writer owns the old snapshot, so a
     /// read upgrades it without acquiring the writer's lock. A weak record
     /// alone does not force a history-sized metadata copy on every commit.
     /// If an otherwise unpinned snapshot is dissociated by Arc::make_mut,
-    /// admission falls back to the existing database lock. That fallback can
-    /// wait through the remaining derived publication I/O; this is not a
+    /// admission falls back to the existing database lock. The commit path
+    /// dissociates it only in its final synchronous snapshot replacement, after
+    /// the publication I/O. This is not a
     /// lock-free or universally nonblocking reader contract.
     pub(crate) async fn read_view(
         &self,

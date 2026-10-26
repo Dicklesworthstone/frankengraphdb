@@ -225,6 +225,94 @@ impl Vfs for PausingVfs {
 }
 
 #[test]
+fn a_new_reader_can_pin_the_old_generation_at_capsule_marker_and_root_slot_pauses() {
+    let ((), report) = run_async_under_lab(0xf171_0203, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        for mode in 1..=3 {
+            // No previous reader pins the snapshot when publication begins.
+            // Exercise release-before-completion, a reader that stays pinned,
+            // and dropped publication followed by authoritative recovery.
+            for completion in 0..=2 {
+                let memory = MemVfs::new().unwrap();
+                let path = memory.database_dir();
+                let pause = Arc::new(Pause::default());
+                let vfs = PausingVfs {
+                    inner: memory,
+                    pause: Arc::clone(&pause),
+                };
+                let keys = DatabaseKeys::new(
+                    [0x91; 32],
+                    DatabaseSecurityNamespaceId([0x92; 32]),
+                    [0x93; 32],
+                );
+                let mut database = Database::create_with_vfs(&cx, vfs, &path, keys)
+                    .await
+                    .unwrap();
+                let mut initial = WriteBatch::new(RelationId(1));
+                initial.create_vertex(VId(1), vec![], vec![]);
+                database.write(&cx, initial).await.unwrap();
+                let old = database.pinned_read_view().unwrap().downgrade();
+
+                let mut change = WriteBatch::new(RelationId(1));
+                change.create_vertex(VId(2), vec![], vec![]);
+                change.add_edge(EId(10), VId(1), VId(2), vec![]);
+                pause.arm(mode);
+                let mut future = Box::pin(database.write(&cx, change));
+                std::future::poll_fn(|task| match future.as_mut().poll(task) {
+                    Poll::Pending if pause.reached.load(Ordering::SeqCst) => Poll::Ready(()),
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(result) => {
+                        panic!("publication pause {mode} was not reached: {result:?}")
+                    }
+                })
+                .await;
+
+                let during = old.upgrade().unwrap_or_else(|| {
+                    panic!("new reader lost the published generation during I/O phase {mode}")
+                });
+                assert_eq!(during.frontier(), CommitSeq(1));
+                assert_eq!(during.delta_frontier(), CommitSeq(1));
+                during.delta_index().verify().unwrap();
+                assert!(during.delta_index().get(CommitSeq(2)).is_none());
+                assert!(during.vertex(VId(1)).unwrap().is_some());
+                assert!(during.vertex(VId(2)).unwrap().is_none());
+                assert!(during.edge(EId(10)).unwrap().is_none());
+                let during = (completion != 0).then_some(during);
+                pause.arm(0);
+
+                if completion == 2 {
+                    drop(future);
+                    assert!(!matches!(database.state(), DatabaseState::Healthy { .. }));
+                    database = database.recover_authoritatively(&cx).await.unwrap();
+                    let expected = CommitSeq(if mode == 1 { 1 } else { 2 });
+                    assert_eq!(database.frontier().unwrap(), expected);
+                } else {
+                    assert_eq!(future.await.unwrap(), CommitSeq(2));
+                    assert_eq!(database.frontier().unwrap(), CommitSeq(2));
+                }
+                assert_eq!(
+                    database.delta_frontier().unwrap(),
+                    database.frontier().unwrap()
+                );
+                if let Some(during) = during {
+                    assert_eq!(during.frontier(), CommitSeq(1));
+                    assert_eq!(during.delta_frontier(), CommitSeq(1));
+                    assert!(during.vertex(VId(2)).unwrap().is_none());
+                    assert!(old.upgrade().is_some());
+                    drop(during);
+                }
+                assert!(
+                    old.upgrade().is_none(),
+                    "a weak publication record alone retained the old generation"
+                );
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn dropping_commit_or_finish_future_releases_pin_at_each_real_durability_phase() {
     let ((), report) = run_async_under_lab(0xf171_0201, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
