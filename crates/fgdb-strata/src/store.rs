@@ -417,12 +417,14 @@ async fn prove_chunks<I: Send + 'static, T: Send + 'static>(
 
 /// A root walk's next window, polled while the current one is admitted so
 /// its reads and pool proofs run meanwhile; its result is kept once ready.
-enum Ahead<F: Future> {
-    Running(std::pin::Pin<Box<F>>),
-    Done(F::Output),
+/// Erase the already-boxed read future here so downstream open tasks do not
+/// recursively prove its entire I/O and proof pipeline is Send.
+enum Ahead<'a, T> {
+    Running(std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>),
+    Done(T),
 }
 
-impl<F: Future> Ahead<F> {
+impl<T> Ahead<'_, T> {
     /// Poll once without waiting.
     async fn advance(&mut self) {
         std::future::poll_fn(|task| {
@@ -436,7 +438,7 @@ impl<F: Future> Ahead<F> {
         .await;
     }
 
-    async fn finish(self) -> F::Output {
+    async fn finish(self) -> T {
         match self {
             Self::Running(read) => read.await,
             Self::Done(output) => output,

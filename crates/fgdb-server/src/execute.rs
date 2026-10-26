@@ -1174,9 +1174,9 @@ pub(crate) fn schema(db: &Served, token: &CapabilityToken) -> Result<Schema, Ref
         .begin_read_at(TRUNK, now)
         .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
     let scope = capability.predicates();
-    let visible = |names: &mut dyn Iterator<Item = (&str, u32)>, allows: &dyn Fn(u64) -> bool| {
+    let visible = |names: &mut dyn Iterator<Item = (&str, u64)>, allows: &dyn Fn(u64) -> bool| {
         names
-            .filter(|&(_, id)| allows(u64::from(id)))
+            .filter(|&(_, id)| allows(id))
             .map(|(name, _)| name.to_owned())
             .collect::<Vec<_>>()
     };

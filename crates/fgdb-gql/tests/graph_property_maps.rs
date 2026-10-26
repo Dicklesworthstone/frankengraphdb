@@ -1,5 +1,6 @@
 //! Complete element maps share native projection, scope and resource owners.
 
+use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{
     GlaDirection, GraphColumn, GraphPathFunction, GraphPatternBuilder, GraphValue, GraphValueRow,
@@ -18,6 +19,56 @@ use std::collections::BTreeMap;
 const P: PropertyKeyId = PropertyKeyId(1);
 const R: RelationId = RelationId(1);
 type Edge = (EId, VId, RelationId, VId);
+
+#[test]
+fn native_catalog_resolver_drives_relation_names_and_complete_property_maps() {
+    use fgdb_gql::symbol_bindings::CatalogSymbolResolver;
+
+    let mut catalog = SymbolCatalog::default();
+    catalog
+        .bind_all([
+            ("MENTORS", CatalogSymbol::Relation(R)),
+            ("p", CatalogSymbol::Property(P)),
+        ])
+        .unwrap();
+    let mut fixture = Fixture::new();
+    // This low-level source lends the already-resolved type text, just as the
+    // embedded source does. Bind its metadata through the same catalog pin.
+    for (edge, _, relation, _) in &fixture.edges {
+        let name = catalog.name(CatalogSymbol::Relation(*relation)).unwrap();
+        fixture
+            .edge_types
+            .insert(*edge, CanonicalScalar::ucs_basic_text(name).unwrap());
+    }
+    let mut resolver = CatalogSymbolResolver::new(&catalog);
+    let query = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+        "MATCH (a)-[r:MENTORS]->(b) RETURN a.p AS value, type(r) AS relation, properties(r) AS props",
+        &[],
+        &mut resolver,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    let result = query
+        .execute_governed(
+            policy(),
+            |pattern, policy| fixture.execute(pattern, policy),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    let relation = GraphValue::Scalar(CanonicalScalar::ucs_basic_text("MENTORS").unwrap());
+    assert_eq!(
+        result
+            .value
+            .into_iter()
+            .map(|row| row.values().to_vec())
+            .collect::<Vec<_>>(),
+        vec![
+            vec![integer(1), relation.clone(), map(&[("p", integer(11))])],
+            vec![integer(1), relation, map(&[("p", integer(12))])],
+        ]
+    );
+}
 
 #[derive(Clone, Copy)]
 struct Catalog(&'static str);
@@ -80,6 +131,7 @@ struct Fixture {
     edge_maps: BTreeMap<EId, GraphValue>,
     vertex_values: BTreeMap<(VId, PropertyKeyId), CanonicalPropertyValue>,
     edge_values: BTreeMap<(EId, PropertyKeyId), CanonicalPropertyValue>,
+    edge_types: BTreeMap<EId, CanonicalScalar>,
 }
 impl Fixture {
     fn new() -> Self {
@@ -91,6 +143,7 @@ impl Fixture {
         Self {
             vertex_values: stored(&vertices),
             edge_values: stored(&edge_maps),
+            edge_types: BTreeMap::new(),
             vertices,
             edges: vec![(EId(11), VId(1), R, VId(2)), (EId(12), VId(1), R, VId(2))],
             edge_maps,
@@ -109,7 +162,7 @@ impl Fixture {
             |vid, key| Ok(self.vertex_values.get(&(vid, key))),
             |eid, key| Ok(self.edge_values.get(&(eid, key))),
             |_| Ok(None),
-            |_| Ok(None),
+            |eid| Ok(self.edge_types.get(&eid)),
             |vid| Ok(self.vertices.get(&vid)),
             |eid| Ok(self.edge_maps.get(&eid)),
             policy,

@@ -10,6 +10,110 @@
 //! per kind is the host's rule, applied exactly as for flags.
 
 use crate::GraphSymbolKind;
+use fgdb_delta_types::catalog::{CatalogSymbol, CatalogSymbolKind, SymbolCatalog};
+
+/// Resolve one pinned catalog through the ordinary native binder interface.
+///
+/// The host owns the catalog coordinate and authorization. A restricted host
+/// supplies its stable symbol-visibility predicate before preparation; the
+/// same predicate gates forward lookup, reverse lookup and enumeration. This
+/// adapter does not acquire a snapshot, validate a token or grant authority.
+pub struct CatalogSymbolResolver<'a> {
+    catalog: &'a SymbolCatalog,
+    visible: Option<&'a (dyn Fn(CatalogSymbol) -> bool + Send + Sync)>,
+    zones: Option<crate::GqlTimeZones>,
+}
+
+impl core::fmt::Debug for CatalogSymbolResolver<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CatalogSymbolResolver")
+            .field("catalog", &"[REDACTED]")
+            .field("restricted", &self.visible.is_some())
+            .field("time_zones", &self.zones.is_some())
+            .finish()
+    }
+}
+
+impl<'a> CatalogSymbolResolver<'a> {
+    #[must_use]
+    pub const fn new(catalog: &'a SymbolCatalog) -> Self {
+        Self {
+            catalog,
+            visible: None,
+            zones: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_visibility(
+        mut self,
+        visible: &'a (dyn Fn(CatalogSymbol) -> bool + Send + Sync),
+    ) -> Self {
+        self.visible = Some(visible);
+        self
+    }
+
+    #[must_use]
+    pub fn with_time_zones(mut self, zones: crate::GqlTimeZones) -> Self {
+        self.zones = Some(zones);
+        self
+    }
+
+    fn admits(&self, symbol: CatalogSymbol) -> bool {
+        self.visible.is_none_or(|visible| visible(symbol))
+    }
+}
+
+impl crate::GraphSymbolResolver for CatalogSymbolResolver<'_> {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<crate::GraphSymbol> {
+        let kind = match kind {
+            GraphSymbolKind::Label => CatalogSymbolKind::Label,
+            GraphSymbolKind::Relation => CatalogSymbolKind::Relation,
+            GraphSymbolKind::Property => CatalogSymbolKind::Property,
+        };
+        let symbol = self.catalog.resolve(kind, name)?;
+        if !self.admits(symbol) {
+            return None;
+        }
+        Some(match symbol {
+            CatalogSymbol::Label(id) => crate::GraphSymbol::Label(id),
+            CatalogSymbol::Relation(id) => crate::GraphSymbol::Relation(id),
+            CatalogSymbol::Property(id) => crate::GraphSymbol::Property(id),
+        })
+    }
+
+    fn time_zones(&self) -> Option<crate::GqlTimeZones> {
+        self.zones.clone()
+    }
+
+    fn reverse_catalog(&self) -> Option<crate::ReverseSymbolCatalog> {
+        let mut catalog = crate::ReverseSymbolCatalog::new();
+        for (symbol, name) in self.catalog.bindings() {
+            if self.admits(symbol) {
+                match symbol {
+                    CatalogSymbol::Label(id) => catalog.insert_label(id, name),
+                    CatalogSymbol::Relation(id) => catalog.insert_relation(id, name),
+                    CatalogSymbol::Property(id) => catalog.insert_property(id, name),
+                }
+            }
+        }
+        Some(catalog)
+    }
+
+    fn reverse_label(&self, id: fgdb_delta_types::LabelId) -> Option<String> {
+        let symbol = CatalogSymbol::Label(id);
+        self.admits(symbol)
+            .then(|| self.catalog.name(symbol).map(str::to_owned))
+            .flatten()
+    }
+
+    fn reverse_relation(&self, id: fgdb_delta_types::RelationId) -> Option<String> {
+        let symbol = CatalogSymbol::Relation(id);
+        self.admits(symbol)
+            .then(|| self.catalog.name(symbol).map(str::to_owned))
+            .flatten()
+    }
+}
 
 /// Largest bindings file a host reads, in bytes.
 pub const MAX_SYMBOL_BINDINGS_BYTES: usize = 1024 * 1024;
@@ -96,6 +200,122 @@ pub fn parse_symbol_bindings(bytes: &[u8]) -> Result<Vec<SymbolBinding>, SymbolB
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{GraphSymbol, GraphSymbolResolver, ReverseSymbolCatalog};
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+
+    #[test]
+    fn catalog_resolver_keeps_native_width_and_complete_unmentioned_names() {
+        fn shared_host_state<T: Send + Sync>(_: &T) {}
+
+        let ordinal = u64::from(u32::MAX) + 41;
+        let mut catalog = SymbolCatalog::default();
+        catalog
+            .bind_all([
+                ("研究者", CatalogSymbol::Label(LabelId(ordinal))),
+                ("MENTORS", CatalogSymbol::Relation(RelationId(ordinal))),
+                (
+                    "display name",
+                    CatalogSymbol::Property(PropertyKeyId(ordinal)),
+                ),
+            ])
+            .unwrap();
+        let mut resolver = CatalogSymbolResolver::new(&catalog);
+        shared_host_state(&catalog);
+        shared_host_state(&resolver);
+        for (kind, name, expected) in [
+            (
+                GraphSymbolKind::Label,
+                "研究者",
+                GraphSymbol::Label(LabelId(ordinal)),
+            ),
+            (
+                GraphSymbolKind::Relation,
+                "MENTORS",
+                GraphSymbol::Relation(RelationId(ordinal)),
+            ),
+            (
+                GraphSymbolKind::Property,
+                "display name",
+                GraphSymbol::Property(PropertyKeyId(ordinal)),
+            ),
+        ] {
+            assert_eq!(resolver.resolve_symbol(kind, name), Some(expected));
+        }
+        assert_eq!(
+            resolver.reverse_label(LabelId(ordinal)).as_deref(),
+            Some("研究者")
+        );
+        assert_eq!(
+            resolver.reverse_relation(RelationId(ordinal)).as_deref(),
+            Some("MENTORS")
+        );
+        let mut expected = ReverseSymbolCatalog::new();
+        expected.insert_label(LabelId(ordinal), "研究者");
+        expected.insert_relation(RelationId(ordinal), "MENTORS");
+        expected.insert_property(PropertyKeyId(ordinal), "display name");
+        assert_eq!(
+            ReverseSymbolCatalog::from_resolver(&mut resolver, "MATCH (n) RETURN n"),
+            expected
+        );
+        assert!(resolver.time_zones().is_none());
+    }
+
+    #[test]
+    fn hidden_catalog_entries_observe_like_absent_entries_through_every_resolver_seam() {
+        let bindings = [
+            ("Visible", CatalogSymbol::Label(LabelId(1))),
+            ("Hidden", CatalogSymbol::Label(LabelId(2))),
+            ("VISIBLE", CatalogSymbol::Relation(RelationId(1))),
+            ("HIDDEN", CatalogSymbol::Relation(RelationId(2))),
+            ("visible", CatalogSymbol::Property(PropertyKeyId(1))),
+            ("hidden", CatalogSymbol::Property(PropertyKeyId(2))),
+        ];
+        let visible = |symbol: CatalogSymbol| symbol.ordinal() == 1;
+        let mut full = SymbolCatalog::default();
+        full.bind_all(bindings).unwrap();
+        let mut absent = SymbolCatalog::default();
+        absent
+            .bind_all(bindings.into_iter().filter(|(_, symbol)| visible(*symbol)))
+            .unwrap();
+        let mut masked = CatalogSymbolResolver::new(&full).with_visibility(&visible);
+        let mut without_hidden = CatalogSymbolResolver::new(&absent).with_visibility(&visible);
+        for kind in [
+            GraphSymbolKind::Label,
+            GraphSymbolKind::Relation,
+            GraphSymbolKind::Property,
+        ] {
+            for name in bindings.map(|(name, _)| name).into_iter().chain(["absent"]) {
+                assert_eq!(
+                    masked.resolve_symbol(kind, name),
+                    without_hidden.resolve_symbol(kind, name)
+                );
+            }
+        }
+        for id in [0, 1, 2, u64::MAX] {
+            assert_eq!(
+                masked.reverse_label(LabelId(id)),
+                without_hidden.reverse_label(LabelId(id))
+            );
+            assert_eq!(
+                masked.reverse_relation(RelationId(id)),
+                without_hidden.reverse_relation(RelationId(id))
+            );
+        }
+        assert_eq!(masked.reverse_catalog(), without_hidden.reverse_catalog());
+        let visible_catalog = masked.reverse_catalog().unwrap();
+        assert_eq!(visible_catalog.labels.len(), 1);
+        assert_eq!(visible_catalog.relations.len(), 1);
+        assert_eq!(visible_catalog.properties.len(), 1);
+        assert_eq!(
+            visible_catalog
+                .properties
+                .get(&PropertyKeyId(1))
+                .map(String::as_str),
+            Some("visible")
+        );
+        assert!(!visible_catalog.properties.contains_key(&PropertyKeyId(2)));
+        assert_eq!(format!("{masked:?}"), format!("{without_hidden:?}"));
+    }
 
     #[test]
     fn every_kind_comments_blanks_and_first_equals_split() {

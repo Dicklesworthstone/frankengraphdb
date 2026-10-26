@@ -529,6 +529,8 @@ fn component_subscription_scope_and_projection_refusals_precede_registration() {
         assert_eq!(db.subscriptions.load(Ordering::Acquire), 0);
         let mut subscription = success(subscribe(&root, db, &token, &statement).await);
         assert_eq!(db.subscriptions.load(Ordering::Acquire), 1);
+        // Without RETURN, the CALL exposes its canonical named schema.
+        assert_eq!(subscription.columns, ["component", "node"]);
         // A later narrowed capability cannot read or consume a pending result.
         refused(
             poll(&root, db, &scoped[0], &mut subscription).await,
@@ -539,7 +541,7 @@ fn component_subscription_scope_and_projection_refusals_precede_registration() {
             delivered.entries,
             vec![
                 (1, vec![WireValue::Vertex(1), WireValue::Vertex(1)]),
-                (1, vec![WireValue::Vertex(2), WireValue::Vertex(1)]),
+                (1, vec![WireValue::Vertex(1), WireValue::Vertex(2)]),
             ]
         );
     });
@@ -738,6 +740,7 @@ fn clustering_subscription_refuses_hidden_topology_before_registration_or_delive
             assert_eq!(db.subscriptions.load(Ordering::Acquire), 0);
         }
         let mut subscription = success(subscribe(&root, db, &token, &statement).await);
+        assert_eq!(subscription.columns, ["score", "vertex"]);
         for token in &scoped {
             refused(
                 poll(&root, db, token, &mut subscription).await,
@@ -749,7 +752,7 @@ fn clustering_subscription_refuses_hidden_topology_before_registration_or_delive
         assert_eq!(
             initial.entries,
             [1, 2, 3]
-                .map(|vertex| (1, vec![WireValue::Vertex(vertex), WireValue::Float(1.0)]))
+                .map(|vertex| (1, vec![WireValue::Float(1.0), WireValue::Vertex(vertex)]))
                 .to_vec()
         );
     });

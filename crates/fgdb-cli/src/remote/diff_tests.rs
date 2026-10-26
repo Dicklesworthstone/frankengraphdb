@@ -253,7 +253,7 @@ fn remote_diff_empty_answer_still_completes_and_late_refusals_leave_only_a_prefi
                 result.unwrap_or_else(|error| panic!("{}", error.message));
                 assert!(text.contains(r#""changed_rows":"0","inserted":"0","retracted":"0""#));
             } else {
-                let error = result.err().expect("only matching END completes delivery");
+                let error = result.expect_err("only matching END completes delivery");
                 assert_eq!(error.code, if late == 1 { 3 } else { 5 });
                 assert!(
                     error
@@ -311,8 +311,7 @@ fn remote_diff_output_failure_cancels_and_drains_before_another_query() {
                 &mut out,
             )
             .await
-            .err()
-            .expect("failed flush is incomplete");
+            .expect_err("failed flush is incomplete");
             assert_eq!(error.code, 5);
             assert!(
                 error

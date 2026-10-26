@@ -124,7 +124,18 @@ fn conditional_writes_refuse_stale_clients_and_preserve_returning_and_no_effects
             ),
             ErrorCode::PermissionDenied
         );
-        let mut restricted = grant(Rights::Write);
+        let mut write_only = connected(cx, address, &grant(Rights::Write)).await;
+        assert_eq!(
+            server_code(
+                write_only
+                    .execute_write_if_current(cx, 3, "MATCH (n:Person) SET n.age=100", vec![])
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::PermissionDenied,
+            "MATCH reads require read authority even when the result has no rows"
+        );
+        let mut restricted = grant(Rights::ReadWrite);
         restricted.properties = Scope::only([PropertyKeyId(1)]);
         let mut scoped = connected(cx, address, &restricted).await;
         assert_eq!(
@@ -136,7 +147,7 @@ fn conditional_writes_refuse_stale_clients_and_preserve_returning_and_no_effects
             ),
             ErrorCode::PermissionDenied
         );
-        let mut stats_grant = grant(Rights::Write);
+        let mut stats_grant = grant(Rights::ReadWrite);
         stats_grant.limits.max_rows = 0;
         let mut stats = connected(cx, address, &stats_grant).await;
         let answer = stats

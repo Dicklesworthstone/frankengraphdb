@@ -236,7 +236,7 @@ impl PreparedNativeRead {
         max_row_bytes: usize,
         max_input_rows: u64,
         max_work_units: u64,
-    ) -> impl Future<Output = VisitResult<NativeSpoolDifference<'q, B>>> + 's + use<'q, 's, V, A, B>
+    ) -> impl Future<Output = VisitResult<NativeSpoolDifference<'q, B>>> + Send + 's + use<'q, 's, V, A, B>
     where
         'q: 's,
         V: Vfs + Clone,
@@ -283,7 +283,7 @@ impl PreparedNativeRead {
         max_row_bytes: usize,
         max_input_rows: u64,
         max_work_units: u64,
-    ) -> impl Future<Output = VisitResult<NativeSpoolDifference<'q, B>>> + 's + use<'q, 's, A, B>
+    ) -> impl Future<Output = VisitResult<NativeSpoolDifference<'q, B>>> + Send + 's + use<'q, 's, A, B>
     where
         'q: 's,
         A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 's,
