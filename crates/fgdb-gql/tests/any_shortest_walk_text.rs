@@ -352,3 +352,47 @@ fn opencypher_shortest_path_functions_compile_to_the_gql_selectors() {
         assert_eq!(calls.get(), 0, "{text}");
     }
 }
+
+/// `MATCH (a), (b), p = shortestPath((a)-[*]-(b))` (LDBC SNB IC13; IC14 with
+/// allShortestPaths): a named path after node-only comma parts is its own
+/// required clause, the same plan byte for byte as `MATCH (a), (b) MATCH p =
+/// shortestPath(...)`. A clause scopes relationship uniqueness, and the
+/// parts before the comma bind no relationship. Parts that bind one, an
+/// OPTIONAL MATCH and a part after the selector keep the one clause, and
+/// still refuse.
+#[test]
+fn a_named_path_after_node_only_comma_parts_is_its_own_clause() {
+    for (comma, clauses) in [
+        (
+            "MATCH (a {p: 1}), (b {p: 2}), p = shortestPath((a)-[:R*]-(b)) RETURN ALL p",
+            "MATCH (a {p: 1}), (b {p: 2}) MATCH p = shortestPath((a)-[:R*]-(b)) RETURN ALL p",
+        ),
+        (
+            "MATCH (a), p = allShortestPaths((a)-[:R*0..]-(b)) WHERE b.p = 1 RETURN ALL a, b",
+            "MATCH (a) MATCH p = allShortestPaths((a)-[:R*0..]-(b)) WHERE b.p = 1 RETURN ALL a, b",
+        ),
+        (
+            "MATCH (a), p = (a)-[:R]->(b) RETURN ALL p",
+            "MATCH (a) MATCH p = (a)-[:R]->(b) RETURN ALL p",
+        ),
+        (
+            "MATCH (x) MATCH (a), (b), p = shortestPath((a)-[:R*]-(b)) RETURN ALL x, p",
+            "MATCH (x) MATCH (a), (b) MATCH p = shortestPath((a)-[:R*]-(b)) RETURN ALL x, p",
+        ),
+    ] {
+        let split = prepare(comma);
+        assert_eq!(split, prepare(clauses), "{comma}");
+        assert_eq!(
+            split.canonical_bytes(),
+            prepare(clauses).canonical_bytes(),
+            "{comma}"
+        );
+    }
+    for text in [
+        "MATCH (a)-[:R]->(c), p = shortestPath((a)-[:R*]-(b)) RETURN ALL p",
+        "MATCH (x) OPTIONAL MATCH (a), p = shortestPath((a)-[:R*]-(b)) RETURN ALL p",
+        "MATCH (a), (b), p = shortestPath((a)-[:R*]-(b)), (c) RETURN ALL p",
+    ] {
+        assert!(PreparedGraphText::prepare(text, symbols).is_err(), "{text}");
+    }
+}

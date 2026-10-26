@@ -1000,6 +1000,12 @@ struct Parser<'a> {
     /// cannot see: an earlier clause's relationship, or an imported column
     /// (unresolved_read_input).
     implicit_withs: Vec<usize>,
+    /// Whether the required MATCH clause being read may start a new
+    /// required clause at a comma before a named path, and the offset of
+    /// that comma and the clause's match mode once it did (`MATCH (a), (b),
+    /// p = shortestPath(...)`).
+    split_paths: bool,
+    comma_clause: Option<(usize, GraphMatchMode)>,
     /// A write clause after WITH is being read (fgdb-sl4ym): its scope is
     /// the WITH row alone, so the MATCH bindings WITH dropped stay hidden.
     write_row_scope: bool,
@@ -1111,6 +1117,8 @@ impl<'a> Parser<'a> {
             deferred_where: None,
             deferred_wheres: Vec::new(),
             implicit_withs: Vec::new(),
+            split_paths: false,
+            comma_clause: None,
             write_row_scope: false,
             write_prefix: false,
             chain_write: false,

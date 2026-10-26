@@ -616,7 +616,11 @@ impl<'a> Parser<'a> {
             self.punct(b'=', "=")?;
             self.syntax.path = Some(path);
         }
-        self.positive_pattern()?;
+        // An OPTIONAL part's comma parts stay one clause.
+        self.split_paths = !self.optional_part;
+        let pattern = self.positive_pattern();
+        self.split_paths = false;
+        pattern?;
         self.syntax.root_variables = self.syntax.variables.len();
         // openCypher: a named variable-length relationship `[r*m..n]` is the
         // list of relationships it matched. When it is the pattern's only
@@ -663,7 +667,11 @@ impl<'a> Parser<'a> {
             }
             if self.take_word("OPTIONAL")? {
                 self.match_scope(ScopeKind::Optional)?;
-            } else if self.is_word("MATCH") {
+            } else if self.is_word("MATCH")
+                || self
+                    .comma_clause
+                    .is_some_and(|(at, _)| at == self.current.at)
+            {
                 self.match_scope(ScopeKind::Required)?;
             } else {
                 break;
@@ -1160,6 +1168,24 @@ impl<'a> Parser<'a> {
                     GraphPatternTextErrorKind::Expected(expected_atom),
                 ));
             }
+            // `MATCH (a), (b), p = shortestPath((a)-[*]-(b))` (LDBC SNB IC13,
+            // IC14): a named path after node-only parts starts a new required
+            // clause there. A clause scopes relationship uniqueness, and the
+            // parts before the comma bind no relationship, so the rows are
+            // those of the one clause.
+            if self.split_paths
+                && self.is_punct(b',')
+                && self.syntax.edges.len() == first_edge
+                && matches!(self.lexer.clone().next()?.kind, TokenKind::Word(_))
+                && {
+                    let mut ahead = self.lexer.clone();
+                    ahead.next()?;
+                    matches!(ahead.next()?.kind, TokenKind::Punct(b'='))
+                }
+            {
+                self.comma_clause = Some((self.current.at, self.syntax.match_mode));
+                break;
+            }
             if !self.take(b',')? {
                 break;
             }
@@ -1482,7 +1508,17 @@ impl<'a> Parser<'a> {
         // name its path and introduce locals, and a WHERE, all private.
         let comprehension = form == ScopeForm::Comprehension;
         let parsed = (|| {
-            if clause {
+            if let Some((at, mode)) = self.comma_clause
+                && clause
+                && at == self.current.at
+            {
+                // The named path after a required clause's node-only comma
+                // parts (positive_pattern): its own clause, in that clause's
+                // match mode.
+                self.comma_clause = None;
+                self.advance()?;
+                self.syntax.match_mode = mode;
+            } else if clause {
                 // openCypher `EXISTS { (n)-->() }` leaves out the MATCH of
                 // `EXISTS { MATCH (n)-->() }`; the body is otherwise the same.
                 if kind.exports_bindings() || !self.is_punct(b'(') {
@@ -1510,7 +1546,10 @@ impl<'a> Parser<'a> {
                 }
                 None
             };
-            self.positive_pattern()?;
+            self.split_paths = clause && matches!(kind, ScopeKind::Required);
+            let pattern = self.positive_pattern();
+            self.split_paths = false;
+            pattern?;
             // As at the root, a named variable-length relationship that is a
             // required or OPTIONAL clause's only edge, with no path named,
             // captures that edge's path under its name, and a bare name reads
