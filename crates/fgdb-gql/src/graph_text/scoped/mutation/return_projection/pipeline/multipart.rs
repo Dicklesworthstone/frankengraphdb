@@ -604,6 +604,17 @@ impl<'a> Parser<'a> {
         if !self.is_word("RETURN") {
             return Ok((stages, schema, false));
         }
+        // An inline CALL body's aggregating RETURN, once per outer row.
+        if !aggregate && self.call_body && self.return_has_aggregate()? {
+            let (stage, next) = self.return_aggregate_stage(&schema)?;
+            stages.push(stage);
+            if let Some(page) = self.row_expression_page(&next)? {
+                stages.push(page);
+            }
+            self.boundary_reads = None;
+            self.projected_sources = None;
+            return Ok((stages, next, true));
+        }
         if !aggregate {
             let at = self.current.at;
             self.advance()?;
@@ -680,7 +691,9 @@ impl<'a> Parser<'a> {
         self.boundary_reads = None;
         self.projected_sources = None;
         let previous_reads = core::mem::replace(&mut self.call_element_reads, true);
+        let previous_body = core::mem::replace(&mut self.call_body, true);
         let body = self.multipart_parts_from(statement, false, schema, call_depth + 1);
+        self.call_body = previous_body;
         self.call_element_reads = previous_reads;
         let (body, exports) = body?;
         self.punct(b'}', "} after a read-only CALL body ending in RETURN")?;
@@ -1030,9 +1043,14 @@ impl<'a> Parser<'a> {
         // An UNWIND directly after a continuation reads that same row (TCK
         // Graph8 [4]: `OPTIONAL MATCH (n) UNWIND keys(n) AS x RETURN ...`).
         let before_call = self.inline_call()?;
+        // An inline CALL body's aggregating RETURN reads every binding at an
+        // implicit `WITH *` and aggregates those rows, once per outer row.
+        let body_aggregate = self.call_body && self.return_has_aggregate()?;
         let implicit_star = kind.is_some()
             && deferred.is_none()
-            && ((aggregate && self.is_word("RETURN")) || self.is_word("UNWIND") || before_call);
+            && (((aggregate || body_aggregate) && self.is_word("RETURN"))
+                || self.is_word("UNWIND")
+                || before_call);
         if aggregate
             && !implicit_star
             && deferred.is_none()
@@ -1065,7 +1083,7 @@ impl<'a> Parser<'a> {
             self.current = at_where;
             head
         } else if kind.is_none() {
-            if before_call {
+            if before_call || body_aggregate {
                 self.implicit_with_head()?
             } else {
                 self.graph_projection_head()?
@@ -1129,7 +1147,18 @@ impl<'a> Parser<'a> {
         } else {
             (graph_page.into_iter().collect(), schema)
         };
-        if !terminal && self.is_word("RETURN") && !aggregate {
+        // The body's RETURN may follow its own WITH stages, so ask again here.
+        if !terminal && self.call_body && self.return_has_aggregate()? {
+            let (stage, schema) = self.return_aggregate_stage(&next)?;
+            pipeline.push(stage);
+            if let Some(page) = self.row_expression_page(&schema)? {
+                pipeline.push(page);
+            }
+            self.boundary_reads = None;
+            self.projected_sources = None;
+            next = schema;
+            terminal = true;
+        } else if !terminal && self.is_word("RETURN") && !aggregate {
             let at = self.current.at;
             self.advance()?;
             let distinct = self.take_word("DISTINCT")?;

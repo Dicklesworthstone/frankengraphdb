@@ -911,6 +911,9 @@ struct Parser<'a> {
     /// Inline read bodies and their returning row scopes may dereference
     /// visible graph identities. Ordinary WITH keeps its hidden-read boundary.
     call_element_reads: bool,
+    /// Inside an inline CALL body. Its terminal RETURN may aggregate the
+    /// body's rows, once per outer row, as a row-domain aggregate stage.
+    call_body: bool,
     /// A read statement's host reads element values at the statement's cut,
     /// so a carried vertex's `n.p` past its boundary's scope (after an UNWIND
     /// or a later WITH) reads through that element reader (fgdb-xnd7x). A
@@ -1085,6 +1088,7 @@ impl<'a> Parser<'a> {
             boundary_reads: None,
             resolved_entries: false,
             call_element_reads: false,
+            call_body: false,
             read_elements: false,
             elements: Vec::new(),
             lets: None,

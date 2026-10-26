@@ -183,6 +183,101 @@ fn inline_call_correlates_actual_graph_sources_before_export() {
 }
 
 #[test]
+fn inline_call_bodies_aggregate_once_per_outer_row() {
+    // Each vertex's out-degree and the sum of its neighbours' p, from the
+    // fixture itself. The vertex with no edge still gets its row: a global
+    // aggregate over no rows is one row (count 0).
+    let p = |id: u128| [1, 2, 2, 3][id as usize - 1];
+    let out = |id: u128| {
+        EDGES
+            .iter()
+            .filter(move |(source, _, _)| *source == VId(id))
+    };
+    let degree = |id: u128| out(id).count() as i64;
+    let sum = |id: u128| out(id).map(|(_, _, target)| p(target.0)).sum::<i64>();
+    let rows = |value: &dyn Fn(u128) -> i64| -> Vec<GraphValueRow> {
+        (1..=4)
+            .map(|id| {
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(id)),
+                    GraphValue::Scalar(CanonicalScalar::Int(value(id))),
+                ])
+            })
+            .collect()
+    };
+    assert_eq!(degree(4), 0, "the fixture keeps a vertex with no edge");
+    for text in [
+        "MATCH (n) CALL (n) { MATCH (n)-[:R]->(m) RETURN count(m) AS out } \
+         RETURN n, out ORDER BY n",
+        "MATCH (n) CALL { WITH n MATCH (n)-[:R]->(m) RETURN count(*) AS out } \
+         RETURN n, out ORDER BY n",
+        "MATCH (n) CALL (n) { OPTIONAL MATCH (n)-[:R]->(m) RETURN count(m) AS out } \
+         RETURN n, out ORDER BY n",
+        "MATCH (n) CALL (n) { MATCH (n)-[:R]->(m) WITH m WHERE m.p > 0 \
+         RETURN count(*) AS out } RETURN n, out ORDER BY n",
+    ] {
+        let query = PreparedGraphSetText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let result = run(&query, wide(), &mut || Ok(())).unwrap();
+        assert_eq!(result.value, rows(&degree), "{text}");
+    }
+    // sum over a body with no rows is NULL, as at the top level
+    // (`UNWIND [] AS x RETURN sum(x)`).
+    let sums: Vec<_> = (1..=4)
+        .map(|id| {
+            let value = if degree(id) == 0 {
+                CanonicalScalar::Null
+            } else {
+                CanonicalScalar::Int(sum(id))
+            };
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(id)),
+                GraphValue::Scalar(value),
+            ])
+        })
+        .collect();
+    assert_eq!(
+        execute(
+            "MATCH (n) CALL (n) { MATCH (n)-[:R]->(m) RETURN sum(m.p) AS s } \
+             RETURN n, s ORDER BY n",
+        ),
+        sums
+    );
+    // A grouped body yields one row per group, and none for a vertex with
+    // no edge: CALL then drops that outer row, as a subquery with no rows
+    // does.
+    let mut groups = std::collections::BTreeMap::new();
+    for (source, _, target) in EDGES {
+        *groups.entry((source.0, p(target.0))).or_insert(0_i64) += 1;
+    }
+    assert_eq!(
+        execute(
+            "MATCH (n) CALL (n) { MATCH (n)-[:R]->(m) RETURN m.p AS p, count(*) AS c } \
+             RETURN n, p, c ORDER BY n, p",
+        ),
+        groups
+            .into_iter()
+            .map(|((id, p), c)| {
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(id)),
+                    GraphValue::Scalar(CanonicalScalar::Int(p)),
+                    GraphValue::Scalar(CanonicalScalar::Int(c)),
+                ])
+            })
+            .collect::<Vec<_>>()
+    );
+    // An uncorrelated body aggregates once.
+    assert_eq!(
+        execute("CALL { MATCH (n) RETURN count(n) AS total } RETURN total"),
+        vec![GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+            CanonicalScalar::Int(4)
+        )])]
+    );
+}
+
+#[test]
 fn inline_call_parameters_governance_and_scope_bounds_span_the_whole_definition() {
     let text = "WITH $outer AS x CALL (x) { RETURN x+$inner AS y } RETURN y+$tail AS total";
     let template = PreparedGraphSetText::prepare(text, |_, _: &str| {
