@@ -466,6 +466,10 @@ impl<'a> Parser<'a> {
         // the head projects, never a binding a plain WITH drops.
         let mut unwind = matches!(self.current.kind, TokenKind::Word(word)
             if word.eq_ignore_ascii_case("UNWIND"));
+        // A write prefix's scope runs past that UNWIND's AS to the write's
+        // end: the write reads the carried elements too, and the UNWIND keeps
+        // their hidden columns for it (row_pipeline_prefix, fgdb-cpny9).
+        let mut unwound = false;
         // A later plain WITH that projects a carried element under its own
         // name keeps that element's reads in scope (MATCH (a) WITH a WITH a
         // RETURN a.p); row_pipeline_prefix carries their hidden columns
@@ -595,9 +599,16 @@ impl<'a> Parser<'a> {
                     depth = outer;
                 }
                 TokenKind::Word(word)
-                    if unwind && depth == 0 && !after_dot && word.eq_ignore_ascii_case("AS") =>
+                    if unwind
+                        && !unwound
+                        && depth == 0
+                        && !after_dot
+                        && word.eq_ignore_ascii_case("AS") =>
                 {
-                    break;
+                    if !self.write_prefix {
+                        break;
+                    }
+                    unwound = true;
                 }
                 TokenKind::Word(word)
                     if !unwind
@@ -1569,6 +1580,60 @@ impl<'a> Parser<'a> {
                     .map(|boundary| boundary.visible);
                 let stage = self.unwind_stage(&mut schema, at)?;
                 append_stage(&mut stages, stage, &mut depth)?;
+                if let Some(visible) = carried
+                    && self.write_prefix
+                {
+                    // A write right after the UNWIND reads the carried hidden
+                    // columns (hoist_boundary_reads, fgdb-cpny9). They stay,
+                    // after the unwound column, so the row keeps its visible
+                    // prefix and hidden suffix.
+                    let unwound = schema.len() - 1;
+                    let order: Vec<usize> = (0..visible)
+                        .chain([unwound])
+                        .chain(visible..unwound)
+                        .collect();
+                    let projection = order
+                        .iter()
+                        .map(|&index| ReadProjectionTemplate {
+                            name: schema[index].0.text.to_owned(),
+                            value: ReadValueTemplate::Column(index),
+                        })
+                        .collect();
+                    append_stage(
+                        &mut stages,
+                        ReadStageTemplate::Project {
+                            at,
+                            projection,
+                            quantifier: GraphSetQuantifier::All,
+                        },
+                        &mut depth,
+                    )?;
+                    schema = order.iter().map(|&index| schema[index]).collect();
+                    if let Some(boundary) = self.boundary_reads.as_mut() {
+                        let shift = |column: &mut usize| {
+                            if *column >= visible {
+                                *column += 1;
+                            }
+                        };
+                        boundary
+                            .reads
+                            .iter_mut()
+                            .for_each(|read| shift(&mut read.2));
+                        boundary
+                            .functions
+                            .iter_mut()
+                            .for_each(|read| shift(&mut read.2));
+                        boundary
+                            .grouped
+                            .iter_mut()
+                            .for_each(|read| shift(&mut read.3));
+                        boundary.visible += 1;
+                        boundary.width += 1;
+                    }
+                    self.existence_reads = None;
+                    self.comprehension_reads = None;
+                    continue;
+                }
                 if let Some(visible) = carried {
                     self.boundary_reads = None;
                     let unwound = schema.len() - 1;

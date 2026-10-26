@@ -2474,9 +2474,7 @@ fn a_write_right_after_match_unwind_reads_its_rows() {
         let stored = |value: i64| -> CanonicalPropertyValue { CanonicalScalar::Int(value).into() };
 
         // CREATE: one vertex per (source, element) row. The UNWIND reads the
-        // matched vertex's property. A CREATE property reading it directly
-        // (`{p: s.p}`) after a MATCH-first UNWIND still refuses; the
-        // explicit `WITH s UNWIND ...` form reads it.
+        // matched vertex's property.
         write(
             &mut db,
             "MATCH (s:Source) UNWIND [s.p + 1, s.p + 2] AS i CREATE (:Copy {p: i})",
@@ -2487,6 +2485,30 @@ fn a_write_right_after_match_unwind_reads_its_rows() {
             property(&db, COPY, P),
             [stored(11), stored(12), stored(21), stored(22)]
         );
+        // So does the CREATE itself, through the row's hidden read of `s.p`,
+        // and so does a RETURN after it.
+        write(
+            &mut db,
+            "MATCH (s:Source) UNWIND [1, 2] AS i CREATE (:Person {p: s.p * 10 + i})",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            property(&db, PERSON, P),
+            [stored(101), stored(102), stored(201), stored(202)]
+        );
+        let returned = write(
+            &mut db,
+            "MATCH (s:Source) UNWIND [7] AS i CREATE (c:Person {q: s.p + i}) \
+             RETURN s.p AS p, c.q AS q ORDER BY p",
+        )
+        .await
+        .unwrap();
+        let QueryResult::Rows { rows, .. } = returned else {
+            unreachable!("a CREATE with RETURN answers rows")
+        };
+        let int = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        assert_eq!(rows, [vec![int(10), int(17)], vec![int(20), int(27)]]);
         // SET: the row's value, one row per vertex.
         write(
             &mut db,

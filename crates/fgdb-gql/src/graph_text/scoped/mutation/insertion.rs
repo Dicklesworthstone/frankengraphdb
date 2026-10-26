@@ -213,27 +213,17 @@ impl<'a> Parser<'a> {
         Ok(true)
     }
 
-    /// A MATCH-first UNWIND selects the native graph-to-row compiler (a
-    /// MATCH-first WITH takes the write-row pipeline, `prepare_after_with`).
-    /// The MATCH parser has identified the boundary; restart that same bounded
-    /// statement with its row-source owner, not a rewritten RETURN or a
-    /// fallback after a refused parse. Its parameter table remains live through
-    /// CREATE, while take_part_syntax removes the old graph-local scope.
-    pub(super) fn insertion_graph_row_prefix(
-        &mut self,
-        statement: &'a str,
-        declarations: &[(&str, GqlParameterType)],
-        zones: Option<crate::GqlTimeZones>,
-    ) -> Result<GraphRowPrefix<'a>, crate::GraphSetTextError> {
-        *self = Self::new_with_parameter_types(statement, declarations)?.with_zones(zones);
-        let (source, schema, _) = self.leading_aggregate_prefix(statement)?;
-        Ok((source, schema))
-    }
-
-    /// The same `UNWIND ... MATCH ...` read before a SET/REMOVE/DELETE or a
-    /// vertex MERGE (fgdb-0s2pq). The MATCH vertices' hidden reads stay in
-    /// the row, as write_row_prefix keeps them, so the write's values and its
-    /// RETURN read a vertex's properties: `SET n.p = 1 RETURN n.id`.
+    /// The read before a write over `UNWIND ... MATCH ...` or a MATCH-first
+    /// UNWIND (a MATCH-first WITH takes the write-row pipeline,
+    /// `prepare_after_with`): a CREATE, a SET/REMOVE/DELETE or a vertex MERGE
+    /// (fgdb-0s2pq). The MATCH parser has identified the boundary; restart
+    /// that same bounded statement with its row-source owner, not a rewritten
+    /// RETURN or a fallback after a refused parse. Its parameter table remains
+    /// live through the write, while take_part_syntax removes the old
+    /// graph-local scope. The MATCH vertices' hidden reads stay in the row, as
+    /// write_row_prefix keeps them, so the write's values and its RETURN read
+    /// a vertex's properties: `CREATE (:C {p: s.p + i})`, `SET n.p = 1 RETURN
+    /// n.id`.
     pub(super) fn write_graph_row_prefix(
         &mut self,
         statement: &'a str,
@@ -941,7 +931,7 @@ impl PreparedGraphInsertText {
         }
         let read_source = if leading.is_empty() && matched && parser.is_word("UNWIND") {
             let (source, schema) =
-                parser.insertion_graph_row_prefix(statement, declarations, resolve.time_zones())?;
+                parser.write_graph_row_prefix(statement, declarations, resolve.time_zones())?;
             row_schema = schema;
             matched = false;
             Some(source)
