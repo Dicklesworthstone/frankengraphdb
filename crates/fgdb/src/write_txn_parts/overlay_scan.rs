@@ -4,9 +4,10 @@
 use super::{Database, EdgeRecord, PendingRow, VertexRow, Vfs, WriteTxn, WriteTxnError};
 use crate::gql_exec::source::{self, SourceEvent};
 use fgdb_delta_types::{DeltaRow, ElementId, PropertyKeyId, RelationId};
-use fgdb_gql::algebra::VertexScanDomain;
+use fgdb_gql::algebra::{GlaOutput, GlaPlan, VertexScanDomain};
 use fgdb_strata::AdjacencyEntry;
 use fgdb_types::{CanonicalPropertyValue, EId, VId};
+use fgdb_warden::PlannerPredicates;
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
 /// Private statement-lifetime owner. Neither the transaction nor database can
@@ -20,6 +21,16 @@ pub(crate) struct OverlayRows<'a, V: Vfs + Clone> {
     database: &'a Database<V>,
     vertices: BTreeMap<VId, Option<VertexRow>>,
     edges: Option<BTreeMap<EId, Option<EdgeRecord>>>,
+}
+
+/// Native candidate identities and the exact root-membership attempts which
+/// produced them. Retaining this value does not complete those attempts: a
+/// failed admission, evaluation or final quota check keeps their conservative
+/// refusal domains in the transaction.
+pub(crate) struct BoundOverlayCandidates {
+    pub(super) vertices: BTreeSet<VId>,
+    pub(super) edges: Vec<EId>,
+    pub(super) root_observations: Vec<usize>,
 }
 
 impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
@@ -170,6 +181,112 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
         }
         poll()?;
         Ok(owner)
+    }
+
+    /// The same unmasked index proof used by snapshot admission is valid only
+    /// when the permit hides no labels, relations or fields. A scoped permit
+    /// or an unsupported native closure keeps the complete masked visitor.
+    /// Imported anchors, nested scopes and quantified paths are not modeled by
+    /// the native overlay closure and cannot enter this path accidentally.
+    pub(crate) fn bound_candidates<E, Row: GlaOutput>(
+        &self,
+        plan: &GlaPlan<Row>,
+        scope: &PlannerPredicates,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<Option<BoundOverlayCandidates>, E> {
+        if !scope.sees_all_incidence()
+            || !scope.sees_all_fields()
+            || (plan.reads_edges() && self.edges.is_none())
+        {
+            return Ok(None);
+        }
+        self.transaction
+            .bound_overlay_candidates(&self.database.snapshot, plan, control)
+    }
+
+    pub(crate) fn accept_bound_observations(&self, bound: &BoundOverlayCandidates) {
+        for &observation in &bound.root_observations {
+            self.transaction
+                .point_reads
+                .borrow_mut()
+                .complete_vertex_scan(observation);
+        }
+    }
+
+    /// Resolve only closure identities, borrowing either their canonical
+    /// replacement or their pinned historical winner. A staged tombstone
+    /// always shadows the basis; no intent is replayed here.
+    pub(crate) fn visit_bound_vertices<'s, E, C>(
+        &'s self,
+        bound: &BoundOverlayCandidates,
+        control: &mut C,
+        mut visit: impl FnMut(&'s VertexRow, &mut C) -> Result<(), E>,
+    ) -> Result<(), E>
+    where
+        C: FnMut(SourceEvent) -> Result<(), E>,
+    {
+        for &vid in &bound.vertices {
+            control(SourceEvent::Work)?;
+            let row = match self.vertices.get(&vid) {
+                Some(replacement) => replacement.as_ref(),
+                None => source::find_vertex(
+                    &self.database.snapshot,
+                    vid,
+                    self.transaction.basis,
+                    control,
+                )?,
+            };
+            if let Some(row) = row {
+                visit(row, control)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Both endpoint identities of every candidate are in the vertex closure.
+    /// Ordinary table admission still checks their current visibility before
+    /// retaining an edge. Deleted/cascaded edges never revive from the basis.
+    pub(crate) fn visit_bound_edges<'s, E, C>(
+        &'s self,
+        bound: &BoundOverlayCandidates,
+        control: &mut C,
+        mut visit: impl FnMut(
+            &'s AdjacencyEntry,
+            &'s [(PropertyKeyId, CanonicalPropertyValue)],
+            &mut C,
+        ) -> Result<(), E>,
+    ) -> Option<Result<(), E>>
+    where
+        C: FnMut(SourceEvent) -> Result<(), E>,
+    {
+        let edges = self.edges.as_ref()?;
+        Some((|| {
+            for &eid in &bound.edges {
+                control(SourceEvent::Work)?;
+                match edges.get(&eid) {
+                    Some(Some(row)) => visit(&row.entry, &row.props, control)?,
+                    Some(None) => {}
+                    None => {
+                        let snapshot = &self.database.snapshot;
+                        if let Some((block, row)) =
+                            snapshot.adjacency_index().statement_at_controlled(
+                                &snapshot.blocks,
+                                eid,
+                                self.transaction.basis,
+                                control,
+                            )?
+                        {
+                            visit(
+                                &snapshot.blocks[block][row],
+                                source::edge_properties_at(&snapshot.block_props, block, row),
+                                control,
+                            )?;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })())
     }
 
     /// Merge replacements and borrowed historical winners in identity order.

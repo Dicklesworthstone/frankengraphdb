@@ -545,15 +545,16 @@ mod query_source {
                 return Ok(None);
             }
             let mut root_selection = None;
-            for operator in prefix.iter().take_while(|operator| {
-                !matches!(
-                    operator,
-                    GlaOperator::Expand { .. } | GlaOperator::SelectBoolean { .. }
-                )
-            }) {
+            for operator in prefix {
                 control(SourceEvent::Work)?;
-                let GlaOperator::Select { slot, predicates } = operator else {
-                    continue;
+                let (slot, predicates) = match operator {
+                    GlaOperator::Select { slot, predicates } => (slot, predicates),
+                    GlaOperator::VertexIdentity { .. } | GlaOperator::DifferentEdges { .. } => {
+                        continue;
+                    }
+                    // A later seek must not suppress an earlier expression's
+                    // exception or cross a binding/projection boundary.
+                    _ => break,
                 };
                 let Ok(root_slot) = usize::try_from(slot.ordinal()) else {
                     continue;
@@ -856,6 +857,59 @@ mod query_source {
                 vertices,
                 edges: OverlayEdges::new(),
                 root_observations,
+            }))
+        }
+
+        /// Reuse the native overlay's proved candidate closure for a source
+        /// with its own row owner and admission boundary. This is physical
+        /// selection only: unchanged GLA still owns all predicates, bags and
+        /// expressions. The caller must resolve each identity from the same
+        /// basis and canonical staged effects, and complete the observations
+        /// only after its complete execution and final allowance checks.
+        pub(super) fn bound_overlay_candidates<E, Row: GlaOutput>(
+            &self,
+            snapshot: &Snapshot,
+            logical: &GlaPlan<Row>,
+            control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+        ) -> Result<Option<super::overlay_scan::BoundOverlayCandidates>, E> {
+            if logical.reads_edges() {
+                // Keep the complete relation insertion gap even for an empty
+                // closure or a refused physical/admission phase.
+                match logical.edge_relations() {
+                    Some(relations) => self.scanned_edge_relations.borrow_mut().extend(relations),
+                    None => self.scanned_edges.set(true),
+                }
+            }
+            let bound = if logical.reads_edges() {
+                self.bound_query_source(snapshot, logical, control)?
+            } else {
+                self.bound_vertex_sources(snapshot, logical, true, control)?
+            };
+            let Some(bound) = bound else {
+                return Ok(None);
+            };
+            let mut observed = BTreeSet::new();
+            for &vid in &bound.vertices {
+                self.note_query_read(&mut observed, ElementId::Vertex(vid), control)?;
+            }
+            let mut edges = Vec::new();
+            for (eid, (src, relation, dst, _)) in bound.edges {
+                for element in [
+                    ElementId::Edge(eid),
+                    ElementId::Vertex(src),
+                    ElementId::Vertex(dst),
+                ] {
+                    self.note_query_read(&mut observed, element, control)?;
+                }
+                control(SourceEvent::ScratchEntry)?;
+                self.match_expansions.borrow_mut().insert((src, relation));
+                control(SourceEvent::ScratchEntry)?;
+                edges.push(eid);
+            }
+            Ok(Some(super::overlay_scan::BoundOverlayCandidates {
+                vertices: bound.vertices,
+                edges,
+                root_observations: bound.root_observations,
             }))
         }
 

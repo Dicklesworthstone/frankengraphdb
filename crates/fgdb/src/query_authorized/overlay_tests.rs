@@ -478,3 +478,84 @@ fn missing_edge_domain_refuses_instead_of_falling_back_to_unstaged_basis() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn indexed_overlay_membership_and_refused_attempts_survive_later_success() {
+    let ((), report) = run_async_under_lab(0xa724, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (query, commit, txcx) = (contexts.query(), contexts.commit(), contexts.txn());
+        for case in 0..5 {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            for id in [10, 20, 30, 40, 50] {
+                seed.create_vertex(VId(id), vec![L], vec![(P, CanonicalScalar::Int(id as i64))]);
+            }
+            seed.add_edge(EId(1), VId(10), VId(20), vec![]);
+            seed.add_edge(EId(2), VId(30), VId(40), vec![]);
+            db.write(&commit, seed).await.unwrap();
+            let authority = authority();
+            let mut unrestricted = grant();
+            unrestricted.labels = Scope::All;
+            unrestricted.relations = Scope::All;
+            unrestricted.properties = Scope::All;
+            let token = authority.issue_at(&unrestricted, 100).unwrap();
+            let verified = authority.verify_at(&token, "main", 100).unwrap();
+            let mut transaction = db.begin(&txcx).unwrap();
+            let mut prefix = WriteBatch::new(R);
+            prefix.set_vertex_property(VId(50), SECRET, Some(CanonicalScalar::Int(50)));
+            transaction.write(&mut db, prefix).unwrap();
+            let pattern = pattern("MATCH (a:L {p:10})-[e:R]->(b:L) RETURN b.p");
+            {
+                let overlay = OverlayRows::new(&transaction, &db, true, &mut || Ok(())).unwrap();
+                let execute = |records| {
+                    db.select_for_authorized_overlay(
+                        &query,
+                        &overlay,
+                        &pattern,
+                        verified.predicates(),
+                        GqlQueryPolicy::new(records, 100, 100_000, 100_000),
+                        || Ok(()),
+                        || Ok(()),
+                        || Ok(()),
+                    )
+                };
+                if case == 2 {
+                    assert!(matches!(execute(0), Err(GqlQueryError::Rows(error))
+                        if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords));
+                }
+                let result = execute(3).unwrap();
+                assert_eq!(result.value.len(), 1);
+                assert_eq!(result.rows.snapshot_records, 3);
+            }
+            let mut concurrent = WriteBatch::new(R);
+            match case {
+                0 | 2 => {
+                    concurrent.set_vertex_property(VId(30), SECRET, Some(CanonicalScalar::Int(30)))
+                }
+                1 => concurrent.set_vertex_property(VId(30), P, Some(CanonicalScalar::Int(10))),
+                3 => concurrent.add_edge(EId(3), VId(10), VId(30), vec![]),
+                4 => concurrent.delete_edge(EId(1)),
+                _ => unreachable!(),
+            }
+            let mut writer = db.begin(&txcx).unwrap();
+            writer.write(&mut db, concurrent).unwrap();
+            writer.commit(&mut db, &commit).await.unwrap();
+            let completed = transaction.commit(&mut db, &commit).await;
+            if case == 0 {
+                assert!(
+                    completed.is_ok(),
+                    "an unrelated field outside the completed closure: {completed:?}"
+                );
+            } else {
+                assert!(
+                    completed
+                        .as_ref()
+                        .is_err_and(|error| format!("{error:?}").contains("FG-LAW-FCW-READ-01")),
+                    "case {case}: membership, relation/identity or refused-read witness was lost: {completed:?}"
+                );
+            }
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

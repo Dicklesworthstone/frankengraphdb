@@ -7,7 +7,7 @@ use super::{
     PreparedGraphPatternFactors, QueryCx, QueryError, ReadError, Tables, Vfs,
     execute_factor_tables, execute_tables,
 };
-use crate::write_txn::overlay_scan::OverlayRows;
+use crate::write_txn::overlay_scan::{BoundOverlayCandidates, OverlayRows};
 
 impl<V: Vfs + Clone> Database<V> {
     /// Internal only: the owner borrows the native transaction and its database
@@ -32,7 +32,7 @@ impl<V: Vfs + Clone> Database<V> {
         self.ensure_readable().map_err(GqlQueryError::Source)?;
         cx.with_restriction(|| {
             let mut usage = AdmissionUsage::default();
-            let tables = admit_overlay_tables(
+            let (tables, bound) = admit_overlay_tables(
                 overlay,
                 pattern,
                 scope,
@@ -42,7 +42,11 @@ impl<V: Vfs + Clone> Database<V> {
                 &mut poll,
                 &mut checkpoint,
             )?;
-            execute_tables(tables, pattern, scope, policy, usage, &mut checkpoint)
+            let result = execute_tables(tables, pattern, scope, policy, usage, &mut checkpoint)?;
+            if let Some(bound) = bound {
+                overlay.accept_bound_observations(&bound);
+            }
+            Ok(result)
         })
     }
 
@@ -65,7 +69,7 @@ impl<V: Vfs + Clone> Database<V> {
         self.ensure_readable().map_err(GqlQueryError::Source)?;
         cx.with_restriction(|| {
             let mut usage = AdmissionUsage::default();
-            let tables = admit_overlay_tables(
+            let (tables, bound) = admit_overlay_tables(
                 overlay,
                 request.original(),
                 scope,
@@ -75,7 +79,12 @@ impl<V: Vfs + Clone> Database<V> {
                 &mut poll,
                 &mut checkpoint,
             )?;
-            execute_factor_tables(tables, request, scope, policy, usage, &mut checkpoint)
+            let result =
+                execute_factor_tables(tables, request, scope, policy, usage, &mut checkpoint)?;
+            if let Some(bound) = bound {
+                overlay.accept_bound_observations(&bound);
+            }
+            Ok(result)
         })
     }
 }
@@ -92,18 +101,20 @@ fn admit_overlay_tables<'a, V: Vfs + Clone, Row: GlaOutput>(
     node: &mut impl FnMut() -> Result<(), QueryError>,
     poll: &mut impl FnMut() -> Result<(), QueryError>,
     checkpoint: &mut impl FnMut() -> Result<(), QueryError>,
-) -> Result<Tables<'a>, Fault> {
+) -> Result<(Tables<'a>, Option<BoundOverlayCandidates>), Fault> {
     let mut tables = Tables::new();
     let mut control = |event| {
         checkpoint().map_err(GqlQueryError::Interrupted)?;
         usage.observe::<ReadError, QueryError>(policy, event)
     };
-    // Historical traversal and sparse shadowing never bill hidden data.
-    // Tables admit each winner BEFORE retaining its reference. Every record
-    // is still admitted and charged; only the read witness narrows to what
-    // the original plan can bind (fgdb-h1d6l).
+    // Physical traversal and sparse shadowing only poll. The same native
+    // indexed closure as the owner path is usable when the scope hides
+    // nothing; scoped or unsupported plans retain complete masked admission.
+    // Every retained winner still crosses the ordinary signed/native charge
+    // boundary, and all statements continue sharing one permit and allowance.
     let mut scan = |_| poll().map_err(GqlQueryError::Interrupted);
-    overlay.visit_vertices(pattern.plan().vertex_scan_domain(), &mut scan, |row, _| {
+    let bound = overlay.bound_candidates(pattern.plan(), scope, &mut scan)?;
+    let mut admit_vertex = |row: &'a crate::VertexRow, _: &mut _| {
         tables
             .admit_vertex(
                 row,
@@ -112,24 +123,42 @@ fn admit_overlay_tables<'a, V: Vfs + Clone, Row: GlaOutput>(
                 &mut control,
             )
             .map(drop)
-    })?;
+    };
+    match &bound {
+        Some(bound) => overlay.visit_bound_vertices(bound, &mut scan, &mut admit_vertex)?,
+        None => overlay.visit_vertices(
+            pattern.plan().vertex_scan_domain(),
+            &mut scan,
+            &mut admit_vertex,
+        )?,
+    }
     if pattern.plan().reads_edges() {
-        let relations = pattern.plan().edge_relations();
-        overlay
-            .visit_edges(relations.as_ref(), &mut scan, |edge, properties, _| {
-                tables
-                    .admit_edge(
-                        ((edge.eid, edge.src, edge.relation, edge.dst), properties),
-                        scope,
-                        &mut control,
-                    )
-                    .map(drop)
-            })
-            .ok_or(GqlQueryError::IdentifiedEdgesRequired)??;
+        let mut admit_edge = |edge: &'a fgdb_strata::AdjacencyEntry,
+                              properties: &'a [(
+            fgdb_delta_types::PropertyKeyId,
+            fgdb_types::CanonicalPropertyValue,
+        )],
+                              _: &mut _| {
+            tables
+                .admit_edge(
+                    ((edge.eid, edge.src, edge.relation, edge.dst), properties),
+                    scope,
+                    &mut control,
+                )
+                .map(drop)
+        };
+        match &bound {
+            Some(bound) => overlay.visit_bound_edges(bound, &mut scan, &mut admit_edge),
+            None => {
+                let relations = pattern.plan().edge_relations();
+                overlay.visit_edges(relations.as_ref(), &mut scan, &mut admit_edge)
+            }
+        }
+        .ok_or(GqlQueryError::IdentifiedEdgesRequired)??;
     }
     tables.seal();
     tables.metadata(pattern.plan(), scope, &mut control)?;
-    Ok(tables)
+    Ok((tables, bound))
 }
 
 #[cfg(test)]

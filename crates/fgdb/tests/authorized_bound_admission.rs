@@ -173,3 +173,291 @@ fn a_bound_two_hop_admits_each_distinct_endpoint_once() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+mod write_overlay {
+    use super::*;
+    use fgdb::{EdgeRecord, VertexRow, WriteTxnError};
+    use fgdb_delta_types::LabelId;
+    use fgdb_gql::{
+        GraphMutationProgramDimension, GraphMutationProgramError, GraphWriteProgramError,
+        GraphWriteProgramPolicy, GraphWriteProgramReceipt, GraphWriteScriptExecutionError,
+        PreparedGraphWriteScript,
+    };
+    use fgdb_types::EmbeddedTxnCompletion;
+    use fgdb_warden::Rights;
+
+    const L: LabelId = LabelId(1);
+    const HIDDEN: LabelId = LabelId(9);
+    const Q: PropertyKeyId = PropertyKeyId(2);
+    const SECRET: PropertyKeyId = PropertyKeyId(9);
+    const UNRELATED_VERTICES: u128 = 512;
+    type Fault = GraphWriteScriptExecutionError<WriteTxnError, WriteTxnError, WriteTxnError>;
+    type ResultGraph = (GraphWriteProgramReceipt, Vec<VertexRow>, Vec<EdgeRecord>);
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Label, "Visible") => Some(GraphSymbol::Label(L)),
+            (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
+            _ => super::symbols(kind, name),
+        }
+    }
+
+    fn grant(scoped: bool) -> Grant {
+        let mut grant = super::grant(1_000_000);
+        grant.rights = Rights::ReadWrite;
+        if scoped {
+            grant.labels = Scope::only([L]);
+            grant.relations = Scope::only([R]);
+            grant.properties = Scope::only([P, Q]);
+        }
+        grant
+    }
+
+    fn policy(records: u64) -> GraphWriteProgramPolicy {
+        GraphWriteProgramPolicy::new(
+            GqlQueryPolicy::new(records, 10_000, 10_000_000, 1_000_000),
+            32,
+            8,
+            8,
+        )
+    }
+
+    async fn fixture(commit: &CommitCx, hidden: bool) -> Database<MemVfs> {
+        let mut db = Database::open_memory(commit, DatabaseKeys::new([0x92; 32], NS, [0x93; 32]))
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(R);
+        for id in (1..=4).chain(1_000..1_000 + UNRELATED_VERTICES) {
+            let mut labels = vec![L];
+            let mut props = vec![
+                (P, CanonicalScalar::Int(id as i64)),
+                (Q, CanonicalScalar::Int(0)),
+            ];
+            if hidden {
+                labels.push(HIDDEN);
+                props.push((SECRET, CanonicalScalar::Int(700)));
+            }
+            batch.create_vertex(VId(id), labels, props);
+        }
+        batch.add_edge(EId(1), VId(1), VId(2), vec![(Q, CanonicalScalar::Int(12))]);
+        batch.add_edge(EId(2), VId(2), VId(3), vec![(Q, CanonicalScalar::Int(23))]);
+        for id in 1_000..1_000 + UNRELATED_VERTICES - 1 {
+            batch.add_edge(
+                EId(id),
+                VId(id),
+                VId(id + 1),
+                vec![(Q, CanonicalScalar::Int(1))],
+            );
+        }
+        if hidden {
+            // These satisfy the unmasked root predicate and touch the visible
+            // component. A scoped selection must mask them before charging.
+            batch.create_vertex(
+                VId(9_000),
+                vec![HIDDEN],
+                vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(900))],
+            );
+            batch.add_edge(
+                EId(9_000),
+                VId(9_000),
+                VId(2),
+                vec![(Q, CanonicalScalar::Int(999))],
+            );
+        }
+        db.write(commit, batch).await.unwrap();
+        if hidden {
+            let mut other = WriteBatch::new(S);
+            other.add_edge(EId(9_001), VId(1), VId(2), vec![]);
+            db.write(commit, other).await.unwrap();
+        }
+        db
+    }
+
+    async fn run(
+        contexts: &PurposeContexts,
+        source: &str,
+        records: u64,
+        scoped: bool,
+        hidden: bool,
+    ) -> Result<ResultGraph, Fault> {
+        let (txn, query, commit) = (contexts.txn(), contexts.query(), contexts.commit());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(scoped), 100).unwrap();
+        let mut db = fixture(&commit, hidden).await;
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        let script = PreparedGraphWriteScript::prepare(source, R, symbols).unwrap();
+        let result = db
+            .execute_graph_write_script_returning_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &script,
+                &GqlParameters::new(),
+                policy(records),
+                || 100,
+            )
+            .await;
+        assert_eq!(txn.outstanding_obligations(), 0);
+        match result {
+            Ok((receipt, completion)) => {
+                let after = db.frontier().unwrap();
+                assert_eq!(after.0, before.0.0 + 1);
+                assert_eq!(
+                    completion,
+                    EmbeddedTxnCompletion::WriteCommitted { commit_seq: after }
+                );
+                Ok((receipt, db.vertices().unwrap(), db.edges().unwrap()))
+            }
+            Err(error) => {
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
+                    before,
+                    "a late refusal must not publish the earlier statement"
+                );
+                Err(error)
+            }
+        }
+    }
+
+    fn property(vertices: &[VertexRow], vid: u128, key: PropertyKeyId) -> CanonicalScalar {
+        vertices
+            .iter()
+            .find(|row| row.vid == VId(vid))
+            .unwrap()
+            .props
+            .iter()
+            .find(|(property, _)| *property == key)
+            .unwrap()
+            .1
+            .as_scalar()
+            .unwrap()
+            .clone()
+    }
+
+    fn assert_record_refusal(error: &Fault) {
+        assert!(
+            matches!(
+                error,
+                Fault::Program(GraphWriteProgramError::Program(
+                    GraphMutationProgramError::Budget {
+                        dimension: GraphMutationProgramDimension::SnapshotRecords,
+                        ..
+                    }
+                ))
+            ),
+            "{error:?}"
+        );
+    }
+
+    const SELECTIVE: &str = "MATCH (n {p:1}) SET n.q=10;
+         MATCH (a {p:1})-[r:R]->(b) SET b.q=a.q+r.q;
+         MATCH (a {p:1})-[:R]->(b)-[:R]->(c) SET c.q=b.q;
+         MATCH (a {p:1}),(b {p:3}) SET a.q=b.q";
+
+    #[test]
+    fn selective_statements_keep_indexed_admission_after_the_first_write() {
+        let ((), report) = run_async_under_lab(0x5ec0_9110, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let (receipt, vertices, _) = run(&contexts, SELECTIVE, 11, false, false).await.unwrap();
+            assert_eq!(receipt.stats().completed_statements, 4);
+            // One root, the one-hop closure, the two-hop closure, then the
+            // union of two independent keyed roots: 1 + 3 + 5 + 2.
+            assert_eq!(receipt.stats().selection.snapshot_records, 11);
+            for id in [1, 2, 3] {
+                assert_eq!(property(&vertices, id, Q), CanonicalScalar::Int(22));
+            }
+            assert_eq!(property(&vertices, 4, Q), CanonicalScalar::Int(0));
+            assert!(
+                vertices
+                    .iter()
+                    .filter(|row| row.vid.0 >= 1_000)
+                    .all(|row| row.props.contains(&(Q, CanonicalScalar::Int(0).into())))
+            );
+            assert_record_refusal(
+                &run(&contexts, SELECTIVE, 10, false, false)
+                    .await
+                    .unwrap_err(),
+            );
+            let unbound = "MATCH (n {p:1}) SET n.q=10;
+                           MATCH (a)-[r:R]->(b) SET b.q=a.q+r.q";
+            assert_record_refusal(&run(&contexts, unbound, 11, false, false).await.unwrap_err());
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn indexed_overlay_sees_staged_edges_retirements_and_rekeyed_roots() {
+        let ((), report) = run_async_under_lab(0x5ec0_9111, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let text = "MATCH (a {p:1}),(b {p:4}) CREATE (a)-[:R {q:14}]->(b);
+                        MATCH (a {p:1})-[r:R]->(b {p:2}) DELETE r;
+                        MATCH (a {p:1}) SET a.p=10;
+                        MATCH (a {p:10})-[r:R]->(b) SET b.q=r.q";
+            let (receipt, vertices, edges) = run(&contexts, text, 16, false, false).await.unwrap();
+            assert_eq!(receipt.stats().completed_statements, 4);
+            assert_eq!(receipt.stats().created_edges, 1);
+            assert!(receipt.stats().selection.snapshot_records <= 16);
+            assert_eq!(property(&vertices, 1, P), CanonicalScalar::Int(10));
+            assert_eq!(property(&vertices, 2, Q), CanonicalScalar::Int(0));
+            assert_eq!(property(&vertices, 4, Q), CanonicalScalar::Int(14));
+            assert!(edges.iter().all(|edge| edge.entry.eid != EId(1)));
+            let outgoing: Vec<_> = edges
+                .iter()
+                .filter(|edge| edge.entry.src == VId(1))
+                .collect();
+            assert_eq!(outgoing.len(), 1);
+            assert_eq!(outgoing[0].entry.dst, VId(4));
+            assert_eq!(
+                outgoing[0].props,
+                vec![(Q, CanonicalScalar::Int(14).into())]
+            );
+
+            let created = "CREATE (n {p:99,q:0}); MATCH (n {p:99}) SET n.q=7";
+            let (receipt, vertices, _) = run(&contexts, created, 1, false, false).await.unwrap();
+            assert_eq!(receipt.stats().selection.snapshot_records, 1);
+            let fresh = receipt.steps()[0].created_vertices().unwrap()[0];
+            assert_eq!(property(&vertices, fresh.0, Q), CanonicalScalar::Int(7));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn scoped_overlay_keeps_hidden_data_independent_admission_and_refusals() {
+        let ((), report) = run_async_under_lab(0x5ec0_9112, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let mut expected = None;
+            for hidden in [false, true] {
+                let (receipt, vertices, _) = run(&contexts, SELECTIVE, 10_000, true, hidden)
+                    .await
+                    .unwrap();
+                assert!(receipt.stats().selection.snapshot_records > UNRELATED_VERTICES as u64);
+                for id in [1, 2, 3] {
+                    assert_eq!(property(&vertices, id, Q), CanonicalScalar::Int(22));
+                }
+                if hidden {
+                    assert_eq!(property(&vertices, 9_000, Q), CanonicalScalar::Int(900));
+                    assert_eq!(Some(receipt), expected);
+                } else {
+                    expected = Some(receipt);
+                }
+                assert_record_refusal(
+                    &run(&contexts, SELECTIVE, 11, true, hidden)
+                        .await
+                        .unwrap_err(),
+                );
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}
