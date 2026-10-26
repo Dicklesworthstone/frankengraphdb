@@ -66,8 +66,8 @@ impl AppendRebaseFootprint {
 impl WriteTxn {
     /// Commit vertex/edge creations after read-validated append rebase.
     ///
-    /// Ordinary commit conservatively conflicts on shared endpoint vertices.
-    /// This opt-in finalization can admit independent appends to the same
+    /// Strict commit conservatively conflicts on shared endpoint vertices.
+    /// This explicit finalization can admit independent appends to the same
     /// neighborhood: it re-evaluates the original typed creation instructions
     /// against the current healthy writer and then uses ordinary FCW validation
     /// and ONE Chronicle publication. No source text is parsed or retried.
@@ -108,7 +108,9 @@ impl WriteTxn {
     /// publication starts, the ordinary unknown/recovery contract applies. No
     /// extra cancellation check follows publication. Raw embedded authority is
     /// unchanged; this is not an authorized-token API, full SSI, automatic retry
-    /// or the general context-derived semantic merge ladder.
+    /// or the general context-derived semantic merge ladder. Ordinary commit
+    /// selects this law automatically for eligible write conflicts using the
+    /// evaluator-input row allowance retained at preparation.
     pub async fn commit_append_only_rebased<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,

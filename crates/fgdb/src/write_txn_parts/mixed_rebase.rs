@@ -204,6 +204,8 @@ impl WriteTxn {
     /// Once polled and owner-admitted the attempt is terminal, including on
     /// refusal, cancellation or unwind. Wrong-owner/unpolled calls preserve the
     /// workspace. This raw embedded API is not token-authorized or full SSI.
+    /// Ordinary commit selects this law automatically for eligible write
+    /// conflicts within the evaluator-input allowance retained at preparation.
     pub async fn commit_mixed_rebased<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,

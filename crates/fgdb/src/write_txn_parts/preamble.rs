@@ -466,7 +466,8 @@ pub enum WriteTxnError {
     /// A new delta family needs an explicit compound-write independence law.
     UnsupportedAtomicMutation,
     /// Explicit append rebase cannot preserve this workspace's decisions or
-    /// exact creations. Ordinary commit/refresh never select this policy.
+    /// exact creations. Automatic commit reports the original conflict instead;
+    /// strict commit and refresh never select this policy.
     AppendRebaseIneligible,
     /// Explicit field rebase cannot preserve the observed decisions, target
     /// lifetimes, supported intent family or exact field effects.

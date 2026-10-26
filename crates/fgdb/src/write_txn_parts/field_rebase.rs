@@ -84,7 +84,7 @@ impl WriteTxn {
     /// repeated, narrowed or discarded. A full-element read still conflicts
     /// with any intervening change to that element, even on another field.
     /// Creation/ensure/deletion intents are ineligible even when their effects
-    /// cancelled. Ordinary commit and
+    /// cancelled. Strict commit and
     /// refresh_snapshot keep their existing element-level conflict behavior.
     ///
     /// Every raw property or label slot is protected, including cancelled SETs,
@@ -113,6 +113,8 @@ impl WriteTxn {
     /// Chronicle commit still finalize it, with unchanged unknown/recovery rules
     /// and no new fallible check after publication. This raw embedded API is not
     /// a capability-token boundary, full SSI or the general semantic merge ladder.
+    /// Ordinary commit selects this law automatically for eligible write
+    /// conflicts within the evaluator-input allowance retained at preparation.
     pub async fn commit_disjoint_fields_rebased<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,

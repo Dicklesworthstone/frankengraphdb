@@ -71,7 +71,7 @@ fn independent_shared_endpoint_appends_commit_once_and_reopen() {
         ordinary.write(&mut database, edge(30, 3)).unwrap();
         let first = left.commit(&mut database, &cx).await.unwrap();
         assert!(matches!(
-            ordinary.commit(&mut database, &cx).await,
+            ordinary.commit_strict(&mut database, &cx).await,
             Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
         ));
         // Refresh intentionally keeps the old conservative behavior too.

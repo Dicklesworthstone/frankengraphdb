@@ -195,6 +195,7 @@ impl<V: Vfs + Clone> Database<V> {
             basis: self.snapshot.frontier,
             handle_owner: Arc::clone(&self.handle_owner),
             dependencies,
+            replay_row_allowance: None,
             authorization_decision_digest: None,
         })
     }
@@ -207,6 +208,7 @@ impl<V: Vfs + Clone> Database<V> {
         // Capture before canonicalization erases conditional no-ops. All data
         // comes from the same admitted live writer used to derive the template.
         let mut dependencies = PreparedDependencies::capture(&self.writer, &batch);
+        let replay_row_allowance = u64::try_from(batch.rows.len()).ok();
         let template = self.build_write_template(batch)?;
         for coordinate in template.coordinate_entries() {
             for row in &coordinate.rows {
@@ -218,6 +220,7 @@ impl<V: Vfs + Clone> Database<V> {
             basis: self.snapshot.frontier,
             handle_owner: Arc::clone(&self.handle_owner),
             dependencies,
+            replay_row_allowance,
             authorization_decision_digest: None,
         })
     }

@@ -88,7 +88,7 @@ fn vertex_replacement_preserves_exact_cascades_single_publication_and_reopen() {
         ordinary.write_ordered(&mut db, replacement()).unwrap();
         let frontier = db.write(&cx, unrelated()).await.unwrap();
         assert!(matches!(
-            ordinary.commit(&mut db, &cx).await,
+            ordinary.commit_strict(&mut db, &cx).await,
             Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))
         ));
         // Three vertex instructions replicated across two relations, one edge.

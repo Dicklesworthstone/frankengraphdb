@@ -185,6 +185,7 @@ impl<V: Vfs + Clone> Database<V> {
         let mut coordinates: BTreeMap<RelationId, CoordinateEntry> = BTreeMap::new();
         let mut shared_vertices: Option<Vec<DeltaRow>> = None;
         let mut dependencies = PreparedDependencies::default();
+        let mut replay_row_allowance = Some(0_u64);
         for relation in relations {
             let mut slice = WriteBatch::new(relation);
             let mut visits = Vec::new();
@@ -198,6 +199,11 @@ impl<V: Vfs + Clone> Database<V> {
                 continue;
             }
             let prepared = self.prepare_write_checked(slice)?;
+            // Count the actual native evaluator inputs, including the vertex
+            // backbone repeated in each nonempty relation slice. Never infer
+            // a replay allowance from the smaller normalized effect template.
+            replay_row_allowance = replay_row_allowance
+                .and_then(|total| total.checked_add(prepared.replay_row_allowance?));
             let [coordinate] = prepared.template.coordinate_entries() else {
                 return Err(WriteTxnError::UnsupportedAtomicMutation);
             };
@@ -264,6 +270,7 @@ impl<V: Vfs + Clone> Database<V> {
             basis: self.snapshot.frontier,
             handle_owner: Arc::clone(&self.handle_owner),
             dependencies,
+            replay_row_allowance,
             authorization_decision_digest: None,
         })
     }

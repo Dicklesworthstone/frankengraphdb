@@ -92,7 +92,7 @@ fn mixed_creation_updates_and_cas_publish_once_and_match_serial_reopen() {
         let mut ordinary = db.begin(&txcx).unwrap();
         ordinary.write_ordered(&mut db, vec![program()]).unwrap();
         let frontier = db.write(&cx, concurrent()).await.unwrap();
-        assert_conflict(ordinary.commit(&mut db, &cx).await, "FG-LAW-FCW-01");
+        assert_conflict(ordinary.commit_strict(&mut db, &cx).await, "FG-LAW-FCW-01");
         assert!(db.vertex(VId(50)).unwrap().is_none());
         assert!(db.edge(EId(60)).unwrap().is_none());
         assert_eq!(txn.vertex(&db, VId(4)).unwrap(), Some(observed));

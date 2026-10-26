@@ -1320,6 +1320,9 @@ pub struct PreparedWrite {
     basis: CommitSeq,
     handle_owner: Arc<()>,
     dependencies: prepared_write::PreparedDependencies,
+    // Exact evaluator-input rows admitted by raw/ordered preparation. Template
+    // composition without that input accounting cannot authorize automatic replay.
+    replay_row_allowance: Option<u64>,
     pub(crate) authorization_decision_digest: Option<Digest>,
 }
 

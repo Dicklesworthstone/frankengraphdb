@@ -90,7 +90,7 @@ fn independent_vertex_edge_and_label_edits_match_serial_execution_and_reopen() {
         concurrent.set_vertex_label(VId(1), LabelId(3), true);
         concurrent.add_edge(EId(20), VId(1), VId(3), vec![]);
         let frontier = database.write(&cx, concurrent.clone()).await.unwrap();
-        assert_conflict(ordinary.commit(&mut database, &cx).await);
+        assert_conflict(ordinary.commit_strict(&mut database, &cx).await);
         assert!(transaction.refresh_snapshot(&database, &txcx).is_err());
         let seq = transaction
             .commit_disjoint_fields_rebased(&mut database, &cx, 5)
@@ -699,9 +699,9 @@ fn read_derived_writes_rebase_without_repeating_reads_and_match_serial_reopen() 
             ordinary.write(&mut database, staged.clone()).unwrap();
             let concurrent = edit(Q, 8);
             let frontier = database.write(&cx, concurrent.clone()).await.unwrap();
-            // The conflict is real on the normal path, not an unrelated write
+            // The conflict is real on the strict path, not an unrelated write
             // that would already commit. Only the staged write domain relaxes.
-            assert_conflict(ordinary.commit(&mut database, &cx).await);
+            assert_conflict(ordinary.commit_strict(&mut database, &cx).await);
             assert_eq!(transaction.basis(), basis);
             assert_eq!(transaction.vertex(&database, VId(3)).unwrap(), Some(read));
             let seq = finish_observed(&mut transaction, &mut database, &cx, append)

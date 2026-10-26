@@ -1,6 +1,7 @@
 include!("mixed_rebase.rs");
 
 enum RebasePreparation {
+    Automatic,
     Append(u64),
     DisjointFields(u64),
     Mixed(u64),
@@ -104,6 +105,17 @@ impl WriteTxn {
     /// marker, root or sequence. ReadClosed retains the original snapshot and
     /// separately reports the healthy frontier through which reads validated.
     ///
+    /// A write conflict may trigger one deterministic replay of the retained
+    /// raw mutation program: independent appends, disjoint field edits and the
+    /// supported mixed creation/edit/retirement program use their existing
+    /// independence laws. Every original read witness must validate first.
+    /// Replay runs under MergeEvalCx, is bounded by the exact evaluator-input
+    /// rows admitted at preparation, and must reproduce the original canonical
+    /// effects. No application callback or query is repeated. Ineligible
+    /// conflicts keep their original FCW error. Live savepoints, active program
+    /// scopes and authorization-bound writes retain strict behavior.
+    /// Use finish_strict to retain element-level conflict rejection throughout.
+    ///
     /// The validation contract is the existing conservative embedded read and
     /// scan witness contract, not full SSI or the durable session protocol.
     /// A dropped UNPOLLED future has no effect. Once polled and admitted by the
@@ -129,11 +141,30 @@ impl WriteTxn {
         cx: &CommitCx,
         crash_at: Option<fgdb_chronicle::commit::CrashPoint>,
     ) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
-        self.complete(database, cx, crash_at, false).await
+        self.complete(
+            database,
+            cx,
+            crash_at,
+            false,
+            Some(RebasePreparation::Automatic),
+        )
+        .await
+    }
+
+    /// Complete using the original element-level conflict policy, without
+    /// semantic replay. Read-only completion and terminal cleanup are the same
+    /// as finish; a conflicting prepared write is refused at its original basis.
+    pub async fn finish_strict<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &CommitCx,
+    ) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
+        self.complete(database, cx, None, false, None).await
     }
 
     /// Require a prepared write, validate it, commit and release its pin.
     /// For a workspace that may be read-only, use finish's typed outcome.
+    /// Uses the same bounded automatic semantic replay as finish.
     pub async fn commit<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,
@@ -151,7 +182,32 @@ impl WriteTxn {
         cx: &CommitCx,
         crash_at: Option<fgdb_chronicle::commit::CrashPoint>,
     ) -> Result<CommitSeq, WriteTxnError> {
-        match self.complete(database, cx, crash_at, true).await? {
+        match self
+            .complete(
+                database,
+                cx,
+                crash_at,
+                true,
+                Some(RebasePreparation::Automatic),
+            )
+            .await?
+        {
+            EmbeddedTxnCompletion::WriteCommitted { commit_seq } => Ok(commit_seq),
+            EmbeddedTxnCompletion::ReadClosed { .. } => {
+                unreachable!("write-only completion refuses before read close")
+            }
+        }
+    }
+
+    /// Require a prepared write and commit with strict element-level conflict
+    /// rejection. This opts out of commit's automatic semantic replay while
+    /// retaining the same owner guard, pin cleanup and publication path.
+    pub async fn commit_strict<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &CommitCx,
+    ) -> Result<CommitSeq, WriteTxnError> {
+        match self.complete(database, cx, None, true, None).await? {
             EmbeddedTxnCompletion::WriteCommitted { commit_seq } => Ok(commit_seq),
             EmbeddedTxnCompletion::ReadClosed { .. } => {
                 unreachable!("write-only completion refuses before read close")
@@ -168,18 +224,21 @@ impl WriteTxn {
         cx: &'a CommitCx,
         crash_at: Option<fgdb_chronicle::commit::CrashPoint>,
         require_write: bool,
+        rebase: Option<RebasePreparation>,
     ) -> crate::SendFuture<'a, Result<EmbeddedTxnCompletion, WriteTxnError>> {
-        Box::pin(cx.with_restriction_async(self.complete_controlled(
+        Box::pin(cx.with_restriction_async(self.complete_rebased_controlled(
             database,
             cx,
             crash_at,
             require_write,
+            rebase,
             || cx.checkpoint().map_err(WriteTxnError::Interrupted),
         )))
     }
 
     // The private checkpoint seam is shared verbatim by production and the
-    // interruption/unwind tests. It grants no query, write or recovery authority.
+    // interruption/unwind tests. Authorized callers also use this STRICT seam:
+    // their original-basis authorization never implicitly grants replay authority.
     async fn complete_controlled<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,
@@ -244,7 +303,7 @@ impl WriteTxn {
             })?;
         // A new apply basis must never erase the interval over which earlier
         // point, negative and query observations need validation. Reuse the
-        // ordinary witness checker BEFORE either policy can replace the basis.
+        // ordinary witness checker BEFORE any policy can replace the basis.
         // Only write conflicts receive policy-specific independence rules.
         if rebase.is_some()
             && let Some((law, element, committed_at)) = attempt
@@ -264,6 +323,11 @@ impl WriteTxn {
         // (FG-INV-17); the commit context stays with validation and publication.
         let merge = cx.merge_eval();
         match rebase {
+            Some(RebasePreparation::Automatic) => attempt.transaction.prepare_automatic_rebase(
+                attempt.database,
+                &merge,
+                &mut checkpoint,
+            )?,
             Some(RebasePreparation::Append(limit)) => attempt.transaction.prepare_append_rebase(
                 attempt.database,
                 limit,
@@ -323,6 +387,121 @@ impl WriteTxn {
         };
         attempt.transaction.state = EmbeddedTxnState::Completed(completion);
         Ok(completion)
+    }
+
+    // Automatic replay is an escape from an actual conservative write conflict,
+    // never an eager refresh of every stale workspace. The caller has already
+    // checked every original read witness under this same terminal guard.
+    fn prepare_automatic_rebase<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        merge: &fgdb_types::MergeEvalCx,
+        checkpoint: &mut impl FnMut() -> Result<(), WriteTxnError>,
+    ) -> Result<(), WriteTxnError> {
+        // The ordinary final check below still validates this workspace. No
+        // drift can require replay, so do not build its mutation footprint twice.
+        if self.prepared.is_none() || self.basis == database.frontier()? {
+            return Ok(());
+        }
+        let Some((law, element, committed_at)) = self.transaction_conflict(database, checkpoint)?
+        else {
+            return Ok(());
+        };
+        let original_conflict = WriteTxnError::Write(WriteError::FirstCommitterWins {
+            law,
+            detail: format!(
+                "transaction dependency {element:?} changed at {committed_at:?} after pinned basis {:?}",
+                self.basis
+            ),
+        });
+        if law != "FG-LAW-FCW-01"
+            || !self.savepoints.is_empty()
+            || self.program_multi_relation
+            || self.authorization_decision_digest.is_some()
+        {
+            return Err(original_conflict);
+        }
+        let previous = self
+            .prepared
+            .as_ref()
+            .expect("prepared write checked above");
+        let Some(limit) = previous.replay_row_allowance else {
+            return Err(original_conflict);
+        };
+        if previous.authorization_decision_digest.is_some() {
+            return Err(original_conflict);
+        }
+        // This embedded evaluator is defined only for its fixed graph, branch
+        // and schema epoch. Inspect coordinate metadata even when it has no
+        // rows: a row-free schema transition must not authorize replay.
+        let supported_coordinate = |coordinate: &fgdb_delta_types::CoordinateEntry| {
+            coordinate.graph == crate::GRAPH
+                && coordinate.branch == crate::BRANCH
+                && coordinate.schema_epoch == fgdb_delta_types::SchemaEpoch(0)
+                && coordinate.schema_transition.is_none()
+        };
+        for coordinate in previous.template.coordinate_entries() {
+            checkpoint()?;
+            if !supported_coordinate(coordinate) {
+                return Err(original_conflict);
+            }
+        }
+        for batch in database.delta_since(self.basis)? {
+            checkpoint()?;
+            for coordinate in batch.coordinate_entries() {
+                checkpoint()?;
+                if !supported_coordinate(coordinate) {
+                    return Err(original_conflict);
+                }
+            }
+        }
+        let mut appends = false;
+        let mut fields = false;
+        let mut retirements = false;
+        for batch in &self.staged {
+            checkpoint()?;
+            for row in &batch.rows {
+                checkpoint()?;
+                match row {
+                    PendingRow::Vertex { ensure: false, .. }
+                    | PendingRow::Edge { ensure: false, .. } => appends = true,
+                    PendingRow::SetProperty { .. }
+                    | PendingRow::SetEdgeProperty { .. }
+                    | PendingRow::SetLabel { .. }
+                    | PendingRow::CompareAndSet { .. } => fields = true,
+                    PendingRow::DeleteVertex { .. } | PendingRow::DeleteEdge { .. } => {
+                        retirements = true;
+                    }
+                    // Raw ENSURE remains a decision even when normalization
+                    // removed its effect. No idempotence is inferred here.
+                    _ => return Err(original_conflict),
+                }
+            }
+        }
+        // Select exactly one existing replay law; never retry a rejected rung
+        // through a more permissive policy or rerun application code.
+        let result = if retirements || (appends && fields) {
+            self.prepare_mixed_rebase(database, limit, merge, checkpoint)
+        } else if appends {
+            self.prepare_append_rebase(database, limit, merge, checkpoint)
+        } else if fields {
+            self.prepare_field_rebase(database, limit, merge, checkpoint)
+        } else {
+            return Err(original_conflict);
+        };
+        match result {
+            Err(
+                WriteTxnError::AppendRebaseIneligible
+                | WriteTxnError::FieldRebaseIneligible
+                | WriteTxnError::MixedRebaseIneligible
+                | WriteTxnError::OrderedWriteBudgetExceeded { .. }
+                | WriteTxnError::UnsupportedAtomicMutation
+                | WriteTxnError::Write(WriteError::FirstCommitterWins { .. }),
+            ) => Err(original_conflict),
+            // Cancellation, history/rebuild failure and native evaluator
+            // errors retain their meaning; they are not eligibility refusals.
+            result => result,
+        }
     }
 
     /// End the transaction without publishing its prepared batch.
@@ -550,4 +729,9 @@ impl WriteTxn {
 #[cfg(test)]
 mod completion_tests {
     include!("completion_tests.rs");
+}
+
+#[cfg(test)]
+mod automatic_rebase_tests {
+    include!("automatic_rebase_tests.rs");
 }
