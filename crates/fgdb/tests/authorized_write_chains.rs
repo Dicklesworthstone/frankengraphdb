@@ -2273,6 +2273,15 @@ mod post_write_deletions {
         UNWIND [0,0] AS occurrence DELETE r \
         RETURN audit.p AS p, occurrence ORDER BY occurrence";
 
+    fn edge_grant(rows: u64) -> Grant {
+        // Deleting a complete edge requires authority over all its fields;
+        // endpoint-label and relation masking still restricts the graph.
+        Grant {
+            properties: Scope::All,
+            ..grant(Rights::ReadWrite, rows)
+        }
+    }
+
     fn unrestricted(rows: u64) -> Grant {
         Grant {
             labels: Scope::All,
@@ -2382,23 +2391,29 @@ mod post_write_deletions {
     #[test]
     fn matched_edge_deletion_preserves_occurrences_hidden_data_and_recovery() {
         lab(0xc4a1_2101, |contexts| async move {
-            let expected = delete_edges(&contexts, false, grant(Rights::ReadWrite, 2), policy(2))
+            let expected = delete_edges(&contexts, false, edge_grant(2), policy(2))
                 .await
                 .unwrap();
-            let hidden = delete_edges(&contexts, true, grant(Rights::ReadWrite, 2), policy(2))
+            let hidden = delete_edges(&contexts, true, edge_grant(2), policy(2))
                 .await
                 .unwrap();
             assert_eq!(
                 hidden, expected,
                 "hidden incidence changes neither rows nor metering"
             );
+            for hidden in [false, true] {
+                let error = delete_edges(&contexts, hidden, grant(Rights::ReadWrite, 2), policy(2))
+                    .await
+                    .expect_err("a property-limited grant cannot delete the whole edge");
+                assert_eq!(authorization(&error), Some(Error::ScopeDenied));
+            }
         });
     }
 
     #[test]
     fn matched_edge_deletion_shares_budgets_and_delivers_only_final_occurrences() {
         lab(0xc4a1_2102, |contexts| async move {
-            let expected = delete_edges(&contexts, true, grant(Rights::ReadWrite, 2), policy(2))
+            let expected = delete_edges(&contexts, true, edge_grant(2), policy(2))
                 .await
                 .unwrap();
             let measured = expected.0;
@@ -2418,14 +2433,14 @@ mod post_write_deletions {
             .with_mutation_limit(1);
             for hidden in [false, true] {
                 assert_eq!(
-                    delete_edges(&contexts, hidden, grant(Rights::ReadWrite, 2), exact)
+                    delete_edges(&contexts, hidden, edge_grant(2), exact)
                         .await
                         .unwrap(),
                     expected
                 );
                 for dimension in 0..6 {
                     let mut budget = exact;
-                    let mut capability = grant(Rights::ReadWrite, 2);
+                    let mut capability = edge_grant(2);
                     match dimension {
                         0 => {
                             budget.query.rows = fgdb_gql::GqlExecutionBudget::new(
@@ -2813,6 +2828,185 @@ mod post_write_mutations {
                 assert_eq!(reopened.frontier().unwrap(), frontier);
                 assert_eq!(reopened.vertices().unwrap(), vertices);
                 assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        });
+    }
+
+    fn matched_merge() -> PreparedGraphWriteChain {
+        let text = "CREATE (audit:Visible {p:100}) WITH audit \
+            MATCH (n:Visible) WHERE n.p<>100 UNWIND [0,0] AS occurrence \
+            MERGE (made:Visible {p:n.p+audit.p+$delta}) \
+            RETURN audit.p,n.p,made.p ORDER BY n.p";
+        assert!(PreparedGraphWriteChainText::is_chain(text).unwrap());
+        PreparedGraphWriteChainText::prepare(text, R, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new().with_int64("delta", 10).unwrap())
+            .unwrap()
+    }
+
+    #[test]
+    fn post_match_vertex_merge_freezes_selection_and_resolves_duplicate_keys() {
+        lab(0xc4a1_2111, |contexts| async move {
+            let program = matched_merge();
+            let expected = execute(
+                &contexts,
+                &program,
+                false,
+                grant(Rights::ReadWrite, 4),
+                policy(4),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                expected.0.created_vertices, 3,
+                "one audit and two distinct MERGE keys"
+            );
+            assert_eq!(
+                expected
+                    .1
+                    .value
+                    .iter()
+                    .map(|row| row.values().to_vec())
+                    .collect::<Vec<_>>(),
+                [
+                    values(&[100, 7, 117]),
+                    values(&[100, 7, 117]),
+                    values(&[100, 8, 118]),
+                    values(&[100, 8, 118])
+                ],
+                "new MERGE vertices satisfy MATCH too, but cannot enter its frozen input",
+            );
+            assert_eq!(
+                execute(
+                    &contexts,
+                    &program,
+                    true,
+                    grant(Rights::ReadWrite, 4),
+                    policy(4)
+                )
+                .await
+                .unwrap(),
+                expected,
+                "hidden vertices and fields change neither rows nor metering",
+            );
+        });
+    }
+
+    #[test]
+    fn post_match_vertex_merge_refusals_discard_the_complete_write_prefix() {
+        lab(0xc4a1_2112, |contexts| async move {
+            for (tail, scope_failure) in [
+                ("MERGE (made:Visible {secret:n.p}) RETURN made.p", true),
+                ("MERGE (made:Visible {p:n.p+a.secret}) RETURN made.p", true),
+                (
+                    "MERGE (made:Visible {p:n.p+10}) ON CREATE SET made.secret=1 RETURN made.p LIMIT 0",
+                    true,
+                ),
+                (
+                    "MERGE (made:Visible {p:CASE WHEN n.p=8 THEN null ELSE n.p+10 END}) RETURN made.p LIMIT 0",
+                    false,
+                ),
+            ] {
+                let program = chain(&format!(
+                    "CREATE (a:Visible {{p:1}}) WITH a \
+                     MATCH (n:Visible) WHERE n.p>=7 AND n.p<=8 {tail}"
+                ));
+                for hidden in [false, true] {
+                    let error = execute(
+                        &contexts,
+                        &program,
+                        hidden,
+                        grant(Rights::ReadWrite, 2),
+                        policy(2),
+                    )
+                    .await
+                    .unwrap_err();
+                    if scope_failure {
+                        assert_eq!(
+                            authorization(&error),
+                            Some(Error::ScopeDenied),
+                            "{tail}: {error:?}"
+                        );
+                    } else {
+                        assert!(
+                            error.to_string().to_lowercase().contains("null"),
+                            "{tail}: {error:?}"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn post_match_vertex_merge_shares_native_creation_and_delivery_allowances() {
+        lab(0xc4a1_2113, |contexts| async move {
+            let program = matched_merge();
+            let expected = execute(
+                &contexts,
+                &program,
+                true,
+                grant(Rights::ReadWrite, 4),
+                policy(4),
+            )
+            .await
+            .unwrap();
+            let measured = expected.0;
+            assert!(measured.selection.snapshot_records > 0);
+            assert!(measured.evaluator.work_units > 0);
+            assert!(measured.evaluator.scratch_entries > 0);
+            let exact = GraphInsertPolicy::new(
+                GqlQueryPolicy::new(
+                    measured.selection.snapshot_records,
+                    4,
+                    measured.evaluator.work_units,
+                    measured.evaluator.scratch_entries,
+                ),
+                3,
+                0,
+            );
+            assert_eq!(
+                execute(
+                    &contexts,
+                    &program,
+                    true,
+                    grant(Rights::ReadWrite, 4),
+                    exact
+                )
+                .await
+                .unwrap(),
+                expected,
+            );
+            for dimension in 0..6 {
+                let mut budget = exact;
+                let mut capability = grant(Rights::ReadWrite, 4);
+                match dimension {
+                    0 => {
+                        budget.query.rows = fgdb_gql::GqlExecutionBudget::new(
+                            measured.selection.snapshot_records - 1,
+                            4,
+                        )
+                    }
+                    1 => budget.query.evaluator.max_work_units -= 1,
+                    2 => budget.query.evaluator.max_scratch_entries -= 1,
+                    3 => budget.max_vertices -= 1,
+                    4 => {
+                        budget.query.rows = fgdb_gql::GqlExecutionBudget::new(
+                            measured.selection.snapshot_records,
+                            3,
+                        )
+                    }
+                    _ => capability.limits.max_rows = 3,
+                }
+                let error = execute(&contexts, &program, true, capability, budget)
+                    .await
+                    .expect_err("MATCH, MERGE and output share the complete allowance");
+                if dimension == 5 {
+                    assert_eq!(
+                        authorization(&error),
+                        Some(Error::LimitExceeded(LimitDimension::Rows))
+                    );
+                }
             }
         });
     }

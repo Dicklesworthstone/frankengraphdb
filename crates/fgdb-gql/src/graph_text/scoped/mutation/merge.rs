@@ -2526,14 +2526,24 @@ impl PreparedGraphVertexMergeRowsText {
         // stages and the WITH stages after them (`WITH 42 AS v MERGE ...`);
         // `matched` its MATCH prefix (a WITH head, or every MATCH binding as
         // `WITH *` carries them) and the row stages after it.
-        // `unwound_match` is a first write's `UNWIND ... MATCH ...` read.
+        // `unwound_match` is the leading-row compiler's MATCH relation: a
+        // first write's `UNWIND ... MATCH ...`, or a later MATCH over owned
+        // rows. Its input schema stays separate from its output schema.
         let mut matched = None;
         let mut unwound_match = None;
+        let mut matched_owned = None;
         let (mut parser, row, owned, leading) = match from {
             Some(from) => {
-                let (_, types) = from.owned_columns();
-                let parser = parser.resume_after(from.boundary, &from.parameters, from.at)?;
-                (parser, from.row, Some(types), None)
+                let (columns, types) = from.owned_columns();
+                let mut parser = parser.resume_after(from.boundary, &from.parameters, from.at)?;
+                if parser.is_word("MATCH") {
+                    let (source, row) = parser.owned_match_row_prefix(statement, from.row)?;
+                    unwound_match = Some(source);
+                    matched_owned = Some(Box::new((columns, types)));
+                    (parser, row, None, None)
+                } else {
+                    (parser, from.row, Some(types), None)
+                }
             }
             None => {
                 let mut parser = parser;
@@ -2831,9 +2841,10 @@ impl PreparedGraphVertexMergeRowsText {
                         .syntax
                         .element_keys
                         .extend(parser.syntax.element_keys.iter().cloned());
-                    VertexMergeRowsTextInput::Relation(Box::new(
-                        source.resolve(crate::graph_text::LentResolver(&mut *resolve))?,
-                    ))
+                    let mut input =
+                        source.resolve(crate::graph_text::LentResolver(&mut *resolve))?;
+                    input.owned = matched_owned;
+                    VertexMergeRowsTextInput::Relation(Box::new(input))
                 }
                 None => VertexMergeRowsTextInput::Unit,
             },
@@ -2864,7 +2875,10 @@ impl PreparedGraphVertexMergeRowsText {
     pub(crate) fn owned_column_types(&self) -> Option<&[GraphSetColumnType]> {
         match &self.input {
             VertexMergeRowsTextInput::Owned(types) => Some(types),
-            VertexMergeRowsTextInput::Unit | VertexMergeRowsTextInput::Relation(_) => None,
+            VertexMergeRowsTextInput::Relation(input) => {
+                input.owned.as_deref().map(|(_, types)| types.as_slice())
+            }
+            VertexMergeRowsTextInput::Unit => None,
         }
     }
 

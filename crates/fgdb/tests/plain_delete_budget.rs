@@ -118,14 +118,25 @@ fn chain_delete_proof_and_return_share_limits_and_preserve_an_existing_prefix() 
                     assert_eq!(receipt.stats().mutation_effects, 3);
                     assert!(rows.value.is_empty(), "LIMIT 0 cannot suppress effects");
                     assert!(txn.vertex(&db, VId(1)).unwrap().is_none());
-                    let graph = (txn.vertices(&db).unwrap(), txn.edges(&db).unwrap());
+                    let mut graph = (txn.vertices(&db).unwrap(), txn.edges(&db).unwrap());
                     assert_eq!(graph.0.len(), 2 + created as usize);
                     assert_eq!(graph.1, vec![before.2[2].clone()]);
                     if let Some(expected) = measured {
                         assert_eq!(usage, expected, "exact cumulative limits must succeed");
                         assert_eq!(Some(&graph), expected_graph.as_ref());
                         txn.finish(&mut db, &commit).await.unwrap();
-                        assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
+                        let committed_at = db.frontier().unwrap();
+                        assert_eq!(committed_at.0, before.0.0 + 1);
+                        // Only updated/created vertices receive a new durable
+                        // version stamp; all other row fields stay exact.
+                        for row in &mut graph.0 {
+                            if row.vid == VId(3)
+                                || (1_000..1_000 + u128::from(created)).contains(&row.vid.0)
+                            {
+                                assert_eq!(row.created_at, before.0);
+                                row.created_at = committed_at;
+                            }
+                        }
                         assert_eq!((db.vertices().unwrap(), db.edges().unwrap()), graph);
                     } else {
                         assert!(usage.into_iter().all(|value| value > 0));
@@ -422,14 +433,20 @@ fn standalone_delete_return_reserves_its_projection_before_incidence_and_staging
                         result.evaluator.scratch_entries,
                     ];
                     assert!(txn.vertex(&db, VId(1)).unwrap().is_none());
-                    let graph = (txn.vertices(&db).unwrap(), txn.edges(&db).unwrap());
+                    let mut graph = (txn.vertices(&db).unwrap(), txn.edges(&db).unwrap());
                     assert_eq!(graph.0.len(), 2);
                     assert_eq!(graph.1, vec![before.2[2].clone()]);
                     if let Some(prior) = measured {
                         assert_eq!(usage, prior);
                         assert_eq!(Some(&(stats, result, graph.clone())), expected.as_ref());
                         txn.finish(&mut db, &commit).await.unwrap();
-                        assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
+                        let committed_at = db.frontier().unwrap();
+                        assert_eq!(committed_at.0, before.0.0 + 1);
+                        // The pre-existing prefix updates only V3. Keep V2's
+                        // original version and every edge field unchanged.
+                        let changed = graph.0.iter_mut().find(|row| row.vid == VId(3)).unwrap();
+                        assert_eq!(changed.created_at, before.0);
+                        changed.created_at = committed_at;
                         assert_eq!((db.vertices().unwrap(), db.edges().unwrap()), graph);
                     } else {
                         measured = Some(usage);

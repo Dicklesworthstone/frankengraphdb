@@ -10,7 +10,7 @@ use crate::write_txn::{
     frozen_merge_predicates, point_scalar_payload_admission, vertex_merge_row_actions_controlled,
 };
 use fgdb_delta_types::{ElementId, PropertyKeyId};
-use fgdb_gql::algebra::{GraphValue, GraphValueRow, VertexPredicate};
+use fgdb_gql::algebra::{GraphValue, GraphValueRow, PreparedGraphPattern, VertexPredicate};
 use fgdb_gql::insertion::{GraphInsertIntent, GraphInsertPolicy, GraphInsertStats};
 use fgdb_gql::{
     GlaExecutionEvent, GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded, GqlExecutionStats,
@@ -443,22 +443,43 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
     cx.with_restriction(|| {
         let selected = {
             let controls = RefCell::new(&mut *execution);
+            let mut source = fgdb_gql::WithElementReads {
+                source: |pattern: &PreparedGraphPattern<GraphValueRow>, allowance| {
+                    admit_pattern(pattern, scope).map_err(GqlQueryError::Source)?;
+                    selection::select_overlay(
+                        transaction,
+                        database,
+                        cx,
+                        pattern,
+                        scope,
+                        allowance,
+                        &controls,
+                    )
+                },
+                elements: |element, key| {
+                    // Named fields retain the same explicit-refusal contract
+                    // as a MATCH projection. An imported identity confers no
+                    // authority: require Read, admit its visible domain, and
+                    // charge the same signed permit before the point lookup.
+                    if !scope.allows_property(key) {
+                        return Err(WriteTxnError::Authorization(Error::ScopeDenied));
+                    }
+                    selection::returning_element_property(
+                        transaction,
+                        database,
+                        cx,
+                        element,
+                        key,
+                        scope,
+                        &controls,
+                    )
+                },
+            };
             merge
-                .select_governed::<WriteTxnError, WriteTxnError, WriteTxnError>(
+                .select_governed_with_source::<WriteTxnError, WriteTxnError, WriteTxnError>(
                     owned,
                     private.query,
-                    |pattern, allowance| {
-                        admit_pattern(pattern, scope).map_err(GqlQueryError::Source)?;
-                        selection::select_overlay(
-                            transaction,
-                            database,
-                            cx,
-                            pattern,
-                            scope,
-                            allowance,
-                            &controls,
-                        )
-                    },
+                    &mut source,
                     || {
                         cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                         controls.borrow_mut().checkpoint()

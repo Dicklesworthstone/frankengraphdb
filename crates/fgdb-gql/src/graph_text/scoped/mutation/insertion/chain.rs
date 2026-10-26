@@ -13,6 +13,7 @@ use crate::{
 enum MatchedWrite {
     Insert,
     Mutation,
+    VertexMerge,
 }
 
 impl PreparedGraphWriteChainText {
@@ -278,7 +279,7 @@ impl PreparedGraphWriteChainText {
     /// Property keys, labels, aliases, map entries and STARTS/ENDS WITH are
     /// never clause boundaries.
     fn matched_write(mut lexer: Lexer<'_>) -> Result<Option<MatchedWrite>, GraphPatternTextError> {
-        const READS: [&str; 6] = ["OPTIONAL", "RETURN", "MERGE", "CALL", "UNION", "FOREACH"];
+        const READS: [&str; 5] = ["OPTIONAL", "RETURN", "CALL", "UNION", "FOREACH"];
         let mut depth = 0_usize;
         let mut row_stages = false;
         let mut previous: Option<TokenKind<'_>> = None;
@@ -296,6 +297,37 @@ impl PreparedGraphWriteChainText {
                 {
                     if word.eq_ignore_ascii_case("CREATE") || word.eq_ignore_ascii_case("INSERT") {
                         return Ok((!row_stages).then_some(MatchedWrite::Insert));
+                    }
+                    if word.eq_ignore_ascii_case("MERGE")
+                        && matches!(
+                            script::next_script_token(&mut lexer.clone())?.kind,
+                            TokenKind::Punct(b'(')
+                        )
+                    {
+                        // A vertex MERGE reads the complete MATCH relation.
+                        // Relationship MERGE remains with its own compiler:
+                        // inspect past the whole node pattern, including
+                        // nested property values, before choosing this owner.
+                        let mut pattern = lexer.clone();
+                        let mut nested = 0_usize;
+                        loop {
+                            match script::next_script_token(&mut pattern)?.kind {
+                                TokenKind::Punct(b'(' | b'[' | b'{') => nested += 1,
+                                TokenKind::Punct(b')' | b']' | b'}') => {
+                                    nested = nested.saturating_sub(1);
+                                    if nested == 0 {
+                                        break;
+                                    }
+                                }
+                                TokenKind::End | TokenKind::Punct(b';') => return Ok(None),
+                                _ => {}
+                            }
+                        }
+                        let vertex = !matches!(
+                            script::next_script_token(&mut pattern)?.kind,
+                            TokenKind::Punct(b'-' | b'<')
+                        );
+                        return Ok(vertex.then_some(MatchedWrite::VertexMerge));
                     }
                     if (word.eq_ignore_ascii_case("SET") || word.eq_ignore_ascii_case("REMOVE"))
                         && Self::mutation_clause_target(lexer.clone())?
@@ -629,9 +661,12 @@ impl PreparedGraphWriteChainText {
                 next = after;
                 continue;
             }
-            let merge = matches!(lexer.next()?.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("MERGE"));
+            let matched_vertex_merge = matches!(matched, Some(MatchedWrite::VertexMerge));
+            let merge = matched_vertex_merge
+                || matches!(lexer.next()?.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("MERGE"));
             // A relationship MERGE names row vertices: `(a)-` or `(a)<-`.
             let relationship = merge
+                && !matched_vertex_merge
                 && matches!(lexer.next()?.kind, TokenKind::Punct(b'('))
                 && matches!(lexer.next()?.kind, TokenKind::Word(_))
                 && matches!(lexer.next()?.kind, TokenKind::Punct(b')'))

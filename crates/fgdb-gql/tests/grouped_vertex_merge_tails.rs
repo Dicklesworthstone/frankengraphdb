@@ -1,15 +1,17 @@
 //! Grouped vertex-MERGE continuations read the chosen vertex after its actions.
 //! Direct identity keys carry fields; aggregate representatives do not.
 
-use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_gql::algebra::{GraphValue, GraphValueRow};
+use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};
+use fgdb_gql::algebra::{GraphValue, GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::{
     GlaExecutionStats, GqlExecutionStats, GqlParameters, GqlQueryError, GqlQueryExecution,
-    GqlQueryPolicy, GraphSetExecutionError, GraphSymbol, GraphSymbolKind, GraphVertexReturnBinding,
+    GqlQueryPolicy, GraphSetExecutionError, GraphSymbol, GraphSymbolKind, GraphVertexMergeError,
+    GraphVertexReturnBinding, GraphWriteChainStep, PreparedGraphVertexMergeRows,
     PreparedGraphVertexUpsertQuery, PreparedGraphVertexUpsertQueryText,
+    PreparedGraphWriteChainText, WithElementReads,
 };
-use fgdb_types::{CanonicalScalar, VId};
-use std::cell::Cell;
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
+use std::cell::{Cell, RefCell};
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
@@ -274,5 +276,255 @@ fn grouped_vertex_work_scratch_and_every_checkpoint_remain_cumulative() {
             },
         );
         assert!(matches!(output, Err(GqlQueryError::Interrupted(at)) if at == fail_at));
+    }
+}
+
+type MatchedInput = Result<Output, GqlQueryError<GraphVertexMergeError<&'static str, ()>, usize>>;
+
+/// The fixture only supplies graph records. MATCH, the owned-row join,
+/// projection, hidden property reads and UNWIND all run the native GLA.
+fn matched_input(
+    merge: &PreparedGraphVertexMergeRows,
+    allowance: GqlQueryPolicy,
+    reader: Option<Result<i64, &'static str>>,
+    checkpoint: &mut impl FnMut() -> Result<(), usize>,
+) -> (MatchedInput, usize, Vec<(ElementId, PropertyKeyId)>) {
+    let vertices = [1, 2, 3].map(|id| VId((1_u128 << 100) + id));
+    let properties =
+        [1, 2, 3].map(|value| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)));
+    let pattern_calls = Cell::new(0);
+    let point_calls = RefCell::new(Vec::new());
+    let checkpoint = RefCell::new(checkpoint);
+    let mut patterns = |pattern: &PreparedGraphPattern<GraphValueRow>, remaining| {
+        pattern_calls.set(pattern_calls.get() + 1);
+        pattern.plan().execute_governed_with_properties(
+            vertices.len() as u64,
+            vertices,
+            std::iter::empty::<(VId, RelationId, VId)>(),
+            |vertex, predicates| {
+                let at = vertices
+                    .iter()
+                    .position(|&candidate| candidate == vertex)
+                    .unwrap();
+                Ok::<_, &'static str>(
+                    predicates
+                        .iter()
+                        .all(|predicate| predicate.matches_borrowed([], [(P, &properties[at])])),
+                )
+            },
+            |vertex, key| {
+                let at = vertices
+                    .iter()
+                    .position(|&candidate| candidate == vertex)
+                    .unwrap();
+                Ok((key == P).then_some(&properties[at]))
+            },
+            remaining,
+            || (checkpoint.borrow_mut())(),
+        )
+    };
+    // This is the exact one-column row schema exported by the CREATE's WITH.
+    // Its full-width identity is deliberately absent from the MATCH fixture.
+    let owned = Some(vec![GraphValueRow::from_owned_values(vec![
+        GraphValue::Vertex(V),
+    ])]);
+    let result = if let Some(value) = reader {
+        let mut source = WithElementReads {
+            source: patterns,
+            elements: |element, key| {
+                point_calls.borrow_mut().push((element, key));
+                assert_eq!((element, key), (ElementId::Vertex(V), P));
+                value.map(|number| {
+                    Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(number)))
+                })
+            },
+        };
+        merge.select_governed_with_source::<&'static str, (), usize>(
+            owned,
+            allowance,
+            &mut source,
+            || (checkpoint.borrow_mut())(),
+        )
+    } else {
+        // Omitting a reader keeps the existing pattern-only API's typed
+        // refusal; an owned identity must never silently acquire a property.
+        merge.select_governed::<&'static str, (), usize>(owned, allowance, &mut patterns, || {
+            (checkpoint.borrow_mut())()
+        })
+    };
+    (result, pattern_calls.get(), point_calls.into_inner())
+}
+
+const MATCHED_MERGE: &str = "CREATE (audit) WITH audit MATCH (n) WHERE n.p >= $minimum \
+    WITH audit,n UNWIND [0,0] AS occurrence \
+    MERGE (made {q:n.p+audit.p+$delta}) RETURN made";
+
+fn matched_arguments(delta: i64) -> GqlParameters {
+    GqlParameters::new()
+        .with_int64("minimum", 2)
+        .unwrap()
+        .with_int64("delta", delta)
+        .unwrap()
+}
+
+#[test]
+fn post_write_match_merge_source_reads_owned_properties_and_late_parameters() {
+    let catalog_calls = Cell::new(0);
+    assert!(PreparedGraphWriteChainText::is_chain(MATCHED_MERGE).unwrap());
+    let template = PreparedGraphWriteChainText::prepare(
+        MATCHED_MERGE,
+        R,
+        |kind: GraphSymbolKind, name: &str| {
+            catalog_calls.set(catalog_calls.get() + 1);
+            symbols(kind, name)
+        },
+    )
+    .unwrap();
+    let resolved = catalog_calls.get();
+    assert!(resolved > 0);
+    assert!(
+        template
+            .bind_parameters(&GqlParameters::new().with_int64("minimum", 2).unwrap())
+            .is_err()
+    );
+    for delta in [5, 9] {
+        let chain = template.bind_parameters(&matched_arguments(delta)).unwrap();
+        assert_eq!(
+            catalog_calls.get(),
+            resolved,
+            "rebinding does not resolve symbols again"
+        );
+        let [_, GraphWriteChainStep::VertexMergeQuery(query)] = chain.steps() else {
+            panic!("the complete mandatory MATCH must feed one native MERGE");
+        };
+        let merge = query.merge();
+        let (result, patterns, points) =
+            matched_input(merge, policy(4), Some(Ok(10)), &mut || Ok(()));
+        let result = result.unwrap();
+        assert_eq!(
+            patterns, 1,
+            "one native graph selection for the full input bag"
+        );
+        assert!(
+            !points.is_empty(),
+            "the unrematched carried identity uses the point reader"
+        );
+        assert_eq!(result.rows.snapshot_records, 3);
+        assert_eq!(result.rows.result_rows, 4);
+        assert_eq!(merge.property_keys().collect::<Vec<_>>(), vec![Q]);
+        for (row_at, (row, property)) in result.value.iter().zip([2, 2, 3, 3]).enumerate() {
+            assert_eq!(
+                &row.values()[..3],
+                &[
+                    GraphValue::Vertex(V),
+                    GraphValue::Vertex(VId((1_u128 << 100) + property as u128)),
+                    int(0),
+                ]
+            );
+            let key = merge
+                .stored_tuple::<&'static str, (), usize>(row_at, row, &mut |_| Ok(()))
+                .unwrap();
+            assert_eq!(
+                key,
+                vec![CanonicalPropertyValue::Scalar(CanonicalScalar::Int(
+                    property + 10 + delta
+                ))]
+            );
+        }
+    }
+}
+
+#[test]
+fn post_write_match_merge_source_enforces_exact_cumulative_limits() {
+    let chain = PreparedGraphWriteChainText::prepare(MATCHED_MERGE, R, symbols)
+        .unwrap()
+        .bind_parameters(&matched_arguments(5))
+        .unwrap();
+    let [_, GraphWriteChainStep::VertexMergeQuery(query)] = chain.steps() else {
+        panic!("native MERGE query");
+    };
+    let merge = query.merge();
+    let measured = matched_input(merge, policy(4), Some(Ok(10)), &mut || Ok(()))
+        .0
+        .unwrap();
+    let exact = GqlQueryPolicy::new(
+        measured.rows.snapshot_records,
+        4,
+        measured.evaluator.work_units,
+        measured.evaluator.scratch_entries,
+    );
+    let exact_result = matched_input(merge, exact, Some(Ok(10)), &mut || Ok(()))
+        .0
+        .unwrap();
+    assert_eq!(exact_result, measured);
+    for dimension in 0..4 {
+        let mut tight = exact;
+        match dimension {
+            0 => {
+                tight.rows =
+                    fgdb_gql::GqlExecutionBudget::new(measured.rows.snapshot_records - 1, 4)
+            }
+            1 => tight.evaluator.max_work_units -= 1,
+            2 => tight.evaluator.max_scratch_entries -= 1,
+            _ => tight.rows = fgdb_gql::GqlExecutionBudget::new(measured.rows.snapshot_records, 3),
+        }
+        let error = matched_input(merge, tight, Some(Ok(10)), &mut || Ok(()))
+            .0
+            .unwrap_err();
+        assert!(
+            matches!(error, GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_)),
+            "dimension {dimension}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn post_write_match_merge_source_preserves_reader_refusals_and_cancellation() {
+    let chain = PreparedGraphWriteChainText::prepare(MATCHED_MERGE, R, symbols)
+        .unwrap()
+        .bind_parameters(&matched_arguments(5))
+        .unwrap();
+    let [_, GraphWriteChainStep::VertexMergeQuery(query)] = chain.steps() else {
+        panic!("native MERGE query");
+    };
+    let merge = query.merge();
+    let (denied, patterns, points) =
+        matched_input(merge, policy(4), Some(Err("denied")), &mut || Ok(()));
+    assert!(matches!(
+        denied,
+        Err(GqlQueryError::Source(GraphVertexMergeError::InputRelation(
+            GraphSetExecutionError::Source("denied")
+        )))
+    ));
+    assert_eq!(patterns, 1);
+    assert_eq!(points, vec![(ElementId::Vertex(V), P)]);
+    let missing = matched_input(merge, policy(4), None, &mut || Ok(())).0;
+    assert!(matches!(
+        missing,
+        Err(GqlQueryError::Source(GraphVertexMergeError::InputRelation(
+            GraphSetExecutionError::Projection { .. }
+        )))
+    ));
+    let mut checkpoints = 0;
+    matched_input(merge, policy(4), Some(Ok(10)), &mut || {
+        checkpoints += 1;
+        Ok(())
+    })
+    .0
+    .unwrap();
+    assert!(checkpoints > 1);
+    for fail_at in [0, checkpoints / 2, checkpoints - 1] {
+        let mut at = 0;
+        let result = matched_input(merge, policy(4), Some(Ok(10)), &mut || {
+            let current = at;
+            at += 1;
+            if current == fail_at {
+                Err(current)
+            } else {
+                Ok(())
+            }
+        })
+        .0;
+        assert!(matches!(result, Err(GqlQueryError::Interrupted(at)) if at == fail_at));
     }
 }

@@ -691,14 +691,36 @@ impl WriteTxn {
             }));
         }
         cx.with_restriction(|| {
-            let selected = merge.select_governed::<WriteTxnError, A, _>(
-                owned,
-                policy.query,
-                |pattern, allowance| {
-                    self.execute_graph_pattern_governed(database, cx, pattern, allowance)
-                },
-                || cx.checkpoint(),
-            )?;
+            // A MATCH input may also read a carried element it does not
+            // rematch. Both callbacks borrow this same entry overlay until
+            // every input row is complete; row MERGEs start only afterwards.
+            let failure = std::cell::RefCell::new(None);
+            let selected = {
+                let mut source = fgdb_gql::WithElementReads {
+                    source: |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
+                        fgdb_gql::algebra::GraphValueRow,
+                    >,
+                             allowance| {
+                        self.execute_graph_pattern_governed(database, cx, pattern, allowance)
+                    },
+                    elements: |element, key| {
+                        self.element_property_with_checkpoint(database, cx, &failure, element, key)
+                    },
+                };
+                merge.select_governed_with_source::<WriteTxnError, A, _>(
+                    owned,
+                    policy.query,
+                    &mut source,
+                    || match failure.borrow_mut().take() {
+                        Some(error) => Err(error),
+                        None => cx.checkpoint(),
+                    },
+                )
+            };
+            let selected = match failure.into_inner() {
+                Some(error) => return Err(GqlQueryError::Interrupted(error)),
+                None => selected?,
+            };
             let rows = selected.value;
             let mut used = GraphVertexMergeStats {
                 match_selection: GqlExecutionStats {

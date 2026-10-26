@@ -568,13 +568,32 @@ impl PreparedGraphVertexMergeRows {
         &self,
         owned: Option<Vec<GraphValueRow>>,
         policy: GqlQueryPolicy,
-        patterns: impl FnMut(
+        mut patterns: impl FnMut(
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
         ) -> Result<
             crate::GqlQueryExecution<GraphValueRow>,
             crate::GqlQueryError<E, C>,
         >,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<
+        crate::GqlQueryExecution<GraphValueRow>,
+        crate::GqlQueryError<GraphVertexMergeError<E, A>, C>,
+    > {
+        self.select_governed_with_source(owned, policy, &mut patterns, checkpoint)
+    }
+
+    /// The same row selection with the host's complete source capabilities.
+    /// A graph relation over owned rows may project a carried identity's
+    /// property; that read uses this source at the same frozen input cut as
+    /// every MATCH. Owned identities themselves grant no read authority.
+    /// A host without an element reader retains the typed unsupported-read
+    /// refusal of [`Self::select_governed`]. Both entries use one evaluator.
+    pub fn select_governed_with_source<E, A, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GqlQueryPolicy,
+        source: &mut dyn crate::GraphSetSource<E, C>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<
         crate::GqlQueryExecution<GraphValueRow>,
@@ -594,11 +613,7 @@ impl PreparedGraphVertexMergeRows {
                 rows
             }
             (GraphVertexMergeRowsInput::Relation(relation), rows) => {
-                let mut patterns = patterns;
-                let mut source = crate::set_ops::WithOwnedRows {
-                    source: &mut patterns,
-                    rows,
-                };
+                let mut source = crate::set_ops::WithOwnedRows { source, rows };
                 let result = relation
                     .execute_with_source(policy, &mut source, checkpoint)
                     .map_err(|error| error.map_source(GraphVertexMergeError::InputRelation))?;
