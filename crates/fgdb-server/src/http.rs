@@ -17,6 +17,7 @@
 //! POST /v1/databases/<name>/query          (read)
 //! POST /v1/databases/<name>/query-diff     (finite historical result changes)
 //! POST /v1/databases/<name>/write          (write)
+//! POST /v1/databases/<name>/write-if-current (exact-frontier conditional write)
 //! POST /v1/databases/<name>/write-batch    (one atomic ingestion program)
 //!      Authorization: Bearer <hex capability token>
 //!      {"statement": "<gql>", "parameters": {"name": <json>, ...}}
@@ -42,7 +43,8 @@ mod studio;
 use crate::Server;
 use crate::commits::CommitWatcher;
 use crate::execute::{
-    Answer, DifferenceAnswer, Refusal, read, read_difference, write, write_batch,
+    Answer, DifferenceAnswer, Refusal, authorize_write, read, read_difference, write, write_batch,
+    write_if_current,
 };
 use crate::recovery::Generation;
 use asupersync::Cx;
@@ -52,7 +54,8 @@ use asupersync::sync::Mutex;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use fgdb_protocol::body::{
-    Body, DiffMode, ErrorCode, Execute, ExecuteBatch, ExecuteDiff, ExecuteMode, Outcome,
+    Body, DiffMode, ErrorCode, Execute, ExecuteBatch, ExecuteConditionalWrite, ExecuteDiff,
+    ExecuteMode, Outcome,
 };
 use fgdb_protocol::json::{Json, argument, cell, parse_json, quote};
 use fgdb_warden::{Authority, CapabilityToken, VerifiedCapability};
@@ -412,6 +415,56 @@ fn statement(request: &Request, mode: ExecuteMode) -> Result<Execute, Response> 
     })
 }
 
+/// The expected frontier is exact unsigned decimal text, never an f64 or a
+/// lower bound. The body cannot select a different write mode or batch API.
+fn conditional_statement(request: &Request) -> Result<ExecuteConditionalWrite, Response> {
+    let malformed = |detail: &str| refusal_response(ErrorCode::Protocol, detail);
+    let mut fields = body_fields(request)?;
+    let expected = match fields.remove("expected_seq") {
+        Some(Json::String(text) | Json::Number(text)) => text,
+        _ => {
+            return Err(malformed(
+                "\"expected_seq\" must be an unsigned decimal sequence",
+            ));
+        }
+    };
+    if expected.is_empty() || !expected.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(malformed(
+            "\"expected_seq\" must be an unsigned decimal sequence",
+        ));
+    }
+    let expected_seq = expected
+        .parse::<u64>()
+        .map_err(|_| malformed("\"expected_seq\" exceeds the u64 sequence range"))?;
+    let Some(Json::String(statement)) = fields.remove("statement") else {
+        return Err(malformed("body needs a \"statement\" string"));
+    };
+    let parameters = match fields.remove("parameters") {
+        None | Some(Json::Null) => Vec::new(),
+        Some(Json::Object(parameters)) => parameters
+            .iter()
+            .map(|(name, value)| {
+                argument(value)
+                    .map(|value| (name.clone(), value))
+                    .map_err(|error| malformed(&format!("parameter ${name}: {error}")))
+            })
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err(malformed("\"parameters\" must be an object")),
+    };
+    if let Some(unknown) = fields.keys().next() {
+        return Err(malformed(&format!("unknown body field {unknown:?}")));
+    }
+    let conditional = ExecuteConditionalWrite {
+        expected_seq,
+        statement,
+        parameters,
+    };
+    conditional
+        .encode()
+        .map_err(|error| malformed(&format!("invalid conditional write: {error}")))?;
+    Ok(conditional)
+}
+
 /// Cuts retain their exact decimal text through JSON parsing. Strings let
 /// callers represent every u64 without their JSON library rounding a number.
 fn difference_statement(request: &Request) -> Result<ExecuteDiff, Response> {
@@ -701,7 +754,7 @@ pub(crate) async fn respond<'s>(
     let mode = match verb {
         "query" => Some(ExecuteMode::Read),
         "write" => Some(ExecuteMode::Write),
-        "write-batch" | "query-diff" => None,
+        "write-batch" | "query-diff" | "write-if-current" => None,
         _ => {
             return json_response(
                 404,
@@ -772,7 +825,18 @@ pub(crate) async fn respond<'s>(
             Err(Refusal { code, message }) => refusal_response(code, &message),
         };
     }
-    let answer = if let Some(mode) = mode {
+    let answer = if verb == "write-if-current" {
+        // Reject missing write rights before parsing any body fields. The
+        // native owner authenticates again after waiting for its writer guard.
+        if let Err(Refusal { code, message }) = authorize_write(db, &token) {
+            return refusal_response(code, &message);
+        }
+        let statement = match conditional_statement(&request) {
+            Ok(statement) => statement,
+            Err(response) => return response,
+        };
+        write_if_current(cx, db, &token, &statement).await
+    } else if let Some(mode) = mode {
         let statement = match statement(&request, mode) {
             Ok(statement) => statement,
             Err(response) => return response,

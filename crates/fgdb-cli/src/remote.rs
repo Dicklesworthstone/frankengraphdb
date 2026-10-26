@@ -56,6 +56,8 @@ struct RemoteOptions {
     write_mode: prepared_writes::WriteMode,
     /// A finite after-minus-before comparison at two explicit revisions.
     difference: Option<diff::Options>,
+    /// A single text write may require the selected database's current cut.
+    expected_seq: Option<u64>,
 }
 
 struct RemoteTls {
@@ -80,6 +82,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     let mut before = None;
     let mut after = None;
     let mut stream = false;
+    let mut expected_seq = None;
     let mut at = 0;
     while at < args.len() {
         let flag = args[at].as_str();
@@ -102,6 +105,9 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
             "--before" if before.is_none() => before = Some(diff::parse_cut(&value()?, flag)?),
             "--after" if after.is_none() => after = Some(diff::parse_cut(&value()?, flag)?),
             "--stream" if !stream => stream = true,
+            "--if-current" if expected_seq.is_none() => {
+                expected_seq = Some(diff::parse_cut(&value()?, flag)?);
+            }
             "--rows-file" if rows_file.is_none() => rows_file = Some(PathBuf::from(value()?)),
             "--prepared-jsonl" if prepared_jsonl.is_none() => {
                 prepared_jsonl = Some(PathBuf::from(value()?));
@@ -229,6 +235,13 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
             "--write-mode requires remote write --prepared-jsonl",
         ));
     }
+    if expected_seq.is_some()
+        && (verb != "write" || rows_file.is_some() || prepared_jsonl.is_some())
+    {
+        return Err(Failure::usage(
+            "--if-current applies only to a single text write, without --rows-file or --prepared-jsonl",
+        ));
+    }
     let tls = match (tls_server_name, tls_ca_file) {
         (Some(server_name), Some(ca_file)) => Some(RemoteTls {
             server_name,
@@ -266,6 +279,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         prepared_jsonl,
         write_mode: write_mode.unwrap_or_default(),
         difference,
+        expected_seq,
     })
 }
 
@@ -490,6 +504,29 @@ fn failure(error: ClientError) -> Failure {
     }
 }
 
+/// Choose the conditional wire operation before sending any statement. A
+/// refusal is returned unchanged; no stale write is retried unconditionally.
+async fn execute_statement(
+    cx: &asupersync::Cx,
+    client: &mut Client,
+    mode: ExecuteMode,
+    expected_seq: Option<u64>,
+    statement: &str,
+    parameters: Vec<(String, WireValue)>,
+) -> Result<fgdb_protocol::client::Answer, ClientError> {
+    match expected_seq {
+        Some(expected) if mode == ExecuteMode::Write => {
+            client
+                .execute_write_if_current(cx, expected, statement, parameters)
+                .await
+        }
+        Some(_) => Err(ClientError::Protocol(
+            "a conditional operation requires write mode",
+        )),
+        None => client.execute(cx, mode, statement, parameters).await,
+    }
+}
+
 pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Failure> {
     let options = parse(args)?;
     let runtime = fgdb::runtime_builder().build().map_err(Failure::io)?;
@@ -596,10 +633,16 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
             .select(&cx, &options.database)
             .await
             .map_err(failure)?;
-        let answer = client
-            .execute(&cx, options.mode, &options.statement, options.parameters)
-            .await
-            .map_err(failure)?;
+        let answer = execute_statement(
+            &cx,
+            &mut client,
+            options.mode,
+            options.expected_seq,
+            &options.statement,
+            options.parameters,
+        )
+        .await
+        .map_err(failure)?;
         // The answer is complete; a failed DRAIN cannot change it.
         let _ = client.close(&cx).await;
         Ok::<_, Failure>(answer)

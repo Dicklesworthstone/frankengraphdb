@@ -61,6 +61,7 @@ these values; callers cannot authenticate merely by constructing the structs.
 | EXECUTE_DIFF | 0x0024 | client |
 | EXECUTE_PREPARED_DIFF | 0x0025 | client |
 | DIFF_RESULT_CHUNK / DIFF_RESULT_END | 0x0026 / 0x0027 | server |
+| EXECUTE_CONDITIONAL_WRITE | 0x0028 | client |
 
 These are the implemented mechanism-profile tags, not an assertion that every
 Appendix D frame body and its generated registry have been implemented.
@@ -169,6 +170,7 @@ redacted from `Debug`.
 | SELECT_DATABASE | `name text` |
 | READY | `namespace [32]`, `incarnation [32]`, `service_epoch u64`, `posture u8`, `authority_commitment [32]`, `frontier u64` |
 | EXECUTE | `mode u8` (0 read, 1 write, 2 subscribe, 3 native source read stream, 4 external ordered read), `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
+| EXECUTE_CONDITIONAL_WRITE | `expected_seq u64`, `statement text`, `parameters [(name text, value)]` (names strictly ascending); native text writes only, including RETURN |
 | EXECUTE_BATCH | `statement text`, `argument_sets u32`, then that many parameter maps (each `count u32`, then strictly ascending `(name text, value)` pairs) |
 | EXECUTE_PREPARED_BATCH | nonzero connection-owned `handle [16]`, `argument_sets u32`, then that many parameter maps with the same canonical encoding and shared bounds as EXECUTE_BATCH; the handle must name a write template |
 | EXECUTE_DIFF | `mode u8` (0 buffered, 1 ordered stream), `before u64`, `after u64`, `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
@@ -319,6 +321,66 @@ cursor checkpoint, delivery acknowledgement or resumable changefeed. They do not
 provide cross-branch comparison, mutation events or retention guarantees for
 future requests. A later invocation must independently authorize and admit its
 requested endpoints.
+
+### Conditional writes at an exact revision
+
+`EXECUTE_CONDITIONAL_WRITE` executes one native text write only when the selected
+database is still at `expected_seq`. The request uses Ready binding on the control
+stream. Fresh write authority is checked before waiting for the exclusive writer
+and again after acquiring it. The healthy frontier is compared before parameter
+conversion, binding, identity allocation or effects, and that same guard remains
+owned through the normal native completion. A competing commit cannot pass
+between the comparison and publication.
+
+A mismatch returns `conflict`, with no effects and no disclosure of the current
+sequence in the diagnostic. This applies even to a statement that would match no
+rows or make no change. A matching no-effect write returns ordinary `ReadClosed`
+without advancing the frontier. `RETURN` uses the same condition and keeps native
+result admission before completion, including expression and row-limit refusals.
+The capability's scope, signed limits, expiry and recovery fences remain active.
+
+Rust clients call `execute_write_if_current(cx, expected_seq, text, parameters)`
+or `execute_write_if_current_streaming` with the ordinary columns/row callbacks.
+Results use `SNAPSHOT_RESULT_CHUNK` and `SNAPSHOT_RESULT_END` with the ordinary
+`WriteCommitted` or `ReadClosed` outcome. Callback cancellation stops delivery;
+it cannot undo effects that already committed. The client never turns a conflict
+into an unconditional write, retries automatically, or treats `outcome_unknown`
+or a disconnect as proof that nothing committed.
+
+The expected revision belongs to the selected database incarnation. Use a
+revision observed from that same database; a bare sequence is not globally
+meaningful across independently created or replaced databases. This is a
+conservative condition on the whole database: even an unrelated intervening
+commit causes conflict. It provides no property-level conflict detection,
+historical rebasing, durable retry identity or cross-request transaction.
+
+```sh
+fgdb --robot remote --addr 127.0.0.1:7688 --token-file writer.hex \
+  --database social --param age=int:31 write --if-current 12 \
+  "MATCH (n:Person) WHERE n.name='Ada' SET n.age=\$age RETURN n.age AS age"
+```
+
+`--if-current` requires one unsigned decimal u64, including zero. It applies
+only to plain text `remote write`, with the existing typed parameters and TLS
+options. Argument-file batches and prepared JSONL input cannot use this flag.
+Output remains the ordinary versioned write contract; a conflict is a query
+refusal with robot code `conflict` and exit status 3. The caller can read the new
+state and decide whether to issue a new conditional request.
+
+HTTP exposes the same operation as
+`POST /v1/databases/<name>/write-if-current`, using the usual bearer token:
+
+```json
+{"statement":"MATCH (n:Person) WHERE n.name=$name SET n.age=$age RETURN n.age AS age","parameters":{"name":"Ada","age":31},"expected_seq":"12"}
+```
+
+The required `expected_seq` accepts a decimal string or an exact integer JSON
+token, with no floating-point conversion. Invalid, negative, fractional,
+overflowing and missing values refuse, as do unknown fields. Write permission
+precedes body inspection. A stale condition is HTTP `409` with code `conflict`;
+success retains the ordinary HTTP write result and physical output guards. The
+existing unconditional routes, prepared writes and atomic batches retain their
+own contracts; this request does not silently select those paths.
 
 ### Authority refresh
 

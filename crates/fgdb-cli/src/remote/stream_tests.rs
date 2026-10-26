@@ -8,6 +8,9 @@ mod prepared_write_tests;
 #[path = "diff_tests.rs"]
 mod diff_tests;
 
+#[path = "conditional_tests.rs"]
+mod conditional_tests;
+
 use super::*;
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::lab::run_async_under_lab;

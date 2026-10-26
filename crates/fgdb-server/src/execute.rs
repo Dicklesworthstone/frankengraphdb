@@ -2,11 +2,13 @@
 //! path every surface (FGP, HTTP and Bolt) shares, so adapters differ only in
 //! framing, never in authority, statement classes or error classes.
 
+mod conditional;
 mod difference;
 mod edge_upsert_output;
 pub(crate) mod ordered;
 mod prepared;
 mod subscription;
+pub(crate) use conditional::{authorize_write, write_if_current};
 pub(crate) use difference::{DifferenceAnswer, read_difference, read_prepared_difference};
 pub(crate) use prepared::{
     PreparedDefinition, PreparedRead, prepare_statement, read_prepared_session, run_prepared,
@@ -397,12 +399,6 @@ async fn write_inner(
         None => db.db.enter(),
     }
     .map_err(Refusal::from)?;
-    let contexts = PurposeContexts::narrow_runtime_root(cx);
-    let (txn, commit, query) = (
-        contexts.txn(),
-        contexts.commit(),
-        crate::query_cx(&contexts),
-    );
     let parameters = convert::parameters(&statement.parameters, None)
         .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
     if let Some(returning) = Returning::prepare(db, &statement.statement, &parameters)? {
@@ -422,7 +418,7 @@ async fn write_inner(
         return write_returning_checked(cx, db, token, returning, deferred, |_, rows, _| Ok(rows))
             .await;
     }
-    let mut guard = db.db.write(cx).await.map_err(Refusal::from)?;
+    let guard = db.db.write(cx).await.map_err(Refusal::from)?;
     if let Some((generation, minimum_seq)) = deferred {
         // Another writer may have fenced the slot while this request waited
         // for the lock. Check again before binding, allocating or mutating.
@@ -437,6 +433,26 @@ async fn write_inner(
             ));
         }
     }
+    write_stats_in_guard(cx, db, token, &statement.statement, &parameters, guard).await
+}
+
+/// Complete an ordinary stats-only program while retaining its admitted
+/// exclusive writer. Conditional requests check their frontier before binding
+/// and arrive here with the same guard, without a check/use lock gap.
+async fn write_stats_in_guard(
+    cx: &Cx,
+    db: &Served,
+    token: &CapabilityToken,
+    statement: &str,
+    parameters: &fgdb_gql::GqlParameters,
+    mut guard: crate::recovery::WriteGuard<'_>,
+) -> Result<Answer, Refusal> {
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    let (txn, commit, query) = (
+        contexts.txn(),
+        contexts.commit(),
+        crate::query_cx(&contexts),
+    );
     let generation = guard.generation();
     let symbols = &db.symbols;
     let mut session = guard
@@ -458,7 +474,7 @@ async fn write_inner(
     // before discarding those receipts below, refusing useful max_rows=0
     // ingestion grants. Keep RETURN on its separately admitted result path.
     let (stats, completion) = session
-        .query_stats(&query, &statement.statement, &parameters)
+        .query_stats(&query, statement, parameters)
         .await
         .map_err(|error| write_refusal(&error))?;
     let statements = stats.completed_statements as u64;
@@ -750,7 +766,7 @@ pub(crate) async fn write_returning_checked<R: Send>(
     token: &CapabilityToken,
     prepared: Returning,
     deferred: Option<(&Generation, fgdb_types::CommitSeq)>,
-    mut collect: impl FnMut(
+    collect: impl FnMut(
         &[String],
         Vec<Vec<WireValue>>,
         &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
@@ -762,14 +778,7 @@ pub(crate) async fn write_returning_checked<R: Send>(
         None => db.db.enter(),
     }
     .map_err(Refusal::from)?;
-    let contexts = PurposeContexts::narrow_runtime_root(cx);
-    let (txn, commit, query) = (
-        contexts.txn(),
-        contexts.commit(),
-        crate::query_cx(&contexts),
-    );
-    let columns = prepared.columns().to_vec();
-    let mut guard = db.db.write(cx).await.map_err(Refusal::from)?;
+    let guard = db.db.write(cx).await.map_err(Refusal::from)?;
     if let Some((generation, minimum_seq)) = deferred {
         generation.check().map_err(Refusal::from)?;
         let frontier = guard
@@ -782,6 +791,32 @@ pub(crate) async fn write_returning_checked<R: Send>(
             ));
         }
     }
+    write_returning_in_guard(cx, db, token, prepared, guard, collect).await
+}
+
+/// Preserve native RETURN admission and completion under an already-owned
+/// writer. The caller establishes any frontier condition before reaching this
+/// collector; all result conversion still happens before the native commit.
+async fn write_returning_in_guard<R: Send>(
+    cx: &Cx,
+    db: &Served,
+    token: &CapabilityToken,
+    prepared: Returning,
+    mut guard: crate::recovery::WriteGuard<'_>,
+    mut collect: impl FnMut(
+        &[String],
+        Vec<Vec<WireValue>>,
+        &mut dyn FnMut(u64) -> Result<(), fgdb::WriteTxnError>,
+    ) -> Result<R, Refusal>
+    + Send,
+) -> Result<Answer<R>, Refusal> {
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    let (txn, commit, query) = (
+        contexts.txn(),
+        contexts.commit(),
+        crate::query_cx(&contexts),
+    );
+    let columns = prepared.columns().to_vec();
     let generation = guard.generation();
     // RETURN changes delivered rows, never the host's write authority. Derive
     // each native policy from the SAME configured program policy as rowless

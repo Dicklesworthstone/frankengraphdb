@@ -9,7 +9,7 @@
 use crate::commits::CommitWatcher;
 use crate::execute::{
     Answer, PreparedDefinition, Refusal, poll, prepare_statement, read, run_prepared,
-    run_prepared_batch, subscribe, write, write_batch,
+    run_prepared_batch, subscribe, write, write_batch, write_if_current,
 };
 use crate::recovery::{Generation, Unavailable};
 use crate::shutdown::Waiter;
@@ -19,10 +19,10 @@ use core::future::poll_fn;
 use core::task::Poll;
 use fgdb_protocol::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, Credential, Empty, ErrorBody, ErrorCode,
-    Execute, ExecuteBatch, ExecuteDiff, ExecuteMode, ExecutePrepared, ExecutePreparedBatch,
-    ExecutePreparedDiff, Hello, HelloAck, Outcome, Ping, Prepare, Prepared, PreparedExecutionMode,
-    PreparedHandle, Ready, ReleasePrepared, ResultChunk, ResultEnd, SelectDatabase, WindowUpdate,
-    WireValue,
+    Execute, ExecuteBatch, ExecuteConditionalWrite, ExecuteDiff, ExecuteMode, ExecutePrepared,
+    ExecutePreparedBatch, ExecutePreparedDiff, Hello, HelloAck, Outcome, Ping, Prepare, Prepared,
+    PreparedExecutionMode, PreparedHandle, Ready, ReleasePrepared, ResultChunk, ResultEnd,
+    SelectDatabase, WindowUpdate, WireValue,
 };
 use fgdb_protocol::transport::{
     DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, split_duplex,
@@ -120,6 +120,7 @@ impl PreparedStatements {
 enum Statement {
     Native(Execute),
     Batch(ExecuteBatch),
+    ConditionalWrite(ExecuteConditionalWrite),
     Difference(ExecuteDiff),
     PreparedDifference {
         definition: Result<Arc<PreparedDefinition>, Refusal>,
@@ -616,6 +617,39 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                     .await
                 {
                     return;
+                }
+            }
+            FrameKind::ExecuteConditionalWrite => {
+                let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
+                    return;
+                };
+                let Ok(statement) = ExecuteConditionalWrite::decode(frame.payload()) else {
+                    return lane
+                        .fatal(
+                            cx,
+                            request,
+                            ErrorCode::Protocol,
+                            "malformed EXECUTE_CONDITIONAL_WRITE",
+                        )
+                        .await;
+                };
+                match lane
+                    .execute_statement(
+                        cx,
+                        &waiter,
+                        db,
+                        token,
+                        request,
+                        Statement::ConditionalWrite(statement),
+                    )
+                    .await
+                {
+                    Ok(()) | Err(Stop::Cancelled) => {}
+                    Err(Stop::Transport | Stop::Recovery(_)) => return,
+                    Err(Stop::Drain) => {
+                        lane.goodbye(cx).await;
+                        return;
+                    }
                 }
             }
             FrameKind::ExecuteDiff => {
@@ -1240,6 +1274,9 @@ impl Lane {
                 }
             },
             Statement::Batch(statement) => write_batch(cx, db, token, &statement).await,
+            Statement::ConditionalWrite(statement) => {
+                write_if_current(cx, db, token, &statement).await
+            }
             Statement::Prepared {
                 definition,
                 parameters,
@@ -1714,6 +1751,7 @@ impl Lane {
             }
             FrameKind::Execute
             | FrameKind::ExecuteBatch
+            | FrameKind::ExecuteConditionalWrite
             | FrameKind::Prepare
             | FrameKind::ExecutePrepared
             | FrameKind::ExecutePreparedBatch
@@ -2073,6 +2111,7 @@ impl Lane {
             }
             FrameKind::Execute
             | FrameKind::ExecuteBatch
+            | FrameKind::ExecuteConditionalWrite
             | FrameKind::Prepare
             | FrameKind::ExecutePrepared
             | FrameKind::ExecutePreparedBatch

@@ -34,6 +34,9 @@ mod prepared_write;
 #[path = "loopback/difference.rs"]
 mod difference;
 
+#[path = "loopback/conditional_write.rs"]
+mod conditional_write;
+
 fn issuer_key() -> AuthKey {
     AuthKey::from_seed(8501)
 }

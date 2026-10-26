@@ -70,7 +70,7 @@ Usage: fgdb [--robot] <command>
          diff --before <seq> --after <seq> [--stream] <gql>
   remote --addr <ip:port> --token-file <file> --database <name> --rows-file <file>
          [--csv-types name=type,...] [--read-mode buffered|source|ordered] query <gql>
-  remote --addr <ip:port> --token-file <file> --database <name> [--param name=value]... write <gql>
+  remote --addr <ip:port> --token-file <file> --database <name> [--param name=value]... [--if-current <seq>] write <gql>
   remote --addr <ip:port> --token-file <file> --database <name> --rows-file <file>
          [--csv-types name=type,...] write <gql>
   remote --addr <ip:port> --token-file <file> --database <name> --prepared-jsonl <file> [--write-mode stats|returning] write <gql>
@@ -113,6 +113,14 @@ including buffered mode. Each block reports its own selected sequence; these
 reads do not share a transaction snapshot. A refusal or output failure stops
 the remaining sets without retry or reprepare; earlier complete answers remain valid.
 remote write --rows-file executes the complete JSON/CSV input as ONE atomic batch.
+remote write --if-current <seq> accepts one text write only if the selected
+database is still at that exact revision. The server checks under the writer
+lock before effects; a mismatch is conflict (exit 3), with nothing committed.
+The revision must come from the same database incarnation. Any intervening commit
+conflicts, including unrelated writes. RETURN and matching no-effect writes keep
+their ordinary outcomes. No retry occurs; transport loss can still leave an
+unknown write outcome. This flag cannot combine with argument files or prepared
+JSONL input. Zero and full-width decimal u64 revisions are accepted.
 remote write --prepared-jsonl <file> prepares once and reads one typed JSON object
 per line. Each line is an independent atomic autocommit, with a flushed completion
 before the next line is decoded. Earlier completed records stay durable if a later
