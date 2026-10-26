@@ -247,6 +247,31 @@ impl<'a> Parser<'a> {
         Ok((source, schema))
     }
 
+    /// A later mutation's MATCH reads the previous write's complete owned
+    /// rows. Reuse the leading-row compiler for its correlations, identity
+    /// bindings and hidden property columns; stop at the mutation with the
+    /// same live parameter table and scope as a MATCH-first write.
+    pub(super) fn owned_match_row_prefix(
+        &mut self,
+        statement: &'a str,
+        imports: Vec<(Name<'a>, GraphSetColumnType)>,
+    ) -> Result<GraphRowPrefix<'a>, crate::GraphSetTextError> {
+        let at = self.current.at;
+        self.write_prefix = true;
+        self.defer_where = true;
+        let prefix = self.leading_graph_part(statement, imports, Vec::new(), Vec::new(), true);
+        self.defer_where = false;
+        self.write_prefix = false;
+        let (source, schema) = prefix?;
+        let schema = schema.ok_or_else(|| {
+            crate::GraphSetTextError::from(error(
+                at,
+                GraphPatternTextErrorKind::Expected("a MATCH row before the mutation"),
+            ))
+        })?;
+        Ok((source, schema))
+    }
+
     /// Resolve the combined row (imports, then projected MATCH fields) while
     /// using the ordinary scalar compiler. The graph child is evaluated once;
     /// these are projection slots, not deferred reads of the created graph.

@@ -207,6 +207,36 @@ fn boundary_binding<'a>(
         .then_some(input.variable)
 }
 
+/// A carried property is either a field projected by this MATCH, or an
+/// imported typed identity whose value the ordinary element reader supplies.
+/// The latter must not become another MATCH root: a lookup preserves the
+/// occurrence even when that identity is absent or hidden from the reader.
+enum BoundaryPropertySource<'a> {
+    Graph(Name<'a>),
+    Row(usize),
+}
+
+fn boundary_property_source<'a>(
+    head: &GraphProjectionHead<'a>,
+    offset: usize,
+    imports: &[(Name<'a>, GraphSetColumnType)],
+    alias: &str,
+) -> Option<BoundaryPropertySource<'a>> {
+    if let Some(variable) = boundary_binding(head, offset, alias) {
+        return Some(BoundaryPropertySource::Graph(variable));
+    }
+    let (_, ReadValueTemplate::Column(column)) =
+        head.outputs.iter().find(|(name, _)| name.text == alias)?
+    else {
+        return None;
+    };
+    (*column < offset
+        && imports.get(*column).is_some_and(|(_, kind)| {
+            matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+        }))
+    .then_some(BoundaryPropertySource::Row(*column))
+}
+
 /// Append a hidden boundary output reading head input `column` under the
 /// first private name no output uses, and return its output index.
 fn hidden_boundary_column<'a>(
@@ -492,6 +522,19 @@ impl<'a> Parser<'a> {
         &mut self,
         head: &mut GraphProjectionHead<'a>,
         offset: usize,
+    ) -> Result<(), GraphSetTextError> {
+        self.hoist_boundary_reads_with_imports(head, offset, &[])
+    }
+
+    /// A leading row may carry identities this MATCH does not bind. Their
+    /// property preimages use the same governed projection as any carried
+    /// element read. Mutation RETURN overlays its proposal on those preimages;
+    /// the hidden column never replaces an updated field's final value.
+    pub(super) fn hoist_boundary_reads_with_imports(
+        &mut self,
+        head: &mut GraphProjectionHead<'a>,
+        offset: usize,
+        imports: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<(), GraphSetTextError> {
         self.grouped_comprehensions = None;
         if !head.with {
@@ -867,7 +910,7 @@ impl<'a> Parser<'a> {
                     let chained = matches!(window[0], Some(TokenKind::Punct(b'.')));
                     if let (Some(TokenKind::Word(alias)), false) = (window[1], chained)
                         && carried.as_ref().is_none_or(|kept| kept.contains(&alias))
-                        && let Some(variable) = boundary_binding(head, offset, alias)
+                        && let Some(source) = boundary_property_source(head, offset, imports, alias)
                         && !reads.iter().any(|&(read, key, _): &(_, Name<'_>, _)| {
                             read == alias && key.text == property
                         })
@@ -884,14 +927,25 @@ impl<'a> Parser<'a> {
                             text: property,
                             at: token.at,
                         };
-                        let input =
-                            self.mutation_projection(&mut head.inputs, variable, Some(key))?;
+                        let value = match source {
+                            BoundaryPropertySource::Graph(variable) => {
+                                let input = self.mutation_projection(
+                                    &mut head.inputs,
+                                    variable,
+                                    Some(key),
+                                )?;
+                                ReadValueTemplate::Column(offset + input)
+                            }
+                            BoundaryPropertySource::Row(column) => {
+                                self.map_get(ReadValueTemplate::Column(column), key.text)
+                            }
+                        };
                         head.outputs.push((
                             Name {
                                 text: name,
                                 at: token.at,
                             },
-                            ReadValueTemplate::Column(offset + input),
+                            value,
                         ));
                         reads.push((alias, key, head.outputs.len() - 1));
                     } else if before_return

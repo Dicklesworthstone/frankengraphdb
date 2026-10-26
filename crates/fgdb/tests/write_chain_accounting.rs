@@ -683,3 +683,438 @@ fn merge_effect_refusal_precedes_rhs_evaluation_and_empty_input_costs_nothing() 
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn post_write_matches_join_owned_occurrences_and_feed_complete_mutation_clauses() {
+    let ((), report) = run_async_under_lab(0xc4a1_1009, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut database = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let chain = prepare(
+            "UNWIND [1,2] AS k CREATE (n {p:k,q:k*10}) \
+             WITH n,n.p AS before SET n.p=n.p+10 \
+             WITH n,before,n.p AS key MATCH (m {p:key}) \
+             WITH n,m,before UNWIND [0,0] AS copy SET m.q=m.q+before \
+             WITH n,before,m.q AS updated MATCH (n) REMOVE n.p \
+             RETURN before,updated,n.p ORDER BY before",
+        );
+        let next = AtomicU64::new(1_000);
+        let mut transaction = database.begin(&contexts.txn()).unwrap();
+        let (stats, result, _) = transaction
+            .execute_graph_write_chain_governed(
+                &mut database,
+                &contexts.query(),
+                &chain,
+                policy(4, HIGH, HIGH),
+                |request| allocate(&next, request),
+            )
+            .unwrap();
+        assert_eq!(stats.created_vertices, 2);
+        assert_eq!(result.rows.result_rows, 4);
+        assert_eq!(
+            result
+                .value
+                .iter()
+                .map(|row| row.values().to_vec())
+                .collect::<Vec<_>>(),
+            [1, 1, 2, 2]
+                .into_iter()
+                .map(|before| vec![
+                    GraphValue::Scalar(CanonicalScalar::Int(before)),
+                    GraphValue::Scalar(CanonicalScalar::Int(before * 11)),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                ])
+                .collect::<Vec<_>>()
+        );
+        // The duplicated input occurrences return twice, but each SET reads
+        // the whole clause's entry state: neither target is incremented twice.
+        let vertices = transaction.vertices(&database).unwrap();
+        assert_eq!(vertices.len(), 2);
+        for (vertex, value) in vertices.iter().zip([11, 22]) {
+            assert_eq!(vertex.props, vec![(Q, CanonicalScalar::Int(value).into())]);
+        }
+        transaction
+            .finish(&mut database, &contexts.commit())
+            .await
+            .unwrap();
+        assert_eq!(database.frontier().unwrap().0, 1);
+        let durable = database.vertices().unwrap();
+        assert_eq!(durable.len(), vertices.len());
+        for (durable, staged) in durable.iter().zip(&vertices) {
+            assert_eq!((durable.vid, &durable.props), (staged.vid, &staged.props));
+        }
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn post_write_matches_preserve_edge_domains_empty_bags_and_parameter_bindings() {
+    let ((), report) = run_async_under_lab(0xc4a1_100a, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut database = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let next = AtomicU64::new(1_000);
+        let chain = prepare(
+            "CREATE (a {p:2}),(b {p:3}),(a)-[made:R {q:1}]->(b) \
+             WITH a,b,made MATCH (a)-[r:R]->(b) SET r.q=r.q+a.p \
+             WITH a,b,r.q AS updated MATCH (a)-[again:R]->(b) REMOVE again.q \
+             RETURN updated,again.q,a.p",
+        );
+        let mut transaction = database.begin(&contexts.txn()).unwrap();
+        let (stats, result, _) = transaction
+            .execute_graph_write_chain_governed(
+                &mut database,
+                &contexts.query(),
+                &chain,
+                policy(1, HIGH, HIGH),
+                |request| allocate(&next, request),
+            )
+            .unwrap();
+        assert_eq!((stats.created_vertices, stats.created_edges), (2, 1));
+        assert_eq!(result.value.len(), 1);
+        assert_eq!(
+            result.value[0].values(),
+            &[
+                GraphValue::Scalar(CanonicalScalar::Int(3)),
+                GraphValue::Scalar(CanonicalScalar::Null),
+                GraphValue::Scalar(CanonicalScalar::Int(2)),
+            ]
+        );
+        let edges = transaction.edges(&database).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert!(edges[0].props.is_empty());
+        transaction
+            .finish(&mut database, &contexts.commit())
+            .await
+            .unwrap();
+
+        // The leading-row helper also serves ordinary reads. Keep its
+        // identity and property columns through a later WITH/MATCH boundary.
+        let read = database
+            .query(
+                &contexts.query(),
+                "WITH [2] AS keys UNWIND keys AS key MATCH (a {p:key}) \
+                 WITH a MATCH (b {p:3}) RETURN a.p AS ap,b.p AS bp",
+                &GqlParameters::new(),
+                symbols,
+                policy(1, HIGH, HIGH).query,
+            )
+            .unwrap();
+        assert_eq!(
+            read,
+            fgdb::QueryResult::Rows {
+                columns: vec!["ap".into(), "bp".into()],
+                rows: vec![vec![
+                    fgdb_gql::GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(
+                        2
+                    ),)),
+                    fgdb_gql::GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(
+                        3
+                    ),)),
+                ]],
+            }
+        );
+
+        // No matched occurrence means no later mutation or result, while
+        // the earlier CREATE remains part of this successful statement.
+        let empty = prepare(
+            "CREATE (a {p:9}) WITH a MATCH (n {p:99}) \
+             SET n.q=1/0 RETURN n.q",
+        );
+        let mut transaction = database.begin(&contexts.txn()).unwrap();
+        let (stats, result, receipt) = transaction
+            .execute_graph_write_chain_governed(
+                &mut database,
+                &contexts.query(),
+                &empty,
+                policy(0, HIGH, HIGH).with_mutation_limit(0),
+                |request| allocate(&next, request),
+            )
+            .unwrap();
+        assert_eq!(stats.created_vertices, 1);
+        assert!(result.value.is_empty());
+        assert_eq!(receipt.stats().mutation_effects, 0);
+        transaction
+            .finish(&mut database, &contexts.commit())
+            .await
+            .unwrap();
+
+        let text = "CREATE (a {p:$seed}) WITH a MATCH (a) WHERE a.p=$wanted \
+                    SET a.q=a.p+$bump RETURN a.q+$suffix AS value";
+        let arguments = GqlParameters::new()
+            .with_int64("seed", 7)
+            .unwrap()
+            .with_int64("wanted", 7)
+            .unwrap()
+            .with_int64("bump", 5)
+            .unwrap()
+            .with_int64("suffix", 3)
+            .unwrap();
+        let prepared = PreparedGraphWriteChainText::prepare(text, R, symbols).unwrap();
+        let chain = prepared.bind_parameters(&arguments).unwrap();
+        let mut transaction = database.begin(&contexts.txn()).unwrap();
+        let (_, result, _) = transaction
+            .execute_graph_write_chain_governed(
+                &mut database,
+                &contexts.query(),
+                &chain,
+                policy(1, HIGH, HIGH),
+                |request| allocate(&next, request),
+            )
+            .unwrap();
+        assert_eq!(result.value.len(), 1);
+        assert_eq!(
+            result.value[0].values(),
+            &[GraphValue::Scalar(CanonicalScalar::Int(15))]
+        );
+        transaction
+            .finish(&mut database, &contexts.commit())
+            .await
+            .unwrap();
+        assert_eq!(database.frontier().unwrap().0, 3);
+        assert_eq!(database.vertices().unwrap().len(), 4);
+
+        for (text, expected) in [
+            (
+                "CREATE (a {p:1}),(b {p:7}) WITH a,b,a.p AS old SET a.p=3 \
+                 WITH a,b,old MATCH (n {p:7}) SET n.q=a.p+old RETURN old,a.p,n.q",
+                [Some(1), Some(3), Some(4)],
+            ),
+            (
+                "CREATE (a {p:1}),(b {p:7}) WITH a,b,a.p AS old SET a.p=3 \
+                 WITH a,b,old MATCH (n {p:7}) SET n.q=a.p+old \
+                 WITH old,a.p AS current,n.q AS updated RETURN old,current,updated",
+                [Some(1), Some(3), Some(4)],
+            ),
+            (
+                "CREATE (a {p:1}),(b {p:9}) WITH a,a.p AS old \
+                 MATCH (n {p:9}) SET a.p=7 RETURN old,a.p,n.p",
+                [Some(1), Some(7), Some(9)],
+            ),
+            (
+                "CREATE (a {p:1}),(b {p:9}) WITH a,a.p AS old \
+                 MATCH (n {p:9}) REMOVE a.p RETURN old,a.p,n.p",
+                [Some(1), None, Some(9)],
+            ),
+        ] {
+            let chain = prepare(text);
+            let mut database = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
+            let mut transaction = database.begin(&contexts.txn()).unwrap();
+            let (_, result, _) = transaction
+                .execute_graph_write_chain_governed(
+                    &mut database,
+                    &contexts.query(),
+                    &chain,
+                    policy(1, HIGH, HIGH),
+                    |request| allocate(&next, request),
+                )
+                .unwrap();
+            assert_eq!(result.value.len(), 1, "{text}");
+            assert_eq!(
+                result.value[0].values(),
+                expected
+                    .map(|value| GraphValue::Scalar(
+                        value.map_or(CanonicalScalar::Null, CanonicalScalar::Int,)
+                    ))
+                    .as_slice(),
+                "{text}"
+            );
+            transaction.abort();
+        }
+
+        // Plain SET/REMOVE are legal row aliases. Framing must leave their
+        // WITH/RETURN in the terminal read compiler.
+        for alias in ["set", "remove"] {
+            let text = format!(
+                "CREATE (a {{p:1}}) WITH a AS {alias} MATCH (n {{p:1}}) \
+                 WITH {alias} RETURN {alias}.p AS value",
+            );
+            let chain = prepare(&text);
+            let mut database = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
+            let mut transaction = database.begin(&contexts.txn()).unwrap();
+            let (_, result, _) = transaction
+                .execute_graph_write_chain_governed(
+                    &mut database,
+                    &contexts.query(),
+                    &chain,
+                    policy(1, HIGH, HIGH),
+                    |request| allocate(&next, request),
+                )
+                .unwrap();
+            assert_eq!(result.value.len(), 1, "{text}");
+            assert_eq!(
+                result.value[0].values(),
+                &[GraphValue::Scalar(CanonicalScalar::Int(1))],
+                "{text}"
+            );
+            transaction.abort();
+        }
+        // The existing identifier contract refuses delimited keywords in
+        // alias positions; framing must not widen that separate admission.
+        for alias in ["`set`", "`remove`"] {
+            let text = format!(
+                "CREATE (a {{p:1}}) WITH a AS {alias} MATCH (n {{p:1}}) \
+                 WITH {alias} RETURN {alias}.p AS value",
+            );
+            assert!(PreparedGraphWriteChainText::prepare(&text, R, symbols).is_err());
+        }
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn post_write_match_mutations_share_allowances_and_restore_a_prefix_on_late_failure() {
+    let ((), report) = run_async_under_lab(0xc4a1_100b, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut database = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in [1, 2] {
+            seed.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(id as i64))]);
+        }
+        database.write(&contexts.commit(), seed).await.unwrap();
+        let basis = database.frontier().unwrap();
+        let next = AtomicU64::new(1_000);
+        let chain = prepare(
+            "CREATE (audit {p:100}) WITH audit MATCH (n) WHERE n.p<3 \
+             SET n.q=n.p+10 RETURN n.q ORDER BY n.q",
+        );
+        let prefix = || {
+            let mut prefix = WriteBatch::new(R);
+            prefix.create_vertex(VId(7), vec![], vec![(P, CanonicalScalar::Int(99))]);
+            prefix
+        };
+        let mut transaction = database.begin(&contexts.txn()).unwrap();
+        transaction.write(&mut database, prefix()).unwrap();
+        let (measured, expected, receipt) = transaction
+            .execute_graph_write_chain_governed(
+                &mut database,
+                &contexts.query(),
+                &chain,
+                policy(2, HIGH, HIGH),
+                |request| allocate(&next, request),
+            )
+            .unwrap();
+        assert_eq!(expected.value.len(), 2);
+        assert!(measured.selection.snapshot_records > 0);
+        let effects = receipt.stats().mutation_effects;
+        assert_eq!(effects, 2);
+        transaction.abort();
+
+        let exact = GraphInsertPolicy::new(
+            GqlQueryPolicy::new(
+                measured.selection.snapshot_records,
+                2,
+                measured.evaluator.work_units,
+                measured.evaluator.scratch_entries,
+            ),
+            1,
+            0,
+        )
+        .with_mutation_limit(effects);
+        for refusal in 0..5 {
+            let mut transaction = database.begin(&contexts.txn()).unwrap();
+            transaction.write(&mut database, prefix()).unwrap();
+            let digest = transaction.staged_effect_digest().unwrap();
+            let mut tight = exact;
+            match refusal {
+                0 => {
+                    tight.query.rows = fgdb_gql::GqlExecutionBudget::new(
+                        measured.selection.snapshot_records - 1,
+                        2,
+                    )
+                }
+                1 => tight.query.evaluator.max_work_units -= 1,
+                2 => tight.query.evaluator.max_scratch_entries -= 1,
+                3 => tight = tight.with_mutation_limit(effects - 1),
+                _ => {
+                    tight.query.rows =
+                        fgdb_gql::GqlExecutionBudget::new(measured.selection.snapshot_records, 1)
+                }
+            }
+            transaction
+                .execute_graph_write_chain_governed(
+                    &mut database,
+                    &contexts.query(),
+                    &chain,
+                    tight,
+                    |request| allocate(&next, request),
+                )
+                .expect_err("the later MATCH/SET must share the original statement allowance");
+            assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+            assert_eq!(transaction.vertices(&database).unwrap().len(), 3);
+            assert_eq!(database.frontier().unwrap(), basis);
+            for id in [1, 2] {
+                assert_eq!(
+                    transaction
+                        .vertex(&database, VId(id))
+                        .unwrap()
+                        .unwrap()
+                        .props,
+                    vec![(P, CanonicalScalar::Int(id as i64).into())]
+                );
+            }
+            let (stats, actual, _) = transaction
+                .execute_graph_write_chain_governed(
+                    &mut database,
+                    &contexts.query(),
+                    &chain,
+                    exact,
+                    |request| allocate(&next, request),
+                )
+                .unwrap();
+            assert_eq!(stats.evaluator, measured.evaluator);
+            assert_eq!(stats.selection, measured.selection);
+            assert_eq!(actual.value, expected.value);
+            transaction.abort();
+        }
+
+        let failing = prepare(
+            "CREATE (audit {p:100}) WITH audit MATCH (n) WHERE n.p<3 \
+             SET n.q=100/(n.p-2) RETURN n.q LIMIT 0",
+        );
+        let mut transaction = database.begin(&contexts.txn()).unwrap();
+        transaction.write(&mut database, prefix()).unwrap();
+        let digest = transaction.staged_effect_digest().unwrap();
+        let error = transaction
+            .execute_graph_write_chain_governed(
+                &mut database,
+                &contexts.query(),
+                &failing,
+                policy(0, HIGH, HIGH),
+                |request| allocate(&next, request),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            GqlQueryError::Source(fgdb_gql::GraphWriteChainError::Mutation(
+                fgdb_gql::GraphMutationQueryError::Mutation(
+                    fgdb_gql::GraphMutationError::Arithmetic {
+                        row: 1,
+                        action: 0,
+                        ..
+                    }
+                )
+            ))
+        ));
+        assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+        assert_eq!(transaction.vertices(&database).unwrap().len(), 3);
+        transaction
+            .finish(&mut database, &contexts.commit())
+            .await
+            .unwrap();
+        assert_eq!(database.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(database.vertices().unwrap().len(), 3);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

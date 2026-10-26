@@ -732,7 +732,7 @@ impl<'a> Parser<'a> {
     /// and MATCH vertices): the aggregate owner compiles RETURN over it with
     /// the same parser.
     #[allow(clippy::type_complexity)]
-    fn leading_graph_part(
+    pub(super) fn leading_graph_part(
         &mut self,
         statement: &'a str,
         mut schema: Vec<(Name<'a>, GraphSetColumnType)>,
@@ -787,12 +787,25 @@ impl<'a> Parser<'a> {
         }
         let mut inputs = Vec::new();
         let mut bound_correlations = Vec::new();
-        // The graph vertices a WITH-less projection exposes after the
-        // leading columns, as (name, combined-row column).
+        // The graph bindings a WITH-less projection exposes after the
+        // leading columns, as (name, combined-row column). Relationship and
+        // path bindings keep the same domains as an explicit WITH *.
         let mut exposed = Vec::new();
         // (leading column, graph vertex input) pairs equal by the join.
         let mut identity = Vec::new();
-        for &variable in &self.syntax.variables {
+        for variable in self
+            .syntax
+            .variables
+            .iter()
+            .copied()
+            .chain(self.syntax.path)
+            .chain(self.syntax.scope_paths.iter().copied())
+            .chain(
+                self.syntax
+                    .visible_edges()
+                    .filter_map(|(edge, _)| edge.variable),
+            )
+        {
             let index = self.mutation_projection(&mut inputs, variable, None)?;
             // A MATCH vertex reusing a leading column's name IS that
             // value: an identity correlation, never a second binding that
@@ -803,7 +816,7 @@ impl<'a> Parser<'a> {
                     identity.push((row, index));
                 }
                 None => {
-                    schema.push((variable, GraphSetColumnType::Vertex));
+                    schema.push((variable, projection_type(&inputs[index])));
                     exposed.push((variable, width + index));
                 }
             }
@@ -904,7 +917,7 @@ impl<'a> Parser<'a> {
                 inputs: core::mem::take(&mut inputs),
                 outputs,
             };
-            self.hoist_boundary_reads(&mut head, width)?;
+            self.hoist_boundary_reads_with_imports(&mut head, width, &schema[..width])?;
             inputs = head.inputs;
             let mut types: Vec<_> = schema[..width].iter().map(|(_, kind)| *kind).collect();
             types.extend(inputs.iter().map(projection_type));
@@ -1052,7 +1065,7 @@ impl<'a> Parser<'a> {
             inputs: core::mem::take(inputs),
             outputs,
         };
-        self.hoist_boundary_reads(&mut head, width)?;
+        self.hoist_boundary_reads_with_imports(&mut head, width, &schema[..width])?;
         *inputs = head.inputs;
         Ok(head.outputs)
     }
@@ -1180,7 +1193,7 @@ impl<'a> Parser<'a> {
             inputs: core::mem::take(inputs),
             outputs,
         };
-        self.hoist_boundary_reads(&mut head, width)?;
+        self.hoist_boundary_reads_with_imports(&mut head, width, &schema[..width])?;
         *inputs = head.inputs;
         Ok((head.outputs, distinct, at))
     }

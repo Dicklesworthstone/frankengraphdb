@@ -1511,7 +1511,9 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
     /// A RETURN or the end of the statement may follow it, or a WITH head or
     /// another write, which then reads its post-write rows. Its actions are
     /// the WITH-row actions of `MATCH ... WITH ... SET` (fgdb-sl4ym), over
-    /// that row instead of a read pipeline.
+    /// that row instead of a read pipeline. A mandatory MATCH may first join
+    /// the previous rows against the post-write graph; its whole relation is
+    /// collected before this step stages any mutation.
     pub(crate) fn prepare_chained<'a, R>(
         statement: &'a str,
         relation: RelationId,
@@ -1533,8 +1535,13 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones())
             .resume_after(from.boundary, &from.parameters, from.at)?;
+        let (source, row) = if parser.is_word("MATCH") {
+            let (source, row) = parser.owned_match_row_prefix(statement, from.row)?;
+            (Some(source), row)
+        } else {
+            (None, from.row)
+        };
         let at = parser.current.at;
-        let row = from.row;
         let (projections, parsed_actions, returning, continuation) = parser.chain_mutation(&row)?;
         if let Some(returning) = &returning {
             returning.admit(&parser.syntax.parameters)?;
@@ -1546,31 +1553,50 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
             )
             .into());
         }
-        // This owned-row step builds its bound input directly, bypassing
-        // UnresolvedGraphText::resolve. Its computed element fields still
-        // need the same catalog binding before actions or RETURN are bound.
-        for (key, slot) in &parser.syntax.element_keys {
-            slot.resolve(
-                match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
-                    Some(GraphSymbol::Property(key)) => Some(key),
-                    _ => None,
-                },
-            );
-        }
-        let input = crate::set_text::BoundSetTextInput {
-            selection: None,
-            parameters: parser.syntax.parameters.clone(),
-            parameter_offsets: parser.syntax.parameter_offsets.clone(),
-            return_at: statement.len(),
-            projection: None,
-            quantifier: crate::GraphSetQuantifier::All,
-            pipeline: Vec::new(),
-            singleton: false,
-            leading: Vec::new(),
-            correlations: Vec::new(),
-            row_fields: Vec::new(),
-            owned: Some(Box::new((columns, types))),
+        let mut input = if let Some(mut source) = source {
+            // SET/REMOVE and their output may add parameters and element
+            // keys after MATCH. Bind its input against that same complete
+            // table, retaining original indices and the exact owned schema.
+            source
+                .syntax
+                .parameters
+                .clone_from(&parser.syntax.parameters);
+            source
+                .syntax
+                .parameter_offsets
+                .clone_from(&parser.syntax.parameter_offsets);
+            source
+                .syntax
+                .element_keys
+                .extend(parser.syntax.element_keys.iter().cloned());
+            source.resolve(crate::graph_text::LentResolver(&mut *resolve))?
+        } else {
+            // The direct owned-row step bypasses UnresolvedGraphText::resolve.
+            // Its computed fields bind at the same catalog boundary.
+            for (key, slot) in &parser.syntax.element_keys {
+                slot.resolve(
+                    match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
+                        Some(GraphSymbol::Property(key)) => Some(key),
+                        _ => None,
+                    },
+                );
+            }
+            crate::set_text::BoundSetTextInput {
+                selection: None,
+                parameters: parser.syntax.parameters.clone(),
+                parameter_offsets: parser.syntax.parameter_offsets.clone(),
+                return_at: statement.len(),
+                projection: None,
+                quantifier: crate::GraphSetQuantifier::All,
+                pipeline: Vec::new(),
+                singleton: false,
+                leading: Vec::new(),
+                correlations: Vec::new(),
+                row_fields: Vec::new(),
+                owned: None,
+            }
         };
+        input.owned = Some(Box::new((columns, types)));
         let (step, returning) =
             Self::resolve_chain_step(resolve, relation, at, input, parsed_actions, returning)?;
         Ok((step, returning, continuation))

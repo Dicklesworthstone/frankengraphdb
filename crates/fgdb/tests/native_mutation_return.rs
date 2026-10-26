@@ -41,6 +41,21 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         _ => None,
     }
 }
+
+struct PropertyMapCatalog;
+impl fgdb_gql::GraphSymbolResolver for PropertyMapCatalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        symbols(kind, name)
+    }
+
+    fn reverse_catalog(&self) -> Option<fgdb_gql::ReverseSymbolCatalog> {
+        let mut catalog = fgdb_gql::ReverseSymbolCatalog::new();
+        catalog.insert_property(P, "p");
+        catalog.insert_property(ID, "id");
+        Some(catalog)
+    }
+}
+
 fn policy(rows: u64, effects: u64, vertices: u64) -> GraphWriteProgramPolicy {
     GraphWriteProgramPolicy::new(
         GqlQueryPolicy::new(10_000, rows, 1_000_000, 1_000_000),
@@ -1281,14 +1296,46 @@ fn a_map_parameter_assigns_its_keys_through_query_write() {
             .unwrap();
         assert_eq!(rows(merged, &["p", "id"]), vec![vec![int(40), int(1)]]);
 
+        let replace = "MATCH (n:L {id: 2}) SET n = $props RETURN n.p AS p, n.id AS id";
+        let replacement = props(&[("id", 2)]);
+        let before = (db.frontier().unwrap(), db.vertices().unwrap());
         let mut txn = db.begin(&txcx).unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        // Replacement enumerates every current property, as a literal SET
+        // map does. A forward-only resolver cannot name the removed fields;
+        // that refusal must preserve the transaction for a catalog-backed retry.
+        let unmapped = txn
+            .query_write(
+                &mut db,
+                &cx,
+                replace,
+                &replacement,
+                symbols,
+                R,
+                policy(10, 10, 0),
+                no_allocate,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                &unmapped,
+                QueryWriteError::Mutation(GqlQueryError::Source(
+                    GraphMutationQueryError::Mutation(fgdb_gql::GraphMutationError::Source(
+                        fgdb::WriteTxnError::Read(fgdb::ReadError::UnmappedProperty(P))
+                    ))
+                ))
+            ),
+            "{unmapped:?}"
+        );
+        assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
         let replaced = txn
             .query_write(
                 &mut db,
                 &cx,
-                "MATCH (n:L {id: 2}) SET n = $props RETURN n.p AS p, n.id AS id",
-                &props(&[("id", 2)]),
-                symbols,
+                replace,
+                &replacement,
+                PropertyMapCatalog,
                 R,
                 policy(10, 10, 0),
                 no_allocate,
@@ -1299,6 +1346,10 @@ fn a_map_parameter_assigns_its_keys_through_query_write() {
             vec![vec![GraphValue::Scalar(CanonicalScalar::Null), int(2)]]
         );
         txn.finish(&mut db, &commit).await.unwrap();
+        assert_eq!(
+            db.vertex(VId(2)).unwrap().unwrap().props,
+            vec![(ID, CanonicalScalar::Int(2).into())]
+        );
 
         let before = db.frontier().unwrap();
         let refused = db

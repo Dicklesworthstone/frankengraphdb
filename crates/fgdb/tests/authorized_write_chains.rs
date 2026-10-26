@@ -2253,3 +2253,463 @@ fn textual_read_limits_are_cumulative_and_noop_merge_reads_do_not_replay_effects
         assert_eq!(txn.outstanding_obligations(), 0);
     });
 }
+
+mod post_write_mutations {
+    use super::*;
+    use fgdb_gql::algebra::GraphValueRow;
+    use fgdb_gql::insertion::GraphInsertStats;
+    use fgdb_gql::{GqlQueryError, GqlQueryExecution, GraphWriteChainError};
+    use fgdb_warden::LimitDimension;
+
+    type Fault = GqlQueryError<GraphWriteChainError<WriteTxnError, WriteTxnError>, WriteTxnError>;
+    type Receipt = (
+        GraphInsertStats,
+        GqlQueryExecution<GraphValueRow>,
+        EmbeddedTxnCompletion,
+    );
+
+    const UPDATE: &str = "CREATE (a:Visible {p:1}) WITH a,a.p AS frozen SET a.p=3 \
+         WITH a,frozen MATCH (n:Visible) WHERE n.p>=7 AND n.p<=8 \
+         SET n.p=n.p+a.p+frozen RETURN frozen,a.p,n.p ORDER BY n.p";
+
+    fn values(cells: &[i64]) -> Vec<GraphValue> {
+        cells
+            .iter()
+            .map(|&value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+            .collect()
+    }
+
+    // The hidden fixture differs only by forbidden records/fields. Every
+    // execution goes through the public capability-checked autocommit API.
+    // The owner view is used solely to assert publication and preservation.
+    async fn execute(
+        contexts: &PurposeContexts,
+        program: &PreparedGraphWriteChain,
+        hidden: bool,
+        capability: Grant,
+        budget: GraphInsertPolicy,
+    ) -> Result<Receipt, Fault> {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&capability, NOW).unwrap();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        for (id, value) in [(10, 7), (20, 8)] {
+            let mut fields = vec![(P, CanonicalScalar::Int(value))];
+            if hidden {
+                fields.push((SECRET, CanonicalScalar::Int(99)));
+            }
+            seed.create_vertex(VId(id), vec![L], fields);
+        }
+        if hidden {
+            for id in 101..109 {
+                seed.create_vertex(
+                    VId(id),
+                    vec![HIDDEN],
+                    vec![
+                        (P, CanonicalScalar::Int(7 + (id % 2) as i64)),
+                        (SECRET, CanonicalScalar::Int(id as i64)),
+                    ],
+                );
+            }
+        }
+        db.write(&commit, seed).await.unwrap();
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        let result = db
+            .execute_graph_write_chain_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                program,
+                budget,
+                || NOW,
+            )
+            .await;
+        if let Ok((stats, _, completion)) = &result {
+            let frontier = db.frontier().unwrap();
+            assert_eq!(frontier.0, before.0.0 + 1);
+            assert_eq!(
+                *completion,
+                EmbeddedTxnCompletion::WriteCommitted {
+                    commit_seq: frontier
+                }
+            );
+            assert_eq!(
+                db.vertices().unwrap().len() as u64,
+                before.1.len() as u64 + stats.created_vertices
+            );
+            for original in &before.1 {
+                let current = db.vertex(original.vid).unwrap().unwrap();
+                if original.labels.contains(&HIDDEN) {
+                    assert_eq!(&current, original);
+                } else {
+                    assert_eq!(
+                        current
+                            .props
+                            .iter()
+                            .filter(|(key, _)| *key != P)
+                            .collect::<Vec<_>>(),
+                        original
+                            .props
+                            .iter()
+                            .filter(|(key, _)| *key != P)
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+            assert_eq!(db.edges().unwrap(), before.2);
+        } else {
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before,
+                "a failed continuation must discard its CREATE and every prior SET"
+            );
+        }
+        assert_eq!(txn.outstanding_obligations(), 0);
+        result
+    }
+
+    #[test]
+    fn owned_matches_preserve_occurrences_frozen_aliases_and_current_properties() {
+        lab(0xc4a1_20f1, |contexts| async move {
+            let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(Rights::ReadWrite, 4), NOW).unwrap();
+            for (text, expected, stored) in [
+                (
+                    "CREATE (a:Visible {p:1}),(b:Visible {p:7}) \
+                     WITH a,b,a.p AS frozen SET a.p=3 WITH a,b,frozen \
+                     MATCH (n:Visible {p:7}) SET n.p=a.p+frozen \
+                     RETURN frozen,a.p,n.p",
+                    vec![values(&[1, 3, 4])],
+                    vec![Some(3), Some(4)],
+                ),
+                (
+                    "CREATE (a:Visible {p:1}),(b:Visible {p:9}) \
+                     WITH a,a.p AS frozen MATCH (n:Visible {p:9}) \
+                     SET a.p=7 RETURN frozen,a.p,n.p",
+                    vec![values(&[1, 7, 9])],
+                    vec![Some(7), Some(9)],
+                ),
+                (
+                    "UNWIND [1,2] AS k CREATE (a:Visible {p:k}) WITH a,k \
+                     MATCH (a) UNWIND [0,0] AS copy SET a.p=a.p+10 \
+                     WITH a,k,a.p AS updated MATCH (a) REMOVE a.p \
+                     RETURN k,updated,a.p ORDER BY k",
+                    [1, 1, 2, 2]
+                        .into_iter()
+                        .map(|key| {
+                            let mut row = values(&[key, key + 10]);
+                            row.push(GraphValue::Scalar(CanonicalScalar::Null));
+                            row
+                        })
+                        .collect(),
+                    vec![None, None],
+                ),
+            ] {
+                let vfs = MemVfs::new().unwrap();
+                let path = vfs.database_dir();
+                let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+                    .await
+                    .unwrap();
+                let program = chain(text);
+                let (stats, rows, completion) = db
+                    .execute_graph_write_chain_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        &program,
+                        policy(4),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!((stats.created_vertices, stats.created_edges), (2, 0));
+                assert_eq!(rows.rows.result_rows, expected.len() as u64);
+                assert_eq!(
+                    rows.value
+                        .iter()
+                        .map(|row| row.values().to_vec())
+                        .collect::<Vec<_>>(),
+                    expected,
+                    "{text}"
+                );
+                let vertices = db.vertices().unwrap();
+                let mut actual: Vec<_> = vertices
+                    .iter()
+                    .map(|vertex| {
+                        vertex
+                            .props
+                            .iter()
+                            .find(|(key, _)| *key == P)
+                            .map(|(_, value)| value.clone())
+                    })
+                    .collect();
+                actual.sort();
+                let mut expected: Vec<Option<fgdb_types::CanonicalPropertyValue>> = stored
+                    .into_iter()
+                    .map(|value| value.map(|value| CanonicalScalar::Int(value).into()))
+                    .collect();
+                expected.sort();
+                assert_eq!(actual, expected, "{text}");
+                assert!(db.edges().unwrap().is_empty());
+                let frontier = db.frontier().unwrap();
+                assert_eq!(frontier.0, 1);
+                assert_eq!(
+                    completion,
+                    EmbeddedTxnCompletion::WriteCommitted {
+                        commit_seq: frontier
+                    }
+                );
+                drop(db);
+                let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+                    .await
+                    .unwrap();
+                assert_eq!(reopened.frontier().unwrap(), frontier);
+                assert_eq!(reopened.vertices().unwrap(), vertices);
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        });
+    }
+
+    #[test]
+    fn hidden_match_rows_and_fields_do_not_change_results_or_signed_work() {
+        lab(0xc4a1_20f2, |contexts| async move {
+            let program = chain(UPDATE);
+            let expected = execute(
+                &contexts,
+                &program,
+                false,
+                grant(Rights::ReadWrite, 2),
+                policy(2),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                expected
+                    .1
+                    .value
+                    .iter()
+                    .map(|row| row.values().to_vec())
+                    .collect::<Vec<_>>(),
+                [values(&[1, 3, 11]), values(&[1, 3, 12])]
+            );
+            let hidden = execute(
+                &contexts,
+                &program,
+                true,
+                grant(Rights::ReadWrite, 2),
+                policy(2),
+            )
+            .await
+            .unwrap();
+            assert_eq!(hidden, expected);
+
+            // Find the actual shared signed-work boundary, then prove both
+            // physically removed and hidden data have that same boundary.
+            let (mut refused, mut admitted) = (0, grant(Rights::ReadWrite, 2).limits.max_work);
+            while admitted - refused > 1 {
+                let trial = refused + (admitted - refused) / 2;
+                let mut capability = grant(Rights::ReadWrite, 2);
+                capability.limits.max_work = trial;
+                match execute(&contexts, &program, false, capability, policy(2)).await {
+                    Ok(actual) => {
+                        assert_eq!(actual, expected);
+                        admitted = trial;
+                    }
+                    Err(error) => {
+                        assert_eq!(
+                            authorization(&error),
+                            Some(Error::LimitExceeded(LimitDimension::Work)),
+                            "{error:?}"
+                        );
+                        refused = trial;
+                    }
+                }
+            }
+            assert!(admitted > 1);
+            for hidden in [false, true] {
+                for (allowance, succeeds) in [(admitted - 1, false), (admitted, true)] {
+                    let mut capability = grant(Rights::ReadWrite, 2);
+                    capability.limits.max_work = allowance;
+                    let result = execute(&contexts, &program, hidden, capability, policy(2)).await;
+                    if succeeds {
+                        assert_eq!(result.unwrap(), expected);
+                    } else {
+                        assert_eq!(
+                            authorization(&result.unwrap_err()),
+                            Some(Error::LimitExceeded(LimitDimension::Work))
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn forbidden_mutations_and_unrematched_carried_reads_abort_every_write() {
+        lab(0xc4a1_20f3, |contexts| async move {
+            for tail in [
+                "SET n.secret=99 RETURN n.p",
+                "REMOVE n.secret RETURN n.p",
+                "SET n.p=a.secret RETURN n.p",
+                "SET n.p=a.p RETURN a.secret",
+                "SET n.p=a.p RETURN a.secret LIMIT 0",
+            ] {
+                let program = chain(&format!(
+                    "CREATE (a:Visible {{p:1}}) WITH a MATCH (n:Visible {{p:7}}) {tail}"
+                ));
+                for hidden in [false, true] {
+                    let error = execute(
+                        &contexts,
+                        &program,
+                        hidden,
+                        grant(Rights::ReadWrite, 1),
+                        policy(1),
+                    )
+                    .await
+                    .unwrap_err();
+                    assert_eq!(
+                        authorization(&error),
+                        Some(Error::ScopeDenied),
+                        "hidden {hidden}, {tail}: {error:?}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn late_match_arithmetic_and_inadequate_rights_publish_no_prefix() {
+        lab(0xc4a1_20f4, |contexts| async move {
+            for page in ["", " LIMIT 0"] {
+                let program = chain(&format!(
+                    "CREATE (audit:Visible {{p:100}}) WITH audit \
+                     MATCH (n:Visible) WHERE n.p>=7 AND n.p<=8 \
+                     SET n.p=100/(n.p-8) RETURN n.p{page}"
+                ));
+                for hidden in [false, true] {
+                    let error = execute(
+                        &contexts,
+                        &program,
+                        hidden,
+                        grant(Rights::ReadWrite, 2),
+                        policy(2),
+                    )
+                    .await
+                    .unwrap_err();
+                    assert!(
+                        matches!(
+                            error,
+                            GqlQueryError::Source(GraphWriteChainError::Mutation(
+                                fgdb_gql::GraphMutationQueryError::Mutation(
+                                    fgdb_gql::GraphMutationError::Arithmetic {
+                                        row: 1,
+                                        action: 0,
+                                        ..
+                                    }
+                                )
+                            ))
+                        ),
+                        "hidden {hidden}, {page}: {error:?}"
+                    );
+                }
+            }
+            let program = chain(UPDATE);
+            for rights in [Rights::Read, Rights::Write] {
+                let error = execute(&contexts, &program, true, grant(rights, 2), policy(2))
+                    .await
+                    .unwrap_err();
+                assert_eq!(authorization(&error), Some(Error::PermissionDenied));
+            }
+        });
+    }
+
+    #[test]
+    fn post_match_mutations_share_native_limits_and_only_final_rows_spend_delivery() {
+        lab(0xc4a1_20f5, |contexts| async move {
+            let program = chain(UPDATE);
+            let expected = execute(
+                &contexts,
+                &program,
+                true,
+                grant(Rights::ReadWrite, 2),
+                policy(2),
+            )
+            .await
+            .unwrap();
+            let measured = expected.0;
+            assert!(measured.selection.snapshot_records > 0);
+            assert!(measured.evaluator.work_units > 0);
+            assert!(measured.evaluator.scratch_entries > 0);
+            let exact = GraphInsertPolicy::new(
+                GqlQueryPolicy::new(
+                    measured.selection.snapshot_records,
+                    2,
+                    measured.evaluator.work_units,
+                    measured.evaluator.scratch_entries,
+                ),
+                1,
+                0,
+            )
+            .with_mutation_limit(3);
+            assert_eq!(
+                execute(
+                    &contexts,
+                    &program,
+                    true,
+                    grant(Rights::ReadWrite, 2),
+                    exact
+                )
+                .await
+                .unwrap(),
+                expected
+            );
+            for dimension in 0..6 {
+                let mut budget = exact;
+                let mut capability = grant(Rights::ReadWrite, 2);
+                match dimension {
+                    0 => {
+                        budget.query.rows = fgdb_gql::GqlExecutionBudget::new(
+                            measured.selection.snapshot_records - 1,
+                            2,
+                        )
+                    }
+                    1 => budget.query.evaluator.max_work_units -= 1,
+                    2 => budget.query.evaluator.max_scratch_entries -= 1,
+                    3 => budget = budget.with_mutation_limit(2),
+                    4 => {
+                        budget.query.rows = fgdb_gql::GqlExecutionBudget::new(
+                            measured.selection.snapshot_records,
+                            1,
+                        )
+                    }
+                    _ => capability.limits.max_rows = 1,
+                }
+                let error = execute(&contexts, &program, true, capability, budget)
+                    .await
+                    .expect_err("the post-write MATCH and SET share the whole statement allowance");
+                if dimension == 5 {
+                    assert_eq!(
+                        authorization(&error),
+                        Some(Error::LimitExceeded(LimitDimension::Rows))
+                    );
+                }
+            }
+        });
+    }
+}

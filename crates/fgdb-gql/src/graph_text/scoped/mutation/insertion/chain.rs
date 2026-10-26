@@ -10,6 +10,11 @@ use crate::{
     PreparedGraphWriteChainText,
 };
 
+enum MatchedWrite {
+    Insert,
+    Mutation,
+}
+
 impl PreparedGraphWriteChainText {
     /// Classify with native token framing. A chain is a top-level write
     /// followed by another write in the same statement:
@@ -265,22 +270,24 @@ impl PreparedGraphWriteChainText {
         }
     }
 
-    /// Whether the MATCH clauses at `lexer` are the prefix of a later CREATE
-    /// (`... WITH p UNWIND $ids AS id MATCH (t {id: id}) CREATE ...`) rather
-    /// than a terminal read: the first clause after them is CREATE or
-    /// INSERT. Property keys, labels, aliases, map entries and `STARTS WITH`
-    /// / `ENDS WITH` are not clauses.
-    fn match_feeds_create(mut lexer: Lexer<'_>) -> Result<bool, GraphPatternTextError> {
-        const READS: [&str; 15] = [
-            "OPTIONAL", "WITH", "RETURN", "UNWIND", "MERGE", "SET", "DELETE", "DETACH", "REMOVE",
-            "CALL", "UNION", "ORDER", "SKIP", "LIMIT", "FOREACH",
+    /// The write family owning a mandatory MATCH prefix after an earlier
+    /// write. CREATE keeps its direct MATCH prefix; SET/REMOVE use the typed
+    /// leading-row compiler, including intervening WITH/UNWIND stages.
+    /// Everything else remains a terminal read. This is framing only: the
+    /// selected compiler still admits the complete relation and write.
+    /// Property keys, labels, aliases, map entries and STARTS/ENDS WITH are
+    /// never clause boundaries.
+    fn matched_write(mut lexer: Lexer<'_>) -> Result<Option<MatchedWrite>, GraphPatternTextError> {
+        const READS: [&str; 8] = [
+            "OPTIONAL", "RETURN", "MERGE", "DELETE", "DETACH", "CALL", "UNION", "FOREACH",
         ];
         let mut depth = 0_usize;
+        let mut row_stages = false;
         let mut previous: Option<TokenKind<'_>> = None;
         loop {
             let token = script::next_script_token(&mut lexer)?;
             match token.kind {
-                TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
+                TokenKind::End | TokenKind::Punct(b';') => return Ok(None),
                 TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
                 TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
                 TokenKind::Word(word)
@@ -290,15 +297,54 @@ impl PreparedGraphWriteChainText {
                             if ["AS", "STARTS", "ENDS"].iter().any(|not| prior.eq_ignore_ascii_case(not))) =>
                 {
                     if word.eq_ignore_ascii_case("CREATE") || word.eq_ignore_ascii_case("INSERT") {
-                        return Ok(true);
+                        return Ok((!row_stages).then_some(MatchedWrite::Insert));
+                    }
+                    if (word.eq_ignore_ascii_case("SET") || word.eq_ignore_ascii_case("REMOVE"))
+                        && Self::mutation_clause_target(lexer.clone())?
+                    {
+                        return Ok(Some(MatchedWrite::Mutation));
                     }
                     if READS.iter().any(|read| word.eq_ignore_ascii_case(read)) {
-                        return Ok(false);
+                        return Ok(None);
+                    }
+                    if ["WITH", "UNWIND", "ORDER", "SKIP", "LIMIT"]
+                        .iter()
+                        .any(|stage| word.eq_ignore_ascii_case(stage))
+                    {
+                        row_stages = true;
                     }
                 }
                 _ => {}
             }
             previous = Some(token.kind);
+        }
+    }
+
+    /// SET and REMOVE are legal row aliases. Only the native target prefix
+    /// distinguishes a mutation clause from `WITH set`, `ORDER BY remove`,
+    /// or a property of either name. The mutation compiler validates the
+    /// target's scope, domain and complete action after this framing check.
+    fn mutation_clause_target(mut lexer: Lexer<'_>) -> Result<bool, GraphPatternTextError> {
+        match script::next_script_token(&mut lexer)?.kind {
+            TokenKind::Word(_) => match script::next_script_token(&mut lexer)?.kind {
+                TokenKind::Punct(b'.' | b':' | b'=') => Ok(true),
+                TokenKind::Punct(b'+') => Ok(matches!(
+                    script::next_script_token(&mut lexer)?.kind,
+                    TokenKind::Punct(b'=')
+                )),
+                _ => Ok(false),
+            },
+            TokenKind::Punct(b'(') => Ok(matches!(
+                script::next_script_token(&mut lexer)?.kind,
+                TokenKind::Word(_)
+            ) && matches!(
+                script::next_script_token(&mut lexer)?.kind,
+                TokenKind::Punct(b')')
+            ) && matches!(
+                script::next_script_token(&mut lexer)?.kind,
+                TokenKind::Punct(b'.')
+            )),
+            _ => Ok(false),
         }
     }
 
@@ -473,12 +519,18 @@ impl PreparedGraphWriteChainText {
                 at: from.at,
                 tokens: 0,
             };
-            // A MATCH that ends at a CREATE is that CREATE's prefix, joined
-            // to these rows; any other MATCH starts the terminal read.
+            // The native write family owns a supported MATCH prefix joined
+            // to these rows. A terminal read keeps its multipart compiler.
             let clause = lexer.clone().next()?.kind;
+            let matched = if matches!(clause, TokenKind::Word(word) if word.eq_ignore_ascii_case("MATCH"))
+            {
+                Self::matched_write(lexer.clone())?
+            } else {
+                None
+            };
             if matches!(clause, TokenKind::Word(word) if word.eq_ignore_ascii_case("OPTIONAL"))
                 || (matches!(clause, TokenKind::Word(word) if word.eq_ignore_ascii_case("MATCH"))
-                    && !Self::match_feeds_create(lexer.clone())?)
+                    && matched.is_none())
             {
                 let (columns, types) = from.owned_columns();
                 let parser = Parser::new_with_parameter_types(body, declarations)?
@@ -501,10 +553,11 @@ impl PreparedGraphWriteChainText {
             // A SET, REMOVE or DELETE: a RETURN or the end of the statement
             // follows it, or a WITH head or another write, which reads its
             // post-write rows.
-            if matches!(lexer.clone().next()?.kind, TokenKind::Word(word)
-                if ["SET", "REMOVE", "DELETE", "DETACH"]
-                    .iter()
-                    .any(|kind| word.eq_ignore_ascii_case(kind)))
+            if matches!(matched, Some(MatchedWrite::Mutation))
+                || matches!(lexer.clone().next()?.kind, TokenKind::Word(word)
+                    if ["SET", "REMOVE", "DELETE", "DETACH"]
+                        .iter()
+                        .any(|kind| word.eq_ignore_ascii_case(kind)))
             {
                 let (step, returning, after) =
                     crate::mutation_text::PreparedGraphMutationRowsText::prepare_chained(
