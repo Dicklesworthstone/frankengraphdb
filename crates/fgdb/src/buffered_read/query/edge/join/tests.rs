@@ -47,6 +47,7 @@ fn pool() -> MemoryPool {
 fn pattern(text: &str) -> PreparedGraphPattern<GraphValueRow> {
     PreparedGraphText::prepare(text, |kind, name| match (kind, name) {
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+        (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(8))),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         (GraphSymbolKind::Property, "missing") => Some(GraphSymbol::Property(PropertyKeyId(10))),
         _ => None,
@@ -546,7 +547,9 @@ fn interrupted_cold_incidence_admission_drops_routing_and_cannot_resume_a_partia
         .await
         .unwrap();
         let baseline = pool.used();
-        let (mut source, checkpoint) = view.edge_input_source(&cx, CommitSeq(3)).unwrap();
+        let (mut source, checkpoint) = view
+            .edge_input_source(&cx, CommitSeq(3), EdgeRelation::Any)
+            .unwrap();
         let mut events = Vec::new();
         let candidate = source
             .next_incident_candidate(
@@ -578,7 +581,9 @@ fn interrupted_cold_incidence_admission_drops_routing_and_cannot_resume_a_partia
         drop(checkpoint);
         assert_eq!(pool.used(), baseline);
         for stop in [1, admission, total] {
-            let (mut source, checkpoint) = view.edge_input_source(&cx, CommitSeq(3)).unwrap();
+            let (mut source, checkpoint) = view
+                .edge_input_source(&cx, CommitSeq(3), EdgeRelation::Any)
+                .unwrap();
             let mut calls = 0;
             let result = source
                 .next_incident_candidate(
@@ -607,6 +612,307 @@ fn interrupted_cold_incidence_admission_drops_routing_and_cannot_resume_a_partia
             );
             drop(source);
             drop(checkpoint);
+            assert_eq!(pool.used(), baseline);
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn a_selected_root_prunes_payload_faults_and_control_refusals_still_fuse_the_source() {
+    let ((), report) = run_async_under_lab(0xc01d_2006, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, _) = history(&commit).await;
+        let path = vfs.database_dir();
+        let pool = pool();
+        let mut view = Database::open_buffered_read_view_with_vfs(
+            &commit,
+            vfs,
+            &path,
+            keys(),
+            pool.clone(),
+            limits(),
+        )
+        .await
+        .unwrap();
+        let baseline = pool.used();
+        let mut measurements = Vec::new();
+        // The unscoped source is the predecessor's actual access path, with
+        // the SAME one-relation evaluator demand and native history resolver.
+        for root_relation in [EdgeRelation::One(R), EdgeRelation::Any] {
+            let before = view.buffer_stats().misses;
+            let (mut source, checkpoint) = view
+                .edge_input_source(&cx, CommitSeq(3), root_relation)
+                .unwrap();
+            let mut events = Vec::new();
+            let mut rows = Vec::new();
+            while let Some(candidate) = source
+                .next_candidate(EdgeRelation::One(R), &mut |event| {
+                    events.push(event);
+                    Ok::<_, usize>(())
+                })
+                .await
+                .unwrap()
+            {
+                if let Some(record) = candidate.record {
+                    let edge = record.image.edge();
+                    rows.push((candidate.eid, edge.entry, edge.props.clone()));
+                }
+            }
+            drop(source);
+            drop(checkpoint);
+            assert_eq!(pool.used(), baseline);
+            measurements.push((rows, events, view.buffer_stats().misses - before));
+        }
+        assert_eq!(measurements[0].0, measurements[1].0);
+        let candidates = |events: &[AsyncEdgeScanEvent]| {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    AsyncEdgeScanEvent::Candidate(eid) => Some(*eid),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            candidates(&measurements[0].1),
+            [EId(0), EId(1), EId(2), EId(3), EId(u128::MAX)]
+        );
+        assert_eq!(
+            candidates(&measurements[1].1),
+            [EId(0), EId(1), EId(2), EId(3), EId(4), EId(u128::MAX)]
+        );
+        assert!(
+            measurements[0].2 < measurements[1].2,
+            "descriptor pruning must avoid actual payload faults"
+        );
+
+        let events = &measurements[0].1;
+        let first_identity = events
+            .iter()
+            .position(|event| matches!(event, AsyncEdgeScanEvent::Candidate(_)))
+            .unwrap()
+            + 1;
+        for stop in [1, first_identity, events.len()] {
+            let (mut source, checkpoint) = view
+                .edge_input_source(&cx, CommitSeq(3), EdgeRelation::One(R))
+                .unwrap();
+            let mut calls = 0;
+            loop {
+                let result = source
+                    .next_candidate(EdgeRelation::One(R), &mut |_| {
+                        calls += 1;
+                        if calls == stop { Err(stop) } else { Ok(()) }
+                    })
+                    .await;
+                match result {
+                    Ok(Some(_)) => {}
+                    Err(EdgeScanSourceError::Control(value)) => {
+                        assert_eq!(value, stop);
+                        break;
+                    }
+                    Ok(None) => panic!("a refused root cannot finish successfully"),
+                    Err(error) => panic!("root refusal must retain its type: {error:?}"),
+                }
+            }
+            assert_eq!(calls, stop);
+            assert!(source.scan.is_closed());
+            assert!(
+                source
+                    .next_candidate(EdgeRelation::Any, &mut |_| -> Result<(), usize> {
+                        panic!("a failed selected root must not resume or widen");
+                    })
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            drop(source);
+            drop(checkpoint);
+            assert_eq!(pool.used(), baseline);
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn typed_join_roots_keep_other_relation_expansions_and_their_exact_candidate_budgets() {
+    let ((), report) = run_async_under_lab(0xc01d_2007, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, _) = history(&commit).await;
+        let path = vfs.database_dir();
+        let pool = pool();
+        let mut view = Database::open_buffered_read_view_with_vfs(
+            &commit,
+            vfs,
+            &path,
+            keys(),
+            pool.clone(),
+            limits(),
+        )
+        .await
+        .unwrap();
+        let baseline = pool.used();
+        for (text, quota, expected) in [
+            (
+                "MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN r,a,s,b,c",
+                8,
+                vec![(0, 0, 4, 1, 0), (1, 0, 4, 1, 0), (u128::MAX, 1, 4, 1, 0)],
+            ),
+            (
+                "MATCH (a)-[r:S]->(b)-[s:R]->(c) RETURN r,a,s,b,c",
+                3,
+                vec![(4, 1, 0, 0, 1), (4, 1, 1, 0, 1)],
+            ),
+        ] {
+            let p = pattern(text);
+            let bytes = p.plan().canonical_bytes();
+            let mut cursor = view
+                .stream_graph_edge_joins_governed(
+                    &cx,
+                    &p,
+                    GqlQueryPolicy::new(quota, 100, 1_000_000, 1_000_000),
+                )
+                .unwrap();
+            let mut actual = Vec::new();
+            while let Some(row) = cursor.next().await {
+                actual.push(row.unwrap().values().to_vec());
+            }
+            let expected: Vec<_> = expected
+                .into_iter()
+                .map(|(r, a, s, b, c)| {
+                    vec![
+                        GraphValue::Edge(EId(r)),
+                        GraphValue::Vertex(IDS[a]),
+                        GraphValue::Edge(EId(s)),
+                        GraphValue::Vertex(IDS[b]),
+                        GraphValue::Vertex(IDS[c]),
+                    ]
+                })
+                .collect();
+            assert_eq!(actual, expected, "{text}");
+            assert_eq!(cursor.row_stats().snapshot_records, quota);
+            assert_eq!(cursor.state(), EdgeScanState::Exhausted);
+            drop(cursor);
+            assert_eq!(pool.used(), baseline);
+            assert_eq!(p.plan().canonical_bytes(), bytes);
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn buffered_sort_and_numeric_aggregate_inputs_use_their_compiled_root_selector() {
+    use core::convert::Infallible;
+    use fgdb_gql::spill_aggregate::AsyncSpillAggregatePlan;
+    use fgdb_gql::{GraphAggregateValue, PreparedGraphAggregateText};
+
+    let ((), report) = run_async_under_lab(0xc01d_2008, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, _) = history(&commit).await;
+        let path = vfs.database_dir();
+        let pool = pool();
+        let mut view = Database::open_buffered_read_view_with_vfs(
+            &commit,
+            vfs,
+            &path,
+            keys(),
+            pool.clone(),
+            limits(),
+        )
+        .await
+        .unwrap();
+        let baseline = pool.used();
+        let p = pattern("MATCH (a)-[r:R]->(b) RETURN r.p AS value ORDER BY value DESC");
+        let (plan, _) = AsyncEdgeScanPlan::compile_sort_input(p.plan()).unwrap();
+        let mut cursor = view
+            .open_edge_input(
+                &cx,
+                plan,
+                CommitSeq(3),
+                GqlQueryPolicy::new(5, 100, 1_000_000, 1_000_000),
+            )
+            .unwrap();
+        let mut occurrences = 0;
+        while let Some(row) = cursor.next().await {
+            row.unwrap();
+            occurrences += 1;
+        }
+        assert_eq!(occurrences, 4);
+        assert_eq!(cursor.row_stats().snapshot_records, 5);
+        drop(cursor);
+        assert_eq!(pool.used(), baseline);
+
+        for (text, records, expected) in [
+            ("MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n", 5, 4),
+            ("MATCH (a)-[r:S]->(b) RETURN COUNT(*) AS n", 1, 1),
+            ("MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN COUNT(*) AS n", 8, 3),
+            ("MATCH (a)-[r:S]->(b)-[s:R]->(c) RETURN COUNT(*) AS n", 3, 2),
+        ] {
+            let aggregate =
+                PreparedGraphAggregateText::prepare(text, |kind, name| match (kind, name) {
+                    (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+                    (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(8))),
+                    _ => None,
+                })
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            let plan = AsyncSpillAggregatePlan::compile(&aggregate).unwrap();
+            let definition = plan.definition().clone();
+            let allowance = GqlQueryPolicy::new(records, 1, 1_000_000, 1_000_000);
+            macro_rules! consume {
+                ($cursor:expr) => {{
+                    let mut cursor = $cursor.unwrap();
+                    let mut state = definition
+                        .new_state(&mut |event| cursor.charge::<Infallible, Cancel>(event))
+                        .unwrap();
+                    while let Some(row) = cursor
+                        .next_input(&mut |_, _| Ok::<_, BufferedReadError>(()))
+                        .await
+                        .unwrap()
+                    {
+                        definition
+                            .update(&mut state, &row, &mut |event| {
+                                cursor.charge::<Infallible, Cancel>(event)
+                            })
+                            .unwrap();
+                    }
+                    let result = definition
+                        .finish(vec![], state, &mut |event| {
+                            cursor.charge::<Infallible, Cancel>(event)
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        result.values(),
+                        &[GraphAggregateValue::Count(expected)],
+                        "{text}"
+                    );
+                    assert_eq!(cursor.row_stats().snapshot_records, records, "{text}");
+                    assert_eq!(cursor.state(), EdgeScanState::Exhausted);
+                    cursor.finish_result::<Infallible, Cancel>().unwrap();
+                }};
+            }
+            match plan {
+                AsyncSpillAggregatePlan::Edge(plan) => {
+                    consume!(view.open_edge_aggregate_input(&cx, plan, CommitSeq(3), allowance))
+                }
+                AsyncSpillAggregatePlan::Join(plan) => consume!(
+                    view.open_edge_join_aggregate_input(&cx, plan, CommitSeq(3), allowance)
+                ),
+                other => panic!("expected an edge source: {other:?}"),
+            }
             assert_eq!(pool.used(), baseline);
         }
         drop(view);

@@ -280,7 +280,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         >,
         EdgeQueryError,
     > {
-        let (source, checkpoint) = self.edge_input_source(cx, as_of)?;
+        let (source, checkpoint) = self.edge_input_source(cx, as_of, plan.root_relation())?;
         Ok(AsyncEdgeScanCursor::new(source, plan, policy, checkpoint))
     }
 
@@ -298,7 +298,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         >,
         EdgeQueryError,
     > {
-        let (source, checkpoint) = self.edge_input_source(cx, as_of)?;
+        let (source, checkpoint) = self.edge_input_source(cx, as_of, plan.root_relation())?;
         Ok(AsyncEdgeSpillAggregateCursor::new(
             source, plan, policy, checkpoint,
         ))
@@ -308,6 +308,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         &'view mut self,
         cx: &'q QueryCx,
         as_of: CommitSeq,
+        relation: EdgeRelation,
     ) -> Result<(Source<'view, 'q, V>, Checkpoint<'q>), EdgeQueryError> {
         if as_of > self.frontier() {
             return Err(source_error(BufferedReadError::BeyondPublication {
@@ -321,12 +322,20 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
             .reserve(cx, 1024)
             .map_err(BufferedReadError::Memory)
             .map_err(source_error)?;
+        // Root admission already proved every block's immutable relation and
+        // complete histories. Select its descriptor family before seeding the
+        // root heap, so unrelated topology/properties spend no payload I/O or
+        // candidate quota. Any/alternation keep the native per-row predicate;
+        // None from one() must never narrow a type alternation to one member.
+        // This restricts only the root; nested incidence requests remain free
+        // to select their own relation at the same admitted snapshot.
+        let scan = match relation.one() {
+            Some(relation) => self.partition.edge_scan_relation(cx, as_of, relation),
+            None => self.partition.edge_scan(cx, as_of),
+        }
+        .map_err(source_error)?;
         let source = Source {
-            scan: self
-                .partition
-                .edge_scan(cx, as_of)
-                .map_err(source_error)?
-                .into_join_scan(),
+            scan: scan.into_join_scan(),
             cx,
             pool,
         };

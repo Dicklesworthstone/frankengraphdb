@@ -13,6 +13,11 @@ pub struct AsyncEdgeSpillAggregatePlan {
 }
 
 impl AsyncEdgeSpillAggregatePlan {
+    /// The checked input selector, before aggregate occurrence evaluation.
+    pub fn root_relation(&self) -> EdgeRelation {
+        self.input.root_relation()
+    }
+
     pub(crate) fn compile(
         definition: SpillAggregateDefinition,
     ) -> Result<Self, EdgeScanBuildError> {

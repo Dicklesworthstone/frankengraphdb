@@ -2,6 +2,7 @@
 //! External storage, group populations and argument DISTINCT remain host-owned.
 
 use super::{SpillAggregateBuildError, SpillAggregateDefinition};
+use crate::algebra::EdgeRelation;
 use crate::edge_stream::aggregate::EdgeAggregateError;
 use crate::edge_stream::{
     AsyncEdgeJoinCursor, AsyncEdgeJoinOutput, AsyncEdgeJoinPlan, AsyncEdgeJoinSource,
@@ -24,6 +25,11 @@ pub struct AsyncEdgeJoinSpillAggregatePlan {
     definition: SpillAggregateDefinition,
 }
 impl AsyncEdgeJoinSpillAggregatePlan {
+    /// The checked root selector of the aggregate's fixed-hop input.
+    pub fn root_relation(&self) -> EdgeRelation {
+        self.input.root_relation()
+    }
+
     pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, SpillAggregateBuildError> {
         Self::from_definition(SpillAggregateDefinition::compile(aggregate)?)
             .map_err(SpillAggregateBuildError::Edge)

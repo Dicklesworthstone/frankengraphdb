@@ -73,6 +73,12 @@ pub struct AsyncEdgeJoinPlan {
     columns: usize,
 }
 impl AsyncEdgeJoinPlan {
+    /// The checked root selector. Nested expansions and probes retain their
+    /// independent selectors and must not inherit this source restriction.
+    pub fn root_relation(&self) -> EdgeRelation {
+        self.inner.relation
+    }
+
     pub fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<Self, EdgeScanBuildError> {
         Self::check_access(plan)?;
         Ok(Self::from_inner(compile_output(plan, Output::OrderedRows)?))

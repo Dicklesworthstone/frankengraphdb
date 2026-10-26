@@ -98,6 +98,13 @@ pub struct AsyncEdgeScanPlan {
     columns: usize,
 }
 impl AsyncEdgeScanPlan {
+    /// The checked root selector, for source-level descriptor pruning before
+    /// heap admission or payload reads. This conveys no authorization; the
+    /// source must still enforce its own visibility and capability boundary.
+    pub fn root_relation(&self) -> EdgeRelation {
+        self.inner.relation
+    }
+
     pub fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<Self, EdgeScanBuildError> {
         if let Some(operator) = plan.operators().iter().position(|operator| {
             matches!(

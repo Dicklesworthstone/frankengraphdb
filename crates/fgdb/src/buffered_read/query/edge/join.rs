@@ -238,7 +238,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         >,
         EdgeQueryError,
     > {
-        let (source, checkpoint) = self.edge_input_source(cx, as_of)?;
+        let (source, checkpoint) = self.edge_input_source(cx, as_of, plan.root_relation())?;
         Ok(AsyncEdgeJoinCursor::new(source, plan, policy, checkpoint))
     }
 
@@ -263,7 +263,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         >,
         EdgeQueryError,
     > {
-        let (source, checkpoint) = self.edge_input_source(cx, as_of)?;
+        let (source, checkpoint) = self.edge_input_source(cx, as_of, plan.root_relation())?;
         Ok(AsyncEdgeJoinSpillAggregateCursor::new(
             source, plan, policy, checkpoint,
         ))

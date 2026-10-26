@@ -123,7 +123,11 @@ fn cold_edge_queries_match_192_independent_history_direction_filter_and_window_c
                             );
                             assert_eq!(cursor.row_stats().result_rows, actual.len() as u64);
                             if count == 100 {
-                                assert_eq!(cursor.row_stats().snapshot_records, 5);
+                                assert_eq!(
+                                    cursor.row_stats().snapshot_records,
+                                    if any { 5 } else { 4 },
+                                    "typed roots admit only their relation's historical identities"
+                                );
                             }
                             assert_eq!(cursor.snapshot_seq(), CommitSeq(cut));
                             assert_eq!(cursor.state(), EdgeScanState::Exhausted);
@@ -138,6 +142,105 @@ fn cold_edge_queries_match_192_independent_history_direction_filter_and_window_c
             }
         }
         assert_eq!(cases, 192);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn typed_roots_spend_only_selected_history_while_alternations_keep_every_member() {
+    let ((), report) = run_async_under_lab(0x6275_e005, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, _) = history(&commit).await;
+        let path = vfs.database_dir();
+        let pool = pool();
+        let mut view = Database::open_buffered_read_view_with_vfs(
+            &commit,
+            vfs,
+            &path,
+            keys(),
+            pool.clone(),
+            limits(),
+        )
+        .await
+        .unwrap();
+        let baseline = pool.used();
+        for cut in 0..=3 {
+            for (selector, candidates, keep_r, keep_s) in [
+                (":R", 4, true, false),
+                (":S", 1, false, true),
+                (":Missing", 0, false, false),
+                ("", 5, true, true),
+                (":R|S", 5, true, true),
+                (":R|Missing", 5, true, false),
+            ] {
+                let text = format!(
+                    "MATCH (a)-[r{selector}]->(b) RETURN r,a,b,r.p AS ep,a.p AS ap,b.p AS bp"
+                );
+                let pattern = PreparedGraphText::prepare(&text, |kind, name| match (kind, name) {
+                    (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RELATION)),
+                    (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(8))),
+                    (GraphSymbolKind::Relation, "Missing") => {
+                        Some(GraphSymbol::Relation(RelationId(9)))
+                    }
+                    (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PROPERTY)),
+                    _ => None,
+                })
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+                let expected: Vec<_> = expected(cut, 0, true, 0, 0, 100)
+                    .into_iter()
+                    .filter(|row| {
+                        if row[0] == GraphValue::Edge(EId(105)) {
+                            keep_s
+                        } else {
+                            keep_r
+                        }
+                    })
+                    .collect();
+                let allowance = GqlQueryPolicy::new(candidates, 100, 1_000_000, 1_000_000);
+                let mut cursor = view
+                    .stream_graph_edges_governed_at(&cx, &pattern, CommitSeq(cut), allowance)
+                    .unwrap();
+                let mut actual = Vec::new();
+                while let Some(row) = cursor.next().await {
+                    actual.push(
+                        row.unwrap_or_else(|error| panic!("{text} at {cut}: {error}"))
+                            .values()
+                            .to_vec(),
+                    );
+                }
+                assert_eq!(actual, expected, "{text} at {cut}");
+                assert_eq!(cursor.row_stats().snapshot_records, candidates);
+                assert_eq!(cursor.state(), EdgeScanState::Exhausted);
+                drop(cursor);
+                assert_eq!(pool.used(), baseline);
+
+                if candidates > 0 {
+                    let allowance = GqlQueryPolicy::new(candidates - 1, 100, 1_000_000, 1_000_000);
+                    let mut cursor = view
+                        .stream_graph_edges_governed_at(&cx, &pattern, CommitSeq(cut), allowance)
+                        .unwrap();
+                    loop {
+                        match cursor.next().await {
+                            Some(Ok(_)) => {}
+                            Some(Err(GqlQueryError::Rows(_))) => break,
+                            other => panic!(
+                                "one missing history admission must refuse: {text}: {other:?}"
+                            ),
+                        }
+                    }
+                    assert_eq!(cursor.state(), EdgeScanState::Failed);
+                    assert!(cursor.next().await.is_none());
+                    drop(cursor);
+                    assert_eq!(pool.used(), baseline);
+                }
+            }
+        }
         drop(view);
         assert_eq!(pool.used(), 0);
     });
