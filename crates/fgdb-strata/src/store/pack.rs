@@ -231,6 +231,38 @@ struct PackFile {
     slot: Mutex<Slot>,
 }
 
+/// Own the residency reservation across every suspension of a whole-pack
+/// read. Cancellation drops the future without visiting its error arm, so
+/// cleanup must be tied to the reservation's lifetime instead.
+struct LoadingPack<'a> {
+    pack: &'a PackFile,
+    resident: &'a Mutex<usize>,
+    size: usize,
+    active: bool,
+}
+
+impl LoadingPack<'_> {
+    fn publish(mut self, bytes: Arc<[u8]>) {
+        *self.pack.slot.lock().expect("pack slot") = Slot::Loaded(bytes);
+        // The loaded slot now owns these resident bytes. No await separates
+        // publication from disarming the refund.
+        self.active = false;
+    }
+}
+
+impl Drop for LoadingPack<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            // Match admission's slot -> resident lock order. release/rearm
+            // leave Loading alone; only this guard owns its reservation.
+            let mut slot = self.pack.slot.lock().expect("pack slot");
+            let mut resident = self.resident.lock().expect("resident packs");
+            *resident -= self.size;
+            *slot = Slot::Empty;
+        }
+    }
+}
+
 impl PackFile {
     /// Forget which objects have been served.
     fn forget(&self) {
@@ -506,23 +538,19 @@ impl PackIndex {
             self.served(&pack, location.entry);
             return Ok(object);
         }
-        let loaded = self.read_whole(cx, vfs, &pack).await;
-        let mut slot = pack.slot.lock().expect("pack slot");
-        match loaded {
-            Ok(bytes) => {
-                let object = bytes[start..end].to_vec();
-                *slot = Slot::Loaded(bytes);
-                drop(slot);
-                self.served(&pack, location.entry);
-                Ok(object)
-            }
-            Err(error) => {
-                *slot = Slot::Empty;
-                drop(slot);
-                *self.resident.lock().expect("resident packs") -= size;
-                Err(error)
-            }
-        }
+        // No suspension occurs between reserving the bytes and installing
+        // their owner. Dropping either the read or its caller refunds them.
+        let loading = LoadingPack {
+            pack: &pack,
+            resident: &self.resident,
+            size,
+            active: true,
+        };
+        let bytes = self.read_whole(cx, vfs, &pack).await?;
+        let object = bytes[start..end].to_vec();
+        loading.publish(bytes);
+        self.served(&pack, location.entry);
+        Ok(object)
     }
 
     async fn read_direct<V: Vfs>(
@@ -794,5 +822,319 @@ mod tests {
             Located::One(Location { pack: 1, .. })
         ));
         assert!(matches!(index.locate(id(3)), Located::None));
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use asupersync::fs::{Metadata, OpenOptions, Permissions, ReadDir, UnixVfs, UnixVfsFile};
+    use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
+    use asupersync::{Budget, runtime::RuntimeBuilder};
+    use fgdb_types::PurposeContexts;
+    use std::future::{Future, pending, poll_fn};
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering::SeqCst};
+    use std::task::{Context, Poll};
+
+    // Park precisely one selected read. All other operations use the real
+    // filesystem, including concurrent fallback and a later whole-pack retry.
+    struct HeldVfs {
+        phase: AtomicU8,
+        entered: Arc<AtomicBool>,
+    }
+    struct HeldFile {
+        inner: UnixVfsFile,
+        park: bool,
+        entered: Arc<AtomicBool>,
+    }
+    impl AsyncRead for HeldFile {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if self.park {
+                self.entered.store(true, SeqCst);
+                Poll::Pending
+            } else {
+                Pin::new(&mut self.inner).poll_read(cx, buf)
+            }
+        }
+    }
+    impl AsyncWrite for HeldFile {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+    impl AsyncSeek for HeldFile {
+        fn poll_seek(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            pos: SeekFrom,
+        ) -> Poll<io::Result<u64>> {
+            Pin::new(&mut self.inner).poll_seek(cx, pos)
+        }
+    }
+    impl VfsFile for HeldFile {
+        async fn metadata(&self) -> io::Result<Metadata> {
+            self.inner.metadata().await
+        }
+        async fn sync_all(&self) -> io::Result<()> {
+            self.inner.sync_all().await
+        }
+        async fn sync_data(&self) -> io::Result<()> {
+            self.inner.sync_data().await
+        }
+        async fn set_len(&self, size: u64) -> io::Result<()> {
+            self.inner.set_len(size).await
+        }
+        async fn set_permissions(&self, perm: Permissions) -> io::Result<()> {
+            self.inner.set_permissions(perm).await
+        }
+    }
+    impl Vfs for HeldVfs {
+        type File = HeldFile;
+        async fn open(&self, path: &Path, opts: &OpenOptions) -> io::Result<Self::File> {
+            let phase = self.phase.swap(0, SeqCst);
+            if phase == 1 {
+                self.entered.store(true, SeqCst);
+                pending::<()>().await;
+            }
+            Ok(HeldFile {
+                inner: UnixVfs.open(path, opts).await?,
+                park: phase == 2,
+                entered: Arc::clone(&self.entered),
+            })
+        }
+        async fn metadata(&self, path: &Path) -> io::Result<Metadata> {
+            UnixVfs.metadata(path).await
+        }
+        async fn symlink_metadata(&self, path: &Path) -> io::Result<Metadata> {
+            UnixVfs.symlink_metadata(path).await
+        }
+        async fn set_permissions(&self, path: &Path, perm: Permissions) -> io::Result<()> {
+            UnixVfs.set_permissions(path, perm).await
+        }
+        async fn create_dir(&self, path: &Path) -> io::Result<()> {
+            UnixVfs.create_dir(path).await
+        }
+        async fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+            UnixVfs.create_dir_all(path).await
+        }
+        async fn remove_dir(&self, path: &Path) -> io::Result<()> {
+            UnixVfs.remove_dir(path).await
+        }
+        async fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+            UnixVfs.remove_dir_all(path).await
+        }
+        async fn read_dir(&self, path: &Path) -> io::Result<ReadDir> {
+            UnixVfs.read_dir(path).await
+        }
+        async fn remove_file(&self, path: &Path) -> io::Result<()> {
+            UnixVfs.remove_file(path).await
+        }
+        async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+            UnixVfs.rename(from, to).await
+        }
+        async fn copy(&self, from: &Path, to: &Path) -> io::Result<u64> {
+            UnixVfs.copy(from, to).await
+        }
+        async fn hard_link(&self, from: &Path, to: &Path) -> io::Result<()> {
+            UnixVfs.hard_link(from, to).await
+        }
+        async fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+            UnixVfs.canonicalize(path).await
+        }
+        async fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
+            UnixVfs.read_link(path).await
+        }
+        async fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+            UnixVfs.read(path).await
+        }
+        async fn read_to_string(&self, path: &Path) -> io::Result<String> {
+            UnixVfs.read_to_string(path).await
+        }
+        async fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            UnixVfs.write(path, bytes).await
+        }
+    }
+
+    fn fixture() -> (PackIndex, HeldVfs, [Location; 3], Vec<u8>) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("fgdb-pack-cancel-{}-{stamp}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bytes = encode(&[(ObjectId([1; 32]), b"abc"), (ObjectId([2; 32]), b"defg")]);
+        let other = encode(&[(ObjectId([9; 32]), b"other")]);
+        let mut table = Table::default();
+        for (filename, bytes, count) in [("a.pack", &bytes, 2), ("b.pack", &other, 1)] {
+            let path = dir.join(filename);
+            std::fs::write(&path, bytes).unwrap();
+            let entries = decode_table(
+                &bytes[HEADER_BYTES..HEADER_BYTES + count * ENTRY_BYTES],
+                bytes.len() as u64,
+            )
+            .unwrap();
+            PackIndex::insert(&mut table, path, bytes.len() as u64, entries);
+        }
+        let locations = [1, 2, 9].map(|id| table.objects[&ObjectId([id; 32])]);
+        (
+            PackIndex {
+                dir,
+                table: RwLock::new(table),
+                cache_reads: true,
+                resident: Mutex::new(0),
+                whole_reads: std::sync::atomic::AtomicUsize::new(0),
+            },
+            HeldVfs {
+                phase: AtomicU8::new(0),
+                entered: Arc::new(AtomicBool::new(false)),
+            },
+            locations,
+            bytes,
+        )
+    }
+
+    #[test]
+    fn dropping_a_whole_pack_read_at_open_or_data_refunds_only_its_reservation() {
+        let runtime = RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(Budget::INFINITE);
+        let cx = PurposeContexts::narrow_runtime_root(&root).query();
+        let (index, vfs, locations, bytes) = fixture();
+        assert_eq!(
+            runtime
+                .block_on(index.read(&cx, &vfs, locations[2], 100))
+                .unwrap(),
+            b"other"
+        );
+        let retained = *index.resident.lock().unwrap();
+        for phase in [1, 2, 1, 2] {
+            vfs.entered.store(false, SeqCst);
+            vfs.phase.store(phase, SeqCst);
+            let before = index.whole_reads();
+            let mut future = Box::pin(index.read(&cx, &vfs, locations[0], 100));
+            runtime.block_on(poll_fn(|cx| {
+                assert!(future.as_mut().poll(cx).is_pending());
+                if vfs.entered.load(SeqCst) {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            }));
+            assert_eq!(*index.resident.lock().unwrap(), retained + bytes.len());
+            assert_eq!(index.whole_reads(), before + 1);
+            // A simultaneous object read neither steals nor refunds the loader's bytes.
+            assert_eq!(
+                runtime
+                    .block_on(index.read(&cx, &vfs, locations[1], 100))
+                    .unwrap(),
+                b"defg"
+            );
+            assert_eq!(index.whole_reads(), before + 1);
+            drop(future);
+            assert_eq!(*index.resident.lock().unwrap(), retained);
+            assert!(matches!(
+                *index.packs()[0].slot.lock().unwrap(),
+                Slot::Empty
+            ));
+            assert_eq!(index.resident_packs(), 1);
+        }
+        let before = index.whole_reads();
+        assert_eq!(
+            runtime
+                .block_on(index.read(&cx, &vfs, locations[0], 100))
+                .unwrap(),
+            b"abc"
+        );
+        assert_eq!(
+            runtime
+                .block_on(index.read(&cx, &vfs, locations[1], 100))
+                .unwrap(),
+            b"defg"
+        );
+        assert_eq!(
+            index.whole_reads(),
+            before + 1,
+            "retry repopulates the whole-pack cache"
+        );
+        assert_eq!(*index.resident.lock().unwrap(), retained + bytes.len());
+        index.release();
+        assert_eq!(
+            *index.resident.lock().unwrap(),
+            0,
+            "published bytes are refunded exactly once"
+        );
+    }
+
+    #[test]
+    fn release_and_rearm_during_loading_do_not_take_the_reservation() {
+        let runtime = RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(Budget::INFINITE);
+        let cx = PurposeContexts::narrow_runtime_root(&root).query();
+        let (index, vfs, locations, bytes) = fixture();
+        vfs.phase.store(1, SeqCst);
+        let mut future = Box::pin(index.read(&cx, &vfs, locations[0], 100));
+        runtime.block_on(poll_fn(|cx| {
+            assert!(future.as_mut().poll(cx).is_pending());
+            assert!(vfs.entered.load(SeqCst));
+            Poll::Ready(())
+        }));
+        index.release();
+        index.rearm([ObjectId([1; 32]), ObjectId([2; 32])]);
+        assert_eq!(*index.resident.lock().unwrap(), bytes.len());
+        drop(future);
+        assert_eq!(*index.resident.lock().unwrap(), 0);
+        assert_eq!(
+            runtime
+                .block_on(index.read(&cx, &vfs, locations[0], 100))
+                .unwrap(),
+            b"abc"
+        );
+        index.release();
+        assert_eq!(*index.resident.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn invalid_pack_length_refunds_and_the_next_read_retries() {
+        let runtime = RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(Budget::INFINITE);
+        let cx = PurposeContexts::narrow_runtime_root(&root).query();
+        let (index, vfs, locations, bytes) = fixture();
+        let path = index.packs()[0].path.clone();
+        std::fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
+        assert!(
+            runtime
+                .block_on(index.read(&cx, &vfs, locations[0], 100))
+                .is_err()
+        );
+        assert_eq!(*index.resident.lock().unwrap(), 0);
+        assert!(matches!(
+            *index.packs()[0].slot.lock().unwrap(),
+            Slot::Empty
+        ));
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            runtime
+                .block_on(index.read(&cx, &vfs, locations[0], 100))
+                .unwrap(),
+            b"abc"
+        );
+        assert_eq!(index.whole_reads(), 2);
+        assert_eq!(*index.resident.lock().unwrap(), bytes.len());
     }
 }
