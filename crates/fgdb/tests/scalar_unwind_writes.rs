@@ -2637,3 +2637,76 @@ fn an_on_create_merge_chain_freezes_to_the_sequential_chains_graph() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// fgdb-2l3pt: an UNWIND batch's work grows linearly with its rows. Each
+/// row's statement used to re-walk every earlier row's staged effects, so
+/// an R-row batch cost O(R^2) and about 2,600 MERGE+SET rows exhausted the
+/// default 10M work units. Here each doubling of the rows may at most about
+/// double every counter (2.25x); quadratic growth would quadruple them. The
+/// 4,000-row batch runs under the CLI's default work budget.
+#[test]
+fn unwind_batch_work_grows_linearly_with_its_rows() {
+    let ((), report) = run_async_under_lab(0x7363_6130, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (cx, commit, txcx) = (contexts.query(), contexts.commit(), contexts.txn());
+        let budget = || {
+            GraphWriteProgramPolicy::new(
+                GqlQueryPolicy::new(u64::MAX, u64::MAX, 10_000_000, u64::MAX),
+                100_000,
+                100_000,
+                0,
+            )
+        };
+        let mut counters = Vec::new();
+        for rows in [1_000_i64, 2_000, 4_000] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let input = args(
+                (0..rows)
+                    .map(|id| object(vec![("id", int(id)), ("p", int(2 * id))]))
+                    .collect(),
+            );
+            let issued = AtomicU64::new(0);
+            let result = db
+                .query_write(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n.p = row.p",
+                    &input,
+                    symbols,
+                    R,
+                    budget(),
+                    |_| {
+                        let next = issued.fetch_add(1, Ordering::Relaxed);
+                        Ok::<_, Infallible>(ElementId::Vertex(VId(u128::from(next) + 1)))
+                    },
+                )
+                .await
+                .unwrap();
+            let QueryResult::Write { receipt, .. } = result else {
+                panic!("a no-RETURN batch answers its write receipt")
+            };
+            let stats = receipt.stats();
+            assert_eq!(stats.completed_statements, rows as usize);
+            assert_eq!(stats.created_vertices, rows as u64);
+            assert_eq!(db.vertices().unwrap().len(), rows as usize);
+            // The re-walk charged work units; scratch tracks the staged
+            // overlay. A MERGE keyed by an indexed property reads no
+            // snapshot record here, so that counter stays out of the bound.
+            counters.push([stats.evaluator.work_units, stats.evaluator.scratch_entries]);
+        }
+        for pair in counters.windows(2) {
+            for (smaller, larger) in pair[0].iter().zip(pair[1]) {
+                // Every counter grows with the rows, so the bound is not
+                // satisfied by a counter that stays flat or at zero.
+                assert!(larger > *smaller, "a counter must grow: {counters:?}");
+                assert!(
+                    u128::from(larger) * 100 <= u128::from(*smaller) * 225,
+                    "doubling the rows must not more than double the work: {counters:?}"
+                );
+            }
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
