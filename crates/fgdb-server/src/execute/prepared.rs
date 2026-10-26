@@ -212,10 +212,47 @@ pub(crate) fn run_prepared<'a>(
             read_prepared(cx, db, token, prepared, parameters)
         }
         (PreparedDefinition::Write(prepared), PreparedExecutionMode::Write) => {
-            Box::pin(write_prepared_inner(cx, db, token, prepared, parameters))
+            Box::pin(write_prepared_inner(
+                cx,
+                db,
+                token,
+                prepared,
+                PreparedParameters::Single(parameters),
+            ))
         }
         _ => Box::pin(async { Err(mode_refusal()) }),
     }
+}
+
+/// Execute every binding against one frozen write template and one permit.
+/// The native executor binds the entire batch before staging any mutations.
+pub(crate) fn run_prepared_batch<'a>(
+    cx: &'a Cx,
+    db: &'a Served,
+    token: &'a CapabilityToken,
+    definition: &'a PreparedDefinition,
+    argument_sets: &'a [Vec<(String, WireValue)>],
+) -> Execution<'a> {
+    match definition {
+        PreparedDefinition::Write(prepared) => Box::pin(write_prepared_inner(
+            cx,
+            db,
+            token,
+            prepared,
+            PreparedParameters::Batch(argument_sets),
+        )),
+        PreparedDefinition::Read(_) => Box::pin(async { Err(mode_refusal()) }),
+    }
+}
+
+enum PreparedParameters<'a> {
+    Single(&'a [(String, WireValue)]),
+    Batch(&'a [Vec<(String, WireValue)>]),
+}
+
+enum NativeParameters {
+    Single(GqlParameters),
+    Batch(Vec<GqlParameters>),
 }
 
 async fn write_prepared_inner(
@@ -223,7 +260,7 @@ async fn write_prepared_inner(
     db: &Served,
     token: &CapabilityToken,
     prepared: &PreparedWrite,
-    parameters: &[(String, WireValue)],
+    parameters: PreparedParameters<'_>,
 ) -> Result<Answer, Refusal> {
     let _operation = prepared.generation.enter().map_err(Refusal::from)?;
     let now = unix_millis();
@@ -232,28 +269,69 @@ async fn write_prepared_inner(
         .and_then(|capability| capability.begin_write_at(TRUNK, now).map(|_| ()))
         .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
-    let parameters = convert::parameters(parameters, None)
-        .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
+    let query = crate::query_cx(&contexts);
+    let parameters = match parameters {
+        PreparedParameters::Single(parameters) => NativeParameters::Single(
+            convert::parameters(parameters, None)
+                .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?,
+        ),
+        PreparedParameters::Batch(argument_sets) => {
+            let mut converted = Vec::with_capacity(argument_sets.len());
+            for (index, parameters) in argument_sets.iter().enumerate() {
+                query
+                    .checkpoint()
+                    .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+                converted.push(convert::parameters(parameters, None).map_err(|error| {
+                    Refusal::new(
+                        ErrorCode::Statement,
+                        format!("argument set {index}: {error}"),
+                    )
+                })?);
+            }
+            NativeParameters::Batch(converted)
+        }
+    };
     let mut guard = db.db.write(cx).await.map_err(Refusal::from)?;
     // Waiting for another writer cannot revive metadata from an old recovery
     // generation. No binding or identity allocation precedes this fence.
     prepared.generation.check().map_err(Refusal::from)?;
     let generation = guard.generation();
-    let (stats, completion) = guard
-        .execute_graph_write_script_authorized(
-            &contexts.txn(),
-            &crate::query_cx(&contexts),
-            &contexts.commit(),
-            &db.authority,
-            token,
-            TRUNK,
-            &prepared.script,
-            &parameters,
-            db.write_policy,
-            unix_millis,
-        )
-        .await
-        .map_err(|error| write_refusal(&error))?;
+    let (stats, completion) = match parameters {
+        NativeParameters::Single(parameters) => {
+            guard
+                .execute_graph_write_script_authorized(
+                    &contexts.txn(),
+                    &query,
+                    &contexts.commit(),
+                    &db.authority,
+                    token,
+                    TRUNK,
+                    &prepared.script,
+                    &parameters,
+                    db.write_policy,
+                    unix_millis,
+                )
+                .await
+        }
+        NativeParameters::Batch(argument_sets) => {
+            guard
+                .execute_graph_write_script_batch_authorized(
+                    &contexts.txn(),
+                    &query,
+                    &contexts.commit(),
+                    &db.authority,
+                    token,
+                    TRUNK,
+                    &prepared.script,
+                    &argument_sets,
+                    db.max_statements,
+                    db.write_policy,
+                    unix_millis,
+                )
+                .await
+        }
+    }
+    .map_err(|error| write_refusal(&error))?;
     drop(guard);
     let statements = stats.completed_statements as u64;
     let outcome = match completion {

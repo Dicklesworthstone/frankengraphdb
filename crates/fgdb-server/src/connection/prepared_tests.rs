@@ -222,6 +222,7 @@ fn prepared_write_templates_cannot_outlive_recovery_or_issuer_retirement() {
             statement: "CREATE ()".into(),
             parameters: vec![],
         };
+        let argument_sets = [vec![], vec![]];
         let mut cache = PreparedStatements::default();
         let definition = ok(prepare_statement(&root, db, &token, &request).await);
         let (handle, _) = ok(cache.insert(&root, definition));
@@ -251,6 +252,20 @@ fn prepared_write_templates_cannot_outlive_recovery_or_issuer_retirement() {
             .code,
             ErrorCode::DatabaseRecovering
         );
+        assert_eq!(
+            run_prepared_batch(&root, db, &token, &retained, &argument_sets)
+                .await
+                .err()
+                .unwrap()
+                .code,
+            ErrorCode::DatabaseRecovering,
+            "every record retains the prepared handle's original generation fence"
+        );
+        assert_eq!(
+            db.db.read(&root).await.unwrap().frontier().unwrap(),
+            CommitSeq(1),
+            "the stale template publishes no single write or batch prefix"
+        );
         assert!(cache.get(handle).is_err());
         assert_eq!(cache.source_bytes, 0);
         let definition = ok(prepare_statement(&root, db, &token, &request).await);
@@ -269,6 +284,15 @@ fn prepared_write_templates_cannot_outlive_recovery_or_issuer_retirement() {
             .unwrap()
             .code,
             ErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            run_prepared_batch(&root, db, &token, &definition, &argument_sets)
+                .await
+                .err()
+                .unwrap()
+                .code,
+            ErrorCode::PermissionDenied,
+            "a prepared batch must acquire fresh authority for this invocation"
         );
         assert_eq!(
             db.db.read(&root).await.unwrap().frontier().unwrap(),

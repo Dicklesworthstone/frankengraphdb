@@ -17,6 +17,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "no_return_rows/prepared_batch.rs"]
+mod prepared_batch;
+
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
         [0x31; 32],

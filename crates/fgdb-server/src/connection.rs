@@ -8,8 +8,8 @@
 
 use crate::commits::CommitWatcher;
 use crate::execute::{
-    Answer, PreparedDefinition, Refusal, poll, prepare_statement, read, run_prepared, subscribe,
-    write, write_batch,
+    Answer, PreparedDefinition, Refusal, poll, prepare_statement, read, run_prepared,
+    run_prepared_batch, subscribe, write, write_batch,
 };
 use crate::recovery::{Generation, Unavailable};
 use crate::shutdown::Waiter;
@@ -19,9 +19,9 @@ use core::future::poll_fn;
 use core::task::Poll;
 use fgdb_protocol::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, Credential, Empty, ErrorBody, ErrorCode,
-    Execute, ExecuteBatch, ExecuteMode, ExecutePrepared, Hello, HelloAck, Outcome, Ping, Prepare,
-    Prepared, PreparedExecutionMode, PreparedHandle, Ready, ReleasePrepared, ResultChunk,
-    ResultEnd, SelectDatabase, WindowUpdate, WireValue,
+    Execute, ExecuteBatch, ExecuteMode, ExecutePrepared, ExecutePreparedBatch, Hello, HelloAck,
+    Outcome, Ping, Prepare, Prepared, PreparedExecutionMode, PreparedHandle, Ready,
+    ReleasePrepared, ResultChunk, ResultEnd, SelectDatabase, WindowUpdate, WireValue,
 };
 use fgdb_protocol::transport::{
     DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, split_duplex,
@@ -122,6 +122,10 @@ enum Statement {
         definition: Result<Arc<PreparedDefinition>, Refusal>,
         mode: PreparedExecutionMode,
         parameters: Vec<(String, WireValue)>,
+    },
+    PreparedBatch {
+        definition: Result<Arc<PreparedDefinition>, Refusal>,
+        argument_sets: Vec<Vec<(String, WireValue)>>,
     },
 }
 
@@ -638,6 +642,36 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                     }
                 }
             }
+            FrameKind::ExecutePreparedBatch => {
+                let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
+                    return;
+                };
+                let Ok(statement) = ExecutePreparedBatch::decode(frame.payload()) else {
+                    return lane
+                        .fatal(
+                            cx,
+                            request,
+                            ErrorCode::Protocol,
+                            "malformed EXECUTE_PREPARED_BATCH",
+                        )
+                        .await;
+                };
+                let statement = Statement::PreparedBatch {
+                    definition: prepared_statements.get(statement.handle),
+                    argument_sets: statement.argument_sets,
+                };
+                match lane
+                    .execute_statement(cx, &waiter, db, token, request, statement)
+                    .await
+                {
+                    Ok(()) | Err(Stop::Cancelled) => {}
+                    Err(Stop::Transport | Stop::Recovery(_)) => return,
+                    Err(Stop::Drain) => {
+                        lane.goodbye(cx).await;
+                        return;
+                    }
+                }
+            }
             FrameKind::ExecuteBatch => {
                 let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
                     return;
@@ -1083,6 +1117,15 @@ impl Lane {
                 mode,
             } => match definition {
                 Ok(definition) => run_prepared(cx, db, token, &definition, mode, &parameters).await,
+                Err(refusal) => Err(refusal),
+            },
+            Statement::PreparedBatch {
+                definition,
+                argument_sets,
+            } => match definition {
+                Ok(definition) => {
+                    run_prepared_batch(cx, db, token, &definition, &argument_sets).await
+                }
                 Err(refusal) => Err(refusal),
             },
         };
@@ -1541,6 +1584,7 @@ impl Lane {
             | FrameKind::ExecuteBatch
             | FrameKind::Prepare
             | FrameKind::ExecutePrepared
+            | FrameKind::ExecutePreparedBatch
             | FrameKind::ReleasePrepared
             | FrameKind::AuthRefresh => {
                 let busy = ErrorBody {
@@ -1897,6 +1941,7 @@ impl Lane {
             | FrameKind::ExecuteBatch
             | FrameKind::Prepare
             | FrameKind::ExecutePrepared
+            | FrameKind::ExecutePreparedBatch
             | FrameKind::ReleasePrepared
             | FrameKind::AuthRefresh => {
                 let busy = ErrorBody {

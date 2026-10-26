@@ -8,6 +8,7 @@ mod prepared;
 mod subscription;
 pub(crate) use prepared::{
     PreparedDefinition, PreparedRead, prepare_statement, read_prepared_session, run_prepared,
+    run_prepared_batch,
 };
 #[cfg(test)]
 pub(crate) use prepared::{prepare_read, read_prepared};
