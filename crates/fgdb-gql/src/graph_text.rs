@@ -1655,6 +1655,13 @@ impl<'a> Parser<'a> {
         self.advance()?;
         Ok(Number::Literal(value))
     }
+    /// Whether a comparison operator starts at the current token.
+    fn at_comparison(&self) -> bool {
+        matches!(
+            self.current.kind,
+            TokenKind::Punct(b'=' | b'!' | b'<' | b'>')
+        )
+    }
     fn comparison(&mut self) -> Result<IntegerComparison, GraphPatternTextError> {
         use IntegerComparison::*;
         if self.take(b'=')? {

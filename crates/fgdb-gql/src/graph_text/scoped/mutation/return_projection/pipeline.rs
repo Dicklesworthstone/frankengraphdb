@@ -2334,19 +2334,31 @@ impl<'a> Parser<'a> {
                 at,
             );
         }
-        if self.is_punct(b'=') || self.is_punct(b'!') || self.is_punct(b'<') || self.is_punct(b'>')
-        {
-            let comparison = self.comparison()?;
-            let right = self.row_filter_operand(schema)?;
-            return emit(
-                code,
-                ReadFilterOp::Compare {
-                    left,
-                    comparison,
-                    right,
-                },
-                at,
-            );
+        if self.at_comparison() {
+            // A chained comparison is the conjunction of its links.
+            let mut left = left;
+            let mut first = true;
+            loop {
+                let comparison = self.comparison()?;
+                let right = self.row_filter_operand(schema)?;
+                let next = self.at_comparison().then(|| right.clone());
+                emit(
+                    code,
+                    ReadFilterOp::Compare {
+                        left,
+                        comparison,
+                        right,
+                    },
+                    at,
+                )?;
+                if !core::mem::take(&mut first) {
+                    emit(code, ReadFilterOp::And, at)?;
+                }
+                match next {
+                    Some(operand) => left = operand,
+                    None => return Ok(()),
+                }
+            }
         }
         let truth = match left {
             ReadFilterOperand::Literal(value) => match value.value() {

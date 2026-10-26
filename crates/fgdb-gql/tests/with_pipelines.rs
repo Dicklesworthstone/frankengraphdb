@@ -1029,6 +1029,60 @@ fn computed_with_predicates_filter_the_projected_rows() {
     assert!(run(&alias, &[CanonicalScalar::Int(1)], wide(), &mut || Ok(())).is_err());
 }
 
+/// A row filter chains comparisons as a projection and a MATCH predicate do:
+/// `0 <= p < 10` is `0 <= p AND p < 10`, so a NULL operand leaves the row
+/// unknown and filtered out. It used to stop after the first link and refuse
+/// the rest ("expected RETURN"), which is LDBC SNB IC3's `WHERE $end >
+/// message.creationDate >= $start` after WITH. The grouped WITH's WHERE
+/// chains too.
+#[test]
+fn a_row_filter_chains_its_comparisons() {
+    let mut values: Vec<CanonicalScalar> = [-3, 0, 4, 4, 9, 12].map(CanonicalScalar::Int).to_vec();
+    values.push(CanonicalScalar::Null);
+    let rows = |text: &str| {
+        let result = run_reading(&prepare(text), &values, wide(), &mut || Ok(()), true);
+        let mut kept = ints(&result.unwrap().value, 0);
+        kept.sort();
+        kept
+    };
+    let within = vec![Some(0), Some(4), Some(4), Some(9)];
+    for (chained, conjunction) in [
+        (
+            "MATCH (n) WITH n.p AS p WHERE 0 <= p < 10 RETURN p",
+            "MATCH (n) WITH n.p AS p WHERE 0 <= p AND p < 10 RETURN p",
+        ),
+        // The middle operand is a carried element's property, read once
+        // through the boundary's hidden column.
+        (
+            "MATCH (n) WITH n WHERE 10 > n.p >= 0 RETURN n.p",
+            "MATCH (n) WITH n WHERE 10 > n.p AND n.p >= 0 RETURN n.p",
+        ),
+    ] {
+        assert_eq!(rows(chained), within, "{chained}");
+        assert_eq!(rows(chained), rows(conjunction), "{chained}");
+    }
+    // Three links over a computed middle: -5 < p + 1 < 5 holds for -3 and
+    // 0 only, and 5 < 100 holds always.
+    assert_eq!(
+        rows("MATCH (n) WITH n.p AS p WHERE -5 < p + 1 < 5 < 100 RETURN p"),
+        vec![Some(-3), Some(0)]
+    );
+    // A false last link drops every row, whatever the first ones say.
+    assert_eq!(
+        rows("MATCH (n) WITH n.p AS p WHERE 0 <= p < 10 < 5 RETURN p"),
+        Vec::<Option<i64>>::new()
+    );
+    // The grouped WITH's WHERE: only the key 4 occurs twice.
+    assert_eq!(
+        rows("MATCH (n) WITH n.p AS p, count(*) AS c WHERE 1 < c <= 2 RETURN p"),
+        vec![Some(4)]
+    );
+    assert_eq!(
+        rows("MATCH (n) WITH n.p AS p, count(*) AS c WHERE 0 < c < 2 RETURN p"),
+        vec![None, Some(-3), Some(0), Some(9), Some(12)]
+    );
+}
+
 /// `WITH n WHERE n.p ...` reads the property through a hidden column of the
 /// graph-to-row boundary. Its rows equal the MATCH-level WHERE under the
 /// binding's own name, an alias, DISTINCT and a page after the WHERE, and the

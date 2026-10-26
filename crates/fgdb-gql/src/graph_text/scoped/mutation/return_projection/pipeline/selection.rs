@@ -261,21 +261,34 @@ impl<'a> Parser<'a> {
                 operand: self.selection_cell(schema, selection, left, at)?,
                 is_null: !negate,
             }
-        } else if matches!(
-            self.current.kind,
-            TokenKind::Punct(b'=' | b'!' | b'<' | b'>')
-        ) {
-            let comparison = self.comparison()?;
-            let right = self.selection_value(schema)?;
-            if self.composite_compared(schema, &left, comparison, &right) {
-                return self.selection_composite_comparison(
-                    schema, selection, left, comparison, right, at,
-                );
-            }
-            ReadFilterOp::Compare {
-                left: self.selection_cell(schema, selection, left, at)?,
-                comparison,
-                right: self.selection_cell(schema, selection, right, at)?,
+        } else if self.at_comparison() {
+            // openCypher chains comparisons: `20 > m.d >= 5` is `20 > m.d AND
+            // m.d >= 5`, as it is in a projection and a MATCH predicate.
+            let mut left = left;
+            let mut first = true;
+            loop {
+                let comparison = self.comparison()?;
+                let right = self.selection_value(schema)?;
+                let next = self.at_comparison().then(|| right.clone());
+                if self.composite_compared(schema, &left, comparison, &right) {
+                    self.selection_composite_comparison(
+                        schema, selection, left, comparison, right, at,
+                    )?;
+                } else {
+                    let test = ReadFilterOp::Compare {
+                        left: self.selection_cell(schema, selection, left, at)?,
+                        comparison,
+                        right: self.selection_cell(schema, selection, right, at)?,
+                    };
+                    emit(&mut selection.code, test, at)?;
+                }
+                if !core::mem::take(&mut first) {
+                    emit(&mut selection.code, ReadFilterOp::And, at)?;
+                }
+                match next {
+                    Some(value) => left = value,
+                    None => return Ok(()),
+                }
             }
         } else {
             match left {
