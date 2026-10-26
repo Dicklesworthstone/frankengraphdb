@@ -198,9 +198,18 @@ impl<'a> Parser<'a> {
         if !self.is_word("MATCH") {
             return Ok(false);
         }
-        self.read_row_bindings = imports.iter().map(|(name, _)| *name).collect();
+        // An earlier part's anonymous slot (`MATCH ()`) is no alias a query
+        // can name, and this MATCH's own anonymous slots may reuse its
+        // generated name (TCK Create3 [3]: `MATCH () CREATE () WITH * MATCH ()
+        // CREATE ()`).
+        let named = |name: &Name<'a>| !name.text.starts_with(Self::ANONYMOUS_PREFIX);
+        self.read_row_bindings = imports
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(named)
+            .collect();
         self.parse_match_prefix()?;
-        for &(name, _) in imports {
+        for &(name, _) in imports.iter().filter(|(name, _)| named(name)) {
             if self.insertion_match_kind(name.text).is_some() {
                 return Err(error(
                     name.at,

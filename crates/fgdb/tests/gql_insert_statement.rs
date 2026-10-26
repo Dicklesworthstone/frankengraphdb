@@ -626,6 +626,18 @@ fn chained_creates_read_the_previous_writes_rows() {
             .is_err()
         );
         assert_eq!(db.frontier().unwrap(), frontier);
+        // TCK Create3 [3]: the second MATCH () is its own pattern, not the
+        // first's anonymous vertex. Each of the v first rows creates one
+        // vertex, then matches all 2v vertices and creates one per match.
+        let v = db.vertices().unwrap().len();
+        write(
+            &mut db,
+            "MATCH () CREATE () WITH * MATCH () CREATE ()",
+            GqlParameters::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.vertices().unwrap().len(), v + v + 2 * v * v);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
