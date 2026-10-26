@@ -30,7 +30,7 @@ pub(crate) struct UnresolvedReadInput<'a> {
     continuations: Vec<UnresolvedContinuation<'a>>,
 }
 
-impl UnresolvedReadInput<'_> {
+impl<'a> UnresolvedReadInput<'a> {
     /// Every element property slot the read's parts recorded. The slots are
     /// shared with their parts, so they read each key once it resolves.
     pub(in crate::graph_text) fn element_key_slots(&self) -> Vec<crate::set_text::ElementKeySlot> {
@@ -60,6 +60,22 @@ impl UnresolvedReadInput<'_> {
             .map_or(&mut self.first, |part| &mut part.input)
             .pipeline
             .extend(stages);
+    }
+
+    /// The graph parts have already lent their syntax. Terminal expressions
+    /// (a write tail's rows, an aggregate RETURN's keys and arguments) add
+    /// property slots afterwards; resolve them with the final part so carried
+    /// and optional element reads bind once with the template.
+    pub(in crate::graph_text) fn append_element_keys(
+        &mut self,
+        keys: &mut Vec<(&'a str, crate::set_text::ElementKeySlot)>,
+    ) {
+        self.continuations
+            .last_mut()
+            .map_or(&mut self.first, |part| &mut part.input)
+            .syntax
+            .element_keys
+            .append(keys);
     }
 
     pub(in crate::graph_text) fn share_parameters(
@@ -424,16 +440,7 @@ impl<'a> Parser<'a> {
             self.multipart_parts_with_input(statement, true, incoming, 0, true)?;
         let stages = self.write_row_pipeline(schema)?;
         result.append_stages(stages);
-        // The graph part has already lent its syntax. Terminal row expressions
-        // add property slots afterwards; resolve them with that final part so
-        // carried and optional element reads bind once with the template.
-        result
-            .continuations
-            .last_mut()
-            .map_or(&mut result.first, |part| &mut part.input)
-            .syntax
-            .element_keys
-            .append(&mut self.syntax.element_keys);
+        result.append_element_keys(&mut self.syntax.element_keys);
         // Like every chain step, the read leaves the unused-declaration check
         // to the chain, since an earlier write may read a declaration.
         self.chain_write = true;

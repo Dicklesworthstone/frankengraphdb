@@ -225,7 +225,7 @@ pub(super) fn prefix<'a>(
 }
 
 pub(super) fn finish<'a>(
-    parser: Parser<'a>,
+    mut parser: Parser<'a>,
     statement: &'a str,
     head: Head<'a>,
     stages: Vec<ReadStageTemplate>,
@@ -258,6 +258,10 @@ pub(super) fn finish<'a>(
             // joined row, after every original input filter, DISTINCT and page.
             // Never attach them to a graph leaf before optional null extension.
             input.append_stages(stages);
+            // `WITH a MATCH (b) WITH a, b RETURN a.id, count(b)`: the key reads
+            // the carried vertex's property through an element slot, which
+            // binds only with a part (fgdb-x87sw).
+            input.append_element_keys(&mut parser.syntax.element_keys);
             input
         }
     };

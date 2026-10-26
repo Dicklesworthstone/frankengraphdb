@@ -592,6 +592,81 @@ fn a_continuation_aggregate_return_reads_its_bindings_through_the_implied_with_s
     );
 }
 
+/// A carried vertex's property read past a continuation's explicit WITH is
+/// an element read: as a grouping key or in an aggregate argument it reads
+/// the stored property, whether or not the continuation re-matched the
+/// vertex by name (fgdb-x87sw).
+#[test]
+fn a_carried_vertex_property_feeds_an_aggregate_past_a_continuation_with() {
+    let score = |vid: VId| SCORES[vid.0 as usize - 1];
+    // (key, occurrences) in key order.
+    let groups = |keys: Vec<i64>| {
+        let mut groups: BTreeMap<i64, u64> = BTreeMap::new();
+        for key in keys {
+            *groups.entry(key).or_default() += 1;
+        }
+        groups.into_iter().collect::<Vec<_>>()
+    };
+    let counted = |text: &str| {
+        execute(text)
+            .iter()
+            .map(|row| {
+                let [GraphValue::Scalar(CanonicalScalar::Int(key))] = row.keys() else {
+                    panic!("{text}: one integer key, got {:?}", row.keys());
+                };
+                (*key, row.values()[0].as_count().expect("a count"))
+            })
+            .collect::<Vec<_>>()
+    };
+    // Each a meets all four b.
+    let pairs = groups((1..=4).flat_map(|a| [score(VId(a)); 4]).collect());
+    for text in [
+        "MATCH (a) WITH a MATCH (b) WITH a, b RETURN a.p AS score, COUNT(b) AS n ORDER BY score",
+        "MATCH (a) WITH a MATCH (b) WITH b, a RETURN a.p AS score, COUNT(*) AS n ORDER BY score",
+    ] {
+        assert_eq!(counted(text), pairs, "{text}");
+    }
+    // One occurrence per out-edge of the re-matched a, with or without a
+    // WHERE over an imported value, which filters after the implicit WITH *.
+    let out = groups(EDGES.iter().map(|&(a, _, _)| score(a)).collect());
+    for text in [
+        "MATCH (a) WITH a MATCH (a)-[:R]->(c) WITH a, c \
+         RETURN a.p AS score, COUNT(c) AS n ORDER BY score",
+        "MATCH (a) WITH a, 1 AS k MATCH (a)-[:R]->(c) WHERE k + 0 > 0 \
+         RETURN a.p AS score, COUNT(c) AS n ORDER BY score",
+    ] {
+        assert_eq!(counted(text), out, "{text}");
+    }
+    let high = groups(
+        EDGES
+            .iter()
+            .filter(|&&(_, _, c)| score(c) == 3)
+            .map(|&(a, _, _)| score(a))
+            .collect(),
+    );
+    assert_eq!(
+        counted(
+            "MATCH (a) WITH a, [3] AS xs MATCH (a)-[:R]->(c) WHERE c.p IN xs \
+             RETURN a.p AS score, COUNT(c) AS n ORDER BY score"
+        ),
+        high
+    );
+    // In an aggregate argument: the start scores summed per end score.
+    let mut totals: BTreeMap<i64, i128> = BTreeMap::new();
+    for &(a, _, c) in &EDGES {
+        *totals.entry(score(c)).or_default() += i128::from(score(a));
+    }
+    let rows = execute(
+        "MATCH (a) WITH a MATCH (a)-[:R]->(c) WITH a, c \
+         RETURN c.p AS score, SUM(a.p) AS total ORDER BY score",
+    );
+    assert_eq!(rows.len(), totals.len());
+    for (row, (key, total)) in rows.iter().zip(totals) {
+        assert_eq!(row.keys(), &[scalar(key)]);
+        assert_eq!(row.values()[0].as_integer(), Some(total));
+    }
+}
+
 #[test]
 fn illegal_aliases_aggregate_stages_and_total_depth_refuse_before_catalog() {
     // An aggregate WITH stage is legal since fgdb-ezgeq. It drops `n`, so the
