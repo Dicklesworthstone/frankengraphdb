@@ -1,7 +1,7 @@
 # Fabric protocol mechanisms
 
 Owner beads: `fgdb-w10-fgp-core-5b1`, `fgdb-w10-flow-send-obligations-smd`,
-`fgdb-w10-fgp-frame-catalog-j1bl`, `fgdb-w10-server-rte`, `fgdb-t79am`.
+`fgdb-w10-fgp-frame-catalog-j1bl`, `fgdb-w10-server-rte`, `fgdb-t79am`, `fgdb-5jyok`.
 These beads remain open.
 
 `fgdb-protocol` implements the transport-independent framing, connection-state,
@@ -56,6 +56,7 @@ these values; callers cannot authenticate merely by constructing the structs.
 | RELEASE_PREPARED / PREPARED_RELEASED | 0x001e / 0x001f | client / server |
 | PING / PONG | 0x0020 / 0x0021 | client / server |
 | EXECUTE_BATCH | 0x0022 | client |
+| EXECUTE_PREPARED_BATCH | 0x0023 | client |
 
 These are the implemented mechanism-profile tags, not an assertion that every
 Appendix D frame body and its generated registry have been implemented.
@@ -82,7 +83,7 @@ there is no resynchronization by scanning untrusted payload bytes.
 
 `Connection::validate_client_header` enforces direction, phase, complete binding,
 nonzero request IDs and control/child-stream distinction. EXECUTE, EXECUTE_BATCH, PREPARE,
-EXECUTE_PREPARED and RELEASE_PREPARED use the control stream; child stream IDs
+EXECUTE_PREPARED, EXECUTE_PREPARED_BATCH and RELEASE_PREPARED use the control stream; child stream IDs
 are minted by the server. Cancellation
 and credit address admitted streams. ACK/release may address independent durable
 owners, which the owning service must authenticate and validate separately.
@@ -164,6 +165,7 @@ redacted from `Debug`.
 | READY | `namespace [32]`, `incarnation [32]`, `service_epoch u64`, `posture u8`, `authority_commitment [32]`, `frontier u64` |
 | EXECUTE | `mode u8` (0 read, 1 write, 2 subscribe, 3 native source read stream, 4 external ordered read), `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
 | EXECUTE_BATCH | `statement text`, `argument_sets u32`, then that many parameter maps (each `count u32`, then strictly ascending `(name text, value)` pairs) |
+| EXECUTE_PREPARED_BATCH | nonzero connection-owned `handle [16]`, `argument_sets u32`, then that many parameter maps with the same canonical encoding and shared bounds as EXECUTE_BATCH; the handle must name a write template |
 | PREPARE | `statement text`, representative `parameters [(name text, value)]` (names strictly ascending), optional terminal `mode u8` (omitted = read, 1 = stats-only write; explicit 0 is noncanonical) |
 | PREPARED | nonzero connection-owned `handle [16]` |
 | EXECUTE_PREPARED | `handle [16]`, `mode u8` (0 buffered read, 1 native source read stream, 2 external ordered read stream, 3 stats-only write), execution `parameters [(name text, value)]` (names strictly ascending) |
@@ -332,6 +334,16 @@ application output is admitted.
   `PreparedReadMode` type name aliases `PreparedExecutionMode`; read-only client
   methods reject Write locally before sending a request.
 
+  EXECUTE_PREPARED_BATCH reuses the same write handle for a nonempty sequence
+  of complete operand maps. The retained compiler/catalog bindings are reused
+  without resending or reparsing statement text. All maps bind before graph
+  work, then the records execute in order as one atomic program under one fresh
+  signed allowance and the host's total expanded-statement limit. Preparation
+  and each batch invocation are separate operations. A bad final argument set
+  or any precommit execution failure publishes no prefix. Read handles refuse;
+  no mode conversion or per-record fallback occurs. Its completion, uncertain
+  outcome and handle-lifetime rules are the same as a single prepared write.
+
   The execution body now requires this mode byte immediately after the handle.
   Clients and servers using the earlier handle-plus-parameters body must be
   updated together; an unknown mode is noncanonical. The callback client API
@@ -348,13 +360,14 @@ application output is admitted.
   again after recovery creates a new owner. Disconnect releases the cache.
 
   Prepared reads use ordinary SNAPSHOT_RESULT chunks, exact flow credit,
-  cancellation and live send guards. PREPARE, EXECUTE_PREPARED and
+  cancellation and live send guards. PREPARE, EXECUTE_PREPARED, EXECUTE_PREPARED_BATCH and
   RELEASE_PREPARED refuse busy while another statement or subscription owns
   the connection. They create no transaction owner, durable prepared
   transaction, durable result, or reconnect/resume token.
 
   The Rust client exposes `prepare_read`, `execute_prepared`,
-  `execute_prepared_streaming`, `prepare_write`, `execute_prepared_write`, and
+  `execute_prepared_streaming`, `prepare_write`, `execute_prepared_write`,
+  `execute_prepared_batch`, and
   `release_prepared`. For example, after
   selecting the database:
 
@@ -773,6 +786,42 @@ eviction. These new tests have likewise received source review only; no
 runtime or formatting pass was available in this session.
 
 ## Atomic parameter batches
+
+FGP also accepts `EXECUTE_PREPARED_BATCH` with an existing write handle and
+1–1024 argument sets. Its body is the 16-byte handle followed by the argument
+count and canonical maps; there is no statement text or execution-mode byte.
+Both batch bodies share the same total decoded-value bound across all records,
+and the negotiated frame size remains authoritative. The server separately
+bounds the complete batch's expanded native statements. Existing read and
+write PREPARE encodings are unchanged; older peers reject the new frame kind.
+
+For repeated ingestion batches, prepare once and send fresh records each time:
+
+```rust
+let handle = client.prepare_write(
+    cx,
+    "CREATE (:Person {name:$name,age:$age})",
+    vec![("name".into(), WireValue::Text("sample".into())),
+         ("age".into(), WireValue::Int(0))],
+).await?;
+let outcome = client.execute_prepared_batch(
+    cx,
+    handle,
+    vec![
+        vec![("name".into(), WireValue::Text("Ann".into())),
+             ("age".into(), WireValue::Int(30))],
+        vec![("name".into(), WireValue::Text("Bob".into())),
+             ("age".into(), WireValue::Int(25))],
+    ],
+).await?;
+client.release_prepared(cx, handle).await?;
+```
+
+Each invocation is one new atomic write at the current frontier. An explicit
+`outcome_unknown` or a disconnected transport can follow a committed batch;
+the client never retries, splits the batch, or falls back to text execution.
+Empty columns and no result rows precede `WriteCommitted` or no-effect
+`ReadClosed`. Native RETURN remains unsupported.
 
 `EXECUTE_BATCH` and `POST /v1/databases/<name>/write-batch` prepare one native
 write script, bind all argument sets, and execute one atomic program. The engine

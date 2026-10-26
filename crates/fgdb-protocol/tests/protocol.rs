@@ -486,6 +486,7 @@ fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
         FrameKind::Prepare,
         FrameKind::ExecuteBatch,
         FrameKind::ExecutePrepared,
+        FrameKind::ExecutePreparedBatch,
         FrameKind::ReleasePrepared,
     ] {
         let frame = frame(kind, Binding::Ready(ready()), StreamId::CONTROL, &[]);
@@ -508,6 +509,12 @@ fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
         let request = crate::frame(kind, Binding::Session(session()), StreamId::CONTROL, &[]);
         assert_eq!(
             unselected.validate_client_header(request.header()),
+            Err(ProtocolError::InvalidState)
+        );
+        let mut draining = ready_connection();
+        draining.begin_drain().unwrap();
+        assert_eq!(
+            draining.validate_client_header(frame.header()),
             Err(ProtocolError::InvalidState)
         );
     }
@@ -533,5 +540,13 @@ fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
     assert_eq!(
         FrameKind::try_from(0x001f).unwrap(),
         FrameKind::PreparedReleased
+    );
+    assert_eq!(
+        FrameKind::try_from(0x0023).unwrap(),
+        FrameKind::ExecutePreparedBatch
+    );
+    assert_eq!(
+        FrameKind::try_from(0x0024),
+        Err(ProtocolError::UnknownFrameKind)
     );
 }

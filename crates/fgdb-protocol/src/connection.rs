@@ -135,6 +135,7 @@ impl Connection {
             | FrameKind::Execute
             | FrameKind::ExecuteBatch
             | FrameKind::ExecutePrepared
+            | FrameKind::ExecutePreparedBatch
             | FrameKind::ReleasePrepared => self.phase == Phase::Ready,
             FrameKind::QueryCancel
             | FrameKind::ResultAck

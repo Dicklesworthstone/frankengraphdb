@@ -10,9 +10,10 @@
 
 use crate::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, BodyError, Credential, Empty, ErrorBody,
-    ErrorCode, Execute, ExecuteBatch, ExecuteMode, ExecutePrepared, Hello, HelloAck, Outcome, Ping,
-    Prepare, PrepareMode, Prepared, PreparedHandle, PreparedReadMode, Ready, ReleasePrepared,
-    ResultChunk, ResultEnd, SelectDatabase, SubscriptionBatch, WindowUpdate, WireValue,
+    ErrorCode, Execute, ExecuteBatch, ExecuteMode, ExecutePrepared, ExecutePreparedBatch, Hello,
+    HelloAck, Outcome, Ping, Prepare, PrepareMode, Prepared, PreparedHandle, PreparedReadMode,
+    Ready, ReleasePrepared, ResultChunk, ResultEnd, SelectDatabase, SubscriptionBatch,
+    WindowUpdate, WireValue,
 };
 use crate::transport::{
     DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, TransportError, split_duplex,
@@ -567,6 +568,63 @@ impl Client {
         if unexpected_columns || matches!(outcome, Outcome::Rows { .. }) {
             return Err(ClientError::Protocol(
                 "a stats-only prepared write returned a query result",
+            ));
+        }
+        Ok(outcome)
+    }
+
+    /// Execute one retained write template for every supplied operand set as
+    /// one atomic, stats-only program. The server binds all sets before effects,
+    /// reuses the immutable compiler/catalog bindings, and applies one signed
+    /// execution allowance and expanded-statement limit to the complete batch.
+    /// Every invocation uses the current frontier and fresh live authority.
+    ///
+    /// The handle must come from prepare_write(). Empty input, a read handle,
+    /// incompatible operands and native RETURN profiles refuse. A transport
+    /// failure can follow a committed batch; this method never retries or
+    /// falls back to individual writes. Repeating it can duplicate effects.
+    pub async fn execute_prepared_batch(
+        &mut self,
+        cx: &Cx,
+        handle: PreparedHandle,
+        mut argument_sets: Vec<Vec<(String, WireValue)>>,
+    ) -> Result<Outcome, ClientError> {
+        if self.selected.is_none() {
+            return Err(ClientError::Protocol("select a database first"));
+        }
+        for parameters in &mut argument_sets {
+            parameters.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        }
+        let request = self
+            .send(
+                cx,
+                FrameKind::ExecutePreparedBatch,
+                StreamId::CONTROL,
+                &ExecutePreparedBatch {
+                    handle,
+                    argument_sets,
+                },
+            )
+            .await?;
+        let mut unexpected_columns = false;
+        let outcome = self
+            .receive_result(
+                cx,
+                request,
+                |columns| {
+                    unexpected_columns |= !columns.is_empty();
+                    Ok(())
+                },
+                |_| {
+                    Err(ClientError::Protocol(
+                        "a stats-only prepared batch returned a row",
+                    ))
+                },
+            )
+            .await?;
+        if unexpected_columns || matches!(outcome, Outcome::Rows { .. }) {
+            return Err(ClientError::Protocol(
+                "a stats-only prepared batch returned a query result",
             ));
         }
         Ok(outcome)
@@ -1691,9 +1749,12 @@ mod tests {
     }
 
     #[test]
-    fn prepared_write_client_uses_explicit_modes_and_never_replays_unknown_completion() {
+    fn prepared_write_clients_use_explicit_modes_and_never_replay_unknown_completion() {
         let ((), report) = run_async_under_lab(0x79a0_0321, |root| async move {
-            for scenario in 0..5 {
+            for (batch, scenario) in [false, true]
+                .into_iter()
+                .flat_map(|batch| (0..5).map(move |scenario| (batch, scenario)))
+            {
                 let handle = PreparedHandle([0x41; 16]);
                 let mut replies = vec![rpc(
                     FrameKind::Prepared,
@@ -1777,16 +1838,29 @@ mod tests {
                     ),
                     "read APIs refuse locally before sending"
                 );
-                let result = client
-                    .execute_prepared_write(
-                        &root,
-                        handle,
-                        vec![
-                            ("name".into(), WireValue::Text("Ann".into())),
-                            ("age".into(), WireValue::Int(30)),
-                        ],
-                    )
-                    .await;
+                let arguments = vec![
+                    ("name".into(), WireValue::Text("Ann".into())),
+                    ("age".into(), WireValue::Int(30)),
+                ];
+                let result = if batch {
+                    client
+                        .execute_prepared_batch(
+                            &root,
+                            handle,
+                            vec![
+                                arguments,
+                                vec![
+                                    ("name".into(), WireValue::Text("Bob".into())),
+                                    ("age".into(), WireValue::Int(25)),
+                                ],
+                            ],
+                        )
+                        .await
+                } else {
+                    client
+                        .execute_prepared_write(&root, handle, arguments)
+                        .await
+                };
                 match scenario {
                     0 => assert_eq!(
                         result.unwrap(),
@@ -1820,17 +1894,146 @@ mod tests {
                 );
                 let preparation = Prepare::decode(frames[3].payload()).unwrap();
                 assert_eq!(preparation.mode, PrepareMode::Write);
-                let execution = ExecutePrepared::decode(frames[4].payload()).unwrap();
-                assert_eq!(execution.mode, PreparedReadMode::Write);
-                assert_eq!(execution.handle, handle);
-                assert_eq!(
-                    execution.parameters,
-                    [
-                        ("age".into(), WireValue::Int(30)),
-                        ("name".into(), WireValue::Text("Ann".into())),
-                    ]
-                );
+                let expected = vec![
+                    ("age".into(), WireValue::Int(30)),
+                    ("name".into(), WireValue::Text("Ann".into())),
+                ];
+                if batch {
+                    assert_eq!(frames[4].header().kind(), FrameKind::ExecutePreparedBatch);
+                    let execution = ExecutePreparedBatch::decode(frames[4].payload()).unwrap();
+                    assert_eq!(execution.handle, handle);
+                    assert_eq!(
+                        execution.argument_sets,
+                        [
+                            expected,
+                            vec![
+                                ("age".into(), WireValue::Int(25)),
+                                ("name".into(), WireValue::Text("Bob".into())),
+                            ]
+                        ]
+                    );
+                } else {
+                    assert_eq!(frames[4].header().kind(), FrameKind::ExecutePrepared);
+                    let execution = ExecutePrepared::decode(frames[4].payload()).unwrap();
+                    assert_eq!(execution.mode, PreparedReadMode::Write);
+                    assert_eq!(execution.handle, handle);
+                    assert_eq!(execution.parameters, expected);
+                }
             }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn prepared_writes_refuse_query_output_and_drain_unexpected_rows() {
+        let ((), report) = run_async_under_lab(0x79a0_0324, |root| async move {
+            for (batch, scenario) in [false, true]
+                .into_iter()
+                .flat_map(|batch| (0..3).map(move |scenario| (batch, scenario)))
+            {
+                let handle = PreparedHandle([0x24; 16]);
+                let mut replies = vec![
+                    rpc(
+                        FrameKind::Prepared,
+                        4,
+                        StreamId::CONTROL,
+                        &Prepared { handle },
+                    ),
+                    rpc(
+                        FrameKind::SnapshotResultChunk,
+                        5,
+                        StreamId([5; 16]),
+                        &ResultChunk {
+                            columns: Some(if scenario == 0 {
+                                vec!["n".into()]
+                            } else {
+                                vec![]
+                            }),
+                            rows: if scenario == 1 { vec![vec![]] } else { vec![] },
+                        },
+                    ),
+                    rpc(
+                        FrameKind::SnapshotResultEnd,
+                        5,
+                        StreamId([5; 16]),
+                        &ResultEnd {
+                            outcome: if scenario == 2 {
+                                Outcome::Rows { seq: 8 }
+                            } else {
+                                Outcome::WriteCommitted {
+                                    seq: 8,
+                                    statements: 1,
+                                }
+                            },
+                            rows: u64::from(scenario == 1),
+                        },
+                    ),
+                ];
+                let next_request = if scenario == 1 { 7 } else { 6 };
+                replies.extend([
+                    result_chunk(next_request, &[20]),
+                    result_end(next_request, 1),
+                ]);
+                let io = script(replies);
+                let written = std::sync::Arc::clone(&io.written);
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "test").await.unwrap();
+                let prepared = client
+                    .prepare_write(&root, "CREATE (:Person)", vec![])
+                    .await
+                    .unwrap();
+                let result = if batch {
+                    client
+                        .execute_prepared_batch(&root, prepared, vec![vec![]])
+                        .await
+                } else {
+                    client.execute_prepared_write(&root, prepared, vec![]).await
+                };
+                assert!(matches!(result, Err(ClientError::Protocol(_))));
+                // Profile errors still drain the terminal, including a bad
+                // row's cancellation, before another request can receive data.
+                assert_eq!(
+                    client
+                        .execute(&root, ExecuteMode::Read, "RETURN 20", vec![])
+                        .await
+                        .unwrap()
+                        .rows,
+                    [vec![WireValue::Int(20)]]
+                );
+                let sent = sent_frames(&written.lock().unwrap());
+                assert_eq!(sent.len(), next_request as usize);
+                if scenario == 1 {
+                    assert_eq!(sent[5].header().kind(), FrameKind::QueryCancel);
+                    assert_eq!(sent[5].header().stream_id(), StreamId([5; 16]));
+                }
+                assert_eq!(sent.last().unwrap().header().kind(), FrameKind::Execute);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn prepared_batch_rejects_invalid_local_arguments_without_sending() {
+        let ((), report) = run_async_under_lab(0x79a0_0326, |root| async move {
+            let io = script(vec![]);
+            let written = std::sync::Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "test").await.unwrap();
+            for arguments in [
+                vec![],
+                vec![vec![
+                    ("age".into(), WireValue::Int(1)),
+                    ("age".into(), WireValue::Int(2)),
+                ]],
+            ] {
+                assert!(matches!(
+                    client
+                        .execute_prepared_batch(&root, PreparedHandle([0x23; 16]), arguments)
+                        .await,
+                    Err(ClientError::Body(BodyError::Noncanonical))
+                ));
+            }
+            assert_eq!(sent_frames(&written.lock().unwrap()).len(), 3);
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }

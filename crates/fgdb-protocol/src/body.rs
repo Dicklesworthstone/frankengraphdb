@@ -1093,6 +1093,17 @@ pub struct ExecuteBatch {
     pub argument_sets: Vec<Vec<(String, WireValue)>>,
 }
 
+/// Rebind a connection-owned write template for every argument set, then
+/// execute one atomic, stats-only program. A read handle is never promoted to
+/// a write. All records share the ordinary batch limits and completion; this
+/// operation is neither an idempotent retry nor a series of autocommits.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecutePreparedBatch {
+    pub handle: PreparedHandle,
+    /// Each set supplies the complete typed operands in canonical name order.
+    pub argument_sets: Vec<Vec<(String, WireValue)>>,
+}
+
 body!(
     ExecuteBatch,
     |s, out| {
@@ -1120,6 +1131,40 @@ body!(
         }
         ExecuteBatch {
             statement,
+            argument_sets,
+        }
+    }
+);
+
+body!(
+    ExecutePreparedBatch,
+    |s, out| {
+        s.handle.check()?;
+        check_len(s.argument_sets.len(), MAX_BATCH_ARGUMENT_SETS)?;
+        if s.argument_sets.is_empty() {
+            return Err(BodyError::Noncanonical);
+        }
+        out.array(&s.handle.0);
+        out.len(s.argument_sets.len());
+        for parameters in &s.argument_sets {
+            put_parameters(&mut out, parameters)?;
+        }
+    },
+    |input| {
+        let handle = PreparedHandle(input.array()?);
+        handle.check()?;
+        // Every argument set contains at least its u32 parameter count.
+        let count = input.count(MAX_BATCH_ARGUMENT_SETS, 4)?;
+        if count == 0 {
+            return Err(BodyError::Noncanonical);
+        }
+        let mut argument_sets = Vec::with_capacity(count);
+        for _ in 0..count {
+            // Keep one input so all records share the body-wide value budget.
+            argument_sets.push(get_parameters(&mut input)?);
+        }
+        ExecutePreparedBatch {
+            handle,
             argument_sets,
         }
     }
@@ -1797,6 +1842,104 @@ mod tests {
             over.resize(over.len() + MAX_VALUE_NODES / 2, tag::NULL);
         }
         assert_eq!(ExecuteBatch::decode(&over), Err(BodyError::TooLarge));
+    }
+
+    #[test]
+    fn prepared_batches_have_canonical_handles_records_and_shared_value_budget() {
+        let handle = PreparedHandle([0x23; 16]);
+        let golden = ExecutePreparedBatch {
+            handle,
+            argument_sets: vec![vec![], vec![("a".into(), WireValue::Null)]],
+        };
+        let mut expected = vec![0x23; 16];
+        expected.extend_from_slice(&[0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'a', 0]);
+        assert_eq!(golden.encode().unwrap(), expected);
+        assert_eq!(ExecutePreparedBatch::decode(&expected).unwrap(), golden);
+        every_prefix_refuses::<ExecutePreparedBatch>(&expected);
+        let batch = ExecutePreparedBatch {
+            handle,
+            argument_sets: vec![
+                vec![("value".into(), sample_value())],
+                vec![("value".into(), WireValue::Text("new operands".into()))],
+            ],
+        };
+        let bytes = batch.encode().unwrap();
+        assert_eq!(ExecutePreparedBatch::decode(&bytes).unwrap(), batch);
+        every_prefix_refuses::<ExecutePreparedBatch>(&bytes);
+
+        let mut invalid = expected.clone();
+        invalid[..16].fill(0);
+        assert_eq!(
+            ExecutePreparedBatch::decode(&invalid),
+            Err(BodyError::Noncanonical)
+        );
+        assert_eq!(
+            ExecutePreparedBatch {
+                handle: PreparedHandle([0; 16]),
+                argument_sets: vec![vec![]],
+            }
+            .encode(),
+            Err(BodyError::Noncanonical)
+        );
+        for (records, error) in [
+            (0, BodyError::Noncanonical),
+            (MAX_BATCH_ARGUMENT_SETS + 1, BodyError::TooLarge),
+        ] {
+            assert_eq!(
+                ExecutePreparedBatch {
+                    handle,
+                    argument_sets: vec![vec![]; records],
+                }
+                .encode(),
+                Err(error)
+            );
+            let mut bytes = vec![0x23; 16];
+            bytes.extend_from_slice(&(records as u32).to_be_bytes());
+            assert_eq!(ExecutePreparedBatch::decode(&bytes), Err(error));
+        }
+        let bound = ExecutePreparedBatch {
+            handle,
+            argument_sets: vec![vec![]; MAX_BATCH_ARGUMENT_SETS],
+        };
+        assert_eq!(
+            ExecutePreparedBatch::decode(&bound.encode().unwrap()).unwrap(),
+            bound
+        );
+        let mut missing = vec![0x23; 16];
+        missing.extend_from_slice(&[0, 0, 0, 2, 0, 0, 0, 0]);
+        assert_eq!(
+            ExecutePreparedBatch::decode(&missing),
+            Err(BodyError::Truncated)
+        );
+        let duplicate = ExecutePreparedBatch {
+            handle,
+            argument_sets: vec![
+                vec![],
+                vec![("a".into(), WireValue::Null), ("a".into(), WireValue::Null)],
+            ],
+        };
+        assert_eq!(duplicate.encode(), Err(BodyError::Noncanonical));
+        // Independently encoded duplicate names in the second argument set.
+        let mut duplicate_bytes = vec![0x23; 16];
+        duplicate_bytes.extend_from_slice(&[
+            0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 1, b'a', 0, 0, 0, 0, 1, b'a', 0,
+        ]);
+        assert_eq!(
+            ExecutePreparedBatch::decode(&duplicate_bytes),
+            Err(BodyError::Noncanonical)
+        );
+        // Individually valid trees must not reset the body-wide node ceiling.
+        let mut over = vec![0x23; 16];
+        over.extend_from_slice(&[0, 0, 0, 2]);
+        for _ in 0..2 {
+            over.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, b'a', tag::LIST]);
+            over.extend_from_slice(&((MAX_VALUE_NODES / 2) as u32).to_be_bytes());
+            over.resize(over.len() + MAX_VALUE_NODES / 2, tag::NULL);
+        }
+        assert_eq!(
+            ExecutePreparedBatch::decode(&over),
+            Err(BodyError::TooLarge)
+        );
     }
 
     #[test]
