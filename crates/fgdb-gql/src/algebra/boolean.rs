@@ -13,7 +13,7 @@ use super::{
 };
 use crate::{GlaExecutionEvent, GraphIntegerEvaluationError};
 use fgdb_delta_types::PropertyKeyId;
-use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalPropertyValueError, CanonicalScalar, EId, VId};
 use std::sync::Arc;
 
 pub const MAX_BOOLEAN_INSTRUCTIONS: usize = 1024;
@@ -33,6 +33,10 @@ pub enum GraphBooleanOperand<'a> {
         key: PropertyKeyId,
     },
     Literal(&'a CanonicalScalar),
+    /// A stored value, including a List or Map. Preparation checks the full
+    /// canonical size before copying; execution compares it through the same
+    /// governed three-valued comparator as two stored properties.
+    StoredLiteral(&'a CanonicalPropertyValue),
     /// Reuse an already admitted operand and its canonical encoding.
     CheckedLiteral(&'a ScalarPredicate),
 }
@@ -82,6 +86,8 @@ pub enum GraphBooleanError {
     InvalidElementComparison,
     InvalidExpressionColumn,
     Scalar(ScalarPredicateError),
+    StoredLiteralTooLarge { limit: usize, observed: usize },
+    StoredEncoding(CanonicalPropertyValueError),
 }
 impl core::fmt::Display for GraphBooleanError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -106,6 +112,13 @@ impl core::fmt::Display for GraphBooleanError {
                 f.write_str("Boolean expression references an unknown value column")
             }
             Self::Scalar(error) => core::fmt::Display::fmt(error, f),
+            Self::StoredLiteralTooLarge { limit, observed } => write!(
+                f,
+                "stored predicate literal uses {observed} bytes, limit {limit}"
+            ),
+            Self::StoredEncoding(error) => {
+                write!(f, "stored predicate encoding failed: {error}")
+            }
         }
     }
 }
@@ -113,9 +126,18 @@ impl core::error::Error for GraphBooleanError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Scalar(error) => Some(error),
+            Self::StoredEncoding(error) => Some(error),
             _ => None,
         }
     }
+}
+
+/// Definition-owned immutable bytes, shared by binding and slot remapping.
+/// Scalars keep ScalarPredicate and its existing transcript representation.
+#[derive(PartialEq, Eq)]
+struct StoredOperand {
+    value: CanonicalPropertyValue,
+    encoded: Box<[u8]>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -125,6 +147,7 @@ enum Operand<S> {
     Property { variable: S, key: PropertyKeyId },
     EdgeProperty { variable: S, key: PropertyKeyId },
     Literal(ScalarPredicate),
+    StoredLiteral(Arc<StoredOperand>),
 }
 #[derive(Clone, PartialEq, Eq)]
 enum Instruction<S> {
@@ -164,6 +187,7 @@ impl<S> Operand<S> {
                 key: *key,
             },
             Self::Literal(value) => Operand::Literal(value.clone()),
+            Self::StoredLiteral(value) => Operand::StoredLiteral(value.clone()),
         })
     }
 }
@@ -251,6 +275,25 @@ fn own(operand: GraphBooleanOperand<'_>) -> Result<Operand<String>, GraphBoolean
         },
         GraphBooleanOperand::CheckedLiteral(value) => {
             Operand::Literal(value.with_comparison(IntegerComparison::Equal))
+        }
+        GraphBooleanOperand::StoredLiteral(value) => {
+            if let Some(value) = value.as_scalar() {
+                return own(GraphBooleanOperand::Literal(value));
+            }
+            let observed = value
+                .canonical_encoded_len()
+                .map_err(GraphBooleanError::StoredEncoding)?;
+            if observed > super::MAX_SCALAR_PREDICATE_BYTES {
+                return Err(GraphBooleanError::StoredLiteralTooLarge {
+                    limit: super::MAX_SCALAR_PREDICATE_BYTES,
+                    observed,
+                });
+            }
+            let encoded = value.encode().map_err(GraphBooleanError::StoredEncoding)?;
+            Operand::StoredLiteral(Arc::new(StoredOperand {
+                value: value.clone(),
+                encoded: encoded.into_boxed_slice(),
+            }))
         }
         GraphBooleanOperand::Literal(value) => {
             // Check variable payload BEFORE cloning it. ScalarPredicate then
@@ -456,7 +499,7 @@ impl BoundBooleanExpression {
             Operand::Vertex(variable) | Operand::Property { variable, .. } => {
                 variable.ordinal() == 0
             }
-            Operand::Literal(_) => true,
+            Operand::Literal(_) | Operand::StoredLiteral(_) => true,
             Operand::Edge(_) | Operand::EdgeProperty { .. } => false,
         };
         let mut selected = None;
@@ -604,6 +647,7 @@ fn resolve<'source: 'borrow, 'borrow, E>(
             })
         }
         Operand::Literal(value) => Value::Scalar(Some(value.value())),
+        Operand::StoredLiteral(value) => Value::property(Some(&value.value)),
     })
 }
 /// The one relationship of a captured single-step path, or None for a NULL
@@ -912,6 +956,11 @@ fn append_operand(operand: &Operand<BindingSlot>, bytes: &mut Vec<u8>) {
             bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
             bytes.extend_from_slice(encoded);
         }
+        Operand::StoredLiteral(value) => {
+            bytes.push(5);
+            bytes.extend_from_slice(&(value.encoded.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(&value.encoded);
+        }
     }
 }
 
@@ -943,7 +992,7 @@ impl BoundBooleanExpression {
             Operand::Vertex(slot) | Operand::Property { variable: slot, .. } => {
                 (slot.ordinal() as usize) < width
             }
-            Operand::Literal(_) => true,
+            Operand::Literal(_) | Operand::StoredLiteral(_) => true,
             Operand::Edge(_) | Operand::EdgeProperty { .. } => false,
         })
     }
@@ -972,7 +1021,8 @@ impl BoundBooleanExpression {
             Operand::Vertex(_)
             | Operand::Edge(_)
             | Operand::Property { .. }
-            | Operand::Literal(_) => None,
+            | Operand::Literal(_)
+            | Operand::StoredLiteral(_) => None,
         })
     }
 
@@ -998,7 +1048,7 @@ impl BoundBooleanExpression {
                 Operand::Vertex(slot) | Operand::Property { variable: slot, .. } => {
                     (slot.ordinal() as usize) < bindings.len()
                 }
-                Operand::Literal(_) => true,
+                Operand::Literal(_) | Operand::StoredLiteral(_) => true,
                 Operand::Edge(_) | Operand::EdgeProperty { .. } => false,
             };
             if !supported {
@@ -1043,6 +1093,179 @@ mod tests {
                 },
             )
             .unwrap()
+    }
+
+    #[test]
+    fn stored_literals_are_bounded_shared_and_keep_scalar_transcripts() {
+        let scalar = CanonicalScalar::Int(7);
+        let stored_scalar = CanonicalPropertyValue::from(scalar.clone());
+        let make = |right| {
+            bound(&[Op::Compare {
+                left: Arg::Property {
+                    variable: "a",
+                    key: PropertyKeyId(1),
+                },
+                comparison: IntegerComparison::Equal,
+                right,
+            }])
+        };
+        assert_eq!(
+            make(Arg::Literal(&scalar)).template_bytes(),
+            make(Arg::StoredLiteral(&stored_scalar)).template_bytes()
+        );
+        let value = CanonicalPropertyValue::List(
+            fgdb_types::CanonicalList::try_new(vec![scalar.into()]).unwrap(),
+        );
+        let program = make(Arg::StoredLiteral(&value));
+        assert!(program.supports_vertex_bindings(1));
+        assert!(!program.supports_vertex_bindings(0));
+        assert_eq!(
+            program.referenced_vertex_properties().collect::<Vec<_>>(),
+            vec![(BindingSlot(0), PropertyKeyId(1))]
+        );
+        let moved = program.remap(|_| BindingSlot(2));
+        let operand = |program: &BoundBooleanExpression| {
+            let Instruction::Compare {
+                right: Operand::StoredLiteral(value),
+                ..
+            } = &program.program[0]
+            else {
+                panic!("checked collection literal");
+            };
+            Arc::as_ptr(value)
+        };
+        assert_eq!(operand(&program), operand(&moved));
+        assert_ne!(program.template_bytes(), moved.template_bytes());
+        let oversized = CanonicalPropertyValue::List(
+            fgdb_types::CanonicalList::try_new(vec![
+                CanonicalScalar::bytes(vec![0x61; super::super::MAX_SCALAR_PREDICATE_BYTES])
+                    .unwrap()
+                    .into(),
+            ])
+            .unwrap(),
+        );
+        assert!(matches!(
+            GraphBooleanExpression::prepare(&[Op::IsNull {
+                operand: Arg::StoredLiteral(&oversized),
+                is_null: false,
+            }]),
+            Err(GraphBooleanError::StoredLiteralTooLarge {
+                limit: super::super::MAX_SCALAR_PREDICATE_BYTES,
+                observed,
+            }) if observed > super::super::MAX_SCALAR_PREDICATE_BYTES
+        ));
+    }
+
+    #[test]
+    fn stored_literal_null_children_preserve_unknown_under_negation() {
+        let list = |items: Vec<CanonicalScalar>| {
+            CanonicalPropertyValue::List(
+                fgdb_types::CanonicalList::try_new(items.into_iter().map(Into::into).collect())
+                    .unwrap(),
+            )
+        };
+        let actual = list(vec![CanonicalScalar::Int(1), CanonicalScalar::Null]);
+        for (wanted, negated) in [
+            (vec![CanonicalScalar::Int(1), CanonicalScalar::Null], false),
+            (
+                vec![
+                    CanonicalScalar::Float(fgdb_types::CanonicalF64::new(1.0)),
+                    CanonicalScalar::Null,
+                ],
+                false,
+            ),
+            (vec![CanonicalScalar::Int(2), CanonicalScalar::Null], true),
+            (
+                vec![CanonicalScalar::Int(1), CanonicalScalar::Int(2)],
+                false,
+            ),
+            (vec![CanonicalScalar::Int(1)], true),
+        ] {
+            let wanted = list(wanted);
+            for negate in [false, true] {
+                let mut ops = vec![Op::Compare {
+                    left: Arg::Property {
+                        variable: "a",
+                        key: PropertyKeyId(1),
+                    },
+                    comparison: IntegerComparison::Equal,
+                    right: Arg::StoredLiteral(&wanted),
+                }];
+                if negate {
+                    ops.push(Op::Not);
+                }
+                assert_eq!(
+                    bound(&ops).evaluate(
+                        &[Some(VId(1))],
+                        &mut |_, _| Ok(Some(&actual)),
+                        &mut |_| Ok::<_, Failure<()>>(()),
+                    ),
+                    Ok(negate && negated)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stored_literal_comparison_preserves_every_governed_interruption() {
+        let value = CanonicalPropertyValue::List(
+            fgdb_types::CanonicalList::try_new(vec![
+                CanonicalScalar::ucs_basic_text(&"x".repeat(129))
+                    .unwrap()
+                    .into(),
+                CanonicalScalar::Int(2).into(),
+            ])
+            .unwrap(),
+        );
+        let expression = bound(&[Op::Compare {
+            left: Arg::Property {
+                variable: "a",
+                key: PropertyKeyId(1),
+            },
+            comparison: IntegerComparison::Equal,
+            right: Arg::StoredLiteral(&value),
+        }]);
+        let original = expression.template_bytes();
+        let mut events = Vec::new();
+        assert_eq!(
+            expression.evaluate(
+                &[Some(VId(1))],
+                &mut |_, _| Ok(Some(&value)),
+                &mut |event| {
+                    events.push(event);
+                    Ok::<_, Failure<&str>>(())
+                },
+            ),
+            Ok(true)
+        );
+        assert!(events.contains(&GlaExecutionEvent::Work));
+        assert!(events.contains(&GlaExecutionEvent::ScratchEntry));
+        for stopped in 0..events.len() {
+            let mut reached = 0;
+            assert_eq!(
+                expression.evaluate(&[Some(VId(1))], &mut |_, _| Ok(Some(&value)), &mut |_| {
+                    let at = reached;
+                    reached += 1;
+                    if at == stopped {
+                        Err(Failure::Source("cancelled collection comparison"))
+                    } else {
+                        Ok(())
+                    }
+                },),
+                Err(Failure::Source("cancelled collection comparison")),
+                "checkpoint {stopped}"
+            );
+            assert_eq!(reached, stopped + 1);
+        }
+        assert_eq!(expression.template_bytes(), original);
+        assert_eq!(
+            expression.evaluate(
+                &[Some(VId(1))],
+                &mut |_, _| Err(Failure::Source("property source failed")),
+                &mut |_| Ok(()),
+            ),
+            Err(Failure::Source("property source failed"))
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@
 //! they never imply a global DISTINCT. An explicit root binding captures the
 //! selected path, including its real ordered edge identities.
 
-mod mutation;
+pub(super) mod mutation;
 mod path;
 
 use super::*;
@@ -549,6 +549,9 @@ fn predicate_captures<'a>(
                                 for &(variable, _) in columns.iter().rev() {
                                     pending.push(Pending::Variable(variable));
                                 }
+                            }
+                            boolean::SyntaxItem::StoredProperty { variable, .. } => {
+                                pending.push(Pending::Variable(*variable));
                             }
                             boolean::SyntaxItem::Truth(_)
                             | boolean::SyntaxItem::And
@@ -1835,6 +1838,39 @@ mod capture_tests {
                 vec![vec![Some(VId(1)), None, None]]
             );
         }
+    }
+
+    #[test]
+    fn stored_literal_predicates_capture_each_outer_variable_in_reference_order() {
+        fn name(text: &'static str) -> Name<'static> {
+            Name { text, at: 0 }
+        }
+        let key = name("n");
+        let predicate = |variable: &'static str| boolean::SyntaxItem::StoredProperty {
+            variable: name(variable),
+            key,
+            value: crate::set_text::ReadValueTemplate::List(Vec::new()),
+        };
+        let mut variables = vec![name("local")];
+        let filters = [Filter::Boolean {
+            program: vec![
+                predicate("outer_b"),
+                predicate("outer_a"),
+                boolean::SyntaxItem::And,
+                predicate("outer_b"),
+                boolean::SyntaxItem::And,
+            ],
+            at: 0,
+        }];
+        let captures = predicate_captures(&mut variables, &filters, &[]).unwrap();
+        assert_eq!(
+            variables.iter().map(|name| name.text).collect::<Vec<_>>(),
+            vec!["local", "outer_b", "outer_a"]
+        );
+        assert_eq!(
+            captures.iter().map(|name| name.text).collect::<Vec<_>>(),
+            vec!["outer_b", "outer_a"]
+        );
     }
 
     #[test]

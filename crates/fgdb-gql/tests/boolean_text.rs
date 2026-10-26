@@ -143,6 +143,359 @@ fn size_of_stored_lists_is_a_native_pattern_predicate() {
 }
 
 #[test]
+fn inline_collection_literals_and_parameters_use_native_value_equality() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::{CanonicalF64, CanonicalList, CanonicalMap, CanonicalMapEntry, CanonicalText};
+    let int = |n| CanonicalPropertyValue::from(CanonicalScalar::Int(n));
+    let float = |n| CanonicalPropertyValue::from(CanonicalScalar::Float(CanonicalF64::new(n)));
+    let list = |items| CanonicalPropertyValue::List(CanonicalList::try_new(items).unwrap());
+    let map = |items: Vec<(&str, CanonicalPropertyValue)>| {
+        CanonicalPropertyValue::Map(
+            CanonicalMap::try_new(
+                items
+                    .into_iter()
+                    .map(|(key, value)| {
+                        CanonicalMapEntry::new(CanonicalText::new_ucs_basic(key).unwrap(), value)
+                    })
+                    .collect(),
+            )
+            .unwrap(),
+        )
+    };
+    let payload = "]}) RETURN 0 // data";
+    let values = [
+        Some(list(vec![int(1), int(2)])),
+        Some(list(vec![float(1.0), float(2.0)])),
+        Some(list(vec![int(1), CanonicalScalar::Null.into()])),
+        Some(list(vec![])),
+        None,
+        Some(map(vec![("a", int(1)), ("b", list(vec![int(2)]))])),
+        Some(map(vec![])),
+        Some(CanonicalScalar::Null.into()),
+        Some(list(vec![int(9_007_199_254_740_993)])),
+        Some(list(vec![float(9_007_199_254_740_992.0)])),
+        Some(map(vec![("a", CanonicalScalar::Null.into())])),
+        Some(list(vec![
+            CanonicalScalar::ucs_basic_text(payload).unwrap().into(),
+        ])),
+    ];
+    let execute = |pattern: &PreparedGraphPattern<GraphValueRow>| {
+        pattern
+            .plan()
+            .execute_governed_with_properties(
+                values.len() as u64,
+                (0..values.len()).map(|index| VId(index as u128)),
+                [],
+                |_, _| Ok::<_, ()>(true),
+                |vertex, key| {
+                    assert_eq!(key, P);
+                    Ok(values[vertex.0 as usize].as_ref())
+                },
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value
+            .into_iter()
+            .map(|row| row.get(0).unwrap().as_vertex().unwrap())
+            .collect::<Vec<_>>()
+    };
+    for (literal, expected) in [
+        ("[1, 2]", vec![VId(0), VId(1)]),
+        ("[1.0, 2]", vec![VId(0), VId(1)]),
+        ("[1, NULL]", vec![]),
+        ("[]", vec![VId(3)]),
+        ("{b: [2.0], a: 1.0}", vec![VId(5)]),
+        ("{}", vec![VId(6)]),
+        ("{a: NULL}", vec![]),
+        ("[9007199254740993]", vec![VId(8)]),
+        ("[9007199254740992.0]", vec![VId(9)]),
+    ] {
+        let statement = format!("MATCH (a {{n: {literal}}}) RETURN a");
+        assert_eq!(execute(&query(&statement)), expected, "{statement}");
+    }
+    assert_eq!(
+        query("MATCH (a {n: {a: 1, b: [2]}}) RETURN a").canonical_bytes(),
+        query("MATCH (a {n: {b: [2], a: 1}}) RETURN a").canonical_bytes(),
+        "map key order is canonical"
+    );
+    let catalog_calls = Cell::new(0);
+    let template = PreparedGraphText::prepare_with_parameter_types(
+        "MATCH (a {n: $wanted}) RETURN a",
+        &[("wanted", GqlParameterType::List)],
+        |kind, name| {
+            catalog_calls.set(catalog_calls.get() + 1);
+            symbols(kind, name)
+        },
+    )
+    .unwrap();
+    let calls = catalog_calls.get();
+    let unbound = template.template_bytes();
+    let args = GqlParameters::new()
+        .with_list(
+            "wanted",
+            vec![
+                GraphValue::Scalar(CanonicalScalar::Int(1)),
+                GraphValue::Scalar(CanonicalScalar::Int(2)),
+            ],
+        )
+        .unwrap();
+    let original = template.bind_parameters(&args).unwrap();
+    let frozen = original.canonical_bytes();
+    assert_eq!(execute(&original), vec![VId(0), VId(1)]);
+    assert_eq!(
+        frozen,
+        query("MATCH (a {n: [1, 2]}) RETURN a").canonical_bytes()
+    );
+    let changed = template
+        .bind_parameters(&GqlParameters::new().with_list("wanted", vec![]).unwrap())
+        .unwrap();
+    assert_eq!(execute(&changed), vec![VId(3)]);
+    assert_ne!(changed.canonical_bytes(), frozen);
+    assert!(
+        execute(
+            &template
+                .bind_parameters(&GqlParameters::new().with_null("wanted").unwrap())
+                .unwrap()
+        )
+        .is_empty()
+    );
+    let data = template
+        .bind_parameters(
+            &GqlParameters::new()
+                .with_list(
+                    "wanted",
+                    vec![GraphValue::Scalar(
+                        CanonicalScalar::ucs_basic_text(payload).unwrap(),
+                    )],
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(execute(&data), vec![VId(11)]);
+    let huge = GqlParameters::new()
+        .with_list(
+            "wanted",
+            (0..10_000)
+                .map(|n| GraphValue::Scalar(CanonicalScalar::Int(n)))
+                .collect(),
+        )
+        .unwrap();
+    assert_eq!(
+        template.bind_parameters(&huge).unwrap_err().kind,
+        GraphPatternTextErrorKind::StoredLiteral
+    );
+    assert!(matches!(
+        template
+            .bind_parameters(&GqlParameters::new().with_map("wanted", vec![]).unwrap())
+            .unwrap_err()
+            .kind,
+        GraphPatternTextErrorKind::ParameterTypeMismatch { .. }
+    ));
+    assert_eq!(template.template_bytes(), unbound);
+    assert_eq!(original.canonical_bytes(), frozen);
+    assert_eq!(
+        catalog_calls.get(),
+        calls,
+        "binding never resolves names again"
+    );
+
+    let map_template = PreparedGraphText::prepare_with_parameter_types(
+        "MATCH (a {n: $document}) RETURN a",
+        &[("document", GqlParameterType::Map)],
+        symbols,
+    )
+    .unwrap();
+    let args = GqlParameters::new()
+        .with_map(
+            "document",
+            vec![
+                (
+                    "b".into(),
+                    GraphValue::List(vec![GraphValue::Scalar(CanonicalScalar::Int(2))].into()),
+                ),
+                ("a".into(), GraphValue::Scalar(CanonicalScalar::Int(1))),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        execute(&map_template.bind_parameters(&args).unwrap()),
+        vec![VId(5)]
+    );
+}
+
+#[test]
+fn inline_list_predicates_stay_inside_optional_and_existential_scopes() {
+    use fgdb_types::CanonicalList;
+    let list = |items: &[i64]| {
+        CanonicalPropertyValue::List(
+            CanonicalList::try_new(
+                items
+                    .iter()
+                    .map(|&n| CanonicalScalar::Int(n).into())
+                    .collect(),
+            )
+            .unwrap(),
+        )
+    };
+    let values = [
+        list(&[1, 2]),
+        list(&[1, 2]),
+        list(&[9]),
+        list(&[]),
+        list(&[]),
+    ];
+    let edges = [
+        (VId(0), R, VId(1)),
+        (VId(0), R, VId(1)),
+        (VId(0), R, VId(2)),
+        (VId(3), R, VId(2)),
+    ];
+    let execute = |statement: &str| {
+        query(statement)
+            .plan()
+            .execute_governed_with_properties(
+                7,
+                [VId(0), VId(3), VId(4)],
+                edges,
+                |_, _| Ok::<_, ()>(true),
+                |vid, _| Ok(Some(&values[vid.0 as usize])),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value
+            .into_iter()
+            .map(|row| {
+                row.values()
+                    .iter()
+                    .map(|value| value.as_vertex())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        execute("MATCH (a) OPTIONAL MATCH (a)-[:R]->(b {n: [1.0, 2]}) RETURN a, b"),
+        vec![
+            vec![Some(VId(0)), Some(VId(1))],
+            vec![Some(VId(0)), Some(VId(1))],
+            vec![Some(VId(3)), None],
+            vec![Some(VId(4)), None],
+        ]
+    );
+    for empty_or_unknown in ["[]", "[NULL]"] {
+        assert_eq!(
+            execute(&format!(
+                "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b {{n: {empty_or_unknown}}}) RETURN a, b"
+            )),
+            vec![
+                vec![Some(VId(0)), None],
+                vec![Some(VId(3)), None],
+                vec![Some(VId(4)), None],
+            ]
+        );
+    }
+    assert_eq!(
+        execute("MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->(b {n: [1, 2]}) } RETURN a"),
+        vec![vec![Some(VId(0))]]
+    );
+    assert_eq!(
+        execute("MATCH (a) WHERE NOT EXISTS { MATCH (a)-[:R]->(b {n: [1, 2]}) } RETURN a"),
+        vec![vec![Some(VId(3))], vec![Some(VId(4))]]
+    );
+    assert_eq!(
+        execute("MATCH (a) WHERE EXISTS { MATCH (a {n: []}) } RETURN a"),
+        vec![vec![Some(VId(3))], vec![Some(VId(4))]],
+        "an outer binding retains the child pattern's collection predicate"
+    );
+}
+
+#[test]
+fn inline_collection_relationship_predicates_keep_the_edge_property_domain() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::{CanonicalList, EId};
+    let stored = CanonicalPropertyValue::List(
+        CanonicalList::try_new(vec![CanonicalScalar::Int(2).into()]).unwrap(),
+    );
+    let empty = CanonicalPropertyValue::List(CanonicalList::try_new(vec![]).unwrap());
+    let template = |statement| {
+        PreparedGraphText::prepare_with_parameter_types(
+            statement,
+            &[("wanted", GqlParameterType::List)],
+            symbols,
+        )
+        .unwrap()
+    };
+    let execute = |pattern: &PreparedGraphPattern<GraphValueRow>| {
+        assert!(pattern.plan().requires_identified_edges());
+        pattern
+            .plan()
+            .execute_governed_with_element_properties(
+                6,
+                [VId(1), VId(2), VId(3)],
+                [
+                    (EId(1), VId(1), R, VId(2)),
+                    (EId(2), VId(1), R, VId(3)),
+                    (EId(3), VId(3), R, VId(1)),
+                ],
+                |_, _| Ok::<_, ()>(true),
+                |_, _| panic!("a relationship predicate must not read a vertex property"),
+                |eid, key| {
+                    assert_eq!(key, P);
+                    Ok(Some(if eid == EId(2) { &empty } else { &stored }))
+                },
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value
+            .into_iter()
+            .map(|row| {
+                row.values()
+                    .iter()
+                    .map(|value| value.as_vertex())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        execute(&query("MATCH (a)-[r:R {n: []}]->(b) RETURN a, b")),
+        vec![vec![Some(VId(1)), Some(VId(3))]]
+    );
+    assert_eq!(
+        execute(&query("MATCH (a)-[r:R {n: [2.0]}]->(b) RETURN a, b")),
+        vec![
+            vec![Some(VId(1)), Some(VId(2))],
+            vec![Some(VId(3)), Some(VId(1))],
+        ]
+    );
+    let optional = template("MATCH (a) OPTIONAL MATCH (a)-[r:R {n: $wanted}]->(b) RETURN a, b");
+    let args = GqlParameters::new()
+        .with_list("wanted", vec![GraphValue::Scalar(CanonicalScalar::Int(2))])
+        .unwrap();
+    assert_eq!(
+        execute(&optional.bind_parameters(&args).unwrap()),
+        vec![
+            vec![Some(VId(1)), Some(VId(2))],
+            vec![Some(VId(2)), None],
+            vec![Some(VId(3)), Some(VId(1))],
+        ]
+    );
+    assert_eq!(
+        execute(
+            &optional
+                .bind_parameters(&GqlParameters::new().with_null("wanted").unwrap())
+                .unwrap()
+        ),
+        vec![
+            vec![Some(VId(1)), None],
+            vec![Some(VId(2)), None],
+            vec![Some(VId(3)), None],
+        ]
+    );
+}
+
+#[test]
 fn precedence_parentheses_and_negation_match_independent_multigraph_oracles() {
     let choices = [
         None,

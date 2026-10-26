@@ -15,12 +15,132 @@ use crate::algebra::{
     GraphBooleanExpression, GraphBooleanOp as Op, GraphBooleanOperand as Operand,
     MAX_BOOLEAN_INSTRUCTIONS, ScalarPredicate,
 };
-use fgdb_types::CanonicalScalar;
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar};
 
 const MAX_BOOLEAN_NESTING: usize = 64;
 
+/// Admit constant constructors and their retained argument payloads before
+/// binding copies them. This inspects structure only; the ordinary value
+/// compiler and governed evaluator perform all expression evaluation.
+fn admit_literal_template(
+    template: &crate::set_text::ReadValueTemplate,
+    parameters: Option<&[GqlParameterValue]>,
+) -> bool {
+    use crate::GraphIntegerOp;
+    use crate::mutation_text::MutationIntegerTemplateOp as Integer;
+    use crate::set_text::ReadValueTemplate as Value;
+
+    fn charge(remaining: &mut usize, bytes: usize) -> bool {
+        let Some(next) = remaining.checked_sub(bytes) else {
+            return false;
+        };
+        *remaining = next;
+        true
+    }
+    fn argument(
+        index: usize,
+        parameters: Option<&[GqlParameterValue]>,
+        remaining: &mut usize,
+    ) -> bool {
+        let Some(parameters) = parameters else {
+            return true;
+        };
+        let bytes = match parameters.get(index) {
+            Some(GqlParameterValue::Int64(_) | GqlParameterValue::UInt64(_)) => 9,
+            Some(GqlParameterValue::Scalar(value)) => value.canonical_bytes().len(),
+            Some(GqlParameterValue::List(value)) => value.canonical_bytes().len(),
+            Some(GqlParameterValue::Map(value)) => value.canonical_bytes().len(),
+            None => return false,
+        };
+        charge(remaining, bytes)
+    }
+    fn visit(value: &Value, parameters: Option<&[GqlParameterValue]>, left: &mut usize) -> bool {
+        match value {
+            Value::Literal(value) => charge(left, value.canonical_bytes().len()),
+            Value::Parameter { index, .. } => argument(*index, parameters, left),
+            Value::List(items) => {
+                charge(left, 1) && items.iter().all(|value| visit(value, parameters, left))
+            }
+            Value::MapLiteral {
+                keys,
+                values,
+                guard: None,
+            } => {
+                charge(left, 1)
+                    && keys.iter().all(|key| charge(left, key.len()))
+                    && values.iter().all(|value| visit(value, parameters, left))
+            }
+            Value::Integer { program, .. } => program.iter().all(|op| match op {
+                Integer::Bound(
+                    GraphIntegerOp::Column(_)
+                    | GraphIntegerOp::ScalarColumn(_)
+                    | GraphIntegerOp::IdentityColumn { .. }
+                    | GraphIntegerOp::Local(_),
+                ) => false,
+                Integer::Bound(GraphIntegerOp::Scalar(value)) => {
+                    charge(left, value.canonical_value_bytes().len())
+                }
+                Integer::Bound(_) => charge(left, 1),
+                Integer::Parameter { index, .. }
+                | Integer::ParameterField { index, .. }
+                | Integer::ListMembers { index, .. } => argument(*index, parameters, left),
+            }),
+            _ => false,
+        }
+    }
+    let mut remaining = crate::algebra::MAX_SCALAR_PREDICATE_BYTES;
+    visit(template, parameters, &mut remaining)
+}
+
+fn bind_stored_literal(
+    template: &crate::set_text::ReadValueTemplate,
+    parameters: &[GqlParameterValue],
+    at: usize,
+) -> Result<CanonicalPropertyValue, GraphPatternTextError> {
+    let invalid = || error(at, GraphPatternTextErrorKind::StoredLiteral);
+    if !admit_literal_template(template, Some(parameters)) {
+        return Err(invalid());
+    }
+    let expression =
+        super::scoped::mutation::return_projection::bind_read_value(template, parameters)
+            .map_err(|_| invalid())?;
+    let row = crate::algebra::GraphValueRow::from_owned_values(Vec::new());
+    // A bound literal has no query Cx. A fixed admission budget bounds native
+    // constant evaluation before allocating any result, as for MERGE values.
+    let mut remaining = 1_u32 << 20;
+    let value = crate::set_ops::evaluate_value(&expression, &row, 0, &mut |_| {
+        remaining = remaining.checked_sub(1).ok_or(())?;
+        Ok::<_, ()>(())
+    })
+    .map_err(|_| invalid())?;
+    let cap = crate::algebra::MAX_SCALAR_PREDICATE_BYTES;
+    if value
+        .canonical_byte_len()
+        .ok()
+        .is_none_or(|bytes| bytes > cap)
+    {
+        return Err(invalid());
+    }
+    let value = value.to_property_value().ok_or_else(invalid)?;
+    if value
+        .canonical_encoded_len()
+        .ok()
+        .is_none_or(|bytes| bytes > cap)
+    {
+        return Err(invalid());
+    }
+    Ok(value)
+}
+
 pub(super) enum SyntaxItem<'a> {
     Atom(Filter<'a>),
+    /// Inline collection equality belongs to the pattern that wrote it,
+    /// including a nullable or existential child pattern.
+    StoredProperty {
+        variable: Name<'a>,
+        key: Name<'a>,
+        value: crate::set_text::ReadValueTemplate,
+    },
     /// A column with no key is a vertex read by id()/elementId() (fgdb-j687q).
     Expression {
         columns: Vec<(Name<'a>, Option<Name<'a>>)>,
@@ -61,6 +181,45 @@ impl<'a> Parsed<'a> {
 }
 
 impl<'a> Parser<'a> {
+    pub(super) fn collection_property_operand(
+        &mut self,
+        variable: Name<'a>,
+        key: Name<'a>,
+    ) -> Result<Option<Filter<'a>>, GraphPatternTextError> {
+        let collection = match self.current.kind {
+            TokenKind::Punct(b'[' | b'{') => true,
+            TokenKind::Parameter(name) => matches!(
+                self.parameter_types.get(name),
+                Some(GqlParameterType::List | GqlParameterType::Map)
+            ),
+            _ => false,
+        };
+        if !collection {
+            return Ok(None);
+        }
+        let at = self.current.at;
+        let value = self.read_row_value(&[], 0).map_err(|source| {
+            error(
+                source.offset,
+                match source.kind {
+                    crate::GraphSetTextErrorKind::Pattern(kind) => kind,
+                    _ => GraphPatternTextErrorKind::StoredLiteral,
+                },
+            )
+        })?;
+        if !admit_literal_template(&value, None) {
+            return Err(error(at, GraphPatternTextErrorKind::StoredLiteral));
+        }
+        Ok(Some(Filter::Boolean {
+            program: vec![SyntaxItem::StoredProperty {
+                variable,
+                key,
+                value,
+            }],
+            at,
+        }))
+    }
+
     pub(super) fn boolean_predicates(&mut self) -> Result<bool, GraphPatternTextError> {
         let at = self.current.at;
         let mut parsed = Parsed {
@@ -941,6 +1100,11 @@ enum Atom {
 #[derive(Clone)]
 enum Item {
     Atom(Atom),
+    StoredProperty {
+        variable: String,
+        key: PropertyKeyId,
+        value: crate::set_text::ReadValueTemplate,
+    },
     /// A column with no key is the vertex itself (id()/elementId()).
     Expression {
         columns: Vec<(String, Option<PropertyKeyId>)>,
@@ -980,6 +1144,7 @@ impl BoundBooleanTemplate {
             property(kind, key)
         };
         self.program.iter().any(|item| match item {
+            Item::StoredProperty { variable, key, .. } => reads(variable, *key),
             Item::Atom(atom) => match atom {
                 Atom::Property { variable, key, .. }
                 | Atom::Scalar { variable, key, .. }
@@ -1068,6 +1233,16 @@ impl BoundBooleanTemplate {
         }
         fn encode_item(bytes: &mut Vec<u8>, item: &Item) {
             match item {
+                Item::StoredProperty {
+                    variable,
+                    key,
+                    value,
+                } => {
+                    bytes.push(7);
+                    append_name(bytes, variable);
+                    bytes.extend_from_slice(&key.0.to_be_bytes());
+                    value.append_template_transcript(bytes);
+                }
                 Item::Atom(atom) => {
                     bytes.push(0);
                     encode_atom(bytes, atom);
@@ -1186,6 +1361,15 @@ impl BoundBooleanTemplate {
         let mut resolved = Vec::new();
         for instruction in program {
             resolved.push(match instruction {
+                SyntaxItem::StoredProperty {
+                    variable,
+                    key,
+                    value,
+                } => Item::StoredProperty {
+                    variable: variable.text.to_owned(),
+                    key: property(key)?,
+                    value,
+                },
                 SyntaxItem::Expression { columns, program } => Item::Expression {
                     columns: columns
                         .into_iter()
@@ -1274,6 +1458,7 @@ impl BoundBooleanTemplate {
             .filter_map(|edge| edge.variable)
             .filter(|name| {
                 resolved.iter().any(|item| match item {
+                    Item::StoredProperty { variable, .. } => variable == name.text,
                     Item::Atom(
                         Atom::Property { variable, .. }
                         | Atom::Scalar { variable, .. }
@@ -1320,6 +1505,16 @@ impl BoundBooleanTemplate {
         values: &[GqlParameterValue],
     ) -> Result<GraphBooleanExpression, GraphPatternTextError> {
         let property = |variable, key| self.property_operand(variable, key);
+        let stored = self
+            .program
+            .iter()
+            .map(|item| match item {
+                Item::StoredProperty { value, .. } => {
+                    bind_stored_literal(value, values, self.at).map(Some)
+                }
+                _ => Ok(None),
+            })
+            .collect::<Result<Vec<_>, GraphPatternTextError>>()?;
         // Finish the operand storage before taking any references into it.
         // Canonical scalar arguments reuse their checked Arc/encoding; numeric
         // operands encode once for this bound immutable expression.
@@ -1373,6 +1568,13 @@ impl BoundBooleanTemplate {
         let mut program = Vec::new();
         for (index, (item, literal)) in self.program.iter().zip(&literals).enumerate() {
             program.push(match item {
+                Item::StoredProperty { variable, key, .. } => Op::Compare {
+                    left: property(variable, *key),
+                    comparison: IntegerComparison::Equal,
+                    right: Operand::StoredLiteral(
+                        stored[index].as_ref().expect("bound stored literal"),
+                    ),
+                },
                 Item::Expression { .. } => Op::Expression {
                     expression: expressions[index]
                         .as_ref()
@@ -1494,6 +1696,32 @@ mod template_tests {
             (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(2))),
             (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(1))),
             _ => None,
+        }
+    }
+
+    #[test]
+    fn inline_collection_reads_remain_visible_before_binding_to_write_selection_analysis() {
+        let resolve = |kind, name: &str| {
+            if kind == GraphSymbolKind::Relation && name == "R" {
+                Some(GraphSymbol::Relation(RelationId(1)))
+            } else {
+                symbols(kind, name)
+            }
+        };
+        for (statement, feeds) in [
+            ("MATCH (n {p: [1]}) SET n.p = 2", true),
+            ("MATCH (n {p: [1]}) SET n.q = 2", false),
+            (
+                "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b {p: []}) SET b.p = 2",
+                true,
+            ),
+            ("MATCH (a)-[r:R {p: []}]->(b) SET r.p = 2", true),
+            ("MATCH (a)-[r:R {p: []}]->(b) SET a.p = 2", false),
+        ] {
+            let prepared =
+                crate::PreparedGraphMutationText::prepare(statement, RelationId(1), resolve)
+                    .unwrap();
+            assert_eq!(prepared.feeds_own_match(), feeds, "{statement}");
         }
     }
 

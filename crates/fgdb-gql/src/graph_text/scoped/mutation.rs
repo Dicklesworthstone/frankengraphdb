@@ -10,7 +10,7 @@ mod insertion;
 mod integer;
 mod merge;
 mod mutation_query;
-mod return_projection;
+pub(in crate::graph_text) mod return_projection;
 mod script;
 
 use super::*;

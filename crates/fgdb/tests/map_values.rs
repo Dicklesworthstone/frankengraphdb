@@ -540,6 +540,143 @@ async fn write(
     .map_err(|error| format!("execute: {error:?}"))
 }
 
+#[test]
+fn inline_collection_maps_execute_in_database_node_edge_and_optional_reads() {
+    use fgdb_types::{CanonicalF64, EId};
+    run(async |commit, cx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        let mut batch = graph();
+        let float = |n| GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(n)));
+        let document = map(&[("a", int(1)), ("b", list([int(2)]))]);
+        for (id, value) in [
+            (1, list([int(1), int(2)])),
+            (2, list([float(1.0), float(2.0)])),
+            (3, list([])),
+        ] {
+            batch.set_vertex_property_value(
+                VId(id),
+                FIRST,
+                Some(value.to_property_value().unwrap()),
+            );
+        }
+        batch.create_vertex_values(
+            VId(4),
+            vec![PERSON],
+            vec![
+                (P, CanonicalScalar::Int(40).into()),
+                (NAME, CanonicalScalar::ucs_basic_text("d").unwrap().into()),
+                (FIRST, document.to_property_value().unwrap()),
+            ],
+        );
+        for (id, source, destination, value) in [
+            (11, 1, 2, list([int(1), int(2)])),
+            (12, 1, 3, list([])),
+            (13, 1, 2, list([float(1.0), float(2.0)])),
+            (14, 4, 1, document.clone()),
+        ] {
+            batch.add_edge_values(
+                EId(id),
+                VId(source),
+                VId(destination),
+                vec![(FIRST, value.to_property_value().unwrap())],
+            );
+        }
+        db.write(commit, batch).await.unwrap();
+        let empty = GqlParameters::new();
+        for (statement, expected) in [
+            (
+                "MATCH (n:Person {first: [1, 2]}) RETURN n.name AS name ORDER BY name",
+                vec![vec![text("a")], vec![text("b")]],
+            ),
+            (
+                "MATCH (n:Person {first: []}) RETURN n.name AS name",
+                vec![vec![text("c")]],
+            ),
+            (
+                "MATCH (n:Person {first: {b: [2.0], a: 1.0}}) RETURN n.name AS name",
+                vec![vec![text("d")]],
+            ),
+            (
+                "MATCH (a)-[r:R {first: {b: [2], a: 1}}]->(b) RETURN a.name AS a, b.name AS b",
+                vec![vec![text("d"), text("a")]],
+            ),
+            (
+                "MATCH (a:Person) OPTIONAL MATCH (a)-[r:R {first: [1, 2]}]->(b) \
+                 RETURN a.name AS a, b.name AS b ORDER BY a, b",
+                vec![
+                    vec![text("a"), text("b")],
+                    vec![text("a"), text("b")],
+                    vec![text("b"), null()],
+                    vec![text("c"), null()],
+                    vec![text("d"), null()],
+                ],
+            ),
+            (
+                "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[r:R {first: []}]->(b) } \
+                 RETURN a.name AS a",
+                vec![vec![text("a")]],
+            ),
+            (
+                "MATCH (a:Person) WHERE NOT EXISTS { MATCH (a)-[r:R {first: [1, 2]}]->(b) } \
+                 RETURN a.name AS a ORDER BY a",
+                vec![vec![text("b")], vec![text("c")], vec![text("d")]],
+            ),
+        ] {
+            assert_eq!(
+                cells(
+                    db.query(cx, statement, &empty, symbols, policy())
+                        .expect(statement)
+                ),
+                expected,
+                "{statement}"
+            );
+        }
+        let tags = GqlParameters::new()
+            .with_list("tags", vec![int(1), int(2)])
+            .unwrap();
+        assert_eq!(
+            cells(
+                db.query(
+                    cx,
+                    "MATCH (n:Person {first: $tags}) RETURN n.name AS name ORDER BY name",
+                    &tags,
+                    symbols,
+                    policy(),
+                )
+                .unwrap()
+            ),
+            vec![vec![text("a")], vec![text("b")]]
+        );
+        let payload = map_parameters(&[("b", list([int(2)])), ("a", int(1))]);
+        assert_eq!(
+            cells(
+                db.query(
+                    cx,
+                    "MATCH (n:Person {first: $payload}) RETURN n.name AS name",
+                    &payload,
+                    symbols,
+                    policy(),
+                )
+                .unwrap()
+            ),
+            vec![vec![text("d")]]
+        );
+        let QueryResult::Rows { rows, .. } = db
+            .query(
+                cx,
+                "MATCH (a)-[r:R {first: [1, 2]}]->(b) RETURN count(*) AS n",
+                &empty,
+                symbols,
+                policy(),
+            )
+            .unwrap()
+        else {
+            panic!("COUNT must return rows");
+        };
+        assert_eq!(rows, vec![vec![QueryValue::Count(2)]]);
+    });
+}
+
 /// The openCypher bulk idiom: each map row of a list parameter creates one
 /// vertex whose properties are entries of that row. An absent entry reads
 /// NULL, which stores no property. A list index, size() and IN over a row

@@ -253,6 +253,7 @@ pub enum GraphPatternTextErrorKind {
     Expected(&'static str),
     IntegerOutOfRange,
     ScalarLiteral,
+    StoredLiteral,
     BooleanExpression,
     BooleanNesting {
         limit: usize,
@@ -327,6 +328,9 @@ impl core::fmt::Display for GraphPatternTextErrorKind {
             Self::Expected(item) => write_expected(f, item),
             Self::IntegerOutOfRange => f.write_str("integer literal is out of range"),
             Self::ScalarLiteral => f.write_str("literal is not a valid scalar value here"),
+            Self::StoredLiteral => {
+                f.write_str("literal is not a valid bounded stored property value here")
+            }
             Self::BooleanExpression => f.write_str("invalid boolean expression"),
             Self::BooleanNesting { limit } => {
                 write!(f, "boolean expression nests deeper than {limit} levels")
@@ -371,6 +375,7 @@ impl GraphPatternTextErrorKind {
             Self::UnknownSymbol(_) | Self::WrongSymbolKind { .. } => C::NotFound,
             Self::IntegerOutOfRange
             | Self::ScalarLiteral
+            | Self::StoredLiteral
             | Self::ParameterDeclaration
             | Self::UnusedParameterDeclaration
             | Self::ConflictingParameterTypes
@@ -1546,6 +1551,8 @@ impl<'a> Parser<'a> {
             };
             if let Some(row) = row {
                 self.read_correlations.push((variable, Some(key), row));
+            } else if let Some(predicate) = self.collection_property_operand(variable, key)? {
+                self.syntax.filters.push(predicate);
             } else {
                 let at = self.current.at;
                 let predicate = self.property_operand(variable, key, IntegerComparison::Equal)?;
