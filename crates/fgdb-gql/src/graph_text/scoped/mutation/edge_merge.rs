@@ -259,9 +259,10 @@ impl PreparedGraphEdgeMergeText {
     {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones());
-        // A WHERE the graph predicate cannot hold reads as `WITH * WHERE`.
+        // A WHERE the graph predicate cannot hold reads as `WITH * WHERE`,
+        // and an UNWIND right after the MATCH reads through `WITH *` too.
         let deferred = parser.write_match_prefix()?;
-        if deferred || parser.is_word("WITH") {
+        if deferred || parser.is_word("WITH") || parser.is_word("UNWIND") {
             return Self::prepare_after_with(parser, statement, resolve, returning, deferred);
         }
         let parsed = parser.edge_merge_pattern()?;

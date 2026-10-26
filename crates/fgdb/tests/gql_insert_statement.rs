@@ -2418,3 +2418,106 @@ fn a_chained_create_may_match_against_the_previous_writes_rows() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// A write right after `MATCH ... UNWIND`, with no WITH between, runs over
+/// the UNWIND's rows as `MATCH ... WITH * UNWIND ...` would: `MATCH (p)
+/// UNWIND p.tags AS t CREATE (:Tag {name: t})`. It used to refuse ("expected
+/// a supported graph write statement") although the explicit `WITH p UNWIND`
+/// form ran.
+#[test]
+fn a_write_right_after_match_unwind_reads_its_rows() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4ad, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = fresh(&commit, true).await;
+        let mut next = 100u128;
+        let mut write = async |db: &mut Database<MemVfs>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    next += 1;
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                    })
+                },
+            )
+            .await
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        let property = |db: &Database<MemVfs>, label: LabelId, key: PropertyKeyId| {
+            let mut values: Vec<_> = db
+                .vertices()
+                .unwrap()
+                .into_iter()
+                .filter(|vertex| vertex.labels == vec![label])
+                .filter_map(|vertex| {
+                    vertex
+                        .props
+                        .into_iter()
+                        .find(|(at, _)| *at == key)
+                        .map(|(_, value)| value)
+                })
+                .collect();
+            values.sort();
+            values
+        };
+        let stored = |value: i64| -> CanonicalPropertyValue { CanonicalScalar::Int(value).into() };
+
+        // CREATE: one vertex per (source, element) row. The UNWIND reads the
+        // matched vertex's property. A CREATE property reading it directly
+        // (`{p: s.p}`) after a MATCH-first UNWIND still refuses; the
+        // explicit `WITH s UNWIND ...` form reads it.
+        write(
+            &mut db,
+            "MATCH (s:Source) UNWIND [s.p + 1, s.p + 2] AS i CREATE (:Copy {p: i})",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            property(&db, COPY, P),
+            [stored(11), stored(12), stored(21), stored(22)]
+        );
+        // SET: the row's value, one row per vertex.
+        write(
+            &mut db,
+            "MATCH (s:Source) UNWIND [s.p * 2] AS v SET s.q = v",
+        )
+        .await
+        .unwrap();
+        assert_eq!(property(&db, SOURCE, Q), [stored(20), stored(40)]);
+        // A relationship MERGE: two rows, one relationship.
+        let before = db.edges().unwrap().len();
+        write(
+            &mut db,
+            "MATCH (a:Source {p: 10}), (b:Source {p: 20}) UNWIND [1, 1] AS i \
+             MERGE (a)-[:T]->(b)",
+        )
+        .await
+        .unwrap();
+        let edges = db.edges().unwrap();
+        assert_eq!(edges.len(), before + 1);
+        assert!(edges.iter().any(|edge| {
+            (edge.entry.src, edge.entry.relation, edge.entry.dst) == (VId(10), T, VId(20))
+        }));
+        // An empty UNWIND writes nothing.
+        write(
+            &mut db,
+            "MATCH (s:Source) UNWIND [] AS i CREATE (:Copy {p: i})",
+        )
+        .await
+        .unwrap();
+        assert_eq!(property(&db, COPY, P).len(), 4);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

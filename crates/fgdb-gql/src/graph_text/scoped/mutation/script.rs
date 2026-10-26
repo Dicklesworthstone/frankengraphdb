@@ -257,8 +257,9 @@ fn classify(
     // NOT) reads as `MATCH ... WITH * WHERE ...`.
     let deferred = matched && parser.write_match_prefix()?;
     // MATCH ... WITH ... CREATE/SET/REMOVE/DELETE: the write reads the WITH
-    // row (fgdb-sl4ym).
-    if matched && (deferred || parser.is_word("WITH")) {
+    // row (fgdb-sl4ym). An UNWIND right after the MATCH reads it through
+    // the implicit `WITH *` (`MATCH (p) UNWIND p.tags AS t CREATE ...`).
+    if matched && (deferred || parser.is_word("WITH") || parser.is_word("UNWIND")) {
         let prefix = if deferred {
             parser.implicit_write_row_prefix()
         } else {

@@ -926,18 +926,22 @@ impl PreparedGraphMutationText {
         };
         // MATCH ... WITH ... SET/REMOVE/DELETE (fgdb-sl4ym): the write reads
         // the read pipeline's row through its last WITH stage, and only it.
-        let row_prefix =
-            if unwound.is_none() && !optional_root && (deferred || parser.is_word("WITH")) {
-                let prefix = if deferred {
-                    parser.implicit_write_row_prefix()?
-                } else {
-                    parser.write_row_prefix()?
-                };
-                parser.write_row_scope = true;
-                Some(prefix)
+        // An UNWIND right after the MATCH reads it through the implicit
+        // `WITH *`.
+        let row_prefix = if unwound.is_none()
+            && !optional_root
+            && (deferred || parser.is_word("WITH") || parser.is_word("UNWIND"))
+        {
+            let prefix = if deferred {
+                parser.implicit_write_row_prefix()?
             } else {
-                None
+                parser.write_row_prefix()?
             };
+            parser.write_row_scope = true;
+            Some(prefix)
+        } else {
+            None
+        };
         let row = match (&unwound, &row_prefix) {
             (Some((_, schema)), _) | (None, Some((_, _, schema))) => Some(schema.clone()),
             (None, None) => None,
