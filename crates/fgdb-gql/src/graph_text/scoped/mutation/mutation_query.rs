@@ -823,6 +823,41 @@ impl<'a> ParsedMutationReturn<'a> {
 impl<'a> Parser<'a> {
     /// `row` is the WITH row of a write after WITH (fgdb-sl4ym): RETURN then
     /// reads its values, and `*` is every column it carries.
+    /// Whether the RETURN at the current token reads `name.key` of a
+    /// dynamically typed value of the WITH row, such as an unwound element.
+    /// Nothing is consumed.
+    fn return_reads_row_element(
+        &self,
+        row: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<bool, GraphPatternTextError> {
+        if !self.is_word("RETURN") {
+            return Ok(false);
+        }
+        let visible = self.visible_width(row);
+        let dynamic = |word: &str| {
+            row[..visible]
+                .iter()
+                .any(|(name, kind)| name.text == word && *kind == GraphSetColumnType::Any)
+        };
+        let mut lexer = self.lexer.clone();
+        let mut previous = self.current.kind;
+        loop {
+            let token = lexer.next()?;
+            match token.kind {
+                TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
+                TokenKind::Word(word)
+                    if !matches!(previous, TokenKind::Punct(b'.'))
+                        && dynamic(word)
+                        && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'.')) =>
+                {
+                    return Ok(true);
+                }
+                _ => {}
+            }
+            previous = token.kind;
+        }
+    }
+
     pub(super) fn mutation_return(
         &mut self,
         columns: &mut Vec<Projection<'a>>,
@@ -834,7 +869,14 @@ impl<'a> Parser<'a> {
         // are this statement's own post-write values (openCypher Set, Remove
         // and Delete "... WITH n WHERE ... RETURN"). In a chain, a next write
         // directly after it reads every binding, as `WITH *` would.
-        let implicit = self.chain_write && self.at_chained_write()?;
+        // A RETURN reading a property of a dynamically typed row value, such
+        // as an unwound element, reads it after the write as a tail over an
+        // implicit `WITH *` (fgdb-122y1).
+        let row_element = match row {
+            Some(row) => self.return_reads_row_element(row)?,
+            None => false,
+        };
+        let implicit = (self.chain_write && self.at_chained_write()?) || row_element;
         let head = implicit || self.take_word("WITH")?;
         if !head {
             self.word("RETURN")?;

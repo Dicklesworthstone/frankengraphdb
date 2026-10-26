@@ -313,6 +313,98 @@ fn writes_after_with_target_an_unwound_element() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// fgdb-122y1: a WITH tail after a write over an unwound element reads that
+/// element's properties after the write: a field the statement wrote reads
+/// the write, a removed field is absent, any other field reads its stored
+/// value. An element the statement deletes refuses the read rather than
+/// answering a removed value, and nothing is published.
+#[test]
+fn a_write_tail_reads_an_unwound_elements_post_write_properties() {
+    let ((), report) = run_async_under_lab(0xa071_0008, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let write = async |db: &mut Database<_>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(10, 10, 0),
+                no_allocate,
+            )
+            .await
+        };
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        // The seed's p are 4 and 7.
+        let written = write(
+            &mut db,
+            "MATCH (n:L) WITH collect(n) AS ns UNWIND ns AS m SET m.id = m.p * 10 \
+             WITH m RETURN m.p AS p, m.id AS id ORDER BY p",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows(written, &["p", "id"]),
+            vec![vec![int(4), int(40)], vec![int(7), int(70)]]
+        );
+        let removed = write(
+            &mut db,
+            "MATCH (n:L) WITH collect(n) AS ns UNWIND ns AS m REMOVE m.id \
+             WITH m RETURN m.p AS p, m.id AS id ORDER BY p",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows(removed, &["p", "id"]),
+            vec![vec![int(4), null.clone()], vec![int(7), null]]
+        );
+        // Without a WITH, the RETURN reads the same post-write values, also
+        // beside a list the row computed before the write (TCK List12 [1]).
+        let direct = write(
+            &mut db,
+            "MATCH (n:L) WITH collect(n) AS ns UNWIND ns AS m SET m.id = m.p + 1 \
+             RETURN m.p AS p, m.id AS id ORDER BY p",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows(direct, &["p", "id"]),
+            vec![vec![int(4), int(5)], vec![int(7), int(8)]]
+        );
+        let listed = write(
+            &mut db,
+            "MATCH (n:L) WITH collect(n) AS ns WITH ns, [x IN ns | x.p] AS old \
+             UNWIND ns AS m SET m.p = 0 RETURN m.p AS p, size(old) AS k",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows(listed, &["p", "k"]),
+            vec![vec![int(0), int(2)], vec![int(0), int(2)]]
+        );
+        let frontier = db.frontier().unwrap();
+        assert!(
+            write(
+                &mut db,
+                "MATCH (n:L) WITH collect(n) AS ns UNWIND ns AS m DETACH DELETE m \
+                 WITH m RETURN m.p AS p",
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// A write reads `x.key` of an element it computes (fgdb-694ga), in a
 /// right-hand side and in its input relation, at the statement's frozen cut:
 /// the transaction overlay before the statement's own effects. So

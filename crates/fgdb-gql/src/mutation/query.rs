@@ -338,7 +338,7 @@ impl PreparedGraphMutationQuery {
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        elements: Option<&mut super::collect::MutationElementReader<'_, E>>,
+        mut elements: Option<&mut super::collect::MutationElementReader<'_, E>>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<E>, C>> {
         // Every engine below (selection, aggregate, ordering, tail) sees one
@@ -357,7 +357,7 @@ impl PreparedGraphMutationQuery {
             Some(&self.bindings),
             owned,
             source,
-            elements,
+            elements.as_deref_mut(),
             &mut checkpoint,
         )
         .map_err(|error| error.map_source(GraphMutationQueryError::Mutation))?;
@@ -395,8 +395,18 @@ impl PreparedGraphMutationQuery {
         let returning = match &self.tail {
             None => returning,
             Some(tail) => {
-                crate::set_ops::finish_owned_tail(returning, tail, policy.query, checkpoint)
-                    .map_err(|error| error.map_source(GraphMutationQueryError::Returning))?
+                // The tail reads this statement's post-write rows: an element
+                // property it wrote reads that write, any other the host's
+                // value before the statement (fgdb-122y1).
+                let mut post_write = PostWriteReads::new(mutation.intents(), elements);
+                crate::set_ops::finish_owned_tail_reading(
+                    returning,
+                    tail,
+                    policy.query,
+                    &mut |element, key| post_write.read(element, key),
+                    checkpoint,
+                )
+                .map_err(|error| error.map_source(GraphMutationQueryError::Returning))?
             }
         };
         Ok(GraphMutationQueryBatch {
@@ -509,5 +519,74 @@ impl<E: core::error::Error + 'static> core::error::Error for GraphMutationQueryE
             Self::Mutation(error) => Some(error),
             Self::Returning(error) => Some(error),
         }
+    }
+}
+
+/// Element property reads over a write's post-write rows (fgdb-122y1): the
+/// statement's own last write of a field, else the host's read before the
+/// statement. A read of an element the statement deletes, or of any
+/// relationship once a DETACH DELETE may have cascaded to it, stays a typed
+/// refusal, never a value the statement removed.
+struct PostWriteReads<'r, 'e, E> {
+    written: std::collections::BTreeMap<(ElementId, PropertyKeyId), Option<CanonicalPropertyValue>>,
+    deleted: std::collections::BTreeSet<ElementId>,
+    cascading: bool,
+    base: Option<&'r mut super::collect::MutationElementReader<'e, E>>,
+}
+
+impl<'r, 'e, E> PostWriteReads<'r, 'e, E> {
+    fn new(
+        intents: &[GraphMutationIntent],
+        base: Option<&'r mut super::collect::MutationElementReader<'e, E>>,
+    ) -> Self {
+        let mut written = std::collections::BTreeMap::new();
+        let mut deleted = std::collections::BTreeSet::new();
+        let mut cascading = false;
+        for intent in intents {
+            match intent {
+                GraphMutationIntent::Property { vertex, key, value } => {
+                    written.insert((ElementId::Vertex(*vertex), *key), value.clone());
+                }
+                GraphMutationIntent::EdgeProperty { edge, key, value } => {
+                    written.insert((ElementId::Edge(*edge), *key), value.clone());
+                }
+                GraphMutationIntent::StoredProperty { target, key, value } => {
+                    written.insert((*target, *key), Some(value.clone()));
+                }
+                GraphMutationIntent::Label { .. } => {}
+                GraphMutationIntent::DetachDelete { vertex } => {
+                    deleted.insert(ElementId::Vertex(*vertex));
+                    cascading = true;
+                }
+                GraphMutationIntent::Delete { vertex } => {
+                    deleted.insert(ElementId::Vertex(*vertex));
+                }
+                GraphMutationIntent::DeleteEdge { edge } => {
+                    deleted.insert(ElementId::Edge(*edge));
+                }
+            }
+        }
+        Self {
+            written,
+            deleted,
+            cascading,
+            base,
+        }
+    }
+
+    fn read(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<CanonicalPropertyValue>, E>> {
+        if self.deleted.contains(&element)
+            || (self.cascading && matches!(element, ElementId::Edge(_)))
+        {
+            return None;
+        }
+        if let Some(value) = self.written.get(&(element, key)) {
+            return Some(Ok(value.clone()));
+        }
+        self.base.as_mut().map(|read| read(element, key))
     }
 }

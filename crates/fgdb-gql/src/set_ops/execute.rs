@@ -861,22 +861,8 @@ pub(crate) fn owned_head_policy(policy: GqlQueryPolicy) -> GqlQueryPolicy {
 /// Run a write tail over its finished head under what the write and head
 /// left of the statement's allowance, with the statement's own result-row
 /// limit. Counters continue the head's: work and scratch add, snapshot
-/// records are the write's, and result rows are the tail's alone.
-pub(crate) fn finish_owned_tail<E, C>(
-    head: GqlQueryExecution<GraphValueRow>,
-    tail: &PreparedGraphSet,
-    policy: GqlQueryPolicy,
-    checkpoint: impl FnMut() -> Result<(), C>,
-) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
-    finish_owned_tail_reading(
-        head,
-        tail,
-        policy,
-        &mut projection::no_element_reads,
-        checkpoint,
-    )
-}
-
+/// records are the write's, and result rows are the tail's alone. The tail
+/// reads element properties through `elements`, the write's post-write view.
 pub(crate) fn finish_owned_tail_reading<E, C>(
     head: GqlQueryExecution<GraphValueRow>,
     tail: &PreparedGraphSet,
