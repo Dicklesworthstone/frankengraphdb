@@ -1108,6 +1108,103 @@ pub struct ExecutePreparedBatch {
     pub argument_sets: Vec<Vec<(String, WireValue)>>,
 }
 
+/// Select the execution contract of one finite historical result comparison.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffMode {
+    /// Complete both native results and their net difference in memory.
+    Buffered,
+    /// Use the server's explicitly configured bounded scratch and pull the
+    /// admitted external difference. Unsupported profiles refuse without retry.
+    OrderedStream,
+}
+
+impl DiffMode {
+    fn tag(self) -> u8 {
+        match self {
+            Self::Buffered => 0,
+            Self::OrderedStream => 1,
+        }
+    }
+
+    fn get(input: &mut In<'_>) -> Result<Self, BodyError> {
+        match input.u8()? {
+            0 => Ok(Self::Buffered),
+            1 => Ok(Self::OrderedStream),
+            _ => Err(BodyError::UnknownTag),
+        }
+    }
+}
+
+/// Compare one complete native read at two exact cuts of the selected history.
+/// Changes are the after-minus-before bag, not intermediate write events.
+/// Reverse and equal cuts are legal; both endpoints still require admission.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecuteDiff {
+    pub mode: DiffMode,
+    pub before: u64,
+    pub after: u64,
+    pub statement: String,
+    pub parameters: Vec<(String, WireValue)>,
+}
+
+/// Compare a connection-owned read template at two cuts with fresh operands.
+/// A write template cannot acquire read semantics through this operation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecutePreparedDiff {
+    pub mode: DiffMode,
+    pub before: u64,
+    pub after: u64,
+    pub handle: PreparedHandle,
+    pub parameters: Vec<(String, WireValue)>,
+}
+
+body!(
+    ExecuteDiff,
+    |s, out| {
+        check_len(s.statement.len(), MAX_STATEMENT_BYTES)?;
+        out.u8(s.mode.tag());
+        out.u64(s.before);
+        out.u64(s.after);
+        out.text(&s.statement);
+        put_parameters(&mut out, &s.parameters)?;
+    },
+    |input| {
+        ExecuteDiff {
+            mode: DiffMode::get(&mut input)?,
+            before: input.u64()?,
+            after: input.u64()?,
+            statement: input.text(MAX_STATEMENT_BYTES)?,
+            parameters: get_parameters(&mut input)?,
+        }
+    }
+);
+
+body!(
+    ExecutePreparedDiff,
+    |s, out| {
+        s.handle.check()?;
+        out.u8(s.mode.tag());
+        out.u64(s.before);
+        out.u64(s.after);
+        out.array(&s.handle.0);
+        put_parameters(&mut out, &s.parameters)?;
+    },
+    |input| {
+        let mode = DiffMode::get(&mut input)?;
+        let before = input.u64()?;
+        let after = input.u64()?;
+        let handle = PreparedHandle(input.array()?);
+        handle.check()?;
+        ExecutePreparedDiff {
+            mode,
+            before,
+            after,
+            handle,
+            parameters: get_parameters(&mut input)?,
+        }
+    }
+);
+
 body!(
     ExecuteBatch,
     |s, out| {
@@ -1336,6 +1433,108 @@ body!(
             rows.push(row);
         }
         ResultChunk { columns, rows }
+    }
+);
+
+/// One frame of a finite result difference. Columns appear exactly once, on
+/// the first chunk. Each nonzero signed weight adds or retracts occurrences
+/// of its complete row; flow credit counts entries, not absolute weights.
+/// A prefix remains provisional until the matching DiffResultEnd is received.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiffResultChunk {
+    pub columns: Option<Vec<String>>,
+    pub entries: Vec<(i128, Vec<WireValue>)>,
+}
+
+impl DiffResultChunk {
+    pub fn entry_len(row: &[WireValue]) -> Result<usize, BodyError> {
+        check_len(row.len(), MAX_COLUMNS)?;
+        Ok(16 + ResultChunk::row_len(row)?)
+    }
+}
+
+body!(
+    DiffResultChunk,
+    |s, out| {
+        check_len(s.entries.len(), MAX_ROWS_PER_CHUNK)?;
+        match &s.columns {
+            None => out.u8(0),
+            Some(columns) => {
+                check_len(columns.len(), MAX_COLUMNS)?;
+                out.u8(1);
+                out.len(columns.len());
+                for column in columns {
+                    check_len(column.len(), MAX_NAME_BYTES)?;
+                    out.text(column);
+                }
+            }
+        }
+        out.len(s.entries.len());
+        for (weight, row) in &s.entries {
+            if *weight == 0 {
+                return Err(BodyError::Noncanonical);
+            }
+            check_len(row.len(), MAX_COLUMNS)?;
+            out.i128(*weight);
+            out.len(row.len());
+            for value in row {
+                value.check(0)?;
+                value.put(&mut out);
+            }
+        }
+    },
+    |input| {
+        let columns = if input.bool()? {
+            let n = input.count(MAX_COLUMNS, 4)?;
+            let mut columns = Vec::with_capacity(n);
+            for _ in 0..n {
+                columns.push(input.text(MAX_NAME_BYTES)?);
+            }
+            Some(columns)
+        } else {
+            None
+        };
+        let n = input.count(MAX_ROWS_PER_CHUNK, 20)?;
+        let mut entries = Vec::with_capacity(n);
+        for _ in 0..n {
+            let weight = input.i128()?;
+            if weight == 0 {
+                return Err(BodyError::Noncanonical);
+            }
+            let width = input.count(MAX_COLUMNS, 1)?;
+            let mut row = Vec::with_capacity(width);
+            for _ in 0..width {
+                row.push(WireValue::get(&mut input, 0)?);
+            }
+            entries.push((weight, row));
+        }
+        DiffResultChunk { columns, entries }
+    }
+);
+
+/// Successful completion of a finite comparison at the exact requested cuts.
+/// `rows` is the number of changed tuples delivered across all chunks, never
+/// the sum of signed weights or their absolute multiplicities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiffResultEnd {
+    pub before: u64,
+    pub after: u64,
+    pub rows: u64,
+}
+
+body!(
+    DiffResultEnd,
+    |s, out| {
+        out.u64(s.before);
+        out.u64(s.after);
+        out.u64(s.rows);
+    },
+    |input| {
+        DiffResultEnd {
+            before: input.u64()?,
+            after: input.u64()?,
+            rows: input.u64()?,
+        }
     }
 );
 
@@ -1852,6 +2051,163 @@ mod tests {
             over.resize(over.len() + MAX_VALUE_NODES / 2, tag::NULL);
         }
         assert_eq!(ExecuteBatch::decode(&over), Err(BodyError::TooLarge));
+    }
+
+    #[test]
+    fn finite_diff_requests_preserve_exact_cuts_and_canonical_operands() {
+        for mode in [DiffMode::Buffered, DiffMode::OrderedStream] {
+            let direct = ExecuteDiff {
+                mode,
+                before: u64::MAX,
+                after: 0,
+                statement: "a".into(),
+                parameters: vec![("p".into(), WireValue::Null)],
+            };
+            let mut expected = vec![mode.tag()];
+            expected.extend_from_slice(&u64::MAX.to_be_bytes());
+            expected.extend_from_slice(&0_u64.to_be_bytes());
+            expected.extend_from_slice(&[0, 0, 0, 1, b'a', 0, 0, 0, 1, 0, 0, 0, 1, b'p', 0]);
+            assert_eq!(direct.encode().unwrap(), expected);
+            assert_eq!(ExecuteDiff::decode(&expected).unwrap(), direct);
+            every_prefix_refuses::<ExecuteDiff>(&expected);
+            let prepared = ExecutePreparedDiff {
+                mode,
+                before: 0,
+                after: 0,
+                handle: PreparedHandle([0x45; 16]),
+                parameters: vec![("p".into(), sample_value())],
+            };
+            let bytes = prepared.encode().unwrap();
+            assert_eq!(ExecutePreparedDiff::decode(&bytes).unwrap(), prepared);
+            every_prefix_refuses::<ExecutePreparedDiff>(&bytes);
+            let mut extra = bytes.clone();
+            extra.push(0);
+            assert_eq!(
+                ExecutePreparedDiff::decode(&extra),
+                Err(BodyError::TrailingBytes)
+            );
+            let mut invalid = bytes;
+            invalid[17..33].fill(0);
+            assert_eq!(
+                ExecutePreparedDiff::decode(&invalid),
+                Err(BodyError::Noncanonical)
+            );
+            assert_eq!(
+                ExecutePreparedDiff {
+                    handle: PreparedHandle([0; 16]),
+                    ..prepared.clone()
+                }
+                .encode(),
+                Err(BodyError::Noncanonical)
+            );
+            let duplicate = vec![("p".into(), WireValue::Null), ("p".into(), WireValue::Null)];
+            assert_eq!(
+                ExecuteDiff {
+                    parameters: duplicate.clone(),
+                    ..direct
+                }
+                .encode(),
+                Err(BodyError::Noncanonical)
+            );
+            assert_eq!(
+                ExecutePreparedDiff {
+                    parameters: duplicate,
+                    ..prepared
+                }
+                .encode(),
+                Err(BodyError::Noncanonical)
+            );
+        }
+        assert_eq!(ExecuteDiff::decode(&[2]), Err(BodyError::UnknownTag));
+        assert_eq!(
+            ExecutePreparedDiff::decode(&[2]),
+            Err(BodyError::UnknownTag)
+        );
+        for (kind, tag) in [
+            (crate::FrameKind::ExecuteDiff, 0x24),
+            (crate::FrameKind::ExecutePreparedDiff, 0x25),
+            (crate::FrameKind::DiffResultChunk, 0x26),
+            (crate::FrameKind::DiffResultEnd, 0x27),
+        ] {
+            assert_eq!(kind as u16, tag);
+            assert_eq!(crate::FrameKind::try_from(tag).unwrap(), kind);
+        }
+    }
+
+    #[test]
+    fn finite_diff_chunks_preserve_signed_weights_and_bound_untrusted_shapes() {
+        let chunk = DiffResultChunk {
+            columns: Some(vec!["value".into()]),
+            entries: vec![
+                (i128::MIN, vec![WireValue::Null]),
+                (i128::MAX, vec![sample_value()]),
+            ],
+        };
+        let bytes = chunk.encode().unwrap();
+        assert_eq!(DiffResultChunk::decode(&bytes).unwrap(), chunk);
+        every_prefix_refuses::<DiffResultChunk>(&bytes);
+        assert_eq!(DiffResultChunk::entry_len(&[WireValue::Null]).unwrap(), 21);
+        for weight in [i128::MIN, -1, 1, i128::MAX] {
+            let body = DiffResultChunk {
+                columns: None,
+                entries: vec![(weight, vec![])],
+            };
+            let mut expected = vec![0, 0, 0, 0, 1];
+            expected.extend_from_slice(&weight.to_be_bytes());
+            expected.extend_from_slice(&[0, 0, 0, 0]);
+            assert_eq!(body.encode().unwrap(), expected);
+            assert_eq!(DiffResultChunk::decode(&expected).unwrap(), body);
+        }
+        let zero = DiffResultChunk {
+            columns: None,
+            entries: vec![(0, vec![])],
+        };
+        assert_eq!(zero.encode(), Err(BodyError::Noncanonical));
+        let mut zero_bytes = vec![0, 0, 0, 0, 1];
+        zero_bytes.extend_from_slice(&[0; 20]);
+        assert_eq!(
+            DiffResultChunk::decode(&zero_bytes),
+            Err(BodyError::Noncanonical)
+        );
+        assert_eq!(DiffResultChunk::decode(&[2]), Err(BodyError::Noncanonical));
+        let mut too_many = vec![0];
+        too_many.extend_from_slice(&((MAX_ROWS_PER_CHUNK + 1) as u32).to_be_bytes());
+        assert_eq!(DiffResultChunk::decode(&too_many), Err(BodyError::TooLarge));
+        let mut short = vec![0, 0, 0, 0, 2];
+        short.extend_from_slice(&1_i128.to_be_bytes());
+        short.extend_from_slice(&[0; 4]);
+        assert_eq!(DiffResultChunk::decode(&short), Err(BodyError::Truncated));
+        assert_eq!(
+            DiffResultChunk::entry_len(&vec![WireValue::Null; MAX_COLUMNS + 1]),
+            Err(BodyError::TooLarge)
+        );
+
+        // One shared value allowance covers the entire signed chunk.
+        let mut over = vec![0, 0, 0, 0, 2];
+        for _ in 0..2 {
+            over.extend_from_slice(&1_i128.to_be_bytes());
+            over.extend_from_slice(&[0, 0, 0, 1, tag::LIST]);
+            over.extend_from_slice(&((MAX_VALUE_NODES / 2) as u32).to_be_bytes());
+            over.resize(over.len() + MAX_VALUE_NODES / 2, tag::NULL);
+        }
+        assert_eq!(DiffResultChunk::decode(&over), Err(BodyError::TooLarge));
+        let end = DiffResultEnd {
+            before: 9,
+            after: 3,
+            rows: 2,
+        };
+        let mut expected = Vec::new();
+        for value in [9_u64, 3, 2] {
+            expected.extend_from_slice(&value.to_be_bytes());
+        }
+        assert_eq!(end.encode().unwrap(), expected);
+        assert_eq!(DiffResultEnd::decode(&expected).unwrap(), end);
+        every_prefix_refuses::<DiffResultEnd>(&expected);
+        expected.push(0);
+        assert_eq!(
+            DiffResultEnd::decode(&expected),
+            Err(BodyError::TrailingBytes)
+        );
     }
 
     #[test]

@@ -42,6 +42,10 @@ pub enum FrameKind {
     Pong = 0x0021,
     ExecuteBatch = 0x0022,
     ExecutePreparedBatch = 0x0023,
+    ExecuteDiff = 0x0024,
+    ExecutePreparedDiff = 0x0025,
+    DiffResultChunk = 0x0026,
+    DiffResultEnd = 0x0027,
 }
 
 impl TryFrom<u16> for FrameKind {
@@ -79,6 +83,10 @@ impl TryFrom<u16> for FrameKind {
             0x0021 => Self::Pong,
             0x0022 => Self::ExecuteBatch,
             0x0023 => Self::ExecutePreparedBatch,
+            0x0024 => Self::ExecuteDiff,
+            0x0025 => Self::ExecutePreparedDiff,
+            0x0026 => Self::DiffResultChunk,
+            0x0027 => Self::DiffResultEnd,
             _ => return Err(ProtocolError::UnknownFrameKind),
         })
     }

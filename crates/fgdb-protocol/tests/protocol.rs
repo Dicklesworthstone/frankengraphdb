@@ -487,6 +487,8 @@ fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
         FrameKind::ExecuteBatch,
         FrameKind::ExecutePrepared,
         FrameKind::ExecutePreparedBatch,
+        FrameKind::ExecuteDiff,
+        FrameKind::ExecutePreparedDiff,
         FrameKind::ReleasePrepared,
     ] {
         let frame = frame(kind, Binding::Ready(ready()), StreamId::CONTROL, &[]);
@@ -518,7 +520,12 @@ fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
             Err(ProtocolError::InvalidState)
         );
     }
-    for kind in [FrameKind::Prepared, FrameKind::PreparedReleased] {
+    for kind in [
+        FrameKind::Prepared,
+        FrameKind::PreparedReleased,
+        FrameKind::DiffResultChunk,
+        FrameKind::DiffResultEnd,
+    ] {
         let response = frame(kind, Binding::Ready(ready()), StreamId::CONTROL, &[]);
         assert_eq!(
             connection.validate_client_header(response.header()),
@@ -546,7 +553,7 @@ fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
         FrameKind::ExecutePreparedBatch
     );
     assert_eq!(
-        FrameKind::try_from(0x0024),
+        FrameKind::try_from(0x0028),
         Err(ProtocolError::UnknownFrameKind)
     );
 }

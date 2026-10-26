@@ -25,6 +25,10 @@ use asupersync::Cx;
 use asupersync::net::TcpStream;
 use std::net::SocketAddr;
 
+#[path = "client/diff.rs"]
+mod diff;
+pub use diff::DiffAnswer;
+
 /// What a client can fail with. Server refusals keep their public class.
 #[derive(Debug)]
 pub enum ClientError {
@@ -1146,6 +1150,8 @@ fn server_header(header: &Header, expected: Binding) -> Result<(), ProtocolError
         | FrameKind::Goodbye
         | FrameKind::SnapshotResultChunk
         | FrameKind::SnapshotResultEnd
+        | FrameKind::DiffResultChunk
+        | FrameKind::DiffResultEnd
         | FrameKind::SubscriptionBatch
         | FrameKind::SubscriptionReset => header.binding() == expected,
         _ => return Err(ProtocolError::InvalidState),
@@ -1160,7 +1166,10 @@ fn server_header(header: &Header, expected: Binding) -> Result<(), ProtocolError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::body::{ErrorBody, SubscriptionReset};
+    use crate::body::{
+        DiffMode, DiffResultChunk, DiffResultEnd, ErrorBody, ExecuteDiff, ExecutePreparedDiff,
+        SubscriptionReset,
+    };
     use crate::{Posture, SessionBinding};
     use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
     use asupersync::lab::run_async_under_lab;
@@ -1246,6 +1255,10 @@ mod tests {
         )
     }
     fn script(frames: Vec<Frame>) -> ScriptIo {
+        script_with_window(frames, 65536, 32)
+    }
+
+    fn script_with_window(frames: Vec<Frame>, bytes: u64, rows: u64) -> ScriptIo {
         let limits = FrameLimits::new(4096).unwrap();
         let mut input = Vec::new();
         for frame in [
@@ -1258,8 +1271,8 @@ mod tests {
                     version: crate::PROTOCOL_VERSION,
                     server_nonce: [0; 32],
                     max_frame_len: 4096,
-                    initial_window_bytes: 65536,
-                    initial_window_rows: 32,
+                    initial_window_bytes: bytes,
+                    initial_window_rows: rows,
                 }
                 .encode()
                 .unwrap(),
@@ -1344,6 +1357,389 @@ mod tests {
             frames.push(part.frame.expect("complete sent frame"));
         }
         frames
+    }
+
+    fn diff_chunk(request: u64, columns: bool, entries: Vec<(i128, Vec<WireValue>)>) -> Frame {
+        rpc(
+            FrameKind::DiffResultChunk,
+            request,
+            StreamId([5; 16]),
+            &DiffResultChunk {
+                columns: columns.then(|| vec!["value".into()]),
+                entries,
+            },
+        )
+    }
+
+    fn diff_end(request: u64, before: u64, after: u64, rows: u64) -> Frame {
+        rpc(
+            FrameKind::DiffResultEnd,
+            request,
+            StreamId([5; 16]),
+            &DiffResultEnd {
+                before,
+                after,
+                rows,
+            },
+        )
+    }
+
+    #[test]
+    fn finite_diff_clients_preserve_signed_values_exact_cuts_and_request_mode() {
+        let ((), report) = run_async_under_lab(0x79a0_0420, |root| async move {
+            for mode in [DiffMode::Buffered, DiffMode::OrderedStream] {
+                for prepared in [false, true] {
+                    let entries = vec![
+                        (i128::MIN, vec![WireValue::Null]),
+                        (i128::MAX, vec![WireValue::Int(7)]),
+                    ];
+                    let io = script(vec![
+                        diff_chunk(4, true, entries.clone()),
+                        diff_end(4, u64::MAX, 0, 2),
+                    ]);
+                    let written = std::sync::Arc::clone(&io.written);
+                    let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                    client.select(&root, "test").await.unwrap();
+                    let params = vec![
+                        ("z".into(), WireValue::Int(9)),
+                        ("a".into(), WireValue::Null),
+                    ];
+                    let handle = PreparedHandle([9; 16]);
+                    let answer = if prepared {
+                        client
+                            .execute_prepared_diff(&root, handle, mode, u64::MAX, 0, params)
+                            .await
+                    } else {
+                        client
+                            .execute_diff(&root, mode, u64::MAX, 0, "RETURN $a, $z", params)
+                            .await
+                    }
+                    .unwrap();
+                    assert_eq!(answer.columns, ["value"]);
+                    assert_eq!(answer.entries, entries);
+                    assert_eq!(
+                        answer.end,
+                        DiffResultEnd {
+                            before: u64::MAX,
+                            after: 0,
+                            rows: 2
+                        }
+                    );
+                    let frames = sent_frames(&written.lock().unwrap());
+                    let requests: Vec<_> = frames
+                        .iter()
+                        .filter(|f| {
+                            matches!(
+                                f.header().kind(),
+                                FrameKind::ExecuteDiff | FrameKind::ExecutePreparedDiff
+                            )
+                        })
+                        .collect();
+                    assert_eq!(requests.len(), 1);
+                    assert!(requests[0].header().stream_id().is_control());
+                    let (actual_mode, before, after, params) = if prepared {
+                        let request = ExecutePreparedDiff::decode(requests[0].payload()).unwrap();
+                        assert_eq!(request.handle, handle);
+                        (
+                            request.mode,
+                            request.before,
+                            request.after,
+                            request.parameters,
+                        )
+                    } else {
+                        let request = ExecuteDiff::decode(requests[0].payload()).unwrap();
+                        assert_eq!(request.statement, "RETURN $a, $z");
+                        (
+                            request.mode,
+                            request.before,
+                            request.after,
+                            request.parameters,
+                        )
+                    };
+                    assert_eq!((actual_mode, before, after), (mode, u64::MAX, 0));
+                    assert_eq!(
+                        params,
+                        [
+                            ("a".into(), WireValue::Null),
+                            ("z".into(), WireValue::Int(9))
+                        ]
+                    );
+                }
+            }
+            let io = script(vec![diff_chunk(4, true, vec![]), diff_end(4, 0, 0, 0)]);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "test").await.unwrap();
+            let answer = client
+                .execute_diff(&root, DiffMode::Buffered, 0, 0, "RETURN 1", vec![])
+                .await
+                .unwrap();
+            assert_eq!(answer.columns, ["value"]);
+            assert!(answer.entries.is_empty());
+            assert_eq!(answer.end.rows, 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn finite_diff_credit_counts_changed_tuples_and_replenishes_before_eof_without_retry() {
+        let ((), report) = run_async_under_lab(0x79a0_0421, |root| async move {
+            for fails in [false, true] {
+                let entries: Vec<_> = (0..32)
+                    .map(|v| {
+                        (
+                            if v % 2 == 0 { i128::MAX } else { i128::MIN },
+                            vec![WireValue::Int(v)],
+                        )
+                    })
+                    .collect();
+                let chunk = diff_chunk(4, true, entries);
+                let cost = chunk.header().frame_len() as u64;
+                let terminal = if fails {
+                    output(
+                        FrameKind::Error,
+                        &ErrorBody {
+                            code: ErrorCode::Budget,
+                            message: "late diff refusal".into(),
+                        },
+                    )
+                } else {
+                    diff_end(4, 2, 5, 32)
+                };
+                let io = script(vec![chunk, terminal]);
+                let written = std::sync::Arc::clone(&io.written);
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "test").await.unwrap();
+                let mut delivered = 0;
+                let result = client
+                    .execute_diff_streaming(
+                        &root,
+                        DiffMode::OrderedStream,
+                        2,
+                        5,
+                        "RETURN 1",
+                        vec![],
+                        |_| Ok(()),
+                        |_, _| {
+                            delivered += 1;
+                            Ok(())
+                        },
+                    )
+                    .await;
+                assert_eq!(delivered, 32);
+                if fails {
+                    assert!(matches!(
+                        result,
+                        Err(ClientError::Server {
+                            code: ErrorCode::Budget,
+                            ..
+                        })
+                    ));
+                } else {
+                    assert_eq!(result.unwrap().rows, 32);
+                }
+                let frames = sent_frames(&written.lock().unwrap());
+                assert_eq!(
+                    frames
+                        .iter()
+                        .filter(|f| f.header().kind() == FrameKind::ExecuteDiff)
+                        .count(),
+                    1
+                );
+                let grants: Vec<_> = frames
+                    .iter()
+                    .filter(|f| f.header().kind() == FrameKind::WindowUpdate)
+                    .collect();
+                assert_eq!(grants.len(), 1);
+                assert_eq!(
+                    WindowUpdate::decode(grants[0].payload()).unwrap(),
+                    WindowUpdate {
+                        sequence: 1,
+                        bytes: cost,
+                        rows: 32
+                    }
+                );
+                assert_eq!(grants[0].header().stream_id(), StreamId([5; 16]));
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn finite_diff_refuses_wrong_completion_schema_stream_and_credit() {
+        let ((), report) = run_async_under_lab(0x79a0_0422, |root| async move {
+            let entry = || vec![(1, vec![WireValue::Int(1)])];
+            let valid = || diff_chunk(4, true, entry());
+            let chunk = DiffResultChunk {
+                columns: Some(vec!["value".into()]),
+                entries: entry(),
+            };
+            for frames in [
+                vec![valid(), diff_end(4, 8, 3, 1)],
+                vec![valid(), diff_end(4, 9, 4, 1)],
+                vec![valid(), diff_end(4, 9, 3, 0)],
+                vec![diff_end(4, 9, 3, 0)],
+                vec![diff_chunk(4, false, entry())],
+                vec![valid(), valid()],
+                vec![diff_chunk(4, true, vec![(1, vec![])])],
+                vec![diff_chunk(5, true, entry())],
+                vec![
+                    valid(),
+                    rpc(
+                        FrameKind::DiffResultEnd,
+                        4,
+                        StreamId([6; 16]),
+                        &DiffResultEnd {
+                            before: 9,
+                            after: 3,
+                            rows: 1,
+                        },
+                    ),
+                ],
+                vec![rpc(
+                    FrameKind::DiffResultChunk,
+                    4,
+                    StreamId::CONTROL,
+                    &chunk,
+                )],
+                vec![result_chunk(4, &[1])],
+                vec![diff_chunk(4, true, vec![(1, vec![WireValue::Null]); 33])],
+            ] {
+                let io = script(frames);
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "test").await.unwrap();
+                assert!(matches!(
+                    client
+                        .execute_diff(&root, DiffMode::Buffered, 9, 3, "RETURN 1", vec![])
+                        .await,
+                    Err(ClientError::Protocol(_))
+                ));
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn finite_diff_end_requires_remaining_byte_credit_after_cancellation() {
+        let ((), report) = run_async_under_lab(0x79a0_0424, |root| async move {
+            let chunk = diff_chunk(4, true, vec![(1, vec![WireValue::Text("x".repeat(3700))])]);
+            let terminal = diff_end(4, 1, 2, 1);
+            assert!(chunk.header().frame_len() < 4096);
+            assert!(4096 - chunk.header().frame_len() < terminal.header().frame_len());
+            let io = script_with_window(vec![chunk, terminal], 4096, 32);
+            let written = std::sync::Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            client.select(&root, "test").await.unwrap();
+            let result = client
+                .execute_diff_streaming(
+                    &root,
+                    DiffMode::OrderedStream,
+                    1,
+                    2,
+                    "RETURN 1",
+                    vec![],
+                    |_| Err(ClientError::Protocol("consumer stopped")),
+                    |_, _| panic!("cancelled before any row callback"),
+                )
+                .await;
+            assert!(matches!(
+                result,
+                Err(ClientError::Protocol("server exceeded its flow credit"))
+            ));
+            let frames = sent_frames(&written.lock().unwrap());
+            assert_eq!(
+                frames
+                    .iter()
+                    .filter(|f| f.header().kind() == FrameKind::QueryCancel)
+                    .count(),
+                1
+            );
+            assert!(
+                !frames
+                    .iter()
+                    .any(|f| f.header().kind() == FrameKind::WindowUpdate)
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn finite_diff_callback_cancel_drains_exactly_once_and_next_query_succeeds() {
+        let ((), report) = run_async_under_lab(0x79a0_0423, |root| async move {
+            for columns_fail in [false, true] {
+                for terminal_error in [false, true] {
+                    let terminal = if terminal_error {
+                        output(
+                            FrameKind::Error,
+                            &ErrorBody {
+                                code: ErrorCode::Cancelled,
+                                message: "cancelled".into(),
+                            },
+                        )
+                    } else {
+                        diff_end(4, 1, 2, 3)
+                    };
+                    let io = script(vec![
+                        diff_chunk(
+                            4,
+                            true,
+                            vec![(1, vec![WireValue::Int(1)]), (-1, vec![WireValue::Int(2)])],
+                        ),
+                        diff_chunk(4, false, vec![(1, vec![WireValue::Int(3)])]),
+                        terminal,
+                        result_chunk(6, &[9]),
+                        result_end(6, 1),
+                    ]);
+                    let written = std::sync::Arc::clone(&io.written);
+                    let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                    client.select(&root, "test").await.unwrap();
+                    let mut called = 0;
+                    let result = client
+                        .execute_diff_streaming(
+                            &root,
+                            DiffMode::OrderedStream,
+                            1,
+                            2,
+                            "RETURN 1",
+                            vec![],
+                            |_| {
+                                if columns_fail {
+                                    Err(ClientError::Protocol("consumer stopped"))
+                                } else {
+                                    Ok(())
+                                }
+                            },
+                            |_, _| {
+                                called += 1;
+                                Err(ClientError::Protocol("consumer stopped"))
+                            },
+                        )
+                        .await;
+                    assert!(matches!(
+                        result,
+                        Err(ClientError::Protocol("consumer stopped"))
+                    ));
+                    assert_eq!(called, usize::from(!columns_fail));
+                    let next = client
+                        .execute(&root, ExecuteMode::Read, "RETURN 9", vec![])
+                        .await
+                        .unwrap();
+                    assert_eq!(next.rows, [vec![WireValue::Int(9)]]);
+                    let frames = sent_frames(&written.lock().unwrap());
+                    let cancels: Vec<_> = frames
+                        .iter()
+                        .filter(|f| f.header().kind() == FrameKind::QueryCancel)
+                        .collect();
+                    assert_eq!(cancels.len(), 1);
+                    assert_eq!(cancels[0].header().stream_id(), StreamId([5; 16]));
+                    assert!(
+                        !frames
+                            .iter()
+                            .any(|f| f.header().kind() == FrameKind::WindowUpdate)
+                    );
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]
