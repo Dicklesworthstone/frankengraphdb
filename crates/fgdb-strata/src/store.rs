@@ -1097,6 +1097,35 @@ impl<V: Vfs> BlockStore<V> {
         })
     }
 
+    /// Acquire independent physical reads for one integrity sweep.
+    ///
+    /// Pack tables are re-admitted from the filesystem, and every packed
+    /// object read bypasses payload caches. A previous successful open or
+    /// sweep therefore cannot conceal later table damage, missing files or
+    /// payload corruption. Family-specific getters still verify the exact
+    /// keyed identity and enforce their ordinary allocation ceilings.
+    ///
+    /// This creates no directories, writes no bytes and changes no ordinary
+    /// reader's cache. The caller must create a new reader for each sweep;
+    /// location metadata is fixed at admission, not an atomic filesystem
+    /// snapshot or a substitute for the caller's retained object inventory.
+    pub async fn verification_reader(&self, cx: &impl StorageReadCx) -> Result<Self, StoreError>
+    where
+        V: Clone,
+    {
+        let packs =
+            pack::PackIndex::load_for_verification(cx, &self.vfs, self.dir.join(PACK_DIR)).await?;
+        Ok(Self {
+            vfs: self.vfs.clone(),
+            dir: self.dir.clone(),
+            publication_lock_path: self.publication_lock_path.clone(),
+            k_oid: self.k_oid.clone(),
+            namespace: self.namespace,
+            scalar_resolver: self.scalar_resolver.clone(),
+            packs: Arc::new(packs),
+        })
+    }
+
     /// Where a block of this identity lives.
     ///
     /// Hex rather than any shorter encoding, because a filename is read by humans

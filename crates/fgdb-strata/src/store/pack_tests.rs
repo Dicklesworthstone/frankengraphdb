@@ -253,6 +253,68 @@ fn rereading_one_object_does_not_release_its_pack() {
     });
 }
 
+#[test]
+fn verification_reads_do_not_reuse_warm_payloads_or_previously_admitted_tables() {
+    let dir = scratch_dir("verify-physical");
+    let objects = objects(21, PACK_MIN_OBJECTS + 3);
+    under_lab(0x9a21, move |cx| async move {
+        let store = open(&cx, &dir).await;
+        publish(&cx, &store, &objects, None).await.unwrap();
+        assert!(
+            read_all(&cx, &store, &objects)
+                .await
+                .iter()
+                .all(Result::is_ok)
+        );
+        assert_eq!(store.packs.resident_packs(), 1);
+
+        let verifier = store.verification_reader(&cx).await.unwrap();
+        assert!(
+            read_all(&cx, &verifier, &objects)
+                .await
+                .iter()
+                .all(Result::is_ok)
+        );
+        assert_eq!(verifier.packs.resident_packs(), 0);
+        assert_eq!(verifier.packs.whole_reads(), 0);
+        let [pack] = &packs_in(&dir)[..] else {
+            panic!("one pack");
+        };
+        let original = std::fs::read(pack).unwrap();
+        let mut damaged = original.clone();
+        damaged[offset_in_pack(&objects, 5)] ^= 0x40;
+        std::fs::write(pack, &damaged).unwrap();
+        let target = DeltaBlockVersion(objects[5].0);
+
+        // The ordinary cache is a control: re-hashing its old bytes is not a
+        // new observation of storage, even though those bytes remain valid.
+        assert_eq!(store.get_bytes(&cx, target).await.unwrap(), objects[5].1);
+        let fresh = store.verification_reader(&cx).await.unwrap();
+        for reader in [&verifier, &fresh] {
+            assert!(matches!(
+                reader.get_bytes(&cx, target).await,
+                Err(StoreError::IdentityMismatch { expected, .. }) if expected == target.0
+            ));
+            assert_eq!(reader.packs.resident_packs(), 0);
+        }
+        assert_eq!(std::fs::read(pack).unwrap(), damaged);
+
+        // Payloads alone are not enough: a previously admitted pack table
+        // must not make an unopenable on-disk container look usable either.
+        let mut damaged = original;
+        damaged[0] ^= 1;
+        std::fs::write(pack, &damaged).unwrap();
+        assert_eq!(store.get_bytes(&cx, target).await.unwrap(), objects[5].1);
+        let verifier = store.verification_reader(&cx).await.unwrap();
+        assert!(matches!(
+            verifier.get_bytes(&cx, target).await,
+            Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert_eq!(std::fs::read(pack).unwrap(), damaged);
+        assert_eq!(store.packs.resident_packs(), 1);
+    });
+}
+
 /// A pack that does not fit the budget evicts a spent one, and never one
 /// with objects still unread.
 #[test]
@@ -425,7 +487,7 @@ fn a_damaged_newest_copy_falls_back_to_an_intact_older_one() {
     let mut damaged = first[3].1.clone();
     damaged[0] ^= 0x20;
     second.insert(0, (first[3].0, damaged));
-    let (read, others) = under_lab(0x9a08, {
+    let (read, others, verified) = under_lab(0x9a08, {
         let dir = dir.clone();
         let first = first.clone();
         let second = second.clone();
@@ -443,11 +505,21 @@ fn a_damaged_newest_copy_falls_back_to_an_intact_older_one() {
             (
                 before.get_bytes(&cx, DeltaBlockVersion(first[3].0)).await,
                 others,
+                before
+                    .verification_reader(&cx)
+                    .await
+                    .unwrap()
+                    .get_bytes(&cx, DeltaBlockVersion(first[3].0))
+                    .await,
             )
         }
     });
     assert!(others.into_iter().all(|read| read.is_ok()));
     assert_eq!(read.expect("intact older copy"), first[3].1);
+    assert_eq!(
+        verified.expect("physically verified intact copy"),
+        first[3].1
+    );
 }
 
 #[test]

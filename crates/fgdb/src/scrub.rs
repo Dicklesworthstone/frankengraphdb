@@ -222,6 +222,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// Lost objects are reported individually and are never overwritten.
     /// Also re-read the admitted generation's manifest, partition root, V4
     /// segments, FGSB blocks, hosted FGSP properties and FGVP vertex patches.
+    /// Packed objects use freshly admitted location tables and uncached
+    /// payload reads, so a prior successful sweep cannot hide later damage.
     /// The complete inventory comes from admission metadata retained before
     /// this sweep, so damage to a parent cannot hide a child. Unreachable
     /// staging objects and superseded fallback-slot generations are not swept.
@@ -290,6 +292,16 @@ impl<V: Vfs + Clone> Database<V> {
             lost: capsules.lost,
             ..ScrubSummary::default()
         };
+        // An ordinary store can retain both a previously admitted pack table
+        // and its complete bytes. Neither is evidence of today's physical
+        // storage. Keep the authenticated inventory above, but resolve every
+        // object through a fresh, uncached verification reader for this sweep.
+        let store = self.store.verification_reader(cx).await.map_err(|error| {
+            CommitError::Io(match error {
+                StoreError::Io(error) => error,
+                error => std::io::Error::other(error),
+            })
+        })?;
         let mut objects: BTreeMap<_, _> = self
             .snapshot
             .refs
@@ -312,14 +324,12 @@ impl<V: Vfs + Clone> Database<V> {
         for (object_id, kind) in objects {
             checkpoint(cx)?;
             let result = match kind {
-                DataKind::Block => self.store.get_bytes(cx, DeltaBlockVersion(object_id)).await,
+                DataKind::Block => store.get_bytes(cx, DeltaBlockVersion(object_id)).await,
                 DataKind::EdgeProperties => {
-                    self.store
-                        .get_edge_property_patch_bytes(cx, object_id)
-                        .await
+                    store.get_edge_property_patch_bytes(cx, object_id).await
                 }
                 DataKind::VertexPatch => {
-                    self.store
+                    store
                         .get_patch_bytes(cx, VertexPatchVersion(object_id))
                         .await
                 }
@@ -336,14 +346,12 @@ impl<V: Vfs + Clone> Database<V> {
             checkpoint(cx)?;
             let result = match kind {
                 MetadataKind::Manifest => {
-                    self.store
-                        .get_manifest_bytes(cx, self.snapshot.manifest)
-                        .await
+                    store.get_manifest_bytes(cx, self.snapshot.manifest).await
                 }
-                MetadataKind::Root => self.store.get_root_bytes(cx, self.snapshot.root).await,
-                MetadataKind::Segment => self.store.get_root_segment_bytes(cx, object_id).await,
+                MetadataKind::Root => store.get_root_bytes(cx, self.snapshot.root).await,
+                MetadataKind::Segment => store.get_root_segment_bytes(cx, object_id).await,
                 MetadataKind::IndexSegment => {
-                    self.store.get_root_index_segment_bytes(cx, object_id).await
+                    store.get_root_index_segment_bytes(cx, object_id).await
                 }
             };
             record_verification(

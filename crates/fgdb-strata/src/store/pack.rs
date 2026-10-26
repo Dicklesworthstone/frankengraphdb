@@ -276,6 +276,9 @@ struct Table {
 pub(super) struct PackIndex {
     dir: PathBuf,
     table: RwLock<Table>,
+    /// A verification reader must observe its filesystem on every object read,
+    /// never a complete pack retained by an earlier read or scrub sweep.
+    cache_reads: bool,
     /// Bytes of whole packs admitted as resident, never more than
     /// [`PACK_CACHE_BYTES`]. A pack being loaded is counted from the start.
     resident: Mutex<usize>,
@@ -298,11 +301,25 @@ impl PackIndex {
         let index = Self {
             dir,
             table: RwLock::new(Table::default()),
+            cache_reads: true,
             resident: Mutex::new(0),
             #[cfg(test)]
             whole_reads: std::sync::atomic::AtomicUsize::new(0),
         };
         index.refresh(cx, vfs).await?;
+        Ok(index)
+    }
+
+    /// Re-admit the current on-disk tables without sharing location metadata
+    /// or payload residency with an ordinary store. Invalid tables leave their
+    /// objects absent; they cannot be rescued by an earlier admitted offset.
+    pub(super) async fn load_for_verification<V: Vfs>(
+        cx: &impl StorageReadCx,
+        vfs: &V,
+        dir: PathBuf,
+    ) -> Result<Self, StoreError> {
+        let mut index = Self::load(cx, vfs, dir).await?;
+        index.cache_reads = false;
         Ok(index)
     }
 
@@ -455,6 +472,9 @@ impl PackIndex {
         super::ensure_size_within_limit(location.len(), limit)?;
         let pack =
             Arc::clone(&self.table.read().expect("pack table").packs[location.pack as usize]);
+        if !self.cache_reads {
+            return Self::read_direct(cx, vfs, &pack, location).await;
+        }
         let start = usize::try_from(location.offset).expect("pack offsets fit memory");
         let end = start + location.len as usize;
         let size = usize::try_from(pack.len).unwrap_or(usize::MAX);
@@ -482,16 +502,7 @@ impl PackIndex {
         if !loading {
             // Another read is loading this pack, a walk already drained it,
             // or the resident budget is spent: read just this object.
-            let object = cx
-                .with_restriction_async(async {
-                    let mut file = vfs.open_read(&pack.path).await?;
-                    file.seek(SeekFrom::Start(location.offset)).await?;
-                    let mut bytes = vec![0u8; location.len as usize];
-                    file.read_exact(&mut bytes).await?;
-                    Ok::<_, std::io::Error>(bytes)
-                })
-                .await
-                .map_err(StoreError::Io)?;
+            let object = Self::read_direct(cx, vfs, &pack, location).await?;
             self.served(&pack, location.entry);
             return Ok(object);
         }
@@ -512,6 +523,23 @@ impl PackIndex {
                 Err(error)
             }
         }
+    }
+
+    async fn read_direct<V: Vfs>(
+        cx: &impl StorageReadCx,
+        vfs: &V,
+        pack: &PackFile,
+        location: Location,
+    ) -> Result<Vec<u8>, StoreError> {
+        cx.with_restriction_async(async {
+            let mut file = vfs.open_read(&pack.path).await?;
+            file.seek(SeekFrom::Start(location.offset)).await?;
+            let mut bytes = vec![0u8; location.len as usize];
+            file.read_exact(&mut bytes).await?;
+            Ok::<_, std::io::Error>(bytes)
+        })
+        .await
+        .map_err(StoreError::Io)
     }
 
     /// Count the object at `entry` served, once however often it is read,

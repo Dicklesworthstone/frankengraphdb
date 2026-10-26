@@ -557,8 +557,8 @@ mod publication_metadata {
         path: PathBuf,
         bytes: Vec<u8>,
         /// Whether `path` holds the object. A bulk commit's objects live in
-        /// a commit pack instead (fgdb-79kyi); damage is planted only on
-        /// loose objects, by path.
+        /// a commit pack instead (fgdb-79kyi); the packed-object campaign
+        /// independently locates their containing file and byte ranges.
         loose: bool,
     }
 
@@ -608,6 +608,51 @@ mod publication_metadata {
             }
         }
         panic!("object {id:?} is neither loose nor packed");
+    }
+
+    struct Pack {
+        path: PathBuf,
+        bytes: Vec<u8>,
+        members: Vec<(ObjectId, usize, usize)>,
+    }
+
+    // Test-only physical lookup, independent of BlockStore's pack index and
+    // cache. Resolve it before damage so the expected loss inventory cannot
+    // disappear with a broken container header or table.
+    async fn containing_pack(vfs: &MemVfs, store: &BlockStore<MemVfs>, id: ObjectId) -> Pack {
+        let dir = store
+            .path(id)
+            .parent()
+            .unwrap()
+            .join(fgdb_strata::store::PACK_DIR);
+        let mut entries = vfs.read_dir(&dir).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            let path = entry.path();
+            if path.extension().is_none_or(|extension| extension != "pack") {
+                continue;
+            }
+            let bytes = vfs.read(&path).await.unwrap();
+            assert_eq!(&bytes[..4], b"FGPK");
+            let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+            let members: Vec<_> = bytes[12..12 + count * 44]
+                .chunks_exact(44)
+                .map(|row| {
+                    (
+                        ObjectId(row[..32].try_into().unwrap()),
+                        u64::from_le_bytes(row[32..40].try_into().unwrap()) as usize,
+                        u32::from_le_bytes(row[40..44].try_into().unwrap()) as usize,
+                    )
+                })
+                .collect();
+            if members.iter().any(|member| member.0 == id) {
+                return Pack {
+                    path,
+                    bytes,
+                    members,
+                };
+            }
+        }
+        panic!("expected packed object {id:?}");
     }
 
     // The oracle walks the authenticated on-disk format BEFORE any mutation.
@@ -733,6 +778,173 @@ mod publication_metadata {
         Truncate,
         Missing,
         Oversized,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PackDamage {
+        BlockPayload,
+        PropertyPayload,
+        Header,
+        TableOffset,
+        TableIdentity,
+        Truncate,
+        TrailingBytes,
+        Missing,
+    }
+
+    #[test]
+    fn scrub_rereads_packed_storage_after_clean_sweeps_and_fences_every_loss() {
+        let ((), report) = run_async_under_lab(0x5c15, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let vfs = MemVfs::new().unwrap();
+            let dir = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&cx, vfs.clone(), &dir, engine_keys())
+                .await
+                .unwrap();
+            let edges = fgdb_strata::store::PACK_MIN_OBJECTS as u128 + 1;
+            let mut batch = WriteBatch::new(R);
+            for id in 1..=edges + 1 {
+                batch.create_vertex(VId(id), vec![], vec![]);
+            }
+            for id in 1..=edges {
+                batch.add_edge(
+                    EId(id),
+                    VId(id),
+                    VId(edges + 1),
+                    vec![(PropertyKeyId(2), CanonicalScalar::Int(id as i64))],
+                );
+            }
+            db.write(&cx, batch).await.unwrap();
+            let store = BlockStore::open_with_vfs(&cx, vfs.clone(), &dir, K_OID, NAMESPACE)
+                .await
+                .unwrap();
+            let objects = inventory(&db, &cx, &vfs, &store).await;
+            let block = *objects
+                .iter()
+                .find(|(_, object)| object.kind == Kind::EdgeBlock && !object.loose)
+                .unwrap()
+                .0;
+            let pack = containing_pack(&vfs, &store, block).await;
+            let property = pack
+                .members
+                .iter()
+                .find(|(id, _, _)| {
+                    objects
+                        .get(id)
+                        .is_some_and(|object| object.kind == Kind::EdgeProperties)
+                })
+                .unwrap()
+                .0;
+            let all_lost: Vec<_> = pack
+                .members
+                .iter()
+                .filter_map(|(id, _, _)| objects.contains_key(id).then_some(*id))
+                .collect();
+            assert!(all_lost.len() >= fgdb_strata::store::PACK_MIN_OBJECTS);
+
+            for damage in [
+                PackDamage::BlockPayload,
+                PackDamage::PropertyPayload,
+                PackDamage::Header,
+                PackDamage::TableOffset,
+                PackDamage::TableIdentity,
+                PackDamage::Truncate,
+                PackDamage::TrailingBytes,
+                PackDamage::Missing,
+            ] {
+                // Both sweeps run through the SAME live database handle.
+                // Ordinary getters would leave the whole pack resident and
+                // make the later sweep falsely report clean storage.
+                verified(&db.scrub(&cx).await.unwrap(), &objects, &[]);
+                verified(&db.scrub(&cx).await.unwrap(), &objects, &[]);
+                let mut damaged = pack.bytes.clone();
+                let (lost, reason) = match damage {
+                    PackDamage::BlockPayload | PackDamage::PropertyPayload => {
+                        let target = if matches!(damage, PackDamage::BlockPayload) {
+                            block
+                        } else {
+                            property
+                        };
+                        let (_, offset, len) = pack
+                            .members
+                            .iter()
+                            .find(|member| member.0 == target)
+                            .unwrap();
+                        damaged[offset + len / 2] ^= 1;
+                        (vec![target], LostReason::IdentityMismatch)
+                    }
+                    PackDamage::TableIdentity => {
+                        let at = pack
+                            .members
+                            .iter()
+                            .position(|member| member.0 == block)
+                            .unwrap();
+                        damaged[12 + at * 44] ^= 0x80;
+                        let substituted =
+                            ObjectId(damaged[12 + at * 44..12 + at * 44 + 32].try_into().unwrap());
+                        assert!(!objects.contains_key(&substituted));
+                        (vec![block], LostReason::Unusable)
+                    }
+                    _ => {
+                        match damage {
+                            PackDamage::Header => damaged[0] ^= 1,
+                            PackDamage::TableOffset => damaged[12 + 32] ^= 1,
+                            PackDamage::Truncate => {
+                                damaged.pop();
+                            }
+                            PackDamage::TrailingBytes => damaged.push(0),
+                            PackDamage::Missing => {}
+                            _ => unreachable!("handled individual member damage"),
+                        }
+                        (all_lost.clone(), LostReason::Unusable)
+                    }
+                };
+                let kept = pack.path.with_extension("scrub-kept");
+                if matches!(damage, PackDamage::Missing) {
+                    vfs.rename(&pack.path, &kept).await.unwrap();
+                } else {
+                    vfs.write(&pack.path, &damaged).await.unwrap();
+                }
+                let summary = db.scrub(&cx).await.unwrap();
+                verified(&summary, &objects, &lost);
+                assert!(
+                    summary
+                        .block_lost
+                        .iter()
+                        .chain(&summary.metadata_lost)
+                        .all(|loss| loss.reason == reason),
+                    "{damage:?}: {summary:?}"
+                );
+                assert!(matches!(db.frontier(), Err(ReadError::RecoveryRequired(_))));
+                assert!(matches!(
+                    db.vertex(VId(1)),
+                    Err(ReadError::RecoveryRequired(_))
+                ));
+                assert!(matches!(db.scrub(&cx).await, Err(CommitError::Poisoned)));
+                drop(db);
+                if matches!(damage, PackDamage::Missing) {
+                    assert!(vfs.read(&pack.path).await.is_err());
+                    assert_eq!(vfs.read(&kept).await.unwrap(), pack.bytes);
+                    vfs.rename(&kept, &pack.path).await.unwrap();
+                } else {
+                    assert_eq!(
+                        vfs.read(&pack.path).await.unwrap(),
+                        damaged,
+                        "{damage:?}: scrub must preserve damaged physical evidence"
+                    );
+                    vfs.write(&pack.path, &pack.bytes).await.unwrap();
+                }
+                db = Database::open_with_vfs(&cx, vfs.clone(), &dir, engine_keys())
+                    .await
+                    .unwrap();
+                assert_eq!(db.frontier().unwrap(), CommitSeq(1));
+                assert_eq!(db.edges().unwrap().len(), edges as usize);
+                assert_eq!(db.vertices().unwrap().len(), edges as usize + 1);
+            }
+            verified(&db.scrub(&cx).await.unwrap(), &objects, &[]);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]
