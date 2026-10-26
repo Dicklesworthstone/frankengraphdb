@@ -489,6 +489,7 @@ fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
         FrameKind::ExecutePreparedBatch,
         FrameKind::ExecuteDiff,
         FrameKind::ExecutePreparedDiff,
+        FrameKind::ExecuteConditionalWrite,
         FrameKind::ReleasePrepared,
     ] {
         let frame = frame(kind, Binding::Ready(ready()), StreamId::CONTROL, &[]);
@@ -554,6 +555,10 @@ fn prepared_requests_require_the_exact_ready_connection_and_control_stream() {
     );
     assert_eq!(
         FrameKind::try_from(0x0028),
+        Ok(FrameKind::ExecuteConditionalWrite)
+    );
+    assert_eq!(
+        FrameKind::try_from(0x0029),
         Err(ProtocolError::UnknownFrameKind)
     );
 }

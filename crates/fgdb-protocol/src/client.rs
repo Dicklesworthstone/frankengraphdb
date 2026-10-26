@@ -25,6 +25,8 @@ use asupersync::Cx;
 use asupersync::net::TcpStream;
 use std::net::SocketAddr;
 
+#[path = "client/conditional_write.rs"]
+mod conditional_write;
 #[path = "client/diff.rs"]
 mod diff;
 pub use diff::DiffAnswer;
@@ -1167,8 +1169,8 @@ fn server_header(header: &Header, expected: Binding) -> Result<(), ProtocolError
 mod tests {
     use super::*;
     use crate::body::{
-        DiffMode, DiffResultChunk, DiffResultEnd, ErrorBody, ExecuteDiff, ExecutePreparedDiff,
-        SubscriptionReset,
+        DiffMode, DiffResultChunk, DiffResultEnd, ErrorBody, ExecuteConditionalWrite, ExecuteDiff,
+        ExecutePreparedDiff, SubscriptionReset,
     };
     use crate::{Posture, SessionBinding};
     use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -1369,6 +1371,290 @@ mod tests {
                 entries,
             },
         )
+    }
+
+    fn conditional_end(request: u64, outcome: Outcome, rows: u64) -> Frame {
+        rpc(
+            FrameKind::SnapshotResultEnd,
+            request,
+            StreamId([5; 16]),
+            &ResultEnd { outcome, rows },
+        )
+    }
+
+    #[test]
+    fn conditional_write_client_keeps_each_expected_frontier_and_returned_value() {
+        let ((), report) = run_async_under_lab(0x79a0_0430, |root| async move {
+            let io = script(vec![
+                result_chunk(4, &[7]),
+                conditional_end(
+                    4,
+                    Outcome::WriteCommitted {
+                        seq: 1,
+                        statements: 1,
+                    },
+                    1,
+                ),
+                result_chunk(5, &[19]),
+                conditional_end(
+                    5,
+                    Outcome::WriteCommitted {
+                        seq: 2,
+                        statements: 1,
+                    },
+                    1,
+                ),
+                result_chunk(6, &[]),
+                conditional_end(
+                    6,
+                    Outcome::ReadClosed {
+                        seq: u64::MAX,
+                        statements: 1,
+                    },
+                    0,
+                ),
+            ]);
+            let written = std::sync::Arc::clone(&io.written);
+            let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+            assert!(matches!(
+                client
+                    .execute_write_if_current(&root, 0, "CREATE ()", vec![])
+                    .await,
+                Err(ClientError::Protocol("select a database first"))
+            ));
+            client.select(&root, "test").await.unwrap();
+            for (expected_seq, value) in [(0, 7), (1, 19)] {
+                let answer = client
+                    .execute_write_if_current(
+                        &root,
+                        expected_seq,
+                        "MATCH (n) SET n.p=$value RETURN n.p",
+                        vec![
+                            ("value".into(), WireValue::Int(value)),
+                            ("a".into(), WireValue::Null),
+                        ],
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(answer.columns, ["value"]);
+                assert_eq!(answer.rows, [vec![WireValue::Int(value)]]);
+                assert_eq!(
+                    answer.outcome,
+                    Outcome::WriteCommitted {
+                        seq: expected_seq + 1,
+                        statements: 1
+                    }
+                );
+            }
+            let empty = client
+                .execute_write_if_current(
+                    &root,
+                    u64::MAX,
+                    "MATCH (n) WHERE false SET n.p=1",
+                    vec![],
+                )
+                .await
+                .unwrap();
+            assert!(empty.rows.is_empty());
+            assert_eq!(
+                empty.outcome,
+                Outcome::ReadClosed {
+                    seq: u64::MAX,
+                    statements: 1
+                }
+            );
+            let frames = sent_frames(&written.lock().unwrap());
+            let requests: Vec<_> = frames
+                .iter()
+                .filter(|f| f.header().kind() == FrameKind::ExecuteConditionalWrite)
+                .collect();
+            assert_eq!(requests.len(), 3);
+            for (request, expected_seq) in requests.iter().zip([0, 1, u64::MAX]) {
+                assert!(request.header().stream_id().is_control());
+                let body = ExecuteConditionalWrite::decode(request.payload()).unwrap();
+                assert_eq!(body.expected_seq, expected_seq);
+                if expected_seq != u64::MAX {
+                    assert_eq!(
+                        body.parameters,
+                        [
+                            ("a".into(), WireValue::Null),
+                            (
+                                "value".into(),
+                                WireValue::Int(if expected_seq == 0 { 7 } else { 19 })
+                            )
+                        ]
+                    );
+                }
+            }
+            assert!(
+                !frames
+                    .iter()
+                    .any(|f| f.header().kind() == FrameKind::Execute)
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn conditional_write_client_never_retries_conflict_unknown_or_disconnected_completion() {
+        let ((), report) = run_async_under_lab(0x79a0_0431, |root| async move {
+            for code in [
+                Some(ErrorCode::Conflict),
+                Some(ErrorCode::OutcomeUnknown),
+                Some(ErrorCode::PermissionDenied),
+                None,
+            ] {
+                let replies = code
+                    .map(|code| {
+                        output(
+                            FrameKind::Error,
+                            &ErrorBody {
+                                code,
+                                message: "conditional write refused or outcome unconfirmed".into(),
+                            },
+                        )
+                    })
+                    .into_iter()
+                    .collect();
+                let io = script(replies);
+                let written = std::sync::Arc::clone(&io.written);
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "test").await.unwrap();
+                let result = client
+                    .execute_write_if_current(&root, u64::MAX, "CREATE (:N)", vec![])
+                    .await;
+                match code {
+                    Some(expected) => assert!(
+                        matches!(result, Err(ClientError::Server { code, .. }) if code == expected)
+                    ),
+                    None => assert!(matches!(result, Err(ClientError::Closed))),
+                }
+                let frames = sent_frames(&written.lock().unwrap());
+                assert_eq!(
+                    frames
+                        .iter()
+                        .filter(|f| f.header().kind() == FrameKind::ExecuteConditionalWrite)
+                        .count(),
+                    1
+                );
+                assert!(!frames.iter().any(|f| matches!(
+                    f.header().kind(),
+                    FrameKind::Execute | FrameKind::Prepare | FrameKind::ExecutePrepared
+                )));
+            }
+            let mut client = Client::connect_stream(
+                &root,
+                script(vec![result_chunk(4, &[1]), result_end(4, 1)]),
+                vec![1],
+            )
+            .await
+            .unwrap();
+            client.select(&root, "test").await.unwrap();
+            assert!(matches!(
+                client
+                    .execute_write_if_current(&root, 0, "CREATE (:N)", vec![])
+                    .await,
+                Err(ClientError::Protocol(
+                    "conditional write returned a read outcome"
+                ))
+            ));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn conditional_write_returning_callback_cancellation_drains_without_replaying_effects() {
+        let ((), report) = run_async_under_lab(0x79a0_0432, |root| async move {
+            for columns_fail in [false, true] {
+                for terminal_error in [false, true] {
+                    let terminal = if terminal_error {
+                        output(
+                            FrameKind::Error,
+                            &ErrorBody {
+                                code: ErrorCode::Cancelled,
+                                message: "delivery cancelled after native completion".into(),
+                            },
+                        )
+                    } else {
+                        conditional_end(
+                            4,
+                            Outcome::WriteCommitted {
+                                seq: 1,
+                                statements: 1,
+                            },
+                            2,
+                        )
+                    };
+                    let io = script(vec![
+                        result_chunk(4, &[7, 19]),
+                        terminal,
+                        result_chunk(6, &[19]),
+                        result_end(6, 1),
+                    ]);
+                    let written = std::sync::Arc::clone(&io.written);
+                    let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                    client.select(&root, "test").await.unwrap();
+                    let mut rows_seen = 0;
+                    let result = client
+                        .execute_write_if_current_streaming(
+                            &root,
+                            0,
+                            "CREATE (n) RETURN n.p",
+                            vec![],
+                            |_| {
+                                if columns_fail {
+                                    Err(ClientError::Protocol("consumer stopped"))
+                                } else {
+                                    Ok(())
+                                }
+                            },
+                            |_| {
+                                rows_seen += 1;
+                                Err(ClientError::Protocol("consumer stopped"))
+                            },
+                        )
+                        .await;
+                    assert!(matches!(
+                        result,
+                        Err(ClientError::Protocol("consumer stopped"))
+                    ));
+                    assert_eq!(rows_seen, usize::from(!columns_fail));
+                    let next = client
+                        .execute(&root, ExecuteMode::Read, "RETURN 19", vec![])
+                        .await
+                        .unwrap();
+                    assert_eq!(next.rows, [vec![WireValue::Int(19)]]);
+                    let frames = sent_frames(&written.lock().unwrap());
+                    assert_eq!(
+                        frames
+                            .iter()
+                            .filter(|f| f.header().kind() == FrameKind::ExecuteConditionalWrite)
+                            .count(),
+                        1
+                    );
+                    let cancels: Vec<_> = frames
+                        .iter()
+                        .filter(|f| f.header().kind() == FrameKind::QueryCancel)
+                        .collect();
+                    assert_eq!(cancels.len(), 1);
+                    assert_eq!(cancels[0].header().stream_id(), StreamId([5; 16]));
+                    assert!(
+                        !frames
+                            .iter()
+                            .any(|f| f.header().kind() == FrameKind::WindowUpdate)
+                    );
+                    assert_eq!(
+                        frames
+                            .iter()
+                            .filter(|f| f.header().kind() == FrameKind::Execute)
+                            .count(),
+                        1,
+                        "only the explicitly requested subsequent read is sent"
+                    );
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     fn diff_end(request: u64, before: u64, after: u64, rows: u64) -> Frame {

@@ -1108,6 +1108,36 @@ pub struct ExecutePreparedBatch {
     pub argument_sets: Vec<Vec<(String, WireValue)>>,
 }
 
+/// Execute native write text only when the selected database's current
+/// committed frontier equals `expected_seq`. The server checks the predicate
+/// under the same exclusive writer ownership retained through completion.
+/// A mismatch is Conflict with no effects, including for a no-effect write.
+/// This is neither a historical execution basis nor an idempotency token.
+/// Ordinary native RETURN rows use SNAPSHOT_RESULT_CHUNK/END unchanged.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecuteConditionalWrite {
+    pub expected_seq: u64,
+    pub statement: String,
+    pub parameters: Vec<(String, WireValue)>,
+}
+
+body!(
+    ExecuteConditionalWrite,
+    |s, out| {
+        out.u64(s.expected_seq);
+        check_len(s.statement.len(), MAX_STATEMENT_BYTES)?;
+        out.text(&s.statement);
+        put_parameters(&mut out, &s.parameters)?;
+    },
+    |input| {
+        ExecuteConditionalWrite {
+            expected_seq: input.u64()?,
+            statement: input.text(MAX_STATEMENT_BYTES)?,
+            parameters: get_parameters(&mut input)?,
+        }
+    }
+);
+
 /// Select the execution contract of one finite historical result comparison.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiffMode {
@@ -2051,6 +2081,79 @@ mod tests {
             over.resize(over.len() + MAX_VALUE_NODES / 2, tag::NULL);
         }
         assert_eq!(ExecuteBatch::decode(&over), Err(BodyError::TooLarge));
+    }
+
+    #[test]
+    fn conditional_write_body_preserves_full_width_frontier_and_ordinary_bounds() {
+        for expected_seq in [0, u64::MAX] {
+            let body = ExecuteConditionalWrite {
+                expected_seq,
+                statement: "a".into(),
+                parameters: vec![("p".into(), WireValue::Null)],
+            };
+            let mut expected = expected_seq.to_be_bytes().to_vec();
+            expected.extend_from_slice(&[0, 0, 0, 1, b'a', 0, 0, 0, 1, 0, 0, 0, 1, b'p', 0]);
+            assert_eq!(body.encode().unwrap(), expected);
+            assert_eq!(ExecuteConditionalWrite::decode(&expected).unwrap(), body);
+            every_prefix_refuses::<ExecuteConditionalWrite>(&expected);
+            expected.push(0);
+            assert_eq!(
+                ExecuteConditionalWrite::decode(&expected),
+                Err(BodyError::TrailingBytes)
+            );
+        }
+        let mut body = ExecuteConditionalWrite {
+            expected_seq: 7,
+            statement: "SET n.p=$p RETURN n.p".into(),
+            parameters: vec![("p".into(), sample_value())],
+        };
+        assert_eq!(
+            ExecuteConditionalWrite::decode(&body.encode().unwrap()).unwrap(),
+            body
+        );
+        for parameters in [
+            vec![("p".into(), WireValue::Null), ("p".into(), WireValue::Null)],
+            vec![("z".into(), WireValue::Null), ("a".into(), WireValue::Null)],
+        ] {
+            body.parameters = parameters;
+            assert_eq!(body.encode(), Err(BodyError::Noncanonical));
+            let mut independent = Out::default();
+            independent.u64(body.expected_seq);
+            independent.text(&body.statement);
+            independent.len(body.parameters.len());
+            for (name, value) in &body.parameters {
+                independent.text(name);
+                value.put(&mut independent);
+            }
+            assert_eq!(
+                ExecuteConditionalWrite::decode(&independent.0),
+                Err(BodyError::Noncanonical)
+            );
+        }
+        body.parameters.clear();
+        body.statement = "x".repeat(MAX_STATEMENT_BYTES + 1);
+        assert_eq!(body.encode(), Err(BodyError::TooLarge));
+        let mut hostile = 0_u64.to_be_bytes().to_vec();
+        hostile.extend_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(
+            ExecuteConditionalWrite::decode(&hostile),
+            Err(BodyError::TooLarge)
+        );
+        let mut hostile = 0_u64.to_be_bytes().to_vec();
+        hostile.extend_from_slice(&0_u32.to_be_bytes());
+        hostile.extend_from_slice(&((MAX_PARAMETERS + 1) as u32).to_be_bytes());
+        assert_eq!(
+            ExecuteConditionalWrite::decode(&hostile),
+            Err(BodyError::TooLarge)
+        );
+        let mut deep = WireValue::Null;
+        for _ in 0..=MAX_VALUE_DEPTH {
+            deep = WireValue::List(vec![deep]);
+        }
+        body.statement.clear();
+        body.parameters = vec![("p".into(), deep)];
+        assert_eq!(body.encode(), Err(BodyError::TooDeep));
+        assert_eq!(crate::FrameKind::ExecuteConditionalWrite as u16, 0x0028);
     }
 
     #[test]
