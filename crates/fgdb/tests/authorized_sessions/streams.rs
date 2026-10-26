@@ -27,6 +27,98 @@ fn expected_row(id: u128, p: i64) -> GraphValueRow {
 }
 
 #[test]
+fn temporal_projected_streams_share_masked_history_and_keep_the_session_pin() {
+    let ((), report) = run_async_under_lab(0x5ec0_6111, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = database(&commit).await;
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let text = "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $cut \
+                    RETURN n AS id, n.p AS p, n.hidden AS hidden, $tag AS tag";
+        let args = |cut, tag| {
+            GqlParameters::new()
+                .with_uint64("cut", cut)
+                .unwrap()
+                .with_int64("tag", tag)
+                .unwrap()
+        };
+        let expected = |id, p, tag| {
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(id)),
+                GraphValue::Scalar(CanonicalScalar::Int(p)),
+                GraphValue::Scalar(CanonicalScalar::Null),
+                GraphValue::Scalar(CanonicalScalar::Int(tag)),
+            ])
+        };
+        let mut pinned = db
+            .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+            .unwrap();
+        let prepared = pinned.prepare(&cx, text, &args(1, 17)).unwrap();
+        let mut cursor = pinned.stream_send(&cx, &prepared, &args(1, 17)).unwrap();
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(70)));
+        change.delete_vertex(VId(3));
+        change.create_vertex(
+            VId(4),
+            vec![LabelId(1)],
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(31))],
+        );
+        db.write(&commit, change).await.unwrap();
+        db.compact(&commit).await.unwrap();
+        assert_eq!(cursor.snapshot_seq(), fgdb_types::CommitSeq(1));
+        assert_eq!(
+            cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+            vec![expected(1, 7, 17), expected(3, 19, 17)]
+        );
+        assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        drop(cursor);
+        assert!(matches!(
+            pinned.stream(&cx, &prepared, &args(2, 17)),
+            Err(QueryError::Read(fgdb::ReadError::BeyondFrontier {
+                asked: fgdb_types::CommitSeq(2),
+                frontier: fgdb_types::CommitSeq(1),
+            }))
+        ));
+        assert!(!pinned.is_closed());
+
+        let mut current = db
+            .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+            .unwrap();
+        let template = current.prepare(&cx, text, &args(1, 17)).unwrap();
+        for (cut, tag, expected) in [
+            (0, 5, Vec::new()),
+            (1, 23, vec![expected(1, 7, 23), expected(3, 19, 23)]),
+            (2, 29, vec![expected(1, 70, 29), expected(4, 31, 29)]),
+        ] {
+            let params = args(cut, tag);
+            let eager = current.execute(&cx, &template, &params).unwrap();
+            let mut local = current.stream(&cx, &template, &params).unwrap();
+            assert_eq!(local.snapshot_seq(), fgdb_types::CommitSeq(cut));
+            let columns = local.columns().to_vec();
+            let rows = local.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(rows, expected);
+            assert_eq!(rows_result(&columns, rows), eager);
+            assert_eq!(local.state(), VertexScanState::Exhausted);
+            drop(local);
+            let mut send = current.stream_send(&cx, &template, &params).unwrap();
+            assert_eq!(send.snapshot_seq(), fgdb_types::CommitSeq(cut));
+            assert_eq!(
+                send.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                expected
+            );
+            assert_eq!(send.state(), VertexScanState::Exhausted);
+        }
+        assert!(matches!(
+            current.stream_send(&cx, &prepared, &args(1, 17)),
+            Err(QueryError::Authorization(Error::WrongAuthority))
+        ));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn authorized_equality_streams_seek_only_admitted_candidates_in_both_drivers() {
     let ((), report) = run_async_under_lab(0x5ec0_6101, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);

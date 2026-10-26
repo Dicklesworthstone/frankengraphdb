@@ -759,6 +759,25 @@ fn admit_source_profile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result
 /// for a set that pulls row by row, the projection each source row takes.
 type BoundRows = (RowPlan, CommitSeq, Vec<String>, Option<GraphSetRowPull>);
 
+fn bind_projected_rows(
+    query: &fgdb_gql::PreparedGraphSet,
+    at: CommitSeq,
+    facade: crate::NativeReadClass,
+) -> Result<BoundRows, QueryError> {
+    let pull = query
+        .row_pull()
+        .ok_or(QueryError::StreamingUnsupported { facade })?;
+    let RowPlan::Vertex(plan) = compile(pull.pattern())? else {
+        unreachable!("a row pull is rooted at its one vertex scan")
+    };
+    Ok((
+        RowPlan::Vertex(plan),
+        at,
+        query.columns().to_vec(),
+        Some(pull),
+    ))
+}
+
 fn bind(
     prepared: &PreparedNativeRead,
     params: &GqlParameters,
@@ -787,18 +806,16 @@ fn bind(
         // that scan's native cursor, projecting each row as the eager path.
         PreparedNativeRead::Set(set) => {
             let query = set.bind_parameters(params).map_err(QueryError::SetText)?;
-            let pull = query.row_pull().ok_or(QueryError::StreamingUnsupported {
-                facade: prepared.facade_class(),
-            })?;
-            let RowPlan::Vertex(plan) = compile(pull.pattern())? else {
-                unreachable!("a row pull is rooted at its one vertex scan")
-            };
-            Ok((
-                RowPlan::Vertex(plan),
-                default,
-                query.columns().to_vec(),
-                Some(pull),
-            ))
+            bind_projected_rows(&query, default, prepared.facade_class())
+        }
+        // A historical projection uses the same proved pull profile and the
+        // same scoped source. Only its selected cut differs; source opening
+        // still checks it against the immutable session generation.
+        PreparedNativeRead::TemporalSet(set) => {
+            let query = set
+                .bind_parameters(params)
+                .map_err(QueryError::TemporalSetText)?;
+            bind_projected_rows(query.query(), query.as_of(), prepared.facade_class())
         }
         _ => Err(QueryError::StreamingUnsupported {
             facade: prepared.facade_class(),
@@ -1001,7 +1018,8 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// endpoints, masked vertex/edge properties and admitted fixed-path values.
     /// Both orientations of an undirected edge remain separate occurrences;
     /// a self-loop is emitted once. SKIP/LIMIT act on accepted occurrences.
-    /// Temporal patterns keep their exact cut, no later than the session's pin.
+    /// Temporal patterns and admitted scalar row projections keep their exact
+    /// cut, no later than the session's pin.
     ///
     /// Opening authenticates before binding/profile/source admission and scans
     /// no candidate. Correlated/independent EXISTS and NOT EXISTS, with fixed
@@ -1185,6 +1203,83 @@ mod projected_budget_tests {
         }
     }
 
+    #[test]
+    fn temporal_projected_streams_bind_the_same_profile_at_the_requested_cut() {
+        let args = GqlParameters::new()
+            .with_uint64("cut", 3)
+            .unwrap()
+            .with_int64("value", 17)
+            .unwrap();
+        let text = "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $cut \
+                    RETURN n AS id, $value AS value";
+        let prepared = PreparedNativeRead::prepare(text, &args, symbols).unwrap();
+        assert!(matches!(prepared, PreparedNativeRead::TemporalSet(_)));
+        let (_, at, columns, pull) = bind(&prepared, &args, CommitSeq(7)).unwrap();
+        assert_eq!(at, CommitSeq(3));
+        assert_eq!(columns, ["id", "value"]);
+        assert!(pull.is_some());
+
+        let rebound = GqlParameters::new()
+            .with_uint64("cut", 0)
+            .unwrap()
+            .with_int64("value", 29)
+            .unwrap();
+        assert_eq!(
+            bind(&prepared, &rebound, CommitSeq(7)).unwrap().1,
+            CommitSeq(0)
+        );
+    }
+
+    #[test]
+    fn temporal_projected_streams_check_live_authority_before_rebinding() {
+        let ((), report) = run_async_under_lab(0x8b00_0004, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let db = database(&contexts.commit()).await;
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(), 100).unwrap();
+            let policy = GqlQueryPolicy::new(1000, 1000, 1_000_000, 1_000_000);
+            let args = GqlParameters::new().with_uint64("cut", 1).unwrap();
+            for send in [false, true] {
+                let now = Arc::new(std::sync::atomic::AtomicU64::new(100));
+                let sampled = Arc::clone(&now);
+                let mut session = db
+                    .authorized_read_session(
+                        &cx,
+                        &issuer,
+                        &token,
+                        "main",
+                        symbols,
+                        policy,
+                        move || sampled.load(std::sync::atomic::Ordering::SeqCst),
+                    )
+                    .unwrap();
+                let prepared = session
+                    .prepare(
+                        &cx,
+                        "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $cut RETURN n AS id, 1 AS one",
+                        &args,
+                    )
+                    .unwrap();
+                now.store(10_001, std::sync::atomic::Ordering::SeqCst);
+                // Missing parameters cannot hide expired authority or allow
+                // its historical snapshot to be opened.
+                let missing = GqlParameters::new();
+                let result = if send {
+                    session.stream_send(&cx, &prepared, &missing).map(|_| ())
+                } else {
+                    session.stream(&cx, &prepared, &missing).map(|_| ())
+                };
+                assert!(matches!(
+                    result,
+                    Err(QueryError::Authorization(AuthorizationError::Expired))
+                ));
+                assert!(session.is_closed());
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
     fn denied<Driver>(
         mut cursor: AuthorizedRowCursor<'_, GraphValueRow, Driver>,
         dimension: GlaLimitDimension,
@@ -1225,6 +1320,17 @@ mod projected_budget_tests {
                 ),
                 (
                     "MATCH (n) RETURN n AS id, toUpper($value) AS value",
+                    GqlQueryPolicy::new(1000, 1000, 256, u64::MAX),
+                    GlaLimitDimension::WorkUnits,
+                ),
+                (
+                    "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n AS id, $value AS value",
+                    GqlQueryPolicy::new(1000, 1000, u64::MAX, 128),
+                    GlaLimitDimension::ScratchEntries,
+                ),
+                (
+                    "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 \
+                     RETURN n AS id, toUpper($value) AS value",
                     GqlQueryPolicy::new(1000, 1000, 256, u64::MAX),
                     GlaLimitDimension::WorkUnits,
                 ),
@@ -1294,14 +1400,17 @@ mod projected_budget_tests {
                 .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy, || 100)
                 .unwrap();
             let args = GqlParameters::new();
-            let prepared = session
-                .prepare(&cx, "MATCH (n) RETURN n AS id, 10 / n.p AS value", &args)
-                .unwrap();
             // Hidden VId(2) has the same bad divisor but is not a source row.
             // The failure remains row one of the visible execution in both
             // driver variants; an earlier successful row remains delivered.
-            late_error(session.stream(&cx, &prepared, &args).unwrap());
-            late_error(session.stream_send(&cx, &prepared, &args).unwrap());
+            for text in [
+                "MATCH (n) RETURN n AS id, 10 / n.p AS value",
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n AS id, 10 / n.p AS value",
+            ] {
+                let prepared = session.prepare(&cx, text, &args).unwrap();
+                late_error(session.stream(&cx, &prepared, &args).unwrap());
+                late_error(session.stream_send(&cx, &prepared, &args).unwrap());
+            }
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }

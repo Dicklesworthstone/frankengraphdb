@@ -425,6 +425,26 @@ type BoundOrder = (
     Option<GraphSetRowPull>,
 );
 
+fn bind_projected_order(
+    query: &fgdb_gql::PreparedGraphSet,
+    at: CommitSeq,
+    facade: crate::NativeReadClass,
+) -> core::result::Result<BoundOrder, QueryError> {
+    let (pull, tail) = query
+        .ordered_row_pull()
+        .ok_or(QueryError::StreamingUnsupported { facade })?;
+    let RowPlan::Vertex(plan) = compile(pull.pattern())? else {
+        unreachable!("an ordered row pull is rooted at its one vertex scan")
+    };
+    Ok((
+        RowPlan::Vertex(plan),
+        tail,
+        at,
+        query.columns().to_vec(),
+        Some(pull),
+    ))
+}
+
 fn bind_ordered(
     prepared: &PreparedNativeRead,
     params: &GqlParameters,
@@ -448,22 +468,15 @@ fn bind_ordered(
         // sort applies the set's own ORDER BY and page.
         PreparedNativeRead::Set(set) => {
             let query = set.bind_parameters(params).map_err(QueryError::SetText)?;
-            let (pull, tail) =
-                query
-                    .ordered_row_pull()
-                    .ok_or(QueryError::StreamingUnsupported {
-                        facade: prepared.facade_class(),
-                    })?;
-            let RowPlan::Vertex(plan) = compile(pull.pattern())? else {
-                unreachable!("an ordered row pull is rooted at its one vertex scan")
-            };
-            return Ok((
-                RowPlan::Vertex(plan),
-                tail,
-                default,
-                query.columns().to_vec(),
-                Some(pull),
-            ));
+            return bind_projected_order(&query, default, prepared.facade_class());
+        }
+        // Bind the historical row relation before selecting its physical
+        // profile; sorting and delivery must retain that exact source cut.
+        PreparedNativeRead::TemporalSet(set) => {
+            let query = set
+                .bind_parameters(params)
+                .map_err(QueryError::TemporalSetText)?;
+            return bind_projected_order(query.query(), query.as_of(), prepared.facade_class());
         }
         _ => {
             return Err(QueryError::StreamingUnsupported {

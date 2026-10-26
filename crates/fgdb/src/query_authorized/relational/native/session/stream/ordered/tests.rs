@@ -536,6 +536,156 @@ fn a_vertex_set_with_constant_columns_sorts_its_projected_scan() {
 }
 
 #[test]
+fn temporal_projected_ordering_binds_its_own_cut_and_sort_tail() {
+    let params = GqlParameters::new()
+        .with_uint64("cut", 3)
+        .unwrap()
+        .with_int64("value", 17)
+        .unwrap();
+    let text = "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $cut \
+                RETURN n AS id, $value AS value ORDER BY id DESC SKIP 1 LIMIT 2";
+    let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+    assert!(matches!(prepared, PreparedNativeRead::TemporalSet(_)));
+    let (_, _, at, columns, pull) = bind_ordered(&prepared, &params, CommitSeq(7)).unwrap();
+    assert_eq!(at, CommitSeq(3));
+    assert_eq!(columns, ["id", "value"]);
+    assert!(pull.is_some());
+}
+
+#[test]
+fn temporal_projected_ordering_preserves_history_masking_and_eager_windows() {
+    let ((), report) = run_async_under_lab(0x8600_0012, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = database(&commit).await;
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        let (mut pinned, _, _) = session(&db, &cx, &issuer, &token, &pool, || 100, limits()).await;
+        let text = "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $cut \
+                    RETURN n AS id, n.p AS p, n.hidden AS hidden, $tag AS tag \
+                    ORDER BY id DESC SKIP 1 LIMIT 2";
+        let args = |cut, tag| {
+            GqlParameters::new()
+                .with_uint64("cut", cut)
+                .unwrap()
+                .with_int64("tag", tag)
+                .unwrap()
+        };
+        let prepared = pinned.prepare(&cx, text, &args(1, 17)).unwrap();
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_vertex_property(VId(3), PropertyKeyId(1), Some(CanonicalScalar::Int(30)));
+        change.delete_vertex(VId(4));
+        change.create_vertex(
+            VId(6),
+            vec![LabelId(1)],
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(60))],
+        );
+        db.write(&commit, change).await.unwrap();
+        db.compact(&commit).await.unwrap();
+        let mut old = pinned
+            .execute_ordered(&cx, &prepared, &args(1, 17))
+            .unwrap()
+            .await
+            .unwrap();
+        assert_eq!(old.snapshot_seq(), CommitSeq(1));
+        assert_eq!(
+            values(&mut old).await,
+            vec![
+                vec![GraphValue::Vertex(VId(4)), scalar(-1), null(), scalar(17)],
+                vec![GraphValue::Vertex(VId(3)), scalar(3), null(), scalar(17)],
+            ]
+        );
+        drop(old);
+        assert_eq!(pool.used(), 0);
+        assert!(matches!(
+            pinned.execute_ordered(&cx, &prepared, &args(2, 17)),
+            Err(NativeSpoolError::Authorized(error))
+                if matches!(*error, QueryError::Read(crate::ReadError::BeyondFrontier {
+                    asked: CommitSeq(2), frontier: CommitSeq(1)
+                }))
+        ));
+        assert!(!pinned.is_closed());
+
+        let (mut current, _, _) = session(&db, &cx, &issuer, &token, &pool, || 100, limits()).await;
+        let template = current.prepare(&cx, text, &args(1, 17)).unwrap();
+        for (cut, tag, expected) in [
+            (0, 5, Vec::new()),
+            (
+                1,
+                23,
+                vec![
+                    vec![GraphValue::Vertex(VId(4)), scalar(-1), null(), scalar(23)],
+                    vec![GraphValue::Vertex(VId(3)), scalar(3), null(), scalar(23)],
+                ],
+            ),
+            (
+                2,
+                29,
+                vec![
+                    vec![GraphValue::Vertex(VId(5)), scalar(2), null(), scalar(29)],
+                    vec![GraphValue::Vertex(VId(3)), scalar(30), null(), scalar(29)],
+                ],
+            ),
+        ] {
+            let params = args(cut, tag);
+            let eager = db
+                .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+                .unwrap()
+                .query(&cx, text, &params)
+                .unwrap();
+            let mut cursor = current
+                .execute_ordered(&cx, &template, &params)
+                .unwrap()
+                .await
+                .unwrap();
+            assert_eq!(cursor.snapshot_seq(), CommitSeq(cut));
+            let columns = cursor.columns().to_vec();
+            let rows = values(&mut cursor).await;
+            assert_eq!(rows, expected);
+            assert_eq!(
+                QueryResult::Rows {
+                    columns,
+                    rows: rows
+                        .into_iter()
+                        .map(|row| row.into_iter().map(QueryValue::Value).collect())
+                        .collect(),
+                },
+                eager
+            );
+            drop(cursor);
+            assert_eq!(pool.used(), 0);
+        }
+        let now = Arc::new(AtomicU64::new(100));
+        let sampled = Arc::clone(&now);
+        let (mut expiring, a, b) = session(
+            &db,
+            &cx,
+            &issuer,
+            &token,
+            &pool,
+            move || sampled.load(Ordering::SeqCst),
+            limits(),
+        )
+        .await;
+        let prepared = expiring.prepare(&cx, text, &args(1, 17)).unwrap();
+        now.store(1001, Ordering::SeqCst);
+        // Authorization still precedes parameter validation and source/sort
+        // admission, even for a historical projected statement.
+        refusal(
+            expiring.execute_ordered(&cx, &prepared, &GqlParameters::new()),
+            AuthorizationError::Expired,
+        );
+        assert!(expiring.is_closed());
+        assert!(a.0.lock().unwrap().bytes.get_ref().is_empty());
+        assert!(b.0.lock().unwrap().bytes.get_ref().is_empty());
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn sorted_cursor_pins_the_selected_history_while_the_writer_advances() {
     let ((), report) = run_async_under_lab(0x8600_0002, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
