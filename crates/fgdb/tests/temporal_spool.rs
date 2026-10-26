@@ -1147,3 +1147,390 @@ fn carried_element_reads_share_snapshot_records_work_and_the_exact_history_cut()
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+mod authorized_carried_elements {
+    use super::*;
+    use asupersync::security::key::AuthKey;
+    use fgdb::{
+        AuthorizedOrderedReadSession, AuthorizedSortLimits, AuthorizedSpoolCursor, QueryError,
+    };
+    use fgdb_delta_types::SchemaEpoch;
+    use fgdb_types::{CommitCx, QueryCx};
+    use fgdb_warden::{
+        Authority, Error as AuthorizationError, Grant, LimitDimension, QueryLimits, Scope,
+    };
+
+    const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x62; 32]);
+    type Resolver = fn(GraphSymbolKind, &str) -> Option<GraphSymbol>;
+    type Session<'a> = AuthorizedOrderedReadSession<'a, Resolver, fn() -> u64, File, File>;
+
+    fn authority() -> Authority {
+        Authority::new(
+            AuthKey::from_seed(0x7e4d_0010),
+            NS,
+            "graph",
+            SchemaEpoch(0),
+            1,
+        )
+        .unwrap()
+    }
+
+    fn grant(nodes: u64) -> Grant {
+        let mut grant = Grant::read_only(
+            "main",
+            1000,
+            QueryLimits {
+                max_nodes: nodes,
+                max_work: 10_000_000,
+                max_rows: 100,
+            },
+        );
+        grant.labels = Scope::only([LabelId(1)]);
+        grant.relations = Scope::only([RelationId(1)]);
+        grant.properties = Scope::only([PropertyKeyId(1)]);
+        grant
+    }
+
+    fn resolve(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        if (kind, name) == (GraphSymbolKind::Property, "hidden") {
+            Some(GraphSymbol::Property(PropertyKeyId(2)))
+        } else {
+            symbols(kind, name)
+        }
+    }
+
+    fn now() -> u64 {
+        100
+    }
+
+    async fn session<'a>(
+        db: &Database<MemVfs>,
+        cx: &QueryCx,
+        issuer: &'a Authority,
+        scope: &Grant,
+        pool: &MemoryPool,
+        allowance: GqlQueryPolicy,
+    ) -> Session<'a> {
+        let token = issuer.issue_at(scope, 100).unwrap();
+        let source = scratch(cx, pool).await;
+        let destination = scratch(cx, pool).await;
+        db.authorized_ordered_read_session(
+            cx,
+            issuer,
+            &token,
+            "main",
+            resolve as Resolver,
+            allowance,
+            now as fn() -> u64,
+            source,
+            destination,
+            AuthorizedSortLimits {
+                run_rows: 2,
+                max_runs: 16,
+                page_bytes: 31,
+                max_row_bytes: 4096,
+                max_input_rows: 100,
+                max_sort_work: 1_000_000,
+            },
+        )
+        .unwrap()
+    }
+
+    async fn fixture(cx: &CommitCx, hidden: bool) -> Database<MemVfs> {
+        let mut db = Database::open_memory(cx, DatabaseKeys::new([0x61; 32], NS, [0x63; 32]))
+            .await
+            .unwrap();
+        let props = |value| {
+            let mut props = vec![(PropertyKeyId(1), CanonicalScalar::Int(value))];
+            if hidden {
+                props.extend(
+                    (2..18).map(|key| (PropertyKeyId(key), CanonicalScalar::Int(key as i64))),
+                );
+            }
+            props
+        };
+        let mut batch = WriteBatch::new(RelationId(1));
+        for (id, value) in [(1, 2), (6, 13), (7, 19), (u128::MAX, 7)] {
+            batch.create_vertex(
+                VId(id),
+                if hidden {
+                    vec![LabelId(1), LabelId(99)]
+                } else {
+                    vec![LabelId(1)]
+                },
+                props(value),
+            );
+        }
+        for (id, to, value) in [(u128::MAX, u128::MAX, 11), (6, 6, 17), (7, 7, 23)] {
+            batch.add_edge(EId(id), VId(1), VId(to), props(value));
+        }
+        if hidden {
+            batch.create_vertex(VId(99), vec![LabelId(99)], props(999));
+            batch.add_edge(EId(13), VId(1), VId(99), props(999));
+        }
+        db.write(cx, batch).await.unwrap();
+        if hidden {
+            let mut foreign = WriteBatch::new(RelationId(99));
+            foreign.add_edge(EId(20), VId(1), VId(u128::MAX), props(999));
+            db.write(cx, foreign).await.unwrap();
+            for value in 0..3 {
+                let mut change = WriteBatch::new(RelationId(1));
+                change.set_vertex_property(
+                    VId(u128::MAX),
+                    PropertyKeyId(2),
+                    Some(CanonicalScalar::Int(value)),
+                );
+                change.set_edge_property(
+                    EId(u128::MAX),
+                    PropertyKeyId(2),
+                    Some(CanonicalScalar::Int(value)),
+                );
+                db.write(cx, change).await.unwrap();
+            }
+        }
+        db
+    }
+
+    fn expected(values: &[Option<i64>]) -> Vec<Vec<GraphValue>> {
+        values
+            .iter()
+            .map(|value| {
+                vec![GraphValue::Scalar(
+                    value.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+                )]
+            })
+            .collect()
+    }
+
+    async fn rows(cursor: &mut AuthorizedSpoolCursor<'_, File>) -> Vec<Vec<GraphValue>> {
+        let mut rows = Vec::new();
+        while let Some(bytes) = cursor.next_row().await.unwrap() {
+            rows.push(
+                GraphValueRow::decode_canonical(bytes.as_ref())
+                    .unwrap()
+                    .values()
+                    .to_vec(),
+            );
+        }
+        rows
+    }
+
+    #[test]
+    fn public_authorized_carried_reads_pin_history_and_mask_supplied_identities() {
+        let ((), report) = run_async_under_lab(0x7e4d_0010, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let commit = contexts.commit();
+            let mut db = fixture(&commit, true).await;
+            let issuer = authority();
+            let pool = MemoryPool::new(256_000, 0).unwrap();
+            let cut = db.frontier().unwrap();
+            let items = vec![
+                GraphValue::Vertex(VId(u128::MAX)),
+                GraphValue::Edge(EId(u128::MAX)),
+                GraphValue::Vertex(VId(6)),
+                GraphValue::Edge(EId(6)),
+                GraphValue::Vertex(VId(7)),
+                GraphValue::Edge(EId(7)),
+                GraphValue::Vertex(VId(99)),
+                GraphValue::Edge(EId(13)),
+                GraphValue::Edge(EId(20)),
+                GraphValue::Vertex(VId(u128::MAX - 1)),
+                GraphValue::Edge(EId(u128::MAX - 1)),
+                GraphValue::Vertex(VId(u128::MAX)),
+            ];
+            let params = GqlParameters::new()
+                .with_list("items", items.clone())
+                .unwrap();
+            let suffix = "WITH seed LIMIT 1 WITH $items AS items UNWIND items AS item \
+                          RETURN [item][0].p AS value ORDER BY value NULLS FIRST";
+            let mut pinned = session(&db, &cx, &issuer, &grant(100), &pool, policy()).await;
+            let prepared = pinned
+                .prepare(&cx, &format!("MATCH (seed:L) {suffix}"), &params)
+                .unwrap();
+            let execution = pinned.execute_ordered(&cx, &prepared, &params).unwrap();
+            assert_eq!(execution.snapshot_seq(), cut);
+
+            let mut change = WriteBatch::new(RelationId(1));
+            change.set_vertex_property(
+                VId(u128::MAX),
+                PropertyKeyId(1),
+                Some(CanonicalScalar::Int(70)),
+            );
+            change.set_edge_property(
+                EId(u128::MAX),
+                PropertyKeyId(1),
+                Some(CanonicalScalar::Int(110)),
+            );
+            change.set_vertex_label(VId(6), LabelId(1), false);
+            change.delete_vertex(VId(7));
+            db.write(&commit, change).await.unwrap();
+            db.compact(&commit).await.unwrap();
+
+            let old = expected(&[
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(7),
+                Some(7),
+                Some(11),
+                Some(13),
+                Some(17),
+                Some(19),
+                Some(23),
+            ]);
+            let mut cursor = execution.await.unwrap();
+            assert_eq!(cursor.snapshot_seq(), cut);
+            assert_eq!(rows(&mut cursor).await, old);
+            drop(cursor);
+            assert_eq!(pool.used(), 0);
+
+            for historical in [true, false] {
+                let mut params = GqlParameters::new()
+                    .with_list("items", items.clone())
+                    .unwrap();
+                let temporal = if historical {
+                    params = params.with_uint64("cut", cut.0).unwrap();
+                    "FOR SYSTEM_TIME AS OF SEQ $cut"
+                } else {
+                    ""
+                };
+                let mut ordered = session(&db, &cx, &issuer, &grant(100), &pool, policy()).await;
+                let prepared = ordered
+                    .prepare(&cx, &format!("MATCH (seed:L) {temporal} {suffix}"), &params)
+                    .unwrap();
+                let mut cursor = ordered
+                    .execute_ordered(&cx, &prepared, &params)
+                    .unwrap()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    cursor.snapshot_seq(),
+                    if historical {
+                        cut
+                    } else {
+                        db.frontier().unwrap()
+                    }
+                );
+                assert_eq!(
+                    rows(&mut cursor).await,
+                    if historical {
+                        old.clone()
+                    } else {
+                        expected(&[
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            Some(70),
+                            Some(70),
+                            Some(110),
+                        ])
+                    }
+                );
+                drop(cursor);
+                assert_eq!(pool.used(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn public_authorized_carried_reads_share_limits_and_keep_late_errors() {
+        let ((), report) = run_async_under_lab(0x7e4d_0011, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let issuer = authority();
+            let pool = MemoryPool::new(256_000, 0).unwrap();
+            let params = GqlParameters::new();
+            // Private keys, labels, identities and historical versions cannot
+            // change these public record/node boundaries or delivered values.
+            for hidden in [false, true] {
+                let db = fixture(&contexts.commit(), hidden).await;
+                for (expression, records, nodes, values, refused) in [
+                    (
+                        "CASE WHEN true THEN 7 ELSE [item][0].p END",
+                        4,
+                        4,
+                        vec![Some(7); 4],
+                        None,
+                    ),
+                    ("coalesce(7, [item][0].p)", 4, 4, vec![Some(7); 4], None),
+                    ("[item][0].hidden", 4, 4, vec![None; 4], None),
+                    (
+                        "[item][0].p",
+                        8,
+                        8,
+                        vec![Some(2), Some(7), Some(13), Some(19)],
+                        None,
+                    ),
+                    ("[item][0].p", 7, 8, vec![], Some(false)),
+                    ("[item][0].p", 8, 7, vec![], Some(true)),
+                ] {
+                    let mut ordered = session(
+                        &db,
+                        &cx,
+                        &issuer,
+                        &grant(nodes),
+                        &pool,
+                        GqlQueryPolicy::new(records, 100, 1_000_000, 1_000_000),
+                    )
+                    .await;
+                    let text = format!(
+                        "MATCH (n) WITH n AS item RETURN {expression} AS value ORDER BY value"
+                    );
+                    let prepared = ordered.prepare(&cx, &text, &params).unwrap();
+                    let result = ordered
+                        .execute_ordered(&cx, &prepared, &params)
+                        .unwrap()
+                        .await;
+                    match refused {
+                        Some(true) => assert!(matches!(result,
+                            Err(NativeSpoolError::Authorized(error))
+                            if matches!(*error, QueryError::Authorization(
+                                AuthorizationError::LimitExceeded(LimitDimension::Nodes))))),
+                        Some(false) => assert!(matches!(result,
+                            Err(NativeSpoolError::Authorized(error))
+                            if matches!(*error, QueryError::Set(GqlQueryError::Rows(error))
+                                if error.dimension == GqlBudgetDimension::SnapshotRecords
+                                    && error.limit == 7 && error.observed == 8))),
+                        None => {
+                            let mut cursor = result.unwrap();
+                            assert_eq!(rows(&mut cursor).await, expected(&values), "{text}");
+                        }
+                    }
+                    assert_eq!(pool.used(), 0);
+                }
+
+                let mut ordered = session(&db, &cx, &issuer, &grant(100), &pool, policy()).await;
+                let prepared = ordered
+                    .prepare(
+                        &cx,
+                        "MATCH (n) WITH n AS item \
+                     RETURN 10 / ([item][0].p - 7) AS value ORDER BY value LIMIT 0",
+                        &params,
+                    )
+                    .unwrap();
+                let error = ordered
+                    .execute_ordered(&cx, &prepared, &params)
+                    .unwrap()
+                    .await
+                    .unwrap_err();
+                assert!(matches!(error, NativeSpoolError::Authorized(error)
+                    if matches!(*error, QueryError::Set(GqlQueryError::Source(
+                        GraphSetExecutionError::Projection { row: 3, column: 0, error }))
+                        if error.kind == GraphIntegerErrorKind::DivisionByZero)));
+                assert!(!ordered.is_closed());
+                assert_eq!(pool.used(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}

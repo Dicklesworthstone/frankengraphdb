@@ -6,11 +6,13 @@ use super::*;
 use crate::query::view::{SpoolInput, SpoolRow, ordered_input, ordered_stages};
 use crate::{NativeSpoolCursor, NativeSpoolError};
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite};
+use fgdb_delta_types::ElementId;
 use fgdb_gql::edge_stream::{EdgeScanCursor, EdgeScanSource, EdgeScanState};
 use fgdb_gql::scan_stream::{ScanKind, ScanSortTail, ScanState};
 use fgdb_gql::spill_set::{AsyncSpillElementSource, AsyncSpillSetPlan};
-use fgdb_gql::{GlaExecutionStats, GqlExecutionBudget, GqlExecutionStats};
+use fgdb_gql::{GlaExecutionStats, GqlBudgetDimension, GqlExecutionBudget, GqlExecutionStats};
 use fgdb_strata::tiered::memory::{SpillError, SpillFile, TrackedBytes};
+use fgdb_types::CanonicalPropertyValue;
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -505,7 +507,7 @@ struct OpenedOrder<'q, C> {
     input: OrderedInput<'q>,
     tail: ScanSortTail,
     columns: Vec<String>,
-    stages: Option<AsyncSpillSetPlan>,
+    stages: Option<(AsyncSpillSetPlan, EmbeddedReadView)>,
     at: CommitSeq,
     policy: GqlQueryPolicy,
     execution: Shared<'q, C>,
@@ -601,7 +603,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send> AuthorizedReadSession<'_,
                     OrderedInput(input),
                     tail,
                     columns,
-                    stages,
+                    stages.map(|stages| (stages, view.clone())),
                     at,
                     policy,
                     execution,
@@ -630,20 +632,182 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send> AuthorizedReadSession<'_,
     }
 }
 
-// Every ordinary property capture comes from the masked graph leaf. Opaque
-// element values need a separately scoped lookup owner; this path retains the
-// native reached-operand refusal rather than opening a privileged reader.
-struct NoElementReads;
-impl AsyncSpillElementSource for NoElementReads {
+// A carried element is an identity, never cached authority. Resolve its winner
+// at the source cut, admit the whole visibility predicate, then lend only the
+// requested field until the evaluator admits its copy. Private history and
+// hidden keys poll without spending native or signed allowances.
+struct ScopedElements<'s, 'q, C> {
+    view: &'s EmbeddedReadView,
+    cx: &'q QueryCx,
+    at: CommitSeq,
+    execution: Shared<'q, C>,
+    budget: GqlExecutionBudget,
+    records: u64,
+}
+
+impl<'s, C: FnMut() -> u64> ScopedElements<'s, '_, C> {
+    fn poll(&self) -> Result<()> {
+        self.execution.borrow_mut().poll().map_err(authorized)
+    }
+
+    fn visible_vertex(&self, vid: VId) -> Result<Option<&'s VertexRow>> {
+        let snapshot: &'s crate::Snapshot = &self.view.snapshot;
+        let row = source::find_vertex(snapshot, vid, self.at, &mut |_| self.poll())?;
+        Ok(row.filter(|row| {
+            self.execution
+                .borrow()
+                .permit
+                .predicates()
+                .allows_vertex(&row.labels)
+        }))
+    }
+
+    fn admit_vertex(
+        &self,
+        row: &VertexRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<()>,
+    ) -> Result<()> {
+        control(GlaExecutionEvent::Work)?;
+        for &label in &row.labels {
+            self.poll()?;
+            if self
+                .execution
+                .borrow()
+                .permit
+                .predicates()
+                .allows_label(label)
+            {
+                control(GlaExecutionEvent::Work)?;
+            }
+        }
+        // Source traversal has finished. No previous scan root can exempt a
+        // newly reached vertex from this lookup's signed node admission.
+        self.execution.borrow_mut().node().map_err(authorized)
+    }
+
+    fn read(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<()>,
+    ) -> Result<Option<&'s CanonicalPropertyValue>> {
+        self.poll()?;
+        if !self
+            .execution
+            .borrow()
+            .permit
+            .predicates()
+            .allows_property(key)
+        {
+            return Ok(None);
+        }
+        let snapshot: &'s crate::Snapshot = &self.view.snapshot;
+        let props = match element {
+            ElementId::Vertex(vid) => {
+                let Some(row) = self.visible_vertex(vid)? else {
+                    return Ok(None);
+                };
+                self.admit_vertex(row, control)?;
+                row.props.as_slice()
+            }
+            ElementId::Edge(eid) => {
+                let Some((block, row)) = snapshot.adjacency_index().statement_at_controlled(
+                    &snapshot.blocks,
+                    eid,
+                    self.at,
+                    &mut |_| self.poll(),
+                )?
+                else {
+                    return Ok(None);
+                };
+                let edge = &snapshot.blocks[block][row];
+                if !self
+                    .execution
+                    .borrow()
+                    .permit
+                    .predicates()
+                    .allows_relation(edge.relation)
+                {
+                    return Ok(None);
+                }
+                let Some(source) = self.visible_vertex(edge.src)? else {
+                    return Ok(None);
+                };
+                let target = if edge.dst == edge.src {
+                    None
+                } else {
+                    let Some(target) = self.visible_vertex(edge.dst)? else {
+                        return Ok(None);
+                    };
+                    Some(target)
+                };
+                // Both endpoint predicates precede every logical charge and
+                // the payload lookup, including a repeated carried edge.
+                control(GlaExecutionEvent::Work)?;
+                self.admit_vertex(source, control)?;
+                if let Some(target) = target {
+                    self.admit_vertex(target, control)?;
+                }
+                snapshot
+                    .block_props
+                    .get(block)
+                    .and_then(Option::as_ref)
+                    .map_or(&[][..], |props| props.props_ref(row))
+            }
+        };
+        let records = self
+            .records
+            .checked_add(1)
+            .ok_or(SpillError::SizeOverflow)?;
+        self.budget
+            .check(GqlBudgetDimension::SnapshotRecords, records)
+            .map_err(|error| authorized(QueryError::Set(GqlQueryError::Rows(error))))?;
+        self.records = records;
+        control(GlaExecutionEvent::Work)?;
+        for (candidate, value) in props {
+            self.poll()?;
+            if !self
+                .execution
+                .borrow()
+                .permit
+                .predicates()
+                .allows_property(*candidate)
+            {
+                continue;
+            }
+            control(GlaExecutionEvent::Work)?;
+            match candidate.cmp(&key) {
+                core::cmp::Ordering::Less => {}
+                core::cmp::Ordering::Equal => return Ok(Some(value)),
+                core::cmp::Ordering::Greater => break,
+            }
+        }
+        Ok(None)
+    }
+}
+
+impl<'s, C: FnMut() -> u64 + Send> AsyncSpillElementSource for ScopedElements<'s, '_, C> {
     type Error = NativeSpoolError;
-    type Property = fgdb_types::CanonicalPropertyValue;
+    type Property = &'s CanonicalPropertyValue;
 
     async fn element_property(
         &mut self,
-        _: fgdb_delta_types::ElementId,
-        _: fgdb_delta_types::PropertyKeyId,
+        _: ElementId,
+        _: PropertyKeyId,
     ) -> Option<Result<Option<Self::Property>>> {
+        // The native callback owns both meters. A call that omits it cannot
+        // gain an unmetered read route through this private adapter.
         None
+    }
+
+    async fn element_property_with_control(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+        control: &mut (impl FnMut(GlaExecutionEvent) -> Result<()> + Send),
+    ) -> Option<Result<Option<Self::Property>>> {
+        let cx = self.cx;
+        Some(cx.with_restriction(|| self.read(element, key, control)))
     }
 }
 
@@ -654,6 +818,16 @@ fn stage_error(error: NativeSpoolError) -> NativeSpoolError {
         NativeSpoolError::SetExecution(error) => {
             GqlQueryError::Source(error.map_source(|never| match never {}))
         }
+        NativeSpoolError::Execute(error) => match *error {
+            GqlQueryError::Source(error) => {
+                return NativeSpoolError::Execute(Box::new(GqlQueryError::Source(error)));
+            }
+            GqlQueryError::Rows(error) => GqlQueryError::Rows(error),
+            GqlQueryError::Evaluator(error) => GqlQueryError::Evaluator(error),
+            GqlQueryError::Interrupted(error) => GqlQueryError::Interrupted(error),
+            GqlQueryError::IdentifiedEdgesRequired => GqlQueryError::IdentifiedEdgesRequired,
+            GqlQueryError::Data(error) => GqlQueryError::Data(error),
+        },
         NativeSpoolError::BufferedExecute(error) => match *error {
             GqlQueryError::Source(error) => {
                 return NativeSpoolError::BufferedExecute(Box::new(GqlQueryError::Source(error)));
@@ -716,8 +890,9 @@ where
     /// Unary Set/TemporalSet projections, scopes, filters and UNWIND complete
     /// each native order/DISTINCT/window barrier before the next stage runs.
     /// Stages consume the same signed work permit and cumulative native budget;
-    /// ordinary property captures stay masked, while reached opaque element
-    /// property lookups retain their native unsupported-expression refusal.
+    /// property captures and carried-element lookups share the exact cut and
+    /// live capability. Each reached field is scoped before value inspection;
+    /// the evaluator reserves its destination copy before cloning any payload.
     ///
     /// Opening binds and admits the exact snapshot synchronously; a refusal
     /// returns immediately without creating a future. The successful future
@@ -751,7 +926,7 @@ where
         let opened = session.open_ordered(cx, prepared, params, limits)?;
         let columns = opened.stages.as_ref().map_or_else(
             || opened.columns.clone(),
-            |stages| stages.columns().to_vec(),
+            |(stages, _)| stages.columns().to_vec(),
         );
         let at = opened.at;
         let future = Box::pin(async move {
@@ -795,13 +970,21 @@ where
                     limits.max_sort_work,
                 )
                 .await?;
-                let Some(stages) = stages else {
+                let Some((stages, view)) = stages else {
                     return Ok((spool, work));
+                };
+                let mut elements = ScopedElements {
+                    view: &view,
+                    cx,
+                    at,
+                    execution: stage_execution.clone(),
+                    budget: policy.rows,
+                    records: spool.row_stats().snapshot_records,
                 };
                 ordered_stages(
                     stages,
                     spool,
-                    &mut NoElementReads,
+                    &mut elements,
                     &mut || {
                         stage_execution
                             .borrow_mut()

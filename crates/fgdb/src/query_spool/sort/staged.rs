@@ -562,153 +562,160 @@ where
     }
 }
 
+// Keep the evaluator's future separate from orchestration and sorting Send
+// proofs. This is one allocation per stage, before the input-row loop; the
+// complete transform remains lazy and retains the same affine byte charges.
 #[allow(clippy::too_many_arguments)]
-async fn transform<A, B, S>(
-    input: &NativeResultSpool,
-    stage: &SpillSetStage,
-    source: &mut SpillFile<A>,
-    destination: &mut SpillFile<B>,
+fn transform<'q, A, B, S>(
+    input: &'q NativeResultSpool,
+    stage: &'q SpillSetStage,
+    source: &'q mut SpillFile<A>,
+    destination: &'q mut SpillFile<B>,
     limits: Limits,
     policy: GqlQueryPolicy,
-    evaluator: &mut GlaExecutionStats,
-    work: &mut Work<'_>,
-    resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
-    elements: &mut S,
-    checkpoint: &mut (dyn FnMut() -> Result<()> + Send),
-) -> Result<NativeResultSpool>
+    evaluator: &'q mut GlaExecutionStats,
+    work: &'q mut Work<'_>,
+    resolver: Option<&'q (dyn CanonicalScalarResolver + Send + Sync)>,
+    elements: &'q mut S,
+    checkpoint: &'q mut (dyn FnMut() -> Result<()> + Send),
+) -> crate::SendFuture<'q, Result<NativeResultSpool>>
 where
-    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
-    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin,
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     S: AsyncSpillElementSource<Error = NativeSpoolError>,
 {
-    if input.encoded_columns != stage.input_types().len() {
-        return Err(SpillError::InvalidRun.into());
-    }
-    let pool = destination.memory_pool().clone();
-    let mut reader = input.reader(source);
-    let mut writer = destination.paged_writer(work.cx, limits.page_bytes)?;
-    let mut rows = 0_u64;
-    let mut row_index = 0_usize;
-    let mut largest = 0_usize;
-    while let Some(bytes) = reader.next_row(work.cx).await? {
-        work.charge(bytes.len())?;
-        let reserved = codec::decoded(bytes.as_ref(), work.cx)?;
-        let mut charge = pool
-            .reserve(work.cx, reserved)
-            .map_err(SpillError::Memory)?;
-        let row = match resolver {
-            Some(resolver) => {
-                GraphValueRow::decode_canonical_with_resolver(bytes.as_ref(), resolver)
-            }
-            None => GraphValueRow::decode_stored(bytes.as_ref()),
+    Box::pin(async move {
+        if input.encoded_columns != stage.input_types().len() {
+            return Err(SpillError::InvalidRun.into());
         }
-        .map_err(NativeSpoolError::Decode)?;
-        drop(bytes);
-        let retained = codec::row_memory(&row, work)?;
-        codec::retain_reservation(&mut charge, retained, work.cx)?;
-        let cursor = stage
-            .start_with_async_elements(
-                row,
-                row_index,
-                &mut |event| {
-                    if event != GlaExecutionEvent::ResultRow {
-                        checkpoint()?;
-                    }
-                    native_event(work.cx, policy, evaluator, event)?;
-                    if event == GlaExecutionEvent::ScratchEntry {
-                        let bytes = 8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
-                        charge.grow(work.cx, bytes).map_err(SpillError::Memory)?;
-                    }
-                    Ok(())
-                },
-                elements,
-                &|bytes| {
-                    pool.reserve(work.cx, bytes)
-                        .map_err(|error| NativeSpoolError::Spill(SpillError::Memory(error)))
-                },
-            )
-            .await
-            .map_err(|error| match error {
-                SpillSetRowError::Control(error) => error,
-                SpillSetRowError::Native(error) => NativeSpoolError::SetExecution(error),
-            })?;
-        // Evaluation has finished, so its temporary workspace can be released.
-        // Preserve the initial cursor footprint through the entire expansion:
-        // it covers the original iterator allocation AND payloads moved into
-        // outputs, including asynchronous appends. Native work/scratch counts
-        // stay cumulative; only no-longer-resident byte admission is refunded.
-        let retained = codec::cursor_memory(&cursor, work)?;
-        codec::retain_reservation(&mut charge, retained, work.cx)?;
-        // The cursor's payloads are dropped before its affine charge.
-        let mut state = (cursor, charge);
-        row_index = row_index.checked_add(1).ok_or(SpillError::SizeOverflow)?;
-        loop {
-            // Prefix copies belong to one output occurrence, not to the full
-            // expansion. Refund them before pulling the next row while the
-            // original input/list reservation remains live. Native work and
-            // scratch-entry accounting nevertheless continue cumulatively.
-            let mut charge = pool.reserve(work.cx, 0).map_err(SpillError::Memory)?;
-            let next = state
-                .0
-                .next_with_control(&mut |event| {
-                    if event != GlaExecutionEvent::ResultRow {
-                        checkpoint()?;
-                    }
-                    native_event(work.cx, policy, evaluator, event)?;
-                    if event == GlaExecutionEvent::ScratchEntry {
-                        let bytes = 8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
-                        charge.grow(work.cx, bytes).map_err(SpillError::Memory)?;
-                    }
-                    Ok(())
-                })
+        let pool = destination.memory_pool().clone();
+        let mut reader = input.reader(source);
+        let mut writer = destination.paged_writer(work.cx, limits.page_bytes)?;
+        let mut rows = 0_u64;
+        let mut row_index = 0_usize;
+        let mut largest = 0_usize;
+        while let Some(bytes) = reader.next_row(work.cx).await? {
+            work.charge(bytes.len())?;
+            let reserved = codec::decoded(bytes.as_ref(), work.cx)?;
+            let mut charge = pool
+                .reserve(work.cx, reserved)
+                .map_err(SpillError::Memory)?;
+            let row = match resolver {
+                Some(resolver) => {
+                    GraphValueRow::decode_canonical_with_resolver(bytes.as_ref(), resolver)
+                }
+                None => GraphValueRow::decode_stored(bytes.as_ref()),
+            }
+            .map_err(NativeSpoolError::Decode)?;
+            drop(bytes);
+            let retained = codec::row_memory(&row, work)?;
+            codec::retain_reservation(&mut charge, retained, work.cx)?;
+            let cursor = stage
+                .start_with_async_elements(
+                    row,
+                    row_index,
+                    &mut |event| {
+                        if event != GlaExecutionEvent::ResultRow {
+                            checkpoint()?;
+                        }
+                        native_event(work.cx, policy, evaluator, event)?;
+                        if event == GlaExecutionEvent::ScratchEntry {
+                            let bytes =
+                                8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
+                            charge.grow(work.cx, bytes).map_err(SpillError::Memory)?;
+                        }
+                        Ok(())
+                    },
+                    elements,
+                    &|bytes| {
+                        pool.reserve(work.cx, bytes)
+                            .map_err(|error| NativeSpoolError::Spill(SpillError::Memory(error)))
+                    },
+                )
+                .await
                 .map_err(|error| match error {
                     SpillSetRowError::Control(error) => error,
                     SpillSetRowError::Native(error) => NativeSpoolError::SetExecution(error),
                 })?;
-            let Some((row, remaining)) = next else {
-                break;
-            };
-            state.0 = remaining;
-            if row.len() != stage.columns().len() {
-                return Err(SpillError::InvalidRun.into());
+            // Evaluation has finished, so its temporary workspace can be released.
+            // Preserve the initial cursor footprint through the entire expansion:
+            // it covers the original iterator allocation AND payloads moved into
+            // outputs, including asynchronous appends. Native work/scratch counts
+            // stay cumulative; only no-longer-resident byte admission is refunded.
+            let retained = codec::cursor_memory(&cursor, work)?;
+            codec::retain_reservation(&mut charge, retained, work.cx)?;
+            // The cursor's payloads are dropped before its affine charge.
+            let mut state = (cursor, charge);
+            row_index = row_index.checked_add(1).ok_or(SpillError::SizeOverflow)?;
+            loop {
+                // Prefix copies belong to one output occurrence, not to the full
+                // expansion. Refund them before pulling the next row while the
+                // original input/list reservation remains live. Native work and
+                // scratch-entry accounting nevertheless continue cumulatively.
+                let mut charge = pool.reserve(work.cx, 0).map_err(SpillError::Memory)?;
+                let next = state
+                    .0
+                    .next_with_control(&mut |event| {
+                        if event != GlaExecutionEvent::ResultRow {
+                            checkpoint()?;
+                        }
+                        native_event(work.cx, policy, evaluator, event)?;
+                        if event == GlaExecutionEvent::ScratchEntry {
+                            let bytes =
+                                8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
+                            charge.grow(work.cx, bytes).map_err(SpillError::Memory)?;
+                        }
+                        Ok(())
+                    })
+                    .map_err(|error| match error {
+                        SpillSetRowError::Control(error) => error,
+                        SpillSetRowError::Native(error) => NativeSpoolError::SetExecution(error),
+                    })?;
+                let Some((row, remaining)) = next else {
+                    break;
+                };
+                state.0 = remaining;
+                if row.len() != stage.columns().len() {
+                    return Err(SpillError::InvalidRun.into());
+                }
+                let next = rows.checked_add(1).ok_or(SpillError::SizeOverflow)?;
+                GqlExecutionBudget::result_rows(limits.max_input_rows)
+                    .check(GqlBudgetDimension::ResultRows, next)
+                    .map_err(|error| {
+                        NativeSpoolError::BufferedExecute(Box::new(GqlQueryError::Rows(error)))
+                    })?;
+                let row = SpoolRow::buffered((row, charge));
+                // Data precedes each affine charge in both aggregates. They stay
+                // intact across every await, including cancellation and unwinding.
+                let encoded = codec::encode(&pool, work, &row.row, limits.max_row_bytes)?;
+                write_row(&mut writer, &encoded.0, work).await?;
+                largest = largest.max(encoded.0.len());
+                rows = next;
+                drop(encoded);
+                drop(row);
             }
-            let next = rows.checked_add(1).ok_or(SpillError::SizeOverflow)?;
-            GqlExecutionBudget::result_rows(limits.max_input_rows)
-                .check(GqlBudgetDimension::ResultRows, next)
-                .map_err(|error| {
-                    NativeSpoolError::BufferedExecute(Box::new(GqlQueryError::Rows(error)))
-                })?;
-            let row = SpoolRow::buffered((row, charge));
-            // Data precedes each affine charge in both aggregates. They stay
-            // intact across every await, including cancellation and unwinding.
-            let encoded = codec::encode(&pool, work, &row.row, limits.max_row_bytes)?;
-            write_row(&mut writer, &encoded.0, work).await?;
-            largest = largest.max(encoded.0.len());
-            rows = next;
-            drop(encoded);
-            drop(row);
         }
-    }
-    if reader.state() != ScanState::Exhausted
-        || u64::try_from(row_index).ok() != Some(input.row_count())
-    {
-        return Err(NativeSpoolError::IncompleteCursor);
-    }
-    drop(reader);
-    work.charge(1)?;
-    let run = writer.finish(work.cx).await?;
-    Ok(NativeResultSpool {
-        columns: stage.columns().to_vec().into(),
-        encoded_columns: stage.columns().len(),
-        snapshot: input.snapshot,
-        kind: input.kind,
-        rows: GqlExecutionStats {
-            snapshot_records: input.rows.snapshot_records,
-            result_rows: rows,
-        },
-        evaluator: *evaluator,
-        max_row_bytes: largest,
-        run,
+        if reader.state() != ScanState::Exhausted
+            || u64::try_from(row_index).ok() != Some(input.row_count())
+        {
+            return Err(NativeSpoolError::IncompleteCursor);
+        }
+        drop(reader);
+        work.charge(1)?;
+        let run = writer.finish(work.cx).await?;
+        Ok(NativeResultSpool {
+            columns: stage.columns().to_vec().into(),
+            encoded_columns: stage.columns().len(),
+            snapshot: input.snapshot,
+            kind: input.kind,
+            rows: GqlExecutionStats {
+                snapshot_records: input.rows.snapshot_records,
+                result_rows: rows,
+            },
+            evaluator: *evaluator,
+            max_row_bytes: largest,
+            run,
+        })
     })
 }
 
