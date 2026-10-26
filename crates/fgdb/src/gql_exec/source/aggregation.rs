@@ -130,30 +130,30 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
     // still runs through the ordinary executor, preserving source errors and
     // interleaved scratch/work events when no exact cardinality is available.
     let mut label_builder = None;
-    if let (Some(snapshot), Some(source)) = (admitted.snapshot, aggregate.count_metadata_source()) {
-        if as_of == snapshot.frontier {
-            let matching = snapshot
-                .exact_counts
-                .lookup(source, &mut |event| {
-                    checkpoint().map_err(GqlQueryError::Interrupted)?;
-                    usage.observe::<GraphAggregateError<ReadError>, C>(policy, event)
-                })
-                .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))?;
-            if let Some(matching) = matching {
-                let count = aggregate
-                    .prepare_count_metadata(source, matching)
-                    .expect("the source shape was checked before the exact metadata lookup");
-                let result = count.execute_governed_with_element_reads(
-                    1,
-                    elements,
-                    usage.remaining(policy),
-                    checkpoint,
-                );
-                return usage.finish(policy, result);
-            }
-            if matches!(source, GraphCountSource::Label(_)) {
-                label_builder = snapshot.exact_counts.label_builder();
-            }
+    if let (Some(snapshot), Some(source)) = (admitted.snapshot, aggregate.count_metadata_source())
+        && as_of == snapshot.frontier
+    {
+        let matching = snapshot
+            .exact_counts
+            .lookup(source, &mut |event| {
+                checkpoint().map_err(GqlQueryError::Interrupted)?;
+                usage.observe::<GraphAggregateError<ReadError>, C>(policy, event)
+            })
+            .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))?;
+        if let Some(matching) = matching {
+            let count = aggregate
+                .prepare_count_metadata(source, matching)
+                .expect("the source shape was checked before the exact metadata lookup");
+            let result = count.execute_governed_with_element_reads(
+                1,
+                elements,
+                usage.remaining(policy),
+                checkpoint,
+            );
+            return usage.finish(policy, result);
+        }
+        if matches!(source, GraphCountSource::Label(_)) {
+            label_builder = snapshot.exact_counts.label_builder();
         }
     }
     // The same MVCC visitors can admit a plain count without retaining their
