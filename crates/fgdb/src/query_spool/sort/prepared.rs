@@ -6,6 +6,9 @@ use super::*;
 #[path = "native_order.rs"]
 mod native_order;
 pub use native_order::PreparedBufferedOrder;
+pub(crate) use native_order::{
+    OpenedOrder as OpenedResidentOrder, execute_opened as execute_resident_order,
+};
 pub(crate) use native_order::{ordered_input, ordered_stages};
 
 impl PreparedNativeRead {

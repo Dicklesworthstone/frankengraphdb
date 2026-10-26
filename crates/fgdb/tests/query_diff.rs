@@ -543,3 +543,611 @@ fn temporal_overrides_bad_binding_and_late_endpoint_failures_never_become_empty_
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+mod spill {
+    use super::*;
+    use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
+    use fgdb::{NativeSpoolDifference, NativeSpoolError};
+    use fgdb_gql::algebra::GraphValueRow;
+    use fgdb_gql::scan_stream::ScanState;
+    use fgdb_gql::{
+        GlaLimitDimension, GqlBudgetDimension, GraphIntegerErrorKind, GraphSetExecutionError,
+    };
+    use fgdb_strata::tiered::memory::{MemoryPool, SpillFile, SpillLimits};
+    use fgdb_types::{CommitCx, QueryCx};
+    use std::io::{self, Cursor, Seek, SeekFrom};
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
+
+    type Result<T> =
+        core::result::Result<T, GqlQueryError<NativeSpoolError, Box<asupersync::error::Error>>>;
+
+    #[derive(Default)]
+    struct State {
+        bytes: Cursor<Vec<u8>>,
+        reads: usize,
+        writes: usize,
+    }
+    #[derive(Clone, Default)]
+    struct File(Arc<Mutex<State>>);
+    impl File {
+        fn activity(&self) -> (usize, usize) {
+            let state = self.0.lock().unwrap();
+            (state.reads, state.writes)
+        }
+    }
+    impl AsyncRead for File {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            out: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let mut state = self.0.lock().unwrap();
+            state.reads += 1;
+            let at = state.bytes.position() as usize;
+            let count = out
+                .remaining()
+                .min(state.bytes.get_ref().len().saturating_sub(at));
+            if count != 0 {
+                out.put_slice(&state.bytes.get_ref()[at..at + count]);
+                state.bytes.set_position((at + count) as u64);
+            }
+            Poll::Ready(Ok(()))
+        }
+    }
+    impl AsyncWrite for File {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let mut state = self.0.lock().unwrap();
+            state.writes += 1;
+            Poll::Ready(std::io::Write::write(&mut state.bytes, bytes))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+    impl AsyncSeek for File {
+        fn poll_seek(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            at: SeekFrom,
+        ) -> Poll<io::Result<u64>> {
+            Poll::Ready(self.0.lock().unwrap().bytes.seek(at))
+        }
+    }
+    async fn file(cx: &QueryCx, pool: &MemoryPool) -> (SpillFile<File>, File) {
+        let backend = File::default();
+        let file = SpillFile::new(
+            cx,
+            backend.clone(),
+            pool.clone(),
+            SpillLimits {
+                max_file_bytes: 64_000_000,
+                max_runs: 10_000,
+                max_run_bytes: 16_000_000,
+            },
+        )
+        .await
+        .unwrap();
+        (file, backend)
+    }
+    async fn history(cx: &CommitCx) -> (Database<MemVfs>, CommitSeq, CommitSeq) {
+        let mut db = Database::open_memory(cx, keys()).await.unwrap();
+        let before = db.write(cx, seed()).await.unwrap();
+        let after = db.write(cx, edit()).await.unwrap();
+        (db, before, after)
+    }
+    async fn collect(cursor: &mut NativeSpoolDifference<'_, File>) -> Result<Bag> {
+        let mut changes = Bag::new();
+        while let Some((weight, row)) = cursor.next_change().await? {
+            let row = GraphValueRow::decode_canonical(row.as_ref()).unwrap();
+            let row = row
+                .values()
+                .iter()
+                .cloned()
+                .map(GraphAggregateValue::Value)
+                .collect();
+            assert_ne!(weight, 0);
+            assert!(changes.insert(row, weight).is_none());
+        }
+        assert_eq!(cursor.state(), ScanState::Exhausted);
+        Ok(changes)
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn run(
+        prepared: &PreparedNativeRead,
+        view: &EmbeddedReadView,
+        cx: &QueryCx,
+        params: &GqlParameters,
+        before: CommitSeq,
+        after: CommitSeq,
+        allowance: GqlQueryPolicy,
+        max_input_rows: u64,
+        work: u64,
+        run_rows: usize,
+    ) -> Result<(Bag, u64)> {
+        let pool = MemoryPool::new(262_144, 0).unwrap();
+        let (mut source, _) = file(cx, &pool).await;
+        let (mut scratch, _) = file(cx, &pool).await;
+        let result = async {
+            let mut cursor = prepared
+                .spool_difference_in_view(
+                    view,
+                    cx,
+                    params,
+                    before,
+                    after,
+                    allowance,
+                    &mut source,
+                    &mut scratch,
+                    run_rows,
+                    128,
+                    127,
+                    8192,
+                    max_input_rows,
+                    work,
+                )
+                .await?;
+            assert_eq!((cursor.before(), cursor.after()), (before, after));
+            let changes = collect(&mut cursor).await?;
+            Ok((changes, cursor.work_units()))
+        }
+        .await;
+        assert_eq!(pool.used(), 0);
+        result
+    }
+
+    #[test]
+    fn staged_spill_differences_compare_complete_historical_endpoint_bags() {
+        let ((), report) = run_async_under_lab(0xd1ff_1010, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let (db, before, after) = history(&contexts.commit()).await;
+            let view = db.read_session().unwrap();
+            for text in [
+                "MATCH (n:L) WITH 7 AS marker RETURN marker",
+                "MATCH (n:L) WITH n.score AS score ORDER BY score DESC NULLS LAST SKIP 1 LIMIT 2 RETURN score * 2 AS scaled ORDER BY scaled",
+                "MATCH (n:L) WITH n AS item RETURN [item][0].score AS score ORDER BY score DESC NULLS LAST LIMIT 2",
+                "MATCH (n:L) WITH n.score AS score UNWIND [score, score] AS value RETURN value ORDER BY value NULLS FIRST",
+                "MATCH (n:L) WITH n.score AS score UNWIND [score, 7, score] AS value WITH DISTINCT value AS selected ORDER BY selected DESC NULLS LAST SKIP 1 LIMIT 2 RETURN selected * 2 AS doubled ORDER BY doubled",
+                "MATCH ()-[edge:R]->() WITH edge AS item RETURN [item][0].score AS score ORDER BY score NULLS FIRST",
+                "MATCH (seed:L) WITH seed LIMIT 1 WITH $items AS items UNWIND items AS item RETURN [item][0].score AS score ORDER BY score NULLS FIRST",
+            ] {
+                let params = if text.contains("$items") {
+                    GqlParameters::new()
+                        .with_list(
+                            "items",
+                            vec![
+                                GraphValue::Vertex(VId(u128::MAX)),
+                                GraphValue::Edge(EId(0)),
+                                GraphValue::Edge(EId(u128::MAX)),
+                                GraphValue::Vertex(VId(u128::MAX - 1)),
+                                GraphValue::Edge(EId(u128::MAX - 1)),
+                                GraphValue::Vertex(VId(1)),
+                                GraphValue::Vertex(VId(1)),
+                            ],
+                        )
+                        .unwrap()
+                } else {
+                    GqlParameters::new()
+                };
+                let prepared = PreparedNativeRead::prepare(text, &params, symbols()).unwrap();
+                for (from, to) in [(before, after), (after, before), (after, after)] {
+                    let expected = prepared
+                        .diff_in_view(&view, &cx, &params, from, to, wide())
+                        .unwrap();
+                    for run_rows in [1, 3] {
+                        let (actual, _) = run(
+                            &prepared,
+                            &view,
+                            &cx,
+                            &params,
+                            from,
+                            to,
+                            wide(),
+                            100,
+                            u64::MAX,
+                            run_rows,
+                        )
+                        .await
+                        .unwrap();
+                        assert_eq!(
+                            actual,
+                            observed(&expected),
+                            "{text}: {from:?} -> {to:?}, run_rows={run_rows}"
+                        );
+                    }
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn staged_spill_differences_share_all_endpoint_allowances_and_preserve_short_circuiting() {
+        let ((), report) = run_async_under_lab(0xd1ff_1011, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let (db, before, at) = history(&contexts.commit()).await;
+            let view = db.read_session().unwrap();
+            let params = GqlParameters::new();
+            let text = "MATCH (n:L) WITH n AS item RETURN [item][0].score AS value ORDER BY value";
+            let prepared = PreparedNativeRead::prepare(text, &params, symbols()).unwrap();
+            let pool = MemoryPool::new(262_144, 0).unwrap();
+            let (mut source, _) = file(&cx, &pool).await;
+            let (mut scratch, _) = file(&cx, &pool).await;
+            // Independently measure one ordinary ordered endpoint, then require
+            // the difference to pay exactly twice its complete native costs.
+            let (one, _) = prepared
+                .spool_ordered_in_view(
+                    &view,
+                    &cx,
+                    &params,
+                    wide(),
+                    &mut scratch,
+                    &mut source,
+                    2,
+                    128,
+                    127,
+                    8192,
+                    100,
+                    u64::MAX,
+                )
+                .await
+                .unwrap();
+            assert_eq!(pool.used(), 0);
+            let records = one.row_stats().snapshot_records;
+            let work = one.evaluator_stats().work_units;
+            let scratch_entries = one.evaluator_stats().scratch_entries;
+            assert!(records >= 8 && work > 0 && scratch_entries > 0);
+            let exact = GqlQueryPolicy::new(records * 2, 0, work * 2, scratch_entries * 2);
+            let (changes, physical) = run(
+                &prepared,
+                &view,
+                &cx,
+                &params,
+                at,
+                at,
+                exact,
+                100,
+                u64::MAX,
+                2,
+            )
+            .await
+            .unwrap();
+            assert!(changes.is_empty());
+            for dimension in 0..3 {
+                let allowance = GqlQueryPolicy::new(
+                    records * 2 - u64::from(dimension == 0),
+                    0,
+                    work * 2 - u64::from(dimension == 1),
+                    scratch_entries * 2 - u64::from(dimension == 2),
+                );
+                let error = run(
+                    &prepared,
+                    &view,
+                    &cx,
+                    &params,
+                    at,
+                    at,
+                    allowance,
+                    100,
+                    u64::MAX,
+                    2,
+                )
+                .await
+                .unwrap_err();
+                let GqlQueryError::Source(error) = error else {
+                    panic!("{error:?}")
+                };
+                match (dimension, error.execution_error()) {
+                    (0, Some(GqlQueryError::Rows(error))) => {
+                        assert_eq!(error.dimension, GqlBudgetDimension::SnapshotRecords);
+                        assert_eq!((error.limit, error.observed), (records - 1, records));
+                    }
+                    (1, Some(GqlQueryError::Evaluator(error))) => {
+                        assert_eq!(error.dimension, GlaLimitDimension::WorkUnits);
+                        assert_eq!(error.limit, work - 1);
+                        assert_eq!(error.observed, u128::from(work));
+                    }
+                    (2, Some(GqlQueryError::Evaluator(error))) => {
+                        assert_eq!(error.dimension, GlaLimitDimension::ScratchEntries);
+                        assert_eq!(error.limit, scratch_entries - 1);
+                        assert_eq!(error.observed, u128::from(scratch_entries));
+                    }
+                    _ => panic!("wrong endpoint allowance refusal: {error:?}"),
+                }
+            }
+            assert_eq!(
+                run(
+                    &prepared, &view, &cx, &params, at, at, exact, 100, physical, 2
+                )
+                .await
+                .unwrap()
+                .1,
+                physical
+            );
+            assert!(matches!(run(
+                &prepared, &view, &cx, &params, at, at, exact, 100, physical - 1, 2,
+            ).await, Err(GqlQueryError::Source(NativeSpoolError::SortWorkLimit { attempted, limit }))
+                if attempted == physical && limit == physical - 1));
+            assert!(matches!(run(
+                &prepared, &view, &cx, &params, before, at,
+                GqlQueryPolicy::new(u64::MAX, 0, u64::MAX, u64::MAX), 100, u64::MAX, 2,
+            ).await, Err(GqlQueryError::Rows(error))
+                if error.dimension == GqlBudgetDimension::ResultRows && error.limit == 0));
+
+            for expression in [
+                "CASE WHEN true THEN 7 ELSE [item][0].score END",
+                "coalesce(7, [item][0].score)",
+            ] {
+                let skipped = PreparedNativeRead::prepare(
+                    &format!("MATCH (n:L) WITH n AS item RETURN {expression} AS value"),
+                    &params,
+                    symbols(),
+                )
+                .unwrap();
+                let (one_source, _) = skipped
+                    .spool_ordered_in_view(
+                        &view,
+                        &cx,
+                        &params,
+                        wide(),
+                        &mut scratch,
+                        &mut source,
+                        2,
+                        128,
+                        127,
+                        8192,
+                        100,
+                        u64::MAX,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(records, one_source.row_stats().snapshot_records + 4);
+                let no_lookups = GqlQueryPolicy::new(
+                    one_source.row_stats().snapshot_records * 2,
+                    0,
+                    u64::MAX,
+                    u64::MAX,
+                );
+                assert!(
+                    run(
+                        &skipped,
+                        &view,
+                        &cx,
+                        &params,
+                        at,
+                        at,
+                        no_lookups,
+                        100,
+                        u64::MAX,
+                        2
+                    )
+                    .await
+                    .unwrap()
+                    .0
+                    .is_empty()
+                );
+            }
+            for window in ["", " LIMIT 0"] {
+                let expanded = PreparedNativeRead::prepare(
+                    &format!("MATCH (n:L) WITH n.score AS score UNWIND [score, score] AS value RETURN value{window}"),
+                    &params, symbols(),
+                ).unwrap();
+                let error = run(
+                    &expanded,
+                    &view,
+                    &cx,
+                    &params,
+                    at,
+                    at,
+                    wide(),
+                    7,
+                    u64::MAX,
+                    2,
+                )
+                .await
+                .unwrap_err();
+                assert!(
+                    matches!(error, GqlQueryError::Source(NativeSpoolError::Execute(error))
+                    if matches!(*error, GqlQueryError::Rows(error)
+                        if error.dimension == GqlBudgetDimension::ResultRows && error.limit == 7 && error.observed > 7))
+                );
+            }
+            assert_eq!(pool.used(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn staged_spill_difference_opening_pins_both_cuts_and_preserves_late_errors() {
+        let ((), report) = run_async_under_lab(0xd1ff_1012, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let commit = contexts.commit();
+            let (mut db, before, after) = history(&commit).await;
+            let view = db.read_session().unwrap();
+            let params = GqlParameters::new().with_int64("shift", 1).unwrap();
+            let prepared = PreparedNativeRead::prepare(
+                "MATCH (n:L) WITH n AS item RETURN coalesce([item][0].score, 0) + $shift AS value ORDER BY value DESC LIMIT 2",
+                &params, symbols(),
+            ).unwrap();
+            let expected = observed(
+                &prepared
+                    .diff_in_view(&view, &cx, &params, before, after, wide())
+                    .unwrap(),
+            );
+            let pool = MemoryPool::new(262_144, 0).unwrap();
+            let (mut source, a) = file(&cx, &pool).await;
+            let (mut scratch, b) = file(&cx, &pool).await;
+            let activity = (a.activity(), b.activity());
+            drop(prepared.spool_difference_in_view(
+                &view,
+                &cx,
+                &params,
+                before,
+                after,
+                wide(),
+                &mut source,
+                &mut scratch,
+                2,
+                128,
+                127,
+                8192,
+                100,
+                u64::MAX,
+            ));
+            assert_eq!((a.activity(), b.activity()), activity);
+            assert_eq!(pool.used(), 0);
+            let future = prepared.spool_difference(
+                &db,
+                &cx,
+                &params,
+                before,
+                after,
+                wide(),
+                &mut source,
+                &mut scratch,
+                2,
+                128,
+                127,
+                8192,
+                100,
+                u64::MAX,
+            );
+            drop(prepared);
+            drop(params);
+            let mut change = WriteBatch::new(R);
+            change.delete_vertex(VId(1));
+            db.write(&commit, change).await.unwrap();
+            db.compact(&commit).await.unwrap();
+            drop(db);
+            let mut cursor = future.await.unwrap();
+            assert_eq!((cursor.before(), cursor.after()), (before, after));
+            assert_eq!(collect(&mut cursor).await.unwrap(), expected);
+            drop(cursor);
+            assert_eq!(pool.used(), 0);
+
+            let params = GqlParameters::new();
+            let late = PreparedNativeRead::prepare(
+                "MATCH (n:L) WITH n AS item RETURN 10 / ([item][0].score - 9) AS value ORDER BY value LIMIT 0",
+                &params, symbols(),
+            ).unwrap();
+            assert!(
+                run(
+                    &late,
+                    &view,
+                    &cx,
+                    &params,
+                    before,
+                    before,
+                    wide(),
+                    100,
+                    u64::MAX,
+                    2
+                )
+                .await
+                .unwrap()
+                .0
+                .is_empty()
+            );
+            let writes = a.activity().1;
+            let error = late
+                .spool_difference_in_view(
+                    &view,
+                    &cx,
+                    &params,
+                    before,
+                    after,
+                    wide(),
+                    &mut source,
+                    &mut scratch,
+                    2,
+                    128,
+                    127,
+                    8192,
+                    100,
+                    u64::MAX,
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, GqlQueryError::Source(NativeSpoolError::SetExecution(
+                GraphSetExecutionError::Projection { row: 1, column: 0, error }))
+                if error.kind == GraphIntegerErrorKind::DivisionByZero)
+            );
+            assert!(
+                a.activity().1 > writes,
+                "the first endpoint completed before the late failure"
+            );
+            assert_eq!(pool.used(), 0);
+
+            let activity = (a.activity(), b.activity());
+            for text in [
+                "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ 1 WITH n AS item RETURN [item][0].score AS value LIMIT 0",
+                "MATCH (n:L) RETURN n.score AS score UNION ALL MATCH (m:L) RETURN m.score AS score",
+                "MATCH (n:L) WITH n.score AS score RETURN SUM(score) AS total",
+            ] {
+                let prepared = PreparedNativeRead::prepare(text, &params, symbols()).unwrap();
+                let error = prepared
+                    .spool_difference_in_view(
+                        &view,
+                        &cx,
+                        &params,
+                        before,
+                        after,
+                        wide(),
+                        &mut source,
+                        &mut scratch,
+                        2,
+                        128,
+                        127,
+                        8192,
+                        100,
+                        u64::MAX,
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(
+                    matches!(error, GqlQueryError::Source(NativeSpoolError::Prepare(error))
+                    if matches!(*error, QueryError::StreamingUnsupported { .. })),
+                    "{text}"
+                );
+            }
+            let error = late
+                .spool_difference_in_view(
+                    &view,
+                    &cx,
+                    &params,
+                    before,
+                    CommitSeq(after.0 + 1),
+                    wide(),
+                    &mut source,
+                    &mut scratch,
+                    2,
+                    128,
+                    127,
+                    8192,
+                    100,
+                    u64::MAX,
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, GqlQueryError::Source(NativeSpoolError::Prepare(error))
+                if matches!(*error, QueryError::Read(ReadError::BeyondFrontier { .. })))
+            );
+            assert_eq!((a.activity(), b.activity()), activity);
+            assert_eq!(pool.used(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}

@@ -1,18 +1,27 @@
 //! Bind once, pin both cuts, and feed complete ordered endpoint results into
 //! the existing external difference cursor. No endpoint occurrence table.
 
+use super::super::prepared::{OpenedResidentOrder, execute_resident_order};
 use super::*;
 use crate::{SnapshotEdgeSource, SnapshotVertexSource};
+use fgdb_gql::GraphSetRowPull;
 use fgdb_gql::algebra::{GlaOperator, PreparedGraphPattern};
 use fgdb_gql::edge_stream::{EdgeScanCursor, EdgeScanError, EdgeScanPlan};
 use fgdb_gql::scan_stream::ScanSortTail;
+use fgdb_gql::spill_set::AsyncSpillSetPlan;
 use fgdb_gql::stream::{VertexScanCursor, VertexScanPlan};
 
 // Both sources own the SAME admitted generation before the future is returned.
 // Defer cursor construction so the second receives only the first's remainder.
 // Boxing bounds the sum's size without retaining any candidate or result rows.
 enum PendingInput<'q> {
-    Vertex(Box<(SnapshotVertexSource<'q>, VertexScanPlan<GraphValueRow>)>),
+    Vertex(
+        Box<(
+            SnapshotVertexSource<'q>,
+            VertexScanPlan<GraphValueRow>,
+            Option<GraphSetRowPull>,
+        )>,
+    ),
     Edge(Box<(SnapshotEdgeSource<'q>, EdgeScanPlan)>),
 }
 impl<'q> PendingInput<'q> {
@@ -29,8 +38,12 @@ impl<'q> PendingInput<'q> {
         let checkpoint = move || cx.with_restriction(|| cx.checkpoint());
         match self {
             Self::Vertex(pending) => {
-                let (source, plan) = *pending;
-                ScanCursor::Vertex(VertexScanCursor::new(source, plan, policy, checkpoint))
+                let (source, plan, projection) = *pending;
+                let cursor = VertexScanCursor::new(source, plan, policy, checkpoint);
+                match projection {
+                    Some(projection) => ScanCursor::ProjectedVertex(Box::new((cursor, projection))),
+                    None => ScanCursor::Vertex(cursor),
+                }
             }
             Self::Edge(pending) => {
                 let (source, plan) = *pending;
@@ -46,6 +59,9 @@ struct Opened<'q> {
     columns: Vec<String>,
     before: (PendingInput<'q>, ScanSortTail),
     after: (PendingInput<'q>, ScanSortTail),
+    // Each endpoint executes the complete unary program against its own cut
+    // while borrowing this same immutable generation for carried identities.
+    stages: Option<(AsyncSpillSetPlan, EmbeddedReadView)>,
 }
 
 fn open_at<'q>(
@@ -53,6 +69,8 @@ fn open_at<'q>(
     view: &EmbeddedReadView,
     cx: &'q QueryCx,
     at: CommitSeq,
+    projection: Option<GraphSetRowPull>,
+    projected_tail: Option<ScanSortTail>,
 ) -> core::result::Result<(PendingInput<'q>, ScanSortTail), QueryError> {
     // These are the same physical compilers and sources as spool_ordered.
     // Compilation removes only the checked terminal sort/window. No primary
@@ -71,9 +89,15 @@ fn open_at<'q>(
         let source = view
             .vertex_scan_source(cx, at)
             .map_err(|e| QueryError::Stream(GqlQueryError::Source(VertexScanError::Source(e))))?;
-        let (plan, tail) = VertexScanPlan::compile_sort_input(query.plan())
-            .map_err(|e| QueryError::Stream(GqlQueryError::Source(VertexScanError::Plan(e))))?;
-        Ok((PendingInput::Vertex(Box::new((source, plan))), tail))
+        let (plan, tail) = match projected_tail {
+            Some(tail) => VertexScanPlan::compile(query.plan()).map(|plan| (plan, tail)),
+            None => VertexScanPlan::compile_sort_input(query.plan()),
+        }
+        .map_err(|e| QueryError::Stream(GqlQueryError::Source(VertexScanError::Plan(e))))?;
+        Ok((
+            PendingInput::Vertex(Box::new((source, plan, projection))),
+            tail,
+        ))
     }
 }
 
@@ -96,24 +120,55 @@ fn open<'q>(
     cx.with_restriction(|| {
         cx.checkpoint()
             .map_err(|e| QueryError::Stream(GqlQueryError::Interrupted(e)))?;
-        let PreparedNativeRead::Pattern(template) = prepared else {
-            // In particular, a temporal statement cannot override one or both
-            // explicit endpoint arguments. Aggregate/set classes are not scans.
-            return Err(QueryError::StreamingUnsupported {
-                facade: prepared.facade_class(),
-            });
+        let unsupported = || QueryError::StreamingUnsupported {
+            facade: prepared.facade_class(),
         };
-        let query = template
-            .bind_parameters(params)
-            .map_err(QueryError::PatternText)?;
-        let before = open_at(&query, view, cx, before)?;
-        let after = open_at(&query, view, cx, after)?;
+        let mut projection = None;
+        let mut projected_tail = None;
+        let mut projected_columns = None;
+        let mut stages = None;
+        let query = match prepared {
+            PreparedNativeRead::Pattern(template) => template
+                .bind_parameters(params)
+                .map_err(QueryError::PatternText)?,
+            PreparedNativeRead::Set(template) => {
+                let set = template
+                    .bind_parameters(params)
+                    .map_err(QueryError::SetText)?;
+                if let Some((pull, tail)) = set.ordered_row_pull() {
+                    let pattern = pull.pattern().clone();
+                    projection = Some(pull);
+                    projected_tail = Some(tail);
+                    projected_columns = Some(set.columns().to_vec());
+                    pattern
+                } else {
+                    let plan = AsyncSpillSetPlan::compile(&set).map_err(|_| unsupported())?;
+                    // The resident ordered executor admits exactly one native
+                    // graph leaf. Binary/group/procedure owners remain distinct.
+                    let pattern = plan.source_pattern().ok_or_else(unsupported)?.clone();
+                    stages = Some((plan, view.clone()));
+                    pattern
+                }
+            }
+            // A temporal statement cannot replace either explicit endpoint.
+            _ => return Err(unsupported()),
+        };
+        let before = open_at(
+            &query,
+            view,
+            cx,
+            before,
+            projection.clone(),
+            projected_tail.clone(),
+        )?;
+        let after = open_at(&query, view, cx, after, projection, projected_tail)?;
         cx.checkpoint()
             .map_err(|e| QueryError::Stream(GqlQueryError::Interrupted(e)))?;
         Ok(Opened {
-            columns: query.columns().to_vec(),
+            columns: projected_columns.unwrap_or_else(|| query.columns().to_vec()),
             before,
             after,
+            stages,
         })
     })
 }
@@ -135,11 +190,17 @@ impl PreparedNativeRead {
     /// keys, direction/NULL placement and SKIP/LIMIT. Each endpoint executes its
     /// COMPLETE terminal order/window before canonical bag subtraction. Equal
     /// cuts still execute both inputs; LIMIT 0 never hides a late source error.
-    /// Unsupported physical shapes, aggregate/set classes and explicit temporal
-    /// selectors refuse. No eager fallback or temporal-text rewriting occurs.
+    /// One-source projected Sets and unary Project/Filter/Scope/UNWIND chains
+    /// use the same resident ordered executor as spool_ordered. Each source
+    /// and intermediate DISTINCT/order/window completes before the next stage;
+    /// carried vertex/edge properties read that endpoint's exact historical cut.
+    /// Unsupported binary/group/procedure shapes, aggregate carriers and
+    /// explicit temporal selectors refuse before scratch. No eager fallback or
+    /// temporal-text rewriting occurs.
     ///
-    /// policy's source-record/work/scratch bounds cover BOTH source traversals.
-    /// The second source receives the remainder, not a fresh allowance; its
+    /// policy's source-record/work/scratch bounds cover BOTH complete endpoints,
+    /// including every reached carried-element lookup and unary expression.
+    /// The second endpoint receives the remainder, not a fresh allowance; its
     /// ordinary typed budget error reports that residual allowance. ResultRows
     /// counts only final nonzero changed tuples, not private endpoint results.
     /// max_input_rows bounds private occurrences PER ENDPOINT. max_runs bounds
@@ -258,8 +319,11 @@ fn private_policy(mut policy: GqlQueryPolicy) -> GqlQueryPolicy {
 }
 fn remaining(mut policy: GqlQueryPolicy, first: &NativeResultSpool) -> Result<GqlQueryPolicy> {
     if let Some(limit) = policy.rows.max_snapshot_records() {
-        policy.rows =
-            GqlExecutionBudget::snapshot_records(subtract(limit, first.rows.snapshot_records)?);
+        let records = subtract(limit, first.rows.snapshot_records)?;
+        policy.rows = match policy.rows.max_result_rows() {
+            Some(rows) => GqlExecutionBudget::new(records, rows),
+            None => GqlExecutionBudget::snapshot_records(records),
+        };
     }
     policy.evaluator.max_work_units =
         subtract(policy.evaluator.max_work_units, first.evaluator.work_units)?;
@@ -302,14 +366,26 @@ where
         columns,
         before: (before, before_tail),
         after: (after, after_tail),
+        stages,
     } = opened.map_err(|e| GqlQueryError::Source(NativeSpoolError::Prepare(Box::new(e))))?;
-    let input_policy = private_policy(policy);
+    // Endpoint rows are private but remain bounded, including the final stage
+    // of an expanding relation. Only subtraction spends the public row limit.
+    let input_policy = GqlQueryPolicy {
+        rows: match policy.rows.max_snapshot_records() {
+            Some(records) => GqlExecutionBudget::new(records, max_input_rows),
+            None => GqlExecutionBudget::result_rows(max_input_rows),
+        },
+        evaluator: policy.evaluator,
+    };
     let (before, used) = native(
-        super::super::ordered_input(
+        execute_resident_order(
+            OpenedResidentOrder {
+                columns: columns.clone(),
+                input: before.cursor(cx, input_policy, max_input_rows),
+                tail: before_tail,
+                stages: stages.clone(),
+            },
             cx,
-            columns.clone(),
-            before.cursor(cx, input_policy, max_input_rows),
-            before_tail,
             input_policy,
             scratch,
             source,
@@ -317,6 +393,7 @@ where
             max_runs,
             page_bytes,
             max_row_bytes,
+            max_input_rows,
             max_work_units,
         )
         .await,
@@ -324,11 +401,14 @@ where
     let input_policy = native(remaining(input_policy, &before))?;
     let allowance = native(subtract(max_work_units, used))?;
     let (after, spent) = native(
-        super::super::ordered_input(
+        execute_resident_order(
+            OpenedResidentOrder {
+                columns,
+                input: after.cursor(cx, input_policy, max_input_rows),
+                tail: after_tail,
+                stages,
+            },
             cx,
-            columns,
-            after.cursor(cx, input_policy, max_input_rows),
-            after_tail,
             input_policy,
             scratch,
             source,
@@ -336,6 +416,7 @@ where
             max_runs,
             page_bytes,
             max_row_bytes,
+            max_input_rows,
             allowance,
         )
         .await
