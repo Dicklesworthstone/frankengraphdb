@@ -271,16 +271,14 @@ impl PreparedGraphWriteChainText {
     }
 
     /// The write family owning a mandatory MATCH prefix after an earlier
-    /// write. CREATE keeps its direct MATCH prefix; SET/REMOVE use the typed
+    /// write. CREATE keeps its direct MATCH prefix; mutations use the typed
     /// leading-row compiler, including intervening WITH/UNWIND stages.
     /// Everything else remains a terminal read. This is framing only: the
     /// selected compiler still admits the complete relation and write.
     /// Property keys, labels, aliases, map entries and STARTS/ENDS WITH are
     /// never clause boundaries.
     fn matched_write(mut lexer: Lexer<'_>) -> Result<Option<MatchedWrite>, GraphPatternTextError> {
-        const READS: [&str; 8] = [
-            "OPTIONAL", "RETURN", "MERGE", "DELETE", "DETACH", "CALL", "UNION", "FOREACH",
-        ];
+        const READS: [&str; 6] = ["OPTIONAL", "RETURN", "MERGE", "CALL", "UNION", "FOREACH"];
         let mut depth = 0_usize;
         let mut row_stages = false;
         let mut previous: Option<TokenKind<'_>> = None;
@@ -304,6 +302,15 @@ impl PreparedGraphWriteChainText {
                     {
                         return Ok(Some(MatchedWrite::Mutation));
                     }
+                    if (word.eq_ignore_ascii_case("DELETE") || word.eq_ignore_ascii_case("DETACH"))
+                        && Self::deletion_clause_target(
+                            lexer.clone(),
+                            previous,
+                            word.eq_ignore_ascii_case("DETACH"),
+                        )?
+                    {
+                        return Ok(Some(MatchedWrite::Mutation));
+                    }
                     if READS.iter().any(|read| word.eq_ignore_ascii_case(read)) {
                         return Ok(None);
                     }
@@ -318,6 +325,57 @@ impl PreparedGraphWriteChainText {
             }
             previous = Some(token.kind);
         }
+    }
+
+    /// DELETE and DETACH are also legal identifiers. A deletion clause
+    /// follows a complete read expression and starts a new target expression;
+    /// `WITH delete`, `ORDER BY detach` and `n.p = delete` remain row uses.
+    /// The mutation compiler owns the target's actual type and scope, including
+    /// list/map/path targets and the runtime refusal of a non-element value.
+    fn deletion_clause_target(
+        mut lexer: Lexer<'_>,
+        previous: Option<TokenKind<'_>>,
+        detach: bool,
+    ) -> Result<bool, GraphPatternTextError> {
+        if matches!(
+            previous,
+            Some(TokenKind::Punct(
+                b',' | b'.'
+                    | b':'
+                    | b'+'
+                    | b'-'
+                    | b'*'
+                    | b'/'
+                    | b'%'
+                    | b'^'
+                    | b'|'
+                    | b'~'
+                    | b'!'
+                    | b'='
+                    | b'<'
+                    | b'>'
+            ))
+        ) || matches!(previous, Some(TokenKind::Word(word))
+                if ["WITH", "BY", "WHERE", "AS", "AND", "OR", "XOR", "NOT", "WHEN", "THEN",
+                    "ELSE", "IN", "IS", "UNWIND", "SKIP", "LIMIT", "STARTS", "ENDS", "CONTAINS"]
+                    .iter().any(|prefix| word.eq_ignore_ascii_case(prefix)))
+        {
+            return Ok(false);
+        }
+        if detach
+            && !matches!(script::next_script_token(&mut lexer)?.kind,
+                TokenKind::Word(word) if word.eq_ignore_ascii_case("DELETE"))
+        {
+            return Ok(false);
+        }
+        Ok(match script::next_script_token(&mut lexer)?.kind {
+            TokenKind::Word(word) => !RESERVED_NAMES
+                .iter()
+                .any(|reserved| word.eq_ignore_ascii_case(reserved)),
+            TokenKind::Digits(_) | TokenKind::Parameter(_) | TokenKind::Quoted(_) => true,
+            TokenKind::Punct(b'(' | b'[' | b'{' | b'+' | b'-') => true,
+            _ => false,
+        })
     }
 
     /// SET and REMOVE are legal row aliases. Only the native target prefix

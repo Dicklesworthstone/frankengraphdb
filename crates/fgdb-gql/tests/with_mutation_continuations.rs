@@ -52,6 +52,15 @@ fn execute(
     allowance: GraphMutationPolicy,
     checkpoint: impl FnMut() -> Result<(), usize>,
 ) -> Execution {
+    execute_owned(query, allowance, None, checkpoint)
+}
+
+fn execute_owned(
+    query: &PreparedGraphMutationQuery,
+    allowance: GraphMutationPolicy,
+    owned: Option<Vec<GraphValueRow>>,
+    checkpoint: impl FnMut() -> Result<(), usize>,
+) -> Execution {
     let vertices = [VId(BASE + 1), VId(BASE + 2), VId(BASE + 3)];
     let properties: BTreeMap<_, CanonicalPropertyValue> = vertices
         .iter()
@@ -59,7 +68,8 @@ fn execute(
         .map(|(at, &vertex)| ((vertex, P), CanonicalScalar::Int(at as i64 + 1).into()))
         .collect();
     let calls = Cell::new(0);
-    let result = query.execute_governed(
+    let result = query.execute_governed_over(
+        owned,
         allowance,
         |selection, budget| {
             calls.set(calls.get() + 1);
@@ -102,6 +112,61 @@ fn rows(batch: &GraphMutationQueryBatch) -> Vec<Vec<GraphValue>> {
         .iter()
         .map(|row: &GraphValueRow| row.values().to_vec())
         .collect()
+}
+
+#[test]
+fn post_write_match_deletion_uses_native_relations_and_keeps_occurrences() {
+    use fgdb_gql::{GraphMutationIntent, GraphWriteChainStep, PreparedGraphWriteChainText};
+
+    for action in ["DELETE", "DETACH DELETE"] {
+        for hidden_rows in [false, true] {
+            let text = format!(
+                "CREATE (audit) WITH audit MATCH (n) WHERE n.p>=2 \
+                 UNWIND [0,0] AS occurrence {action} n RETURN n,occurrence ORDER BY n{}",
+                if hidden_rows { " LIMIT 0" } else { "" },
+            );
+            assert!(PreparedGraphWriteChainText::is_chain(&text).unwrap());
+            let chain = PreparedGraphWriteChainText::prepare(&text, R, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            let [_, GraphWriteChainStep::MutationQuery(query)] = chain.steps() else {
+                panic!("the mandatory MATCH must feed the native mutation step");
+            };
+            let batch = execute_owned(
+                query,
+                policy(if hidden_rows { 0 } else { 4 }),
+                Some(vec![GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(BASE + 99)),
+                ])]),
+                || Ok(()),
+            )
+            .unwrap();
+            let expected_intents: Vec<_> = [BASE + 2, BASE + 3]
+                .into_iter()
+                .map(|id| {
+                    if action == "DELETE" {
+                        GraphMutationIntent::Delete { vertex: VId(id) }
+                    } else {
+                        GraphMutationIntent::DetachDelete { vertex: VId(id) }
+                    }
+                })
+                .collect();
+            assert_eq!(batch.mutation().intents(), expected_intents);
+            assert_eq!(batch.mutation().stats().effects, 2);
+            assert_eq!(
+                rows(&batch),
+                if hidden_rows {
+                    vec![]
+                } else {
+                    [BASE + 2, BASE + 2, BASE + 3, BASE + 3]
+                        .into_iter()
+                        .map(|id| vec![GraphValue::Vertex(VId(id)), int(0)])
+                        .collect()
+                },
+            );
+        }
+    }
 }
 
 #[test]

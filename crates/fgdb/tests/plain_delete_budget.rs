@@ -1,10 +1,11 @@
 //! Plain DELETE incidence validation is part of the statement's query budget.
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, WriteBatch};
-use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};
+use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertRequest};
 use fgdb_gql::{
-    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphDeletePolicy, GraphSymbol, GraphSymbolKind,
-    PreparedGraphDeleteText,
+    GlaLimitDimension, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphDeletePolicy,
+    GraphSymbol, GraphSymbolKind, PreparedGraphDeleteText, PreparedGraphWriteChainText,
 };
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 
@@ -20,8 +21,154 @@ fn keys() -> DatabaseKeys {
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         _ => None,
     }
+}
+
+#[test]
+fn chain_delete_proof_and_return_share_limits_and_preserve_an_existing_prefix() {
+    let ((), report) = run_async_under_lab(0xd31e_1003, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txcx = contexts.txn();
+        for continue_after_delete in [false, true] {
+            let text = if continue_after_delete {
+                "MATCH (a {p:1})-[r:R]->(b {p:2}) CREATE (audit {p:99}) \
+                 WITH a,r,audit DELETE a,r WITH audit,size(range(1,32)) AS size \
+                 CREATE (out {p:size}) RETURN out.p LIMIT 0"
+            } else {
+                "MATCH (a {p:1})-[r:R]->(b {p:2}) CREATE (audit {p:99}) \
+                 WITH a,r,audit DELETE a,r \
+                 RETURN size(range(1,32)) AS size,audit.p AS p LIMIT 0"
+            };
+            let chain = PreparedGraphWriteChainText::prepare(text, R, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            let mut measured: Option<[u64; 3]> = None;
+            let mut expected_graph = None;
+            for attempt in 0..5 {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(R);
+                for id in 1..=3_u128 {
+                    seed.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(id as i64))]);
+                }
+                // Two MATCH occurrences create two audit rows. The isolated
+                // deletion proof must read both explicit parallel edges once;
+                // the unrelated edge and its property must survive unchanged.
+                for id in [10, 11] {
+                    seed.add_edge(EId(id), VId(1), VId(2), vec![]);
+                }
+                seed.add_edge(EId(12), VId(2), VId(3), vec![(P, CanonicalScalar::Int(42))]);
+                db.write(&commit, seed).await.unwrap();
+                let before = (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap(),
+                );
+                let mut txn = db.begin(&txcx).unwrap();
+                let mut prefix = WriteBatch::new(R);
+                prefix.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(-3)));
+                txn.write(&mut db, prefix).unwrap();
+                let prefix_digest = txn.staged_effect_digest().unwrap();
+                let prefix_graph = (txn.vertices(&db).unwrap(), txn.edges(&db).unwrap());
+                let created = if continue_after_delete { 4 } else { 2 };
+                let mut budget = GraphInsertPolicy::new(
+                    GqlQueryPolicy::new(10_000, 0, 2_000_000, 2_000_000),
+                    created,
+                    0,
+                )
+                .with_mutation_limit(3);
+                if let Some([records, work, scratch]) = measured {
+                    budget.query = GqlQueryPolicy::new(
+                        records - u64::from(attempt == 4),
+                        0,
+                        work - u64::from(attempt == 2),
+                        scratch - u64::from(attempt == 3),
+                    );
+                }
+                let mut next = 1_000_u128;
+                let result = txn.execute_graph_write_chain_governed(
+                    &mut db,
+                    &query,
+                    &chain,
+                    budget,
+                    |request| {
+                        let id = next;
+                        next += 1;
+                        Ok::<_, ()>(match request {
+                            GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(id)),
+                            GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(id)),
+                        })
+                    },
+                );
+                if attempt < 2 {
+                    let (stats, rows, receipt) = result.unwrap();
+                    let usage = [
+                        rows.rows.snapshot_records,
+                        rows.evaluator.work_units,
+                        rows.evaluator.scratch_entries,
+                    ];
+                    assert_eq!(stats.selection, rows.rows);
+                    assert_eq!(stats.evaluator, rows.evaluator);
+                    assert_eq!(stats.created_vertices, created);
+                    assert_eq!(receipt.stats().mutation_effects, 3);
+                    assert!(rows.value.is_empty(), "LIMIT 0 cannot suppress effects");
+                    assert!(txn.vertex(&db, VId(1)).unwrap().is_none());
+                    let graph = (txn.vertices(&db).unwrap(), txn.edges(&db).unwrap());
+                    assert_eq!(graph.0.len(), 2 + created as usize);
+                    assert_eq!(graph.1, vec![before.2[2].clone()]);
+                    if let Some(expected) = measured {
+                        assert_eq!(usage, expected, "exact cumulative limits must succeed");
+                        assert_eq!(Some(&graph), expected_graph.as_ref());
+                        txn.finish(&mut db, &commit).await.unwrap();
+                        assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
+                        assert_eq!((db.vertices().unwrap(), db.edges().unwrap()), graph);
+                    } else {
+                        assert!(usage.into_iter().all(|value| value > 0));
+                        measured = Some(usage);
+                        expected_graph = Some(graph);
+                        txn.abort();
+                    }
+                } else {
+                    let error = result.unwrap_err();
+                    match attempt {
+                        2 => assert!(
+                            matches!(error, GqlQueryError::Evaluator(limit)
+                                if limit.dimension == GlaLimitDimension::WorkUnits),
+                            "{error:?}"
+                        ),
+                        3 => assert!(
+                            matches!(error, GqlQueryError::Evaluator(limit)
+                                if limit.dimension == GlaLimitDimension::ScratchEntries),
+                            "{error:?}"
+                        ),
+                        4 => assert!(matches!(error, GqlQueryError::Rows(_)), "{error:?}"),
+                        _ => unreachable!(),
+                    }
+                    assert_eq!(txn.staged_effect_digest().unwrap(), prefix_digest);
+                    assert_eq!(
+                        (txn.vertices(&db).unwrap(), txn.edges(&db).unwrap()),
+                        prefix_graph
+                    );
+                    assert_eq!(
+                        (
+                            db.frontier().unwrap(),
+                            db.vertices().unwrap(),
+                            db.edges().unwrap()
+                        ),
+                        before,
+                        "every chain effect stays private after a combined-limit refusal"
+                    );
+                    txn.abort();
+                }
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 fn policy() -> GraphDeletePolicy {
     GraphDeletePolicy::new(

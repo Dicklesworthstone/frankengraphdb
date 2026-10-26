@@ -2254,6 +2254,337 @@ fn textual_read_limits_are_cumulative_and_noop_merge_reads_do_not_replay_effects
     });
 }
 
+mod post_write_deletions {
+    use super::*;
+    use fgdb_gql::algebra::GraphValueRow;
+    use fgdb_gql::insertion::GraphInsertStats;
+    use fgdb_gql::{GqlQueryError, GqlQueryExecution, GraphWriteChainError};
+    use fgdb_warden::LimitDimension;
+
+    type Fault = GqlQueryError<GraphWriteChainError<WriteTxnError, WriteTxnError>, WriteTxnError>;
+    type Receipt = (
+        GraphInsertStats,
+        GqlQueryExecution<GraphValueRow>,
+        EmbeddedTxnCompletion,
+    );
+
+    const EDGE_DELETE: &str = "CREATE (audit:Visible {p:99}) WITH audit \
+        MATCH (a:Visible {p:7})-[r:R]->(b:Visible) \
+        UNWIND [0,0] AS occurrence DELETE r \
+        RETURN audit.p AS p, occurrence ORDER BY occurrence";
+
+    fn unrestricted(rows: u64) -> Grant {
+        Grant {
+            labels: Scope::All,
+            relations: Scope::All,
+            properties: Scope::All,
+            ..grant(Rights::ReadWrite, rows)
+        }
+    }
+
+    async fn delete_edges(
+        contexts: &PurposeContexts,
+        hidden: bool,
+        capability: Grant,
+        budget: GraphInsertPolicy,
+    ) -> Result<Receipt, Fault> {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&capability, NOW).unwrap();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(10), vec![L], vec![(P, CanonicalScalar::Int(7))]);
+        seed.create_vertex(VId(20), vec![L], vec![(P, CanonicalScalar::Int(8))]);
+        seed.add_edge(EId(1), VId(10), VId(20), vec![]);
+        if hidden {
+            seed.create_vertex(VId(90), vec![HIDDEN], vec![(P, CanonicalScalar::Int(8))]);
+            seed.add_edge(EId(90), VId(10), VId(90), vec![]);
+        }
+        db.write(&commit, seed).await.unwrap();
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        let result = db
+            .execute_graph_write_chain_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &chain(EDGE_DELETE),
+                budget,
+                || NOW,
+            )
+            .await;
+        if let Ok((stats, rows, completion)) = &result {
+            assert_eq!((stats.created_vertices, stats.created_edges), (1, 0));
+            assert_eq!(rows.rows.result_rows, 2);
+            for row in &rows.value {
+                assert_eq!(
+                    row.values(),
+                    &[
+                        GraphValue::Scalar(CanonicalScalar::Int(99)),
+                        GraphValue::Scalar(CanonicalScalar::Int(0)),
+                    ]
+                );
+            }
+            assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
+            assert_eq!(
+                *completion,
+                EmbeddedTxnCompletion::WriteCommitted {
+                    commit_seq: db.frontier().unwrap()
+                }
+            );
+            let vertices = db.vertices().unwrap();
+            for original in &before.1 {
+                assert_eq!(db.vertex(original.vid).unwrap().as_ref(), Some(original));
+            }
+            assert_eq!(vertices.len(), before.1.len() + 1);
+            let edges = db.edges().unwrap();
+            assert_eq!(
+                edges,
+                before
+                    .2
+                    .into_iter()
+                    .filter(|edge| edge.entry.eid != EId(1))
+                    .collect::<Vec<_>>()
+            );
+            let frontier = db.frontier().unwrap();
+            drop(db);
+            let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+                .await
+                .unwrap();
+            assert_eq!(reopened.frontier().unwrap(), frontier);
+            assert_eq!(reopened.vertices().unwrap(), vertices);
+            assert_eq!(reopened.edges().unwrap(), edges);
+        } else {
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before,
+                "a refused delete must discard the earlier CREATE"
+            );
+        }
+        assert_eq!(txn.outstanding_obligations(), 0);
+        result
+    }
+
+    #[test]
+    fn matched_edge_deletion_preserves_occurrences_hidden_data_and_recovery() {
+        lab(0xc4a1_2101, |contexts| async move {
+            let expected = delete_edges(&contexts, false, grant(Rights::ReadWrite, 2), policy(2))
+                .await
+                .unwrap();
+            let hidden = delete_edges(&contexts, true, grant(Rights::ReadWrite, 2), policy(2))
+                .await
+                .unwrap();
+            assert_eq!(
+                hidden, expected,
+                "hidden incidence changes neither rows nor metering"
+            );
+        });
+    }
+
+    #[test]
+    fn matched_edge_deletion_shares_budgets_and_delivers_only_final_occurrences() {
+        lab(0xc4a1_2102, |contexts| async move {
+            let expected = delete_edges(&contexts, true, grant(Rights::ReadWrite, 2), policy(2))
+                .await
+                .unwrap();
+            let measured = expected.0;
+            assert!(measured.selection.snapshot_records > 0);
+            assert!(measured.evaluator.work_units > 0);
+            assert!(measured.evaluator.scratch_entries > 0);
+            let exact = GraphInsertPolicy::new(
+                GqlQueryPolicy::new(
+                    measured.selection.snapshot_records,
+                    2,
+                    measured.evaluator.work_units,
+                    measured.evaluator.scratch_entries,
+                ),
+                1,
+                0,
+            )
+            .with_mutation_limit(1);
+            for hidden in [false, true] {
+                assert_eq!(
+                    delete_edges(&contexts, hidden, grant(Rights::ReadWrite, 2), exact)
+                        .await
+                        .unwrap(),
+                    expected
+                );
+                for dimension in 0..6 {
+                    let mut budget = exact;
+                    let mut capability = grant(Rights::ReadWrite, 2);
+                    match dimension {
+                        0 => {
+                            budget.query.rows = fgdb_gql::GqlExecutionBudget::new(
+                                measured.selection.snapshot_records - 1,
+                                2,
+                            )
+                        }
+                        1 => budget.query.evaluator.max_work_units -= 1,
+                        2 => budget.query.evaluator.max_scratch_entries -= 1,
+                        3 => budget = budget.with_mutation_limit(0),
+                        4 => {
+                            budget.query.rows = fgdb_gql::GqlExecutionBudget::new(
+                                measured.selection.snapshot_records,
+                                1,
+                            )
+                        }
+                        _ => capability.limits.max_rows = 1,
+                    }
+                    let error = delete_edges(&contexts, hidden, capability, budget)
+                        .await
+                        .expect_err("every stage must spend the shared statement allowance");
+                    if dimension == 5 {
+                        assert_eq!(
+                            authorization(&error),
+                            Some(Error::LimitExceeded(LimitDimension::Rows))
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn matched_vertex_deletion_keeps_incidence_proofs_and_atomic_rollback() {
+        lab(0xc4a1_2103, |contexts| async move {
+            let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+            let issuer = authority();
+            let token = issuer.issue_at(&unrestricted(1), NOW).unwrap();
+            for action in ["DELETE a", "DELETE a,r", "DETACH DELETE a"] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(R);
+                seed.create_vertex(VId(10), vec![L], vec![(P, CanonicalScalar::Int(7))]);
+                seed.create_vertex(VId(20), vec![L], vec![(P, CanonicalScalar::Int(8))]);
+                seed.add_edge(EId(1), VId(10), VId(20), vec![]);
+                db.write(&commit, seed).await.unwrap();
+                let before = (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap(),
+                );
+                let program = chain(&format!(
+                    "CREATE (audit:Visible {{p:99}}) WITH audit \
+                     MATCH (a:Visible {{p:7}})-[r:R]->(b:Visible) \
+                     {action} RETURN audit.p AS p"
+                ));
+                let result = db
+                    .execute_graph_write_chain_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        &program,
+                        policy(1),
+                        || NOW,
+                    )
+                    .await;
+                if action == "DELETE a" {
+                    let error = result.unwrap_err();
+                    assert!(
+                        error.to_string().contains("incident relationship"),
+                        "{error:?}"
+                    );
+                    assert_eq!(
+                        (
+                            db.frontier().unwrap(),
+                            db.vertices().unwrap(),
+                            db.edges().unwrap()
+                        ),
+                        before,
+                    );
+                } else {
+                    let (_, rows, _) = result.unwrap();
+                    assert_eq!(
+                        rows.value[0].values(),
+                        &[GraphValue::Scalar(CanonicalScalar::Int(99))]
+                    );
+                    assert!(db.vertex(VId(10)).unwrap().is_none());
+                    assert_eq!(db.vertex(VId(20)).unwrap().as_ref(), Some(&before.1[1]));
+                    assert!(db.edges().unwrap().is_empty());
+                    assert_eq!(db.vertices().unwrap().len(), 2);
+                    assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
+                }
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        });
+    }
+
+    #[test]
+    fn scoped_matched_vertex_deletion_cannot_probe_hidden_incidence() {
+        lab(0xc4a1_2104, |contexts| async move {
+            let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(Rights::ReadWrite, 1), NOW).unwrap();
+            for hidden in [false, true] {
+                for action in ["DELETE a", "DETACH DELETE a"] {
+                    let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                    let mut seed = WriteBatch::new(R);
+                    seed.create_vertex(VId(10), vec![L], vec![(P, CanonicalScalar::Int(7))]);
+                    if hidden {
+                        seed.create_vertex(VId(90), vec![HIDDEN], vec![]);
+                        seed.add_edge(EId(90), VId(10), VId(90), vec![]);
+                    }
+                    db.write(&commit, seed).await.unwrap();
+                    let before = (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap(),
+                    );
+                    let program = chain(&format!(
+                        "CREATE (audit:Visible {{p:99}}) WITH audit \
+                         MATCH (a:Visible {{p:7}}) {action} RETURN audit.p LIMIT 0"
+                    ));
+                    let error = db
+                        .execute_graph_write_chain_authorized(
+                            &txn,
+                            &query,
+                            &commit,
+                            &issuer,
+                            &token,
+                            "main",
+                            &program,
+                            policy(1),
+                            || NOW,
+                        )
+                        .await
+                        .unwrap_err();
+                    assert_eq!(
+                        authorization(&error),
+                        Some(Error::ScopeDenied),
+                        "{action}: {error:?}"
+                    );
+                    assert_eq!(
+                        (
+                            db.frontier().unwrap(),
+                            db.vertices().unwrap(),
+                            db.edges().unwrap()
+                        ),
+                        before,
+                        "scope refusal must discard the complete write prefix even with LIMIT 0",
+                    );
+                    assert_eq!(txn.outstanding_obligations(), 0);
+                }
+            }
+        });
+    }
+}
+
 mod post_write_mutations {
     use super::*;
     use fgdb_gql::algebra::GraphValueRow;

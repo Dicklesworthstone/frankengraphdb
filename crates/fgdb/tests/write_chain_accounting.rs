@@ -1118,3 +1118,354 @@ fn post_write_match_mutations_share_allowances_and_restore_a_prefix_on_late_fail
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn post_write_match_deletes_preserve_occurrences_and_deleted_identities() {
+    let ((), report) = run_async_under_lab(0xc4a1_100c, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        for (deletion, retired_vertex) in [
+            ("DELETE r", false),
+            ("DELETE a,r", true),
+            ("DETACH DELETE a", true),
+        ] {
+            let mut database = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(VId(1), vec![], vec![(P, CanonicalScalar::Int(1))]);
+            seed.create_vertex(VId(2), vec![], vec![(P, CanonicalScalar::Int(2))]);
+            seed.add_edge(EId(11), VId(1), VId(2), vec![(P, CanonicalScalar::Int(5))]);
+            database.write(&contexts.commit(), seed).await.unwrap();
+            let chain = prepare(&format!(
+                "CREATE (audit {{p:100}}) WITH audit MATCH (a {{p:1}})-[r:R]->(b) \
+                 WITH audit,a,b,r,r.p AS before UNWIND [0,0] AS copy \
+                 {deletion} RETURN before,a,r,b,audit.p,copy",
+            ));
+            let next = AtomicU64::new(1_000);
+            let mut transaction = database.begin(&contexts.txn()).unwrap();
+            let (stats, result, receipt) = transaction
+                .execute_graph_write_chain_governed(
+                    &mut database,
+                    &contexts.query(),
+                    &chain,
+                    policy(2, HIGH, HIGH),
+                    |request| allocate(&next, request),
+                )
+                .unwrap();
+            assert_eq!(stats.created_vertices, 1, "{deletion}");
+            assert_eq!(result.value.len(), 2, "{deletion}");
+            for row in result.value {
+                assert_eq!(
+                    row.values(),
+                    &[
+                        GraphValue::Scalar(CanonicalScalar::Int(5)),
+                        GraphValue::Vertex(VId(1)),
+                        GraphValue::Edge(EId(11)),
+                        GraphValue::Vertex(VId(2)),
+                        GraphValue::Scalar(CanonicalScalar::Int(100)),
+                        GraphValue::Scalar(CanonicalScalar::Int(0)),
+                    ],
+                    "{deletion}",
+                );
+            }
+            assert_eq!(
+                receipt.stats().mutation_effects,
+                if deletion == "DELETE a,r" { 2 } else { 1 },
+                "duplicate occurrences do not duplicate deletion effects: {deletion}",
+            );
+            assert_eq!(
+                transaction.vertex(&database, VId(1)).unwrap().is_none(),
+                retired_vertex,
+                "{deletion}",
+            );
+            assert!(transaction.vertex(&database, VId(2)).unwrap().is_some());
+            assert!(transaction.edges(&database).unwrap().is_empty());
+            transaction
+                .finish(&mut database, &contexts.commit())
+                .await
+                .unwrap();
+            assert_eq!(database.frontier().unwrap().0, 2);
+            assert_eq!(
+                database.vertices().unwrap().len(),
+                if retired_vertex { 2 } else { 3 }
+            );
+            assert!(database.edges().unwrap().is_empty());
+        }
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn post_write_match_deletes_read_staged_graph_and_feed_later_writes() {
+    let ((), report) = run_async_under_lab(0xc4a1_100d, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut database = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let next = AtomicU64::new(1_000);
+        // Both the relationship selected for deletion and its endpoints were
+        // created earlier in this same statement. The later MATCH must see
+        // the deleted relationship absent before it creates the replacement.
+        let chain = prepare(
+            "CREATE (a {p:1}),(b {p:2}),(a)-[old:R {p:7}]->(b) \
+             WITH a,b MATCH (a)-[r:R]->(b) WITH a,b,r,r.p AS before DELETE r \
+             WITH a,b,before MATCH (a) CREATE (a)-[replacement:R {p:before+1}]->(b) \
+             RETURN replacement.p,a.p,b.p",
+        );
+        let mut transaction = database.begin(&contexts.txn()).unwrap();
+        let (stats, result, _) = transaction
+            .execute_graph_write_chain_governed(
+                &mut database,
+                &contexts.query(),
+                &chain,
+                policy(1, HIGH, HIGH),
+                |request| allocate(&next, request),
+            )
+            .unwrap();
+        assert_eq!((stats.created_vertices, stats.created_edges), (2, 2));
+        assert_eq!(result.value.len(), 1);
+        assert_eq!(
+            result.value[0].values(),
+            &[
+                GraphValue::Scalar(CanonicalScalar::Int(8)),
+                GraphValue::Scalar(CanonicalScalar::Int(1)),
+                GraphValue::Scalar(CanonicalScalar::Int(2)),
+            ],
+        );
+        let edges = transaction.edges(&database).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].props, vec![(P, CanonicalScalar::Int(8).into())]);
+        transaction
+            .finish(&mut database, &contexts.commit())
+            .await
+            .unwrap();
+        assert_eq!(database.edges().unwrap().len(), 1);
+
+        // A computed target uses the existing typed mutation expression;
+        // selection finishes before any target is retired.
+        let computed = prepare(
+            "CREATE (audit {p:100}) WITH audit MATCH (n {p:2}) \
+             WITH audit,n.p AS before,[n] AS targets DETACH DELETE targets[0] \
+             RETURN before,audit.p",
+        );
+        let mut transaction = database.begin(&contexts.txn()).unwrap();
+        let (_, result, _) = transaction
+            .execute_graph_write_chain_governed(
+                &mut database,
+                &contexts.query(),
+                &computed,
+                policy(1, HIGH, HIGH),
+                |request| allocate(&next, request),
+            )
+            .unwrap();
+        assert_eq!(
+            result.value[0].values(),
+            &[
+                GraphValue::Scalar(CanonicalScalar::Int(2)),
+                GraphValue::Scalar(CanonicalScalar::Int(100)),
+            ],
+        );
+        assert_eq!(transaction.vertices(&database).unwrap().len(), 2);
+        assert!(transaction.edges(&database).unwrap().is_empty());
+        transaction
+            .finish(&mut database, &contexts.commit())
+            .await
+            .unwrap();
+
+        let empty = prepare(
+            "CREATE (audit {p:200}) WITH audit MATCH (n {p:99}) \
+             DETACH DELETE n RETURN n",
+        );
+        let mut transaction = database.begin(&contexts.txn()).unwrap();
+        let (stats, result, receipt) = transaction
+            .execute_graph_write_chain_governed(
+                &mut database,
+                &contexts.query(),
+                &empty,
+                policy(0, HIGH, HIGH).with_mutation_limit(0),
+                |request| allocate(&next, request),
+            )
+            .unwrap();
+        assert_eq!(stats.created_vertices, 1);
+        assert_eq!(receipt.stats().mutation_effects, 0);
+        assert!(result.value.is_empty());
+        transaction
+            .finish(&mut database, &contexts.commit())
+            .await
+            .unwrap();
+        assert_eq!(database.frontier().unwrap().0, 3);
+        assert_eq!(database.vertices().unwrap().len(), 3);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn post_write_match_delete_failures_restore_the_existing_transaction_prefix() {
+    let ((), report) = run_async_under_lab(0xc4a1_100e, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut database = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(1), vec![], vec![(P, CanonicalScalar::Int(1))]);
+        seed.create_vertex(VId(2), vec![], vec![(P, CanonicalScalar::Int(2))]);
+        seed.add_edge(EId(11), VId(1), VId(2), vec![(P, CanonicalScalar::Int(5))]);
+        database.write(&contexts.commit(), seed).await.unwrap();
+        let basis = database.frontier().unwrap();
+        let next = AtomicU64::new(1_000);
+        let mut transaction = database.begin(&contexts.txn()).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(7), vec![], vec![(P, CanonicalScalar::Int(99))]);
+        transaction.write(&mut database, prefix).unwrap();
+        let digest = transaction.staged_effect_digest().unwrap();
+        for (text, incident) in [
+            (
+                "CREATE (audit {p:100}) WITH audit MATCH (n {p:1}) DELETE n RETURN n",
+                true,
+            ),
+            (
+                "CREATE (audit {p:100}) WITH audit MATCH (n {p:1}) \
+                 DETACH DELETE n RETURN n.p LIMIT 0",
+                false,
+            ),
+            (
+                "MATCH (victim {p:1}) CREATE (audit {p:100}) WITH victim,audit \
+                 MATCH (n {p:2}) DETACH DELETE victim RETURN victim.p LIMIT 0",
+                false,
+            ),
+            (
+                "CREATE (audit {p:100}) WITH audit MATCH (a {p:1})-[r:R]->(b) \
+                 DELETE r RETURN r.p LIMIT 0",
+                false,
+            ),
+        ] {
+            let chain = prepare(text);
+            let error = transaction
+                .execute_graph_write_chain_governed(
+                    &mut database,
+                    &contexts.query(),
+                    &chain,
+                    policy(1, HIGH, HIGH),
+                    |request| allocate(&next, request),
+                )
+                .unwrap_err();
+            if incident {
+                assert!(
+                    matches!(
+                        error,
+                        GqlQueryError::Source(fgdb_gql::GraphWriteChainError::Mutation(
+                            fgdb_gql::GraphMutationQueryError::Mutation(
+                                fgdb_gql::GraphMutationError::IncidentRelationships
+                            )
+                        ))
+                    ),
+                    "{text}: {error:?}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        error,
+                        GqlQueryError::Source(fgdb_gql::GraphWriteChainError::Mutation(
+                            fgdb_gql::GraphMutationQueryError::Mutation(
+                                fgdb_gql::GraphMutationError::DeletedElementRead { .. }
+                            )
+                        ))
+                    ),
+                    "{text}: {error:?}"
+                );
+            }
+            assert_eq!(
+                transaction.staged_effect_digest().unwrap(),
+                digest,
+                "{text}"
+            );
+            assert_eq!(transaction.vertices(&database).unwrap().len(), 3, "{text}");
+            assert_eq!(transaction.edges(&database).unwrap().len(), 1, "{text}");
+            assert_eq!(database.frontier().unwrap(), basis);
+        }
+        // Retrying through the same transaction retains only the successful
+        // allocation, alongside its earlier staged prefix.
+        let retry = prepare(
+            "CREATE (audit {p:100}) WITH audit MATCH (n {p:1}) \
+             WITH audit,n,n.p AS before DETACH DELETE n RETURN n,before,audit.p",
+        );
+        let (_, result, _) = transaction
+            .execute_graph_write_chain_governed(
+                &mut database,
+                &contexts.query(),
+                &retry,
+                policy(1, HIGH, HIGH),
+                |request| allocate(&next, request),
+            )
+            .unwrap();
+        assert_eq!(
+            result.value[0].values(),
+            &[
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Scalar(CanonicalScalar::Int(1)),
+                GraphValue::Scalar(CanonicalScalar::Int(100)),
+            ],
+        );
+        assert_eq!(transaction.vertices(&database).unwrap().len(), 3);
+        assert!(transaction.edges(&database).unwrap().is_empty());
+        transaction
+            .finish(&mut database, &contexts.commit())
+            .await
+            .unwrap();
+        assert_eq!(database.frontier().unwrap().0, basis.0 + 1);
+        assert!(database.vertex(VId(1)).unwrap().is_none());
+        assert!(database.vertex(VId(7)).unwrap().is_some());
+        assert_eq!(database.vertices().unwrap().len(), 3);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn deletion_keywords_stay_legal_row_aliases_between_writes() {
+    let ((), report) = run_async_under_lab(0xc4a1_100f, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        for alias in ["delete", "detach"] {
+            for tail in [
+                format!("WITH {alias} ORDER BY {alias}.p RETURN {alias}.p"),
+                format!("WITH {alias},n DELETE n RETURN {alias}.p"),
+            ] {
+                let mut database = Database::open_memory(&contexts.commit(), keys())
+                    .await
+                    .unwrap();
+                let text = format!(
+                    "CREATE (a {{p:1}}),(b {{p:2}}) WITH a AS {alias} \
+                     MATCH (n {{p:2}}) {tail}",
+                );
+                let chain = prepare(&text);
+                let next = AtomicU64::new(1_000);
+                let mut transaction = database.begin(&contexts.txn()).unwrap();
+                let (_, result, _) = transaction
+                    .execute_graph_write_chain_governed(
+                        &mut database,
+                        &contexts.query(),
+                        &chain,
+                        policy(1, HIGH, HIGH),
+                        |request| allocate(&next, request),
+                    )
+                    .unwrap();
+                assert_eq!(result.value.len(), 1, "{text}");
+                assert_eq!(
+                    result.value[0].values(),
+                    &[GraphValue::Scalar(CanonicalScalar::Int(1))],
+                    "{text}",
+                );
+                assert_eq!(
+                    transaction.vertices(&database).unwrap().len(),
+                    if tail.contains("DELETE n") { 1 } else { 2 },
+                    "{text}",
+                );
+                transaction.abort();
+            }
+        }
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
