@@ -18,7 +18,8 @@ pub struct FnxExecutionLimits {
     pub max_iterations: usize,
     pub max_result_rows: usize,
     /// Admission model: PageRank (n + arcs) * (max_iter + 1), BFS/CC n + arcs,
-    /// WCC n + 2*arcs, SCC 2*(n + arcs). Dijkstra includes heap sift height;
+    /// WCC n + 2*arcs, SCC 2*(n + arcs). Dijkstra includes heap sift height,
+    /// or 5*n+2*arcs when proven unit weights permit an exact FIFO traversal.
     /// Triangle kernels include forward-CSR construction and a lower-degree
     /// row bound per undirected edge, plus initialization and conversion.
     /// CDLP includes graph-law checks, histogram initialization, all synchronous
@@ -977,6 +978,7 @@ impl FnxCallSpec {
         checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
         let algorithm = self.algorithm();
         let signature = self.signature();
+        let mut execution_kernel = signature.execution_kernel;
         let numeric_profile = self.numeric_profile();
         let n = graph.node_count();
         match signature.graph_kind {
@@ -1032,7 +1034,7 @@ impl FnxCallSpec {
                 n.checked_add(arcs).and_then(|step| step.checked_mul(2))
             }
             FnxAlgorithm::SingleSourceDijkstraPathLength(_) => {
-                Some(crate::shortest_path::estimated_work::<C>(n, arcs)?)
+                Some(crate::shortest_path::decoded_work::<C>(graph, arcs)?)
             }
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
                 Some(crate::clustering::estimated_work(graph, &mut checkpoint)?)
@@ -1057,10 +1059,9 @@ impl FnxCallSpec {
         let word = std::mem::size_of::<usize>();
         let mut kernel_workspace_bytes = match algorithm {
             // Successful PageRank returns its measured allocation peak below.
-            FnxAlgorithm::PageRank(_) | FnxAlgorithm::Cdlp { .. } => 0,
-            FnxAlgorithm::SingleSourceDijkstraPathLength(_) => {
-                crate::shortest_path::workspace_bytes::<C>(n)?
-            }
+            FnxAlgorithm::PageRank(_)
+            | FnxAlgorithm::Cdlp { .. }
+            | FnxAlgorithm::SingleSourceDijkstraPathLength(_) => 0,
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
                 crate::clustering::workspace_bytes::<C>(n, graph.edge_count())?
             }
@@ -1097,12 +1098,15 @@ impl FnxCallSpec {
                 }
             }
             FnxAlgorithm::SingleSourceDijkstraPathLength(options) => {
-                let output = crate::shortest_path::run(
+                let run = crate::shortest_path::run(
                     graph,
                     options,
                     limits.max_result_rows,
                     &mut checkpoint,
                 )?;
+                kernel_workspace_bytes = run.workspace_bytes;
+                execution_kernel = run.execution_kernel;
+                let output = run.output;
                 KernelOutput {
                     values: KernelValues::WeightedDistances(output.distances),
                     row_count: output.row_count,
@@ -1195,7 +1199,7 @@ impl FnxCallSpec {
         hash.update(b"fgdb:prism:call-certificate:v5");
         hash.update(&FNX_SIGNATURE_REGISTRY_VERSION.to_le_bytes());
         hash.update(FNX_IMPLEMENTATION_REVISION.as_bytes());
-        hash_text(&mut hash, signature.execution_kernel);
+        hash_text(&mut hash, execution_kernel);
         hash.update(&kernel_source_digest.0);
         hash_text(&mut hash, numeric_profile);
         hash.update(&graph.digest().0);
@@ -1228,7 +1232,7 @@ impl FnxCallSpec {
         let certificate = FnxCertificate {
             registry_version: FNX_SIGNATURE_REGISTRY_VERSION,
             implementation_revision: FNX_IMPLEMENTATION_REVISION,
-            execution_kernel: signature.execution_kernel,
+            execution_kernel,
             kernel_source_digest,
             numeric_profile,
             snapshot: graph.binding(),

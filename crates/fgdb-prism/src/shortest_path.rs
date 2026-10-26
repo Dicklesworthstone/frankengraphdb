@@ -4,6 +4,8 @@
 //! avoids the O(m) duplicate queue of lazy-deletion Dijkstra implementations.
 //! Equal costs use FIFO discovery from canonical VId-ordered rows. Only finite,
 //! nonnegative projected weights are accepted, including zero-weight cycles.
+//! When the immutable, reduced projection proves every weight is one, a FIFO
+//! computes the same weighted distances without heap repairs or overflow state.
 
 use crate::execute::{admit, reserve};
 use crate::{
@@ -75,7 +77,7 @@ impl DijkstraOptions {
 pub struct DijkstraOutput {
     pub distances: Vec<Option<f64>>,
     pub row_count: usize,
-    /// Finalized vertices, relaxation edges, and maximum active heap entries.
+    /// Finalized vertices, relaxation edges, and maximum active queue entries.
     /// Preflight weight validation and output conversion are separate work.
     pub witness: ComplexityWitness,
 }
@@ -103,11 +105,56 @@ pub fn dijkstra<C>(
     }
     admit(
         "estimated work",
-        estimated_work(n, arcs)?,
+        decoded_work(graph, arcs)?,
         limits.max_estimated_work,
     )?;
-    workspace_bytes::<C>(n)?;
-    run(graph, options, limits.max_result_rows, &mut checkpoint)
+    run(graph, options, limits.max_result_rows, &mut checkpoint).map(|run| run.output)
+}
+
+/// All discovered distances are exact integer hop counts. A simple shortest
+/// path has at most n-1 arcs, and its next candidate must also be exactly
+/// representable in f64. Larger populations retain the general weighted path.
+fn exact_unit_population(n: usize) -> bool {
+    n as u128 <= 1u128 << 53
+}
+
+fn uses_unit_fifo(graph: &SnapshotGraphView) -> bool {
+    #[cfg(test)]
+    if tests::force_indexed_heap() {
+        return false;
+    }
+    graph.has_unit_weights() && exact_unit_population(graph.node_count())
+}
+
+/// The unit case prices the population passes (admission, weight validation,
+/// initialization, finalization and result conversion) and both arc passes.
+/// Constant call transitions are excluded, as in the heap admission model.
+pub(crate) fn decoded_work<C>(
+    graph: &SnapshotGraphView,
+    arcs: usize,
+) -> Result<usize, FnxExecutionError<C>> {
+    if uses_unit_fifo(graph) {
+        graph
+            .node_count()
+            .checked_mul(5)
+            .and_then(|nodes| arcs.checked_mul(2).and_then(|arcs| nodes.checked_add(arcs)))
+            .ok_or(FnxExecutionError::SizeOverflow)
+    } else {
+        estimated_work(graph.node_count(), arcs)
+    }
+}
+
+pub(crate) struct DijkstraRun {
+    pub(crate) output: DijkstraOutput,
+    pub(crate) workspace_bytes: usize,
+    pub(crate) execution_kernel: &'static str,
+}
+
+fn vector_bytes<T, C>(values: &Vec<T>) -> Result<usize, FnxExecutionError<C>> {
+    values
+        .capacity()
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or(FnxExecutionError::SizeOverflow)
 }
 
 /// Conservative admission model including validation and both heap sift
@@ -689,13 +736,27 @@ pub(crate) fn run<C>(
     options: DijkstraOptions,
     row_limit: usize,
     checkpoint: &mut impl FnxMeter<C>,
-) -> Result<DijkstraOutput, FnxExecutionError<C>> {
+) -> Result<DijkstraRun, FnxExecutionError<C>> {
     let source = graph
         .vertex_ordinal(options.source)
         .ok_or(FnxExecutionError::UnknownSource(options.source))?;
     admit("result rows", 1, row_limit)?;
-    let n = graph.node_count();
     validate_weights(graph, checkpoint)?;
+    if uses_unit_fifo(graph) {
+        return run_unit_fifo(graph, source, options.cutoff, row_limit, checkpoint);
+    }
+    run_indexed_heap(graph, source, options, row_limit, checkpoint)
+}
+
+fn run_indexed_heap<C>(
+    graph: &SnapshotGraphView,
+    source: usize,
+    options: DijkstraOptions,
+    row_limit: usize,
+    checkpoint: &mut impl FnxMeter<C>,
+) -> Result<DijkstraRun, FnxExecutionError<C>> {
+    let n = graph.node_count();
+    workspace_bytes::<C>(n)?;
     let mut distances = reserve(n)?;
     let mut overflowed = reserve(n)?;
     let mut heap = IndexedHeap::new_metered(n, options.comparison, checkpoint)?;
@@ -758,10 +819,132 @@ pub(crate) fn run<C>(
         }
     }
     validate_overflow(&distances, &overflowed, checkpoint)?;
-    Ok(DijkstraOutput {
-        distances,
-        row_count: discovered,
-        witness,
+    let bytes = [
+        vector_bytes::<_, C>(&distances)?,
+        vector_bytes::<_, C>(&overflowed)?,
+        vector_bytes::<_, C>(&heap.entries)?,
+        vector_bytes::<_, C>(&heap.positions)?,
+    ];
+    let workspace_bytes = bytes
+        .into_iter()
+        .try_fold(0usize, usize::checked_add)
+        .ok_or(FnxExecutionError::SizeOverflow)?;
+    Ok(DijkstraRun {
+        output: DijkstraOutput {
+            distances,
+            row_count: discovered,
+            witness,
+        },
+        workspace_bytes,
+        execution_kernel: "fgdb-prism/dijkstra-indexed-heap-v1",
+    })
+}
+
+/// With unit weights, first discovery is final under both registered
+/// comparison policies. Canonical outgoing rows and this FIFO produce the
+/// indexed heap's same cost/FIFO finalization order, including cutoff rows.
+/// No path can overflow under exact_unit_population; no overflow bitmap or
+/// inverse heap directory is needed. All state stays private until completion.
+fn run_unit_fifo<C>(
+    graph: &SnapshotGraphView,
+    source: usize,
+    cutoff: Option<f64>,
+    row_limit: usize,
+    checkpoint: &mut impl FnxMeter<C>,
+) -> Result<DijkstraRun, FnxExecutionError<C>> {
+    let n = graph.node_count();
+    checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+    checkpoint.poll().map_err(FnxExecutionError::Cancelled)?;
+    let mut distances = reserve(n)?;
+    let mut queue = reserve(n)?;
+    let workspace_bytes = vector_bytes::<Option<f64>, C>(&distances)?
+        .checked_add(vector_bytes::<usize, C>(&queue)?)
+        .ok_or(FnxExecutionError::SizeOverflow)?;
+    while distances.len() < n {
+        let count = (n - distances.len()).min(FNX_METER_RUN);
+        checkpoint
+            .units(count)
+            .map_err(FnxExecutionError::Cancelled)?;
+        checkpoint.poll().map_err(FnxExecutionError::Cancelled)?;
+        distances.resize(distances.len() + count, None);
+    }
+    checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+    distances[source] = Some(0.0);
+    queue.push(source);
+    let mut head = 0usize;
+    let mut witness = ComplexityWitness {
+        algorithm: "single_source_dijkstra_unit_fifo".to_owned(),
+        complexity_claim: "O(|V| + |E|) for proven unit projected weights".to_owned(),
+        nodes_touched: 0,
+        edges_scanned: 0,
+        queue_peak: 1,
+    };
+    while head < queue.len() {
+        checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+        let node = queue[head];
+        head += 1;
+        if head.is_multiple_of(FNX_METER_RUN) {
+            checkpoint.poll().map_err(FnxExecutionError::Cancelled)?;
+        }
+        let cost = distances[node].ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+        witness.nodes_touched = witness
+            .nodes_touched
+            .checked_add(1)
+            .ok_or(FnxExecutionError::SizeOverflow)?;
+        let row = graph
+            .neighbors_indices(node)
+            .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+        let candidate = cost + 1.0;
+        let within_cutoff = cutoff.is_none_or(|limit| candidate <= limit);
+        let mut at = 0usize;
+        while at < row.len() {
+            // At most every member of a run is new. This bound keeps row
+            // admission infallible inside a multi-edge run; when the quota is
+            // full, inspect one edge at a time until the first new neighbor.
+            let available = if within_cutoff {
+                row_limit.saturating_sub(queue.len()).max(1)
+            } else {
+                FNX_METER_RUN
+            };
+            let proposed = (row.len() - at).min(FNX_METER_RUN).min(available);
+            let count = if witness.edges_scanned.checked_add(proposed).is_some() {
+                proposed
+            } else {
+                1
+            };
+            checkpoint
+                .units(count)
+                .map_err(FnxExecutionError::Cancelled)?;
+            checkpoint.poll().map_err(FnxExecutionError::Cancelled)?;
+            for &target in &row[at..at + count] {
+                witness.edges_scanned = witness
+                    .edges_scanned
+                    .checked_add(1)
+                    .ok_or(FnxExecutionError::SizeOverflow)?;
+                if !within_cutoff || distances[target].is_some() {
+                    continue;
+                }
+                let discovered = queue
+                    .len()
+                    .checked_add(1)
+                    .ok_or(FnxExecutionError::SizeOverflow)?;
+                admit("result rows", discovered, row_limit)?;
+                distances[target] = Some(candidate);
+                queue.push(target);
+                witness.queue_peak = witness.queue_peak.max(queue.len() - head);
+            }
+            at += count;
+        }
+    }
+    checkpoint.poll().map_err(FnxExecutionError::Cancelled)?;
+    Ok(DijkstraRun {
+        output: DijkstraOutput {
+            distances,
+            row_count: queue.len(),
+            witness,
+        },
+        workspace_bytes,
+        execution_kernel: "fgdb-prism/dijkstra-unit-fifo-v1",
     })
 }
 
@@ -778,9 +961,25 @@ mod tests {
     use std::convert::Infallible;
 
     thread_local! {
+        static INDEXED_HEAP_ONLY: Cell<bool> = const { Cell::new(false) };
         static INCUMBENT_WEIGHT_SCAN: Cell<bool> = const { Cell::new(false) };
         static INCUMBENT_HEAP: Cell<bool> = const { Cell::new(false) };
         static INCUMBENT_PASSES: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(super) fn force_indexed_heap() -> bool {
+        INDEXED_HEAP_ONLY.with(Cell::get)
+    }
+
+    fn with_indexed_heap<R>(enabled: bool, work: impl FnOnce() -> R) -> R {
+        struct Reset(bool);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                INDEXED_HEAP_ONLY.with(|mode| mode.set(self.0));
+            }
+        }
+        let _reset = Reset(INDEXED_HEAP_ONLY.with(|mode| mode.replace(enabled)));
+        work()
     }
 
     pub(super) fn scan_incumbent_weights() -> bool {
@@ -942,6 +1141,339 @@ mod tests {
             Ok::<(), Infallible>(())
         })
         .unwrap()
+    }
+
+    #[test]
+    fn unit_fifo_matches_indexed_heap_on_every_small_topology_cutoff_and_comparison() {
+        for mask in 0u16..512 {
+            let edges: Vec<_> = (0..9)
+                .filter(|bit| mask & (1 << bit) != 0)
+                .map(|bit| (bit / 3, bit % 3, 1.0))
+                .collect();
+            for direction in [
+                Directedness::Directed,
+                Directedness::Reversed,
+                Directedness::Undirected,
+            ] {
+                let view = graph(3, &edges, direction);
+                assert!(uses_unit_fifo(&view));
+                for comparison in [DijkstraComparison::Strict, DijkstraComparison::FnxEpsilon] {
+                    for source in 0..3 {
+                        for cutoff in [None, Some(0.0), Some(0.5), Some(1.0), Some(1.5), Some(2.0)]
+                        {
+                            let options =
+                                options(&view, source, cutoff).with_comparison(comparison);
+                            let attempt = |heap| {
+                                with_indexed_heap(heap, || {
+                                    dijkstra(&view, options, limits(), || Ok::<_, Infallible>(()))
+                                        .unwrap()
+                                })
+                            };
+                            let before = attempt(true);
+                            let after = attempt(false);
+                            assert_eq!(
+                                after
+                                    .distances
+                                    .iter()
+                                    .map(|d| d.map(f64::to_bits))
+                                    .collect::<Vec<_>>(),
+                                before
+                                    .distances
+                                    .iter()
+                                    .map(|d| d.map(f64::to_bits))
+                                    .collect::<Vec<_>>(),
+                                "mask={mask} {direction:?} source={source} cutoff={cutoff:?} {comparison:?}"
+                            );
+                            assert_eq!(after.row_count, before.row_count);
+                            assert_eq!(after.witness.nodes_touched, before.witness.nodes_touched);
+                            assert_eq!(after.witness.edges_scanned, before.witness.edges_scanned);
+                            assert_eq!(after.witness.queue_peak, before.witness.queue_peak);
+                            assert_eq!(after.witness.algorithm, "single_source_dijkstra_unit_fifo");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unit_fifo_certifies_real_workspace_linear_admission_and_weighted_rows() {
+        let n = 67;
+        let mut edges: Vec<_> = (1..n).map(|v| (0, v, 1.0)).collect();
+        edges.extend([(1, 2, 1.0), (2, 1, 1.0), (2, 2, 1.0)]);
+        let view = graph(n, &edges, Directedness::Directed);
+        let call = FnxCallSpec::single_source_dijkstra_path_length(options(&view, 0, None));
+        let cap = FnxExecutionLimits {
+            max_result_rows: n,
+            ..limits()
+        };
+        let before = with_indexed_heap(true, || {
+            call.execute(&view, cap, || Ok::<_, Infallible>(()))
+                .unwrap()
+        });
+        let after = call
+            .execute(&view, cap, || Ok::<_, Infallible>(()))
+            .unwrap();
+        assert_eq!(after.rows, before.rows);
+        assert_eq!(
+            after.certificate.result_digest,
+            before.certificate.result_digest
+        );
+        assert_eq!(
+            after.certificate.call_digest,
+            before.certificate.call_digest
+        );
+        assert_eq!(
+            after.certificate.numeric_profile,
+            before.certificate.numeric_profile
+        );
+        assert_eq!(
+            after.certificate.execution_kernel,
+            "fgdb-prism/dijkstra-unit-fifo-v1"
+        );
+        assert_eq!(
+            before.certificate.execution_kernel,
+            "fgdb-prism/dijkstra-indexed-heap-v1"
+        );
+        assert_ne!(after.certificate.digest, before.certificate.digest);
+        let fifo_bytes = n * (std::mem::size_of::<usize>() + std::mem::size_of::<Option<f64>>());
+        assert_eq!(after.certificate.kernel_workspace_bytes, fifo_bytes);
+        assert_eq!(
+            before.certificate.kernel_workspace_bytes,
+            workspace_bytes::<Infallible>(n).unwrap()
+        );
+        assert!(
+            after.certificate.kernel_workspace_bytes < before.certificate.kernel_workspace_bytes
+        );
+        assert_eq!(after.certificate.estimated_work, 5 * n + 2 * edges.len());
+        assert!(after.certificate.estimated_work < before.certificate.estimated_work);
+        assert_eq!(after.rows[0][1], FnxValue::Float(0.0));
+        assert!(matches!(after.rows[0][0], FnxValue::Vertex(VId(v)) if v > u64::MAX as u128));
+        let tight = FnxExecutionLimits {
+            max_estimated_work: after.certificate.estimated_work,
+            ..cap
+        };
+        assert!(
+            call.execute(&view, tight, || Ok::<_, Infallible>(()))
+                .is_ok()
+        );
+        assert!(matches!(
+            with_indexed_heap(true, || call
+                .execute(&view, tight, || Ok::<_, Infallible>(()))),
+            Err(FnxExecutionError::LimitExceeded {
+                resource: "estimated work",
+                ..
+            })
+        ));
+        assert!(matches!(
+            call.execute(
+                &view,
+                FnxExecutionLimits {
+                    max_estimated_work: tight.max_estimated_work - 1,
+                    ..tight
+                },
+                || Ok::<_, Infallible>(())
+            ),
+            Err(FnxExecutionError::LimitExceeded {
+                resource: "estimated work",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn unit_fifo_uses_final_reductions_and_keeps_general_weighted_fallbacks() {
+        assert!(exact_unit_population(0));
+        if let Ok(bound) = usize::try_from(1u64 << 53) {
+            assert!(exact_unit_population(bound));
+            assert!(!exact_unit_population(bound + 1));
+        }
+        let vertices = [VId(0), VId(1u128 << 90), VId(u128::MAX)];
+        for (parallel_edges, weights) in [
+            (ParallelEdgePolicy::CollapseUnit, [-9.0, 4.0]),
+            (ParallelEdgePolicy::Sum, [-1.0, 2.0]),
+            (ParallelEdgePolicy::Minimum, [1.0, 2.0]),
+            (ParallelEdgePolicy::Maximum, [0.5, 1.0]),
+        ] {
+            let edges: Vec<_> = weights
+                .into_iter()
+                .enumerate()
+                .map(|(i, weight)| ProjectionEdge {
+                    eid: EId(i as u128),
+                    source: vertices[0],
+                    target: vertices[1],
+                    weight,
+                })
+                .collect();
+            for directedness in [
+                Directedness::Directed,
+                Directedness::Reversed,
+                Directedness::Undirected,
+            ] {
+                let view = SnapshotGraphView::build(
+                    SnapshotBinding {
+                        root: ObjectId([2; 32]),
+                        as_of: CommitSeq(1),
+                    },
+                    &vertices,
+                    &edges,
+                    ProjectionSpec {
+                        directedness,
+                        parallel_edges,
+                        self_loops: SelfLoopPolicy::Keep,
+                    },
+                    ProjectionLimits {
+                        max_vertices: 3,
+                        max_input_edges: 2,
+                        max_adjacency_entries: 4,
+                        max_workspace_bytes: 1 << 20,
+                    },
+                )
+                .unwrap();
+                assert!(uses_unit_fifo(&view), "{parallel_edges:?} {directedness:?}");
+                let actual = execute(&view, 0, None);
+                let expected = with_indexed_heap(true, || execute(&view, 0, None));
+                assert_eq!(actual.distances, expected.distances);
+            }
+        }
+        for weight in [0.0, -0.0, 0.5, 2.0, -1.0, f64::MAX] {
+            let view = graph(5, &[(0, 1, 1.0), (2, 3, weight)], Directedness::Directed);
+            assert!(!uses_unit_fifo(&view));
+            for cutoff in [None, Some(0.0), Some(1.0)] {
+                let call =
+                    FnxCallSpec::single_source_dijkstra_path_length(options(&view, 0, cutoff));
+                let actual = full_call(&view, &call, limits(), false, None);
+                let expected =
+                    with_indexed_heap(true, || full_call(&view, &call, limits(), false, None));
+                assert_eq!(actual.0, expected.0);
+                assert_eq!(
+                    (actual.1.seen, actual.1.polls),
+                    (expected.1.seen, expected.1.polls)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unit_fifo_batches_preserve_each_logical_refusal_and_row_limit_boundary() {
+        struct Scalar<'a>(ExactMeter<'a>);
+        impl FnxMeter<&'static str> for Scalar<'_> {
+            fn unit(&mut self) -> Result<(), &'static str> {
+                self.0.unit()
+            }
+            fn poll(&mut self) -> Result<(), &'static str> {
+                self.0.poll()
+            }
+        }
+        let n = 2 * FNX_METER_RUN + 5;
+        let mut edges: Vec<_> = (1..n).map(|v| (0, v, 1.0)).collect();
+        edges.extend([(1, 0, 1.0), (2, 3, 1.0), (n - 1, n - 1, 1.0)]);
+        let view = graph(n, &edges, Directedness::Directed);
+        for cutoff in [None, Some(0.5), Some(1.0)] {
+            let call = FnxCallSpec::single_source_dijkstra_path_length(options(&view, 0, cutoff));
+            for max_result_rows in [0, 1, FNX_METER_RUN - 1, FNX_METER_RUN, FNX_METER_RUN + 1, n] {
+                let cap = FnxExecutionLimits {
+                    max_result_rows,
+                    ..limits()
+                };
+                let attempt = |batched, stop| {
+                    let mut trace = Trace::default();
+                    let meter = ExactMeter {
+                        trace: &mut trace,
+                        stop,
+                    };
+                    let result = if batched {
+                        call.execute(&view, cap, meter)
+                    } else {
+                        call.execute(&view, cap, Scalar(meter))
+                    };
+                    (result.map_err(|error| format!("{error:?}")), trace)
+                };
+                let (expected, before) = attempt(false, None);
+                let (actual, after) = attempt(true, None);
+                assert_eq!(actual, expected);
+                assert_eq!((after.seen, after.polls), (before.seen, before.polls));
+                let heap = with_indexed_heap(true, || full_call(&view, &call, cap, false, None).0);
+                match (&actual, &heap) {
+                    (Ok(a), Ok(b)) => assert_eq!(a.rows, b.rows),
+                    (Err(a), Err(b)) => assert_eq!(a, b),
+                    _ => panic!("row admission differs: {cutoff:?} rows={max_result_rows}"),
+                }
+                for stop in 1..=before.seen + 1 {
+                    let (expected, before) = attempt(false, Some(stop));
+                    let (actual, after) = attempt(true, Some(stop));
+                    assert_eq!(
+                        actual, expected,
+                        "{cutoff:?} rows={max_result_rows} stop={stop}"
+                    );
+                    assert_eq!((after.seen, after.polls), (before.seen, before.polls));
+                    if stop <= before.seen {
+                        assert!(
+                            matches!(actual, Err(ref message) if message.contains("Cancelled"))
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unit_fifo_live_cancellation_is_bounded_inside_hubs_and_initialization() {
+        #[derive(Default)]
+        struct Live {
+            units: usize,
+            previous_poll: usize,
+            polls: usize,
+            stop: Option<usize>,
+        }
+        impl FnxMeter<&'static str> for Live {
+            fn unit(&mut self) -> Result<(), &'static str> {
+                self.units(1)
+            }
+            fn units(&mut self, n: usize) -> Result<(), &'static str> {
+                assert!((1..=FNX_METER_RUN).contains(&n));
+                self.units += n;
+                Ok(())
+            }
+            fn poll(&mut self) -> Result<(), &'static str> {
+                // Initialization, FIFO pops and row arithmetic all have
+                // bounded live checks independently of logical charging.
+                assert!(self.units - self.previous_poll <= 2 * FNX_METER_RUN + 2);
+                self.previous_poll = self.units;
+                self.polls += 1;
+                if self.stop == Some(self.polls) {
+                    Err("live")
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let n = 4109;
+        let edges: Vec<_> = (1..n).map(|v| (0, v, 1.0)).collect();
+        let view = graph(n, &edges, Directedness::Directed);
+        let mut complete = Live::default();
+        let result = run_unit_fifo(&view, 0, None, n, &mut complete).unwrap();
+        assert_eq!(result.output.row_count, n);
+        assert!(complete.polls > 3 * n / FNX_METER_RUN);
+        for stop in 1..=complete.polls {
+            let mut meter = Live {
+                stop: Some(stop),
+                ..Live::default()
+            };
+            assert!(matches!(
+                run_unit_fifo(&view, 0, None, n, &mut meter),
+                Err(FnxExecutionError::Cancelled("live"))
+            ));
+            assert_eq!(meter.polls, stop);
+        }
+        // A failed call leaves the immutable projection reusable.
+        assert_eq!(
+            run_unit_fifo(&view, 0, None, n, &mut Live::default())
+                .unwrap()
+                .output
+                .distances,
+            result.output.distances
+        );
     }
 
     #[test]

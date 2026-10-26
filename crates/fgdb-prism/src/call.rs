@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 15;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 16;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -255,8 +255,8 @@ const SIGNATURES: &[FnxSignature] = &[
         numeric_profile: "dijkstra-f64-policy-selected-by-strict-v1",
         rng_policy: "none",
         graph_laws: "explicit projection; finite nonnegative weights; inclusive cost cutoff; FIFO ties; fnx 1e-12 relaxation unless strict; reachable rows in VId order",
-        complexity: "O((|V| + |E|) * log(1 + |V|))",
-        execution_kernel: "fgdb-prism/dijkstra-indexed-heap-v1",
+        complexity: "O((|V| + |E|) * log(1 + |V|)); O(|V| + |E|) when final projected weights are all one and |V| <= 2^53",
+        execution_kernel: "fgdb-prism/dijkstra-unit-or-indexed-heap-v2",
     },
     FnxSignature {
         name: "fnx.triangles",
