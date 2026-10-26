@@ -357,7 +357,9 @@ impl ServeOptions {
                                 _ => GraphSymbolKind::Property,
                             };
                             let (name, id) = binding(value(args, &mut at, flag)?, flag)?;
-                            db.symbols.bind(kind, &name, id).map_err(Failure::usage)?;
+                            db.symbols
+                                .bind(kind, &name, u64::from(id))
+                                .map_err(Failure::usage)?;
                         }
                         _ => {
                             return Err(Failure::usage(format!(
@@ -453,7 +455,7 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
                 fgdb_gql::symbol_bindings::parse_symbol_bindings(&bytes).map_err(Failure::usage)?;
             for binding in bindings {
                 db.symbols
-                    .bind(binding.kind, &binding.name, binding.id)
+                    .bind(binding.kind, &binding.name, u64::from(binding.id))
                     .map_err(|error| {
                         Failure::usage(format!("bindings file line {}: {error}", binding.line))
                     })?;

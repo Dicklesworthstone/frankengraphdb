@@ -15,7 +15,8 @@ use crate::recovery::{Generation, Unavailable};
 use crate::shutdown::Waiter;
 use crate::{Served, Server};
 use asupersync::Cx;
-use core::future::poll_fn;
+use core::future::{Future, poll_fn};
+use core::pin::Pin;
 use core::task::Poll;
 use fgdb_protocol::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, Credential, Empty, ErrorBody, ErrorCode,
@@ -180,7 +181,18 @@ struct Lane {
     send_generation: Option<Generation>,
 }
 
-pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
+/// Prove Send once before a listener task captures the connection state.
+/// One allocation per connection bounds the downstream task's future type;
+/// row pulls retain their native allocation and polling behavior.
+pub(crate) fn run<'a>(
+    cx: &'a Cx,
+    server: &'a Server,
+    stream: Box<dyn DuplexIo>,
+) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    Box::pin(run_inner(cx, server, stream))
+}
+
+async fn run_inner(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
     let limits = FrameLimits::new(server.limits.max_frame_len as usize)
         .expect("server limits were validated at construction");
     let Ok((read, write)) = split_duplex(cx, stream) else {

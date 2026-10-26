@@ -286,11 +286,13 @@ mod storage_read_seal {
     pub trait Sealed {}
 }
 
-/// Purpose-typed authority for synchronous storage reads.
+/// Purpose-typed authority for storage reads.
 ///
 /// Implementations install their existing role restriction while the read is
 /// executed. The trait is sealed to the storage-capable database roles; in
 /// particular, deterministic merge evaluation cannot satisfy this boundary.
+/// Shared read contexts are Sync so a borrowed context can accompany a Send
+/// asynchronous read without exposing any additional capability.
 ///
 /// ```compile_fail
 /// use fgdb_types::{MergeEvalCx, StorageReadCx};
@@ -301,7 +303,7 @@ mod storage_read_seal {
 ///     requires_storage_read(cx);
 /// }
 /// ```
-pub trait StorageReadCx: storage_read_seal::Sealed {
+pub trait StorageReadCx: storage_read_seal::Sealed + Sync {
     /// Runs a storage read with this role's synchronous restriction installed.
     fn with_restriction<T>(&self, run: impl FnOnce() -> T) -> T;
 

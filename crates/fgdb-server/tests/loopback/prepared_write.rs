@@ -554,10 +554,18 @@ fn fgp_prepared_returning_cancellation_only_stops_delivery_and_authority_stays_l
         );
         let mut no_rows = grant(Rights::ReadWrite);
         no_rows.limits.max_rows = 0;
-        limited
-            .refresh_authority(cx, token(&no_rows))
-            .await
-            .unwrap();
+        assert_eq!(
+            server_code(
+                limited
+                    .refresh_authority(cx, token(&no_rows))
+                    .await
+                    .unwrap_err()
+            ),
+            ErrorCode::Unauthenticated,
+            "zero rows cannot authorize widening the previous one-unit work allowance"
+        );
+        let mut limited = Client::connect(cx, addr, token(&no_rows)).await.unwrap();
+        limited.select(cx, "social").await.unwrap();
         let limited_handle = limited
             .prepare_write_returning(cx, "CREATE (n:Person {age:99}) RETURN n.age AS age", vec![])
             .await

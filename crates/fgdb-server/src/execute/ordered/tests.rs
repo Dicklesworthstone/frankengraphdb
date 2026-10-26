@@ -1,7 +1,7 @@
 use super::*;
 use crate::recovery::tests::{fail_after_marker, served, settled, vertex};
 use asupersync::lab::run_async_under_lab;
-use fgdb_warden::{Grant, QueryLimits};
+use fgdb_warden::{Grant, QueryLimits, Scope};
 
 fn accepted<T>(result: Result<T, Refusal>) -> T {
     result.unwrap_or_else(|error| panic!("{}: {}", error.code.name(), error.message))
@@ -189,21 +189,20 @@ fn ordered_difference_preserves_signed_multiplicity_and_refuses_stale_delivery()
                 .unwrap(),
         );
         let db = &server.databases["test"];
-        let token = db
-            .authority
-            .issue_at(
-                &Grant::read_only(
-                    TRUNK,
-                    u64::MAX / 2,
-                    QueryLimits {
-                        max_nodes: 100_000,
-                        max_work: 100_000_000,
-                        max_rows: 1,
-                    },
-                ),
-                unix_millis(),
-            )
-            .unwrap();
+        let mut grant = Grant::read_only(
+            TRUNK,
+            u64::MAX / 2,
+            QueryLimits {
+                max_nodes: 100_000,
+                max_work: 100_000_000,
+                max_rows: 1,
+            },
+        );
+        let denied = db.authority.issue_at(&grant, unix_millis()).unwrap();
+        // read_only starts with no visible objects. This query needs vertex
+        // visibility; relation and property scopes remain empty.
+        grant.labels = Scope::All;
+        let token = db.authority.issue_at(&grant, unix_millis()).unwrap();
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let query = contexts.query();
         let mut initial = vertex(1);
@@ -228,6 +227,21 @@ fn ordered_difference_preserves_signed_multiplicity_and_refuses_stale_delivery()
             .unwrap();
 
         let generation = accepted(ordered_generation(db, &token));
+        {
+            let (mut hidden, _) =
+                accepted(read_ordered_session(&root, db, &denied, None, generation.clone()).await);
+            let hidden_plan = accepted(hidden.prepare(
+                &query,
+                "MATCH (n) RETURN 1 AS value",
+                &fgdb_gql::GqlParameters::new(),
+            ));
+            let parameters = fgdb_gql::GqlParameters::new();
+            let execution =
+                accepted(hidden.start_difference(&query, &hidden_plan, &parameters, 1, 2));
+            let mut cursor = accepted(execution.finish().await);
+            assert!(accepted(cursor.next().await).is_none());
+            assert!(cursor.exhausted());
+        }
         let (mut session, _) =
             accepted(read_ordered_session(&root, db, &token, None, generation.clone()).await);
         let params = fgdb_gql::GqlParameters::new();

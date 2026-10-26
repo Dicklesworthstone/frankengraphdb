@@ -29,6 +29,7 @@
 #![forbid(unsafe_code)]
 
 mod canonical;
+pub mod catalog;
 mod fold;
 mod index;
 pub mod zset;

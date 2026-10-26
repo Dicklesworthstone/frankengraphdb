@@ -6,7 +6,6 @@ use fgdb_gql::GraphSymbolKind;
 use fgdb_protocol::body::{ExecuteConditionalWrite, ExecuteMode};
 use fgdb_types::{CommitSeq, VId};
 use fgdb_warden::{Grant, QueryLimits};
-use std::future::Future;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 

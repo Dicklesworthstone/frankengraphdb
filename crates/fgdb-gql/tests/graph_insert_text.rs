@@ -2,6 +2,7 @@
 //! inspect complete generated intents, not just successful syntax admission.
 
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
+use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::*;
 use fgdb_gql::{
     GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphInsertTextErrorKind,
@@ -983,10 +984,10 @@ fn unwind_creation_rejects_invalid_scope_and_unsupported_forms_before_catalog() 
         // `x.name` is a map entry since fgdb-2jw3z slice 3, checked per row
         // at execution (crates/fgdb/tests/map_values.rs); a map literal is
         // never a property value. A list literal is a stored List since
-        // fgdb-k3nub (a_create_property_may_be_a_temporal_or_composite_value);
-        // a list PARAMETER still binds no stored List.
+        // fgdb-k3nub (a_create_property_may_be_a_temporal_or_composite_value).
+        // A list parameter can also be stored; its exact intents are covered
+        // by list_parameter_is_both_unwind_input_and_stored_property below.
         "UNWIND [1] AS x CREATE (:Copy {p:{name: x}})",
-        "UNWIND $items AS x CREATE (:Copy {p:$items})",
         // `UNWIND ... MATCH ... CREATE` is supported since 70ebdf31; its
         // positive laws are in graph_insert_query_text.rs.
         "UNWIND [1] AS x CREATE (n:Copy {p:x}) RETURN n",
@@ -1017,6 +1018,55 @@ fn unwind_creation_rejects_invalid_scope_and_unsupported_forms_before_catalog() 
         .is_err()
     );
     assert_eq!(calls.get(), 0);
+}
+
+#[test]
+fn list_parameter_is_both_unwind_input_and_stored_property() {
+    let parameters = GqlParameters::new()
+        .with_list(
+            "items",
+            vec![
+                GraphValue::Scalar(CanonicalScalar::Int(1)),
+                GraphValue::Scalar(CanonicalScalar::Int(2)),
+            ],
+        )
+        .unwrap();
+    let query = PreparedGraphInsertText::prepare(
+        "UNWIND $items AS x CREATE (:Copy {p:$items})",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&parameters)
+    .unwrap();
+    let result: ResultOf = query.execute_governed(
+        policy(),
+        |_, _| panic!("parameter UNWIND has no graph source"),
+        identity,
+        || Ok(()),
+    );
+    let stored = CanonicalPropertyValue::List(
+        CanonicalList::try_new(vec![
+            CanonicalScalar::Int(1).into(),
+            CanonicalScalar::Int(2).into(),
+        ])
+        .unwrap(),
+    );
+    assert_eq!(
+        result.unwrap().intents(),
+        vec![
+            GraphInsertIntent::Vertex {
+                vertex: VId(100),
+                labels: vec![COPY],
+                properties: vec![(P, stored.clone())],
+            },
+            GraphInsertIntent::Vertex {
+                vertex: VId(116),
+                labels: vec![COPY],
+                properties: vec![(P, stored)],
+            },
+        ]
+    );
 }
 
 #[test]
