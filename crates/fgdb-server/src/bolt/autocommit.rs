@@ -75,6 +75,14 @@ fn is_native_write(
         // Preparing the definition does not expand parameter rows or allocate
         // identities. PULL/DISCARD later binds the retained definition.
         // Execution uses one signed permit and the queued generation fence.
+        // Map arguments splice as the executor's ReturningTemplate splices
+        // them (fgdb-0s2pq), so both classify the same statement.
+        let lowered = fgdb_gql::GqlMapArgumentText::lower(text, parameters);
+        let (text, parameters) = lowered
+            .as_ref()
+            .map_or((text, parameters), |(lowered, derived)| {
+                (lowered.text(), derived)
+            });
         let declarations: Vec<_> = parameters.parameter_types().collect();
         return PreparedGraphWriteChainText::prepare_with_parameter_types(
             text,
