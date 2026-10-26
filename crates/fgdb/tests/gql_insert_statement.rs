@@ -2027,19 +2027,167 @@ fn a_write_after_create_updates_what_the_create_made() {
         assert_eq!(receipt.stats().created_vertices, 2);
         assert_eq!(db.vertices().unwrap().len(), vertices);
 
-        // A SET is the last write: another write after it refuses, and
-        // nothing is written.
+        // Another write may follow a SET: it runs over the SET's post-write
+        // rows, and the statement commits once.
         let before = db.frontier().unwrap();
-        assert!(
-            write(
-                &mut db,
-                "CREATE (n:Person) SET n.p = 1 CREATE (m:Copy)",
-                GqlParameters::new(),
+        let (people, copies) = (labelled(&db, PERSON).len(), labelled(&db, COPY).len());
+        write(
+            &mut db,
+            "CREATE (n:Person) SET n.p = 1 CREATE (m:Copy)",
+            GqlParameters::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+        assert_eq!(labelled(&db, PERSON).len(), people + 1);
+        assert_eq!(labelled(&db, COPY).len(), copies + 1);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// A SET, REMOVE or DELETE another write follows hands that write its
+/// post-write rows, through its WITH head or, directly before the write,
+/// with every binding as `WITH *` carries them (TCK Match5 [26], Merge1 [14],
+/// Merge5 [21]). Deleting a relationship and creating its replacement renames
+/// a relationship type in one statement.
+#[test]
+fn a_write_after_a_mutation_reads_its_post_write_rows() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4ab, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = fresh(&commit, true).await;
+        let mut next = 100u128;
+        let mut write = async |db: &mut Database<MemVfs>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    next += 1;
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                    })
+                },
             )
             .await
-            .is_err()
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        let relations = |db: &Database<MemVfs>| {
+            db.edges()
+                .unwrap()
+                .into_iter()
+                .map(|edge| (edge.entry.src, edge.entry.relation, edge.entry.dst))
+                .collect::<Vec<_>>()
+        };
+        let labelled = |db: &Database<MemVfs>, label: LabelId| {
+            let mut props = db
+                .vertices()
+                .unwrap()
+                .into_iter()
+                .filter(|vertex| vertex.labels == vec![label])
+                .map(|vertex| vertex.props)
+                .collect::<Vec<_>>();
+            props.sort();
+            props
+        };
+        let stored = |value: i64| -> CanonicalPropertyValue { CanonicalScalar::Int(value).into() };
+        let int = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+
+        // Rename the seeded R relationship to T, then back through a WITH.
+        write(
+            &mut db,
+            "MATCH (a:Source)-[r:R]->(b:Source) DELETE r CREATE (a)-[:T]->(b)",
+        )
+        .await
+        .unwrap();
+        assert_eq!(relations(&db), [(VId(10), T, VId(20))]);
+        write(
+            &mut db,
+            "MATCH (a:Source)-[r:T]->(b:Source) WITH a, b, r DELETE r CREATE (a)-[:R]->(b)",
+        )
+        .await
+        .unwrap();
+        assert_eq!(relations(&db), [(VId(10), R, VId(20))]);
+
+        // The next write reads the value the SET left, not the matched one.
+        write(
+            &mut db,
+            "MATCH (n:Source) SET n.q = n.p + 1 CREATE (:Copy {p: n.q})",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            labelled(&db, COPY),
+            [vec![(P, stored(11))], vec![(P, stored(21))]]
         );
-        assert_eq!(db.frontier().unwrap(), before);
+        // A WITH head filters the post-write rows the next write reads.
+        let headed = write(
+            &mut db,
+            "MATCH (n:Source) SET n.q = n.q * 2 WITH n WHERE n.p = 10 \
+             CREATE (n)-[:T]->(m:Person {p: n.q}) RETURN m.p AS p",
+        )
+        .await
+        .unwrap();
+        let QueryResult::Rows { rows, .. } = headed else {
+            unreachable!("a chain with RETURN answers rows")
+        };
+        assert_eq!(rows, [vec![int(22)]]);
+        assert_eq!(labelled(&db, PERSON), [vec![(P, stored(22))]]);
+        // A SET between two CREATEs.
+        write(
+            &mut db,
+            "CREATE (n:Person {p: 1}) SET n.p = 2 CREATE (:Copy {p: n.p})",
+        )
+        .await
+        .unwrap();
+        assert_eq!(labelled(&db, COPY).len(), 3);
+
+        // Merge1 [14]: a MERGE after a DELETE never matches what the DELETE
+        // removed. The first row creates the vertex and the later ones bind it.
+        let merged = write(
+            &mut db,
+            "MATCH (a:Copy) DELETE a MERGE (b:Copy) RETURN b.p AS p",
+        )
+        .await
+        .unwrap();
+        let QueryResult::Rows { rows, .. } = merged else {
+            unreachable!("a chain with RETURN answers rows")
+        };
+        let null = QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null));
+        assert_eq!(rows, vec![vec![null.clone()]; 3]);
+        assert_eq!(labelled(&db, COPY), [Vec::new()]);
+
+        // A failing later write rolls the mutation back with it, and a
+        // relationship to a vertex the statement deleted refuses.
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        for refused in [
+            "MATCH (n:Source) SET n.q = 0 CREATE (:Copy {p: 1 / 0})",
+            "MATCH (a:Copy) DELETE a CREATE (a)-[:R]->(:Copy)",
+        ] {
+            assert!(write(&mut db, refused).await.is_err(), "{refused}");
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before,
+                "{refused}"
+            );
+        }
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

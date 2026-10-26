@@ -920,6 +920,15 @@ mod tests {
             "CREATE (n {p: 1}) REMOVE n.p",
             "MATCH () CREATE (n) DELETE n",
             "CREATE (n) DETACH DELETE n",
+            // A write after a SET, REMOVE or DELETE reads its post-write rows
+            // (TCK Match5 [26], Merge1 [14], Merge5 [21]).
+            "MATCH (a)-[r:OLD]->(b) DELETE r CREATE (a)-[:NEW]->(b)",
+            "MATCH (a)-[r:OLD]->(b) WITH a, b, r DELETE r CREATE (a)-[:NEW]->(b)",
+            "MATCH (n:A) SET n.x = 1 WITH n CREATE (n)-[:T]->(:C)",
+            "MATCH (n) REMOVE n.x MERGE (m:M)",
+            "MATCH (a:A) DELETE a MERGE (a2:A) RETURN a2.num",
+            "MATCH (a)-[t:T]->(b) DELETE t MERGE (a)-[t2:T {name: 'rel3'}]->(b) RETURN t2.name",
+            "CREATE (n) SET n.p = 1 CREATE (m)",
         ] {
             assert!(
                 PreparedGraphWriteChainText::is_chain(text).unwrap(),
@@ -964,6 +973,8 @@ mod tests {
             "MERGE (n:L) RETURN n",
             // A SET without a CREATE before it is the mutation's own.
             "MATCH (n) SET n.p = 1",
+            "MATCH (n) SET n.p = 1 RETURN n",
+            "MATCH (n) SET n.p = 1 WITH n RETURN n.p",
             "MATCH (n) WITH n SET n.p = 1 RETURN n",
             "MATCH (n {p: 'CREATE (x)'}) DELETE n",
         ] {
