@@ -1,11 +1,11 @@
-//! Filterless owner counts retain native history, resource and output laws.
+//! Exact owner counts retain native history, resource and output laws.
 
 use asupersync::{CancelKind, lab::run_async_under_lab};
 use fgdb::{
     Database, DatabaseKeys, EmbeddedReadView, GqlError, MemVfs, PreparedNativeRead, QueryError,
     QueryResult, QueryValue, ReadError, WriteBatch,
 };
-use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{
     GqlBudgetDimension, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateError,
     GraphSymbol, GraphSymbolKind, PreparedGraphAggregate, PreparedGraphAggregateText,
@@ -36,6 +36,9 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(S)),
         (GraphSymbolKind::Relation, "T") => Some(GraphSymbol::Relation(RelationId(3))),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+        (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
+        (GraphSymbolKind::Label, "M") => Some(GraphSymbol::Label(LabelId(2))),
+        (GraphSymbolKind::Label, "Missing") => Some(GraphSymbol::Label(LabelId(3))),
         _ => None,
     }
 }
@@ -447,6 +450,142 @@ fn exact_current_counts_do_not_grow_with_graph_and_reopen_rebuilds_before_reuse(
             .unwrap();
         assert_eq!(next.value[0].values()[0].as_count(), Some(511));
         assert_eq!(next.rows.snapshot_records, 1);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn exact_label_counts_track_membership_without_graph_sized_query_admission() {
+    let ((), report) = run_async_under_lab(0xc017_0031, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let vfs = MemVfs::new().unwrap();
+        let dir = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&contexts.commit(), vfs.clone(), &dir, keys())
+            .await
+            .unwrap();
+        let labeled = aggregate("MATCH (n:L) RETURN COUNT(*) AS total");
+        let other = aggregate("MATCH (n:M) RETURN COUNT(*) AS total");
+        let absent = aggregate("MATCH (n:Missing) RETURN COUNT(*) AS total");
+        let small = GqlQueryPolicy::new(1, 10, 1000, 1000);
+        let mut baseline = None;
+        let mut pinned = None;
+        let mut begin = 1;
+        for total in [1_u128, 32, 512] {
+            let mut batch = WriteBatch::new(R);
+            for id in begin..=total {
+                let mut labels = vec![LabelId(1)];
+                if id % 3 == 0 {
+                    labels.push(LabelId(2));
+                }
+                batch.create_vertex(VId(id), labels, vec![(P, CanonicalScalar::Int(id as i64))]);
+            }
+            db.write(&contexts.commit(), batch).await.unwrap();
+            for (query, expected) in [
+                (&labeled, total as u64),
+                (&other, total as u64 / 3),
+                (&absent, 0),
+            ] {
+                let result = db
+                    .execute_graph_aggregate_governed(&contexts.query(), query, small)
+                    .unwrap();
+                assert_eq!(result.rows.snapshot_records, 1);
+                assert_eq!(result.value[0].values()[0].as_count(), Some(expected));
+            }
+            // After both labels exist, lookup and finalization depend only on
+            // the fixed label population, not the growing vertex population.
+            if total >= 32 {
+                let result = db
+                    .execute_graph_aggregate_governed(&contexts.query(), &labeled, small)
+                    .unwrap();
+                let observed = (
+                    result.evaluator.work_units,
+                    result.evaluator.scratch_entries,
+                );
+                assert_eq!(*baseline.get_or_insert(observed), observed);
+            }
+            if total == 32 {
+                pinned = Some(db.read_session().unwrap());
+            }
+            begin = total + 1;
+        }
+        let pinned = pinned.unwrap();
+        let mut changes = WriteBatch::new(R);
+        changes.set_vertex_label(VId(1), LabelId(1), false);
+        changes.set_vertex_label(VId(1), LabelId(1), false);
+        changes.set_vertex_label(VId(2), LabelId(2), true);
+        changes.set_vertex_label(VId(2), LabelId(2), true);
+        changes.set_vertex_property(VId(4), P, Some(CanonicalScalar::Int(-1)));
+        changes.delete_vertex(VId(3));
+        changes.create_vertex(VId(513), vec![LabelId(1), LabelId(2)], vec![]);
+        changes.delete_vertex(VId(513));
+        db.write(&contexts.commit(), changes).await.unwrap();
+        for (query, expected) in [(&labeled, 510), (&other, 170), (&absent, 0)] {
+            let result = db
+                .execute_graph_aggregate_governed(&contexts.query(), query, small)
+                .unwrap();
+            assert_eq!(result.rows.snapshot_records, 1);
+            assert_eq!(result.value[0].values()[0].as_count(), Some(expected));
+        }
+        assert_eq!(
+            pinned
+                .execute_graph_aggregate_governed(&contexts.query(), &labeled, small)
+                .unwrap()
+                .value[0]
+                .values()[0]
+                .as_count(),
+            Some(32)
+        );
+        assert_eq!(
+            db.execute_graph_aggregate_governed_at(
+                &contexts.query(),
+                &labeled,
+                CommitSeq(1),
+                policy()
+            )
+            .unwrap()
+            .value[0]
+                .values()[0]
+                .as_count(),
+            Some(1)
+        );
+        let intersection = aggregate("MATCH (n:L:M) RETURN COUNT(*) AS total");
+        assert!(intersection.count_metadata_source().is_none());
+        assert_eq!(
+            db.execute_graph_aggregate_governed(&contexts.query(), &intersection, policy())
+                .unwrap()
+                .value[0]
+                .values()[0]
+                .as_count(),
+            Some(170)
+        );
+        db.compact(&contexts.commit()).await.unwrap();
+        assert_eq!(
+            db.execute_graph_aggregate_governed(&contexts.query(), &labeled, small)
+                .unwrap()
+                .value[0]
+                .values()[0]
+                .as_count(),
+            Some(510)
+        );
+        drop(db);
+        let reopened = Database::open_with_vfs(&contexts.commit(), vfs, &dir, keys())
+            .await
+            .unwrap();
+        assert!(
+            matches!(reopened.execute_graph_aggregate_governed(&contexts.query(), &labeled, small), Err(GqlQueryError::Rows(error)) if error.dimension == GqlBudgetDimension::SnapshotRecords)
+        );
+        let cold = reopened
+            .execute_graph_aggregate_governed(&contexts.query(), &labeled, policy())
+            .unwrap();
+        assert_eq!(cold.rows.snapshot_records, 511);
+        assert_eq!(cold.value[0].values()[0].as_count(), Some(510));
+        for (query, expected) in [(&labeled, 510), (&other, 170), (&absent, 0)] {
+            let warm = reopened
+                .execute_graph_aggregate_governed(&contexts.query(), query, small)
+                .unwrap();
+            assert_eq!(warm.rows.snapshot_records, 1);
+            assert_eq!(warm.value[0].values()[0].as_count(), Some(expected));
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

@@ -661,6 +661,11 @@ fn relation_count_summaries_are_bounded_and_accounted() {
         }
         let mut core = recording.finish(relations as u64 + 1).unwrap();
         assert_eq!(core.count_source(GraphCountSource::Vertices), Some((1, 1)));
+        assert_eq!(
+            core.count_source(GraphCountSource::Label(fgdb_delta_types::LabelId(1))),
+            None,
+            "scoped admission cannot substitute owner label metadata"
+        );
         let expected = (relations <= COUNT_SUMMARY_RELATIONS).then_some((relations as u64, 1));
         assert_eq!(
             core.count_source(GraphCountSource::Relation(RelationId(0))),

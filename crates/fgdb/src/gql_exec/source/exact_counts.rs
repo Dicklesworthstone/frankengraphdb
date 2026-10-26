@@ -3,19 +3,21 @@
 //! admission, authorize a hidden population, or supply a historical estimate.
 
 use super::{IndexMap, SourceEvent};
-use fgdb_delta_types::{DeltaRow, RelationId};
+use fgdb_delta_types::{DeltaRow, LabelId, RelationId};
 use fgdb_gql::GraphCountSource;
 use fgdb_strata::writer::BlockWriter;
 use std::sync::OnceLock;
 
 // Bound retained metadata independently of both edge and vertex cardinality.
-const MAX_RELATIONS: usize = 4096;
+const MAX_COUNTERS: usize = 4096;
 type Relations = Option<IndexMap<RelationId, u64>>;
+type Labels = Option<IndexMap<LabelId, u64>>;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ExactCounts {
     vertices: OnceLock<u64>,
     relations: OnceLock<Relations>,
+    labels: OnceLock<Labels>,
 }
 
 impl ExactCounts {
@@ -24,6 +26,7 @@ impl ExactCounts {
             Self {
                 vertices: OnceLock::from(0),
                 relations: OnceLock::from(Some(IndexMap::new())),
+                labels: OnceLock::from(Some(IndexMap::new())),
             }
         } else {
             Self::default()
@@ -37,24 +40,17 @@ impl ExactCounts {
     ) -> Result<Option<u64>, E> {
         let value = match source {
             GraphCountSource::Vertices => self.vertices.get().copied(),
+            GraphCountSource::Label(label) => {
+                let Some(Some(index)) = self.labels.get() else {
+                    return Ok(None);
+                };
+                Some(lookup_key(index, label, control)?)
+            }
             GraphCountSource::Relation(relation) => {
                 let Some(Some(index)) = self.relations.get() else {
                     return Ok(None);
                 };
-                let mut node = index.0.as_deref();
-                let mut value = 0;
-                while let Some(current) = node {
-                    control(SourceEvent::Work)?;
-                    match relation.cmp(&current.key) {
-                        std::cmp::Ordering::Less => node = current.left.0.as_deref(),
-                        std::cmp::Ordering::Greater => node = current.right.0.as_deref(),
-                        std::cmp::Ordering::Equal => {
-                            value = current.value;
-                            break;
-                        }
-                    }
-                }
-                Some(value)
+                Some(lookup_key(index, relation, control)?)
             }
         };
         if value.is_some() {
@@ -71,6 +67,10 @@ impl ExactCounts {
             .then(RelationBuilder::default)
     }
 
+    pub(super) fn label_builder(&self) -> Option<LabelBuilder> {
+        self.labels.get().is_none().then(LabelBuilder::default)
+    }
+
     // Called only after the whole governed query, including its output, has
     // succeeded. A cancelled/refused scan never publishes partial metadata.
     pub(super) fn publish_vertices(&self, count: u64) {
@@ -79,6 +79,10 @@ impl ExactCounts {
 
     pub(super) fn publish_relations(&self, counts: Relations) {
         let _ = self.relations.set(counts);
+    }
+
+    pub(super) fn publish_labels(&self, counts: Labels) {
+        let _ = self.labels.set(counts);
     }
 
     /// Update a private successor immediately BEFORE the same row is folded.
@@ -97,6 +101,7 @@ impl ExactCounts {
             };
             self.vertices = next.map_or_else(OnceLock::new, OnceLock::from);
         }
+        self.apply_labels_before(writer, row);
         let Some(Some(counts)) = self.relations.get_mut() else {
             // A topology change can bring an oversized relation population
             // back under the bound. Permit one new governed rebuild then.
@@ -114,16 +119,7 @@ impl ExactCounts {
         };
         let mut work = 0;
         let valid = match row {
-            DeltaRow::CreateEdge { relation, .. } => {
-                let old = counts.get(relation).copied().unwrap_or(0);
-                old.checked_add(1).is_some_and(|next| {
-                    if old == 0 && counts.len() == MAX_RELATIONS {
-                        return false;
-                    }
-                    *counts = counts.insert(*relation, next, &mut work);
-                    true
-                })
-            }
+            DeltaRow::CreateEdge { relation, .. } => increment(counts, *relation, &mut work),
             DeltaRow::DeleteEdge { eid, .. } => writer
                 .live_edge(*eid)
                 .is_some_and(|(_, relation, _, _)| decrement(counts, relation, &mut work)),
@@ -142,33 +138,122 @@ impl ExactCounts {
             self.relations = OnceLock::new();
         }
     }
+
+    fn apply_labels_before(&mut self, writer: &BlockWriter, row: &DeltaRow) {
+        let Some(Some(counts)) = self.labels.get_mut() else {
+            if matches!(self.labels.get(), Some(None))
+                && matches!(
+                    row,
+                    DeltaRow::CreateVertex { .. }
+                        | DeltaRow::DeleteVertex { .. }
+                        | DeltaRow::LabelMembership { .. }
+                )
+            {
+                self.labels = OnceLock::new();
+            }
+            return;
+        };
+        let mut work = 0;
+        let valid = match row {
+            DeltaRow::CreateVertex { labels, .. } => labels
+                .iter()
+                .all(|label| increment(counts, *label, &mut work)),
+            DeltaRow::DeleteVertex { vid, .. } => {
+                writer.live_vertex_labels(*vid).is_some_and(|labels| {
+                    labels
+                        .iter()
+                        .all(|label| decrement(counts, *label, &mut work))
+                })
+            }
+            DeltaRow::LabelMembership {
+                vid,
+                label,
+                before,
+                after,
+            } => writer.live_vertex_labels(*vid).is_some_and(|labels| {
+                let member = labels.binary_search(label).is_ok();
+                if member != *before {
+                    return false;
+                }
+                member == *after
+                    || if *after {
+                        increment(counts, *label, &mut work)
+                    } else {
+                        decrement(counts, *label, &mut work)
+                    }
+            }),
+            _ => true,
+        };
+        if !valid {
+            self.labels = OnceLock::new();
+        }
+    }
 }
 
-fn decrement(counts: &mut IndexMap<RelationId, u64>, relation: RelationId, work: &mut u64) -> bool {
-    let Some(next) = counts.get(&relation).and_then(|value| value.checked_sub(1)) else {
+fn lookup_key<K: Ord, E>(
+    index: &IndexMap<K, u64>,
+    key: K,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<u64, E> {
+    let mut node = index.0.as_deref();
+    while let Some(current) = node {
+        control(SourceEvent::Work)?;
+        match key.cmp(&current.key) {
+            std::cmp::Ordering::Less => node = current.left.0.as_deref(),
+            std::cmp::Ordering::Greater => node = current.right.0.as_deref(),
+            std::cmp::Ordering::Equal => return Ok(current.value),
+        }
+    }
+    Ok(0)
+}
+
+fn increment<K: Ord + Clone>(counts: &mut IndexMap<K, u64>, key: K, work: &mut u64) -> bool {
+    let old = counts.get(&key).copied().unwrap_or(0);
+    old.checked_add(1).is_some_and(|next| {
+        if old == 0 && counts.len() == MAX_COUNTERS {
+            return false;
+        }
+        *counts = counts.insert(key, next, work);
+        true
+    })
+}
+
+fn decrement<K: Ord + Clone>(counts: &mut IndexMap<K, u64>, key: K, work: &mut u64) -> bool {
+    let Some(next) = counts.get(&key).and_then(|value| value.checked_sub(1)) else {
         return false;
     };
     *counts = if next == 0 {
-        counts.remove(&relation, work)
+        counts.remove(&key, work)
     } else {
-        counts.insert(relation, next, work)
+        counts.insert(key, next, work)
     };
     true
 }
 
-/// Cold scans collect at most MAX_RELATIONS sorted counters, then build one
+pub(super) type RelationBuilder = CountBuilder<RelationId>;
+pub(super) type LabelBuilder = CountBuilder<LabelId>;
+
+/// Cold scans collect at most MAX_COUNTERS sorted counters, then build one
 /// persistent tree. Charge replacement capacity before allocation and every
 /// comparison/move; geometric growth avoids quadratic reallocation.
-#[derive(Default)]
-pub(super) struct RelationBuilder {
-    rows: Vec<(RelationId, u64)>,
+pub(super) struct CountBuilder<K> {
+    rows: Vec<(K, u64)>,
     unavailable: bool,
 }
 
-impl RelationBuilder {
+impl<K> Default for CountBuilder<K> {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            unavailable: false,
+        }
+    }
+}
+
+impl<K: Ord + Clone> CountBuilder<K> {
     pub(super) fn observe<E>(
         &mut self,
-        relation: RelationId,
+        key: K,
         control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
     ) -> Result<(), E> {
         if self.unavailable {
@@ -178,7 +263,7 @@ impl RelationBuilder {
         while low < high {
             let mid = low + (high - low) / 2;
             control(SourceEvent::Work)?;
-            match self.rows[mid].0.cmp(&relation) {
+            match self.rows[mid].0.cmp(&key) {
                 std::cmp::Ordering::Less => low = mid + 1,
                 std::cmp::Ordering::Greater => high = mid,
                 std::cmp::Ordering::Equal => {
@@ -191,12 +276,12 @@ impl RelationBuilder {
                 }
             }
         }
-        if self.rows.len() == MAX_RELATIONS {
+        if self.rows.len() == MAX_COUNTERS {
             self.unavailable = true;
             return Ok(());
         }
         if self.rows.len() == self.rows.capacity() {
-            let capacity = (self.rows.capacity().max(4) * 2).min(MAX_RELATIONS);
+            let capacity = (self.rows.capacity().max(4) * 2).min(MAX_COUNTERS);
             // Charge the entire replacement, including overlap with the old
             // allocation during reserve, rather than just the length delta.
             for _ in 0..capacity {
@@ -211,14 +296,14 @@ impl RelationBuilder {
             control(SourceEvent::Work)?;
         }
         control(SourceEvent::Work)?;
-        self.rows.insert(low, (relation, 1));
+        self.rows.insert(low, (key, 1));
         Ok(())
     }
 
     pub(super) fn finish<E>(
         self,
         control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
-    ) -> Result<Relations, E> {
+    ) -> Result<Option<IndexMap<K, u64>>, E> {
         if self.unavailable {
             return Ok(None);
         }

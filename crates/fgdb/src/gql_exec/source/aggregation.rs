@@ -125,14 +125,13 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
             |eid| reader.gql_edge_at(eid, as_of),
         )
     };
-    // The same MVCC visitors can admit a plain count without retaining their
-    // winning rows a second time. Shape admission excludes every input reader,
-    // filter and metadata projection; the original aggregate finalizer still
-    // owns output expressions, HAVING, ordering and pages. An independently
-    // fallible reader keeps its ordinary materialized source.
-    if let (Some(snapshot), Some(source)) = (admitted.snapshot, aggregate.count_summary_source()) {
-        let current = as_of == snapshot.frontier;
-        if current {
+    // Exact metadata is available only on the private unrestricted source at
+    // its own frontier. A label count has a separate cold path: its predicate
+    // still runs through the ordinary executor, preserving source errors and
+    // interleaved scratch/work events when no exact cardinality is available.
+    let mut label_builder = None;
+    if let (Some(snapshot), Some(source)) = (admitted.snapshot, aggregate.count_metadata_source()) {
+        if as_of == snapshot.frontier {
             let matching = snapshot
                 .exact_counts
                 .lookup(source, &mut |event| {
@@ -152,7 +151,18 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
                 );
                 return usage.finish(policy, result);
             }
+            if matches!(source, GraphCountSource::Label(_)) {
+                label_builder = snapshot.exact_counts.label_builder();
+            }
         }
+    }
+    // The same MVCC visitors can admit a plain count without retaining their
+    // winning rows a second time. Shape admission excludes every input reader,
+    // filter and metadata projection; the original aggregate finalizer still
+    // owns output expressions, HAVING, ordering and pages. An independently
+    // fallible reader keeps its ordinary materialized source.
+    if let (Some(snapshot), Some(source)) = (admitted.snapshot, aggregate.count_summary_source()) {
+        let current = as_of == snapshot.frontier;
         let mut builder = if current && matches!(source, GraphCountSource::Relation(_)) {
             snapshot.exact_counts.relation_builder()
         } else {
@@ -205,6 +215,38 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
             usage.observe::<GraphAggregateError<ReadError>, C>(policy, event)
         })
         .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))?;
+    // A single-label count admits every live vertex, then evaluates its one
+    // label predicate in GLA. Build from that complete admitted population,
+    // never from matching output rows or an independently pruned candidate set.
+    // Each label membership and bounded-map allocation is governed before use.
+    let labels = if let Some(mut builder) = label_builder {
+        let tables = admitted
+            .borrowed
+            .as_ref()
+            .expect("exact label metadata requires the private snapshot source");
+        let mut control = |event| {
+            checkpoint().map_err(GqlQueryError::Interrupted)?;
+            usage.observe::<GraphAggregateError<ReadError>, C>(policy, event)
+        };
+        for vertex in &tables.vertices {
+            control(super::SourceEvent::Work)
+                .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))?;
+            for label in &vertex.labels {
+                control(super::SourceEvent::Work)
+                    .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))?;
+                builder
+                    .observe(*label, &mut control)
+                    .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))?;
+            }
+        }
+        Some(
+            builder
+                .finish(&mut control)
+                .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))?,
+        )
+    } else {
+        None
+    };
     // labels(n) and type(r) keys, arguments and row stages read the catalog
     // names, as a pattern read does; an unmapped symbol refuses, never NULL.
     admitted
@@ -236,7 +278,13 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
         usage.remaining(policy),
         checkpoint,
     );
-    usage.finish(policy, result)
+    let result = usage.finish(policy, result);
+    if result.is_ok()
+        && let (Some(snapshot), Some(labels)) = (admitted.snapshot, labels)
+    {
+        snapshot.exact_counts.publish_labels(labels);
+    }
+    result
 }
 
 // Preserve scan_vertices/scan_edges' full admission transcript, including the
@@ -279,6 +327,9 @@ fn count_input_with_builder<E>(
                 Ok(())
             })?;
             matching = examined;
+        }
+        GraphCountSource::Label(_) => {
+            unreachable!("label predicates use ordinary admission when metadata is unavailable")
         }
         GraphCountSource::Relation(relation) => {
             super::visit_edges(&snapshot.blocks, as_of, control, |entry, control| {

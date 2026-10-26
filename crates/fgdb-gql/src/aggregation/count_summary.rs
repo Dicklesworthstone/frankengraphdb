@@ -1,20 +1,25 @@
-//! Exact filterless counts from a source's already admitted live cardinality.
+//! Exact counts from a source's already admitted live cardinality.
 //!
 //! This is a checked physical input to the ordinary aggregate finalizer, not
 //! a cached result. Source admission stays the host's responsibility. Only
-//! plans whose scan and reduction have no data-dependent expression qualify;
+//! plans with filterless input or one metadata-proven vertex label qualify.
 //! The scan-summary path preserves the original evaluator event order. An
 //! exact-metadata input spends only its own lookup and finalization work.
 
 use super::*;
 use crate::algebra::GlaDirection;
+use fgdb_delta_types::LabelId;
 
-/// The live source whose exact cardinality a filterless COUNT(*) can use.
+/// The live source whose exact cardinality a checked COUNT(*) can use.
 /// An edge count examines every admitted edge, including other relations,
 /// but only occurrences of the named relation contribute to its value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphCountSource {
     Vertices,
+    /// Vertices with one label, counted once even when they have other labels.
+    /// Only exact metadata can replace this input; ordinary label scans retain
+    /// their predicate reads and interleaved work/scratch transcript.
+    Label(LabelId),
     Relation(RelationId),
 }
 
@@ -48,7 +53,7 @@ impl PreparedGraphAggregate {
             return None;
         }
         let operators = self.input.plan().operators();
-        let (source, slots) = match operators.first()? {
+        let (mut source, slots) = match operators.first()? {
             GlaOperator::ScanVertices => (GraphCountSource::Vertices, 1),
             GlaOperator::ScanEdges {
                 relation,
@@ -59,6 +64,17 @@ impl PreparedGraphAggregate {
         let mut columns = None;
         for operator in &operators[1..] {
             match operator {
+                GlaOperator::Select { slot, predicates }
+                    if source == GraphCountSource::Vertices
+                        && columns.is_none()
+                        && slot.ordinal() == 0 =>
+                {
+                    let [crate::algebra::VertexPredicate::HasLabel(label)] = predicates.as_slice()
+                    else {
+                        return None;
+                    };
+                    source = GraphCountSource::Label(*label);
+                }
                 GlaOperator::ProjectValues { columns: output }
                     if columns.is_none()
                         && output.iter().all(|column| {
@@ -88,6 +104,18 @@ impl PreparedGraphAggregate {
     /// multi-hop patterns and other aggregate functions return `None`.
     #[must_use]
     pub fn count_summary_source(&self) -> Option<GraphCountSource> {
+        self.count_shape().and_then(|shape| match shape.source {
+            GraphCountSource::Label(_) => None,
+            source => Some(source),
+        })
+    }
+
+    /// The exact current-snapshot cardinality this definition may consume.
+    /// In addition to filterless counts, one vertex-label predicate qualifies.
+    /// Multiple labels, property predicates and label-filtered edge counts do
+    /// not: independent populations cannot prove an intersection's size.
+    #[must_use]
+    pub fn count_metadata_source(&self) -> Option<GraphCountSource> {
         self.count_shape().map(|shape| shape.source)
     }
 
@@ -107,6 +135,7 @@ impl PreparedGraphAggregate {
     ) -> Option<PreparedGraphCount<'_>> {
         let shape = self.count_shape()?;
         if shape.source != source
+            || matches!(source, GraphCountSource::Label(_))
             || matching > examined
             || (source == GraphCountSource::Vertices && examined != matching)
         {
@@ -215,6 +244,9 @@ impl PreparedGraphCount<'_> {
         } else {
             match self.shape.source {
                 GraphCountSource::Vertices => u128::from(self.examined) * (2 + visit_work),
+                GraphCountSource::Label(_) => {
+                    unreachable!("label predicates admit exact metadata, never scan summaries")
+                }
                 GraphCountSource::Relation(_) => {
                     u128::from(self.examined) + u128::from(self.matching > 0) * visit_work
                 }

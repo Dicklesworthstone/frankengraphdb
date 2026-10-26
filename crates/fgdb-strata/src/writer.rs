@@ -568,6 +568,14 @@ impl BlockWriter {
         self.live_vertices.get(&vid).cloned()
     }
 
+    /// Borrow one live vertex's labels without copying its property payload.
+    /// Derived cardinalities use this before the corresponding row is folded.
+    pub fn live_vertex_labels(&self, vid: VId) -> Option<&[LabelId]> {
+        self.live_vertices
+            .get(&vid)
+            .map(|row| row.labels.as_slice())
+    }
+
     /// The full LIVE statement of `eid` — topology, birth of the current
     /// content version, and its row (fgdb-ge6a v3).
     pub fn live_edge_statement(

@@ -10,7 +10,11 @@ fn query(text: &str) -> PreparedGraphAggregate {
             _ => 3,
         }))),
         GraphSymbolKind::Property => Some(GraphSymbol::Property(PropertyKeyId(1))),
-        GraphSymbolKind::Label => Some(GraphSymbol::Label(LabelId(1))),
+        GraphSymbolKind::Label => Some(GraphSymbol::Label(LabelId(match name {
+            "L" => 1,
+            "M" => 2,
+            _ => 3,
+        }))),
     })
     .unwrap_or_else(|error| panic!("{text}: {error:?}"))
     .bind_parameters(&GqlParameters::new())
@@ -182,20 +186,24 @@ fn run<const RUNS: bool>(
     policy: GqlQueryPolicy,
     stop: Option<usize>,
 ) -> Outcome {
-    let source = query.count_summary_source().expect("checked count shape");
+    let source = query.count_metadata_source().expect("checked count shape");
     let examined = match source {
-        GraphCountSource::Vertices => vertices.len() as u64,
+        GraphCountSource::Vertices | GraphCountSource::Label(_) => vertices.len() as u64,
         GraphCountSource::Relation(_) => edges.len() as u64,
     };
     let matching = match source {
         GraphCountSource::Vertices => examined,
+        GraphCountSource::Label(_) => vertices.iter().filter(|vid| vid.0 % 3 == 0).count() as u64,
         GraphCountSource::Relation(relation) => edges
             .iter()
             .filter(|&&(_, actual, _)| actual == relation)
             .count() as u64,
     };
     let records = vertices.len() as u64
-        + if source == GraphCountSource::Vertices {
+        + if matches!(
+            source,
+            GraphCountSource::Vertices | GraphCountSource::Label(_)
+        ) {
             0
         } else {
             examined
@@ -216,7 +224,13 @@ fn run<const RUNS: bool>(
             records,
             vertices.iter().copied(),
             edges.iter().copied(),
-            |_, _| -> Result<bool, ()> { panic!("filterless input tested a vertex") },
+            |vid, predicates| -> Result<bool, ()> {
+                assert_eq!(
+                    predicates,
+                    [crate::algebra::VertexPredicate::HasLabel(LabelId(1))]
+                );
+                Ok(vid.0 % 3 == 0)
+            },
             |_, _| -> Result<Option<&fgdb_types::CanonicalPropertyValue>, ()> {
                 panic!("COUNT(*) read an input property")
             },
@@ -410,6 +424,37 @@ fn only_plain_filterless_counts_admit_source_summaries() {
     );
 }
 
+#[test]
+fn only_one_vertex_label_can_supply_exact_metadata() {
+    let labeled = query("MATCH (n:L) RETURN COUNT(*) AS n");
+    let source = GraphCountSource::Label(LabelId(1));
+    assert_eq!(labeled.count_metadata_source(), Some(source));
+    assert_eq!(labeled.count_summary_source(), None);
+    assert!(labeled.prepare_count_summary(source, 10, 5).is_none());
+    assert!(labeled.prepare_count_metadata(source, 5).is_some());
+    for other in [
+        GraphCountSource::Vertices,
+        GraphCountSource::Label(LabelId(2)),
+        GraphCountSource::Relation(RelationId(1)),
+    ] {
+        assert!(labeled.prepare_count_metadata(other, 5).is_none());
+    }
+    for text in [
+        "MATCH (n:L:M) RETURN COUNT(*) AS n",
+        "MATCH (n:L) WHERE n.p = 1 RETURN COUNT(*) AS n",
+        "MATCH (n:L) RETURN COUNT(n) AS n",
+        "MATCH (n:L) RETURN n.p, COUNT(*) AS n GROUP BY n.p",
+        "MATCH (n:L)-[:R]->(m) RETURN COUNT(*) AS n",
+    ] {
+        let prepared = query(text);
+        assert_eq!(prepared.count_metadata_source(), None, "{text}");
+        assert!(
+            prepared.prepare_count_metadata(source, 5).is_none(),
+            "{text}"
+        );
+    }
+}
+
 fn run_metadata<const RUNS: bool>(
     query: &PreparedGraphAggregate,
     matching: u64,
@@ -418,7 +463,7 @@ fn run_metadata<const RUNS: bool>(
 ) -> Outcome {
     let mut calls = Vec::new();
     let result = query
-        .prepare_count_metadata(query.count_summary_source().unwrap(), matching)
+        .prepare_count_metadata(query.count_metadata_source().unwrap(), matching)
         .unwrap()
         .execute_governed(
             1,
@@ -438,6 +483,9 @@ fn exact_metadata_keeps_the_native_finalizer_and_has_cardinality_independent_wor
         let policy = GqlQueryPolicy::new(100_000, 100, 10_000_000, 1_000_000);
         for text in [
             "MATCH (n) RETURN COUNT(*) AS n",
+            "MATCH (n:L) RETURN COUNT(*) AS n",
+            "MATCH (n:L) RETURN COUNT(*) + 1 AS n HAVING n > 2 ORDER BY n DESC LIMIT 1",
+            "MATCH (n:L) RETURN 1 / (COUNT(*) - COUNT(*)) AS n LIMIT 0",
             "MATCH (n) RETURN COUNT(*) AS n, COUNT(*) AS m",
             "MATCH (n) RETURN COUNT(*) + 1 AS n ORDER BY n DESC LIMIT 1",
             "MATCH (n) RETURN COUNT(*) AS n HAVING n > 2",
@@ -459,8 +507,11 @@ fn exact_metadata_keeps_the_native_finalizer_and_has_cardinality_independent_wor
                         )
                     })
                     .collect();
-                let matching = match query.count_summary_source().unwrap() {
+                let matching = match query.count_metadata_source().unwrap() {
                     GraphCountSource::Vertices => size as u64,
+                    GraphCountSource::Label(_) => {
+                        vertices.iter().filter(|vid| vid.0 % 3 == 0).count() as u64
+                    }
                     GraphCountSource::Relation(relation) => {
                         edges.iter().filter(|&&(_, r, _)| r == relation).count() as u64
                     }
@@ -501,6 +552,7 @@ fn exact_metadata_keeps_the_native_finalizer_and_has_cardinality_independent_wor
 fn exact_metadata_checks_every_budget_and_cancellation_boundary() {
     for text in [
         "MATCH (n) RETURN COUNT(*) AS n",
+        "MATCH (n:L) RETURN COUNT(*) AS n",
         "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n, COUNT(*) AS m",
         "MATCH (n) RETURN COUNT(*) AS n SKIP 1 LIMIT 0",
     ] {

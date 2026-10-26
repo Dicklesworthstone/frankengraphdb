@@ -4,7 +4,7 @@ use super::*;
 use crate::gql_exec::source::SourceEvent;
 use crate::{DatabaseKeys, EdgeRecord, VertexRow, WriteBatch};
 use asupersync::lab::run_async_under_lab;
-use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText};
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts};
 
@@ -13,6 +13,7 @@ fn query(text: &str) -> PreparedGraphAggregate {
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
         (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(2))),
         (GraphSymbolKind::Relation, "T") => Some(GraphSymbol::Relation(RelationId(3))),
+        (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
         _ => None,
     })
     .unwrap()
@@ -57,6 +58,7 @@ fn source_run(
                     assert_eq!(tables.snapshot_records, count);
                     (count, count)
                 }
+                GraphCountSource::Label(_) => panic!("labels do not admit scan summaries"),
                 GraphCountSource::Relation(relation) => {
                     let examined = tables.edges.len() as u64;
                     let matching = tables
@@ -178,6 +180,7 @@ impl GqlSnapshotReader for RefusingReader {
 fn fallible_owned_readers_keep_their_source_errors_and_preceding_checkpoint() {
     for (text, frontier) in [
         ("MATCH (n) RETURN COUNT(*) AS total", CommitSeq(11)),
+        ("MATCH (n:L) RETURN COUNT(*) AS total", CommitSeq(11)),
         (
             "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS total",
             CommitSeq(12),
@@ -220,7 +223,7 @@ fn cold_counts_publish_only_after_complete_output_and_survive_every_cancellation
             .unwrap();
         let mut batch = WriteBatch::new(RelationId(1));
         for id in 1..=4 {
-            batch.create_vertex(VId(id), vec![], vec![]);
+            batch.create_vertex(VId(id), vec![LabelId(if id <= 2 { 1 } else { 2 })], vec![]);
         }
         for (eid, source, destination) in [(1, 1, 1), (2, 1, 2), (3, 1, 2), (4, 2, 3), (5, 3, 4)] {
             batch.add_edge(EId(eid), VId(source), VId(destination), vec![]);
@@ -228,9 +231,11 @@ fn cold_counts_publish_only_after_complete_output_and_survive_every_cancellation
         db.write(&contexts.commit(), batch).await.unwrap();
         let policy = GqlQueryPolicy::new(100, 10, 100_000, 100_000);
         let at = db.snapshot.frontier;
-        for (pattern, matching) in [("(n)", 4), ("(a)-[:R]->(b)", 5)] {
+        for (pattern, matching, records) in
+            [("(n)", 4, 4), ("(n:L)", 2, 4), ("(a)-[:R]->(b)", 5, 5)]
+        {
             let plain = query(&format!("MATCH {pattern} RETURN COUNT(*) AS total"));
-            let source = plain.count_summary_source().unwrap();
+            let source = plain.count_metadata_source().unwrap();
             let bad = query(&format!(
                 "MATCH {pattern} RETURN 1 / (COUNT(*) - COUNT(*)) AS total LIMIT 0"
             ));
@@ -267,7 +272,7 @@ fn cold_counts_publish_only_after_complete_output_and_survive_every_cancellation
             })
             .unwrap();
             assert_eq!(full.value[0].values()[0].as_count(), Some(matching));
-            assert_eq!(full.rows.snapshot_records, matching);
+            assert_eq!(full.rows.snapshot_records, records);
             assert_eq!(
                 db.snapshot
                     .exact_counts
