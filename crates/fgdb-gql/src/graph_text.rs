@@ -3556,8 +3556,8 @@ mod tests {
             "MATCH (a {n:1,n:2}) RETURN a",
             "MATCH (a {n:1,}) RETURN a",
             "MATCH (a {n 1}) RETURN a",
-            "MATCH (a {n:[1]}) RETURN a",
-            "MATCH (a {n:{n:1}}) RETURN a",
+            "MATCH (a {n:[1,]}) RETURN a",
+            "MATCH (a {n:{n:}}) RETURN a",
             "MATCH (a {n:a.n}) RETURN a",
             "MATCH (a {n:1+2}) RETURN a",
             "MATCH (a {n:$x}) RETURN a LIMIT $x",
@@ -3573,6 +3573,57 @@ mod tests {
                 "{text}"
             );
             assert_eq!(calls, 0, "{text}");
+        }
+        // These exact forms used to refuse. Stored collection equality now
+        // admits them; keep them as executed positives instead of dropping
+        // coverage when extending the literal grammar.
+        let values = BTreeMap::from([
+            (
+                VId(1),
+                CanonicalPropertyValue::List(
+                    fgdb_types::CanonicalList::try_new(vec![CanonicalScalar::Int(1).into()])
+                        .unwrap(),
+                ),
+            ),
+            (
+                VId(2),
+                CanonicalPropertyValue::Map(
+                    fgdb_types::CanonicalMap::try_new(vec![fgdb_types::CanonicalMapEntry::new(
+                        fgdb_types::CanonicalText::new_ucs_basic("n").unwrap(),
+                        CanonicalScalar::Int(1).into(),
+                    )])
+                    .unwrap(),
+                ),
+            ),
+            (
+                VId(3),
+                CanonicalPropertyValue::from(CanonicalScalar::Int(1)),
+            ),
+        ]);
+        for (text, expected) in [
+            ("MATCH (a {n:[1]}) RETURN a", VId(1)),
+            ("MATCH (a {n:{n:1}}) RETURN a", VId(2)),
+        ] {
+            let rows = query(text)
+                .plan()
+                .execute_governed_with_properties(
+                    3,
+                    [VId(1), VId(2), VId(3)],
+                    [],
+                    |vid, predicates| {
+                        let properties = [(PropertyKeyId(4), values[&vid].clone())];
+                        Ok::<_, ()>(predicates.iter().all(|p| p.matches(&[], &properties)))
+                    },
+                    |vid, key| {
+                        assert_eq!(key, PropertyKeyId(4));
+                        Ok(values.get(&vid))
+                    },
+                    policy(),
+                    || Ok::<_, ()>(()),
+                )
+                .unwrap()
+                .value;
+            assert_eq!(vertex_rows(&rows), vec![vec![expected]], "{text}");
         }
         let entries = (0..MAX_PATTERN_PREDICATES)
             .map(|index| format!("p{index}:1"))
