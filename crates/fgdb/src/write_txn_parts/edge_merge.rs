@@ -16,6 +16,8 @@ struct EdgeMergeProposal<Output = fgdb_gql::GraphEdgeMergeOutcome> {
 struct ResolvedEdge {
     pair: (VId, VId),
     endpoints: (VId, VId),
+    /// A non-reflexive list key resolves this occurrence independently.
+    occurrence: Option<usize>,
 }
 
 // The singular primitive and the native program differ only in admitted
@@ -43,6 +45,7 @@ type ResolvedPairEdges = std::collections::BTreeMap<(VId, VId), Vec<(EId, (VId, 
 #[derive(Default)]
 struct EdgeMergeRows {
     edges: ResolvedPairEdges,
+    occurrences: std::collections::BTreeMap<usize, Vec<(EId, (VId, VId))>>,
     resolved: u64,
     /// Every resolved edge's outcome and the created edges, in canonical
     /// pair and identity order: a chain step's receipt (fgdb-cpny9).
@@ -61,6 +64,12 @@ type EdgeMergeOutputResult<Output, A> = Result<
     TxnGqlError<fgdb_gql::GraphEdgeMergeError<WriteTxnError, A>>,
 >;
 
+impl EdgeMergeRows {
+    fn edges_for(&self, pair: (VId, VId), row: usize) -> Option<&Vec<(EId, (VId, VId))>> {
+        self.occurrences.get(&row).or_else(|| self.edges.get(&pair))
+    }
+}
+
 impl EdgeMergeOutput for EdgeMergeRows {
     const PARALLEL: bool = true;
 
@@ -78,10 +87,11 @@ impl EdgeMergeOutput for EdgeMergeRows {
             return Ok(());
         };
         control(Some(fgdb_gql::GlaExecutionEvent::ScratchEntry))?;
-        self.edges
-            .entry(resolved.pair)
-            .or_default()
-            .push((edge, resolved.endpoints));
+        let edges = match resolved.occurrence {
+            Some(row) => self.occurrences.entry(row).or_default(),
+            None => self.edges.entry(resolved.pair).or_default(),
+        };
+        edges.push((edge, resolved.endpoints));
         self.resolved += 1;
         self.outcomes.push(outcome);
         if outcome.created() {
@@ -213,7 +223,7 @@ fn edge_merge_query_rows<E, C>(
         query.merge().destination_column(),
     );
     let mut rows = Vec::new();
-    for row in selected {
+    for (row_at, row) in selected.iter().enumerate() {
         let values = row.values();
         // The collector already refused NULL or non-vertex endpoints.
         let (Some(source), Some(destination)) = (
@@ -222,7 +232,7 @@ fn edge_merge_query_rows<E, C>(
         ) else {
             continue;
         };
-        let Some(edges) = resolved.edges.get(&(source, destination)) else {
+        let Some(edges) = resolved.edges_for((source, destination), row_at) else {
             continue;
         };
         for &(edge, (src, dst)) in edges {
@@ -325,6 +335,7 @@ fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
     let source_column = merge.source_column();
     let destination_column = merge.destination_column();
     let mut pairs = std::collections::BTreeSet::new();
+    let occurrences = Output::PARALLEL && !merge.shares_pair_outcomes();
     for (row_at, row) in selected.value.iter().enumerate() {
         event(Some(GlaExecutionEvent::Work))?;
         if row.len() != width {
@@ -348,7 +359,10 @@ fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
                 })
             })
         };
-        let pair = (endpoint(source_column)?, endpoint(destination_column)?);
+        let pair = (
+            (endpoint(source_column)?, endpoint(destination_column)?),
+            occurrences.then_some(row_at),
+        );
         if !pairs.contains(&pair) {
             event(Some(GlaExecutionEvent::ScratchEntry))?;
             pairs.insert(pair);
@@ -363,7 +377,7 @@ fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
     let mut overlay_edges = 0u64;
     let mut created_edges = 0u64;
     let mut creation: Option<WriteBatch> = None;
-    for (pair_at, (source, destination)) in pairs.into_iter().enumerate() {
+    for (pair_at, ((source, destination), occurrence)) in pairs.into_iter().enumerate() {
         // A scoped host admits candidates BEFORE they reach these counters or
         // the uniqueness reducer. Repeated physical scans spend the SAME cap.
         let edges = edge_source(source, destination)
@@ -387,8 +401,9 @@ fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
 
         // An edge matches when its relation and orientation agree and every
         // property of the MERGE map equals its stored value (fgdb-at06q).
-        // Each map comparison is one charged step. A program keeps every
-        // match in identity order; the singular primitive refuses a second.
+        // Scalars retain their charged step; lists additionally charge their
+        // recursive comparison and copies. A program keeps every match in
+        // identity order; the singular primitive refuses a second.
         let mut matching = Vec::new();
         for edge in &edges {
             event(Some(GlaExecutionEvent::Work))?;
@@ -398,18 +413,13 @@ fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
             {
                 continue;
             }
-            for _ in merge.properties() {
-                event(Some(GlaExecutionEvent::Work))?;
-            }
-            // MERGE map values are scalars, so a stored List or Map never
-            // equals one: it reads as no scalar and the edge does not match.
             let stored = |key| {
                 edge.props
                     .binary_search_by_key(&key, |(candidate, _)| *candidate)
                     .ok()
-                    .and_then(|at| edge.props[at].1.as_scalar())
+                    .map(|at| &edge.props[at].1)
             };
-            if !merge.matches_properties(stored) {
+            if !merge.matches_stored_properties(stored, &mut |kind| event(Some(kind)))? {
                 continue;
             }
             if !Output::PARALLEL && !matching.is_empty() {
@@ -428,6 +438,7 @@ fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
                     ResolvedEdge {
                         pair: (source, destination),
                         endpoints,
+                        occurrence,
                     },
                     &mut event,
                 )?;
@@ -444,11 +455,7 @@ fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
                 observed,
             }));
         }
-        let mut properties = Vec::with_capacity(merge.properties().len());
-        for (key, value) in merge.properties() {
-            event(Some(GlaExecutionEvent::ScratchEntry))?;
-            properties.push((*key, value.value().clone()));
-        }
+        let properties = merge.creation_properties_with_control(&mut |kind| event(Some(kind)))?;
         event(None)?;
         let identity = allocate(pair_at)
             .map_err(|error| GqlQueryError::Source(GraphEdgeMergeError::IdentitySource(error)))?;
@@ -460,12 +467,13 @@ fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
             ResolvedEdge {
                 pair: (source, destination),
                 endpoints: (source, destination),
+                occurrence,
             },
             &mut event,
         )?;
         creation
             .get_or_insert_with(|| WriteBatch::new(merge.relation()))
-            .add_edge(edge, source, destination, properties);
+            .add_edge_values(edge, source, destination, properties);
         created_edges += 1;
         // All proposals remain private until every pair has succeeded.
         event(None)?;

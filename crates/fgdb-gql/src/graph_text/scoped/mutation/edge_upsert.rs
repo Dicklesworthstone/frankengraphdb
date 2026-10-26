@@ -228,7 +228,7 @@ impl<'a> Parser<'a> {
         // Share literal/parameter, duplicate-key and field-count admission
         // with plain MERGE. The map is part of the match identity, not SET.
         let properties = self
-            .merge_property_map(false)
+            .merge_property_map(true)
             .map_err(|refusal| match refusal {
                 super::merge::MergeMapError::Pattern(error) => {
                     GraphEdgeUpsertTextError::from(error)

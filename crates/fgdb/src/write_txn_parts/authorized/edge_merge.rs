@@ -467,11 +467,7 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
     // The MERGE map is an existence predicate (fgdb-at06q): a key the
     // capability cannot see would let its stored values decide a match.
     // Refuse before selection, never compare a hidden field.
-    if merge
-        .properties()
-        .iter()
-        .any(|(key, _)| !scope.allows_property(*key))
-    {
+    if merge.property_keys().any(|key| !scope.allows_property(key)) {
         return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
     }
     let original_row = selected.as_ref().and_then(|(_, row)| *row);

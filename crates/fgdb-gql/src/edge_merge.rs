@@ -13,13 +13,14 @@
 //! - Every matching edge is a match. The singular primitive refuses parallel
 //!   matches as ambiguous; native write programs keep each one.
 //!
-//! Map values are already-bound non-null canonical scalars. ON MATCH/ON CREATE
-//! actions remain above this primitive.
+//! Map values are already-bound non-null scalars or bounded stored lists.
+//! ON MATCH/ON CREATE actions remain above this primitive.
 
 use crate::algebra::{GraphValueRow, PreparedGraphPattern, ValueProjection};
 use crate::{GlaExecutionStats, GqlExecutionStats, GqlQueryPolicy, GqlScalarParameter};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
+use std::sync::Arc;
 
 pub const MAX_GRAPH_EDGE_MERGE_PROPERTIES: usize = 256;
 
@@ -38,6 +39,10 @@ pub enum GraphEdgeMergeBuildError {
     DuplicateProperty,
     /// A NULL map value can neither match nor be created (openCypher).
     NullProperty {
+        key: PropertyKeyId,
+    },
+    /// A key cannot be stored, or exceeds the bounded predicate format.
+    InvalidStoredProperty {
         key: PropertyKeyId,
     },
     /// A row relation input exceeds the parent depth a write admits.
@@ -62,6 +67,9 @@ impl core::fmt::Display for GraphEdgeMergeBuildError {
             Self::NullProperty { .. } => f.write_str(
                 "relationship MERGE has a NULL property value, which can neither match nor be created",
             ),
+            Self::InvalidStoredProperty { .. } => {
+                f.write_str("relationship MERGE requires a non-null scalar or bounded stored list")
+            }
             Self::RelationalInput(error) => error.fmt(f),
         }
     }
@@ -261,6 +269,15 @@ enum Input {
     Relation(Box<crate::PreparedGraphSet>),
 }
 
+/// The predicate value and creation value share one admitted immutable owner.
+#[derive(Clone, PartialEq, Eq)]
+struct StoredMergeProperty {
+    key: PropertyKeyId,
+    value: CanonicalPropertyValue,
+    encoded: Box<[u8]>,
+    reflexive: bool,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphEdgeMerge {
     input: Input,
@@ -268,12 +285,16 @@ pub struct PreparedGraphEdgeMerge {
     source: usize,
     destination: usize,
     properties: Vec<(PropertyKeyId, GqlScalarParameter)>,
+    stored_properties: Arc<[StoredMergeProperty]>,
     undirected: bool,
 }
 impl core::fmt::Debug for PreparedGraphEdgeMerge {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PreparedGraphEdgeMerge")
-            .field("properties", &self.properties.len())
+            .field(
+                "properties",
+                &(self.properties.len() + self.stored_properties.len()),
+            )
             .field("definition", &"[REDACTED]")
             .finish()
     }
@@ -368,8 +389,86 @@ impl PreparedGraphEdgeMerge {
             source,
             destination,
             properties,
+            stored_properties: Arc::from([]),
             undirected: false,
         })
+    }
+
+    /// Add stored property keys to the same match/create definition. The
+    /// canonical size, query depth/node limits and writable value domain are
+    /// checked before encoding or copying. A scalar keeps the original scalar
+    /// representation; lists share one immutable owner across bound clones.
+    pub fn with_stored_properties(
+        mut self,
+        properties: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
+    ) -> Result<Self, GraphEdgeMergeBuildError> {
+        use crate::algebra::{GraphValue, MAX_SCALAR_PREDICATE_BYTES};
+        fn writable(value: &CanonicalPropertyValue, depth: usize, remaining: &mut usize) -> bool {
+            if depth > GraphValue::MAX_LIST_DEPTH || *remaining == 0 {
+                return false;
+            }
+            *remaining -= 1;
+            match value {
+                CanonicalPropertyValue::Scalar(_) => true,
+                CanonicalPropertyValue::List(list) => list
+                    .values()
+                    .iter()
+                    .all(|value| writable(value, depth + 1, remaining)),
+                CanonicalPropertyValue::Map(_) => false,
+            }
+        }
+        fn reflexive(value: &CanonicalPropertyValue) -> bool {
+            match value {
+                CanonicalPropertyValue::Scalar(value) => {
+                    crate::algebra::IntegerComparison::Equal
+                        .evaluate_scalar_pair(Some(value), Some(value))
+                        == Some(true)
+                }
+                CanonicalPropertyValue::List(list) => list.values().iter().all(reflexive),
+                CanonicalPropertyValue::Map(_) => false,
+            }
+        }
+        let observed = self.properties.len() + self.stored_properties.len() + properties.len();
+        if observed > MAX_GRAPH_EDGE_MERGE_PROPERTIES {
+            return Err(GraphEdgeMergeBuildError::TooManyProperties {
+                limit: MAX_GRAPH_EDGE_MERGE_PROPERTIES,
+                observed,
+            });
+        }
+        let mut keys = self
+            .property_keys()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut stored = self.stored_properties.to_vec();
+        for (key, value) in properties {
+            if !keys.insert(key) {
+                return Err(GraphEdgeMergeBuildError::DuplicateProperty);
+            }
+            let invalid = || GraphEdgeMergeBuildError::InvalidStoredProperty { key };
+            if let CanonicalPropertyValue::Scalar(value) = value {
+                if matches!(value, CanonicalScalar::Null) {
+                    return Err(GraphEdgeMergeBuildError::NullProperty { key });
+                }
+                self.properties
+                    .push((key, GqlScalarParameter::new(value).map_err(|_| invalid())?));
+                continue;
+            }
+            let bytes = value.canonical_encoded_len().map_err(|_| invalid())?;
+            let mut remaining = GraphValue::MAX_LIST_NODES;
+            if bytes > MAX_SCALAR_PREDICATE_BYTES || !writable(&value, 0, &mut remaining) {
+                return Err(invalid());
+            }
+            let encoded = value.encode().map_err(|_| invalid())?.into_boxed_slice();
+            stored.push(StoredMergeProperty {
+                key,
+                reflexive: reflexive(&value),
+                value,
+                encoded,
+            });
+        }
+        self.properties.sort_by_key(|(key, _)| *key);
+        stored.sort_by_key(|property| property.key);
+        self.stored_properties = stored.into();
+        Ok(self)
     }
 
     /// An undirected MERGE, `(a)-[:R]-(b)` (fgdb-at06q): an existing edge in
@@ -406,11 +505,67 @@ impl PreparedGraphEdgeMerge {
         &self,
         mut stored: impl FnMut(PropertyKeyId) -> Option<&'s CanonicalScalar>,
     ) -> bool {
-        self.properties.iter().all(|(key, wanted)| {
-            crate::algebra::IntegerComparison::Equal
-                .evaluate_scalar_pair(stored(*key), Some(wanted.value()))
-                == Some(true)
-        })
+        self.stored_properties.is_empty()
+            && self.properties.iter().all(|(key, wanted)| {
+                crate::algebra::IntegerComparison::Equal
+                    .evaluate_scalar_pair(stored(*key), Some(wanted.value()))
+                    == Some(true)
+            })
+    }
+
+    /// Governed stored-property matching. This is the same three-valued
+    /// comparator MATCH uses: exact numeric peers compare equal recursively,
+    /// and NULL children never become a match through storage equality.
+    pub fn matches_stored_properties<'s, E: From<crate::GraphIntegerError>>(
+        &self,
+        mut stored: impl FnMut(PropertyKeyId) -> Option<&'s CanonicalPropertyValue>,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        use crate::algebra::IntegerComparison;
+        // Preserve the scalar path's existing accounting and short-circuiting.
+        for _ in &self.properties {
+            control(crate::GlaExecutionEvent::Work)?;
+        }
+        if !self.properties.iter().all(|(key, wanted)| {
+            IntegerComparison::Equal.evaluate_scalar_pair(
+                stored(*key).and_then(CanonicalPropertyValue::as_scalar),
+                Some(wanted.value()),
+            ) == Some(true)
+        }) {
+            return Ok(false);
+        }
+        for property in self.stored_properties.iter() {
+            control(crate::GlaExecutionEvent::Work)?;
+            if !IntegerComparison::Equal.accepts_property_pair(
+                stored(property.key),
+                Some(&property.value),
+                control,
+            )? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Own the exact match keys for an ordinary creation. All collection
+    /// nodes and payloads are charged before their single deep copy.
+    pub fn creation_properties_with_control<E>(
+        &self,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Vec<(PropertyKeyId, CanonicalPropertyValue)>, E> {
+        let mut properties =
+            Vec::with_capacity(self.properties.len() + self.stored_properties.len());
+        for (key, value) in &self.properties {
+            control(crate::GlaExecutionEvent::ScratchEntry)?;
+            properties.push((*key, CanonicalPropertyValue::Scalar(value.value().clone())));
+        }
+        for property in self.stored_properties.iter() {
+            control(crate::GlaExecutionEvent::ScratchEntry)?;
+            crate::algebra::GraphValue::charge_property_value(&property.value, control)?;
+            properties.push((property.key, property.value.clone()));
+        }
+        properties.sort_by_key(|(key, _)| *key);
+        Ok(properties)
     }
 
     /// The MERGE's own MATCH prefix; `None` over a row relation.
@@ -504,6 +659,34 @@ impl PreparedGraphEdgeMerge {
     #[must_use]
     pub fn properties(&self) -> &[(PropertyKeyId, GqlScalarParameter)] {
         &self.properties
+    }
+
+    /// A collection containing NULL or another non-reflexive scalar cannot
+    /// share a creation across repeated input occurrences: its own written
+    /// value would not match the next occurrence under query equality.
+    #[must_use]
+    pub fn shares_pair_outcomes(&self) -> bool {
+        self.stored_properties
+            .iter()
+            .all(|property| property.reflexive)
+    }
+
+    /// All keys read by the existence predicate, including stored lists.
+    /// Hosts must authorize this complete set before selection or observation.
+    pub fn property_keys(&self) -> impl Iterator<Item = PropertyKeyId> + '_ {
+        self.properties
+            .iter()
+            .map(|(key, _)| *key)
+            .chain(self.stored_properties.iter().map(|property| property.key))
+    }
+
+    /// Explicit borrowed export of the stored-list keys; Debug stays redacted.
+    pub fn stored_properties(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (PropertyKeyId, &CanonicalPropertyValue)> {
+        self.stored_properties
+            .iter()
+            .map(|property| (property.key, &property.value))
     }
 
     /// The equality keys of a directed MERGE whose MATCH is two independent
@@ -607,6 +790,15 @@ impl PreparedGraphEdgeMerge {
             bytes.extend_from_slice(&key.0.to_be_bytes());
             bytes.extend_from_slice(&(value.canonical_bytes().len() as u64).to_be_bytes());
             bytes.extend_from_slice(value.canonical_bytes());
+        }
+        if !self.stored_properties.is_empty() {
+            bytes.extend_from_slice(b"fgdb:stored-edge-merge-properties:v1\0");
+            bytes.extend_from_slice(&(self.stored_properties.len() as u64).to_be_bytes());
+            for property in self.stored_properties.iter() {
+                bytes.extend_from_slice(&property.key.0.to_be_bytes());
+                bytes.extend_from_slice(&(property.encoded.len() as u64).to_be_bytes());
+                bytes.extend_from_slice(&property.encoded);
+            }
         }
         bytes
     }

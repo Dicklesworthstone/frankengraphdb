@@ -127,13 +127,15 @@ fn stored_tuple_binding_requires_every_key_and_preserves_scalar_api_bytes() {
 }
 
 #[test]
-fn relationship_merge_keys_keep_the_existing_scalar_boundary() {
-    assert!(
-        PreparedGraphEdgeMergeText::prepare(
-            "MATCH (a:Item), (b:Item) MERGE (a)-[:R {p:[1,2]}]->(b)",
-            R,
-            symbols,
-        )
-        .is_err()
-    );
+fn relationship_merge_keys_share_the_stored_list_domain() {
+    let merge = PreparedGraphEdgeMergeText::prepare(
+        "MATCH (a:Item), (b:Item) MERGE (a)-[:R {p:[1,2]}]->(b)",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    assert_eq!(merge.stored_properties().len(), 1);
+    assert_eq!(merge.property_keys().collect::<Vec<_>>(), vec![P]);
 }

@@ -560,7 +560,7 @@ impl WriteTxn {
                         // Each row continues once per relationship its pair
                         // resolved to, in row order and then identity order.
                         let mut output = Vec::new();
-                        for row in &selected {
+                        for (row_at, row) in selected.iter().enumerate() {
                             vertex_targets_event::<GraphWriteChainError<WriteTxnError, A>>(
                                 cx,
                                 allowance.query,
@@ -574,7 +574,8 @@ impl WriteTxn {
                             ) else {
                                 continue;
                             };
-                            let Some(edges) = resolved.edges.get(&(source, destination)) else {
+                            let Some(edges) = resolved.edges_for((source, destination), row_at)
+                            else {
                                 continue;
                             };
                             for &(edge, _) in edges {
@@ -1359,13 +1360,13 @@ mod chain_materialization_tests {
                     )
                     .unwrap();
                 let mut rows = Vec::new();
-                for row in &input {
+                for (row_at, row) in input.iter().enumerate() {
                     event(&mut copies, GlaExecutionEvent::Work);
                     let source = row.values()[merge.source_column()].as_vertex().unwrap();
                     let destination = row.values()[merge.destination_column()]
                         .as_vertex()
                         .unwrap();
-                    for &(edge, _) in &resolved.edges[&(source, destination)] {
+                    for &(edge, _) in resolved.edges_for((source, destination), row_at).unwrap() {
                         let mut cells = row.values()[..*keep].to_vec();
                         cells.push(GraphValue::Edge(edge));
                         rows.push(GraphValueRow::from_owned_values(cells));

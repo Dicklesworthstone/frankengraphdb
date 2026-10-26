@@ -115,7 +115,7 @@ impl<'a> Parser<'a> {
         self.punct(b':', ":")?;
         let relation = self.schema_name()?;
         let properties = self
-            .merge_property_map(false)
+            .merge_property_map(true)
             .map_err(|refusal| match refusal {
                 super::merge::MergeMapError::Pattern(error) => error.into(),
                 super::merge::MergeMapError::Value(error) => error.into(),
@@ -841,20 +841,25 @@ impl PreparedGraphEdgeMergeText {
         values: &[GqlParameterValue],
     ) -> Result<PreparedGraphEdgeMerge, GraphEdgeMergeTextError> {
         let mut properties = Vec::with_capacity(self.properties.len());
+        let mut stored_properties = Vec::new();
         for (key, template) in &self.properties {
             let value = match template {
                 crate::mutation_text::VertexMergeValueTemplate::Bound(value) => value.clone(),
                 crate::mutation_text::VertexMergeValueTemplate::Parameter { index, at } => {
                     scalar(values[*index].clone(), *at)?
                 }
-                crate::mutation_text::VertexMergeValueTemplate::Stored { at, .. } => {
-                    return Err(error(
-                        *at,
-                        GraphPatternTextErrorKind::Expected(
-                            "scalar literal or parameter relationship MERGE property value",
-                        ),
-                    )
-                    .into());
+                crate::mutation_text::VertexMergeValueTemplate::Stored { value, at } => {
+                    let value =
+                        Parser::constant_written_value(value, values)?.ok_or_else(|| {
+                            error(
+                                *at,
+                                GraphPatternTextErrorKind::Expected(
+                                    "non-null scalar or bounded list MERGE property value",
+                                ),
+                            )
+                        })?;
+                    stored_properties.push((*key, value));
+                    continue;
                 }
             };
             properties.push((*key, value));
@@ -877,6 +882,7 @@ impl PreparedGraphEdgeMergeText {
                 properties,
             ),
         }
+        .and_then(|merge| merge.with_stored_properties(stored_properties))
         .map_err(|source| build_error(self.input.return_at(), source))?;
         Ok(if self.undirected {
             merge.with_undirected()

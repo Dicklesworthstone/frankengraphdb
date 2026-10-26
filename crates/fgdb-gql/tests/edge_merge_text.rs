@@ -345,3 +345,234 @@ fn relationship_merge_return_refuses_star_unknown_variables_and_trailing_text() 
         );
     }
 }
+
+#[test]
+fn stored_list_keys_bind_immutably_and_preserve_literal_parameter_identity() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{GqlParameterType, PreparedGraphEdgeUpsertText};
+    use fgdb_types::CanonicalScalar;
+    let calls = Cell::new(0);
+    let text = "MATCH (a),(b) MERGE (a)-[:R {p:$key}]->(b)";
+    let template = PreparedGraphEdgeMergeText::prepare_with_parameter_types(
+        text,
+        R,
+        &[("key", GqlParameterType::List)],
+        |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        },
+    )
+    .unwrap();
+    let resolved = calls.get();
+    let args = |n| {
+        GqlParameters::new()
+            .with_list("key", vec![GraphValue::Scalar(CanonicalScalar::Int(n))])
+            .unwrap()
+    };
+    let first = template.bind_parameters(&args(7)).unwrap();
+    let original = first.canonical_bytes();
+    assert_ne!(
+        original,
+        template
+            .bind_parameters(&args(8))
+            .unwrap()
+            .canonical_bytes()
+    );
+    assert_eq!(
+        original,
+        template
+            .bind_parameters(&args(7))
+            .unwrap()
+            .canonical_bytes()
+    );
+    assert_eq!(calls.get(), resolved);
+    let literal = PreparedGraphEdgeMergeText::prepare(
+        "MATCH (a),(b) MERGE (a)-[:R {p:[7]}]->(b)",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    assert_eq!(original, literal.canonical_bytes());
+    let cloned = first.clone();
+    assert!(std::ptr::eq(
+        first.stored_properties().next().unwrap().1,
+        cloned.stored_properties().next().unwrap().1,
+    ));
+    let upsert = PreparedGraphEdgeUpsertText::prepare(
+        "MATCH (a),(b) MERGE (a)-[r:R {p:[]}]->(b) ON CREATE SET r.p=[7]",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    assert_eq!(upsert.merge().stored_properties().len(), 1);
+}
+
+#[test]
+fn stored_merge_comparisons_keep_numeric_peers_empty_lists_and_unknown_children() {
+    use fgdb_gql::{GraphIntegerError, PreparedGraphEdgeMerge};
+    fn prepared(value: &str) -> PreparedGraphEdgeMerge {
+        PreparedGraphEdgeMergeText::prepare(
+            &format!("MATCH (a),(b) MERGE (a)-[:R {{p:{value}}}]->(b)"),
+            R,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+    }
+    for (wanted, actual, expected) in [
+        ("[1,[2],[]]", "[1.0,[2.0],[]]", true),
+        ("[9007199254740993]", "[9007199254740992.0]", false),
+        ("[]", "[]", true),
+        ("[1,NULL]", "[1,NULL]", false),
+        ("[1,NULL]", "[2,NULL]", false),
+        ("[1]", "[1,2]", false),
+    ] {
+        let merge = prepared(wanted);
+        let stored = prepared(actual);
+        let (_, value) = stored.stored_properties().next().unwrap();
+        assert_eq!(merge.matches_stored_properties(
+            |_| Some(value), &mut |_| Ok::<_, GraphIntegerError>(()),
+        ).unwrap(), expected, "{wanted} = {actual}");
+    }
+    assert!(prepared("[]").shares_pair_outcomes());
+    assert!(!prepared("[1,NULL]").shares_pair_outcomes());
+}
+
+#[test]
+fn stored_key_comparison_and_creation_propagate_every_control_failure() {
+    use fgdb_gql::{GlaExecutionEvent, GraphIntegerError};
+    #[derive(Debug, PartialEq)]
+    enum Failure {
+        Stop(usize),
+        Data(GraphIntegerError),
+    }
+    impl From<GraphIntegerError> for Failure {
+        fn from(error: GraphIntegerError) -> Self {
+            Self::Data(error)
+        }
+    }
+    let merge = PreparedGraphEdgeMergeText::prepare(
+        "MATCH (a),(b) MERGE (a)-[:R {p:[1,[2,3],[]]}]->(b)",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    let original = merge.canonical_bytes();
+    let stored = merge.stored_properties().next().unwrap().1;
+    for copying in [false, true] {
+        let run = |control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), Failure>| {
+            if copying {
+                merge
+                    .creation_properties_with_control(&mut |event| control(event))
+                    .map(|_| true)
+            } else {
+                merge.matches_stored_properties(|_| Some(stored), &mut |event| control(event))
+            }
+        };
+        let mut calls = 0;
+        assert!(
+            run(&mut |_| {
+                calls += 1;
+                Ok(())
+            })
+            .unwrap()
+        );
+        assert!(calls > 4);
+        for stop in 1..=calls {
+            let mut at = 0;
+            assert_eq!(
+                run(&mut |_| {
+                    at += 1;
+                    if at == stop {
+                        Err(Failure::Stop(stop))
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(Failure::Stop(stop))
+            );
+            assert_eq!(at, stop);
+            assert_eq!(merge.canonical_bytes(), original);
+        }
+    }
+}
+
+#[test]
+fn stored_merge_keys_refuse_invalid_domains_aliases_and_payloads_before_execution() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{GqlParameterType, GraphEdgeMergeBuildError};
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar};
+    let template = PreparedGraphEdgeMergeText::prepare_with_parameter_types(
+        "MATCH (a),(b) MERGE (a)-[:R {p:$key}]->(b)",
+        R,
+        &[("key", GqlParameterType::List)],
+        symbols,
+    )
+    .unwrap();
+    for args in [
+        GqlParameters::new().with_null("key").unwrap(),
+        GqlParameters::new()
+            .with_list(
+                "key",
+                vec![
+                    GraphValue::map(vec![(
+                        "x".into(),
+                        GraphValue::Scalar(CanonicalScalar::Int(1)),
+                    )])
+                    .unwrap(),
+                ],
+            )
+            .unwrap(),
+        GqlParameters::new()
+            .with_list(
+                "key",
+                vec![GraphValue::Scalar(
+                    CanonicalScalar::ucs_basic_text(&"x".repeat(65_536)).unwrap(),
+                )],
+            )
+            .unwrap(),
+    ] {
+        assert!(template.bind_parameters(&args).is_err());
+    }
+    let scalar =
+        PreparedGraphEdgeMergeText::prepare("MATCH (a),(b) MERGE (a)-[:R {p:1}]->(b)", R, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+    let before = scalar.canonical_bytes();
+    assert_eq!(
+        scalar
+            .clone()
+            .with_stored_properties(Vec::new())
+            .unwrap()
+            .canonical_bytes(),
+        before
+    );
+    assert!(matches!(
+        scalar.with_stored_properties(vec![(
+            P,
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(2))
+        )]),
+        Err(GraphEdgeMergeBuildError::DuplicateProperty),
+    ));
+    let alias = PreparedGraphEdgeMergeText::prepare(
+        "MATCH (a),(b) MERGE (a)-[:R {p:1,alias:[2]}]->(b)",
+        R,
+        |kind, name| {
+            if name == "alias" && kind == GraphSymbolKind::Property {
+                Some(GraphSymbol::Property(P))
+            } else {
+                symbols(kind, name)
+            }
+        },
+    )
+    .unwrap();
+    assert!(alias.bind_parameters(&GqlParameters::new()).is_err());
+}

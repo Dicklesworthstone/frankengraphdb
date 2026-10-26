@@ -109,10 +109,7 @@ pub(super) fn preflight(
         )));
     }
     if !scope.allows_relation(merge.relation())
-        || merge
-            .properties()
-            .iter()
-            .any(|(key, _)| !scope.allows_property(*key))
+        || merge.property_keys().any(|key| !scope.allows_property(key))
     {
         return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
     }
@@ -393,7 +390,7 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
         let mut continued = Vec::new();
         let mut returning = Vec::new();
         if !matches!(step, GraphWriteChainStep::EdgeMerge(_)) {
-            for input in &selected {
+            for (row_at, input) in selected.iter().enumerate() {
                 event(
                     cx,
                     &controls,
@@ -411,7 +408,7 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
                     .get(merge.destination_column())
                     .and_then(GraphValue::as_vertex)
                     .ok_or_else(invalid)?;
-                let edges = resolved.edges.get(&(src, dst)).ok_or_else(invalid)?;
+                let edges = resolved.edges_for((src, dst), row_at).ok_or_else(invalid)?;
                 for &(edge, endpoints) in edges {
                     match step {
                         GraphWriteChainStep::EdgeMergeRows { .. } => {

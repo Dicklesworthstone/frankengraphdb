@@ -97,9 +97,8 @@ fn apply_all<V: Vfs + Clone, Clock: FnMut() -> u64>(
     if !scope.allows_relation(input.merge().relation())
         || input
             .merge()
-            .properties()
-            .iter()
-            .any(|(key, _)| !scope.allows_property(*key))
+            .property_keys()
+            .any(|key| !scope.allows_property(key))
     {
         return Err(staging(WriteTxnError::Authorization(Error::ScopeDenied)));
     }
