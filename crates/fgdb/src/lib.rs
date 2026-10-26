@@ -1800,6 +1800,9 @@ struct Snapshot {
     /// traversal or a load by caller keys never looks a vertex up by value; a
     /// commit extends it incrementally once it is built.
     property_index: std::sync::OnceLock<Arc<gql_exec::source::PropertyEqualityIndex>>,
+    /// Exact unrestricted current-cut cardinalities; lazy, bounded and
+    /// derived. A successor updates only touched relation counters.
+    exact_counts: gql_exec::source::exact_counts::ExactCounts,
     /// The root's block references, aligned with `blocks`. Retained so the
     /// next commit can tell which decoded blocks the new root carries forward
     /// unchanged (fgdb-gieu) — content addressing makes the identity the
@@ -4644,6 +4647,7 @@ impl<V: Vfs + Clone> Database<V> {
                 }),
             })?;
         Self::fail_publication_if_requested(recovery, publication_failure)?;
+        let mut exact_counts = self.snapshot.exact_counts.clone();
         let mut folded =
             std::mem::replace(&mut self.writer, BlockWriter::new(GRAPH, BRANCH, PARTITION));
         let mut next_birth_ordinal = self.heads.next_birth_ordinal;
@@ -4653,6 +4657,7 @@ impl<V: Vfs + Clone> Database<V> {
                 continue;
             }
             for row in &coordinate.rows {
+                exact_counts.apply_before(&folded, row);
                 folded
                     .apply(self.keys.block_keys(), frontier, row)
                     .map_err(|error| WriteError::CommittedNeedsRecovery {
@@ -5033,6 +5038,7 @@ impl<V: Vfs + Clone> Database<V> {
             read_caches: Arc::clone(&previous.read_caches),
             adjacency,
             property_index,
+            exact_counts,
             blocks: decoded,
             block_props: decoded_props,
             refs,
@@ -5572,6 +5578,7 @@ impl<V: Vfs + Clone> Database<V> {
         .await?;
         snapshot.delta_index = self.snapshot.delta_index.clone();
         snapshot.read_caches = Arc::clone(&self.snapshot.read_caches);
+        snapshot.exact_counts = self.snapshot.exact_counts.clone();
         let versions = VersionHeads::from_checkpoint(&snapshot);
         // The slot advances so the compacted generation is what the next
         // checkpoint-selected open lands on.
@@ -6608,6 +6615,9 @@ fn current_generation(
         // once built.
         adjacency: std::sync::OnceLock::new(),
         property_index: std::sync::OnceLock::new(),
+        exact_counts: gql_exec::source::exact_counts::ExactCounts::new(
+            blocks.is_empty() && patches.is_empty(),
+        ),
         blocks: blocks.into_iter().map(Arc::from).collect(),
         refs: root.blocks,
         block_props: block_props
@@ -7276,6 +7286,9 @@ async fn publish_and_snapshot_inner<V: Vfs>(
     Ok((
         Snapshot {
             read_caches: Arc::default(),
+            exact_counts: gql_exec::source::exact_counts::ExactCounts::new(
+                decoded.is_empty() && decoded_patches.is_empty(),
+            ),
             adjacency: if build_adjacency {
                 std::sync::OnceLock::from(Arc::new(gql_exec::source::AdjacencyIndex::build(
                     &decoded,

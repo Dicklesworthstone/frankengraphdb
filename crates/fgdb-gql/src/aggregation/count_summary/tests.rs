@@ -367,11 +367,21 @@ fn only_plain_filterless_counts_admit_source_summaries() {
         assert_eq!(query.count_summary_source(), None, "{text}");
         assert!(
             query
+                .prepare_count_metadata(GraphCountSource::Vertices, 9)
+                .is_none()
+        );
+        assert!(
+            query
                 .prepare_count_summary(GraphCountSource::Vertices, 9, 9)
                 .is_none()
         );
     }
     let vertices = query("MATCH (n) RETURN COUNT(*) AS n");
+    assert!(
+        vertices
+            .prepare_count_metadata(GraphCountSource::Relation(RelationId(1)), 9)
+            .is_none()
+    );
     assert!(
         vertices
             .prepare_count_summary(GraphCountSource::Vertices, 9, 8)
@@ -385,6 +395,11 @@ fn only_plain_filterless_counts_admit_source_summaries() {
     let edges = query("MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n");
     assert!(
         edges
+            .prepare_count_metadata(GraphCountSource::Relation(RelationId(2)), 9)
+            .is_none()
+    );
+    assert!(
+        edges
             .prepare_count_summary(GraphCountSource::Relation(RelationId(1)), 8, 9)
             .is_none()
     );
@@ -393,4 +408,144 @@ fn only_plain_filterless_counts_admit_source_summaries() {
             .prepare_count_summary(GraphCountSource::Relation(RelationId(2)), 9, 9)
             .is_none()
     );
+}
+
+fn run_metadata<const RUNS: bool>(
+    query: &PreparedGraphAggregate,
+    matching: u64,
+    policy: GqlQueryPolicy,
+    stop: Option<usize>,
+) -> Outcome {
+    let mut calls = Vec::new();
+    let result = query
+        .prepare_count_metadata(query.count_summary_source().unwrap(), matching)
+        .unwrap()
+        .execute_governed(
+            1,
+            policy,
+            Host::<RUNS> {
+                calls: &mut calls,
+                stop,
+                refused: false,
+            },
+        );
+    (result, calls)
+}
+
+#[test]
+fn exact_metadata_keeps_the_native_finalizer_and_has_cardinality_independent_work() {
+    fn compare_metadata<const RUNS: bool>() {
+        let policy = GqlQueryPolicy::new(100_000, 100, 10_000_000, 1_000_000);
+        for text in [
+            "MATCH (n) RETURN COUNT(*) AS n",
+            "MATCH (n) RETURN COUNT(*) AS n, COUNT(*) AS m",
+            "MATCH (n) RETURN COUNT(*) + 1 AS n ORDER BY n DESC LIMIT 1",
+            "MATCH (n) RETURN COUNT(*) AS n HAVING n > 2",
+            "MATCH (n) RETURN COUNT(*) AS n SKIP 1 LIMIT 0",
+            "MATCH (n) RETURN 1 / (COUNT(*) - COUNT(*)) AS n LIMIT 0",
+            "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n",
+            "MATCH (a)<-[:R]-(b) RETURN COUNT(*) AS n",
+            "MATCH (a)-[:T]->(b) RETURN COUNT(*) AS n",
+        ] {
+            let query = query(text);
+            for size in [0, 1, 7, 4097] {
+                let vertices: Vec<_> = (0..size).map(|n| VId(u128::MAX - n as u128)).collect();
+                let edges: Vec<_> = (0..size * 2)
+                    .map(|n| {
+                        (
+                            vertices[n % size],
+                            RelationId(if n % 3 == 0 { 2 } else { 1 }),
+                            vertices[(n * 7) % size],
+                        )
+                    })
+                    .collect();
+                let matching = match query.count_summary_source().unwrap() {
+                    GraphCountSource::Vertices => size as u64,
+                    GraphCountSource::Relation(relation) => {
+                        edges.iter().filter(|&&(_, r, _)| r == relation).count() as u64
+                    }
+                };
+                let expected = run::<RUNS>(&query, &vertices, &edges, false, policy, None);
+                let actual = run_metadata::<RUNS>(&query, matching, policy, None);
+                assert_eq!(
+                    actual.0.as_ref().map(|r| &r.value),
+                    expected.0.as_ref().map(|r| &r.value),
+                    "{text}, size {size}"
+                );
+                if let Ok(result) = actual.0 {
+                    assert_eq!(result.rows.snapshot_records, 1);
+                }
+            }
+        }
+        // Full u64 cardinality is exact; no conversion through a signed row
+        // multiplicity or floating-point value is permitted.
+        let query = query("MATCH (n) RETURN COUNT(*) AS n");
+        let mut work = None;
+        for matching in [0, 1, 900_000, u64::MAX] {
+            let result = run_metadata::<RUNS>(&query, matching, policy, None)
+                .0
+                .unwrap();
+            assert_eq!(result.value[0].values()[0].as_count(), Some(matching));
+            let observed = (
+                result.evaluator.work_units,
+                result.evaluator.scratch_entries,
+            );
+            assert_eq!(*work.get_or_insert(observed), observed);
+        }
+    }
+    compare_metadata::<false>();
+    compare_metadata::<true>();
+}
+
+#[test]
+fn exact_metadata_checks_every_budget_and_cancellation_boundary() {
+    for text in [
+        "MATCH (n) RETURN COUNT(*) AS n",
+        "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n, COUNT(*) AS m",
+        "MATCH (n) RETURN COUNT(*) AS n SKIP 1 LIMIT 0",
+    ] {
+        let query = query(text);
+        let wide = GqlQueryPolicy::new(1, 100, 1_000_000, 1_000_000);
+        let (result, calls) = run_metadata::<false>(&query, 900_000, wide, None);
+        let result = result.unwrap();
+        let exact = GqlQueryPolicy::new(
+            1,
+            result.rows.result_rows,
+            result.evaluator.work_units,
+            result.evaluator.scratch_entries,
+        );
+        assert_eq!(
+            run_metadata::<false>(&query, 900_000, exact, None)
+                .0
+                .unwrap(),
+            result
+        );
+        for stop in 1..=calls.len() {
+            let interrupted = run_metadata::<false>(&query, 900_000, wide, Some(stop));
+            assert!(matches!(interrupted.0, Err(GqlQueryError::Interrupted(at)) if at == stop));
+            assert_eq!(interrupted.1.len(), stop);
+        }
+        for work in 0..result.evaluator.work_units {
+            assert!(matches!(
+                run_metadata::<false>(&query, 900_000, GqlQueryPolicy::new(1, 100, work, 1_000_000), None).0,
+                Err(GqlQueryError::Evaluator(error)) if error.observed == u128::from(error.limit) + 1
+            ));
+        }
+        for scratch in 0..result.evaluator.scratch_entries {
+            assert!(matches!(
+                run_metadata::<false>(&query, 900_000, GqlQueryPolicy::new(1, 100, 1_000_000, scratch), None).0,
+                Err(GqlQueryError::Evaluator(error)) if error.observed == u128::from(error.limit) + 1
+            ));
+        }
+        assert!(matches!(
+            run_metadata::<false>(&query, 900_000, GqlQueryPolicy::new(0, 100, 1_000_000, 1_000_000), None).0,
+            Err(GqlQueryError::Rows(error)) if error.dimension == GqlBudgetDimension::SnapshotRecords && error.observed == 1
+        ));
+        if result.rows.result_rows > 0 {
+            assert!(matches!(
+                run_metadata::<false>(&query, 900_000, GqlQueryPolicy::new(1, 0, 1_000_000, 1_000_000), None).0,
+                Err(GqlQueryError::Rows(error)) if error.dimension == GqlBudgetDimension::ResultRows && error.observed == 1
+            ));
+        }
+    }
 }

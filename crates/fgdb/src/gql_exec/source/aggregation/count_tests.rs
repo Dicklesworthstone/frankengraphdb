@@ -205,3 +205,99 @@ fn fallible_owned_readers_keep_their_source_errors_and_preceding_checkpoint() {
         ));
     }
 }
+
+#[test]
+fn cold_counts_publish_only_after_complete_output_and_survive_every_cancellation() {
+    let ((), report) = run_async_under_lab(0xc017_0021, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let keys = DatabaseKeys::new(
+            [0x41; 32],
+            DatabaseSecurityNamespaceId([0x42; 32]),
+            [0x43; 32],
+        );
+        let mut db = Database::open_memory(&contexts.commit(), keys)
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        for id in 1..=4 {
+            batch.create_vertex(VId(id), vec![], vec![]);
+        }
+        for (eid, source, destination) in [(1, 1, 1), (2, 1, 2), (3, 1, 2), (4, 2, 3), (5, 3, 4)] {
+            batch.add_edge(EId(eid), VId(source), VId(destination), vec![]);
+        }
+        db.write(&contexts.commit(), batch).await.unwrap();
+        let policy = GqlQueryPolicy::new(100, 10, 100_000, 100_000);
+        let at = db.snapshot.frontier;
+        for (pattern, matching) in [("(n)", 4), ("(a)-[:R]->(b)", 5)] {
+            let plain = query(&format!("MATCH {pattern} RETURN COUNT(*) AS total"));
+            let source = plain.count_summary_source().unwrap();
+            let bad = query(&format!(
+                "MATCH {pattern} RETURN 1 / (COUNT(*) - COUNT(*)) AS total LIMIT 0"
+            ));
+            std::sync::Arc::make_mut(&mut db.snapshot).exact_counts = Default::default();
+            assert!(matches!(
+                execute_at(&db, &bad, at, policy, || Ok::<_, usize>(())),
+                Err(GqlQueryError::Source(
+                    GraphAggregateError::OutputExpression { .. }
+                ))
+            ));
+            assert_eq!(
+                db.snapshot
+                    .exact_counts
+                    .lookup(source, &mut |_| Ok::<_, ()>(()))
+                    .unwrap(),
+                None
+            );
+            assert!(matches!(
+                execute_at(&db, &plain, at, GqlQueryPolicy::new(100, 0, 100_000, 100_000), || Ok::<_, usize>(())),
+                Err(GqlQueryError::Rows(error)) if error.dimension == fgdb_gql::GqlBudgetDimension::ResultRows
+            ));
+            assert_eq!(
+                db.snapshot
+                    .exact_counts
+                    .lookup(source, &mut |_| Ok::<_, ()>(()))
+                    .unwrap(),
+                None
+            );
+
+            let mut calls = 0;
+            let full = execute_at(&db, &plain, at, policy, || {
+                calls += 1;
+                Ok::<_, usize>(())
+            })
+            .unwrap();
+            assert_eq!(full.value[0].values()[0].as_count(), Some(matching));
+            assert_eq!(full.rows.snapshot_records, matching);
+            assert_eq!(
+                db.snapshot
+                    .exact_counts
+                    .lookup(source, &mut |_| Ok::<_, ()>(()))
+                    .unwrap(),
+                Some(matching)
+            );
+            let warm = execute_at(&db, &plain, at, policy, || Ok::<_, usize>(())).unwrap();
+            assert_eq!(warm.value, full.value);
+            assert_eq!(warm.rows.snapshot_records, 1);
+            assert!(warm.evaluator.work_units < full.evaluator.work_units);
+            for stop in 1..=calls {
+                std::sync::Arc::make_mut(&mut db.snapshot).exact_counts = Default::default();
+                let mut seen = 0;
+                let result = execute_at(&db, &plain, at, policy, || {
+                    seen += 1;
+                    assert!(seen <= stop, "polled after refusing");
+                    if seen == stop { Err(stop) } else { Ok(()) }
+                });
+                assert!(matches!(result, Err(GqlQueryError::Interrupted(at)) if at == stop));
+                assert_eq!(seen, stop);
+                assert_eq!(
+                    db.snapshot
+                        .exact_counts
+                        .lookup(source, &mut |_| Ok::<_, ()>(()))
+                        .unwrap(),
+                    None
+                );
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

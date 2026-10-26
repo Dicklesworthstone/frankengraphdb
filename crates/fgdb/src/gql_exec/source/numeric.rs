@@ -655,6 +655,7 @@ mod tests {
             blocks: vec![],
             adjacency: Default::default(),
             property_index: Default::default(),
+            exact_counts: Default::default(),
             refs: vec![],
             block_props: vec![],
             patches: patches

@@ -147,7 +147,12 @@ fn owner_and_pinned_native_counts_keep_history_and_live_multiplicity() {
                     )
                     .unwrap();
                 assert_eq!(owned, pinned);
-                assert_eq!(owned.rows.snapshot_records, records);
+                // Exact current-cut metadata admits one cardinality record;
+                // historical cuts retain their full live-source admission.
+                assert_eq!(
+                    owned.rows.snapshot_records,
+                    if cut == 3 { 1 } else { records }
+                );
                 assert_eq!(owned.value[0].get(0).unwrap().as_count(), Some(expected));
             }
         }
@@ -332,6 +337,116 @@ fn owner_count_history_fences_precede_cancellation_and_empty_page_limits() {
             .unwrap();
         assert_eq!(handle.join(&root).await, Ok(()));
         assert!(root.checkpoint().is_ok());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn exact_current_counts_do_not_grow_with_graph_and_reopen_rebuilds_before_reuse() {
+    let ((), report) = run_async_under_lab(0xc017_0022, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let vfs = MemVfs::new().unwrap();
+        let dir = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&contexts.commit(), vfs.clone(), &dir, keys())
+            .await
+            .unwrap();
+        let vertices = aggregate("MATCH (n) RETURN COUNT(*) AS total");
+        let edges = aggregate("MATCH (a)-[:R]->(b) RETURN COUNT(*) AS total");
+        let mut baseline = None;
+        let mut pinned = None;
+        for total in [1_u128, 32, 512] {
+            let mut batch = WriteBatch::new(R);
+            let begin = if total == 1 {
+                1
+            } else if total == 32 {
+                2
+            } else {
+                33
+            };
+            for id in begin..=total {
+                batch.create_vertex(VId(id), vec![], vec![]);
+                batch.add_edge(EId(id), VId(id), VId(id), vec![]);
+            }
+            db.write(&contexts.commit(), batch).await.unwrap();
+            for query in [&vertices, &edges] {
+                let result = db
+                    .execute_graph_aggregate_governed(&contexts.query(), query, policy())
+                    .unwrap();
+                assert_eq!(result.rows.snapshot_records, 1);
+                assert_eq!(result.value[0].values()[0].as_count(), Some(total as u64));
+            }
+            let result = db
+                .execute_graph_aggregate_governed(&contexts.query(), &edges, policy())
+                .unwrap();
+            let observed = (
+                result.evaluator.work_units,
+                result.evaluator.scratch_entries,
+            );
+            assert_eq!(
+                *baseline.get_or_insert(observed),
+                observed,
+                "counts touch only relation metadata"
+            );
+            if total == 32 {
+                pinned = Some(db.read_session().unwrap());
+            }
+        }
+        let pinned = pinned.unwrap();
+        let mut retired = WriteBatch::new(R);
+        retired.delete_vertex(VId(1)); // self-loop cascade counts one retirement
+        retired.delete_edge(EId(2));
+        db.write(&contexts.commit(), retired).await.unwrap();
+        assert_eq!(
+            db.execute_graph_aggregate_governed(&contexts.query(), &vertices, policy())
+                .unwrap()
+                .value[0]
+                .values()[0]
+                .as_count(),
+            Some(511)
+        );
+        let maintained = db
+            .execute_graph_aggregate_governed(&contexts.query(), &edges, policy())
+            .unwrap();
+        assert_eq!(maintained.value[0].values()[0].as_count(), Some(510));
+        assert_eq!(
+            pinned
+                .execute_graph_aggregate_governed(&contexts.query(), &edges, policy())
+                .unwrap()
+                .value[0]
+                .values()[0]
+                .as_count(),
+            Some(32)
+        );
+        db.compact(&contexts.commit()).await.unwrap();
+        assert_eq!(
+            db.execute_graph_aggregate_governed(&contexts.query(), &edges, policy())
+                .unwrap(),
+            maintained
+        );
+        drop(db);
+        let mut reopened = Database::open_with_vfs(&contexts.commit(), vfs, &dir, keys())
+            .await
+            .unwrap();
+        let cold = reopened
+            .execute_graph_aggregate_governed(&contexts.query(), &edges, policy())
+            .unwrap();
+        assert_eq!(cold.value, maintained.value);
+        assert_eq!(
+            cold.rows.snapshot_records, 510,
+            "reopen discards process-local metadata"
+        );
+        let warm = reopened
+            .execute_graph_aggregate_governed(&contexts.query(), &edges, policy())
+            .unwrap();
+        assert_eq!(warm, maintained);
+        let mut next = WriteBatch::new(R);
+        next.add_edge(EId(513), VId(2), VId(2), vec![]);
+        reopened.write(&contexts.commit(), next).await.unwrap();
+        let next = reopened
+            .execute_graph_aggregate_governed(&contexts.query(), &edges, policy())
+            .unwrap();
+        assert_eq!(next.value[0].values()[0].as_count(), Some(511));
+        assert_eq!(next.rows.snapshot_records, 1);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

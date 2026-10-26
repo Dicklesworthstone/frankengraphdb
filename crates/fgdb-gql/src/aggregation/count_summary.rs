@@ -3,7 +3,8 @@
 //! This is a checked physical input to the ordinary aggregate finalizer, not
 //! a cached result. Source admission stays the host's responsibility. Only
 //! plans whose scan and reduction have no data-dependent expression qualify;
-//! all their evaluator events are still spent in their original order.
+//! The scan-summary path preserves the original evaluator event order. An
+//! exact-metadata input spends only its own lookup and finalization work.
 
 use super::*;
 use crate::algebra::GlaDirection;
@@ -30,6 +31,7 @@ pub struct PreparedGraphCount<'query> {
     shape: Shape,
     examined: u64,
     matching: u64,
+    metadata: bool,
 }
 
 impl PreparedGraphAggregate {
@@ -115,16 +117,39 @@ impl PreparedGraphAggregate {
             shape,
             examined,
             matching,
+            metadata: false,
+        })
+    }
+
+    /// Bind an exact cardinality read from a trusted generation's metadata.
+    /// The host must prove the same cut and unrestricted visible scope, admit
+    /// the metadata read, and charge its actual lookup work. This is a distinct
+    /// physical input: it does not replay work for rows it never traverses.
+    /// Output expressions, HAVING, ordering, pagination and errors still use
+    /// the original aggregate finalizer.
+    #[must_use]
+    pub fn prepare_count_metadata(
+        &self,
+        source: GraphCountSource,
+        matching: u64,
+    ) -> Option<PreparedGraphCount<'_>> {
+        let shape = self.count_shape()?;
+        (shape.source == source).then_some(PreparedGraphCount {
+            query: self,
+            shape,
+            examined: 0,
+            matching,
+            metadata: true,
         })
     }
 }
 
 impl PreparedGraphCount<'_> {
-    /// Execute with the ordinary scan's evaluator transcript and the original
-    /// aggregate finalizer. The host must first admit or exactly replay its
-    /// source and deduct that work/scratch from `policy`. No record allowance
-    /// is reset, and even LIMIT 0 consumes source and evaluator work before
-    /// the original output stage decides whether to deliver a row.
+    /// Execute the bound physical input with the original aggregate finalizer.
+    /// A scan summary replays the scan's evaluator transcript; exact metadata
+    /// spends one cardinality update. The host must first admit its source and
+    /// deduct that work/scratch from `policy`. No record allowance is reset,
+    /// and LIMIT 0 still consumes source and evaluator work before output.
     pub fn execute_governed<E, C>(
         &self,
         snapshot_records: u64,
@@ -184,10 +209,15 @@ impl PreparedGraphCount<'_> {
         // once. Every event here is Work: no reader or data exception can
         // occur between them for a shape admitted above.
         let visit_work = self.shape.columns as u128 + 1 + self.query.aggregates.len() as u128;
-        let work = match self.shape.source {
-            GraphCountSource::Vertices => u128::from(self.examined) * (2 + visit_work),
-            GraphCountSource::Relation(_) => {
-                u128::from(self.examined) + u128::from(self.matching > 0) * visit_work
+        let work = if self.metadata {
+            // One admitted weighted cardinality and one update per aggregate.
+            1 + self.query.aggregates.len() as u128
+        } else {
+            match self.shape.source {
+                GraphCountSource::Vertices => u128::from(self.examined) * (2 + visit_work),
+                GraphCountSource::Relation(_) => {
+                    u128::from(self.examined) + u128::from(self.matching > 0) * visit_work
+                }
             }
         };
         let visited = charges.work(work).map(|()| {

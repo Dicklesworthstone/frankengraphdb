@@ -3,6 +3,7 @@
 
 mod aggregation;
 pub use aggregation::{SnapshotEdgeSource, SnapshotVertexSource};
+pub(crate) mod exact_counts;
 mod numeric;
 mod vertex_scan;
 use vertex_scan::VertexHistoryScanCursor;
@@ -192,7 +193,6 @@ impl<K: Ord + Clone, V: Clone> IndexMap<K, V> {
             }
         }
     }
-    #[cfg(test)]
     fn remove(&self, key: &K, work: &mut u64) -> Self {
         *work += 1;
         let Some(node) = self.0.as_ref() else {

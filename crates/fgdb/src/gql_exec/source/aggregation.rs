@@ -131,17 +131,54 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
     // owns output expressions, HAVING, ordering and pages. An independently
     // fallible reader keeps its ordinary materialized source.
     if let (Some(snapshot), Some(source)) = (admitted.snapshot, aggregate.count_summary_source()) {
-        let (examined, matching) = count_input(
+        let current = as_of == snapshot.frontier;
+        if current {
+            let matching = snapshot
+                .exact_counts
+                .lookup(source, &mut |event| {
+                    checkpoint().map_err(GqlQueryError::Interrupted)?;
+                    usage.observe::<GraphAggregateError<ReadError>, C>(policy, event)
+                })
+                .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))?;
+            if let Some(matching) = matching {
+                let count = aggregate
+                    .prepare_count_metadata(source, matching)
+                    .expect("the source shape was checked before the exact metadata lookup");
+                let result = count.execute_governed_with_element_reads(
+                    1,
+                    elements,
+                    usage.remaining(policy),
+                    checkpoint,
+                );
+                return usage.finish(policy, result);
+            }
+        }
+        let mut builder = if current && matches!(source, GraphCountSource::Relation(_)) {
+            snapshot.exact_counts.relation_builder()
+        } else {
+            None
+        };
+        let (examined, matching) = count_input_with_builder(
             snapshot,
             aggregate.input_pattern().plan(),
             source,
             as_of,
+            builder.as_mut(),
             &mut |event| {
                 checkpoint().map_err(GqlQueryError::Interrupted)?;
                 usage.observe::<GraphAggregateError<ReadError>, C>(policy, event)
             },
         )
         .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))?;
+        let relations = builder
+            .map(|builder| {
+                builder.finish(&mut |event| {
+                    checkpoint().map_err(GqlQueryError::Interrupted)?;
+                    usage.observe::<GraphAggregateError<ReadError>, C>(policy, event)
+                })
+            })
+            .transpose()
+            .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))?;
         let count = aggregate
             .prepare_count_summary(source, examined, matching)
             .expect("the checked source counts only its admitted live occurrences");
@@ -151,7 +188,16 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
             usage.remaining(policy),
             checkpoint,
         );
-        return usage.finish(policy, result);
+        let result = usage.finish(policy, result);
+        if result.is_ok() && current {
+            if source == GraphCountSource::Vertices {
+                snapshot.exact_counts.publish_vertices(matching);
+            }
+            if let Some(relations) = relations {
+                snapshot.exact_counts.publish_relations(relations);
+            }
+        }
+        return result;
     }
     admitted
         .materialize(&mut |event| {
@@ -197,11 +243,23 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
 // logical scratch charge for each live row, while retaining just two counts.
 // The existing edge visitor still owns its bounded-by-policy MVCC winner merge;
 // this removes the second live-edge table, not the source's history work.
+#[cfg(test)]
 fn count_input<E>(
     snapshot: &Snapshot,
     plan: &fgdb_gql::algebra::GlaPlan<fgdb_gql::algebra::GraphValueRow>,
     source: GraphCountSource,
     as_of: CommitSeq,
+    control: &mut impl FnMut(super::SourceEvent) -> Result<(), E>,
+) -> Result<(u64, u64), E> {
+    count_input_with_builder(snapshot, plan, source, as_of, None, control)
+}
+
+fn count_input_with_builder<E>(
+    snapshot: &Snapshot,
+    plan: &fgdb_gql::algebra::GlaPlan<fgdb_gql::algebra::GraphValueRow>,
+    source: GraphCountSource,
+    as_of: CommitSeq,
+    mut builder: Option<&mut super::exact_counts::RelationBuilder>,
     control: &mut impl FnMut(super::SourceEvent) -> Result<(), E>,
 ) -> Result<(u64, u64), E> {
     let mut examined = 0;
@@ -229,6 +287,9 @@ fn count_input<E>(
                 examined += 1;
                 if entry.relation == relation {
                     matching += 1;
+                }
+                if let Some(builder) = builder.as_deref_mut() {
+                    builder.observe(entry.relation, control)?;
                 }
                 Ok(())
             })?;
