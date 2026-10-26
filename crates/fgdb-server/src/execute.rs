@@ -2,10 +2,12 @@
 //! path every surface (FGP, HTTP and Bolt) shares, so adapters differ only in
 //! framing, never in authority, statement classes or error classes.
 
+mod difference;
 mod edge_upsert_output;
 pub(crate) mod ordered;
 mod prepared;
 mod subscription;
+pub(crate) use difference::{DifferenceAnswer, read_difference, read_prepared_difference};
 pub(crate) use prepared::{
     PreparedDefinition, PreparedRead, prepare_statement, read_prepared_session, run_prepared,
     run_prepared_batch,

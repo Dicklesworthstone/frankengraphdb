@@ -170,3 +170,120 @@ fn a_pending_order_does_not_hold_a_recovery_operation() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn ordered_difference_preserves_signed_multiplicity_and_refuses_stale_delivery() {
+    let ((), report) = run_async_under_lab(0xd1ff_9002, |root| async move {
+        let (mut server, _, path) = served(&root, "ordered-difference-recovery").await;
+        let db = server.databases.get_mut("test").unwrap();
+        let directory = path.join("difference-scratch");
+        asupersync::fs::create_dir(&directory).await.unwrap();
+        let mut config = crate::OrderedReadConfig::new(&directory);
+        config.max_concurrent = 1;
+        config.sort.run_rows = 2;
+        config.sort.page_bytes = 31;
+        config.sort.max_sort_work = 1_000_000;
+        Arc::get_mut(db).unwrap().ordered_reads = Some(
+            crate::ordered::OrderedReads::open(&root, config)
+                .await
+                .unwrap(),
+        );
+        let db = &server.databases["test"];
+        let token = db
+            .authority
+            .issue_at(
+                &Grant::read_only(
+                    TRUNK,
+                    u64::MAX / 2,
+                    QueryLimits {
+                        max_nodes: 100_000,
+                        max_work: 100_000_000,
+                        max_rows: 1,
+                    },
+                ),
+                unix_millis(),
+            )
+            .unwrap();
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let query = contexts.query();
+        let mut initial = vertex(1);
+        initial.create_vertex(fgdb_types::VId(2), vec![], vec![]);
+        initial.create_vertex(fgdb_types::VId(3), vec![], vec![]);
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), initial)
+            .await
+            .unwrap();
+        let mut update = fgdb::WriteBatch::new(fgdb_delta_types::RelationId(1));
+        update.delete_vertex(fgdb_types::VId(1));
+        update.delete_vertex(fgdb_types::VId(2));
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), update)
+            .await
+            .unwrap();
+
+        let generation = accepted(ordered_generation(db, &token));
+        let (mut session, _) =
+            accepted(read_ordered_session(&root, db, &token, None, generation.clone()).await);
+        let params = fgdb_gql::GqlParameters::new();
+        let prepared = accepted(session.prepare(&query, "MATCH (n) RETURN 1 AS value", &params));
+        for (before, after, weight) in [(1, 2, Some(-2)), (2, 1, Some(2)), (2, 2, None)] {
+            let execution =
+                accepted(session.start_difference(&query, &prepared, &params, before, after));
+            assert_eq!(execution.columns(), ["value"]);
+            let mut cursor = accepted(execution.finish().await);
+            assert_eq!((cursor.before(), cursor.after()), (before, after));
+            assert_eq!(
+                accepted(cursor.next().await),
+                weight.map(|weight| (weight, vec![WireValue::Int(1)]))
+            );
+            assert!(accepted(cursor.next().await).is_none());
+            assert!(cursor.exhausted());
+        }
+        let aggregate =
+            accepted(session.prepare(&query, "MATCH (n) RETURN COUNT(*) AS count", &params));
+        assert_eq!(
+            session
+                .start_difference(&query, &aggregate, &params, 1, 2)
+                .err()
+                .unwrap()
+                .code,
+            ErrorCode::Statement
+        );
+        let mut cursor = accepted(
+            accepted(session.start_difference(&query, &prepared, &params, 1, 2))
+                .finish()
+                .await,
+        );
+        assert!(!cursor.exhausted());
+        fail_after_marker(&root, db, 4).await;
+        assert!(matches!(
+            settled(db).await,
+            crate::DatabaseStatus::Ready { .. }
+        ));
+        assert_eq!(
+            cursor.next().await.err().unwrap().code,
+            ErrorCode::DatabaseRecovering
+        );
+        assert!(!cursor.exhausted());
+        assert!(accepted(cursor.next().await).is_none());
+        assert!(!cursor.exhausted());
+        drop(cursor);
+        drop(session);
+        assert_eq!(
+            read_ordered_session(&root, db, &token, None, generation)
+                .await
+                .err()
+                .unwrap()
+                .code,
+            ErrorCode::DatabaseRecovering
+        );
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

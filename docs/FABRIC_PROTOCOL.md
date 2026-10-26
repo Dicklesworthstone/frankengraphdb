@@ -11,7 +11,8 @@ and adapters must consume the pinned asupersync implementation.
 
 ## Implemented byte profile
 
-All integers are unsigned, fixed-width, big-endian. Length includes the header.
+Header integers are unsigned, fixed-width, big-endian. Typed bodies also carry
+explicit signed value and difference-weight fields. Length includes the header.
 There is no padding, compression, implicit decompression, extension-skipping,
 or FEC in this profile. Unknown versions, frame kinds and flags are fatal.
 
@@ -57,6 +58,9 @@ these values; callers cannot authenticate merely by constructing the structs.
 | PING / PONG | 0x0020 / 0x0021 | client / server |
 | EXECUTE_BATCH | 0x0022 | client |
 | EXECUTE_PREPARED_BATCH | 0x0023 | client |
+| EXECUTE_DIFF | 0x0024 | client |
+| EXECUTE_PREPARED_DIFF | 0x0025 | client |
+| DIFF_RESULT_CHUNK / DIFF_RESULT_END | 0x0026 / 0x0027 | server |
 
 These are the implemented mechanism-profile tags, not an assertion that every
 Appendix D frame body and its generated registry have been implemented.
@@ -83,7 +87,8 @@ there is no resynchronization by scanning untrusted payload bytes.
 
 `Connection::validate_client_header` enforces direction, phase, complete binding,
 nonzero request IDs and control/child-stream distinction. EXECUTE, EXECUTE_BATCH, PREPARE,
-EXECUTE_PREPARED, EXECUTE_PREPARED_BATCH and RELEASE_PREPARED use the control stream; child stream IDs
+EXECUTE_PREPARED, EXECUTE_PREPARED_BATCH, EXECUTE_DIFF, EXECUTE_PREPARED_DIFF
+and RELEASE_PREPARED use the control stream; child stream IDs
 are minted by the server. Cancellation
 and credit address admitted streams. ACK/release may address independent durable
 owners, which the owning service must authenticate and validate separately.
@@ -166,12 +171,16 @@ redacted from `Debug`.
 | EXECUTE | `mode u8` (0 read, 1 write, 2 subscribe, 3 native source read stream, 4 external ordered read), `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
 | EXECUTE_BATCH | `statement text`, `argument_sets u32`, then that many parameter maps (each `count u32`, then strictly ascending `(name text, value)` pairs) |
 | EXECUTE_PREPARED_BATCH | nonzero connection-owned `handle [16]`, `argument_sets u32`, then that many parameter maps with the same canonical encoding and shared bounds as EXECUTE_BATCH; the handle must name a write template |
+| EXECUTE_DIFF | `mode u8` (0 buffered, 1 ordered stream), `before u64`, `after u64`, `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
+| EXECUTE_PREPARED_DIFF | `mode u8` (0 buffered, 1 ordered stream), `before u64`, `after u64`, nonzero connection-owned `handle [16]`, execution `parameters [(name text, value)]`; the handle must name a read template |
 | PREPARE | `statement text`, representative `parameters [(name text, value)]` (names strictly ascending), optional terminal `mode u8` (omitted = read, 1 = stats-only write; explicit 0 is noncanonical) |
 | PREPARED | nonzero connection-owned `handle [16]` |
 | EXECUTE_PREPARED | `handle [16]`, `mode u8` (0 buffered read, 1 native source read stream, 2 external ordered read stream, 3 stats-only write), execution `parameters [(name text, value)]` (names strictly ascending) |
 | RELEASE_PREPARED / PREPARED_RELEASED | `handle [16]` |
 | SNAPSHOT_RESULT_CHUNK | `columns: none \| [text]` (first chunk only), `rows [[value]]` |
 | SNAPSHOT_RESULT_END | `outcome` (`Rows{seq}`, `WriteCommitted{seq,statements}`, `ReadClosed{seq,statements}`), `rows u64` |
+| DIFF_RESULT_CHUNK | `columns: none \| [text]` (first chunk only), `entries u32`, then `(weight i128 ≠ 0, row-width u32, [value])` for each changed tuple |
+| DIFF_RESULT_END | exact requested `before u64`, `after u64`, `rows u64` (changed tuples delivered, not occurrence totals) |
 | SUBSCRIPTION_BATCH | `frontier u64`, `snapshot bool`, `last bool`, `columns: none \| [text]` (first frame only), `entries [(weight i128 ≠ 0, [value])]` |
 | SUBSCRIPTION_RESET | `has_checkpoint bool`, then `last_delivered_seq u64` only when true |
 | ERROR | `code u16`, `message text` (structural diagnostics only) |
@@ -197,6 +206,121 @@ exactly the canonical text a server emits — vertex, edge
 (tag 14) and `database_unavailable` (tag 15).
 
 ## fgdbd: the served subset
+
+### Finite historical NET differences
+
+`EXECUTE_DIFF` compares one read's complete results at two explicit committed
+revisions in the selected database's admitted history. Every entry carries its
+exact **after-minus-before bag weight**: positive adds occurrences, negative
+retracts occurrences. Successfully admitted and evaluated equal cuts return an
+empty change set; reverse cuts reverse the signs. Equal cuts still validate
+history availability, authority and execution budgets. Revision zero is a valid
+explicit endpoint. This comparison covers
+result membership and multiplicity, rather than a log of writes or a comparison
+of row positions. Each endpoint keeps the query's own DISTINCT, ordering and
+pagination semantics before the final result bags are compared. Explicit temporal
+selectors within the statement and writes refuse; the request supplies both cuts.
+
+The buffered profile evaluates both endpoints and consolidates their difference
+before returning changes. The ordered profile uses the server's configured,
+operator-owned scratch and bounded native difference cursor. Unsupported source
+or relational profiles and absent scratch refuse without switching modes. Host
+execution limits and one execution's signed work allowance cover both endpoint
+evaluations and the comparison; a second endpoint does not reset the permit.
+The signed result-row allowance charges final changed tuples, never private
+endpoint rows or absolute weights. An empty admitted difference can therefore
+complete with a zero result-row allowance. Native source, evaluation and scratch
+limits retain their separate scopes.
+No per-query directory or physical limit is accepted from the remote caller.
+
+`EXECUTE_PREPARED_DIFF` rebinds the same read template for both cuts. The handle is
+connection-owned, invalidated by authority refresh and explicit release, and
+cannot name a write. Preparation preserves structural parameter types and exact
+catalog resolution, not a snapshot or an execution permit. Every comparison
+checks fresh live authority, branch and endpoint visibility. It uses the same
+authorization scope at both cuts; prepared handles cannot bypass that scope.
+
+Both requests require Ready binding on the control stream. Results use one
+server-minted query child, retaining the initiating request ID and complete Ready
+binding. The first `DIFF_RESULT_CHUNK` carries the columns even for an empty
+answer. Subsequent chunks omit columns; every entry has the declared width and a
+nonzero signed 128-bit weight. Ordinary value, depth, frame, name and row-count
+bounds apply, including the shared body-wide value-node ceiling. Signed weights
+are encoded as 16-byte big-endian two's-complement integers with no rounding.
+
+Flow byte credit includes each encoded chunk and END header/body. Row credit
+counts changed tuples, one per signed entry, rather than absolute multiplicity.
+The client replenishes a fully consumed row window before waiting for natural
+EOF. `DIFF_RESULT_END` carries the requested endpoint pair unchanged and the exact
+sum of delivered entry counts. It carries no privileged evaluator or source
+statistics. Every physical response remains protected by the server's current
+authority check. Error or EOF after a prefix leaves the comparison incomplete;
+there is no successful END for partial, cancelled or refused evaluation.
+
+The client exposes `execute_diff` and `execute_prepared_diff` collecting methods,
+which return `DiffAnswer { columns, entries, end }`, and corresponding
+`execute_diff_streaming` / `execute_prepared_diff_streaming` callbacks returning
+`DiffResultEnd`. It rejects changed endpoint metadata, a terminal count that
+differs from delivery, schema drift, zero weights, foreign streams/requests and
+credit violations. Callback failure sends one `QUERY_CANCEL`, suppresses further
+callbacks and credit, drains the child terminal, and returns the original callback
+failure. It never retries, reconnects or falls back to another execution mode.
+
+The CLI uses the same finite operation:
+
+```sh
+fgdb --robot remote --addr 127.0.0.1:7688 --token-file reader.hex \
+  --database social diff --before 7 --after 12 \
+  'MATCH (n:Person) RETURN n.name AS name'
+
+fgdb --robot remote --addr 127.0.0.1:7688 --token-file reader.hex \
+  --database social --param limit=uint:20 diff --before 7 --after 12 --stream \
+  'MATCH (n:Person) RETURN n.name AS name ORDER BY name LIMIT $limit'
+```
+
+`--stream` selects ordered execution; omission selects buffered. The command
+accepts the existing typed parameters and TLS options. Both decimal-u64 cuts are
+required before credential access. `--read-mode`, argument files, write options
+and subscription limits are incompatible. Robot output is `diff_columns`, signed
+`change` records and a final `result` with `kind:"diff"`. Revisions, signed
+weights, changed-row count and inserted/retracted occurrence totals are exact
+decimal strings. The CLI flushes each record and retains one decoded frame and
+one encoded row, plus counters. It emits no selected-frontier substitute,
+`snapshot_records`, `work_units` or `scratch_entries`. Only a matching END and
+successful final output flush establish completion; a late refusal or output
+failure leaves any earlier prefix incomplete.
+
+HTTP clients can request the same buffered comparison with
+`POST /v1/databases/<name>/query-diff` and their usual bearer token:
+
+```json
+{"statement":"MATCH (n:Person) WHERE n.age >= $floor RETURN n.age AS age","parameters":{"floor":18},"before":"7","after":"12"}
+```
+
+Both cuts are required unsigned decimal u64 values. Decimal strings preserve
+the complete range in clients whose JSON numbers cannot represent every integer;
+integer JSON tokens are accepted without conversion through floating point.
+Fractional, exponent, negative, overflowing and missing cuts refuse. Ordinary
+FGP statement/parameter bounds apply, and unknown request fields refuse. Read
+authority is checked before body inspection. HTTP buffers the complete answer
+and returns exact decimal strings for revisions, signed weights and tuple count:
+
+```json
+{"v":1,"columns":["age"],"changes":[{"weight":"-2","row":[{"type":"int","value":"30"}]},{"weight":"2","row":[{"type":"int","value":"31"}]}],"before":"7","after":"12","changed_rows":"2"}
+```
+
+Each row uses the existing typed JSON cell contract. The original database
+generation and live output authority remain checked through physical delivery.
+An HTTP difference has no row-level flow control or external-sort mode; use FGP
+or `remote diff --stream` for the bounded ordered cursor.
+
+Finite differences create no subscription registration, durable result handle,
+cursor checkpoint, delivery acknowledgement or resumable changefeed. They do not
+provide cross-branch comparison, mutation events or retention guarantees for
+future requests. A later invocation must independently authorize and admit its
+requested endpoints.
+
+### Authority refresh
 
 FGP connections may narrow their authority between statements with
 `Client::refresh_authority(cx, credential)`, before or after database selection.

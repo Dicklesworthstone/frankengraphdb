@@ -19,9 +19,10 @@ use core::future::poll_fn;
 use core::task::Poll;
 use fgdb_protocol::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, Credential, Empty, ErrorBody, ErrorCode,
-    Execute, ExecuteBatch, ExecuteMode, ExecutePrepared, ExecutePreparedBatch, Hello, HelloAck,
-    Outcome, Ping, Prepare, Prepared, PreparedExecutionMode, PreparedHandle, Ready,
-    ReleasePrepared, ResultChunk, ResultEnd, SelectDatabase, WindowUpdate, WireValue,
+    Execute, ExecuteBatch, ExecuteDiff, ExecuteMode, ExecutePrepared, ExecutePreparedBatch,
+    ExecutePreparedDiff, Hello, HelloAck, Outcome, Ping, Prepare, Prepared, PreparedExecutionMode,
+    PreparedHandle, Ready, ReleasePrepared, ResultChunk, ResultEnd, SelectDatabase, WindowUpdate,
+    WireValue,
 };
 use fgdb_protocol::transport::{
     DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, split_duplex,
@@ -35,6 +36,7 @@ use fgdb_warden::{Authority, CapabilityToken, VerifiedCapability};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
+mod difference;
 mod ordered_stream;
 mod source_stream;
 
@@ -118,6 +120,11 @@ impl PreparedStatements {
 enum Statement {
     Native(Execute),
     Batch(ExecuteBatch),
+    Difference(ExecuteDiff),
+    PreparedDifference {
+        definition: Result<Arc<PreparedDefinition>, Refusal>,
+        request: ExecutePreparedDiff,
+    },
     Prepared {
         definition: Result<Arc<PreparedDefinition>, Refusal>,
         mode: PreparedExecutionMode,
@@ -611,6 +618,64 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                     return;
                 }
             }
+            FrameKind::ExecuteDiff => {
+                let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
+                    return;
+                };
+                let Ok(statement) = ExecuteDiff::decode(frame.payload()) else {
+                    return lane
+                        .fatal(cx, request, ErrorCode::Protocol, "malformed EXECUTE_DIFF")
+                        .await;
+                };
+                match lane
+                    .execute_statement(
+                        cx,
+                        &waiter,
+                        db,
+                        token,
+                        request,
+                        Statement::Difference(statement),
+                    )
+                    .await
+                {
+                    Ok(()) | Err(Stop::Cancelled) => {}
+                    Err(Stop::Transport | Stop::Recovery(_)) => return,
+                    Err(Stop::Drain) => {
+                        lane.goodbye(cx).await;
+                        return;
+                    }
+                }
+            }
+            FrameKind::ExecutePreparedDiff => {
+                let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
+                    return;
+                };
+                let Ok(statement) = ExecutePreparedDiff::decode(frame.payload()) else {
+                    return lane
+                        .fatal(
+                            cx,
+                            request,
+                            ErrorCode::Protocol,
+                            "malformed EXECUTE_PREPARED_DIFF",
+                        )
+                        .await;
+                };
+                let statement = Statement::PreparedDifference {
+                    definition: prepared_statements.get(statement.handle),
+                    request: statement,
+                };
+                match lane
+                    .execute_statement(cx, &waiter, db, token, request, statement)
+                    .await
+                {
+                    Ok(()) | Err(Stop::Cancelled) => {}
+                    Err(Stop::Transport | Stop::Recovery(_)) => return,
+                    Err(Stop::Drain) => {
+                        lane.goodbye(cx).await;
+                        return;
+                    }
+                }
+            }
             FrameKind::ExecutePrepared => {
                 let (Some(db), Some(token)) = (selected.as_ref(), token.as_ref()) else {
                     return;
@@ -1028,6 +1093,70 @@ impl Lane {
             self.send_generation = None;
             return delivered;
         }
+        let difference = match &statement {
+            Statement::Difference(request) => Some((
+                Ok(source_stream::SourceStatement::Text(
+                    request.statement.as_str(),
+                )),
+                request.mode,
+                request.parameters.as_slice(),
+                request.before,
+                request.after,
+            )),
+            Statement::PreparedDifference {
+                definition,
+                request,
+            } => Some((
+                match definition {
+                    Ok(definition) => definition
+                        .read()
+                        .map(source_stream::SourceStatement::Prepared)
+                        .ok_or_else(|| {
+                            Refusal::new(
+                                ErrorCode::Statement,
+                                "query differences require a prepared read handle",
+                            )
+                        }),
+                    Err(refusal) => Err(Refusal::new(refusal.code, refusal.message.clone())),
+                },
+                request.mode,
+                request.parameters.as_slice(),
+                request.before,
+                request.after,
+            )),
+            _ => None,
+        };
+        if let Some((source, mode, parameters, before, after)) = difference {
+            // Missing, released and write-only handles cannot expose a
+            // different refusal surface before this operation's read rights.
+            let admitted = crate::execute::ordered::ordered_generation(db, token).and(source);
+            let delivered = match admitted {
+                Ok(source) => {
+                    self.difference(
+                        cx, waiter, db, token, request, stream, binding, source, parameters, mode,
+                        before, after,
+                    )
+                    .await
+                }
+                Err(refusal) => {
+                    self.refuse(cx, request, stream, binding, refusal.code, &refusal.message)
+                        .await
+                }
+            };
+            let delivered = match delivered {
+                Err(Stop::Recovery(error)) => {
+                    self.refuse(cx, request, stream, binding, error.code(), error.message())
+                        .await
+                }
+                other => other,
+            };
+            let _ = self
+                .conn
+                .child_terminal(stream, generation, ChildTerminus::EphemeralCompleted);
+            self.finish(stream);
+            self.send_generation = None;
+            return delivered;
+        }
         let ordered = match &statement {
             Statement::Native(statement) if statement.mode == ExecuteMode::ReadOrdered => Some((
                 source_stream::SourceStatement::Text(statement.statement.as_str()),
@@ -1128,6 +1257,9 @@ impl Lane {
                 }
                 Err(refusal) => Err(refusal),
             },
+            Statement::Difference(_) | Statement::PreparedDifference { .. } => {
+                unreachable!("difference dispatched above")
+            }
         };
         let committed = matches!(
             answer,
@@ -1585,6 +1717,8 @@ impl Lane {
             | FrameKind::Prepare
             | FrameKind::ExecutePrepared
             | FrameKind::ExecutePreparedBatch
+            | FrameKind::ExecuteDiff
+            | FrameKind::ExecutePreparedDiff
             | FrameKind::ReleasePrepared
             | FrameKind::AuthRefresh => {
                 let busy = ErrorBody {
@@ -1942,6 +2076,8 @@ impl Lane {
             | FrameKind::Prepare
             | FrameKind::ExecutePrepared
             | FrameKind::ExecutePreparedBatch
+            | FrameKind::ExecuteDiff
+            | FrameKind::ExecutePreparedDiff
             | FrameKind::ReleasePrepared
             | FrameKind::AuthRefresh => {
                 let busy = ErrorBody {

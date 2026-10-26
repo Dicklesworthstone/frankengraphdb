@@ -15,6 +15,7 @@
 //! GET  /v1/health                          -> {"v":1,"status":"ok"}
 //! GET  /v1/databases/<name>/schema         (the names the token may see)
 //! POST /v1/databases/<name>/query          (read)
+//! POST /v1/databases/<name>/query-diff     (finite historical result changes)
 //! POST /v1/databases/<name>/write          (write)
 //! POST /v1/databases/<name>/write-batch    (one atomic ingestion program)
 //!      Authorization: Bearer <hex capability token>
@@ -40,7 +41,9 @@ mod studio;
 
 use crate::Server;
 use crate::commits::CommitWatcher;
-use crate::execute::{Answer, Refusal, read, write, write_batch};
+use crate::execute::{
+    Answer, DifferenceAnswer, Refusal, read, read_difference, write, write_batch,
+};
 use crate::recovery::Generation;
 use asupersync::Cx;
 use asupersync::http::h1::types::{Method, Request, Response};
@@ -48,7 +51,9 @@ use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::sync::Mutex;
 use core::pin::Pin;
 use core::task::{Context, Poll};
-use fgdb_protocol::body::{Body, ErrorCode, Execute, ExecuteBatch, ExecuteMode, Outcome};
+use fgdb_protocol::body::{
+    Body, DiffMode, ErrorCode, Execute, ExecuteBatch, ExecuteDiff, ExecuteMode, Outcome,
+};
 use fgdb_protocol::json::{Json, argument, cell, parse_json, quote};
 use fgdb_warden::{Authority, CapabilityToken, VerifiedCapability};
 use std::io;
@@ -407,6 +412,63 @@ fn statement(request: &Request, mode: ExecuteMode) -> Result<Execute, Response> 
     })
 }
 
+/// Cuts retain their exact decimal text through JSON parsing. Strings let
+/// callers represent every u64 without their JSON library rounding a number.
+fn difference_statement(request: &Request) -> Result<ExecuteDiff, Response> {
+    let malformed = |detail: &str| refusal_response(ErrorCode::Protocol, detail);
+    let mut fields = body_fields(request)?;
+    let endpoint = |value: Option<Json>, name: &str| -> Result<u64, Response> {
+        let text = match value {
+            Some(Json::String(text) | Json::Number(text)) => text,
+            _ => {
+                return Err(malformed(&format!(
+                    "{name:?} must be an unsigned decimal cut"
+                )));
+            }
+        };
+        if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(malformed(&format!(
+                "{name:?} must be an unsigned decimal cut"
+            )));
+        }
+        text.parse()
+            .map_err(|_| malformed(&format!("{name:?} exceeds the u64 cut range")))
+    };
+    let before = endpoint(fields.remove("before"), "before")?;
+    let after = endpoint(fields.remove("after"), "after")?;
+    let Some(Json::String(statement)) = fields.remove("statement") else {
+        return Err(malformed("body needs a \"statement\" string"));
+    };
+    let parameters = match fields.remove("parameters") {
+        None | Some(Json::Null) => Vec::new(),
+        Some(Json::Object(parameters)) => parameters
+            .iter()
+            .map(|(name, value)| {
+                argument(value)
+                    .map(|value| (name.clone(), value))
+                    .map_err(|error| malformed(&format!("parameter ${name}: {error}")))
+            })
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err(malformed("\"parameters\" must be an object")),
+    };
+    if let Some(unknown) = fields.keys().next() {
+        return Err(malformed(&format!("unknown body field {unknown:?}")));
+    }
+    let difference = ExecuteDiff {
+        mode: DiffMode::Buffered,
+        before,
+        after,
+        statement,
+        parameters,
+    };
+    // The alternative framing admits exactly the same statement and operand
+    // limits. HTTP remains a whole-response adapter with no stream fallback.
+    difference
+        .encode()
+        .map_err(|error| malformed(&format!("invalid difference: {error}")))?;
+    Ok(difference)
+}
+
 /// The batch uses exactly the native FGP value/schema limits, plus HTTP's
 /// existing whole-body JSON limits. No field can select raw graph identities.
 fn batch_statement(request: &Request) -> Result<ExecuteBatch, Response> {
@@ -498,6 +560,35 @@ fn answer_response(answer: &Answer) -> Response {
             ),
         ),
     }
+}
+
+fn difference_response(answer: &DifferenceAnswer) -> Response {
+    let columns = answer
+        .columns
+        .iter()
+        .map(|column| quote(column))
+        .collect::<Vec<_>>()
+        .join(",");
+    let changes = answer
+        .entries
+        .iter()
+        .map(|(weight, row)| {
+            format!(
+                r#"{{"weight":"{weight}","row":[{}]}}"#,
+                row.iter().map(cell).collect::<Vec<_>>().join(",")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    json_response(
+        200,
+        format!(
+            r#"{{"v":1,"columns":[{columns}],"changes":[{changes}],"before":"{}","after":"{}","changed_rows":"{}"}}"#,
+            answer.before,
+            answer.after,
+            answer.entries.len(),
+        ),
+    )
 }
 
 /// `GET /v1/databases/<name>/schema`: the label, relation and property
@@ -610,7 +701,7 @@ pub(crate) async fn respond<'s>(
     let mode = match verb {
         "query" => Some(ExecuteMode::Read),
         "write" => Some(ExecuteMode::Write),
-        "write-batch" => None,
+        "write-batch" | "query-diff" => None,
         _ => {
             return json_response(
                 404,
@@ -643,6 +734,43 @@ pub(crate) async fn respond<'s>(
     };
     if !output.protected(cx, &db.authority, verified) {
         return refusal_response(ErrorCode::Execution, "connection unavailable");
+    }
+    if verb == "query-diff" {
+        // Read rights precede even body inspection. Keep the admitted history
+        // generation through parsing, evaluation and protected output.
+        let generation = match crate::execute::ordered::ordered_generation(db, &token) {
+            Ok(generation) => generation,
+            Err(Refusal { code, message }) => return refusal_response(code, &message),
+        };
+        let statement = match difference_statement(&request) {
+            Ok(statement) => statement,
+            Err(response) => return response,
+        };
+        let answer = read_difference(
+            cx,
+            db,
+            &token,
+            &statement.statement,
+            &statement.parameters,
+            statement.before,
+            statement.after,
+        )
+        .await;
+        if let Err(error) = generation.check() {
+            return refusal_response(error.code(), error.message());
+        }
+        return match answer {
+            Ok(answer) => {
+                if let Err(error) = answer.generation.check() {
+                    return refusal_response(error.code(), error.message());
+                }
+                if !output.pin_generation(answer.generation.clone()) {
+                    return refusal_response(ErrorCode::Execution, "connection unavailable");
+                }
+                difference_response(&answer)
+            }
+            Err(Refusal { code, message }) => refusal_response(code, &message),
+        };
     }
     let answer = if let Some(mode) = mode {
         let statement = match statement(&request, mode) {

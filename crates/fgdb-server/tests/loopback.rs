@@ -31,6 +31,9 @@ mod insertion_property_maps;
 #[path = "loopback/prepared_write.rs"]
 mod prepared_write;
 
+#[path = "loopback/difference.rs"]
+mod difference;
+
 fn issuer_key() -> AuthKey {
     AuthKey::from_seed(8501)
 }

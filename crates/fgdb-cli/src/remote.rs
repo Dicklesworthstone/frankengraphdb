@@ -10,6 +10,7 @@
 //! transport failures or an unknown commit outcome are I/O failures (5).
 
 mod batch;
+mod diff;
 mod prepared_writes;
 
 use super::refusal::Code;
@@ -53,6 +54,8 @@ struct RemoteOptions {
     prepared_jsonl: Option<PathBuf>,
     /// Explicit prepared write output profile; each record still commits once.
     write_mode: prepared_writes::WriteMode,
+    /// A finite after-minus-before comparison at two explicit revisions.
+    difference: Option<diff::Options>,
 }
 
 struct RemoteTls {
@@ -74,6 +77,9 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     let mut csv_types = None;
     let mut prepared_jsonl = None;
     let mut write_mode = None;
+    let mut before = None;
+    let mut after = None;
+    let mut stream = false;
     let mut at = 0;
     while at < args.len() {
         let flag = args[at].as_str();
@@ -93,6 +99,9 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
             }
             "--token-file" if token_file.is_none() => token_file = Some(PathBuf::from(value()?)),
             "--database" if database.is_none() => database = Some(value()?),
+            "--before" if before.is_none() => before = Some(diff::parse_cut(&value()?, flag)?),
+            "--after" if after.is_none() => after = Some(diff::parse_cut(&value()?, flag)?),
+            "--stream" if !stream => stream = true,
             "--rows-file" if rows_file.is_none() => rows_file = Some(PathBuf::from(value()?)),
             "--prepared-jsonl" if prepared_jsonl.is_none() => {
                 prepared_jsonl = Some(PathBuf::from(value()?));
@@ -159,12 +168,35 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         at += 1;
     }
     let [verb, statement] = <[String; 2]>::try_from(positional)
-        .map_err(|_| Failure::usage("remote needs query|write|subscribe and one statement"))?;
+        .map_err(|_| Failure::usage("remote needs query|write|subscribe|diff and one statement"))?;
     let mode = match verb.as_str() {
         "query" => read_mode.unwrap_or(ExecuteMode::Read),
         "write" => ExecuteMode::Write,
         "subscribe" => ExecuteMode::Subscribe,
-        _ => return Err(Failure::usage("remote needs query, write or subscribe")),
+        "diff" => ExecuteMode::Read,
+        _ => {
+            return Err(Failure::usage(
+                "remote needs query, write, subscribe or diff",
+            ));
+        }
+    };
+    let difference = if verb == "diff" {
+        Some(diff::Options {
+            before: before.ok_or_else(|| Failure::usage("remote diff needs --before"))?,
+            after: after.ok_or_else(|| Failure::usage("remote diff needs --after"))?,
+            mode: if stream {
+                fgdb_protocol::body::DiffMode::OrderedStream
+            } else {
+                fgdb_protocol::body::DiffMode::Buffered
+            },
+        })
+    } else {
+        if before.is_some() || after.is_some() || stream {
+            return Err(Failure::usage(
+                "--before, --after and --stream apply only to remote diff",
+            ));
+        }
+        None
     };
     if read_mode.is_some() && verb != "query" {
         return Err(Failure::usage("--read-mode applies only to query"));
@@ -172,7 +204,9 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     if max_batches.is_some() && mode != ExecuteMode::Subscribe {
         return Err(Failure::usage("--max-batches applies only to subscribe"));
     }
-    if rows_file.is_some() && (mode == ExecuteMode::Subscribe || !parameters.is_empty()) {
+    if rows_file.is_some()
+        && (!matches!(verb.as_str(), "query" | "write") || !parameters.is_empty())
+    {
         return Err(Failure::usage(
             "--rows-file applies only to query or write and cannot be combined with --param",
         ));
@@ -231,6 +265,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         csv_types,
         prepared_jsonl,
         write_mode: write_mode.unwrap_or_default(),
+        difference,
     })
 }
 
@@ -509,6 +544,27 @@ pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<
     }
     if options.mode == ExecuteMode::Subscribe {
         return runtime.block_on(subscribe(&cx, options, robot, out));
+    }
+    if let Some(difference) = options.difference {
+        return runtime.block_on(async {
+            let mut client = connect(&cx, &options).await?;
+            client
+                .select(&cx, &options.database)
+                .await
+                .map_err(failure)?;
+            diff::execute(
+                &cx,
+                &mut client,
+                difference,
+                &options.statement,
+                options.parameters,
+                robot,
+                out,
+            )
+            .await?;
+            let _ = client.close(&cx).await;
+            Ok(())
+        });
     }
     if matches!(
         options.mode,

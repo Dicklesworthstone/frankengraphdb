@@ -2,7 +2,7 @@
 use super::*;
 use fgdb_server::OrderedReadConfig;
 
-async fn start_ordered(
+pub(super) async fn start_ordered(
     cx: &Cx,
     name: &str,
     max_input_rows: u64,
@@ -74,7 +74,7 @@ async fn seed(cx: &Cx, owner: &mut Client) {
         .unwrap();
 }
 
-async fn empty_scratch(directory: &std::path::Path) {
+pub(super) async fn empty_scratch(directory: &std::path::Path) {
     assert!(
         asupersync::fs::read_dir(directory)
             .await

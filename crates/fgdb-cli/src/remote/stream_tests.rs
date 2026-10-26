@@ -5,6 +5,9 @@ mod batch_tests;
 #[path = "prepared_write_tests.rs"]
 mod prepared_write_tests;
 
+#[path = "diff_tests.rs"]
+mod diff_tests;
+
 use super::*;
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::lab::run_async_under_lab;

@@ -31,6 +31,17 @@ pub(crate) struct OrderedCursor<'q> {
     generation: Generation,
 }
 
+pub(crate) struct DifferenceExecution<'q> {
+    native: fgdb::AuthorizedDifferenceExecution<'q, File>,
+    generation: Generation,
+}
+
+pub(crate) struct DifferenceCursor<'q> {
+    native: fgdb::AuthorizedDifferenceCursor<'q, File>,
+    generation: Generation,
+    failed: bool,
+}
+
 /// Admit only for a single nonblocking poll. Recovery never waits for client
 /// credit or a Pending filesystem operation, and an old result or error cannot
 /// cross the post-poll generation check. The native future separately checks
@@ -199,6 +210,32 @@ impl OrderedSession<'_> {
             generation,
         })
     }
+
+    /// Compare two cuts with the native external-sort difference cursor. The
+    /// same scratch lease, scope and generation remain owned until it drops.
+    pub(crate) fn start_difference<'q>(
+        &'q mut self,
+        cx: &'q QueryCx,
+        prepared: &fgdb::AuthorizedPreparedRead,
+        parameters: &fgdb_gql::GqlParameters,
+        before: u64,
+        after: u64,
+    ) -> Result<DifferenceExecution<'q>, Refusal> {
+        let generation = self.generation.clone();
+        let _operation = generation.enter().map_err(Refusal::from)?;
+        let result = self.native.difference_stream(
+            cx,
+            prepared,
+            parameters,
+            fgdb_types::CommitSeq(before),
+            fgdb_types::CommitSeq(after),
+        );
+        generation.check().map_err(Refusal::from)?;
+        Ok(DifferenceExecution {
+            native: result.map_err(spool_refusal)?,
+            generation,
+        })
+    }
 }
 
 impl<'q> OrderedExecution<'q> {
@@ -243,6 +280,72 @@ impl OrderedCursor<'_> {
                 .transpose()
         })
         .await
+    }
+}
+
+impl<'q> DifferenceExecution<'q> {
+    pub(crate) fn columns(&self) -> &[String] {
+        self.native.columns()
+    }
+
+    pub(crate) fn finish(
+        self,
+    ) -> Pin<Box<dyn Future<Output = Result<DifferenceCursor<'q>, Refusal>> + Send + 'q>> {
+        Box::pin(async move {
+            let Self { native, generation } = self;
+            let native = in_generation(
+                &generation,
+                async move { native.await.map_err(spool_refusal) },
+            )
+            .await?;
+            Ok(DifferenceCursor {
+                native,
+                generation,
+                failed: false,
+            })
+        })
+    }
+}
+
+impl DifferenceCursor<'_> {
+    pub(crate) fn before(&self) -> u64 {
+        self.native.before().0
+    }
+
+    pub(crate) fn after(&self) -> u64 {
+        self.native.after().0
+    }
+
+    pub(crate) fn exhausted(&self) -> bool {
+        !self.failed && self.native.state() == ScanState::Exhausted
+    }
+
+    pub(crate) async fn next(&mut self) -> Result<Option<(i128, Vec<WireValue>)>, Refusal> {
+        if self.failed {
+            return Ok(None);
+        }
+        // Native pulls fuse on dropped or failed I/O. Extend that boundary to
+        // generation fencing and canonical decoding as well, so a later None
+        // can never turn a refused prefix into a complete difference.
+        self.failed = true;
+        let generation = self.generation.clone();
+        let result = in_generation(&generation, async {
+            let change = self.native.next_change().await.map_err(spool_refusal)?;
+            change
+                .map(|(weight, frame)| {
+                    GraphValueRow::decode_canonical(frame.as_ref())
+                        .map(|row| (weight, row.values().iter().map(convert::graph).collect()))
+                        .map_err(|_| {
+                            Refusal::new(ErrorCode::Execution, "invalid canonical difference row")
+                        })
+                })
+                .transpose()
+        })
+        .await;
+        if result.is_ok() {
+            self.failed = false;
+        }
+        result
     }
 }
 
