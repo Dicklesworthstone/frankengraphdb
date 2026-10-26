@@ -225,14 +225,23 @@ selectors within the statement and writes refuse; the request supplies both cuts
 
 The buffered profile evaluates both endpoints and consolidates their difference
 before returning changes. The ordered profile uses the server's configured,
-operator-owned scratch and bounded native difference cursor. Unsupported source
-or relational profiles and absent scratch refuse without switching modes. Host
+operator-owned scratch and bounded native difference cursor. Its supported
+vertex and fixed-edge sources can feed unary `WITH`, computed filters, and
+`UNWIND` stages. Every intermediate DISTINCT, ordering and page finishes before
+the next stage, independently at each endpoint. Properties read through carried
+vertices or edges resolve at that endpoint's cut under the same capability scope.
+The published columns describe the final query result. An expression failure at
+either endpoint fails the comparison before changed tuples are delivered, even
+when a later `LIMIT 0` selects no rows. Unsupported source or relational profiles
+and absent scratch refuse without switching modes. Host
 execution limits and one execution's signed work allowance cover both endpoint
 evaluations and the comparison; a second endpoint does not reset the permit.
 The signed result-row allowance charges final changed tuples, never private
 endpoint rows or absolute weights. An empty admitted difference can therefore
 complete with a zero result-row allowance. Native source, evaluation and scratch
-limits retain their separate scopes.
+limits retain their separate scopes. Native snapshot-record limits include
+carried-element property lookups and span both endpoints, as do native evaluator
+work and scratch-entry limits.
 No per-query directory or physical limit is accepted from the remote caller.
 
 `EXECUTE_PREPARED_DIFF` rebinds the same read template for both cuts. The handle is

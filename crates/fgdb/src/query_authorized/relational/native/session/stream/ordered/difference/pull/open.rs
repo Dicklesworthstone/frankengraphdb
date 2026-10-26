@@ -15,9 +15,12 @@ where
     /// filter participates.
     ///
     /// Rebind the exact-session template once and admit both cuts/sources before
-    /// returning. The existing ordered Pattern and one-source projected Set
-    /// pull profiles are supported. Unary relation stages, explicit temporal
-    /// selectors and other profiles refuse without scratch I/O or eager fallback. The schema and
+    /// returning. The existing ordered Pattern, one-source projected Set pull
+    /// and unary relation-stage profiles are supported. Every source and stage
+    /// DISTINCT/order/window completes independently at each cut before
+    /// subtraction. Carried element properties resolve under the same scope at
+    /// that endpoint's cut. Explicit temporal selectors and other profiles
+    /// refuse without scratch I/O or eager fallback. The final schema and
     /// endpoints are available on the returned execution before its first poll.
     ///
     /// One signed permit spans endpoint evaluation and every later pull. Native
@@ -92,18 +95,9 @@ where
                         facade: native.facade_class(),
                     });
                 }
-                let (plan, tail, at, columns, pull, stages) = bind_ordered(native, params, before)?;
-                // Endpoint evaluation owns a source pull and one terminal
-                // order/window only. Dropping a unary stage program here
-                // would compare raw leaf rows instead of either query result.
-                if stages.is_some() {
-                    return Err(QueryError::StreamingUnsupported {
-                        facade: native.facade_class(),
-                    });
-                }
-                Ok((plan, tail, at, columns, pull))
+                bind_ordered(native, params, before)
             },
-            |(plan, tail, _, columns, pull), view, cx, execution, policy| {
+            |(plan, tail, _, source_columns, pull, stages), view, cx, execution, policy| {
                 view.snapshot
                     .check_frontier(before)
                     .map_err(QueryError::Read)?;
@@ -116,6 +110,10 @@ where
                     RowPlan::Edge(plan) => RowPlan::Edge(plan.clone()),
                 };
                 let second_pull = pull.clone();
+                let columns = stages.as_ref().map_or_else(
+                    || source_columns.clone(),
+                    |stages| stages.columns().to_vec(),
+                );
                 let first = Endpoint {
                     input: pending(
                         plan,
@@ -127,6 +125,9 @@ where
                         limits.max_input_rows,
                     )?,
                     tail: tail.clone(),
+                    columns: source_columns.clone(),
+                    stages: stages.as_ref().map(|stages| (stages.clone(), view.clone())),
+                    at: before,
                 };
                 let second = Endpoint {
                     input: pending(
@@ -139,6 +140,9 @@ where
                         limits.max_input_rows,
                     )?,
                     tail,
+                    columns: source_columns,
+                    stages: stages.map(|stages| (stages, view.clone())),
+                    at: after,
                 };
                 execution.borrow_mut().checkpoint()?;
                 Ok((first, second, columns, policy, execution))
@@ -158,45 +162,42 @@ where
         let future = Box::pin(async move {
             let future = async {
                 let input_policy = private_policy(policy);
-                let (first, used) = ordered_input(
+                let first = complete_endpoint(
+                    first,
                     cx,
-                    columns.clone(),
-                    (first.input)(input_policy),
-                    first.tail,
+                    execution.clone(),
                     input_policy,
                     &mut *scratch,
                     &mut *destination,
-                    limits.run_rows,
-                    limits.max_runs,
-                    limits.page_bytes,
-                    limits.max_row_bytes,
+                    limits,
                     limits.max_sort_work,
                 )
                 .await?;
                 let input_policy = after_policy(input_policy, &first)?;
-                let allowance = remainder(limits.max_sort_work, used)?;
-                let (second, spent) = ordered_input(
+                let allowance = remainder(limits.max_sort_work, first.work)?;
+                let second = complete_endpoint(
+                    second,
                     cx,
-                    columns.clone(),
-                    (second.input)(input_policy),
-                    second.tail,
+                    execution.clone(),
                     input_policy,
                     &mut *scratch,
                     &mut *destination,
-                    limits.run_rows,
-                    limits.max_runs,
-                    limits.page_bytes,
-                    limits.max_row_bytes,
+                    limits,
                     allowance,
                 )
                 .await?;
-                if first.snapshot_seq() != before || second.snapshot_seq() != after {
+                if first.spool.snapshot_seq() != before
+                    || second.spool.snapshot_seq() != after
+                    || first.spool.columns() != columns
+                    || second.spool.columns() != columns
+                {
                     return Err(NativeSpoolError::IncompleteCursor);
                 }
-                let allowance = remainder(allowance, spent)?;
+                let allowance = remainder(allowance, second.work)?;
                 first
+                    .spool
                     .difference_stream(
-                        &second,
+                        &second.spool,
                         cx,
                         destination,
                         scratch,

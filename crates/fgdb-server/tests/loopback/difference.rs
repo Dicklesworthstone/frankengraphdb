@@ -47,6 +47,12 @@ fn historical_differences_preserve_bags_endpoints_and_prepared_rebinding() {
             .unwrap();
         let query = "MATCH (n:Person) WHERE n.age >= $floor RETURN n.age AS age";
         let prepared = reader.prepare_read(cx, query, args(99)).await.unwrap();
+        let staged_query = "MATCH (n:Person) WHERE n.age >= $floor WITH n AS item \
+                            RETURN [item][0].age AS age";
+        let staged = reader
+            .prepare_read(cx, staged_query, args(99))
+            .await
+            .unwrap();
         // The requested upper endpoint is now older than the current frontier.
         insert(cx, &mut owner, &[77]).await;
         for mode in [DiffMode::Buffered, DiffMode::OrderedStream] {
@@ -74,12 +80,33 @@ fn historical_differences_preserve_bags_endpoints_and_prepared_rebinding() {
                     .unwrap(),
                 answer,
             );
+            assert_eq!(
+                reader
+                    .execute_diff(cx, mode, 1, 2, staged_query, args(0))
+                    .await
+                    .unwrap(),
+                answer,
+            );
+            assert_eq!(
+                reader
+                    .execute_prepared_diff(cx, staged, mode, 1, 2, args(0))
+                    .await
+                    .unwrap(),
+                answer,
+            );
             let rebound = reader
                 .execute_prepared_diff(cx, prepared, mode, 1, 2, args(2))
                 .await
                 .unwrap();
             assert_eq!(rebound.entries, [(2, vec![WireValue::Int(3)])]);
             assert_eq!(rebound.end.rows, 1);
+            assert_eq!(
+                reader
+                    .execute_prepared_diff(cx, staged, mode, 1, 2, args(2))
+                    .await
+                    .unwrap(),
+                rebound,
+            );
             let reverse = reader
                 .execute_diff(cx, mode, 2, 1, query, args(0))
                 .await
@@ -133,6 +160,59 @@ fn historical_differences_preserve_bags_endpoints_and_prepared_rebinding() {
                 limited.entries,
                 [(-1, vec![WireValue::Int(2)]), (1, vec![WireValue::Int(3)]),]
             );
+            let staged_page = reader
+                .execute_diff(
+                    cx,
+                    mode,
+                    1,
+                    2,
+                    "MATCH (n:Person) WITH n.age AS age ORDER BY age DESC LIMIT 2 \
+                     UNWIND [age, age + 1] AS value \
+                     RETURN DISTINCT value ORDER BY value DESC SKIP 1 LIMIT 2",
+                    vec![],
+                )
+                .await
+                .unwrap();
+            assert_eq!(staged_page.columns, ["value"]);
+            assert_eq!(
+                staged_page.entries,
+                [
+                    (-1, vec![WireValue::Int(1)]),
+                    (-1, vec![WireValue::Int(2)]),
+                    (1, vec![WireValue::Int(3)]),
+                ]
+            );
+            assert_eq!(staged_page.end.rows, 3);
+            let mut delivered = 0;
+            let error = reader
+                .execute_diff_streaming(
+                    cx,
+                    mode,
+                    1,
+                    2,
+                    "MATCH (n:Person) WITH n AS item \
+                     RETURN 10 / ([item][0].age - 3) AS value LIMIT 0",
+                    vec![],
+                    |_| Ok(()),
+                    |_, _| {
+                        delivered += 1;
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(server_code(error), ErrorCode::Execution);
+            assert_eq!(delivered, 0, "both endpoints must complete before delivery");
+            // Processing the next request also fences the failed execution's
+            // scratch cleanup; its ERROR frame can arrive just before Drop.
+            assert_eq!(
+                reader
+                    .execute(cx, ExecuteMode::Read, "RETURN 1 AS alive", vec![])
+                    .await
+                    .unwrap()
+                    .rows,
+                [vec![WireValue::Int(1)]],
+            );
             empty_scratch(&directory).await;
         }
         let count = reader
@@ -183,25 +263,23 @@ fn historical_differences_mask_both_cuts_and_charge_only_changed_tuples() {
         masked_scope.limits.max_rows = 0;
         let mut masked = connect(cx, address, &masked_scope).await;
         for mode in [DiffMode::Buffered, DiffMode::OrderedStream] {
-            let answer = masked
-                .execute_diff(
-                    cx,
-                    mode,
-                    1,
-                    2,
-                    "MATCH (n:Person) RETURN n.name AS hidden",
-                    vec![],
-                )
-                .await
-                .unwrap();
-            assert!(
-                answer.entries.is_empty(),
-                "hidden property changes must remain invisible"
-            );
-            assert_eq!(
-                answer.end.rows, 0,
-                "endpoint rows do not consume delivery quota"
-            );
+            for query in [
+                "MATCH (n:Person) RETURN n.name AS hidden",
+                "MATCH (n:Person) WITH n AS item RETURN [item][0].name AS hidden",
+            ] {
+                let answer = masked
+                    .execute_diff(cx, mode, 1, 2, query, vec![])
+                    .await
+                    .unwrap();
+                assert!(
+                    answer.entries.is_empty(),
+                    "hidden property changes must remain invisible"
+                );
+                assert_eq!(
+                    answer.end.rows, 0,
+                    "endpoint rows do not consume delivery quota"
+                );
+            }
         }
         owner
             .execute(

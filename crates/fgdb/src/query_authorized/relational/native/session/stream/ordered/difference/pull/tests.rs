@@ -228,14 +228,14 @@ fn pull_delivery_exposes_metadata_before_work_and_certifies_only_clean_exhaustio
 }
 
 #[test]
-fn staged_relations_refuse_before_scratch_while_proven_projected_pulls_still_run() {
+fn staged_relations_and_projected_pulls_complete_each_endpoint_before_delivery() {
     let ((), report) = run_async_under_lab(0xd1ff_8204, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let (db, cuts) = history(&contexts.commit()).await;
         let authority = authority();
         let pool = MemoryPool::new(262_144, 0).unwrap();
-        let (mut scoped, a, b) = session(&db, &cx, &authority, &pool).await;
+        let (mut scoped, _, _) = session(&db, &cx, &authority, &pool).await;
         let params = GqlParameters::new();
         for text in [
             "MATCH (n) RETURN n.p + 1 AS value ORDER BY value LIMIT 0",
@@ -248,16 +248,17 @@ fn staged_relations_refuse_before_scratch_while_proven_projected_pulls_still_run
                     .5
                     .is_some()
             );
-            assert!(matches!(
-                scoped.difference_stream(&cx, &prepared, &params, cuts[0], cuts[1]),
-                Err(NativeSpoolError::Authorized(error))
-                    if matches!(*error, QueryError::StreamingUnsupported { .. })
-            ));
-            for backing in [&a, &b] {
-                let state = backing.0.lock().unwrap();
-                assert_eq!((state.reads, state.writes), (0, 0));
-                assert!(state.bytes.get_ref().is_empty());
-            }
+            let execution = scoped
+                .difference_stream(&cx, &prepared, &params, cuts[0], cuts[1])
+                .unwrap();
+            assert_eq!(execution.columns(), ["value"]);
+            assert_eq!((execution.before(), execution.after()), (cuts[0], cuts[1]));
+            let mut cursor = execution.await.unwrap();
+            assert_eq!(cursor.columns(), ["value"]);
+            assert_eq!((cursor.before(), cursor.after()), (cuts[0], cuts[1]));
+            assert!(cursor.next_change().await.unwrap().is_none());
+            assert_eq!(cursor.state(), ScanState::Exhausted);
+            drop(cursor);
             assert!(!scoped.is_closed());
             assert_eq!(pool.used(), 0);
         }

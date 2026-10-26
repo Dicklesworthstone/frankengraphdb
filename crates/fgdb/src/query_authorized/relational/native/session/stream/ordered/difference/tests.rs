@@ -268,6 +268,15 @@ fn both_endpoint_masks_match_physically_absent_histories_before_order_and_subtra
             "MATCH (n) RETURN n.hidden AS secret",
             "MATCH (a)-[e:R]->(b) RETURN a.p AS a, b.p AS b",
             "MATCH (n) RETURN 1 AS one ORDER BY one",
+            "MATCH (n) WITH n.p AS p WHERE p >= 3 \
+             UNWIND [p, p + 1] AS value \
+             RETURN DISTINCT value ORDER BY value DESC SKIP 1 LIMIT 3",
+            "MATCH (n) WITH n.p AS p ORDER BY p DESC LIMIT 2 \
+             RETURN p * 2 AS doubled ORDER BY doubled",
+            "MATCH (n) WITH n AS item \
+             RETURN [item][0].p AS value, [item][0].hidden AS secret ORDER BY value",
+            "MATCH (a)-[e:R]->(b) WITH a AS item, e AS edge \
+             RETURN [item][0].p AS value, [edge][0].hidden AS secret ORDER BY value",
         ] {
             let (mut scoped, _, _) =
                 session(&db, &cx, &authority, &grant(), &pool, || 100, policy(100)).await;
@@ -484,6 +493,97 @@ fn signed_and_native_budgets_span_both_endpoints_and_charge_only_changed_output(
 }
 
 #[test]
+fn staged_endpoints_publish_the_final_schema_and_apply_each_page_before_comparison() {
+    let ((), report) = run_async_under_lab(0xd1ff_8108, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let (db, cuts) = history(&contexts.commit(), true).await;
+        let authority = authority();
+        let pool = MemoryPool::new(262_144, 0).unwrap();
+        let params = GqlParameters::new();
+        let (mut scoped, _, _) =
+            session(&db, &cx, &authority, &grant(), &pool, || 100, policy(100)).await;
+        let prepared = scoped
+            .prepare(
+                &cx,
+                "MATCH (n) WITH n.p AS p ORDER BY p DESC LIMIT 2 \
+                 UNWIND [p, p + 1] AS value \
+                 RETURN DISTINCT value ORDER BY value DESC SKIP 1 LIMIT 2",
+                &params,
+            )
+            .unwrap();
+        let execution = scoped
+            .difference_stream(&cx, &prepared, &params, cuts[0], cuts[1])
+            .unwrap();
+        assert_eq!(execution.columns(), ["value"]);
+        let mut cursor = execution.await.unwrap();
+        assert_eq!(cursor.columns(), ["value"]);
+        let mut changes = Bag::new();
+        while let Some((weight, row)) = cursor.next_change().await.unwrap() {
+            assert!(changes.insert(cells(&row), weight).is_none());
+        }
+        // Before: the inner page [7, 3] expands to [7, 8, 3, 4],
+        // and its final page is [7, 4]. After: [9] becomes [10, 9],
+        // whose final page is [9]. Comparing raw graph leaves is incorrect.
+        assert_eq!(
+            changes,
+            Bag::from([(value(4), -1), (value(7), -1), (value(9), 1)])
+        );
+        assert_eq!(cursor.state(), ScanState::Exhausted);
+        drop(cursor);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn staged_carried_reads_share_record_and_node_allowances_across_both_endpoints() {
+    let ((), report) = run_async_under_lab(0xd1ff_8109, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let (db, cuts) = history(&contexts.commit(), true).await;
+        let authority = authority();
+        let pool = MemoryPool::new(262_144, 0).unwrap();
+        let params = GqlParameters::new();
+        for (expression, records, nodes, refused) in [
+            ("[item][0].p", 12, 12, None),
+            ("[item][0].p", 11, 12, Some(false)),
+            ("[item][0].p", 12, 11, Some(true)),
+            ("[item][0].hidden", 6, 6, None),
+            ("CASE WHEN TRUE THEN 7 ELSE [item][0].p END", 6, 6, None),
+        ] {
+            let mut bounded = grant();
+            bounded.limits.max_nodes = nodes;
+            bounded.limits.max_rows = 0;
+            let native = GqlQueryPolicy::new(records, 0, 10_000_000, 10_000_000);
+            let (mut scoped, _, _) =
+                session(&db, &cx, &authority, &bounded, &pool, || 100, native).await;
+            let text =
+                format!("MATCH (n) WITH n AS item RETURN {expression} AS value ORDER BY value");
+            let prepared = scoped.prepare(&cx, &text, &params).unwrap();
+            let result = collect(&mut scoped, &cx, &prepared, &params, cuts[0], cuts[0]).await;
+            match refused {
+                Some(true) => refusal(
+                    result,
+                    AuthorizationError::LimitExceeded(LimitDimension::Nodes),
+                ),
+                Some(false) => assert!(matches!(result,
+                    Err(NativeSpoolError::Authorized(error))
+                    if matches!(*error, QueryError::Set(GqlQueryError::Rows(error))
+                        if error.dimension == GqlBudgetDimension::SnapshotRecords))),
+                None => {
+                    let (columns, changes) = result.unwrap();
+                    assert_eq!(columns, ["value"]);
+                    assert!(changes.is_empty(), "{text}");
+                }
+            }
+            assert_eq!(pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn expiry_while_scratch_or_callback_is_pending_stops_without_another_delivery() {
     let ((), report) = run_async_under_lab(0xd1ff_8105, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -614,25 +714,18 @@ fn late_second_endpoint_failure_and_signed_work_refusal_publish_no_changes() {
         let authority = authority();
         let pool = MemoryPool::new(262_144, 0).unwrap();
         let params = GqlParameters::new();
-        for suffix in ["", " LIMIT 0"] {
+        for (projection, suffix) in [
+            ("100 / (n.p - 9) AS x", ""),
+            ("100 / (n.p - 9) AS x", " LIMIT 0"),
+            ("n AS id, 100 / (n.p - 9) AS x", ""),
+            ("n AS id, 100 / (n.p - 9) AS x", " LIMIT 0"),
+        ] {
             let (mut scoped, _, _) =
                 session(&db, &cx, &authority, &grant(), &pool, || 100, policy(100)).await;
-            let text = format!("MATCH (n) RETURN 100 / (n.p - 9) AS x{suffix}");
-            let prepared = scoped.prepare(&cx, &text, &params).unwrap();
-            // A property-only source cannot keep eager source-row ordinals
-            // in an identity-ordered pull. Preserve its early typed refusal.
-            assert!(matches!(
-                scoped.visit_difference(&cx, &prepared, &params, cuts[0], cuts[1], |_, _| ready(Ok(()))),
-                Err(NativeSpoolError::Authorized(error))
-                    if matches!(*error, QueryError::StreamingUnsupported { .. })
-            ));
-            assert_eq!(scoped.scratch.stats().published_runs, 0);
-            assert_eq!(scoped.destination.stats().published_runs, 0);
-            assert!(!scoped.is_closed());
-            // Leading identity makes the source's canonical order exactly
-            // the pull order. The second endpoint must reach its real late
-            // arithmetic failure, even when the public page is empty.
-            let text = format!("MATCH (n) RETURN n AS id, 100 / (n.p - 9) AS x{suffix}");
+            // The direct identity pull and property-only staged projection
+            // both reach the second endpoint's real arithmetic failure.
+            // A final empty page cannot hide that earlier expression error.
+            let text = format!("MATCH (n) RETURN {projection}{suffix}");
             let prepared = scoped.prepare(&cx, &text, &params).unwrap();
             let calls = AtomicU64::new(0);
             let outcome = scoped
