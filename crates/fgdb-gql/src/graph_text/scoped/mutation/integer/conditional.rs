@@ -63,6 +63,9 @@ impl<'a> Parser<'a> {
         let mut alternatives = 0;
         loop {
             self.word("WHEN")?;
+            if searched {
+                self.boolean_operand_at = self.current.at;
+            }
             self.scalar_boolean(columns, depth, program)?;
             self.word("THEN")?;
             self.scalar_boolean(columns, depth, program)?;

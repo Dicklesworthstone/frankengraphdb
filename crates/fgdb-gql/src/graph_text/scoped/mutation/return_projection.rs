@@ -3408,6 +3408,13 @@ impl<'a> Parser<'a> {
         if self.is_word("COUNT") {
             return Ok(matches!(lexer.next()?.kind, TokenKind::Punct(b'{')));
         }
+        // A bare pattern in a Boolean position (boolean_operand_at).
+        if self.boolean_operand_at == self.current.at && self.is_punct(b'(') {
+            return crate::graph_text::scoped::pattern_predicate_follows(
+                self.current.kind,
+                &mut lexer,
+            );
+        }
         if !self.is_word("EXISTS") {
             return Ok(false);
         }
@@ -3424,7 +3431,8 @@ impl<'a> Parser<'a> {
     /// A pattern count over the MATCH bindings of a graph projection: the
     /// pattern is a Collect scope, as an existence predicate's is
     /// (existence_body), and the count is the size of its witness list, one
-    /// entry per witness. It takes either form EXISTS takes. An existence
+    /// entry per witness. It takes either form EXISTS takes, and the bare
+    /// pattern a Boolean position takes (boolean_operand_at). An existence
     /// test is that size being positive.
     fn pattern_count(
         &mut self,
@@ -3432,11 +3440,14 @@ impl<'a> Parser<'a> {
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
         let at = self.current.at;
         let scope = self.syntax.scopes.len();
-        let exists = self.take_word("EXISTS")?;
+        let bare = self.boolean_operand_at == at && self.is_punct(b'(');
+        let exists = bare || self.take_word("EXISTS")?;
         if !exists {
             self.word("COUNT")?;
         }
-        if exists && self.take(b'(')? {
+        if bare {
+            self.scope(ScopeKind::Collect, ScopeForm::Pattern)?;
+        } else if exists && self.take(b'(')? {
             self.scope(ScopeKind::Collect, ScopeForm::Pattern)?;
             self.punct(b')', ")")?;
         } else {

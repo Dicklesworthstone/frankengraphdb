@@ -946,6 +946,12 @@ struct Parser<'a> {
     /// a comparison's right operand may begin a composite membership, which
     /// binds tighter than the comparison (`true = [1] IN l`).
     predicate_start: usize,
+    /// Where the operand of a NOT, AND, OR or XOR, or a searched CASE's WHEN
+    /// condition, starts, through any parentheses: a Boolean position, where
+    /// a bare pattern is its existence test (`NOT (a)-[:K]-(b)` is `NOT
+    /// exists((a)-[:K]-(b))`, LDBC SNB IC7). Anywhere else a bare pattern
+    /// stays a syntax error (TCK Pattern1 [22]-[24]).
+    boolean_operand_at: usize,
     /// Set for exactly the next value read: it is the list operand of `IN`,
     /// which ends at the concatenation level, so a following AND, OR or
     /// comparison stays outside it (fgdb-klah2).
@@ -1106,6 +1112,7 @@ impl<'a> Parser<'a> {
             let_base: 0,
             comparison_start: usize::MAX,
             predicate_start: usize::MAX,
+            boolean_operand_at: usize::MAX,
             membership_list: false,
             projected_sources: None,
             existence_reads: None,

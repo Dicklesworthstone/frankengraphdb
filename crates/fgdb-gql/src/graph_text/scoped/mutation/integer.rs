@@ -371,6 +371,22 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Whether a let-carrying expression has a node pattern followed by a
+    /// relationship at the current `(`. Out of line and infallible:
+    /// integer_unary repeats once per nested parenthesis, and a Result here
+    /// would widen every one of those frames (fgdb-9cawv). A lexer error
+    /// reads as false; the ordinary operand reader then reports it.
+    #[inline(never)]
+    fn bare_pattern_follows(&self) -> bool {
+        self.lets.is_some()
+            && self.is_punct(b'(')
+            && crate::graph_text::scoped::pattern_predicate_follows(
+                self.current.kind,
+                &mut self.lexer.clone(),
+            )
+            .unwrap_or(false)
+    }
+
     // The two let-slot readers below are out of line on purpose: their
     // templates would otherwise sit in `integer_unary`'s frame, which repeats
     // once per nested parenthesis up to MAX_INTEGER_NESTING, and a wider frame
@@ -1414,6 +1430,7 @@ impl<'a> Parser<'a> {
         self.scalar_exclusive(columns, depth, program)?;
         while self.take_word("OR")? {
             let at = self.current.at;
+            self.boolean_operand_at = at;
             self.scalar_exclusive(columns, depth, program)?;
             emit(program, ParsedOp::Bound(GraphIntegerOp::Or), at)?;
         }
@@ -1430,6 +1447,7 @@ impl<'a> Parser<'a> {
         self.scalar_conjunction(columns, depth, program)?;
         while self.take_word("XOR")? {
             let at = self.current.at;
+            self.boolean_operand_at = at;
             self.scalar_conjunction(columns, depth, program)?;
             emit(program, ParsedOp::Bound(GraphIntegerOp::Xor), at)?;
         }
@@ -1455,6 +1473,7 @@ impl<'a> Parser<'a> {
             }
             self.advance()?;
             let at = self.current.at;
+            self.boolean_operand_at = at;
             self.scalar_negation(columns, depth, program)?;
             emit(program, ParsedOp::Bound(GraphIntegerOp::And), at)?;
         }
@@ -1479,6 +1498,7 @@ impl<'a> Parser<'a> {
         {
             let at = self.current.at;
             self.advance()?;
+            self.boolean_operand_at = self.current.at;
             self.scalar_negation(columns, depth + 1, program)?;
             return emit(program, ParsedOp::Bound(GraphIntegerOp::Not), at);
         }
@@ -2032,7 +2052,16 @@ impl<'a> Parser<'a> {
             self.integer_unary(columns, depth + 1, program)?;
             return emit(program, ParsedOp::Unary(op), at);
         }
+        // A bare pattern in a Boolean position is its existence test, read
+        // through a let slot as `exists(...)` is (pattern_count).
+        if self.boolean_operand_at == at && self.bare_pattern_follows() {
+            return self.composite_slot(columns, depth, program, at);
+        }
         if self.take(b'(')? {
+            // `NOT ((a)-->(b))`: the Boolean position is inside the parentheses.
+            if self.boolean_operand_at == at {
+                self.boolean_operand_at = self.current.at;
+            }
             self.scalar_boolean(columns, depth + 1, program)?;
             self.punct(b')', ")")?;
             return Ok(());

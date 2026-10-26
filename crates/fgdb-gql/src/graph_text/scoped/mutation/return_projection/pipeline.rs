@@ -231,6 +231,20 @@ pub(super) fn hoist_candidate(token: TokenKind<'_>, after_dot: bool) -> bool {
     }
 }
 
+/// Whether `token`, after the three tokens of `window`, opens a pattern in a
+/// Boolean position: right after NOT, AND, OR, XOR or WHEN, or inside one
+/// parenthesis after one (`NOT ((a)-->(b))`). The scalar compiler reads a
+/// bare pattern there as its existence test (boolean_operand_at).
+fn bare_boolean_operand(window: &[Option<TokenKind<'_>>; 3], token: TokenKind<'_>) -> bool {
+    let boolean = |kind: Option<TokenKind<'_>>| {
+        matches!(kind, Some(TokenKind::Word(word))
+            if ["NOT", "AND", "OR", "XOR", "WHEN"].iter().any(|op| word.eq_ignore_ascii_case(op)))
+    };
+    matches!(token, TokenKind::Punct(b'('))
+        && (boolean(window[2])
+            || (matches!(window[2], Some(TokenKind::Punct(b'('))) && boolean(window[1])))
+}
+
 /// Whether the word between `previous` and `next` binds an element local:
 /// `[x IN`, `any(x IN`, `reduce(acc = 0, x IN` (also `, x IN`) or a reduce
 /// accumulator `reduce(acc =`. A pattern comprehension a graph head gathers
@@ -563,7 +577,11 @@ impl<'a> Parser<'a> {
                 window = [window[1], window[2], Some(TokenKind::Punct(b')'))];
                 continue;
             }
-            if hoist_candidate(token.kind, after_dot)
+            let bare = bare_boolean_operand(&window, token.kind);
+            if bare {
+                self.boolean_operand_at = token.at;
+            }
+            if (hoist_candidate(token.kind, after_dot) || bare)
                 && carried.is_none()
                 && pending.is_none()
                 && !self.syntax.distinct
@@ -1258,11 +1276,14 @@ impl<'a> Parser<'a> {
             if count && !self.starts_pattern_count()? {
                 return Ok(None);
             }
-            // The scan covers the whole expression: from `[` to its `]`, or
-            // from `COUNT` to the end of its braces.
+            // The scan covers the whole expression: from `[` to its `]`, from
+            // `COUNT` to the end of its braces, or a bare pattern
+            // (boolean_operand_at) from its first `(` past every node and
+            // relationship that continues it.
+            let bare = count && self.boolean_operand_at == token.at;
             let mut scan = lexer.clone();
             let mut previous = token.kind;
-            let mut depth = usize::from(!count);
+            let mut depth = usize::from(!count) + usize::from(bare);
             loop {
                 let next = scan.next()?;
                 match next.kind {
@@ -1270,7 +1291,13 @@ impl<'a> Parser<'a> {
                     TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
                     TokenKind::Punct(b')' | b']' | b'}') => {
                         depth = depth.saturating_sub(1);
-                        if depth == 0 {
+                        if depth == 0
+                            && !(bare
+                                && matches!(
+                                    scan.clone().next()?.kind,
+                                    TokenKind::Punct(b'-' | b'<')
+                                ))
+                        {
                             break;
                         }
                     }

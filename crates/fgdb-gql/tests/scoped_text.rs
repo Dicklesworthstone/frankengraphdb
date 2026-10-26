@@ -745,6 +745,66 @@ fn exists_function_on_a_pattern_is_the_pattern_predicate() {
     );
 }
 
+/// A bare pattern in a Boolean position of a projection is its existence
+/// test, compiled exactly as the `exists(...)` spelling: after NOT, AND, OR
+/// or XOR, inside parentheses there, and as a searched CASE's condition,
+/// whether the RETURN reads the MATCH bindings directly or past a WITH (LDBC
+/// SNB IC7, `NOT ((liker)-[:KNOWS]-(person)) AS isNew`). A whole RETURN or
+/// WITH item is no Boolean position and stays refused (TCK Pattern1 [22],
+/// [23]).
+#[test]
+fn a_bare_pattern_in_a_boolean_position_is_its_existence_test() {
+    let template = |text: &str| {
+        fgdb_gql::PreparedGraphSetText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .canonical_template_bytes()
+    };
+    for (bare, exists) in [
+        (
+            "MATCH (a), (b) RETURN NOT (a)-[:R]-(b) AS e",
+            "MATCH (a), (b) RETURN NOT exists((a)-[:R]-(b)) AS e",
+        ),
+        (
+            "MATCH (a), (b) RETURN NOT ((a)-[:R]-(b)) AS e",
+            "MATCH (a), (b) RETURN NOT exists((a)-[:R]-(b)) AS e",
+        ),
+        // `AND EXISTS` itself ends a projection's conjunction (the graph
+        // clause parser owns a scoped EXISTS), so this reference spelling
+        // parenthesizes it.
+        (
+            "MATCH (a) RETURN a.n > 1 AND (a)-[:R]->() AS e",
+            "MATCH (a) RETURN a.n > 1 AND (exists((a)-[:R]->())) AS e",
+        ),
+        (
+            "MATCH (a) RETURN a.n > 1 OR (a)<-[:S]-(:L) AS e",
+            "MATCH (a) RETURN a.n > 1 OR exists((a)<-[:S]-(:L)) AS e",
+        ),
+        (
+            "MATCH (a) RETURN a.n > 1 XOR (a)-[:R]->() AS e",
+            "MATCH (a) RETURN a.n > 1 XOR exists((a)-[:R]->()) AS e",
+        ),
+        (
+            "MATCH (a) RETURN CASE WHEN (a)-[:R]->() THEN 1 ELSE 0 END AS e",
+            "MATCH (a) RETURN CASE WHEN exists((a)-[:R]->()) THEN 1 ELSE 0 END AS e",
+        ),
+        (
+            "MATCH (a), (b) WITH a, b RETURN NOT ((a)-[:R]-(b)) AS e",
+            "MATCH (a), (b) WITH a, b RETURN NOT exists((a)-[:R]-(b)) AS e",
+        ),
+    ] {
+        assert_eq!(template(bare), template(exists), "{bare}");
+    }
+    for text in [
+        "MATCH (n) RETURN (n)-[:R]->() AS x",
+        "MATCH (n) WITH (n)-[:R]->() AS x RETURN x",
+    ] {
+        assert!(
+            fgdb_gql::PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
+}
+
 /// fgdb-fj106 design 1: a relationship type test in a scoped WHERE (an
 /// EXISTS body, an OPTIONAL MATCH) narrows that clause's edge, as the typed
 /// pattern does: `type(r) = 'R'`, `'R' = type(r)`, `r:R` and `type(r) IN
