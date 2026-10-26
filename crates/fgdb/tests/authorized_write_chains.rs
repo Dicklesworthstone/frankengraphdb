@@ -1504,3 +1504,335 @@ fn blind_create_continuations_cannot_read_parameter_carried_element_ids() {
         assert_eq!(txn.outstanding_obligations(), 0);
     });
 }
+
+fn post_write_pattern(key: PropertyKeyId) -> fgdb_gql::PreparedGraphSet {
+    use fgdb_gql::algebra::{GraphColumn, GraphPatternBuilder, IntegerComparison, VertexPredicate};
+    let mut graph = GraphPatternBuilder::new();
+    graph.vertex("matched").unwrap();
+    graph
+        .filter(
+            "matched",
+            VertexPredicate::IntegerProperty {
+                key: P,
+                comparison: IntegerComparison::Equal,
+                value: 1,
+            },
+        )
+        .unwrap();
+    graph
+        .prepare_values(
+            &[
+                GraphColumn::vertex("matched", "matched"),
+                GraphColumn::property("matched_p", "matched", key),
+            ],
+            0,
+            None,
+        )
+        .unwrap()
+        .with_duplicates()
+        .into()
+}
+
+fn post_write_read(
+    chain: &PreparedGraphWriteChain,
+    key: PropertyKeyId,
+) -> fgdb_gql::PreparedGraphSet {
+    use fgdb_gql::row_join::{RowJoinKind, RowJoinSpec};
+    let left = chain.read_input().unwrap();
+    let right = post_write_pattern(key);
+    let join = RowJoinSpec::new(left.column_types(), right.column_types(), &[(0, 0)])
+        .unwrap()
+        .with_kind(RowJoinKind::Left);
+    left.join(right, join).unwrap()
+}
+
+#[test]
+fn authorized_post_write_read_sees_staged_bags_masks_hidden_rows_and_reopens() {
+    lab(0xc4a1_20d1, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 3), NOW).unwrap();
+        let program = chain("UNWIND [1,1,2] AS k MERGE (n:Visible {p:k}) RETURN n");
+        let continuation = post_write_read(&program, P);
+        let mut expected_usage = None;
+        for hidden in [0, 32] {
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            if hidden != 0 {
+                let mut seed = WriteBatch::new(R);
+                for id in 1..=hidden {
+                    seed.create_vertex(VId(id), vec![HIDDEN], vec![(P, CanonicalScalar::Int(1))]);
+                }
+                db.write(&commit, seed).await.unwrap();
+            }
+            let before = db.frontier().unwrap();
+            let (stats, result, completion) = db
+                .execute_graph_write_chain_then_read_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    &continuation,
+                    policy(3),
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!((stats.created_vertices, stats.created_edges), (2, 0));
+            assert_eq!(stats.selection, result.rows);
+            assert_eq!(stats.evaluator, result.evaluator);
+            assert_eq!(result.rows.result_rows, 3);
+            let mut observed = Vec::new();
+            for row in &result.value {
+                let [GraphValue::Vertex(id), matched, value] = row.values() else {
+                    panic!("unexpected continuation row: {row:?}")
+                };
+                let vertex = db.vertex(*id).unwrap().unwrap();
+                let p = vertex
+                    .props
+                    .iter()
+                    .find(|(key, _)| *key == P)
+                    .unwrap()
+                    .1
+                    .clone();
+                if p == CanonicalScalar::Int(1).into() {
+                    assert_eq!(matched, &GraphValue::Vertex(*id));
+                    assert_eq!(value, &GraphValue::Scalar(CanonicalScalar::Int(1)));
+                    observed.push(1);
+                } else {
+                    assert_eq!(p, CanonicalScalar::Int(2).into());
+                    assert_eq!(matched, &GraphValue::Scalar(CanonicalScalar::Null));
+                    assert_eq!(value, &GraphValue::Scalar(CanonicalScalar::Null));
+                    observed.push(2);
+                }
+            }
+            observed.sort_unstable();
+            assert_eq!(observed, [1, 1, 2]);
+            if let Some(expected) = expected_usage {
+                assert_eq!(stats, expected, "hidden rows cannot affect public usage");
+            } else {
+                expected_usage = Some(stats);
+            }
+            let frontier = db.frontier().unwrap();
+            assert_eq!(frontier.0, before.0 + 1);
+            assert_eq!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted {
+                    commit_seq: frontier
+                }
+            );
+            let expected = db.vertices().unwrap();
+            drop(db);
+            let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+                .await
+                .unwrap();
+            assert_eq!(reopened.frontier().unwrap(), frontier);
+            assert_eq!(reopened.vertices().unwrap(), expected);
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn authorized_post_write_read_charges_only_final_rows_and_admits_them_before_commit() {
+    use fgdb_gql::{GraphSetOperand, GraphSetPredicateOp};
+    lab(0xc4a1_20d2, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 1), NOW).unwrap();
+        let program = chain("UNWIND [1,1,2] AS k MERGE (n:Visible {p:k}) RETURN n");
+        let continuation = post_write_read(&program, P)
+            .filter(&[GraphSetPredicateOp::IsNull {
+                operand: GraphSetOperand::Column(1),
+                is_null: true,
+            }])
+            .unwrap();
+        for refuse_output in [true, false] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = db.frontier().unwrap();
+            let mut called = 0;
+            let result = db
+                .execute_graph_write_chain_then_read_authorized_checked(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    &continuation,
+                    policy(1),
+                    || NOW,
+                    |rows, meter| {
+                        called += 1;
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0].values().len(), 3);
+                        meter(1)?;
+                        if refuse_output {
+                            Err(WriteTxnError::Authorization(Error::ScopeDenied))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .await;
+            assert_eq!(called, 1);
+            if refuse_output {
+                assert_eq!(
+                    authorization(&result.unwrap_err()),
+                    Some(Error::ScopeDenied)
+                );
+                assert_eq!(db.frontier().unwrap(), before);
+                assert!(db.vertices().unwrap().is_empty());
+            } else {
+                let (stats, result, _) = result.unwrap();
+                assert_eq!(stats.created_vertices, 2);
+                assert_eq!(result.rows.result_rows, 1);
+                assert_eq!(db.vertices().unwrap().len(), 2);
+                assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            }
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn authorized_post_write_read_schema_rights_scope_and_row_failures_publish_nothing() {
+    lab(0xc4a1_20d3, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let program = chain("UNWIND [1,1,2] AS k MERGE (n:Visible {p:k}) RETURN n");
+        for case in 0..5 {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = db.frontier().unwrap();
+            let rights = if case == 1 {
+                Rights::Write
+            } else {
+                Rights::ReadWrite
+            };
+            let token = issuer
+                .issue_at(&grant(rights, if case == 3 { 2 } else { 3 }), NOW)
+                .unwrap();
+            let continuation = if case == 0 {
+                post_write_pattern(P)
+            } else {
+                post_write_read(&program, if case == 4 { SECRET } else { P })
+            };
+            let error = db
+                .execute_graph_write_chain_then_read_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    &continuation,
+                    policy(if case == 2 { 2 } else { 3 }),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            if case == 1 {
+                assert_eq!(authorization(&error), Some(Error::PermissionDenied));
+            } else if case == 4 {
+                assert_eq!(authorization(&error), Some(Error::ScopeDenied));
+            }
+            assert_eq!(db.frontier().unwrap(), before, "case {case}: {error:?}");
+            assert!(db.vertices().unwrap().is_empty(), "case {case}");
+            assert!(db.edges().unwrap().is_empty(), "case {case}");
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn authorized_post_write_read_shares_each_native_allowance_with_its_write_prefix() {
+    lab(0xc4a1_20d4, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 3), NOW).unwrap();
+        let program = chain("UNWIND [1,1,2] AS k MERGE (n:Visible {p:k}) RETURN n");
+        let continuation = post_write_read(&program, P);
+        let mut write_db = Database::open_memory(&commit, keys()).await.unwrap();
+        let (prefix, _, _) = write_db
+            .execute_graph_write_chain_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &program,
+                policy(3),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        let mut complete_db = Database::open_memory(&commit, keys()).await.unwrap();
+        let (complete, _, _) = complete_db
+            .execute_graph_write_chain_then_read_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &program,
+                &continuation,
+                policy(3),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        assert!(complete.selection.snapshot_records > prefix.selection.snapshot_records);
+        assert!(complete.evaluator.work_units > prefix.evaluator.work_units);
+        assert!(complete.evaluator.scratch_entries > prefix.evaluator.scratch_entries);
+        for dimension in 0..3 {
+            let mut bounded = policy(3);
+            match dimension {
+                0 => {
+                    bounded.query = GqlQueryPolicy::new(
+                        complete.selection.snapshot_records - 1,
+                        3,
+                        bounded.query.evaluator.max_work_units,
+                        bounded.query.evaluator.max_scratch_entries,
+                    );
+                }
+                1 => bounded.query.evaluator.max_work_units = complete.evaluator.work_units - 1,
+                _ => {
+                    bounded.query.evaluator.max_scratch_entries =
+                        complete.evaluator.scratch_entries - 1
+                }
+            }
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = db.frontier().unwrap();
+            assert!(
+                db.execute_graph_write_chain_then_read_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    &continuation,
+                    bounded,
+                    || NOW,
+                )
+                .await
+                .is_err(),
+                "dimension {dimension}"
+            );
+            assert_eq!(db.frontier().unwrap(), before);
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}

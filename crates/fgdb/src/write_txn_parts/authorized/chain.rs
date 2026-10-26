@@ -436,6 +436,113 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         chain: &PreparedGraphWriteChain,
         policy: GraphInsertPolicy,
+        clock: impl FnMut() -> u64,
+        admit: impl FnOnce(
+            &[GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+        ) -> Result<(), WriteTxnError>,
+    ) -> Result<Receipt, Fault> {
+        self.execute_graph_write_chain_authorized_with_read(
+            txn_cx, query_cx, commit_cx, authority, token, branch, chain, None, policy, clock,
+            admit,
+        )
+        .await
+    }
+
+    /// Execute a returning write chain and a correlated read under one live
+    /// capability and one commit. Build the continuation from
+    /// `chain.read_input()` with the native relational operators. It reads the
+    /// complete post-write overlay through the same masked source as the write.
+    /// An outer join preserves each unmatched input occurrence and extends only
+    /// its new columns with NULL.
+    ///
+    /// ReadWrite authority is required before allocation or graph access. The
+    /// write's output is private: only the continuation's final rows spend the
+    /// signed and native result-row allowances. Snapshot, work and scratch
+    /// limits cover both phases cumulatively. A late read, permission, budget
+    /// or cancellation failure discards the entire unpublished statement.
+    /// This is typed composition, with the same scope as the owner-level
+    /// `execute_graph_write_chain_then_read_autocommit_engine_governed` API.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_graph_write_chain_then_read_authorized(
+        &mut self,
+        txn_cx: &TxnCx,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        chain: &PreparedGraphWriteChain,
+        continuation: &fgdb_gql::PreparedGraphSet,
+        policy: GraphInsertPolicy,
+        clock: impl FnMut() -> u64,
+    ) -> Result<Receipt, Fault> {
+        self.execute_graph_write_chain_then_read_authorized_checked(
+            txn_cx,
+            query_cx,
+            commit_cx,
+            authority,
+            token,
+            branch,
+            chain,
+            continuation,
+            policy,
+            clock,
+            |_, _| Ok(()),
+        )
+        .await
+    }
+
+    /// Admit the final read's host representation before the sole commit.
+    /// The callback has the same private-buffer and live-meter contract as
+    /// `execute_graph_write_chain_authorized_checked`; it never receives the
+    /// intermediate write rows. Returned statistics include both phases.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_graph_write_chain_then_read_authorized_checked(
+        &mut self,
+        txn_cx: &TxnCx,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        chain: &PreparedGraphWriteChain,
+        continuation: &fgdb_gql::PreparedGraphSet,
+        policy: GraphInsertPolicy,
+        clock: impl FnMut() -> u64,
+        admit: impl FnOnce(
+            &[GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+        ) -> Result<(), WriteTxnError>,
+    ) -> Result<Receipt, Fault> {
+        self.execute_graph_write_chain_authorized_with_read(
+            txn_cx,
+            query_cx,
+            commit_cx,
+            authority,
+            token,
+            branch,
+            chain,
+            Some(continuation),
+            policy,
+            clock,
+            admit,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_graph_write_chain_authorized_with_read(
+        &mut self,
+        txn_cx: &TxnCx,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        chain: &PreparedGraphWriteChain,
+        continuation: Option<&fgdb_gql::PreparedGraphSet>,
+        policy: GraphInsertPolicy,
         mut clock: impl FnMut() -> u64,
         admit: impl FnOnce(
             &[GraphValueRow],
@@ -458,9 +565,14 @@ impl<V: Vfs + Clone> Database<V> {
             clock,
         };
         let scope = verified.predicates();
+        if continuation.is_some_and(|read| !chain.accepts_read_continuation(read)) {
+            return Err(GqlQueryError::Source(GraphWriteChainError::Read(
+                fgdb_gql::GraphSetExecutionError::InputSchema { operand: 0 },
+            )));
+        }
         // Whole-program admission precedes even the first engine ID. The
         // chain is compiler-owned, but its unsupported family is not authority.
-        let mut reads = chain.returns_rows();
+        let mut reads = chain.returns_rows() || continuation.is_some();
         for (step, statement) in chain.steps().iter().enumerate() {
             execution.checkpoint().map_err(source)?;
             if merges::preflight(statement, scope)? || vertices::preflight(statement, scope)? {
@@ -549,7 +661,7 @@ impl<V: Vfs + Clone> Database<V> {
                         policy,
                         &used,
                         mutation_effects,
-                        at == last && chain.returns_rows(),
+                        at == last && chain.returns_rows() && continuation.is_none(),
                     );
                     let (stats, returning, effects) = if matches!(
                         statement,
@@ -888,6 +1000,45 @@ impl<V: Vfs + Clone> Database<V> {
                 }
                 result.rows.snapshot_records = used.selection.snapshot_records;
                 result.evaluator = used.evaluator;
+                if let Some(continuation) = continuation {
+                    result = query_cx.with_restriction(|| {
+                        let controls = RefCell::new(&mut execution);
+                        let database = RefCell::new(&mut *self);
+                        let transaction = workspace.transaction();
+                        let graph = fgdb_gql::WithElementReads {
+                            source: ChainSource {
+                                transaction,
+                                database: &database,
+                                cx: query_cx,
+                                scope,
+                                execution: &controls,
+                            },
+                            elements: |element, key| {
+                                selection::returning_element_property(
+                                    transaction,
+                                    &database.borrow(),
+                                    query_cx,
+                                    element,
+                                    key,
+                                    scope,
+                                    &controls,
+                                )
+                            },
+                        };
+                        chain.finish_read_continuation(
+                            continuation,
+                            result,
+                            policy.query,
+                            graph,
+                            || {
+                                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                                controls.borrow_mut().checkpoint()
+                            },
+                        )
+                    })?;
+                    used.selection.snapshot_records = result.rows.snapshot_records;
+                    used.evaluator = result.evaluator;
+                }
                 used.selection.result_rows = result.rows.result_rows;
                 let delivered = u64::try_from(result.value.len())
                     .map_err(|_| source(WriteTxnError::Authorization(Error::TooLarge)))?;
