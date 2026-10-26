@@ -200,6 +200,9 @@ struct Projection {
     outgoing: Rows,
     incoming: Option<Rows>,
     weights: Vec<f64>,
+    // Evidence over the FINAL reduced incidence, not the raw input weights.
+    // Immutable with the CSR, so eligible kernels need no repeated weight scan.
+    unit_weights: bool,
     // The 1-based row/weight checkpoint of the first negative final CSR
     // weight. Finite weights are guaranteed by construction. Retaining the
     // visit ordinal preserves Dijkstra's cancellation/error precedence while
@@ -906,7 +909,9 @@ impl SnapshotGraphView {
         // prefix of out_nodes. Reversing both the traversal and row cursors
         // leaves neighbors ascending on both faces, without row sorting.
         let mut first_negative_weight_visit = None;
+        let mut unit_weights = true;
         let mut record_weight = |source, slot, weight: f64| {
+            unit_weights &= weight == 1.0;
             if weight < 0.0 {
                 // Each earlier row and weight contributes one checkpoint.
                 // Observe the reduced weight, never a raw parallel edge.
@@ -965,6 +970,7 @@ impl SnapshotGraphView {
             },
             incoming,
             weights,
+            unit_weights,
             first_negative_weight_visit,
             max_out_degree,
             max_weak_degree,
@@ -1000,6 +1006,9 @@ impl SnapshotGraphView {
     }
     pub(crate) fn first_negative_weight_visit(&self) -> Option<usize> {
         self.0.first_negative_weight_visit
+    }
+    pub(crate) fn has_unit_weights(&self) -> bool {
+        self.0.unit_weights
     }
     pub(crate) fn component_degree_bound(&self, weak: bool) -> usize {
         if weak {

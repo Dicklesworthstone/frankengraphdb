@@ -653,7 +653,8 @@ fn charge_runs<C>(len: usize, meter: &mut impl FnxMeter<C>) -> Result<(), FnxExe
 /// push alpha times rank, share 1 / sum unweighted (the weighted share is per
 /// arc). Independent per source, so several threads give identical bits.
 fn contributions<C>(
-    options: crate::PageRankOptions,
+    alpha: f64,
+    per_arc_weights: bool,
     ranks: &[f64],
     out_offsets: &[usize],
     contrib: &mut [f64],
@@ -667,8 +668,8 @@ fn contributions<C>(
             }
             for (at, slot) in rows.iter_mut().enumerate() {
                 let index = low + chunk * ARITHMETIC_RUN + at;
-                let push = options.alpha() * ranks[index];
-                *slot = if options.weighted() {
+                let push = alpha * ranks[index];
+                *slot = if per_arc_weights {
                     push
                 } else {
                     let degree = out_offsets[index + 1] - out_offsets[index];
@@ -730,8 +731,9 @@ fn metered<C>(
 /// Preserve the pinned fnx scalar evaluation order exactly: ascending fixed-
 /// width vertex names, ascending targets, division before multiplication,
 /// dangling-mass redistribution, then an ordered L1 convergence test. Weighted
-/// execution retains one normalized share per incoming arc; unweighted
-/// execution borrows CSR offsets instead of allocating per-vertex sums.
+/// execution retains one normalized share per incoming arc unless immutable
+/// final weights are all one. Unit-weight execution borrows CSR degrees;
+/// its weighted call identity and logical validation charges are unchanged.
 fn pagerank<C>(
     graph: &SnapshotGraphView,
     options: crate::PageRankOptions,
@@ -765,6 +767,13 @@ fn pagerank_with_threads<C>(
     if n == 0 {
         return Ok((Vec::new(), witness, 0));
     }
+    // Summing ones agrees bit-for-bit with the integer degree conversion only
+    // through 2^53. Keep the ordinary weighted path above that exactness bound.
+    let unit_weights =
+        graph.has_unit_weights() && graph.component_degree_bound(false) as u128 <= (1u128 << 53);
+    #[cfg(test)]
+    let unit_weights = unit_weights && !tests::force_weighted_shares();
+    let per_arc_weights = options.weighted() && !unit_weights;
     let mut ranks = reserve(n)?;
     let mut next = reserve(n)?;
     // The pass gathers over the incoming face. A weighted arc's share is the
@@ -782,7 +791,7 @@ fn pagerank_with_threads<C>(
     let mut dangling: Vec<usize> = reserve(n)?;
     let mut shares: Vec<f64> = Vec::new();
     let mut cursor: Vec<usize> = Vec::new();
-    if options.weighted() && face_ok {
+    if per_arc_weights && face_ok {
         shares = reserve(in_sources.len())?;
         while shares.len() < in_sources.len() {
             meter.poll().map_err(FnxExecutionError::Cancelled)?;
@@ -826,7 +835,7 @@ fn pagerank_with_threads<C>(
             .checked_add(1 + targets.len())
             .ok_or(FnxExecutionError::SizeOverflow)?;
         let mut sum = 0.0;
-        if options.weighted() {
+        if per_arc_weights {
             for &weight in weights {
                 meter.unit().map_err(FnxExecutionError::Cancelled)?;
                 if weight < 0.0 {
@@ -838,12 +847,17 @@ fn pagerank_with_threads<C>(
                 }
             }
         } else {
+            if options.weighted() {
+                // The immutable evidence removes arithmetic and allocation,
+                // not any unit of the weighted call's validation transcript.
+                charge_runs(targets.len(), meter)?;
+            }
             sum = targets.len() as f64;
         }
         if face_ok {
             face_ok = in_offsets[source] <= in_offsets[source + 1];
         }
-        if options.weighted() && face_ok {
+        if per_arc_weights && face_ok {
             for (at, &target) in targets.iter().enumerate() {
                 if at != 0 && at % ARITHMETIC_RUN == 0 {
                     meter.poll().map_err(FnxExecutionError::Cancelled)?;
@@ -888,7 +902,8 @@ fn pagerank_with_threads<C>(
         // contribution walk spends its unit per row first.
         charge_runs(n, meter)?;
         contributions(
-            options,
+            options.alpha(),
+            per_arc_weights,
             &ranks,
             graph.outgoing_offsets(),
             &mut contrib,
@@ -911,7 +926,7 @@ fn pagerank_with_threads<C>(
             in_offsets,
             in_sources,
             &contrib,
-            options.weighted().then_some(shares.as_slice()),
+            per_arc_weights.then_some(shares.as_slice()),
             initial,
             &mut next,
             threads,
@@ -1362,6 +1377,27 @@ mod tests {
     use fgdb_types::{CommitSeq, EId, ids::ObjectId};
     use std::convert::Infallible;
     use std::mem::size_of;
+
+    thread_local! {
+        // Retain the predecessor as a differential and paired-measurement
+        // control. This switch does not exist in production builds.
+        static FORCE_WEIGHTED_SHARES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    pub(super) fn force_weighted_shares() -> bool {
+        FORCE_WEIGHTED_SHARES.with(std::cell::Cell::get)
+    }
+
+    fn with_weighted_shares<T>(forced: bool, run: impl FnOnce() -> T) -> T {
+        struct Reset(bool);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                FORCE_WEIGHTED_SHARES.with(|mode| mode.set(self.0));
+            }
+        }
+        let _reset = Reset(FORCE_WEIGHTED_SHARES.with(|mode| mode.replace(forced)));
+        run()
+    }
 
     fn projection(mask: u16, direction: Directedness) -> SnapshotGraphView {
         let vertices = [VId(0), VId(17), VId(u128::MAX)];
@@ -2085,9 +2121,15 @@ mod tests {
                 .collect();
             for threads in 1..=8 {
                 let mut actual = vec![f64::NAN; ranks.len()];
-                contributions(options, &ranks, &offsets, &mut actual, threads, &mut || {
-                    Ok::<(), Infallible>(())
-                })
+                contributions(
+                    options.alpha(),
+                    weighted,
+                    &ranks,
+                    &offsets,
+                    &mut actual,
+                    threads,
+                    &mut || Ok::<(), Infallible>(()),
+                )
                 .unwrap();
                 for (row, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
                     assert_eq!(
@@ -2395,7 +2437,15 @@ mod tests {
         let mut values = vec![f64::NAN; n];
         let mut meter = LiveOnly { polls: 0 };
         assert!(matches!(
-            contributions(options, &ranks, &offsets, &mut values, 1, &mut meter),
+            contributions(
+                options.alpha(),
+                false,
+                &ranks,
+                &offsets,
+                &mut values,
+                1,
+                &mut meter
+            ),
             Err(FnxExecutionError::Cancelled("live stop"))
         ));
         assert!(values[..ARITHMETIC_RUN].iter().all(|&x| x == 0.425));
@@ -3014,6 +3064,317 @@ mod tests {
         }
     }
 
+    fn unit_projection(mask: u16, direction: Directedness) -> SnapshotGraphView {
+        let vertices = [VId(0), VId(17), VId(u128::MAX)];
+        let edges: Vec<_> = (0..9)
+            .filter(|bit| mask & (1 << bit) != 0)
+            .map(|bit| ProjectionEdge {
+                eid: EId((bit as u128) << 64 | 7),
+                source: vertices[bit / 3],
+                target: vertices[bit % 3],
+                weight: 1.0,
+            })
+            .collect();
+        SnapshotGraphView::build(
+            SnapshotBinding {
+                root: ObjectId([0x31; 32]),
+                as_of: CommitSeq(7),
+            },
+            &vertices,
+            &edges,
+            ProjectionSpec {
+                directedness: direction,
+                parallel_edges: ParallelEdgePolicy::CollapseUnit,
+                self_loops: SelfLoopPolicy::Keep,
+            },
+            ProjectionLimits {
+                max_vertices: 3,
+                max_input_edges: 9,
+                max_adjacency_entries: 18,
+                max_workspace_bytes: 1 << 20,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn unit_weight_pagerank_matches_weighted_predecessor_and_fnx_on_every_small_topology() {
+        for mask in 0..512 {
+            for direction in [
+                Directedness::Directed,
+                Directedness::Reversed,
+                Directedness::Undirected,
+            ] {
+                let graph = unit_projection(mask, direction);
+                assert!(graph.has_unit_weights());
+                let arcs = graph.incoming_face().1.len();
+                for options in [
+                    PageRankOptions::new(0.85, 1000, 1e-12, true).unwrap(),
+                    PageRankOptions::global_l1(0.85, 1000, 1e-12, true).unwrap(),
+                    PageRankOptions::fixed_iterations(0.85, 17, true).unwrap(),
+                ] {
+                    let run = || {
+                        pagerank_with_threads(&graph, options, arcs, 1, &mut || {
+                            Ok::<(), Infallible>(())
+                        })
+                        .unwrap()
+                    };
+                    let (old, old_witness, old_workspace) = with_weighted_shares(true, run);
+                    let (new, new_witness, new_workspace) = run();
+                    assert!(
+                        old.iter()
+                            .zip(&new)
+                            .all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "mask={mask} direction={direction:?} options={options:?}"
+                    );
+                    assert_eq!(new_witness, old_witness);
+                    assert_eq!(
+                        new_workspace,
+                        3 * (3 * size_of::<f64>() + size_of::<usize>())
+                    );
+                    assert_eq!(
+                        old_workspace - new_workspace,
+                        arcs * size_of::<f64>() + 3 * size_of::<usize>()
+                    );
+                    if options.stopping_rule() == crate::PageRankStoppingRule::Convergence {
+                        let oracle = fnx_algorithms::pagerank_with_weight(
+                            &graph,
+                            options.alpha(),
+                            options.max_iter(),
+                            options.tolerance(),
+                            Some(PROJECTED_WEIGHT_ATTRIBUTE),
+                        );
+                        assert!(oracle.converged);
+                        assert_eq!(new_witness, oracle.witness);
+                        for score in oracle.scores {
+                            assert_eq!(
+                                new[graph.get_node_index(&score.node).unwrap()].to_bits(),
+                                score.score.to_bits(),
+                                "FNX mask={mask} direction={direction:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unit_weight_arithmetic_remains_cancellable_at_every_live_poll() {
+        struct Live {
+            units: usize,
+            polls: usize,
+            stop: Option<usize>,
+        }
+        impl FnxMeter<usize> for Live {
+            fn unit(&mut self) -> Result<(), usize> {
+                self.units += 1;
+                Ok(())
+            }
+            fn poll(&mut self) -> Result<(), usize> {
+                self.polls += 1;
+                if self.stop == Some(self.polls) {
+                    Err(self.polls)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let n = ARITHMETIC_RUN + 13;
+        let vertices: Vec<_> = (0..n).map(|i| VId((i as u128) << 64 | 17)).collect();
+        let edges: Vec<_> = (1..n)
+            .map(|i| ProjectionEdge {
+                eid: EId(u128::MAX - i as u128),
+                source: vertices[i],
+                target: vertices[0],
+                weight: 1.0,
+            })
+            .collect();
+        let hub = SnapshotGraphView::build(
+            SnapshotBinding {
+                root: ObjectId([0x33; 32]),
+                as_of: CommitSeq(7),
+            },
+            &vertices,
+            &edges,
+            ProjectionSpec {
+                directedness: Directedness::Directed,
+                parallel_edges: ParallelEdgePolicy::Sum,
+                self_loops: SelfLoopPolicy::Keep,
+            },
+            ProjectionLimits {
+                max_vertices: n,
+                max_input_edges: edges.len(),
+                max_adjacency_entries: edges.len(),
+                max_workspace_bytes: 8 << 20,
+            },
+        )
+        .unwrap();
+        for graph in [unit_projection(0b111_001_010, Directedness::Directed), hub] {
+            assert!(graph.has_unit_weights());
+            let options = PageRankOptions::fixed_iterations(0.85, 2, true).unwrap();
+            let arcs = graph.incoming_face().1.len();
+            let mut live = Live {
+                units: 0,
+                polls: 0,
+                stop: None,
+            };
+            pagerank_with_threads(&graph, options, arcs, 1, &mut live).unwrap();
+            assert!(live.polls > 0);
+            assert_eq!(
+                live.units,
+                graph.node_count() + arcs + 2 * (4 * graph.node_count() + arcs)
+            );
+            for stop in 1..=live.polls {
+                let mut live = Live {
+                    units: 0,
+                    polls: 0,
+                    stop: Some(stop),
+                };
+                assert!(
+                    matches!(pagerank_with_threads(&graph, options, arcs, 1, &mut live), Err(FnxExecutionError::Cancelled(at)) if at == stop)
+                );
+                assert_eq!(live.polls, stop);
+            }
+        }
+    }
+
+    #[test]
+    fn unit_weight_full_call_keeps_identity_and_every_logical_refusal() {
+        let graph = unit_projection(0b111_001_010, Directedness::Directed);
+        let call = FnxCallSpec::pagerank(PageRankOptions::fixed_iterations(0.85, 7, true).unwrap());
+        let limits = FnxExecutionLimits {
+            max_iterations: 7,
+            max_result_rows: 3,
+            max_estimated_work: 1000,
+        };
+        let fresh = |stop| Recording {
+            calls: Vec::new(),
+            stop,
+            seen: 0,
+            polls: 0,
+        };
+        let mut prior_meter = fresh(None);
+        let prior = with_weighted_shares(true, || {
+            call.execute(&graph, limits, RecordingMeter::<true>(&mut prior_meter))
+        })
+        .unwrap();
+        let mut meter = fresh(None);
+        let new = call
+            .execute(&graph, limits, RecordingMeter::<true>(&mut meter))
+            .unwrap();
+        assert_eq!(new.rows, prior.rows);
+        assert_eq!(new.certificate.call_digest, prior.certificate.call_digest);
+        assert_eq!(
+            new.certificate.result_digest,
+            prior.certificate.result_digest
+        );
+        assert_eq!(
+            new.certificate.estimated_work,
+            prior.certificate.estimated_work
+        );
+        assert_eq!(new.certificate.witness, prior.certificate.witness);
+        assert_eq!(meter.seen, prior_meter.seen);
+        assert!(meter.calls.iter().all(|&units| units <= FNX_METER_RUN));
+        assert!(new.certificate.kernel_workspace_bytes < prior.certificate.kernel_workspace_bytes);
+        for stop in 1..=meter.seen {
+            let mut prior = fresh(Some(stop));
+            let old = with_weighted_shares(true, || {
+                call.execute(&graph, limits, RecordingMeter::<true>(&mut prior))
+            });
+            let mut actual = fresh(Some(stop));
+            let new = call.execute(&graph, limits, RecordingMeter::<true>(&mut actual));
+            assert!(matches!(old, Err(FnxExecutionError::Cancelled("stop"))));
+            assert!(matches!(new, Err(FnxExecutionError::Cancelled("stop"))));
+            assert_eq!((prior.seen, actual.seen), (stop, stop));
+        }
+        for refused in [
+            FnxExecutionLimits {
+                max_result_rows: 2,
+                ..limits
+            },
+            FnxExecutionLimits {
+                max_iterations: 6,
+                ..limits
+            },
+            FnxExecutionLimits {
+                max_estimated_work: 0,
+                ..limits
+            },
+        ] {
+            let old = with_weighted_shares(true, || {
+                call.execute(&graph, refused, RecordingMeter::<true>(&mut fresh(None)))
+            });
+            let new = call.execute(&graph, refused, RecordingMeter::<true>(&mut fresh(None)));
+            assert_eq!(format!("{old:?}"), format!("{new:?}"));
+            assert!(matches!(new, Err(FnxExecutionError::LimitExceeded { .. })));
+        }
+    }
+
+    #[test]
+    fn non_unit_weights_keep_the_weighted_path_and_error_precedence() {
+        for weights in [[0.0, 1.0], [0.5, 2.0], [-1.0, 1.0], [f64::MAX, f64::MAX]] {
+            let graph = SnapshotGraphView::build(
+                SnapshotBinding {
+                    root: ObjectId([0x32; 32]),
+                    as_of: CommitSeq(7),
+                },
+                &[VId(1), VId(2), VId(3)],
+                &[
+                    ProjectionEdge {
+                        eid: EId(1),
+                        source: VId(1),
+                        target: VId(2),
+                        weight: weights[0],
+                    },
+                    ProjectionEdge {
+                        eid: EId(2),
+                        source: VId(1),
+                        target: VId(3),
+                        weight: weights[1],
+                    },
+                ],
+                ProjectionSpec {
+                    directedness: Directedness::Directed,
+                    parallel_edges: ParallelEdgePolicy::Sum,
+                    self_loops: SelfLoopPolicy::Keep,
+                },
+                ProjectionLimits {
+                    max_vertices: 3,
+                    max_input_edges: 2,
+                    max_adjacency_entries: 2,
+                    max_workspace_bytes: 1 << 20,
+                },
+            )
+            .unwrap();
+            assert!(!graph.has_unit_weights());
+            let options = PageRankOptions::fixed_iterations(0.85, 2, true).unwrap();
+            let run = |stop| {
+                let mut meter = Recording {
+                    calls: Vec::new(),
+                    stop,
+                    seen: 0,
+                    polls: 0,
+                };
+                let result = pagerank_with_threads(&graph, options, 2, 1, &mut meter);
+                (format!("{result:?}"), meter.calls, meter.seen, meter.polls)
+            };
+            let before = with_weighted_shares(true, || run(None));
+            assert_eq!(run(None), before);
+            for stop in 1..=before.2 {
+                assert_eq!(
+                    run(Some(stop)),
+                    with_weighted_shares(true, || run(Some(stop)))
+                );
+            }
+            if weights[0] < 0.0 {
+                assert!(before.0.contains("NegativeWeight"));
+            } else if weights[0] == f64::MAX {
+                assert!(before.0.contains("NonFiniteWeightSum"));
+            }
+        }
+    }
+
     #[test]
     fn cancellation_reaches_iteration_and_every_partial_result_is_discarded() {
         let graph = projection(2, Directedness::Directed);
@@ -3100,7 +3461,7 @@ mod tests {
                 .unwrap();
                 let n = graph.node_count();
                 let retained = n * (3 * std::mem::size_of::<f64>() + std::mem::size_of::<usize>());
-                let weighted_peak = if weighted {
+                let weighted_peak = if weighted && !graph.has_unit_weights() {
                     arcs * std::mem::size_of::<f64>() + n * std::mem::size_of::<usize>()
                 } else {
                     0

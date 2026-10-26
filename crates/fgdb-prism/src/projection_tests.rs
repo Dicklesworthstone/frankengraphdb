@@ -1603,3 +1603,100 @@ fn discarded_weights_and_self_loops_do_not_become_observable() {
     assert_eq!(graph.projected_weight(0, 1), Some(1.0));
     assert_eq!(graph.projected_weight(0, 0), None);
 }
+
+#[test]
+fn unit_weight_evidence_describes_reduced_incidence_in_both_builders() {
+    let vertices = vec![VId(0), VId(17), VId(u128::MAX)];
+    let cases = [
+        (
+            ParallelEdgePolicy::Sum,
+            vec![edge(1, 0, 17, 1.0), edge(2, 0, 17, 1.0)],
+            false,
+        ),
+        (
+            ParallelEdgePolicy::Sum,
+            vec![edge(1, 0, 17, 0.5), edge(2, 0, 17, 0.5)],
+            true,
+        ),
+        (
+            ParallelEdgePolicy::Minimum,
+            vec![edge(1, 0, 17, -2.0), edge(2, 0, 17, 1.0)],
+            false,
+        ),
+        (
+            ParallelEdgePolicy::Maximum,
+            vec![edge(1, 0, 17, -2.0), edge(2, 0, 17, 1.0)],
+            true,
+        ),
+        (
+            ParallelEdgePolicy::CollapseUnit,
+            vec![edge(1, 0, 17, -2.0), edge(2, 0, 17, 7.0)],
+            true,
+        ),
+        (
+            ParallelEdgePolicy::Sum,
+            vec![edge(1, 0, 17, 1.0), edge(2, 17, u128::MAX, 1.0)],
+            true,
+        ),
+        (ParallelEdgePolicy::Sum, vec![edge(1, 0, 17, -0.0)], false),
+        (ParallelEdgePolicy::Sum, Vec::new(), true),
+    ];
+    for directedness in [
+        Directedness::Directed,
+        Directedness::Reversed,
+        Directedness::Undirected,
+    ] {
+        for (parallel_edges, edges, expected) in &cases {
+            let spec = ProjectionSpec {
+                directedness,
+                parallel_edges: *parallel_edges,
+                self_loops: SelfLoopPolicy::Keep,
+            };
+            let borrowed =
+                SnapshotGraphView::build(binding(), &vertices, edges, spec, limits()).unwrap();
+            let owned = SnapshotGraphView::build_owned_with_checkpoint(
+                binding(),
+                vertices.clone(),
+                edges.clone(),
+                spec,
+                limits(),
+                || Ok::<(), Infallible>(()),
+            )
+            .unwrap();
+            for graph in [&borrowed, &owned] {
+                assert_eq!(
+                    graph.has_unit_weights(),
+                    *expected,
+                    "{directedness:?} {parallel_edges:?}"
+                );
+                assert_eq!(
+                    graph.has_unit_weights(),
+                    (0..vertices.len()).all(|source| graph
+                        .projected_row(source)
+                        .unwrap()
+                        .1
+                        .iter()
+                        .all(|&weight| weight == 1.0))
+                );
+                assert_eq!(graph.clone().has_unit_weights(), graph.has_unit_weights());
+            }
+            assert_eq!(borrowed.digest(), owned.digest());
+        }
+        let edges = [edge(1, 0, 17, 1.0), edge(2, 17, 17, 2.0)];
+        for self_loops in [SelfLoopPolicy::Keep, SelfLoopPolicy::Drop] {
+            let graph = SnapshotGraphView::build(
+                binding(),
+                &vertices,
+                &edges,
+                ProjectionSpec {
+                    directedness,
+                    self_loops,
+                    ..spec()
+                },
+                limits(),
+            )
+            .unwrap();
+            assert_eq!(graph.has_unit_weights(), self_loops == SelfLoopPolicy::Drop);
+        }
+    }
+}
