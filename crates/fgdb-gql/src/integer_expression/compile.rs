@@ -113,6 +113,7 @@ fn prepare_root(
             | Op::Lower
             | Op::Trim
             | Op::CharLength
+            | Op::Size
             | Op::ToText
             | Op::ToInteger
             | Op::ToBoolean
@@ -180,6 +181,7 @@ fn prepare_root(
                 | Op::Lower
                 | Op::Trim
                 | Op::CharLength
+                | Op::Size
                 | Op::Concat
                 | Op::StartsWith
                 | Op::EndsWith
@@ -485,6 +487,7 @@ fn prepare_root(
                     Op::Lower => Some(Instruction::Lower),
                     Op::Trim => Some(Instruction::Trim),
                     Op::CharLength => Some(Instruction::CharLength),
+                    Op::Size => Some(Instruction::Size),
                     Op::ToText => Some(Instruction::ToText),
                     Op::ToInteger => Some(Instruction::ToInteger),
                     Op::ToBoolean => Some(Instruction::ToBoolean),
@@ -576,6 +579,7 @@ fn prepare_root(
                     | Op::Lower
                     | Op::Trim
                     | Op::CharLength
+                    | Op::Size
                     | Op::ToText
                     | Op::ToInteger
                     | Op::ToBoolean

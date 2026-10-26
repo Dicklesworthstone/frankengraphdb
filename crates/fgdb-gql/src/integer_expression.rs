@@ -159,6 +159,9 @@ pub enum GraphIntegerOp {
     Lower,
     Trim,
     CharLength,
+    /// openCypher size: Unicode scalar count for text, top-level member
+    /// count for a List, and NULL for NULL. CHAR_LENGTH remains text-only.
+    Size,
     /// openCypher toString: NULL, integer, Boolean or text to text.
     ToText,
     /// openCypher toInteger: NULL, integer, Boolean or integer text to an
@@ -300,6 +303,7 @@ impl GraphIntegerOp {
             Self::Lower => bytes.push(18),
             Self::Trim => bytes.push(19),
             Self::CharLength => bytes.push(20),
+            Self::Size => bytes.push(46),
             Self::ToText => bytes.push(30),
             Self::ToInteger => bytes.push(31),
             Self::ToBoolean => bytes.push(37),
@@ -361,6 +365,7 @@ impl core::fmt::Debug for GraphIntegerOp {
             Self::Lower => f.write_str("Lower"),
             Self::Trim => f.write_str("Trim"),
             Self::CharLength => f.write_str("CharLength"),
+            Self::Size => f.write_str("Size"),
             Self::ToText => f.write_str("ToText"),
             Self::ToInteger => f.write_str("ToInteger"),
             Self::ToBoolean => f.write_str("ToBoolean"),
@@ -567,10 +572,9 @@ pub(crate) enum ExpressionCell<'a> {
     Integer(i128),
     Average(crate::GraphExactAverage),
     /// A List or Map only evaluate_value_with_control loads (fgdb-bqri3).
-    /// `+` joins a List (list_plus), a comparison compares either as the
-    /// value language does (compare_cells), and a text predicate over either
-    /// is NULL; every other instruction refuses it, NonScalar or NonText, as
-    /// the scalar loader refuses it.
+    /// `+` joins a List (list_plus), SIZE counts its members, a comparison
+    /// compares either as the value language does (compare_cells), and a
+    /// text predicate over either is NULL. Other instructions refuse it.
     Composite(Cow<'a, GraphValue>),
 }
 
@@ -687,6 +691,7 @@ enum Instruction {
     Lower,
     Trim,
     CharLength,
+    Size,
     ToText,
     ToInteger,
     ToBoolean,
@@ -861,11 +866,11 @@ impl GraphIntegerExpression {
     }
 
     /// As evaluate_scalar_with_control, except that a List input may meet
-    /// `+` (fgdb-bqri3): openCypher concatenates two lists and appends or
-    /// prepends any other value, so `n.tags + 'x'` and `n.ids + 5` answer a
-    /// List when the stored property holds one. A text predicate over a List
-    /// or Map input is NULL, as over any non-text value. Anywhere else a List
-    /// or Map refuses as the scalar loader does.
+    /// `+` or SIZE: openCypher concatenates two lists and appends or prepends
+    /// any other value, while SIZE counts top-level members. Comparisons
+    /// preserve the value language's three-valued collection semantics. A
+    /// text predicate over a List or Map input is NULL, as over any non-text
+    /// value. Unsupported operations still refuse the collection.
     pub fn evaluate_value_with_control<E>(
         &self,
         values: &[GraphValue],
@@ -1194,12 +1199,28 @@ impl GraphIntegerExpression {
                 Instruction::Upper
                 | Instruction::Lower
                 | Instruction::Trim
-                | Instruction::CharLength => {
+                | Instruction::CharLength
+                | Instruction::Size => {
                     let value = stack.last_mut().expect("validated text operand");
+                    if matches!(op, Instruction::Size)
+                        && let ExpressionCell::Composite(collection) = value
+                    {
+                        let members = collection
+                            .as_list()
+                            .ok_or_else(|| failure(GraphIntegerErrorKind::NonScalar))?
+                            .len();
+                        *value = CanonicalScalar::Int(
+                            i64::try_from(members)
+                                .map_err(|_| failure(GraphIntegerErrorKind::Overflow))?,
+                        )
+                        .into();
+                        at += 1;
+                        continue;
+                    }
                     let result = if let Some(text) = value.text().map_err(failure)? {
                         charge_payload(text.len(), false, control)?;
                         match op {
-                            Instruction::CharLength => CanonicalScalar::Int(
+                            Instruction::CharLength | Instruction::Size => CanonicalScalar::Int(
                                 i64::try_from(text.chars().count())
                                     .map_err(|_| failure(GraphIntegerErrorKind::Overflow))?,
                             ),
@@ -1553,6 +1574,7 @@ impl GraphIntegerExpression {
                 Instruction::Lower => bytes.push(18),
                 Instruction::Trim => bytes.push(19),
                 Instruction::CharLength => bytes.push(20),
+                Instruction::Size => bytes.push(46),
                 Instruction::ToText => bytes.push(27),
                 Instruction::ToInteger => bytes.push(28),
                 Instruction::ToBoolean => bytes.push(37),

@@ -689,19 +689,29 @@ fn map_rows_drive_create_properties() {
         wanted_widened.push(vec![list([text("z")])]);
         wanted_widened.sort();
         assert_eq!(widened, wanted_widened);
-        // fgdb-bqri3: a pattern WHERE whose scalar program meets a stored List
-        // raises. It never reads the row as UNKNOWN, which silently dropped
-        // every listed vertex (count 0 for size(n.name) > 1). In RETURN and
-        // after WITH the value language reads the list.
-        for statement in [
-            "MATCH (n:Listed) WHERE size(n.name) > 1 RETURN count(*) AS c",
-            "MATCH (n:Listed) WHERE size(n.name) > 1 RETURN n.name AS name",
-        ] {
-            assert!(
-                db.query(&cx, statement, &empty, symbols, policy()).is_err(),
-                "{statement}"
-            );
-        }
+        // fgdb-fc7cx: the pushed-down pattern predicate counts stored List
+        // members, just as RETURN and the WITH row filter do. The expected
+        // rows are the two values written above, not another engine result.
+        let QueryResult::Rows { rows: count, .. } = db
+            .query(
+                &cx,
+                "MATCH (n:Listed) WHERE size(n.name) > 1 RETURN count(*) AS c",
+                &empty,
+                symbols,
+                policy(),
+            )
+            .unwrap()
+        else {
+            panic!("COUNT must produce a row result");
+        };
+        assert_eq!(count, vec![vec![QueryValue::Count(1)]]);
+        assert_eq!(
+            query(
+                &db,
+                "MATCH (n:Listed) WHERE size(n.name) > 1 RETURN n.name AS name"
+            ),
+            vec![vec![list([text("a"), text("b")])]]
+        );
         let boolean = |value| GraphValue::Scalar(CanonicalScalar::Bool(value));
         let mut longer = query(&db, "MATCH (n:Listed) RETURN size(n.name) > 1 AS longer");
         longer.sort();

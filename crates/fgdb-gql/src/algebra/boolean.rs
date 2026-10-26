@@ -789,21 +789,26 @@ impl BoundBooleanExpression {
                     // overflow) raises, as it does in every other family. A
                     // value that does not fit its operator (a mixed-type
                     // property), NULL, or a non-Boolean result is UNKNOWN.
-                    match expression.evaluate_scalar_with_control(&values, control) {
-                        Ok(CanonicalScalar::Bool(value)) => Truth::from(Some(value)),
+                    match expression.evaluate_value_with_control(&values, control) {
+                        Ok(GraphValue::Scalar(CanonicalScalar::Bool(value))) => {
+                            Truth::from(Some(value))
+                        }
                         Err(GraphIntegerEvaluationError::Value(error))
                             if error.kind.is_arithmetic_exception() =>
                         {
                             return Err(E::from(error));
                         }
-                        // The scalar program cannot read a stored List or
-                        // Map operand (size(n.list), n.list[0] here): it
-                        // raises, as the same expression in RETURN does. As
-                        // UNKNOWN it silently dropped every row whose
-                        // property holds a collection (fgdb-bqri3).
+                        // Unsupported collection operations still raise, as
+                        // the same expression in RETURN does. SIZE accepts a
+                        // List, but a Map has no SIZE and CHAR_LENGTH remains
+                        // text-only. UNKNOWN must never hide those refusals.
                         Err(GraphIntegerEvaluationError::Value(error))
                             if collection
-                                && error.kind == crate::GraphIntegerErrorKind::NonScalar =>
+                                && matches!(
+                                    error.kind,
+                                    crate::GraphIntegerErrorKind::NonScalar
+                                        | crate::GraphIntegerErrorKind::NonText
+                                ) =>
                         {
                             return Err(E::from(error));
                         }
@@ -1080,6 +1085,59 @@ mod tests {
         assert_eq!(
             after_read,
             [GlaExecutionEvent::Work, GlaExecutionEvent::ScratchEntry]
+        );
+    }
+
+    #[test]
+    fn collection_size_admits_payload_before_allocation_and_obeys_interruption() {
+        let value = CanonicalPropertyValue::List(
+            fgdb_types::CanonicalList::try_new(
+                (0..256)
+                    .map(|index| CanonicalScalar::Int(index).into())
+                    .collect(),
+            )
+            .unwrap(),
+        );
+        let scalar = crate::GraphIntegerExpression::prepare_scalar(&[
+            crate::GraphIntegerOp::ScalarColumn(0),
+            crate::GraphIntegerOp::Size,
+            crate::GraphIntegerOp::Literal(Some(256)),
+            crate::GraphIntegerOp::Compare(IntegerComparison::Equal),
+        ])
+        .unwrap();
+        let columns = [Arg::Property {
+            variable: "a",
+            key: PropertyKeyId(1),
+        }];
+        let expression = bound(&[Op::Expression {
+            expression: &scalar,
+            columns: &columns,
+        }]);
+        for refused in [GlaExecutionEvent::Work, GlaExecutionEvent::ScratchEntry] {
+            let read = std::cell::Cell::new(false);
+            let result = expression.evaluate(
+                &[Some(VId(1))],
+                &mut |_, _| {
+                    read.set(true);
+                    Ok(Some(&value))
+                },
+                &mut |event| {
+                    if read.get() && event == refused {
+                        Err(Failure::Source("collection admission refused"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(result, Err(Failure::Source("collection admission refused")));
+        }
+        assert_eq!(
+            expression.evaluate(
+                &[Some(VId(1))],
+                &mut |_, _| Ok(Some(&value)),
+                &mut |_| Ok::<_, Failure<()>>(()),
+            ),
+            Ok(true)
         );
     }
 

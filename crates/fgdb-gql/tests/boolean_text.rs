@@ -61,6 +61,87 @@ fn absent(value: Option<&CanonicalScalar>) -> bool {
     value.is_none_or(|v| matches!(v, CanonicalScalar::Null))
 }
 
+/// The direct pattern facade proves SIZE stays in the pattern's governed
+/// predicate rather than a post-match filter.
+/// List members (including nested and NULL members) count once; strings
+/// count Unicode scalars, and absent/NULL properties remain UNKNOWN.
+#[test]
+fn size_of_stored_lists_is_a_native_pattern_predicate() {
+    use fgdb_types::CanonicalList;
+    let integer = |value| CanonicalPropertyValue::from(CanonicalScalar::Int(value));
+    let list = |values| CanonicalPropertyValue::List(CanonicalList::try_new(values).unwrap());
+    let values = [
+        Some(list(vec![integer(8), integer(9)])),
+        Some(list(vec![])),
+        Some(list(vec![
+            list(vec![integer(1), integer(2), integer(3)]),
+            CanonicalScalar::Null.into(),
+        ])),
+        Some(CanonicalScalar::ucs_basic_text("é🦀").unwrap().into()),
+        Some(CanonicalScalar::Null.into()),
+        None,
+    ];
+    for (predicate, expected) in [
+        ("size(a.n) = 2", vec![VId(0), VId(2), VId(3)]),
+        ("size(a.n) = 0", vec![VId(1)]),
+        ("NOT size(a.n) = 2", vec![VId(1)]),
+        ("size(a.n) IS NULL", vec![VId(4), VId(5)]),
+        ("size(a.n) + 1 = 3", vec![VId(0), VId(2), VId(3)]),
+    ] {
+        let pattern = query(&format!("MATCH (a) WHERE {predicate} RETURN a"));
+        let result = pattern
+            .plan()
+            .execute_governed_with_properties(
+                values.len() as u64,
+                (0..values.len()).map(|index| VId(index as u128)),
+                [],
+                |_, _| Ok::<_, ()>(true),
+                |vertex, _| Ok(values[vertex.0 as usize].as_ref()),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        assert_eq!(
+            result
+                .value
+                .iter()
+                .map(|row| row.get(0).unwrap().as_vertex().unwrap())
+                .collect::<Vec<_>>(),
+            expected,
+            "{predicate}"
+        );
+    }
+    assert_ne!(
+        query("MATCH (a) WHERE size(a.n) = 2 RETURN a"),
+        query("MATCH (a) WHERE char_length(a.n) = 2 RETURN a"),
+        "SIZE's list semantics must have their own plan identity"
+    );
+    for (statement, value) in [
+        (
+            "MATCH (a) WHERE char_length(a.n) = 2 RETURN a",
+            list(vec![integer(8), integer(9)]),
+        ),
+        (
+            "MATCH (a) WHERE size(a.n) = 0 RETURN a",
+            CanonicalPropertyValue::Map(fgdb_types::CanonicalMap::try_new(vec![]).unwrap()),
+        ),
+    ] {
+        let result = query(statement).plan().execute_governed_with_properties(
+            1,
+            [VId(0)],
+            [],
+            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok(Some(&value)),
+            wide(),
+            || Ok::<_, ()>(()),
+        );
+        assert!(
+            result.is_err(),
+            "unsupported collection operation: {statement}"
+        );
+    }
+}
+
 #[test]
 fn precedence_parentheses_and_negation_match_independent_multigraph_oracles() {
     let choices = [

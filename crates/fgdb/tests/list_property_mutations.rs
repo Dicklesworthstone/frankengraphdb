@@ -376,6 +376,88 @@ fn list_intents_keep_capability_checks_including_forbidden_equal_to_current_writ
     });
 }
 
+/// SIZE consumes the same masked property source as other pattern
+/// predicates. A hidden List is NULL before its members can affect either
+/// the answer or the signed/native work counters (FG-INV-20).
+#[test]
+fn authorized_size_predicates_mask_hidden_list_contents_before_observation() {
+    run(async |commit, cx, txcx| {
+        let authority =
+            Authority::new(AuthKey::from_seed(0x7a13), NS, "graph", SchemaEpoch(1), 1).unwrap();
+        let query = PreparedGraphMutationText::prepare(
+            "MATCH (n:Item) WHERE size(n.p) = 3 SET n.q = 9",
+            R,
+            Catalog,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let outcome = async |sees_p: bool, members: usize| {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            let mut batch = fixture();
+            for id in [1, 2] {
+                batch.set_vertex_property_value(
+                    VId(BASE + id),
+                    P,
+                    Some(
+                        list((0..members).map(|index| int(index as i64)).collect())
+                            .to_written_property()
+                            .unwrap(),
+                    ),
+                );
+            }
+            db.write(commit, batch).await.unwrap();
+            let grant = Grant {
+                branch: "main".into(),
+                labels: Scope::only([L]),
+                relations: Scope::only([R]),
+                properties: if sees_p {
+                    Scope::only([P, Q])
+                } else {
+                    Scope::only([Q])
+                },
+                rights: Rights::ReadWrite,
+                limits: QueryLimits {
+                    max_nodes: 100_000,
+                    max_work: 2_000_000,
+                    max_rows: 100,
+                },
+                expires_at_ms: 10_000,
+            };
+            let token = authority.issue_at(&grant, 100).unwrap();
+            let before = db.frontier().unwrap();
+            let (stats, _) = db
+                .execute_graph_mutation_authorized(
+                    txcx,
+                    cx,
+                    commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &query,
+                    GraphMutationPolicy::new(query_policy(100), 100),
+                    || 100,
+                )
+                .await
+                .unwrap();
+            if !sees_p {
+                assert_eq!(db.frontier().unwrap(), before);
+            }
+            (stats, prop(&db, 1, Q), prop(&db, 2, Q))
+        };
+        let visible = outcome(true, 3).await;
+        assert_eq!(visible.0.effects, 2);
+        assert_eq!(visible.1, Some(CanonicalScalar::Int(9).into()));
+        assert_eq!(visible.2, Some(CanonicalScalar::Int(9).into()));
+        let hidden = outcome(false, 3).await;
+        assert_eq!(hidden.0.effects, 0);
+        assert_eq!(hidden.1, Some(CanonicalScalar::Int(1).into()));
+        assert_eq!(hidden.2, Some(CanonicalScalar::Int(2).into()));
+        assert_eq!(outcome(false, 4096).await, hidden);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
 /// An authorized write reads `x.key` of an element it computes (fgdb-694ga)
 /// under the capability's property scope, exactly as its pattern reads a
 /// MATCH binding's property: the unwound form writes what `SET n.q = n.p`

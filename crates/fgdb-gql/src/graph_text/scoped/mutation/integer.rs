@@ -2107,7 +2107,9 @@ impl<'a> Parser<'a> {
                 Some(GraphIntegerOp::ToInteger)
             } else if function.eq_ignore_ascii_case("TOBOOLEAN") {
                 Some(GraphIntegerOp::ToBoolean)
-            } else if spelled(["CHAR_LENGTH", "SIZE"]) || function.eq_ignore_ascii_case("LENGTH") {
+            } else if function.eq_ignore_ascii_case("SIZE") {
+                Some(GraphIntegerOp::Size)
+            } else if spelled(["CHAR_LENGTH", "LENGTH"]) {
                 Some(GraphIntegerOp::CharLength)
             } else {
                 None
