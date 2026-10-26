@@ -2191,6 +2191,7 @@ mod async_elements {
         live: Arc<AtomicUsize>,
         refuse: Option<ElementId>,
         unavailable: bool,
+        stored: Option<CanonicalPropertyValue>,
     }
     impl AsyncSpillElementSource for Reader {
         type Error = &'static str;
@@ -2219,7 +2220,10 @@ mod async_elements {
             let property = value.map(|value| {
                 self.live.fetch_add(1, AtomicOrdering::SeqCst);
                 Property {
-                    value: CanonicalScalar::Int(value).into(),
+                    value: self
+                        .stored
+                        .clone()
+                        .unwrap_or_else(|| CanonicalScalar::Int(value).into()),
                     live: Arc::clone(&self.live),
                 }
             });
@@ -2241,6 +2245,41 @@ mod async_elements {
             } else {
                 Ok(property)
             })
+        }
+    }
+
+    #[derive(Default)]
+    struct ControlledReader {
+        source: Reader,
+    }
+    impl AsyncSpillElementSource for ControlledReader {
+        type Error = &'static str;
+        type Property = Property;
+
+        async fn element_property(
+            &mut self,
+            _: ElementId,
+            _: PropertyKeyId,
+        ) -> Option<Result<Option<Property>, &'static str>> {
+            panic!("the evaluator must pass its original control to the source");
+        }
+
+        async fn element_property_with_control(
+            &mut self,
+            element: ElementId,
+            key: PropertyKeyId,
+            control: &mut (impl FnMut(GlaExecutionEvent) -> Result<(), Self::Error> + Send),
+        ) -> Option<Result<Option<Property>, Self::Error>> {
+            for event in [
+                GlaExecutionEvent::Work,
+                GlaExecutionEvent::ScratchEntry,
+                GlaExecutionEvent::Work,
+            ] {
+                if let Err(error) = control(event) {
+                    return Some(Err(error));
+                }
+            }
+            self.source.element_property(element, key).await
         }
     }
 
@@ -2333,18 +2372,193 @@ mod async_elements {
         stop: Option<usize>,
     ) -> Result<Vec<GraphValueRow>, SpillSetRowError<&'static str>> {
         let mut control = control(Arc::clone(&reader.trace), stop);
+        run_source(stage, input, reader, frames, &mut control)
+    }
+
+    fn run_source<S>(
+        stage: &SpillSetStage,
+        input: GraphValueRow,
+        reader: &mut S,
+        frames: &Frames,
+        control: &mut (impl FnMut(GlaExecutionEvent) -> Result<(), &'static str> + Send),
+    ) -> Result<Vec<GraphValueRow>, SpillSetRowError<&'static str>>
+    where
+        S: AsyncSpillElementSource<Error = &'static str>,
+    {
         let reserve = |bytes| frames.reserve(bytes);
         finish(async {
             let mut cursor = stage
-                .start_with_async_elements(input, 17, &mut control, reader, &reserve)
+                .start_with_async_elements(input, 17, control, reader, &reserve)
                 .await?;
             let mut rows = Vec::new();
-            while let Some((row, next)) = cursor.next_with_control(&mut control)? {
+            while let Some((row, next)) = cursor.next_with_control(control)? {
                 rows.push(row);
                 cursor = next;
             }
             Ok(rows)
         })
+    }
+
+    #[test]
+    fn controlled_sources_use_the_same_native_meter_and_preserve_short_circuiting() {
+        let expression = stage("[x IN items | x.p]");
+        let frames = Frames::new(usize::MAX, None);
+        let mut baseline = Reader::default();
+        let expected_rows = run(&expression, input(), &mut baseline, &frames, None).unwrap();
+        let baseline_events = baseline
+            .trace
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|effect| matches!(effect, Effect::Event(_)))
+            .count();
+        let mut reader = ControlledReader::default();
+        let mut meter = control(Arc::clone(&reader.source.trace), None);
+        let rows = run_source(&expression, input(), &mut reader, &frames, &mut meter).unwrap();
+        assert_eq!(rows, expected_rows);
+        let expected = reader.source.trace.lock().unwrap().clone();
+        assert_eq!(
+            expected
+                .iter()
+                .filter(|effect| matches!(effect, Effect::Event(_)))
+                .count(),
+            baseline_events + 3 * identities().len()
+        );
+        assert_eq!(reads(&expected), identities().map(|element| (element, P)));
+        frames.assert_released(&reader.source);
+        let mut ordinal = 0;
+        for (at, effect) in expected.iter().enumerate() {
+            if !matches!(effect, Effect::Event(_)) {
+                continue;
+            }
+            ordinal += 1;
+            let mut reader = ControlledReader::default();
+            let mut meter = control(Arc::clone(&reader.source.trace), Some(ordinal));
+            assert_eq!(
+                run_source(&expression, input(), &mut reader, &frames, &mut meter),
+                Err(SpillSetRowError::Control("native event refused"))
+            );
+            assert_eq!(*reader.source.trace.lock().unwrap(), expected[..=at]);
+            frames.assert_released(&reader.source);
+        }
+        for (expression, expected, reached) in [
+            ("CASE WHEN true THEN 7 ELSE items[0].p END", 7, false),
+            ("coalesce(7,items[0].p)", 7, false),
+            ("coalesce(null,items[0].p)", 2, true),
+        ] {
+            let mut reader = ControlledReader::default();
+            let mut meter = control(Arc::clone(&reader.source.trace), None);
+            assert_eq!(
+                run_source(
+                    &stage(expression),
+                    input(),
+                    &mut reader,
+                    &frames,
+                    &mut meter
+                )
+                .unwrap(),
+                vec![row(vec![scalar(expected)])],
+                "{expression}"
+            );
+            assert_eq!(
+                reads(&reader.source.trace.lock().unwrap()),
+                if reached {
+                    vec![(identities()[0], P)]
+                } else {
+                    Vec::new()
+                },
+                "{expression}"
+            );
+            frames.assert_released(&reader.source);
+        }
+    }
+
+    #[test]
+    fn stored_collections_admit_once_while_the_source_guard_is_live() {
+        use fgdb_types::{CanonicalList, CanonicalMap, CanonicalMapEntry, CanonicalText};
+
+        let stored = CanonicalPropertyValue::Map(
+            CanonicalMap::try_new(vec![CanonicalMapEntry::new(
+                CanonicalText::new_ucs_basic(&"key".repeat(65)).unwrap(),
+                CanonicalPropertyValue::List(
+                    CanonicalList::try_new(vec![
+                        CanonicalScalar::bytes(vec![0xa5; 257]).unwrap().into(),
+                        CanonicalScalar::ucs_basic_text(&"value".repeat(31))
+                            .unwrap()
+                            .into(),
+                    ])
+                    .unwrap(),
+                ),
+            )])
+            .unwrap(),
+        );
+        let mut admission = Vec::new();
+        let expected = GraphValue::admit_property_value::<fgdb_gql::GraphIntegerError>(
+            &stored,
+            &mut |event| {
+                admission.push(Effect::Event(event));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(admission.len() > 10);
+        let expression = stage("items[0].p");
+        for stop in (1..=admission.len()).map(Some).chain([None]) {
+            let mut reader = Reader {
+                stored: Some(stored.clone()),
+                ..Reader::default()
+            };
+            let trace = Arc::clone(&reader.trace);
+            let live = Arc::clone(&reader.live);
+            let frames = Frames::new(usize::MAX, None);
+            let reserve = |bytes| frames.reserve(bytes);
+            let mut after_read = 0;
+            let mut meter = |event| {
+                let mut trace = trace.lock().unwrap();
+                let returned = trace
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::Read(..)));
+                trace.push(Effect::Event(event));
+                if returned {
+                    assert_eq!(live.load(AtomicOrdering::SeqCst), 1);
+                    after_read += 1;
+                    if stop == Some(after_read) {
+                        return Err("collection admission refused");
+                    }
+                }
+                Ok(())
+            };
+            fn require_send<F: Future + Send>(future: F) -> F {
+                future
+            }
+            let result = finish(require_send(expression.start_with_async_elements(
+                input(),
+                17,
+                &mut meter,
+                &mut reader,
+                &reserve,
+            )));
+            if stop.is_some() {
+                assert!(matches!(
+                    result,
+                    Err(SpillSetRowError::Control("collection admission refused"))
+                ));
+            } else {
+                let cursor = result.unwrap();
+                let (actual, _) = cursor.next_with_control(&mut meter).unwrap().unwrap();
+                assert_eq!(actual, row(vec![expected.clone()]));
+            }
+            let trace = reader.trace.lock().unwrap();
+            let start = trace
+                .iter()
+                .position(|effect| matches!(effect, Effect::Read(..)))
+                .unwrap();
+            assert_eq!(
+                trace[start + 1..],
+                admission[..stop.unwrap_or(admission.len())]
+            );
+            frames.assert_released(&reader);
+        }
     }
 
     fn stage(expression: &str) -> SpillSetStage {

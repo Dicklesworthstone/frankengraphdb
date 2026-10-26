@@ -663,7 +663,7 @@ fn staged_temporal_ordering_rebinds_the_cut_without_reacquiring_the_writer() {
         let mut change = WriteBatch::new(RelationId(1));
         change.set_vertex_property(VId(3), PropertyKeyId(1), Some(CanonicalScalar::Int(30)));
         db.write(&commit, change).await.unwrap();
-        db.compact(&contexts.maint()).await.unwrap();
+        db.compact(&commit).await.unwrap();
         let mut cursor = execution.await.unwrap();
         assert_eq!(cursor.snapshot_seq(), CommitSeq(1));
         assert_eq!(values(&mut cursor).await, vec![vec![scalar(4), null()]; 2]);

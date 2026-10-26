@@ -1869,6 +1869,15 @@ trait SynchronousElementSource {
         element: ElementId,
         key: PropertyKeyId,
     ) -> Option<Result<Option<Self::Property>, Self::Error>>;
+
+    fn element_property_with_control(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+        _control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), Self::Error>,
+    ) -> Option<Result<Option<Self::Property>, Self::Error>> {
+        self.element_property(element, key)
+    }
 }
 
 impl<E, F: ?Sized> SynchronousElementSource for F
@@ -2481,7 +2490,10 @@ where
                     GraphElementKey::Missing => Some(Ok(None)),
                     GraphElementKey::Property(key) => {
                         control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
-                        projection_await!($mode, nodes.read.element_property(element, *key))
+                        projection_await!(
+                            $mode,
+                            nodes.read.element_property_with_control(element, *key, control)
+                        )
                     }
                 };
                 match value
@@ -2493,15 +2505,17 @@ where
                         fgdb_types::CanonicalPropertyValue::Scalar(scalar) => {
                             copy_property(scalar, control).map_err(ProjectionFailure::Control)?
                         }
-                        // A stored List or Map reads as the value it is
-                        // (fgdb-k3nub); copy_value charges every node.
-                        stored => copy_value(
-                            &GraphValue::from_property_value(stored).ok_or_else(|| {
+                        // Admit the stored collection in place, under the
+                        // same contract as GraphValue::admit_property_value.
+                        // Converting first would clone every payload before
+                        // the host can reserve it, then copy it a second time.
+                        stored => {
+                            GraphValue::charge_property_value(stored, control)
+                                .map_err(ProjectionFailure::Control)?;
+                            GraphValue::from_property_value(stored).ok_or_else(|| {
                                 failure(GraphIntegerErrorKind::StoredValueBounds)
-                            })?,
-                            control,
-                        )
-                        .map_err(ProjectionFailure::Control)?,
+                            })?
+                        }
                     },
                     None => {
                         control(GlaExecutionEvent::ScratchEntry)

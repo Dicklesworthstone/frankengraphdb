@@ -3,7 +3,10 @@
 
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, MemVfs, NativeSpoolError, PreparedNativeRead, WriteBatch};
+use fgdb::{
+    Database, DatabaseKeys, EmbeddedReadView, MemVfs, NativeSpoolError, PreparedNativeRead,
+    WriteBatch,
+};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueOrder, GraphValueRow};
 use fgdb_gql::{
@@ -13,7 +16,7 @@ use fgdb_gql::{
 use fgdb_strata::tiered::memory::{MemoryPool, SpillFile, SpillLimits};
 use fgdb_types::{
     CanonicalDate, CanonicalDuration, CanonicalLocalDateTime, CanonicalLocalTime, CanonicalScalar,
-    CanonicalTime, DatabaseSecurityNamespaceId, PurposeContexts, VId,
+    CanonicalTime, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
 };
 use std::io::{self, Cursor, Seek, SeekFrom};
 use std::pin::Pin;
@@ -98,6 +101,7 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
         _ => None,
     }
 }
@@ -152,6 +156,63 @@ async fn database(
     }
     db.write(cx, batch).await.unwrap();
     (db, rows)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ElementSpoolResult {
+    rows: Vec<GraphValueRow>,
+    stats: fgdb_gql::GqlExecutionStats,
+    evaluator: fgdb_gql::GlaExecutionStats,
+    snapshot: fgdb_types::CommitSeq,
+}
+
+async fn element_spool(
+    view: &EmbeddedReadView,
+    cx: &fgdb_types::QueryCx,
+    prepared: &PreparedNativeRead,
+    params: &GqlParameters,
+    allowance: GqlQueryPolicy,
+    run_rows: usize,
+) -> Result<ElementSpoolResult, NativeSpoolError> {
+    let pool = MemoryPool::new(256_000, 0).unwrap();
+    let mut source = scratch(cx, &pool).await;
+    let mut destination = scratch(cx, &pool).await;
+    let result = prepared
+        .spool_ordered_in_view(
+            view,
+            cx,
+            params,
+            allowance,
+            &mut source,
+            &mut destination,
+            run_rows,
+            64,
+            127,
+            4096,
+            100,
+            10_000_000,
+        )
+        .await;
+    let (spool, _) = match result {
+        Ok(spool) => spool,
+        Err(error) => {
+            assert_eq!(pool.used(), 0);
+            return Err(error);
+        }
+    };
+    let mut rows = Vec::new();
+    let mut reader = spool.reader(&mut destination);
+    while let Some(bytes) = reader.next_row(cx).await.unwrap() {
+        rows.push(GraphValueRow::decode_stored(bytes.as_ref()).unwrap());
+    }
+    drop(reader);
+    assert_eq!(pool.used(), 0);
+    Ok(ElementSpoolResult {
+        rows,
+        stats: spool.row_stats(),
+        evaluator: spool.evaluator_stats(),
+        snapshot: spool.snapshot_seq(),
+    })
 }
 
 #[test]
@@ -391,7 +452,7 @@ fn computed_temporal_sets_bind_and_pin_before_polling() {
         .await;
         let old = db.read_session().unwrap();
         let first = old.frontier();
-        let text = "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $at RETURN n.p + $bump AS value ORDER BY value DESC LIMIT $cap";
+        let text = "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $at WITH n AS item RETURN [item][0].p + $bump AS value ORDER BY value DESC LIMIT $cap";
         let params = GqlParameters::new()
             .with_uint64("at", first.0)
             .unwrap()
@@ -566,13 +627,12 @@ fn computed_set_errors_follow_complete_source_order_even_for_empty_pages() {
             ));
             assert_eq!(pool.used(), 0);
         }
-        // An element hidden inside a list needs a deferred graph lookup,
-        // unlike a scalar captured by the pattern. Do not silently read NULL
-        // or skip its late typed refusal under LIMIT zero. The first identity
-        // has p=2 and takes the successful CASE arm; the second needs a lookup.
+        // The first identity has p=2 and takes the successful CASE arm. The
+        // second performs a deferred element lookup whose actual p=1 must
+        // still raise the late division error under LIMIT zero.
         for page in [0, 1] {
             let text = format!(
-                "MATCH (n:L) WITH n AS item,n.p AS value RETURN CASE WHEN value = 2 THEN 7 ELSE [item][0].p END AS output ORDER BY output LIMIT {page}"
+                "MATCH (n:L) WITH n AS item,n.p AS value RETURN CASE WHEN value = 2 THEN 7 ELSE 12 / ([item][0].p - 1) END AS output ORDER BY output LIMIT {page}"
             );
             let prepared = PreparedNativeRead::prepare(&text, &params, symbols).unwrap();
             let mut source = scratch(&cx, &pool).await;
@@ -599,7 +659,7 @@ fn computed_set_errors_follow_complete_source_order_even_for_empty_pages() {
                     row: 1,
                     error,
                     ..
-                })) if error.kind == GraphIntegerErrorKind::IncompatibleOperands
+                })) if error.kind == GraphIntegerErrorKind::DivisionByZero
             ));
             assert_eq!(pool.used(), 0);
         }
@@ -782,6 +842,308 @@ fn computed_order_refuses_unowned_sources_and_future_cuts_before_scratch() {
             );
             assert_eq!(pool.used(), 0);
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn carried_properties_preserve_scalar_and_collection_values_across_spill_runs() {
+    let ((), report) = run_async_under_lab(0x7e4d_0008, |root| async move {
+        use fgdb_types::{
+            CanonicalList, CanonicalMap, CanonicalMapEntry, CanonicalPropertyValue, CanonicalText,
+        };
+
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let samples: Vec<_> = families().into_iter().flatten().collect();
+        let (mut db, _) = database(&contexts.commit(), &samples).await;
+        let collection = CanonicalMap::try_new(vec![CanonicalMapEntry::new(
+            CanonicalText::new_ucs_basic("nested").unwrap(),
+            CanonicalPropertyValue::List(
+                CanonicalList::try_new(vec![
+                    CanonicalScalar::bytes(vec![0xa7; 257]).unwrap().into(),
+                    CanonicalScalar::Int(17).into(),
+                ])
+                .unwrap(),
+            ),
+        )])
+        .unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        batch.create_vertex_values(
+            VId(u128::MAX),
+            vec![LabelId(1)],
+            vec![(PropertyKeyId(1), CanonicalPropertyValue::Map(collection))],
+        );
+        db.write(&contexts.commit(), batch).await.unwrap();
+        let view = db.read_session().unwrap();
+        let params = GqlParameters::new();
+        let text = "MATCH (n:L) WITH n AS item RETURN [item][0].p AS value ORDER BY value DESC";
+        let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+        let PreparedNativeRead::Set(template) = &prepared else {
+            panic!("carried property must use the unary relation plan");
+        };
+        let bound = template.bind_parameters(&params).unwrap();
+        let expected = view
+            .execute_graph_set_governed_at(&cx, &bound, view.frontier(), policy())
+            .unwrap()
+            .value;
+        let mut measured = None;
+        for run_rows in [1, 4] {
+            let actual = element_spool(&view, &cx, &prepared, &params, policy(), run_rows)
+                .await
+                .unwrap();
+            assert_eq!(actual.rows, expected);
+            assert_eq!(actual.stats.snapshot_records, 2 * expected.len() as u64);
+            assert_eq!(actual.snapshot, view.frontier());
+            if let Some(previous) = measured {
+                assert_eq!(actual, previous);
+            }
+            measured = Some(actual);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn carried_element_reads_share_snapshot_records_work_and_the_exact_history_cut() {
+    let ((), report) = run_async_under_lab(0x7e4d_0009, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let (mut db, _) = database(&contexts.commit(), &[CanonicalScalar::Int(2)]).await;
+        let mut batch = WriteBatch::new(RelationId(1));
+        batch.create_vertex(
+            VId(u128::MAX),
+            vec![LabelId(1)],
+            (1..=17)
+                .map(|key| (PropertyKeyId(key), CanonicalScalar::Int(9)))
+                .collect(),
+        );
+        batch.create_vertex(
+            VId(6),
+            vec![LabelId(1)],
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(17))],
+        );
+        batch.add_edge(
+            EId(u128::MAX),
+            VId(1),
+            VId(u128::MAX),
+            (1..=17)
+                .map(|key| (PropertyKeyId(key), CanonicalScalar::Int(11)))
+                .collect(),
+        );
+        batch.add_edge(EId(2), VId(1), VId(3), vec![]);
+        batch.add_edge(
+            EId(3),
+            VId(1),
+            VId(2),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(13))],
+        );
+        let first = db.write(&contexts.commit(), batch).await.unwrap();
+        for value in 20..28 {
+            let mut batch = WriteBatch::new(RelationId(1));
+            batch.set_vertex_property(
+                VId(u128::MAX),
+                PropertyKeyId(1),
+                Some(CanonicalScalar::Int(value)),
+            );
+            batch.set_edge_property(
+                EId(u128::MAX),
+                PropertyKeyId(1),
+                Some(CanonicalScalar::Int(value + 100)),
+            );
+            if value == 27 {
+                batch.delete_vertex(VId(6));
+                batch.delete_edge(EId(3));
+            }
+            db.write(&contexts.commit(), batch).await.unwrap();
+        }
+        let view = db.read_session().unwrap();
+        let items = vec![
+            GraphValue::Vertex(VId(u128::MAX)),
+            GraphValue::Edge(EId(u128::MAX)),
+            GraphValue::Vertex(VId(3)),
+            GraphValue::Edge(EId(2)),
+            GraphValue::Vertex(VId(6)),
+            GraphValue::Edge(EId(3)),
+            GraphValue::Vertex(VId(u128::MAX - 1)),
+            GraphValue::Edge(EId(u128::MAX - 1)),
+            GraphValue::Vertex(VId(u128::MAX)),
+        ];
+        for historical in [true, false] {
+            let temporal = if historical {
+                "FOR SYSTEM_TIME AS OF SEQ $at"
+            } else {
+                ""
+            };
+            let prefix = format!(
+                "MATCH (seed:L) {temporal} WITH seed LIMIT 1 WITH $items AS items UNWIND items AS item"
+            );
+            let text = format!(
+                "{prefix} WITH item,[item][0].p AS value RETURN value,coalesce([item][0].p,0) AS repeated ORDER BY value NULLS FIRST,repeated"
+            );
+            let skip_text = format!(
+                "{prefix} RETURN CASE WHEN true THEN 0 ELSE [item][0].p END AS value,coalesce(0,[item][0].p) AS repeated ORDER BY value NULLS FIRST,repeated"
+            );
+            let mut params = GqlParameters::new()
+                .with_list("items", items.clone())
+                .unwrap();
+            if historical {
+                params = params.with_uint64("at", first.0).unwrap();
+            }
+            let prepared = PreparedNativeRead::prepare(&text, &params, symbols).unwrap();
+            let skipped = PreparedNativeRead::prepare(&skip_text, &params, symbols).unwrap();
+            let (bound, as_of) = match &prepared {
+                PreparedNativeRead::TemporalSet(template) => {
+                    let bound = template.bind_parameters(&params).unwrap();
+                    (bound.query().clone(), bound.as_of())
+                }
+                PreparedNativeRead::Set(template) => {
+                    (template.bind_parameters(&params).unwrap(), view.frontier())
+                }
+                _ => panic!("expected unary element stages"),
+            };
+            let expected = view
+                .execute_graph_set_governed_at(&cx, &bound, as_of, policy())
+                .unwrap()
+                .value;
+            let skipped = element_spool(&view, &cx, &skipped, &params, policy(), 1)
+                .await
+                .unwrap();
+            assert_eq!(skipped.rows.len(), items.len());
+            assert!(skipped.rows.iter().all(|row| {
+                row.values()
+                    == [
+                        GraphValue::Scalar(CanonicalScalar::Int(0)),
+                        GraphValue::Scalar(CanonicalScalar::Int(0)),
+                    ]
+            }));
+            let actual = element_spool(&view, &cx, &prepared, &params, policy(), 1)
+                .await
+                .unwrap();
+            assert_eq!(actual.rows, expected);
+            assert_eq!(actual.snapshot, as_of);
+            assert_eq!(
+                actual.stats.snapshot_records,
+                skipped.stats.snapshot_records + 2 * items.len() as u64
+            );
+            let mut values = if historical {
+                vec![
+                    Some(9),
+                    Some(11),
+                    None,
+                    None,
+                    Some(17),
+                    Some(13),
+                    None,
+                    None,
+                    Some(9),
+                ]
+            } else {
+                vec![
+                    Some(27),
+                    Some(127),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(27),
+                ]
+            };
+            values.sort();
+            let explicit: Vec<_> = values
+                .into_iter()
+                .map(|value| {
+                    GraphValueRow::from_owned_values(vec![
+                        GraphValue::Scalar(
+                            value.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+                        ),
+                        GraphValue::Scalar(CanonicalScalar::Int(value.unwrap_or(0))),
+                    ])
+                })
+                .collect();
+            assert_eq!(actual.rows, explicit);
+            let exact = GqlQueryPolicy::new(
+                actual.stats.snapshot_records,
+                actual.stats.result_rows,
+                actual.evaluator.work_units,
+                actual.evaluator.scratch_entries,
+            );
+            assert_eq!(
+                element_spool(&view, &cx, &prepared, &params, exact, 1)
+                    .await
+                    .unwrap(),
+                actual
+            );
+            for dimension in [0, 1, 2] {
+                let mut below = exact;
+                match dimension {
+                    0 => {
+                        below.rows = fgdb_gql::GqlExecutionBudget::new(
+                            actual.stats.snapshot_records - 1,
+                            actual.stats.result_rows,
+                        )
+                    }
+                    1 => below.evaluator.max_work_units -= 1,
+                    2 => below.evaluator.max_scratch_entries -= 1,
+                    _ => unreachable!(),
+                }
+                let error = element_spool(&view, &cx, &prepared, &params, below, 1)
+                    .await
+                    .unwrap_err();
+                match (dimension, error.execution_error()) {
+                    (0, Some(GqlQueryError::Rows(error))) => {
+                        assert_eq!(error.dimension, GqlBudgetDimension::SnapshotRecords);
+                        assert_eq!(error.limit, actual.stats.snapshot_records - 1);
+                        assert_eq!(error.observed, actual.stats.snapshot_records);
+                    }
+                    (1, Some(GqlQueryError::Evaluator(error))) => {
+                        assert_eq!(error.dimension, GlaLimitDimension::WorkUnits);
+                        assert_eq!(error.limit, actual.evaluator.work_units - 1);
+                        assert_eq!(error.observed, u128::from(actual.evaluator.work_units));
+                    }
+                    (2, Some(GqlQueryError::Evaluator(error))) => {
+                        assert_eq!(error.dimension, GlaLimitDimension::ScratchEntries);
+                        assert_eq!(error.limit, actual.evaluator.scratch_entries - 1);
+                        assert_eq!(error.observed, u128::from(actual.evaluator.scratch_entries));
+                    }
+                    _ => panic!("wrong cumulative refusal: {error:?}"),
+                }
+            }
+            // A zero lookup budget above the source count still succeeds
+            // when CASE and coalesce never reach their element operands.
+            let skipped_prepared =
+                PreparedNativeRead::prepare(&skip_text, &params, symbols).unwrap();
+            let no_reads = GqlQueryPolicy::new(
+                skipped.stats.snapshot_records,
+                skipped.stats.result_rows,
+                skipped.evaluator.work_units,
+                skipped.evaluator.scratch_entries,
+            );
+            assert_eq!(
+                element_spool(&view, &cx, &skipped_prepared, &params, no_reads, 1)
+                    .await
+                    .unwrap(),
+                skipped
+            );
+        }
+        // Edge-rooted scans use the same reader and retain full-width EIds.
+        let params = GqlParameters::new();
+        let prepared = PreparedNativeRead::prepare(
+            "MATCH ()-[r:R]->() WITH r AS item RETURN [item][0].p AS value ORDER BY value NULLS FIRST",
+            &params,
+            symbols,
+        )
+        .unwrap();
+        let actual = element_spool(&view, &cx, &prepared, &params, policy(), 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            actual.rows,
+            [CanonicalScalar::Null, CanonicalScalar::Int(127)]
+                .map(|value| GraphValueRow::from_owned_values(vec![GraphValue::Scalar(value)]))
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

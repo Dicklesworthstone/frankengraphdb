@@ -44,6 +44,21 @@ pub trait AsyncSpillElementSource: Send {
         element: ElementId,
         key: PropertyKeyId,
     ) -> impl Future<Output = Option<Result<Option<Self::Property>, Self::Error>>> + Send;
+
+    /// Read through the evaluator's existing cumulative work/scratch control.
+    /// Unscoped resident hosts use it for every history search and property-key
+    /// comparison. Scoped hosts admit visible work here and poll hidden source
+    /// traversal separately, preserving their noninterference contract. This is
+    /// the same control that admits expression evaluation and the property copy,
+    /// not a fresh meter. Existing awaitable sources retain their read admission.
+    fn element_property_with_control(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+        _control: &mut (impl FnMut(GlaExecutionEvent) -> Result<(), Self::Error> + Send),
+    ) -> impl Future<Output = Option<Result<Option<Self::Property>, Self::Error>>> + Send {
+        self.element_property(element, key)
+    }
 }
 
 /// A refusal found before any graph source or scratch writer is opened.

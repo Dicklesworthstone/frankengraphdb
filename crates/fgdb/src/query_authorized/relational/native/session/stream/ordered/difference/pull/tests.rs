@@ -228,6 +228,78 @@ fn pull_delivery_exposes_metadata_before_work_and_certifies_only_clean_exhaustio
 }
 
 #[test]
+fn staged_relations_refuse_before_scratch_while_proven_projected_pulls_still_run() {
+    let ((), report) = run_async_under_lab(0xd1ff_8204, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let (db, cuts) = history(&contexts.commit()).await;
+        let authority = authority();
+        let pool = MemoryPool::new(262_144, 0).unwrap();
+        let (mut scoped, a, b) = session(&db, &cx, &authority, &pool).await;
+        let params = GqlParameters::new();
+        for text in [
+            "MATCH (n) RETURN n.p + 1 AS value ORDER BY value LIMIT 0",
+            "MATCH (n) WITH n.p AS value RETURN value + 1 AS value ORDER BY value LIMIT 0",
+        ] {
+            let prepared = scoped.prepare(&cx, text, &params).unwrap();
+            assert!(
+                bind_ordered(&prepared.native, &params, cuts[0])
+                    .unwrap()
+                    .5
+                    .is_some()
+            );
+            assert!(matches!(
+                scoped.difference_stream(&cx, &prepared, &params, cuts[0], cuts[1]),
+                Err(NativeSpoolError::Authorized(error))
+                    if matches!(*error, QueryError::StreamingUnsupported { .. })
+            ));
+            for backing in [&a, &b] {
+                let state = backing.0.lock().unwrap();
+                assert_eq!((state.reads, state.writes), (0, 0));
+                assert!(state.bytes.get_ref().is_empty());
+            }
+            assert!(!scoped.is_closed());
+            assert_eq!(pool.used(), 0);
+        }
+        let prepared = scoped
+            .prepare(
+                &cx,
+                "MATCH (n) RETURN n AS id, n.p + 1 AS value ORDER BY id",
+                &params,
+            )
+            .unwrap();
+        let mut cursor = scoped
+            .difference_stream(&cx, &prepared, &params, cuts[0], cuts[1])
+            .unwrap()
+            .await
+            .unwrap();
+        let mut changes = Bag::new();
+        while let Some((weight, row)) = cursor.next_change().await.unwrap() {
+            assert!(changes.insert(cells(&row), weight).is_none());
+        }
+        let projected = |id, p| {
+            vec![
+                QueryValue::Value(GraphValue::Vertex(VId(id))),
+                QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(p))),
+            ]
+        };
+        assert_eq!(
+            changes,
+            Bag::from([
+                (projected(1, 4), -1),
+                (projected(2, 4), -1),
+                (projected(1, 10), 1),
+            ])
+        );
+        assert_eq!(cursor.state(), ScanState::Exhausted);
+        drop(cursor);
+        assert!(!scoped.is_closed());
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn unpolled_open_and_explicit_close_do_not_consume_a_difference_suffix() {
     let ((), report) = run_async_under_lab(0xd1ff_8202, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

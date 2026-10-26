@@ -2,12 +2,15 @@
 //! No text rewriting, identity-prefix injection, eager fallback or new evaluator.
 
 use super::*;
+use crate::gql_exec::source::{SourceEvent, find_vertex};
+use fgdb_delta_types::{ElementId, PropertyKeyId};
 use fgdb_gql::algebra::GlaOperator;
 use fgdb_gql::edge_stream::{EdgeScanCursor, EdgeScanError, EdgeScanPlan};
 use fgdb_gql::scan_stream::ScanSortTail;
 use fgdb_gql::spill_set::{AsyncSpillElementSource, AsyncSpillSetPlan};
 use fgdb_gql::stream::{VertexScanCursor, VertexScanPlan};
-use fgdb_gql::{GqlBudgetDimension, GqlExecutionBudget};
+use fgdb_gql::{GlaExecutionEvent, GqlBudgetDimension, GqlExecutionBudget};
+use fgdb_types::CanonicalPropertyValue;
 
 #[path = "buffered_order.rs"]
 mod buffered;
@@ -67,7 +70,7 @@ struct OpenedOrder<I> {
     // A unary relation first finishes its native graph leaf, including that
     // leaf's own order and page. The shared spill stages then consume those
     // exact rows; projecting in identity order would change failure ordinals.
-    stages: Option<AsyncSpillSetPlan>,
+    stages: Option<(AsyncSpillSetPlan, EmbeddedReadView)>,
 }
 
 fn open<'q>(
@@ -120,7 +123,7 @@ fn open<'q>(
             // Binary products, groups and procedure sources require their own
             // physical owners. A unary chain retains exactly one graph leaf.
             let pattern = plan.source_pattern().ok_or_else(unsupported)?.clone();
-            stages = Some(plan);
+            stages = Some((plan, view.clone()));
             (pattern, as_of)
         }
     } else {
@@ -195,22 +198,97 @@ fn open<'q>(
     })
 }
 
-// Ordinary property references are captured by the governed graph leaf. A
-// property reached through an opaque element value needs a separately metered
-// lookup source, which this owner path does not yet provide. Preserve the native
-// reached-operand refusal, including CASE/coalesce short-circuit semantics.
-struct NoElementReads;
+// The source and all later element reads share one immutable generation/cut.
+// Borrow stored values until the shared evaluator admits their destination
+// copies; neither a row clone nor a second query source crosses this boundary.
+struct ResidentElements<'s> {
+    view: &'s EmbeddedReadView,
+    as_of: CommitSeq,
+    budget: GqlExecutionBudget,
+    records: u64,
+}
 
-impl AsyncSpillElementSource for NoElementReads {
+impl<'s> ResidentElements<'s> {
+    fn read(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<()>,
+    ) -> Result<Option<&'s CanonicalPropertyValue>> {
+        let snapshot: &'s crate::Snapshot = &self.view.snapshot;
+        snapshot.check_frontier(self.as_of).map_err(|error| {
+            NativeSpoolError::Execute(Box::new(GqlQueryError::Source(match element {
+                ElementId::Vertex(_) => ScanError::Vertex(VertexScanError::Source(error)),
+                ElementId::Edge(_) => ScanError::Edge(EdgeScanError::Source(error)),
+            })))
+        })?;
+        // A reached identity is one logical record even if it is absent,
+        // retired, or repeated. Continue the source spool's original budget.
+        let records = self
+            .records
+            .checked_add(1)
+            .ok_or(SpillError::SizeOverflow)?;
+        self.budget
+            .check(GqlBudgetDimension::SnapshotRecords, records)
+            .map_err(|error| NativeSpoolError::Execute(Box::new(GqlQueryError::Rows(error))))?;
+        self.records = records;
+        let mut physical = |event| {
+            control(match event {
+                SourceEvent::Work | SourceEvent::SnapshotRecord => GlaExecutionEvent::Work,
+                SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+            })
+        };
+        let props = match element {
+            ElementId::Vertex(vid) => find_vertex(snapshot, vid, self.as_of, &mut physical)?
+                .map(|row| row.props.as_slice()),
+            ElementId::Edge(eid) => snapshot
+                .adjacency_index()
+                .statement_at_controlled(&snapshot.blocks, eid, self.as_of, &mut physical)?
+                .and_then(|(block, row)| {
+                    snapshot
+                        .block_props
+                        .get(block)
+                        .and_then(Option::as_ref)
+                        .map(|props| props.props_ref(row))
+                }),
+        }
+        .unwrap_or(&[]);
+        let mut low = 0;
+        let mut high = props.len();
+        while low < high {
+            let middle = low + (high - low) / 2;
+            control(GlaExecutionEvent::Work)?;
+            match props[middle].0.cmp(&key) {
+                core::cmp::Ordering::Less => low = middle + 1,
+                core::cmp::Ordering::Greater => high = middle,
+                core::cmp::Ordering::Equal => return Ok(Some(&props[middle].1)),
+            }
+        }
+        Ok(None)
+    }
+}
+
+impl<'s> AsyncSpillElementSource for ResidentElements<'s> {
     type Error = NativeSpoolError;
-    type Property = fgdb_types::CanonicalPropertyValue;
+    type Property = &'s CanonicalPropertyValue;
 
     async fn element_property(
         &mut self,
-        _: fgdb_delta_types::ElementId,
-        _: fgdb_delta_types::PropertyKeyId,
+        _: ElementId,
+        _: PropertyKeyId,
     ) -> Option<Result<Option<Self::Property>>> {
+        // This resident source requires the native evaluator's control. An
+        // ungoverned caller cannot silently perform an unmetered index lookup.
         None
+    }
+
+    async fn element_property_with_control(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+        control: &mut (impl FnMut(GlaExecutionEvent) -> Result<()> + Send),
+    ) -> Option<Result<Option<Self::Property>>> {
+        Some(self.read(element, key, control))
     }
 }
 
@@ -253,13 +331,19 @@ where
         max_sort_work,
     )
     .await?;
-    let Some(plan) = opened.stages else {
+    let Some((plan, view)) = opened.stages else {
         return Ok((input, work));
     };
-    staged::execute_with_elements(
+    let mut elements = ResidentElements {
+        view: &view,
+        as_of: input.snapshot_seq(),
+        budget: policy.rows,
+        records: input.row_stats().snapshot_records,
+    };
+    let (mut output, work) = staged::execute_with_elements(
         plan,
         input,
-        &mut NoElementReads,
+        &mut elements,
         cx,
         policy,
         scratch,
@@ -274,7 +358,9 @@ where
         None,
     )
     .await
-    .map_err(resident_stage_error)
+    .map_err(resident_stage_error)?;
+    output.rows.snapshot_records = elements.records;
+    Ok((output, work))
 }
 
 // Shared stages have no buffered source on this path. Preserve the owner's
@@ -322,8 +408,11 @@ impl PreparedNativeRead {
     /// Every source and intermediate order, DISTINCT and window finishes
     /// before the next expression runs. Computed property-only output therefore
     /// keeps native ordering and source-row error coordinates. Properties are
-    /// captured by that governed pattern; opaque element-property lookups keep
-    /// their native reached-operand refusal. Binary/group/procedure sources and
+    /// captured by that governed pattern; properties reached through carried
+    /// elements borrow the same pinned generation at its exact cut. Each
+    /// reached lookup spends the original snapshot-record allowance, while
+    /// history/key searches share the cumulative native evaluator controls.
+    /// Binary/group/procedure sources and
     /// unsupported physical instructions refuse before execution.
     ///
     /// Opening binds parameters and pins the exact source synchronously. The

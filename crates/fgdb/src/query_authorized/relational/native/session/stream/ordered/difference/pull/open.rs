@@ -16,8 +16,8 @@ where
     ///
     /// Rebind the exact-session template once and admit both cuts/sources before
     /// returning. The existing ordered Pattern and one-source projected Set
-    /// profiles are supported. Explicit temporal selectors and unsupported
-    /// profiles refuse without scratch I/O or eager fallback. The schema and
+    /// pull profiles are supported. Unary relation stages, explicit temporal
+    /// selectors and other profiles refuse without scratch I/O or eager fallback. The schema and
     /// endpoints are available on the returned execution before its first poll.
     ///
     /// One signed permit spans endpoint evaluation and every later pull. Native
@@ -92,7 +92,16 @@ where
                         facade: native.facade_class(),
                     });
                 }
-                bind_ordered(native, params, before)
+                let (plan, tail, at, columns, pull, stages) = bind_ordered(native, params, before)?;
+                // Endpoint evaluation owns a source pull and one terminal
+                // order/window only. Dropping a unary stage program here
+                // would compare raw leaf rows instead of either query result.
+                if stages.is_some() {
+                    return Err(QueryError::StreamingUnsupported {
+                        facade: native.facade_class(),
+                    });
+                }
+                Ok((plan, tail, at, columns, pull))
             },
             |(plan, tail, _, columns, pull), view, cx, execution, policy| {
                 view.snapshot

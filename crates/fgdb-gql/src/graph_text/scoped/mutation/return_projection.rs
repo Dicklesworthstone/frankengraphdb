@@ -3075,9 +3075,10 @@ impl<'a> Parser<'a> {
         Ok(matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')).then_some(function))
     }
 
-    /// `coalesce(` with a composite argument: a list or map literal, a call
-    /// that makes a list, a row column that is not a scalar, or in a `graph`
-    /// scope a bare MATCH element (`coalesce(b, a)` over an OPTIONAL MATCH).
+    /// `coalesce(` with a composite argument: a list or map literal, a named
+    /// subscript or slice, a call that makes a list, a row column that is not
+    /// a scalar, or in a `graph` scope a bare MATCH element (`coalesce(b, a)`
+    /// over an OPTIONAL MATCH).
     /// That call is the value function; the scalar COALESCE keeps every
     /// all-scalar call. Only lexical lookahead: nothing is read or registered.
     fn composite_coalesce(
@@ -3102,6 +3103,13 @@ impl<'a> Parser<'a> {
                     TokenKind::Punct(b'[' | b'{') => return Ok(true),
                     TokenKind::Word(word) => {
                         let next = lexer.clone().next()?.kind;
+                        // A named subscript (including a later .property)
+                        // needs a branch-local value scope. Lowering it to an
+                        // outer scalar let would read it before COALESCE can
+                        // select an earlier non-NULL argument.
+                        if matches!(next, TokenKind::Punct(b'[')) {
+                            return Ok(true);
+                        }
                         let bare = matches!(next, TokenKind::Punct(b',' | b')'));
                         if bare
                             && (schema.iter().any(|(name, kind)| {
