@@ -51,6 +51,7 @@ pub(crate) fn edge_merge_row_actions_controlled<E, A, C>(
     mut stage: impl FnMut(WriteBatch) -> EdgeUpsertActionResult<(), E, A, C>,
 ) -> EdgeUpsertActionResult<(), E, A, C> {
     use crate::gql_exec::source::SourceEvent;
+    use fgdb_gql::algebra::GraphValue;
     use fgdb_gql::{
         GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlQueryError, GraphEdgeMergeError,
         GraphEdgeMergeRowAction, GraphEdgeMergeRowInput, GraphEdgeUpsertError,
@@ -105,6 +106,20 @@ pub(crate) fn edge_merge_row_actions_controlled<E, A, C>(
                     source,
                 })
             };
+            // The vertex a row-vertex assignment writes (fgdb-at06q). A NULL
+            // one, from OPTIONAL MATCH, takes no assignment, as SET on NULL.
+            let vertex = match definition.vertex_column() {
+                None => None,
+                Some(column) => match row.values().get(column) {
+                    Some(GraphValue::Vertex(vertex)) => Some(*vertex),
+                    Some(GraphValue::Scalar(CanonicalScalar::Null)) => continue,
+                    _ => {
+                        return Err(GqlQueryError::Source(GraphEdgeUpsertError::Merge(
+                            GraphEdgeMergeError::InputSchema { row: at, column },
+                        )));
+                    }
+                },
+            };
             let (key, written) = match definition {
                 GraphEdgeMergeRowAction::Edge(definition) => {
                     let written = match &definition.value {
@@ -156,7 +171,8 @@ pub(crate) fn edge_merge_row_actions_controlled<E, A, C>(
                         })?;
                     (*key, CanonicalPropertyValue::Scalar(value))
                 }
-                GraphEdgeMergeRowAction::Value { key, value } => {
+                GraphEdgeMergeRowAction::Value { key, value }
+                | GraphEdgeMergeRowAction::RowVertex { key, value, .. } => {
                     let written = value
                         .written(row, &mut control)
                         .map_err(|error| match error {
@@ -170,7 +186,10 @@ pub(crate) fn edge_merge_row_actions_controlled<E, A, C>(
                     (*key, written)
                 }
             };
-            batch.set_edge_property_value(edge, key, Some(written));
+            match vertex {
+                Some(vertex) => batch.set_vertex_property_value(vertex, key, Some(written)),
+                None => batch.set_edge_property_value(edge, key, Some(written)),
+            };
         }
         checkpoint.borrow_mut()().map_err(GqlQueryError::Interrupted)?;
         stage(batch)?;

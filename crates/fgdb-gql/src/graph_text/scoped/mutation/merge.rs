@@ -63,6 +63,15 @@ enum ParsedUpsertAction<'a> {
         value: ReadValueTemplate,
         at: usize,
     },
+    /// A relationship MERGE step's assignment to a vertex its row carries
+    /// in `column` (`ON CREATE SET b.created = 1`, fgdb-at06q), by the
+    /// shared value compiler over the row.
+    RowVertex {
+        column: usize,
+        key: Name<'a>,
+        value: ReadValueTemplate,
+        at: usize,
+    },
     Label {
         label: Name<'a>,
     },
@@ -262,11 +271,14 @@ impl<'a> Parser<'a> {
 
     /// ON MATCH SET, ON CREATE SET and a trailing SET on `variable`. `row` is
     /// the row a vertex MERGE step runs over, whose columns the right-hand
-    /// sides may read (fgdb-cpny9); a unique MERGE has none.
+    /// sides may read (fgdb-cpny9); a unique MERGE has none. With
+    /// `row_vertices`, an assignment may also target a vertex the row
+    /// carries (relationship MERGE, fgdb-at06q).
     fn upsert_branch_actions(
         &mut self,
         variable: Name<'a>,
         row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+        row_vertices: bool,
     ) -> Result<ParsedUpsertClauses<'a>, GraphVertexUpsertTextError> {
         let mut on_match = Vec::new();
         let mut on_create = Vec::new();
@@ -306,13 +318,19 @@ impl<'a> Parser<'a> {
             } else {
                 (&mut on_match, GraphVertexUpsertBranch::Match)
             };
-            self.upsert_assignments(variable, target, branch, row)?;
+            self.upsert_assignments(variable, target, branch, row, row_vertices)?;
         }
         // The common SET is a distinct clause, not a deduplicated extension
         // of both branches. It sees prior effects and cannot erase an earlier
         // failure or unauthorized write just by overwriting the same target.
         if self.take_word("SET")? {
-            self.upsert_assignments(variable, &mut after, GraphVertexUpsertBranch::Match, row)?;
+            self.upsert_assignments(
+                variable,
+                &mut after,
+                GraphVertexUpsertBranch::Match,
+                row,
+                row_vertices,
+            )?;
         }
         for (branch, actions) in [
             (GraphVertexUpsertBranch::Match, &on_match),
@@ -340,7 +358,7 @@ impl<'a> Parser<'a> {
         variable: Name<'a>,
         row: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<ParsedEdgeRowActions<'a>, GraphVertexUpsertTextError> {
-        let clauses = self.upsert_branch_actions(variable, Some(row))?;
+        let clauses = self.upsert_branch_actions(variable, Some(row), true)?;
         for actions in [&clauses.0, &clauses.1, &clauses.2] {
             for action in actions {
                 if let ParsedUpsertAction::Label { label } = action {
@@ -363,16 +381,53 @@ impl<'a> Parser<'a> {
         target: &mut Vec<ParsedUpsertAction<'a>>,
         branch: GraphVertexUpsertBranch,
         row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+        row_vertices: bool,
     ) -> Result<(), GraphVertexUpsertTextError> {
         loop {
             self.upsert_capacity(target.len(), branch)?;
             let actual = self.name()?;
             if actual.text != variable.text {
-                return Err(error(
-                    actual.at,
-                    GraphPatternTextErrorKind::Expected("the MERGE variable"),
-                )
-                .into());
+                // `b.key = value` on a vertex the row carries. Its value
+                // reads the row and not the merged relationship.
+                let carried = row.filter(|_| row_vertices).and_then(|row| {
+                    row[..self.visible_width(row)]
+                        .iter()
+                        .position(|(name, kind)| {
+                            name.text == actual.text && *kind == GraphSetColumnType::Vertex
+                        })
+                        .map(|column| (row, column))
+                });
+                let Some((row, column)) = carried else {
+                    return Err(error(
+                        actual.at,
+                        GraphPatternTextErrorKind::Expected("the MERGE variable"),
+                    )
+                    .into());
+                };
+                self.punct(b'.', "property assignment")?;
+                let key = self.schema_name()?;
+                self.punct(b'=', "=")?;
+                let at = self.current.at;
+                if self.value_reads(row, Some(variable.text))?.1 {
+                    return Err(error(
+                        at,
+                        GraphPatternTextErrorKind::Expected(
+                            "a value that does not read the MERGE relationship",
+                        ),
+                    )
+                    .into());
+                }
+                let value = self.merge_row_value(row)?;
+                target.push(ParsedUpsertAction::RowVertex {
+                    column,
+                    key,
+                    value,
+                    at,
+                });
+                if !self.take(b',')? {
+                    break;
+                }
+                continue;
             }
             let action = if self.take(b':')? {
                 ParsedUpsertAction::Label {
@@ -646,6 +701,17 @@ fn resolve_row_actions<'a>(
                     at,
                 }
             }
+            ParsedUpsertAction::RowVertex {
+                column,
+                key,
+                value,
+                at,
+            } => VertexMergeRowActionTemplate::RowVertex {
+                column,
+                key: property_symbol(symbol, key)?,
+                value: Box::new(value),
+                at,
+            },
         });
     }
     Ok(actions)
@@ -707,19 +773,36 @@ pub(super) fn bind_row_actions(
             VertexMergeRowActionTemplate::Value { key, value, at } => {
                 crate::GraphVertexMergeRowAction::Value {
                     key: *key,
-                    value: crate::GraphVertexMergeRowComputed(
-                        return_projection::bind_read_value(value, values).map_err(|error| {
-                            GraphVertexUpsertTextError {
-                                offset: *at,
-                                ..GraphVertexUpsertTextError::from(error)
-                            }
-                        })?,
-                    ),
+                    value: bind_row_value(value, values, *at)?,
                 }
+            }
+            // Only relationship MERGE parses one, and binds it itself.
+            VertexMergeRowActionTemplate::RowVertex { at, .. } => {
+                return Err(error(
+                    *at,
+                    GraphPatternTextErrorKind::Expected("a MERGE vertex property assignment"),
+                )
+                .into());
             }
         });
     }
     Ok(actions)
+}
+
+/// A row-reading right-hand side, bound by the shared value compiler.
+pub(super) fn bind_row_value(
+    value: &ReadValueTemplate,
+    values: &[crate::GqlParameterValue],
+    at: usize,
+) -> Result<crate::GraphVertexMergeRowComputed, GraphVertexUpsertTextError> {
+    Ok(crate::GraphVertexMergeRowComputed(
+        return_projection::bind_read_value(value, values).map_err(|error| {
+            GraphVertexUpsertTextError {
+                offset: at,
+                ..GraphVertexUpsertTextError::from(error)
+            }
+        })?,
+    ))
 }
 
 /// A vertex MERGE branch's constant list value (fgdb-k3nub): a scalar result
@@ -1014,7 +1097,7 @@ impl PreparedGraphVertexUpsertText {
         let (variable, labels, properties) =
             parser.vertex_merge_pattern().map_err(upsert_merge_error)?;
         let (parsed_match, parsed_create, parsed_after) =
-            parser.upsert_branch_actions(variable, None)?;
+            parser.upsert_branch_actions(variable, None, false)?;
         if !returning
             && parsed_match.is_empty()
             && parsed_create.is_empty()
@@ -1127,7 +1210,8 @@ impl PreparedGraphVertexUpsertText {
                             }
                         }
                         // A unique MERGE parses with no row to read.
-                        ParsedUpsertAction::RowValue { at, .. } => {
+                        ParsedUpsertAction::RowValue { at, .. }
+                        | ParsedUpsertAction::RowVertex { at, .. } => {
                             return Err(error(
                                 at,
                                 GraphPatternTextErrorKind::Expected("the MERGE vertex variable"),
@@ -2369,7 +2453,7 @@ impl PreparedGraphVertexMergeRowsText {
                 )
                 .into());
             };
-            Some(parser.upsert_branch_actions(variable, Some(row.as_slice()))?)
+            Some(parser.upsert_branch_actions(variable, Some(row.as_slice()), false)?)
         } else {
             None
         };
@@ -2452,7 +2536,10 @@ impl PreparedGraphVertexMergeRowsText {
                         ParsedUpsertAction::Property { key, .. }
                         | ParsedUpsertAction::Expression { key, .. }
                         | ParsedUpsertAction::RowValue { key, .. } => Some(key.text),
-                        ParsedUpsertAction::Label { .. } => None,
+                        // A vertex MERGE step parses no row-vertex target.
+                        ParsedUpsertAction::RowVertex { .. } | ParsedUpsertAction::Label { .. } => {
+                            None
+                        }
                     })
                     .collect()
             });

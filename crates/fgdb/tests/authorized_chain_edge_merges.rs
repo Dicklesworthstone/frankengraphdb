@@ -518,6 +518,106 @@ fn vertex_and_relationship_actions_share_one_effect_cap_and_rollback_late_errors
 }
 
 #[test]
+fn relationship_actions_write_carried_endpoints_only_within_scope() {
+    // fgdb-at06q: an assignment to a carried endpoint passes the same
+    // property scope as a relationship assignment. A denied key refuses the
+    // whole statement; an allowed one commits with the creation.
+    lab(0xc4a1_3117, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 10), NOW).unwrap();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(S);
+        for id in 1..=2 {
+            seed.create_vertex(
+                VId(id as u128),
+                vec![L],
+                vec![(P, CanonicalScalar::Int(id))],
+            );
+        }
+        db.write(&commit, seed).await.unwrap();
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        for denied in [
+            "MATCH (a:Visible {p:1}), (b:Visible {p:2}) MERGE (a)-[:R]->(b) \
+             ON CREATE SET b.secret=1",
+            "MATCH (a:Visible {p:1}), (b:Visible {p:2}) MERGE (a)-[r:R]->(b) \
+             ON CREATE SET r.q=1, a.secret=1",
+        ] {
+            let error = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &chain(denied),
+                    policy(10).with_mutation_limit(10),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(
+                authorization(&error),
+                Some(Error::ScopeDenied),
+                "{denied}: {error:?}"
+            );
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
+        }
+        // Created, then matched: each run takes only its own branch.
+        let allowed = chain(
+            "MATCH (a:Visible {p:1}), (b:Visible {p:2}) MERGE (a)-[:R]->(b) \
+             ON CREATE SET b.q=a.p+10 ON MATCH SET a.q=b.p",
+        );
+        for created in [true, false] {
+            let (stats, _, _) = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &allowed,
+                    policy(10).with_mutation_limit(10),
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!(stats.created_edges, u64::from(created));
+        }
+        assert_eq!(db.edges().unwrap().len(), 1);
+        let props = |id: u128| db.vertex(VId(id)).unwrap().unwrap().props;
+        assert_eq!(
+            props(1),
+            [
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(2).into())
+            ]
+        );
+        assert_eq!(
+            props(2),
+            [
+                (P, CanonicalScalar::Int(2).into()),
+                (Q, CanonicalScalar::Int(11).into())
+            ]
+        );
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
 fn whole_pair_reduction_preserves_parallel_orientation_and_private_bag_rows() {
     lab(0xc4a1_3101, |contexts| async move {
         let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());

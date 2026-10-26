@@ -1436,19 +1436,77 @@ impl<'a> ChainContinuation<'a> {
     }
 }
 
+/// One ON-less SET, REMOVE or DELETE step of a chain over `row`, through the
+/// end of its RETURN, or through the WITH head (implicit before a write
+/// that directly follows) whose rows the next write reads.
+type ChainMutation<'a> = (
+    Vec<Projection<'a>>,
+    Vec<Action<'a>>,
+    Option<mutation_query::ParsedMutationReturn<'a>>,
+    Option<ChainContinuation<'a>>,
+);
+
+impl<'a> Parser<'a> {
+    fn chain_mutation(
+        &mut self,
+        row: &[(Name<'a>, crate::GraphSetColumnType)],
+    ) -> Result<ChainMutation<'a>, GraphMutationTextError> {
+        self.write_row_scope = true;
+        self.chain_write = true;
+        let (mut projections, parsed_actions) = self.mutation_actions(Some(row))?;
+        let returning =
+            if self.is_word("RETURN") || self.is_word("WITH") || self.at_chained_write()? {
+                let scope = mutation_query::ReturnScope {
+                    labels_changed: parsed_actions.iter().any(|action| {
+                        !matches!(
+                            action.kind,
+                            ActionKind::Property { .. }
+                                | ActionKind::RowProperty { .. }
+                                | ActionKind::Clear { .. }
+                        )
+                    }),
+                    deleting: parsed_actions.iter().any(|action| {
+                        matches!(
+                            action.kind,
+                            ActionKind::Delete { detach: true }
+                                | ActionKind::RowDelete { detach: true, .. }
+                        )
+                    }),
+                };
+                Some(self.mutation_return(&mut projections, scope, Some(row))?)
+            } else {
+                None
+            };
+        let continuation = self.continuation();
+        if continuation.is_none() {
+            self.end()?;
+        }
+        self.write_row_scope = false;
+        Ok((projections, parsed_actions, returning, continuation))
+    }
+}
+
 impl crate::mutation_text::PreparedGraphMutationRowsText {
     /// The SET, REMOVE or DELETE of a chain over the row the previous write
-    /// left (`CREATE (n:P) SET n.name = $name RETURN n.name`, fgdb-cpny9), as
-    /// the last write: a RETURN or the end of the statement follows. Its
-    /// actions are the WITH-row actions of `MATCH ... WITH ... SET`
-    /// (fgdb-sl4ym), over that row instead of a read pipeline.
+    /// left (`CREATE (n:P) SET n.name = $name RETURN n.name`, fgdb-cpny9).
+    /// A RETURN or the end of the statement may follow it, or a WITH head or
+    /// another write, which then reads its post-write rows. Its actions are
+    /// the WITH-row actions of `MATCH ... WITH ... SET` (fgdb-sl4ym), over
+    /// that row instead of a read pipeline.
     pub(crate) fn prepare_chained<'a, R>(
         statement: &'a str,
         relation: RelationId,
         declarations: &[(&str, GqlParameterType)],
         resolve: &mut R,
         from: ChainContinuation<'a>,
-    ) -> Result<(Self, Option<MutationReturnTemplate>), GraphMutationTextError>
+    ) -> Result<
+        (
+            Self,
+            Option<MutationReturnTemplate>,
+            Option<ChainContinuation<'a>>,
+        ),
+        GraphMutationTextError,
+    >
     where
         R: GraphSymbolResolver + ?Sized,
     {
@@ -1457,33 +1515,8 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
             .with_zones(resolve.time_zones())
             .resume_after(from.boundary, &from.parameters, from.at)?;
         let at = parser.current.at;
-        parser.write_row_scope = true;
         let row = from.row;
-        let (mut projections, parsed_actions) = parser.mutation_actions(Some(&row))?;
-        let returning = if parser.is_word("RETURN") {
-            let scope = mutation_query::ReturnScope {
-                labels_changed: parsed_actions.iter().any(|action| {
-                    !matches!(
-                        action.kind,
-                        ActionKind::Property { .. }
-                            | ActionKind::RowProperty { .. }
-                            | ActionKind::Clear { .. }
-                    )
-                }),
-                deleting: parsed_actions.iter().any(|action| {
-                    matches!(
-                        action.kind,
-                        ActionKind::Delete { detach: true }
-                            | ActionKind::RowDelete { detach: true, .. }
-                    )
-                }),
-            };
-            Some(parser.mutation_return(&mut projections, scope, Some(&row))?)
-        } else {
-            None
-        };
-        parser.end()?;
-        parser.write_row_scope = false;
+        let (projections, parsed_actions, returning, continuation) = parser.chain_mutation(&row)?;
         if let Some(returning) = &returning {
             returning.admit(&parser.syntax.parameters)?;
         }
@@ -1519,6 +1552,92 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
             row_fields: Vec::new(),
             owned: Some(Box::new((columns, types))),
         };
+        let (step, returning) =
+            Self::resolve_chain_step(resolve, relation, at, input, parsed_actions, returning)?;
+        Ok((step, returning, continuation))
+    }
+
+    /// A SET, REMOVE or DELETE over a leading MATCH as the first write of a
+    /// chain another write follows (`MATCH (a)-[r:OLD]->(b) DELETE r CREATE
+    /// (a)-[:NEW]->(b)`). The MATCH and its WITH stages are its row source,
+    /// as for a relationship MERGE first step; its rows reach the next write
+    /// through its WITH head, implicit before a write that directly follows.
+    pub(crate) fn prepare_first_step<'a, R>(
+        statement: &'a str,
+        relation: RelationId,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: &mut R,
+    ) -> Result<
+        (
+            Self,
+            Option<MutationReturnTemplate>,
+            Option<ChainContinuation<'a>>,
+        ),
+        GraphMutationTextError,
+    >
+    where
+        R: GraphSymbolResolver + ?Sized,
+    {
+        let mut parser = Parser::new_with_parameter_types(statement, declarations)?
+            .with_zones(resolve.time_zones());
+        parser.parse_match_prefix()?;
+        let (head, stages, schema) = if parser.is_word("WITH") {
+            parser.write_row_prefix()?
+        } else {
+            parser.implicit_write_row_prefix()?
+        };
+        let at = parser.current.at;
+        let (projections, parsed_actions, returning, continuation) =
+            parser.chain_mutation(&schema)?;
+        if let Some(returning) = &returning {
+            returning.admit(&parser.syntax.parameters)?;
+        }
+        if !projections.is_empty() {
+            return Err(error(
+                statement.len(),
+                GraphPatternTextErrorKind::Expected("a write that reads only the MATCH row"),
+            )
+            .into());
+        }
+        let read = parser.finish_write_row_prefix(statement, head, stages)?;
+        let mut input = read.resolve(crate::graph_text::LentResolver(&mut *resolve))?;
+        // Graph metadata the row reads names catalog symbols, as in
+        // `MATCH ... WITH ... SET`.
+        let metadata = input.selection.as_ref().is_some_and(|selection| {
+            selection.columns.iter().any(|column| {
+                matches!(
+                    column.path,
+                    Some(
+                        GraphPathFunction::Labels
+                            | GraphPathFunction::Type
+                            | GraphPathFunction::Properties
+                    )
+                )
+            })
+        });
+        if metadata && let Some(selection) = input.selection.as_mut() {
+            selection.reverse_catalog = Some(std::sync::Arc::new(
+                ReverseSymbolCatalog::from_resolver(&mut *resolve, statement),
+            ));
+        }
+        let (step, returning) =
+            Self::resolve_chain_step(resolve, relation, at, input, parsed_actions, returning)?;
+        Ok((step, returning, continuation))
+    }
+
+    /// Bind a chain mutation step's actions and its RETURN or WITH head to
+    /// the catalog, over its resolved input.
+    fn resolve_chain_step<'a, R>(
+        resolve: &mut R,
+        relation: RelationId,
+        at: usize,
+        input: crate::set_text::BoundSetTextInput,
+        parsed_actions: Vec<Action<'a>>,
+        returning: Option<mutation_query::ParsedMutationReturn<'a>>,
+    ) -> Result<(Self, Option<MutationReturnTemplate>), GraphMutationTextError>
+    where
+        R: GraphSymbolResolver + ?Sized,
+    {
         let mut cache = BTreeMap::new();
         let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
             let key = (kind, name.text.to_owned());
@@ -1582,8 +1701,14 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
     ) -> Result<PreparedGraphMutation, GraphMutationTextError> {
         let actions = PreparedGraphMutationText::bind_actions(&self.actions, values, self.at)?;
         let input = self.input.bind_values(values)?;
-        PreparedGraphMutation::prepare_owned(input, self.relation, actions)
-            .map_err(|error| build_error(self.at, error))
+        // A first step reads its MATCH; a later one only the previous
+        // write's rows.
+        if input.reads_graph() {
+            PreparedGraphMutation::prepare_relation(input, self.relation, actions)
+        } else {
+            PreparedGraphMutation::prepare_owned(input, self.relation, actions)
+        }
+        .map_err(|error| build_error(self.at, error))
     }
 
     /// The mutation and its RETURN over the owned rows.

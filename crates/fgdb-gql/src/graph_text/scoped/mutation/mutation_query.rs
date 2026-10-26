@@ -832,15 +832,19 @@ impl<'a> Parser<'a> {
         let at = self.current.at;
         // A WITH after the write is the head of a row pipeline whose rows
         // are this statement's own post-write values (openCypher Set, Remove
-        // and Delete "... WITH n WHERE ... RETURN").
-        let head = self.take_word("WITH")?;
+        // and Delete "... WITH n WHERE ... RETURN"). In a chain, a next write
+        // directly after it reads every binding, as `WITH *` would.
+        let implicit = self.chain_write && self.at_chained_write()?;
+        let head = implicit || self.take_word("WITH")?;
         if !head {
             self.word("RETURN")?;
         }
-        let quantifier = if self.take_word("DISTINCT")? {
+        let quantifier = if !implicit && self.take_word("DISTINCT")? {
             GraphSetQuantifier::Distinct
         } else {
-            self.take_all_quantifier()?;
+            if !implicit {
+                self.take_all_quantifier()?;
+            }
             GraphSetQuantifier::All
         };
         let mut returning = ParsedMutationReturn {
@@ -859,7 +863,7 @@ impl<'a> Parser<'a> {
         let mut spellings = Vec::new();
         let mut star = true;
         if let Some(row) = row
-            && self.take(b'*')?
+            && (implicit || self.take(b'*')?)
         {
             // A WITH row's hidden reads are never columns of `*`.
             let visible = self.visible_width(row);
@@ -973,7 +977,14 @@ impl<'a> Parser<'a> {
         let visible = schema.len();
         let mut reads = Vec::new();
         let input_boundary = self.boundary_reads.take();
-        for (alias, key) in self.write_tail_reads(&schema)? {
+        // In a chain, a field the next write only names as a SET target is
+        // not a read of its post-write value.
+        let tail_reads = if self.chain_write {
+            self.write_chain_reads(&schema)?
+        } else {
+            self.write_tail_reads(&schema)?
+        };
+        for (alias, key) in tail_reads {
             let Some(at) = schema[..visible]
                 .iter()
                 .position(|(name, _)| name.text == alias.text)

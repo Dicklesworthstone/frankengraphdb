@@ -51,6 +51,14 @@ pub enum GraphEdgeMergeRowAction {
         key: PropertyKeyId,
         value: GraphEdgeMergeRowComputed,
     },
+    /// `v.key = value` on the vertex in input column `column` (an endpoint
+    /// or another vertex the row carries), not on the relationship. The
+    /// value is computed from the row as `Value` is (fgdb-at06q).
+    RowVertex {
+        column: usize,
+        key: PropertyKeyId,
+        value: GraphEdgeMergeRowComputed,
+    },
 }
 
 impl GraphEdgeMergeRowAction {
@@ -58,7 +66,19 @@ impl GraphEdgeMergeRowAction {
     pub const fn key(&self) -> PropertyKeyId {
         match self {
             Self::Edge(action) => action.key,
-            Self::Expression { key, .. } | Self::Value { key, .. } => *key,
+            Self::Expression { key, .. }
+            | Self::Value { key, .. }
+            | Self::RowVertex { key, .. } => *key,
+        }
+    }
+
+    /// The input column of the vertex this assignment writes, or `None`
+    /// when it writes the merged relationship.
+    #[must_use]
+    pub const fn vertex_column(&self) -> Option<usize> {
+        match self {
+            Self::RowVertex { column, .. } => Some(*column),
+            Self::Edge(_) | Self::Expression { .. } | Self::Value { .. } => None,
         }
     }
 }
@@ -69,6 +89,7 @@ impl core::fmt::Debug for GraphEdgeMergeRowAction {
             Self::Edge(_) => "Edge([REDACTED])",
             Self::Expression { .. } => "Expression([REDACTED])",
             Self::Value { .. } => "Value([REDACTED])",
+            Self::RowVertex { .. } => "RowVertex([REDACTED])",
         })
     }
 }
@@ -100,8 +121,9 @@ impl core::fmt::Debug for PreparedGraphEdgeUpsertRows {
 }
 
 impl PreparedGraphEdgeUpsertRows {
-    /// Validate every branch's input frame and clause-local target uniqueness.
-    /// Reassigning a property in the later SET remains a distinct action.
+    /// Validate every branch's input frame and clause-local target uniqueness
+    /// (one assignment per element and key). Reassigning a property in the
+    /// later SET remains a distinct action.
     pub fn prepare(
         merge: PreparedGraphEdgeMerge,
         actions: GraphEdgeMergeRowActions,
@@ -122,7 +144,7 @@ impl PreparedGraphEdgeUpsertRows {
             for clause in [selected, &actions.after] {
                 let mut keys = BTreeSet::new();
                 for (action, assignment) in clause.iter().enumerate() {
-                    if !keys.insert(assignment.key()) {
+                    if !keys.insert((assignment.vertex_column(), assignment.key())) {
                         return Err(GraphEdgeUpsertBuildError::DuplicateProperty { branch });
                     }
                     let valid = match assignment {
@@ -161,6 +183,18 @@ impl PreparedGraphEdgeUpsertRows {
                                 | GraphSetColumnType::List
                                 | GraphSetColumnType::Any)
                         ),
+                        GraphEdgeMergeRowAction::RowVertex { column, value, .. } => {
+                            types.get(*column) == Some(&GraphSetColumnType::Vertex)
+                                && matches!(
+                                    crate::GraphSetProjection::admit_output(
+                                        &value.0.0, &types, action
+                                    ),
+                                    Ok(GraphSetColumnType::Scalar
+                                        | GraphSetColumnType::Stored
+                                        | GraphSetColumnType::List
+                                        | GraphSetColumnType::Any)
+                                )
+                        }
                     };
                     if !valid {
                         return Err(GraphEdgeUpsertBuildError::InvalidExpressionInput {
@@ -248,6 +282,13 @@ impl PreparedGraphEdgeUpsertRows {
                     }
                     GraphEdgeMergeRowAction::Value { value, .. } => {
                         bytes.push(3);
+                        let mut encoded = Vec::new();
+                        value.0.0.append_canonical_bytes(&mut encoded);
+                        field(&mut bytes, &encoded);
+                    }
+                    GraphEdgeMergeRowAction::RowVertex { column, value, .. } => {
+                        bytes.push(4);
+                        bytes.extend_from_slice(&(*column as u64).to_be_bytes());
                         let mut encoded = Vec::new();
                         value.0.0.append_canonical_bytes(&mut encoded);
                         field(&mut bytes, &encoded);
@@ -361,6 +402,45 @@ mod tests {
             upsert.canonical_bytes(),
             definition(changed.steps().last().unwrap()).canonical_bytes(),
         );
+    }
+
+    #[test]
+    fn carried_vertices_are_assignment_targets_of_their_own() {
+        // TCK Merge6 [1]: an anonymous relationship's ON clause writes an
+        // endpoint (fgdb-at06q).
+        let targets = |text: &str| {
+            let program = bound(text, &GqlParameters::new());
+            let upsert = definition(&program.steps()[0]).clone();
+            let target = |actions: &[GraphEdgeMergeRowAction]| {
+                actions
+                    .iter()
+                    .map(|action| (action.vertex_column(), action.key()))
+                    .collect::<Vec<_>>()
+            };
+            (
+                target(&upsert.actions().on_create),
+                target(&upsert.actions().on_match),
+                target(&upsert.actions().after),
+                upsert.canonical_bytes(),
+            )
+        };
+        let (create, matched, after, endpoint) =
+            targets("MATCH (a:A), (b:A) MERGE (a)-[:R]->(b) ON CREATE SET b.p = 1");
+        assert_eq!(create, [(Some(1), P)]);
+        assert!(matched.is_empty() && after.is_empty());
+        // The same key on the relationship and on each endpoint is three
+        // assignments, not a duplicate; the trailing SET writes too.
+        let (create, matched, after, _) = targets(
+            "MATCH (a:A), (b:A) MERGE (a)-[r:R]->(b) \
+             ON CREATE SET a.p = 1, b.p = a.p, r.p = 3 ON MATCH SET b.q = 2 SET r.q = r.p",
+        );
+        assert_eq!(create, [(Some(0), P), (Some(1), P), (None, P)]);
+        assert_eq!(matched, [(Some(1), Q)]);
+        assert_eq!(after, [(None, Q)]);
+        // The definition binds which element an assignment writes.
+        let (_, _, _, source) =
+            targets("MATCH (a:A), (b:A) MERGE (a)-[:R]->(b) ON CREATE SET a.p = 1");
+        assert_ne!(endpoint, source);
     }
 
     #[test]
@@ -592,12 +672,16 @@ mod tests {
     #[test]
     fn invalid_branch_targets_duplicates_and_schemas_refuse_before_execution() {
         for tail in [
-            "ON CREATE SET a.p=1",
             "ON CREATE SET r:A",
+            "ON CREATE SET a:A",
             "ON CREATE SET r.p=1 ON CREATE SET r.q=2",
             "ON MATCH SET r.p=1,r.p=2",
+            "ON MATCH SET a.p=1,a.p=2",
             "ON MATCH SET r.p=unknown.p",
+            "ON MATCH SET unknown.p=1",
             "ON MATCH SET r.p=a",
+            "ON MATCH SET a.p=b",
+            "ON CREATE SET a.p=r.p",
         ] {
             let text =
                 format!("MERGE (a:A {{p:1}}) MERGE (b:A {{p:2}}) MERGE (a)-[r:R]->(b) {tail}");

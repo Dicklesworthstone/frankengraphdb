@@ -497,6 +497,14 @@ pub(crate) enum VertexMergeRowActionTemplate {
         value: Box<crate::set_text::ReadValueTemplate>,
         at: usize,
     },
+    /// `b.key = value` on the vertex in row column `column`, which only a
+    /// relationship MERGE step parses (fgdb-at06q).
+    RowVertex {
+        column: usize,
+        key: PropertyKeyId,
+        value: Box<crate::set_text::ReadValueTemplate>,
+        at: usize,
+    },
 }
 
 /// The ON/SET clauses of a vertex MERGE step, resolved (fgdb-cpny9).

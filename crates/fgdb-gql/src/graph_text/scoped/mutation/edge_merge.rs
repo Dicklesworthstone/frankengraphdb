@@ -661,15 +661,15 @@ impl PreparedGraphEdgeMergeText {
         }
         // A chained ON/SET clause belongs to this occurrence-preserving
         // MERGE. A plain SET on a different carried element remains the
-        // existing terminal mutation step.
+        // existing terminal mutation step. An anonymous relationship's ON
+        // clauses can assign only the vertices the row carries: its
+        // placeholder name is empty, which no identifier matches.
         let edge_set = parser.edge_only_set(parsed.relationship)?;
         if parser.chain_write && (parser.is_word("ON") || edge_set) {
-            let relationship = parsed.relationship.ok_or_else(|| {
-                error(
-                    parser.current.at,
-                    GraphPatternTextErrorKind::Expected("a named MERGE relationship for ON/SET"),
-                )
-            })?;
+            let relationship = parsed.relationship.unwrap_or(Name {
+                text: "",
+                at: parser.current.at,
+            });
             parsed.actions = Some(parser.edge_row_actions(relationship, schema)?);
         }
         let continues = parser.chain_write && parser.at_chained_write()?;
@@ -889,9 +889,31 @@ impl PreparedGraphEdgeMergeText {
             return Ok(None);
         };
         let bind = |templates: &[crate::mutation_text::VertexMergeRowActionTemplate]| {
-            super::merge::bind_row_actions(templates, values)?
-                .into_iter()
-                .map(|action| {
+            templates
+                .iter()
+                .map(|template| {
+                    // An assignment to a vertex the row carries (fgdb-at06q).
+                    if let crate::mutation_text::VertexMergeRowActionTemplate::RowVertex {
+                        column,
+                        key,
+                        value,
+                        at,
+                    } = template
+                    {
+                        return Ok(EdgeAction::RowVertex {
+                            column: *column,
+                            key: *key,
+                            value: crate::GraphEdgeMergeRowComputed(super::merge::bind_row_value(
+                                value, values, *at,
+                            )?),
+                        });
+                    }
+                    let Some(action) =
+                        super::merge::bind_row_actions(core::slice::from_ref(template), values)?
+                            .pop()
+                    else {
+                        unreachable!("one bound action per template")
+                    };
                     Ok(match action {
                         VertexAction::Vertex(GraphVertexUpsertAction::SetProperty {
                             key,

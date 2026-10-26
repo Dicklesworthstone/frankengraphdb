@@ -13,12 +13,14 @@ use fgdb_gql::{
     PreparedGraphEdgeUpsertText, PreparedGraphWriteProgram,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, TxnCx,
+    VId,
 };
 
 const R: RelationId = RelationId(1);
 const S: RelationId = RelationId(2);
 const P: PropertyKeyId = PropertyKeyId(1);
+const Q: PropertyKeyId = PropertyKeyId(2);
 const FIRST: EId = EId((1_u128 << 96) + 10);
 const SECOND: EId = EId((1_u128 << 112) + 20);
 const PAIRS: &str = "MATCH (a),(b) WHERE a.p=1 AND b.p>1 MERGE (a)-[r:R]->(b) \
@@ -39,6 +41,7 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(S)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+        (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
         _ => None,
     }
 }
@@ -489,6 +492,111 @@ fn later_allocator_failure_restores_the_prefix_but_never_reclaims_issued_ids() {
         txn.finish(&mut db, &commit).await.unwrap();
         assert!(db.vertex(VId(99)).unwrap().is_some());
         assert!(db.edges().unwrap().is_empty());
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// One no-RETURN statement through the public write facade, allocating fresh
+/// relationship identities from `next`.
+async fn write_text(
+    db: &mut Database<MemVfs>,
+    (commit, cx, txcx): (&CommitCx, &QueryCx, &TxnCx),
+    text: &str,
+    next: &mut u128,
+) -> Result<(), String> {
+    db.query_write(
+        txcx,
+        cx,
+        commit,
+        text,
+        &GqlParameters::new(),
+        symbols,
+        R,
+        policy(),
+        |_| {
+            *next += 1;
+            Ok::<_, ()>(ElementId::Edge(EId(*next)))
+        },
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| format!("{error:?}"))
+}
+
+fn vertex_props(db: &Database<MemVfs>, vertex: VId, expected: &[(PropertyKeyId, i64)]) {
+    let expected: Vec<_> = expected
+        .iter()
+        .map(|&(key, value)| (key, CanonicalScalar::Int(value).into()))
+        .collect();
+    assert_eq!(
+        db.vertex(vertex).unwrap().unwrap().props,
+        expected,
+        "{vertex:?}"
+    );
+}
+
+#[test]
+fn on_and_set_clauses_write_carried_endpoints_atomically() {
+    // TCK Merge6 [1] and Merge7 [1] (fgdb-at06q): an anonymous relationship's
+    // ON clauses write its endpoints, and a named one's clauses may write
+    // both, each right-hand side reading the matched row.
+    const ANONYMOUS: &str = "MATCH (a),(b) WHERE a.p=1 AND b.p>1 MERGE (a)-[:R]->(b) \
+        ON CREATE SET b.q=b.p*10 ON MATCH SET b.q=b.q+a.p";
+    let ((), report) = run_async_under_lab(0xe8a0_0007, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let cxs = (&commit, &cx, &txcx);
+        let mut db = database(&commit, false, false).await;
+        let mut next = 900;
+        write_text(&mut db, cxs, ANONYMOUS, &mut next)
+            .await
+            .unwrap();
+        assert_eq!(db.edges().unwrap().len(), 2);
+        assert!(db.edges().unwrap().iter().all(|edge| edge.props.is_empty()));
+        vertex_props(&db, VId(1), &[(P, 1)]);
+        vertex_props(&db, VId(2), &[(P, 2), (Q, 20)]);
+        vertex_props(&db, VId(3), &[(P, 3), (Q, 30)]);
+        // Both pairs now match: only ON MATCH runs.
+        write_text(&mut db, cxs, ANONYMOUS, &mut next)
+            .await
+            .unwrap();
+        assert_eq!(db.edges().unwrap().len(), 2);
+        vertex_props(&db, VId(2), &[(P, 2), (Q, 21)]);
+        vertex_props(&db, VId(3), &[(P, 3), (Q, 31)]);
+        // The relationship and both endpoints in one statement; the
+        // trailing SET writes after the selected branch.
+        write_text(
+            &mut db,
+            cxs,
+            "MATCH (a),(b) WHERE a.p=2 AND b.p=3 MERGE (a)-[r:R]->(b) \
+             ON CREATE SET r.p=a.p+b.p, a.q=0 SET b.p=b.p+100",
+            &mut next,
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.edges().unwrap().len(), 3);
+        assert_edge(&db, EId(next), 5);
+        vertex_props(&db, VId(2), &[(P, 2), (Q, 0)]);
+        vertex_props(&db, VId(3), &[(P, 103), (Q, 31)]);
+        // A failing trailing SET rolls back the creation and the staged ON
+        // CREATE endpoint write with it.
+        let before = db.frontier().unwrap();
+        assert!(
+            write_text(
+                &mut db,
+                cxs,
+                "MATCH (a),(b) WHERE a.p=1 AND b.p=103 MERGE (a)-[:R]->(b) \
+                 ON CREATE SET b.q=-1 SET a.q=1/0",
+                &mut next,
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(db.frontier().unwrap(), before);
+        assert_eq!(db.edges().unwrap().len(), 3);
+        vertex_props(&db, VId(1), &[(P, 1)]);
+        vertex_props(&db, VId(3), &[(P, 103), (Q, 31)]);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

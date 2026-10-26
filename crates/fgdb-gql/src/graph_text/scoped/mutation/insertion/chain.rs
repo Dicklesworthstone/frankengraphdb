@@ -57,6 +57,9 @@ impl PreparedGraphWriteChainText {
         // A MATCH after `UNWIND $rows`: the batch writer lowers no vertex
         // MERGE over its bindings, so one heads a chain.
         let mut parameter_matched = false;
+        // A SET, REMOVE or DELETE after a leading MATCH: a chain once a
+        // CREATE or MERGE follows it.
+        let mut mutated = false;
         let mut depth = 0_usize;
         let mut previous: Option<TokenKind<'_>> = None;
         loop {
@@ -81,7 +84,7 @@ impl PreparedGraphWriteChainText {
                             || word.eq_ignore_ascii_case("INSERT"))
                     {
                         if pattern()? {
-                            if headed || merged {
+                            if headed || merged || mutated {
                                 return Ok(true);
                             }
                             written = true;
@@ -97,6 +100,13 @@ impl PreparedGraphWriteChainText {
                         // A SET, REMOVE or DELETE after a CREATE writes its
                         // rows (`CREATE (n) SET n.p = 1`, fgdb-cpny9).
                         return Ok(true);
+                    } else if clause
+                        && matched
+                        && ["SET", "REMOVE", "DELETE", "DETACH"]
+                            .iter()
+                            .any(|kind| word.eq_ignore_ascii_case(kind))
+                    {
+                        mutated = true;
                     } else if previous.is_none() && word.eq_ignore_ascii_case("UNWIND") {
                         parameter_unwound = matches!(
                             script::next_script_token(&mut lexer.clone())?.kind,
@@ -112,7 +122,7 @@ impl PreparedGraphWriteChainText {
                     } else if clause && parameter_unwound && word.eq_ignore_ascii_case("MATCH") {
                         parameter_matched = true;
                     } else if clause && word.eq_ignore_ascii_case("MERGE") && pattern()? {
-                        if written || merged {
+                        if written || merged || mutated {
                             return Ok(true);
                         }
                         // A first-clause vertex MERGE heads a chain, and one
@@ -139,6 +149,13 @@ impl PreparedGraphWriteChainText {
                                 TokenKind::Punct(b'-' | b'<')
                             );
                             if parameter_matched && vertex {
+                                return Ok(true);
+                            }
+                            if !vertex
+                                && matched
+                                && !parameter_unwound
+                                && Self::edge_actions_need_rows(lookahead.clone())?
+                            {
                                 return Ok(true);
                             }
                             if previous.is_some() && !parameter_unwound && (vertex || !matched) {
@@ -174,6 +191,70 @@ impl PreparedGraphWriteChainText {
         }
     }
 
+    /// Whether the ON/SET clauses of a relationship MERGE after a leading
+    /// MATCH need the chain's row actions (fgdb-at06q): the relationship is
+    /// anonymous, or an assignment writes or reads (`a.key`) an element
+    /// other than it. The unique upsert writes only its named relationship.
+    /// `lexer` is just past the `-` or `<` after the first node pattern.
+    fn edge_actions_need_rows(mut lexer: Lexer<'_>) -> Result<bool, GraphPatternTextError> {
+        const ENDS: [&str; 12] = [
+            "RETURN", "WITH", "CREATE", "INSERT", "MERGE", "MATCH", "OPTIONAL", "UNWIND", "DELETE",
+            "DETACH", "REMOVE", "FOREACH",
+        ];
+        let mut token = script::next_script_token(&mut lexer)?;
+        if matches!(token.kind, TokenKind::Punct(b'-')) {
+            token = script::next_script_token(&mut lexer)?;
+        }
+        if !matches!(token.kind, TokenKind::Punct(b'[')) {
+            return Ok(false);
+        }
+        let relationship = match script::next_script_token(&mut lexer)?.kind {
+            TokenKind::Word(word) => Some(word),
+            _ => None,
+        };
+        let (mut depth, mut actions) = (1_usize, false);
+        let (mut previous, mut before): (Option<TokenKind<'_>>, Option<TokenKind<'_>>) =
+            (None, None);
+        loop {
+            let token = script::next_script_token(&mut lexer)?;
+            match token.kind {
+                TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                // `ON CREATE` and `ON MATCH` name a branch, not a clause.
+                TokenKind::Word(word)
+                    if depth == 0
+                        && ENDS.iter().any(|end| word.eq_ignore_ascii_case(end))
+                        && !matches!(previous, Some(TokenKind::Word(on))
+                            if on.eq_ignore_ascii_case("ON")) =>
+                {
+                    return Ok(false);
+                }
+                TokenKind::Word(word)
+                    if depth == 0
+                        && (word.eq_ignore_ascii_case("ON")
+                            || word.eq_ignore_ascii_case("SET")) =>
+                {
+                    if relationship.is_none() {
+                        return Ok(true);
+                    }
+                    actions = true;
+                }
+                TokenKind::Punct(b'.') if actions => {
+                    if let Some(TokenKind::Word(element)) = previous
+                        && !matches!(before, Some(TokenKind::Punct(b'.')))
+                        && Some(element) != relationship
+                    {
+                        return Ok(true);
+                    }
+                }
+                _ => {}
+            }
+            before = previous;
+            previous = Some(token.kind);
+        }
+    }
+
     pub fn prepare(
         statement: &str,
         relation: RelationId,
@@ -191,7 +272,10 @@ impl PreparedGraphWriteChainText {
         let body = query::statement_body(statement)?;
         // The first write is a MERGE (`first_merge` is where it starts) when
         // it is the first clause or follows only a leading UNWIND, or a
-        // leading MATCH and its read stages; otherwise it is a CREATE.
+        // leading MATCH and its read stages; otherwise it is a CREATE. A SET,
+        // REMOVE or DELETE after a leading MATCH is a first mutation step
+        // (`first_mutation`), which is_chain admits only before another write.
+        let mut first_mutation = false;
         let first_merge = {
             let mut lexer = Lexer {
                 text: body,
@@ -209,6 +293,14 @@ impl PreparedGraphWriteChainText {
                     TokenKind::Word(word) if depth == 0 => {
                         if word.eq_ignore_ascii_case("MERGE") {
                             break (first || unwound || matched).then_some(token.at);
+                        }
+                        if matched
+                            && ["SET", "REMOVE", "DELETE", "DETACH"]
+                                .iter()
+                                .any(|clause| word.eq_ignore_ascii_case(clause))
+                        {
+                            first_mutation = true;
+                            break None;
                         }
                         if word.eq_ignore_ascii_case("UNWIND") {
                             unwound |= first;
@@ -271,7 +363,17 @@ impl PreparedGraphWriteChainText {
             None => false,
         };
         let mut steps = Vec::new();
-        let mut next = if first_merge.is_some() && relationship {
+        let mut next = if first_mutation {
+            let (step, returning, after) =
+                crate::mutation_text::PreparedGraphMutationRowsText::prepare_first_step(
+                    body,
+                    relation,
+                    declarations,
+                    &mut resolve,
+                )?;
+            steps.push(ChainTextStep::Mutation(Box::new((step, returning))));
+            after
+        } else if first_merge.is_some() && relationship {
             let (merge, returning, after) = crate::PreparedGraphEdgeMergeText::prepare_first_step(
                 body,
                 declarations,
@@ -321,22 +423,25 @@ impl PreparedGraphWriteChainText {
                 at: from.at,
                 tokens: 0,
             };
-            // A SET, REMOVE or DELETE is the last write: a RETURN or the end
-            // of the statement follows it.
+            // A SET, REMOVE or DELETE: a RETURN or the end of the statement
+            // follows it, or a WITH head or another write, which reads its
+            // post-write rows.
             if matches!(lexer.clone().next()?.kind, TokenKind::Word(word)
                 if ["SET", "REMOVE", "DELETE", "DETACH"]
                     .iter()
                     .any(|kind| word.eq_ignore_ascii_case(kind)))
             {
-                let step = crate::mutation_text::PreparedGraphMutationRowsText::prepare_chained(
-                    body,
-                    relation,
-                    declarations,
-                    &mut resolve,
-                    from,
-                )?;
-                steps.push(ChainTextStep::Mutation(Box::new(step)));
-                break;
+                let (step, returning, after) =
+                    crate::mutation_text::PreparedGraphMutationRowsText::prepare_chained(
+                        body,
+                        relation,
+                        declarations,
+                        &mut resolve,
+                        from,
+                    )?;
+                steps.push(ChainTextStep::Mutation(Box::new((step, returning))));
+                next = after;
+                continue;
             }
             let merge = matches!(lexer.next()?.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("MERGE"));
             // A relationship MERGE names row vertices: `(a)-` or `(a)<-`.
@@ -391,10 +496,13 @@ impl PreparedGraphWriteChainText {
         }
         // One write is a chain only as a vertex MERGE over a leading UNWIND
         // or MATCH (`UNWIND [1, 2] AS x MERGE (n {id: x}) RETURN n`, `MATCH
-        // (p:Person) MERGE (c:City {name: p.bornIn})`).
+        // (p:Person) MERGE (c:City {name: p.bornIn})`), or as a relationship
+        // MERGE whose ON/SET clauses read or write the MATCH row (fgdb-at06q).
         let unwound_merge = matches!(steps.as_slice(), [ChainTextStep::VertexMerge(merge)]
             if matches!(merge.input, crate::mutation_text::VertexMergeRowsTextInput::Relation(_)));
-        if steps.len() < 2 && !unwound_merge {
+        let row_actions = matches!(steps.as_slice(), [ChainTextStep::EdgeMerge(merge)]
+            if merge.0.row_actions.is_some());
+        if steps.len() < 2 && !unwound_merge && !row_actions {
             return Err(expected(body.len(), "another write after the first").into());
         }
         let chain = Self {
@@ -772,6 +880,16 @@ mod tests {
             "MATCH (a), (b) MERGE (a)-[:X]->(b) MERGE (c)",
             "MATCH (n) MATCH (m) WITH n AS a, m AS b MERGE (a)-[:T]->(b) WITH a AS x, b AS y \
              MERGE (a) MERGE (b) MERGE (a)-[:T]->(b) RETURN x.id AS x, y.id AS y",
+            // A relationship MERGE over a leading MATCH whose ON/SET clauses
+            // write a carried vertex, read one, or follow an anonymous
+            // relationship: the unique upsert writes only its named
+            // relationship (TCK Merge6 [1], Merge7 [1], fgdb-at06q).
+            "MATCH (a:A), (b:B) MERGE (a)-[:KNOWS]->(b) ON CREATE SET b.created = 1",
+            "MATCH (a:A), (b:B) MERGE (a)<-[:KNOWS]-(b) ON MATCH SET b.created = 1",
+            "MATCH (a), (b) MERGE (a)-[r:R]->(b) ON CREATE SET b.p = 1",
+            "MATCH (a), (b) MERGE (a)-[r:R]->(b) ON MATCH SET r.p = a.p",
+            "MATCH (a), (b) WITH a, b MERGE (a)-[r:R {k: 1}]->(b) SET r.p = 1, b.q = 2",
+            "MATCH (a), (b) MERGE (a)-[r:R]->(b) ON CREATE SET r += {p: a.p} RETURN r",
             // A vertex MERGE after source-free WITH stages (TCK Merge1 [8],
             // Merge9 [4]).
             "WITH 42 AS var MERGE (c:N {var: var})",
@@ -826,6 +944,11 @@ mod tests {
             "MATCH (a), (b) WITH a, b MERGE (a)-[:X]->(b)",
             "MATCH (a), (b) MERGE (a)-[:X]->(b) RETURN a",
             "OPTIONAL MATCH (a) MERGE (b)",
+            // ON/SET clauses that write and read only the named relationship
+            // stay with the unique upsert; reads in a RETURN do not count.
+            "MATCH (a), (b) MERGE (a)-[r:R]->(b) ON CREATE SET r.p = 1 ON MATCH SET r.p = r.p + 1",
+            "MATCH (a), (b) MERGE (a)-[r:R]->(b) SET r += {p: 1, q: 'a.b'} RETURN a.p, r.p",
+            "MATCH (a), (b) MERGE (a)-[r:R]->(b) ON CREATE SET r.p = $x.p",
             // An UNWIND of a parameter before one MERGE is the batch writer's,
             // its ON/SET clauses and a relationship MERGE after MATCH included.
             "UNWIND $rows AS row MERGE (n:Entity {id: row.id})",
