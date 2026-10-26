@@ -1276,6 +1276,34 @@ fn existence_predicates_combine_with_any_predicate_in_a_where() {
     let star = execute("MATCH (n) WHERE (n)-[:R]->() OR n.p = 3 RETURN *");
     assert!(star.iter().all(|row| row.len() == 1), "{star:?}");
     assert_eq!(ids(star), singles(&|n| out(n) || p(n) == 3));
+    // The same root WHERE before a later part (LDBC SNB IC10's `WHERE NOT
+    // friend = person AND NOT (friend)-[:KNOWS]-(person) ... OPTIONAL MATCH`)
+    // filters the first part's rows before the later part joins them, as
+    // the explicit `WITH * WHERE` does. Vertex 4 is the one with p = 3.
+    let cases: [(&str, &dyn Fn(u128) -> bool); 4] = [
+        ("NOT n.p = 1 AND NOT (n)-[:R]->()", &|n| {
+            p(n) != 1 && !out(n)
+        }),
+        ("n.p = 2 OR (n)<-[:R]-()", &|n| p(n) == 2 || into(n)),
+        ("(n)-[:R]->() OR n.p = 2", &|n| out(n) || p(n) == 2),
+        ("n.p = 1 OR exists((n)<-[:R]-())", &|n| p(n) == 1 || into(n)),
+    ];
+    for (predicate, keep) in cases {
+        let later = "WITH n MATCH (m {p: 3}) RETURN n, m";
+        let implicit = format!("MATCH (n) WHERE {predicate} {later}");
+        let explicit = format!("MATCH (n) WITH * WHERE {predicate} {later}");
+        let expected: Vec<Vec<u128>> = (1..=4).filter(|&n| keep(n)).map(|n| vec![n, 4]).collect();
+        assert_eq!(ids(execute(&implicit)), expected, "{implicit}");
+        assert_eq!(ids(execute(&explicit)), expected, "{explicit}");
+        // The explicit WITH's own WHERE before a later MATCH part, with no
+        // further WITH: the head's existence columns are typed as the lists
+        // they are (projection_type), so the part's projection admits them.
+        let direct = format!("MATCH (n) WITH n WHERE {predicate} MATCH (m {{p: 3}}) RETURN n, m");
+        assert_eq!(ids(execute(&direct)), expected, "{direct}");
+        let optional =
+            format!("MATCH (n) WHERE {predicate} OPTIONAL MATCH (n)-[:R]->(m) RETURN DISTINCT n");
+        assert_eq!(ids(execute(&optional)), singles(keep), "{optional}");
+    }
     // A predicate correlates by name: a binding the WITH renames or drops
     // would read the wrong element, so it is refused.
     for text in [

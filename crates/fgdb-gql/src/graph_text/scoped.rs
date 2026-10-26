@@ -759,6 +759,11 @@ impl<'a> Parser<'a> {
         // A conjunct begins the WHERE and follows each top-level AND.
         let (mut conjunct, mut existence) = (true, false);
         let (mut vertex_test, mut edge_test, mut compound) = (false, false, false);
+        // An existence conjunct beside a compound one (`NOT a = b AND NOT
+        // (a)-->(b)`, LDBC SNB IC10) is a conjunction the graph predicate
+        // refuses (scoped_predicates); the row filter reads the existence
+        // test from a hidden column instead (hoist_existence_reads).
+        let mut existential = false;
         loop {
             let token = lexer.next()?;
             let key = matches!(previous, Some(TokenKind::Punct(b'.' | b':')));
@@ -770,11 +775,29 @@ impl<'a> Parser<'a> {
             };
             if core::mem::take(&mut conjunct) {
                 existence = existence_follows(token.kind, &lexer)?;
+                existential |= existence;
             }
+            // So is an existence test inside a compound conjunct (`b.p = 3 OR
+            // (a)-->(b)`), which the Boolean parser refuses (boolean_unary).
+            if !existence && !key && existence_follows(token.kind, &lexer)? {
+                return Ok(true);
+            }
+            let needs = edge_test || (vertex_test && compound) || (existential && compound);
             match token.kind {
-                TokenKind::End => return Ok(edge_test || (vertex_test && compound)),
+                TokenKind::End => return Ok(needs),
                 TokenKind::Word(word) if depth == 0 && !key && Self::ends_where(word, previous) => {
-                    return Ok(edge_test || (vertex_test && compound));
+                    return Ok(needs);
+                }
+                // So is an existence test under a top-level OR or XOR
+                // (`(a)-->(b) OR b.p = 3`).
+                TokenKind::Word(word)
+                    if existence
+                        && depth == 0
+                        && !key
+                        && (word.eq_ignore_ascii_case("OR")
+                            || word.eq_ignore_ascii_case("XOR")) =>
+                {
+                    return Ok(true);
                 }
                 TokenKind::Word(word) if !key && matches!(next, TokenKind::Punct(b'(')) => {
                     let list_function = [

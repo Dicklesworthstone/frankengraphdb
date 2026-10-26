@@ -364,6 +364,11 @@ fn is_element_column(kind: GraphSetColumnType) -> bool {
 /// The column domain of one graph input: a property is a stored value, a bare
 /// variable its element, a path function its own result.
 fn projection_type(input: &Projection<'_>) -> GraphSetColumnType {
+    // A Collect scope's column is the list of its witnesses: an existence
+    // test's (hoist_existence_reads) or a pattern comprehension's.
+    if input.collect.is_some() {
+        return GraphSetColumnType::List;
+    }
     if input.property.is_some() {
         return GraphSetColumnType::Stored;
     }
