@@ -2367,6 +2367,23 @@ impl<'a> Parser<'a> {
                 let variable = self.any_variable()?;
                 self.mutation_projection(columns, variable, None)?
             }
+            // A path is NULL exactly when its length is: an OPTIONAL MATCH
+            // that found no `p = shortestPath(...)` (LDBC SNB IC13's `CASE
+            // path IS NULL WHEN true THEN -1 ELSE length(path) END`).
+            ExpressionColumns::Graph(columns) if self.syntax.names_path(word) => {
+                let variable = self.path_variable()?;
+                let column = self.projection_slot(
+                    columns,
+                    Projection {
+                        variable,
+                        property: None,
+                        path: Some(GraphPathFunction::Length),
+                        collect: None,
+                    },
+                )?;
+                emit(program, ParsedOp::Atom(Operand::Column(column), at), at)?;
+                return Ok(true);
+            }
             ExpressionColumns::Row(schema) => {
                 let visible = self.visible_width(schema);
                 let Some(column) = schema[..visible].iter().position(|(name, kind)| {

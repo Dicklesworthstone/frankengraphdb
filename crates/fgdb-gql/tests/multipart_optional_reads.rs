@@ -1346,3 +1346,41 @@ fn path_functions_read_path_values() {
         ])]
     );
 }
+
+/// A path is NULL exactly when its OPTIONAL MATCH found none, so `path IS
+/// NULL` reads as `length(path) IS NULL` (LDBC SNB IC13: `CASE path IS NULL
+/// WHEN true THEN -1 ELSE length(path) END`). Vertex 3 (score 30) is reached
+/// from 1 in two hops and from 2 in one, not from the isolated 4; out of it
+/// runs only its own loop, so it reaches none of them.
+#[test]
+fn a_path_is_null_exactly_when_its_optional_match_found_none() {
+    let rows = |direction: &str| -> Vec<(u128, bool, i64)> {
+        let text = format!(
+            "MATCH (x {{score: 30}}), (y) WHERE y.score <> 30 \
+             OPTIONAL MATCH path = shortestPath((x){direction}(y)) \
+             RETURN y, path IS NULL AS missing, \
+             CASE path IS NULL WHEN true THEN -1 ELSE length(path) END AS hops ORDER BY y"
+        );
+        identified_rows(&text)
+            .iter()
+            .map(|row| {
+                let values = row.values();
+                let Some(CanonicalScalar::Bool(missing)) = values[1].as_scalar() else {
+                    panic!("{text}: {row:?}")
+                };
+                let Some(CanonicalScalar::Int(hops)) = values[2].as_scalar() else {
+                    panic!("{text}: {row:?}")
+                };
+                (values[0].as_vertex().unwrap().0, *missing, *hops)
+            })
+            .collect()
+    };
+    assert_eq!(
+        rows("<-[:R*]-"),
+        [(1, false, 2), (2, false, 1), (4, true, -1)]
+    );
+    assert_eq!(
+        rows("-[:R*]->"),
+        [(1, true, -1), (2, true, -1), (4, true, -1)]
+    );
+}
