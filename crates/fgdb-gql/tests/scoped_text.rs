@@ -805,6 +805,40 @@ fn a_bare_pattern_in_a_boolean_position_is_its_existence_test() {
     }
 }
 
+/// fgdb-8tb9l: in a projection, `x AND exists(...)` is one conjunction,
+/// compiled exactly as its parenthesized spelling. A graph clause's WHERE
+/// still owns a scoped EXISTS after AND.
+#[test]
+fn a_projection_conjoins_an_existence_test_after_and() {
+    let template = |text: &str| {
+        fgdb_gql::PreparedGraphSetText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .canonical_template_bytes()
+    };
+    for (written, parenthesized) in [
+        (
+            "MATCH (a) RETURN a.n > 1 AND exists((a)-[:R]->()) AS e",
+            "MATCH (a) RETURN a.n > 1 AND (exists((a)-[:R]->())) AS e",
+        ),
+        (
+            "MATCH (a) RETURN a.n > 1 AND NOT exists((a)-[:R]->()) AS e",
+            "MATCH (a) RETURN a.n > 1 AND (NOT exists((a)-[:R]->())) AS e",
+        ),
+        (
+            "MATCH (a) WITH a RETURN a.n > 1 AND EXISTS { MATCH (a)-[:R]->() } AS e",
+            "MATCH (a) WITH a RETURN a.n > 1 AND (EXISTS { MATCH (a)-[:R]->() }) AS e",
+        ),
+    ] {
+        assert_eq!(template(written), template(parenthesized), "{written}");
+    }
+    assert_eq!(
+        query("MATCH (a) WHERE a.n > 1 AND EXISTS { MATCH (a)-[:R]->() } RETURN a")
+            .canonical_bytes(),
+        query("MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->() } AND a.n > 1 RETURN a")
+            .canonical_bytes()
+    );
+}
+
 /// fgdb-fj106 design 1: a relationship type test in a scoped WHERE (an
 /// EXISTS body, an OPTIONAL MATCH) narrows that clause's edge, as the typed
 /// pattern does: `type(r) = 'R'`, `'R' = type(r)`, `r:R` and `type(r) IN

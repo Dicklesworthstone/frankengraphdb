@@ -1462,13 +1462,17 @@ impl<'a> Parser<'a> {
     ) -> Result<(), GraphMutationTextError> {
         self.scalar_negation(columns, depth, program)?;
         while self.is_word("AND") {
-            // Scoped EXISTS is owned by the graph clause parser.
+            // Scoped EXISTS is owned by the graph clause parser. An
+            // expression with let slots (a projection's) reads `exists(...)`
+            // itself, through one (fgdb-8tb9l).
             let mut lexer = self.lexer.clone();
             let mut next = lexer.next()?;
             if matches!(next.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT")) {
                 next = lexer.next()?;
             }
-            if matches!(next.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("EXISTS")) {
+            if self.lets.is_none()
+                && matches!(next.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("EXISTS"))
+            {
                 break;
             }
             self.advance()?;
