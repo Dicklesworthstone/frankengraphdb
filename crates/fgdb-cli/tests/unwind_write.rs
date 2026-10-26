@@ -355,6 +355,25 @@ fn a_map_parameter_binds_as_the_property_map_it_holds() {
         assert!(output(&refused).contains(&at), "{}", output(&refused));
     }
     assert_eq!(row_count(&fixture.query("MATCH (n:Entity) RETURN n")), 3);
+
+    // A record's array is a stored List, through the spliced map, with or
+    // without RETURN.
+    let list = || {
+        r#"{"type":"list","value":[{"type":"int","value":"1"},{"type":"int","value":"2"}]}"#
+            .to_owned()
+    };
+    success(&write(
+        r#"{"id":5,"name":"Eve","weight":[1,2]}"#,
+        "CREATE (n:Entity $props)",
+    ));
+    let listed = write(
+        r#"{"id":6,"name":"Fay","weight":[1,2]}"#,
+        "CREATE (n:Entity $props) RETURN n.weight",
+    );
+    success(&listed);
+    rows(&listed, &[&[list()]]);
+    let weights = fixture.query("MATCH (n:Entity) WHERE n.id >= 5 RETURN n.weight ORDER BY n.id");
+    rows(&weights, &[&[list()], &[list()]]);
 }
 
 #[path = "unwind_write/document_roots.rs"]
