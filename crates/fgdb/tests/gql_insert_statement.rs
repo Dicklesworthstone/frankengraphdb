@@ -1043,14 +1043,24 @@ fn vertex_merge_steps_run_over_a_leading_unwind_and_return_rows() {
         .await
         .unwrap();
         assert_eq!(rows(carried), [vec![int(11), int(11)]]);
-        // RETURN * and a NULL UNWIND value refuse and publish nothing.
+        // RETURN * returns the row's binding and the merged vertex, ordered
+        // by name (n, then x).
+        let starred = write(&mut db, "UNWIND [1] AS x MERGE (n:Person {p: x}) RETURN *")
+            .await
+            .unwrap();
+        let QueryResult::Rows { columns, rows } = starred else {
+            unreachable!("a MERGE with RETURN answers rows")
+        };
+        assert_eq!(columns, ["n", "x"]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1], int(1));
+        // A NULL UNWIND value refuses and publishes nothing.
         let frontier = db.frontier().unwrap();
-        for refused in [
-            "UNWIND [1] AS x MERGE (n:Person {p: x}) RETURN *",
-            "UNWIND [null] AS x MERGE (n:Person {p: x})",
-        ] {
-            assert!(write(&mut db, refused).await.is_err(), "{refused}");
-        }
+        assert!(
+            write(&mut db, "UNWIND [null] AS x MERGE (n:Person {p: x})")
+                .await
+                .is_err()
+        );
         assert_eq!(db.frontier().unwrap(), frontier);
         // A List key merges as a stored List (fgdb-fc7cx): a second MERGE
         // binds the vertex the first created.
@@ -1637,13 +1647,21 @@ fn merge_steps_take_a_with_head() {
         let int = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
         assert_eq!(rows, [vec![int(70), int(71)]]);
         assert_eq!(db.edges().unwrap().len(), 6);
-        // A head no write follows, a WHERE after it and WITH * refuse and
-        // publish nothing.
+        // WITH * carries every binding to the next write (TCK Match8 [2]).
+        let edges = db.edges().unwrap().len();
+        write(
+            &mut db,
+            "MERGE (a:Person {p: 60}) WITH * CREATE (a)-[:R]->(:Copy)",
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.edges().unwrap().len(), edges + 1);
+        // A head no write follows and a WHERE after it refuse and publish
+        // nothing.
         let frontier = db.frontier().unwrap();
         for refused in [
             "MERGE (a:Person {p: 60}) WITH a",
             "MERGE (a:Person {p: 60}) WITH a WHERE a.p > 1 CREATE (b)",
-            "MERGE (a:Person {p: 60}) WITH * CREATE (b)",
         ] {
             assert!(write(&mut db, refused).await.is_err(), "{refused}");
         }

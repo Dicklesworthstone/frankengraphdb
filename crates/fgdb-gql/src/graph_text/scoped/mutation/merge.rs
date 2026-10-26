@@ -2382,13 +2382,7 @@ impl<'a> Parser<'a> {
             self.take_all_quantifier()?;
             GraphSetQuantifier::All
         };
-        if self.is_punct(b'*') {
-            return Err(error(
-                self.current.at,
-                GraphPatternTextErrorKind::Expected("named RETURN items after a chained MERGE"),
-            )
-            .into());
-        }
+        let star = self.is_punct(b'*').then_some(self.current.at);
         let mut returning = ParsedVertexRowsReturn {
             variable,
             row,
@@ -2403,6 +2397,51 @@ impl<'a> Parser<'a> {
             at,
             output: Vec::new(),
         };
+        if let Some(star_at) = star {
+            // `WITH *` / `RETURN *` (TCK Match8 [2]): every named binding the
+            // row carries, then the merged vertex when it is named. RETURN *
+            // orders its columns by name; WITH * keeps the row's order
+            // (fgdb-7jja3).
+            self.advance()?;
+            let visible = self.visible_width(row);
+            let mut items: Vec<_> = row[..visible]
+                .iter()
+                .enumerate()
+                .map(|(index, &(name, kind))| (RowsBinding::Input(index), name, kind))
+                .chain(variable.map(|name| (RowsBinding::Vertex, name, GraphSetColumnType::Vertex)))
+                .filter(|(_, name, _)| !name.text.starts_with(Self::ANONYMOUS_PREFIX))
+                .collect();
+            if items.is_empty() {
+                return Err(error(
+                    star_at,
+                    GraphPatternTextErrorKind::Expected("named bindings for * after a MERGE"),
+                )
+                .into());
+            }
+            if keyword == "RETURN" {
+                items.sort_by(|(_, a, _), (_, b, _)| a.text.cmp(b.text));
+            }
+            for (binding, name, kind) in items {
+                let column = returning.column(binding, kind, name.at)?;
+                returning.projection.push(ReadProjectionTemplate {
+                    name: name.text.to_owned(),
+                    value: ReadValueTemplate::Column(column),
+                });
+                returning.output.push((name, kind));
+            }
+            if let Some(ReadStageTemplate::Page {
+                order,
+                offset,
+                count,
+                ..
+            }) = self.row_page_sourced(&returning.output, &[])?
+            {
+                returning.order = order;
+                returning.offset = offset;
+                returning.count = count;
+            }
+            return Ok(returning);
+        }
         let items = self.write_return_items(&mut returning)?;
         returning.projection = items.projection;
         returning.grouping = items.grouping;
