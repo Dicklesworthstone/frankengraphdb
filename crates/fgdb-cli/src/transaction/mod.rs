@@ -67,6 +67,7 @@ pub(super) struct Step {
     /// GQL text for a query or write; the savepoint name otherwise.
     text: String,
     pub(super) raw_params: Vec<(String, String)>,
+    pub(super) param_files: Vec<(String, std::path::PathBuf)>,
     query_write: QueryWriteOptions,
 }
 impl Step {
@@ -75,6 +76,7 @@ impl Step {
             kind,
             text,
             raw_params: Vec::new(),
+            param_files: Vec::new(),
             query_write: QueryWriteOptions::default(),
         }
     }
@@ -114,7 +116,7 @@ pub(super) fn validate_input(steps: &[Step]) -> Result<(), Failure> {
         if step.text.trim().is_empty() {
             return Err(Failure::usage("transaction step must not be empty"));
         }
-        if !step.takes_params() && !step.raw_params.is_empty() {
+        if !step.takes_params() && (!step.raw_params.is_empty() || !step.param_files.is_empty()) {
             return Err(Failure::usage(
                 "transaction --param must follow --query or --write",
             ));

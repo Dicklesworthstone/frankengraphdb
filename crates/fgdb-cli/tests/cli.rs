@@ -1200,3 +1200,273 @@ fn sealed_analytics_reads_beside_a_live_writer_without_mutating_database_files()
         drop(writer);
     });
 }
+
+#[test]
+fn parameter_file_commits_ten_thousand_rows_beyond_single_argument_capacity() {
+    let fixture = Fixture::new("parameter-file-large");
+    succeeded(&fixture.robot("create", &[]), "created");
+    let rows = (0..10_000)
+        .map(|id| format!(r#"{{"id":{id},"name":"person-{id:05}"}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let input = format!("[{rows}]");
+    assert!(
+        input.len() > 128 * 1024,
+        "fixture must exceed a Linux single argv value"
+    );
+    std::fs::write(fixture.dir.join("rows.json"), input).unwrap();
+    let write = fixture.robot(
+        "write",
+        &[
+            "--property",
+            "name=2",
+            "--param-file",
+            "rows=rows.json",
+            "UNWIND $rows AS row CREATE (:Person {id: row.id, name: row.name})",
+        ],
+    );
+    assert_eq!(succeeded(&write, "written"), 1, "one durable batch commit");
+    let count = fixture.robot("query", &["MATCH (n:Person) RETURN count(*) AS total"]);
+    succeeded(&count, "rows");
+    assert!(String::from_utf8_lossy(&count.stdout).contains(r#"{"type":"count","value":"10000"}"#));
+    let last = fixture.robot(
+        "query",
+        &[
+            "--property",
+            "name=2",
+            "MATCH (n:Person {id: 9999}) RETURN n.name AS name",
+        ],
+    );
+    succeeded(&last, "rows");
+    assert!(
+        String::from_utf8_lossy(&last.stdout).contains(r#"{"type":"text","value":"person-09999"}"#)
+    );
+}
+
+#[test]
+fn parameter_files_match_inline_types_and_keep_transaction_scopes_separate() {
+    let fixture = Fixture::new("parameter-file-parity");
+    succeeded(&fixture.robot("create", &[]), "created");
+    let first = r#"[{"id":1,"parts":[2,null,{"active":true}]}]"#;
+    let second = r#"[{"id":2,"parts":[3.5,"literal $not_a_parameter"]}]"#;
+    std::fs::write(fixture.dir.join("first.json"), first).unwrap();
+    std::fs::write(fixture.dir.join("second.json"), second).unwrap();
+    let inline_first = format!("rows=json:{first}");
+    let inline_second = format!("rows=json:{second}");
+    let query = "UNWIND $rows AS row RETURN row.id AS id, row.parts AS parts";
+    let file = fixture.robot("query", &["--param-file", "rows=first.json", query]);
+    let inline = fixture.robot("query", &["--param", &inline_first, query]);
+    succeeded(&file, "rows");
+    succeeded(&inline, "rows");
+    assert_eq!(file.stdout, inline.stdout);
+    let files = fixture.robot(
+        "transaction",
+        &[
+            "--query",
+            query,
+            "--param-file",
+            "rows=first.json",
+            "--query",
+            query,
+            "--param-file",
+            "rows=second.json",
+        ],
+    );
+    let inline = fixture.robot(
+        "transaction",
+        &[
+            "--query",
+            query,
+            "--param",
+            &inline_first,
+            "--query",
+            query,
+            "--param",
+            &inline_second,
+        ],
+    );
+    assert!(
+        files.status.success(),
+        "{}",
+        String::from_utf8_lossy(&files.stderr)
+    );
+    assert!(
+        inline.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inline.stderr)
+    );
+    assert_eq!(files.stdout, inline.stdout);
+}
+
+#[test]
+fn bad_parameter_files_and_late_transaction_files_leave_storage_unchanged() {
+    let fixture = Fixture::new("parameter-file-refusal");
+    succeeded(&fixture.robot("create", &[]), "created");
+    let before = directory_bytes(&fixture.db());
+    for (name, bytes) in [
+        ("bad.json", b"[{".to_vec()),
+        ("scalar.json", b"42".to_vec()),
+        ("utf8.json", vec![b'[', 255, b']']),
+        ("large.json", vec![b' '; 4 * 1024 * 1024 + 1]),
+        ("good.json", b"[{\"id\":1}]".to_vec()),
+        (
+            "transaction-limit.json",
+            [vec![b' '; 1024 * 1024 - 3], b"[1]".to_vec()].concat(),
+        ),
+    ] {
+        std::fs::write(fixture.dir.join(name), bytes).unwrap();
+    }
+    for file in ["bad.json", "scalar.json", "utf8.json", "large.json", "."] {
+        let raw = format!("rows={file}");
+        refused(
+            &fixture.robot(
+                "write",
+                &[
+                    "--param-file",
+                    &raw,
+                    "UNWIND $rows AS row CREATE (:Person {id: row.id})",
+                ],
+            ),
+            2,
+            "usage",
+        );
+        assert_eq!(directory_bytes(&fixture.db()), before);
+    }
+    refused(
+        &fixture.robot(
+            "query",
+            &["--param-file", "rows=absent.json", "RETURN $rows"],
+        ),
+        5,
+        "io",
+    );
+    refused(
+        &fixture.robot(
+            "write",
+            &[
+                "--param",
+                "rows=json:[]",
+                "--param-file",
+                "rows=absent.json",
+                "UNWIND $rows AS row CREATE (:Person {id: row.id})",
+            ],
+        ),
+        2,
+        "usage",
+    );
+    refused(
+        &fixture.robot(
+            "transaction",
+            &[
+                "--write",
+                "UNWIND $rows AS row CREATE (:Person {id: row.id})",
+                "--param-file",
+                "rows=good.json",
+                "--query",
+                "RETURN $rows",
+                "--param-file",
+                "rows=bad.json",
+            ],
+        ),
+        2,
+        "usage",
+    );
+    refused(
+        &fixture.robot(
+            "transaction",
+            &[
+                "--query",
+                "UNWIND $rows AS row RETURN row",
+                "--param-file",
+                "rows=transaction-limit.json",
+            ],
+        ),
+        2,
+        "usage",
+    );
+    assert_eq!(directory_bytes(&fixture.db()), before);
+}
+
+#[test]
+fn remote_parameter_files_refuse_before_credentials_in_every_single_statement_mode() {
+    let fixture = Fixture::new("parameter-file-remote");
+    std::fs::write(fixture.dir.join("bad.json"), "[{").unwrap();
+    let run = |flags: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_fgdb"))
+            .current_dir(&fixture.dir)
+            .args([
+                "--robot",
+                "remote",
+                "--addr",
+                "127.0.0.1:1",
+                "--database",
+                "test",
+                "--token-file",
+                "missing-token",
+            ])
+            .args(flags)
+            .output()
+            .unwrap()
+    };
+    for verb in ["query", "write", "subscribe"] {
+        refused(
+            &run(&["--param-file", "rows=bad.json", verb, "RETURN $rows"]),
+            2,
+            "usage",
+        );
+    }
+    refused(
+        &run(&[
+            "--param-file",
+            "rows=bad.json",
+            "diff",
+            "--before",
+            "0",
+            "--after",
+            "1",
+            "RETURN $rows",
+        ]),
+        2,
+        "usage",
+    );
+    refused(
+        &run(&[
+            "--param-file",
+            "rows=bad.json",
+            "--if-current",
+            "0",
+            "write",
+            "RETURN $rows",
+        ]),
+        2,
+        "usage",
+    );
+    for flags in [
+        vec![
+            "--param-file",
+            "rows=missing.json",
+            "--param",
+            "rows=json:[]",
+            "query",
+            "RETURN $rows",
+        ],
+        vec![
+            "--param-file",
+            "rows=missing.json",
+            "--rows-file",
+            "other.json",
+            "query",
+            "RETURN $rows",
+        ],
+        vec![
+            "--param-file",
+            "rows=missing.json",
+            "--prepared-jsonl",
+            "other.jsonl",
+            "write",
+            "RETURN $rows",
+        ],
+    ] {
+        refused(&run(&flags), 2, "usage");
+    }
+}

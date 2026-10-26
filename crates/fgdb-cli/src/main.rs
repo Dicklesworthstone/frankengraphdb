@@ -10,6 +10,7 @@ mod diff;
 mod fnx;
 mod import;
 mod load;
+mod parameter_file;
 mod query_write;
 mod refusal;
 mod remote;
@@ -148,6 +149,13 @@ TLS 1.3 and fgp/1 are required, and a TLS failure never retries in plaintext.
 Parameters: int:42, uint:42, float:1.5e-3, text:Ada, bool:true, bool:false, null,
 timestamp:<utc-nanos>,<offset-seconds>,<zone>,<tzdb-oid-hex>,
 json:<array|object> (a list or map; integers int, other numbers float).
+--param-file name=path reads one UTF-8 JSON array or object as that parameter,
+equivalent to --param name=json:<contents>, without putting the data on argv.
+It applies wherever --param does, including each transaction query/write step.
+Files must be regular files; all parameter files together allow at most 4 MiB
+per invocation. Native JSON/parameter limits and the transaction's 1 MiB input
+limit still apply. Inline and file parameters cannot repeat a name in one scope.
+Remote --param-file cannot combine with --rows-file or --prepared-jsonl.
 write --rows json:[{...},...] binds the statement's parameters once per object
 and commits every row as ONE atomic program (MERGE sees earlier rows).
 --tzdb-file <file> supplies a pinned transition-table artifact on every invocation.
@@ -579,6 +587,7 @@ struct Options {
     text: String,
     params: GqlParameters,
     raw_params: Vec<(String, String)>,
+    param_files: Vec<(String, PathBuf)>,
     /// `write --rows json:[...]`: one parameter set per object.
     rows: Option<String>,
     /// `write --from-query`: a frozen read feeds one atomic native batch.
@@ -779,6 +788,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     let mut text = None;
     let params = GqlParameters::new();
     let mut raw_params = Vec::new();
+    let mut param_files = Vec::new();
     let mut rows = None;
     let mut query_write = query_write::QueryWriteOptions::default();
     let mut tzdb_file = None;
@@ -951,6 +961,28 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                     };
                     target.push((name.to_owned(), raw.to_owned()));
                 }
+                "--param-file"
+                    if matches!(
+                        command,
+                        "query" | "write" | "replay" | "diff" | "transaction"
+                    ) =>
+                {
+                    let file = parameter_file::parse(value)?;
+                    let target = if command == "transaction" {
+                        &mut steps
+                            .last_mut()
+                            .filter(|step| step.takes_params())
+                            .ok_or_else(|| {
+                                Failure::usage(
+                                    "transaction --param-file must follow --query or --write",
+                                )
+                            })?
+                            .param_files
+                    } else {
+                        &mut param_files
+                    };
+                    target.push(file);
+                }
                 flag if command == "transaction"
                     && transaction::StepKind::of_flag(flag).is_some() =>
                 {
@@ -1032,6 +1064,16 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     }
     if command == "transaction" {
         transaction::validate_input(&steps)?;
+    }
+    parameter_file::validate_names(
+        &param_files,
+        raw_params.iter().map(|(name, _)| name.as_str()),
+    )?;
+    for step in &steps {
+        parameter_file::validate_names(
+            &step.param_files,
+            step.raw_params.iter().map(|(name, _)| name.as_str()),
+        )?;
     }
     if command == "diff" {
         diff.validate()?;
@@ -1133,6 +1175,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
         },
         params,
         raw_params,
+        param_files,
         rows,
         tzdb_file,
         zones: None,
@@ -1786,6 +1829,7 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let tunable = matches!(command, "query" | "replay" | "diff");
             let outcome = runtime.block_on(async {
+                parameter_file::load_local(&mut options, &contexts.query()).await?;
                 read_bindings_file(&mut options, &contexts.query()).await?;
                 let mut keys = read_keys(&contexts.query(), &options.key).await?;
                 let artifact = if let Some(path) = &options.tzdb_file {

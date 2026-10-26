@@ -42,6 +42,7 @@ struct RemoteOptions {
     mode: ExecuteMode,
     statement: String,
     parameters: Vec<(String, WireValue)>,
+    param_files: Vec<(String, PathBuf)>,
     /// `subscribe` stops after this many batches (default: until interrupted).
     max_batches: Option<u64>,
     tls: Option<RemoteTls>,
@@ -71,6 +72,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     let mut database = None;
     let mut positional = Vec::new();
     let mut parameters: Vec<(String, WireValue)> = Vec::new();
+    let mut param_files = Vec::new();
     let mut max_batches = None;
     let mut read_mode = None;
     let mut tls_server_name = None;
@@ -166,6 +168,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
                 }
                 parameters.push((name.to_owned(), parameter(typed)?));
             }
+            "--param-file" => param_files.push(super::parameter_file::parse(&value()?)?),
             other if other.starts_with("--") => {
                 return Err(Failure::usage(format!("unknown or duplicate flag {other}")));
             }
@@ -211,10 +214,12 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         return Err(Failure::usage("--max-batches applies only to subscribe"));
     }
     if rows_file.is_some()
-        && (!matches!(verb.as_str(), "query" | "write") || !parameters.is_empty())
+        && (!matches!(verb.as_str(), "query" | "write")
+            || !parameters.is_empty()
+            || !param_files.is_empty())
     {
         return Err(Failure::usage(
-            "--rows-file applies only to query or write and cannot be combined with --param",
+            "--rows-file applies only to query or write and cannot be combined with --param or --param-file",
         ));
     }
     if csv_types.is_some() && rows_file.is_none() {
@@ -224,10 +229,11 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         && (mode != ExecuteMode::Write
             || rows_file.is_some()
             || csv_types.is_some()
-            || !parameters.is_empty())
+            || !parameters.is_empty()
+            || !param_files.is_empty())
     {
         return Err(Failure::usage(
-            "--prepared-jsonl applies only to write and cannot combine with --rows-file, --csv-types or --param",
+            "--prepared-jsonl applies only to write and cannot combine with --rows-file, --csv-types, --param or --param-file",
         ));
     }
     if write_mode.is_some() && (mode != ExecuteMode::Write || prepared_jsonl.is_none()) {
@@ -265,6 +271,10 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
     } else {
         statement
     };
+    super::parameter_file::validate_names(
+        &param_files,
+        parameters.iter().map(|(name, _)| name.as_str()),
+    )?;
     Ok(RemoteOptions {
         addr: addr.ok_or_else(|| Failure::usage("remote needs --addr"))?,
         token_file: token_file.ok_or_else(|| Failure::usage("remote needs --token-file"))?,
@@ -272,6 +282,7 @@ fn parse(args: &[String]) -> Result<RemoteOptions, Failure> {
         mode,
         statement,
         parameters,
+        param_files,
         max_batches,
         tls,
         rows_file,
@@ -528,9 +539,26 @@ async fn execute_statement(
 }
 
 pub(crate) fn run(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Failure> {
-    let options = parse(args)?;
+    let mut options = parse(args)?;
     let runtime = fgdb::runtime_builder().build().map_err(Failure::io)?;
     let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    if !options.param_files.is_empty() {
+        let contexts = fgdb_types::PurposeContexts::narrow_runtime_root(&cx);
+        let mut remaining = super::parameter_file::MAX_INPUT_BYTES;
+        let loaded = runtime.block_on(super::parameter_file::load(
+            &contexts.query(),
+            &options.param_files,
+            options.parameters.iter().map(|(name, _)| name.as_str()),
+            &mut remaining,
+        ))?;
+        // Fully decode all parameters before credentials or a connection can
+        // be opened. Every remote mode shares the ordinary wire value binder.
+        let decoded = loaded
+            .into_iter()
+            .map(|(name, raw)| Ok((name, parameter(&raw)?)))
+            .collect::<Result<Vec<_>, Failure>>()?;
+        options.parameters.extend(decoded);
+    }
     if let Some(path) = &options.prepared_jsonl {
         return runtime.block_on(async {
             // Invalid or empty first input cannot read credentials or connect.
