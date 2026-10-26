@@ -817,3 +817,413 @@ fn full_property_authority_still_deletes_scoped_edges_and_reopens() {
         assert!(reopened.vertex(VId(3)).unwrap().is_some());
     });
 }
+
+mod query_deletion {
+    use super::*;
+    use fgdb_gql::{
+        GlaLimitDimension, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphDeleteError,
+        GraphDeletePolicy, GraphDeleteStats, GraphMutationPolicy, GraphSymbol, GraphSymbolKind,
+        PreparedGraphDeleteText, PreparedGraphMutationQueryText,
+    };
+
+    type DeleteFault = GqlQueryError<GraphDeleteError<WriteTxnError>, WriteTxnError>;
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Label, "Visible") => Some(GraphSymbol::Label(L)),
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+            _ => None,
+        }
+    }
+
+    fn read_grant() -> Grant {
+        Grant {
+            rights: Rights::ReadWrite,
+            ..total_grant()
+        }
+    }
+
+    fn authorization(error: &(dyn std::error::Error + 'static)) -> Option<Error> {
+        let mut cause = Some(error);
+        while let Some(error) = cause {
+            if let Some(WriteTxnError::Authorization(error)) = error.downcast_ref::<WriteTxnError>()
+            {
+                return Some(*error);
+            }
+            cause = error.source();
+        }
+        None
+    }
+
+    async fn fixture(
+        cx: &fgdb_types::CommitCx,
+        unrelated: u128,
+        incident: bool,
+    ) -> Database<fgdb::MemVfs> {
+        let mut db = Database::open_memory(cx, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in 1..=3 {
+            seed.create_vertex(VId(id), vec![L], vec![(P, CanonicalScalar::Int(id as i64))]);
+        }
+        if incident {
+            for id in [10, 11] {
+                seed.add_edge(
+                    EId(id),
+                    VId(1),
+                    VId(2),
+                    vec![(P, CanonicalScalar::Int(id as i64))],
+                );
+            }
+        }
+        for id in 0..unrelated {
+            seed.add_edge(
+                EId(1_000 + id),
+                VId(2),
+                VId(3),
+                vec![(P, CanonicalScalar::Int(id as i64))],
+            );
+        }
+        db.write(cx, seed).await.unwrap();
+        db
+    }
+
+    async fn isolated(
+        contexts: &PurposeContexts,
+        unrelated: u128,
+        mut capability: Grant,
+        records: u64,
+    ) -> Result<GraphDeleteStats, DeleteFault> {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = fixture(&commit, unrelated, false).await;
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        capability.limits.max_rows = 0;
+        let authority = issuer(NAMESPACE);
+        let token = authority.issue_at(&capability, NOW).unwrap();
+        let statement =
+            PreparedGraphDeleteText::prepare("MATCH (a:Visible {p:1}) DELETE a", R, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+        let result = db
+            .execute_graph_delete_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                BRANCH,
+                &statement,
+                GraphDeletePolicy::new(GqlQueryPolicy::new(records, 1, 1_000_000, 100_000), 1),
+                || NOW,
+            )
+            .await;
+        let result = match result {
+            Ok((stats, _)) => {
+                assert_eq!((stats.target_vertices, stats.target_edges), (1, 0));
+                assert!(db.vertex(VId(1)).unwrap().is_none());
+                assert_eq!(db.vertices().unwrap(), before.1[1..]);
+                assert_eq!(
+                    db.edges().unwrap(),
+                    before.2,
+                    "unrelated payloads must survive"
+                );
+                assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
+                Ok(stats)
+            }
+            Err(error) => {
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
+                    before
+                );
+                Err(error)
+            }
+        };
+        assert_eq!(txn.outstanding_obligations(), 0);
+        result
+    }
+
+    #[test]
+    fn isolated_delete_reads_no_unrelated_edge_rows_and_keeps_one_signed_allowance() {
+        under_lab(0xa9b1, |contexts| async move {
+            let empty = isolated(&contexts, 0, read_grant(), 10_000).await.unwrap();
+            assert!(empty.selection.snapshot_records > 0);
+            // Exact matching input allowance from the edge-free control. Any
+            // whole-graph incidence scan would exceed it on these two graphs.
+            let records = empty.selection.snapshot_records;
+            let mut expected = None;
+            for unrelated in [8, 128] {
+                let stats = isolated(&contexts, unrelated, read_grant(), records)
+                    .await
+                    .unwrap();
+                assert_eq!(stats.selection.snapshot_records, records);
+                expected = Some(stats);
+            }
+            let expected = expected.unwrap();
+            let (mut refused, mut admitted) = (0, read_grant().limits.max_work);
+            while admitted - refused > 1 {
+                let trial = refused + (admitted - refused) / 2;
+                let mut capability = read_grant();
+                capability.limits.max_work = trial;
+                match isolated(&contexts, 128, capability, records).await {
+                    Ok(stats) => {
+                        assert_eq!(stats, expected);
+                        admitted = trial;
+                    }
+                    Err(error) => {
+                        assert_eq!(
+                            authorization(&error),
+                            Some(Error::LimitExceeded(LimitDimension::Work)),
+                            "{error:?}"
+                        );
+                        refused = trial;
+                    }
+                }
+            }
+            for (limit, succeeds) in [(admitted - 1, false), (admitted, true)] {
+                let mut capability = read_grant();
+                capability.limits.max_work = limit;
+                let result = isolated(&contexts, 128, capability, records).await;
+                if succeeds {
+                    assert_eq!(result.unwrap(), expected);
+                } else {
+                    assert_eq!(
+                        authorization(&result.unwrap_err()),
+                        Some(Error::LimitExceeded(LimitDimension::Work))
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn standalone_delete_projection_and_incidence_share_native_limits_before_commit() {
+        under_lab(0xa9b2, |contexts| async move {
+            let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+            let authority = issuer(NAMESPACE);
+            let token = authority.issue_at(&read_grant(), NOW).unwrap();
+            let statement = PreparedGraphMutationQueryText::prepare(
+                "MATCH (a:Visible {p:1})-[r:R]->(b:Visible) DELETE a,r \
+                 RETURN size(range(1,32)) AS size LIMIT 0",
+                R,
+                symbols,
+            )
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+            let mut measured: Option<[u64; 3]> = None;
+            let mut expected = None;
+            for attempt in 0..5 {
+                let mut db = fixture(&commit, 8, true).await;
+                let before = (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap(),
+                );
+                let mut policy =
+                    GraphMutationPolicy::new(GqlQueryPolicy::new(10_000, 0, 1_000_000, 100_000), 3);
+                if let Some([records, work, scratch]) = measured {
+                    policy.query = GqlQueryPolicy::new(
+                        records - u64::from(attempt == 4),
+                        0,
+                        work - u64::from(attempt == 2),
+                        scratch - u64::from(attempt == 3),
+                    );
+                }
+                let result = db
+                    .execute_graph_mutation_query_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &authority,
+                        &token,
+                        BRANCH,
+                        &statement,
+                        policy,
+                        || NOW,
+                    )
+                    .await;
+                if attempt < 2 {
+                    let (stats, rows, _) = result.unwrap();
+                    assert_eq!(stats.effects, 3);
+                    assert!(rows.value.is_empty());
+                    assert!(rows.evaluator.work_units > stats.evaluator.work_units);
+                    let usage = [
+                        rows.rows.snapshot_records,
+                        rows.evaluator.work_units,
+                        rows.evaluator.scratch_entries,
+                    ];
+                    let graph = (db.vertices().unwrap(), db.edges().unwrap());
+                    assert_eq!(graph.0, before.1[1..]);
+                    assert_eq!(graph.1, before.2[2..]);
+                    assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
+                    if let Some(prior) = measured {
+                        assert_eq!(usage, prior);
+                        assert_eq!(Some(&(stats, rows, graph)), expected.as_ref());
+                    } else {
+                        measured = Some(usage);
+                        expected = Some((stats, rows, graph));
+                    }
+                } else {
+                    let error = result.unwrap_err();
+                    match attempt {
+                        2 => assert!(
+                            matches!(error, GqlQueryError::Evaluator(limit)
+                            if limit.dimension == GlaLimitDimension::WorkUnits),
+                            "{error:?}"
+                        ),
+                        3 => assert!(
+                            matches!(error, GqlQueryError::Evaluator(limit)
+                            if limit.dimension == GlaLimitDimension::ScratchEntries),
+                            "{error:?}"
+                        ),
+                        4 => assert!(matches!(error, GqlQueryError::Rows(_)), "{error:?}"),
+                        _ => unreachable!(),
+                    }
+                    assert_eq!(
+                        (
+                            db.frontier().unwrap(),
+                            db.vertices().unwrap(),
+                            db.edges().unwrap()
+                        ),
+                        before
+                    );
+                }
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        });
+    }
+
+    #[test]
+    fn indexed_proof_keeps_parallel_incoming_self_loop_and_cross_relation_incidence() {
+        under_lab(0xa9b3, |contexts| async move {
+            let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+            let mut db = fixture(&commit, 1, true).await;
+            let mut loops = WriteBatch::new(R);
+            loops.add_edge(EId(12), VId(1), VId(1), vec![]);
+            db.write(&commit, loops).await.unwrap();
+            let mut incoming = WriteBatch::new(RelationId(2));
+            incoming.add_edge(EId(13), VId(3), VId(1), vec![]);
+            db.write(&commit, incoming).await.unwrap();
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            let authority = issuer(NAMESPACE);
+            let token = authority.issue_at(&read_grant(), NOW).unwrap();
+            for (pattern, succeeds) in [("[r:R]", false), ("[r]", true)] {
+                let deletion = PreparedGraphDeleteText::prepare(
+                    &format!("MATCH (a:Visible {{p:1}})-{pattern}-(b) DELETE a,r"),
+                    R,
+                    symbols,
+                )
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+                let result = db
+                    .execute_graph_delete_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &authority,
+                        &token,
+                        BRANCH,
+                        &deletion,
+                        GraphDeletePolicy::new(GqlQueryPolicy::new(100, 100, 100_000, 10_000), 5),
+                        || NOW,
+                    )
+                    .await;
+                if succeeds {
+                    let (stats, _) = result.unwrap();
+                    assert_eq!((stats.target_vertices, stats.target_edges), (1, 4));
+                    assert!(db.vertex(VId(1)).unwrap().is_none());
+                    assert_eq!(db.vertices().unwrap(), before.1[1..]);
+                    assert_eq!(db.edges().unwrap(), before.2[4..]);
+                } else {
+                    assert!(matches!(
+                        result.unwrap_err(),
+                        GqlQueryError::Source(GraphDeleteError::IncidentRelationships)
+                    ));
+                    assert_eq!(
+                        (
+                            db.frontier().unwrap(),
+                            db.vertices().unwrap(),
+                            db.edges().unwrap()
+                        ),
+                        before
+                    );
+                }
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        });
+    }
+
+    #[test]
+    fn restricted_delete_still_refuses_before_observing_hidden_incidence() {
+        under_lab(0xa9b4, |contexts| async move {
+            let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+            let authority = issuer(NAMESPACE);
+            let capability = Grant {
+                relations: Scope::only([R]),
+                ..read_grant()
+            };
+            let token = authority.issue_at(&capability, NOW).unwrap();
+            let statement =
+                PreparedGraphDeleteText::prepare("MATCH (a:Visible {p:1}) DELETE a", R, symbols)
+                    .unwrap()
+                    .bind_parameters(&GqlParameters::new())
+                    .unwrap();
+            for hidden in [false, true] {
+                let mut db = fixture(&commit, 8, false).await;
+                if hidden {
+                    let mut extra = WriteBatch::new(RelationId(2));
+                    extra.add_edge(
+                        EId(10),
+                        VId(3),
+                        VId(1),
+                        vec![(SECRET, CanonicalScalar::Int(99))],
+                    );
+                    db.write(&commit, extra).await.unwrap();
+                }
+                let before = (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap(),
+                );
+                let error = db
+                    .execute_graph_delete_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &authority,
+                        &token,
+                        BRANCH,
+                        &statement,
+                        GraphDeletePolicy::new(GqlQueryPolicy::new(3, 1, 100_000, 10_000), 1),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(authorization(&error), Some(Error::ScopeDenied));
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
+                    before
+                );
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        });
+    }
+}

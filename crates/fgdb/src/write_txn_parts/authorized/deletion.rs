@@ -3,10 +3,11 @@
 
 use super::{Authority, CapabilityToken, Database, Error, Execution, Vfs};
 use super::{Workspace, WriteBatch, WriteTxn, WriteTxnError, redacted, selection, stage};
+use crate::gql_exec::source::SourceEvent;
 use fgdb_delta_types::RelationId;
 use fgdb_gql::{
-    GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension, GqlQueryError,
-    GraphDeleteError, GraphDeletePolicy, GraphDeleteStats, PreparedGraphDelete,
+    GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension, GqlQueryError, GraphDeleteError,
+    GraphDeletePolicy, GraphDeleteStats, PreparedGraphDelete,
 };
 use fgdb_types::{CommitCx, EId, EmbeddedTxnCompletion, QueryCx, TxnCx, VId};
 use fgdb_warden::PlannerPredicates;
@@ -26,15 +27,33 @@ fn event<Clock: FnMut() -> u64>(
     policy: GraphDeletePolicy,
     cx: &QueryCx,
     execution: &mut Execution<'_, '_, Clock>,
-    kind: GlaExecutionEvent,
+    kind: SourceEvent,
 ) -> Result<(), Fault> {
     cx.checkpoint()
         .map_err(WriteTxnError::Interrupted)
         .map_err(source)?;
     execution.checkpoint().map_err(source)?;
-    let work = u128::from(stats.evaluator.work_units) + 1;
-    let scratch = u128::from(stats.evaluator.scratch_entries)
-        + u128::from(kind == GlaExecutionEvent::ScratchEntry);
+    let mut next = *stats;
+    if kind == SourceEvent::SnapshotRecord {
+        next.selection.snapshot_records =
+            next.selection
+                .snapshot_records
+                .checked_add(1)
+                .ok_or(GqlQueryError::Source(
+                    GraphDeleteError::InvalidSourceStatistics,
+                ))?;
+        policy
+            .query
+            .rows
+            .check(
+                GqlBudgetDimension::SnapshotRecords,
+                next.selection.snapshot_records,
+            )
+            .map_err(GqlQueryError::Rows)?;
+    }
+    let work = u128::from(next.evaluator.work_units) + 1;
+    let scratch =
+        u128::from(next.evaluator.scratch_entries) + u128::from(kind == SourceEvent::ScratchEntry);
     for (observed, limit, dimension) in [
         (
             work,
@@ -55,8 +74,9 @@ fn event<Clock: FnMut() -> u64>(
             }));
         }
     }
-    stats.evaluator.work_units = work as u64;
-    stats.evaluator.scratch_entries = scratch as u64;
+    next.evaluator.work_units = work as u64;
+    next.evaluator.scratch_entries = scratch as u64;
+    *stats = next;
     Ok(())
 }
 
@@ -82,8 +102,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// An empty selection closes read-only without publishing a new sequence.
     /// Stats are control receipts and need no signed result-row allowance.
     ///
-    /// Incidence is read through the native pinned overlay, retaining its scan
-    /// and point dependencies. Its logical records/work and delete proposals
+    /// Incidence is read through the native index and pinned overlay, retaining
+    /// its target and point dependencies. The proof reads only target incidence,
+    /// without cloning unrelated edges or property payloads. Its logical
+    /// records/work and delete proposals
     /// extend the selection's native policy counters. As on ordinary DELETE,
     /// overlay materialization and native preparation remain resident-storage
     /// operations, not bounded-memory or preemptible query execution.
@@ -283,56 +305,30 @@ pub(super) fn complete<V: Vfs + Clone, Clock: FnMut() -> u64>(
             .map_err(|error| source(WriteTxnError::Authorization(error)))?;
     }
     if !vertices.is_empty() {
-        event(
-            &mut stats,
-            policy,
-            query_cx,
-            execution,
-            GlaExecutionEvent::Work,
-        )?;
-        // Full visibility was established above. Thus these native
-        // records and all proof charges contain no hidden topology.
-        // Never use the masked MATCH alone to prove isolation.
-        let incidence = transaction
-            .edges(database)
-            .map_err(redacted)
-            .map_err(source)?;
-        let records = u64::try_from(incidence.len())
-            .ok()
-            .and_then(|count| stats.selection.snapshot_records.checked_add(count))
-            .ok_or(GqlQueryError::Source(
-                GraphDeleteError::InvalidSourceStatistics,
-            ))?;
-        policy
-            .query
-            .rows
-            .check(GqlBudgetDimension::SnapshotRecords, records)
-            .map_err(GqlQueryError::Rows)?;
-        stats.selection.snapshot_records = records;
-        // Both proposal vectors are sorted. Price fixed-width
-        // binary searches before testing adjacency; allocate no
-        // alternate topology or target index.
-        let searches = 2 * (usize::BITS - vertices.len().leading_zeros()).max(1)
-            + (usize::BITS - edges.len().leading_zeros()).max(1);
-        for edge in incidence {
-            for _ in 0..searches {
-                event(
-                    &mut stats,
-                    policy,
-                    query_cx,
-                    execution,
-                    GlaExecutionEvent::Work,
-                )?;
-            }
-            if (vertices.binary_search(&edge.entry.src).is_ok()
-                || vertices.binary_search(&edge.entry.dst).is_ok())
-                && edges.binary_search(&edge.entry.eid).is_err()
-            {
-                return Err(GqlQueryError::Source(
-                    GraphDeleteError::IncidentRelationships,
-                ));
-            }
-        }
+        // The same native proof as owner DELETE. Full visibility above admits
+        // every target's incidence before it is observed or charged. Original
+        // snapshot edges and canonical staged creations/retirements contribute
+        // the proof's ordinary witnesses; MATCH alone never proves isolation.
+        transaction
+            .prove_delete_incidence(database, &vertices, &edges, &mut |kind| {
+                event(&mut stats, policy, query_cx, execution, kind)
+            })
+            .map_err(|error| {
+                error.map_source(|error| match error {
+                    GraphDeleteError::Source(error) => {
+                        // The event callback retains the public signed-limit,
+                        // expiry and interruption failures. Storage/ownership
+                        // refusals remain redacted as on the former scan.
+                        GraphDeleteError::Source(match error {
+                            WriteTxnError::Authorization(_) | WriteTxnError::Interrupted(_) => {
+                                error
+                            }
+                            error => redacted(error),
+                        })
+                    }
+                    error => error,
+                })
+            })?;
     }
     // Retire ALL explicit edges first. The complete incidence
     // proof above guarantees every subsequent native vertex delete
@@ -343,7 +339,7 @@ pub(super) fn complete<V: Vfs + Clone, Clock: FnMut() -> u64>(
             policy,
             query_cx,
             execution,
-            GlaExecutionEvent::ScratchEntry,
+            SourceEvent::ScratchEntry,
         )?;
         let mut batch = WriteBatch::new(relation);
         batch.delete_edge(*edge);
@@ -357,7 +353,7 @@ pub(super) fn complete<V: Vfs + Clone, Clock: FnMut() -> u64>(
             policy,
             query_cx,
             execution,
-            GlaExecutionEvent::ScratchEntry,
+            SourceEvent::ScratchEntry,
         )?;
         let mut batch = WriteBatch::new(relation);
         batch.delete_vertex(*vertex);

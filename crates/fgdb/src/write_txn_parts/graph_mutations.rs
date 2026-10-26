@@ -1,6 +1,97 @@
 // Query-selected writes share the existing canonical staged overlay and the
 // ordinary WriteTxn::write rollback/preparation boundary. No alternate writer.
 
+// Mutation RETURN/WITH has already evaluated the collection prefix when the
+// host proves plain DELETE incidence. All four standalone/chain and
+// owner/authorized adapters reserve the projection's additional usage before
+// native staging, then retain the complete counters without counting the
+// collection twice. This helper has no graph access or mutation semantics.
+struct MutationProjectionTail {
+    snapshot_records: u64,
+    work_units: u64,
+    scratch_entries: u64,
+}
+
+impl MutationProjectionTail {
+    fn reserve<E>(
+        policy: fgdb_gql::GraphMutationPolicy,
+        prefix: fgdb_gql::GraphMutationStats,
+        result: &fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+    ) -> Result<(fgdb_gql::GraphMutationPolicy, Self), fgdb_gql::GraphMutationError<E>> {
+        let invalid = || fgdb_gql::GraphMutationError::InvalidSourceStatistics;
+        let tail = Self {
+            snapshot_records: result
+                .rows
+                .snapshot_records
+                .checked_sub(prefix.selection.snapshot_records)
+                .ok_or_else(invalid)?,
+            work_units: result
+                .evaluator
+                .work_units
+                .checked_sub(prefix.evaluator.work_units)
+                .ok_or_else(invalid)?,
+            scratch_entries: result
+                .evaluator
+                .scratch_entries
+                .checked_sub(prefix.evaluator.scratch_entries)
+                .ok_or_else(invalid)?,
+        };
+        let reserved = fgdb_gql::GqlQueryPolicy::new(
+            policy
+                .query
+                .rows
+                .max_snapshot_records()
+                .unwrap_or(u64::MAX)
+                .checked_sub(tail.snapshot_records)
+                .ok_or_else(invalid)?,
+            policy.query.rows.max_result_rows().unwrap_or(u64::MAX),
+            policy
+                .query
+                .evaluator
+                .max_work_units
+                .checked_sub(tail.work_units)
+                .ok_or_else(invalid)?,
+            policy
+                .query
+                .evaluator
+                .max_scratch_entries
+                .checked_sub(tail.scratch_entries)
+                .ok_or_else(invalid)?,
+        );
+        Ok((
+            fgdb_gql::GraphMutationPolicy::new(reserved, policy.max_effects),
+            tail,
+        ))
+    }
+
+    fn complete<E>(
+        self,
+        staged: fgdb_gql::GraphMutationStats,
+        result: &mut fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+    ) -> Result<(), fgdb_gql::GraphMutationError<E>> {
+        let invalid = || fgdb_gql::GraphMutationError::InvalidSourceStatistics;
+        let snapshot_records = staged
+            .selection
+            .snapshot_records
+            .checked_add(self.snapshot_records)
+            .ok_or_else(invalid)?;
+        let work_units = staged
+            .evaluator
+            .work_units
+            .checked_add(self.work_units)
+            .ok_or_else(invalid)?;
+        let scratch_entries = staged
+            .evaluator
+            .scratch_entries
+            .checked_add(self.scratch_entries)
+            .ok_or_else(invalid)?;
+        result.rows.snapshot_records = snapshot_records;
+        result.evaluator.work_units = work_units;
+        result.evaluator.scratch_entries = scratch_entries;
+        Ok(())
+    }
+}
+
 impl WriteTxn {
     /// Stage one simultaneous query-selected element mutation. This does NOT
     /// commit: the caller still explicitly commits or aborts this transaction.
@@ -87,17 +178,27 @@ impl WriteTxn {
                 ))
             })?;
         cx.with_restriction(|| {
-            let proposal =
-                self.collect_graph_mutation_query_over(database, cx, query, policy, None)?;
-            let (batch, returning) = proposal.into_parts();
-            let stats = self.stage_mutation_intents(
+            let workspace = MutationProgramWorkspace::new(self);
+            let proposal = workspace
+                .txn
+                .collect_graph_mutation_query_over(database, cx, query, policy, None)?;
+            let (batch, mut returning) = proposal.into_parts();
+            let mutation_error =
+                |error| GqlQueryError::Source(GraphMutationQueryError::Mutation(error));
+            let (staging_policy, tail) =
+                MutationProjectionTail::reserve(policy, batch.stats(), &returning)
+                    .map_err(mutation_error)?;
+            let stats = workspace.txn.stage_mutation_intents(
                 database,
                 cx,
                 mutation.relation(),
                 batch,
-                policy,
+                staging_policy,
                 GraphMutationQueryError::Mutation,
             )?;
+            tail.complete(stats, &mut returning)
+                .map_err(mutation_error)?;
+            workspace.accept();
             Ok((stats, returning))
         })
     }

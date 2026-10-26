@@ -5,7 +5,8 @@ use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertRequest};
 use fgdb_gql::{
     GlaLimitDimension, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphDeletePolicy,
-    GraphSymbol, GraphSymbolKind, PreparedGraphDeleteText, PreparedGraphWriteChainText,
+    GraphMutationPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphDeleteText,
+    PreparedGraphMutationQueryText, PreparedGraphWriteChainText,
 };
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 
@@ -341,6 +342,134 @@ fn empty_selection_neither_scans_incidence_nor_spends_a_target_allowance() {
         ));
         assert_eq!(db.frontier().unwrap(), before);
         assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn standalone_delete_return_reserves_its_projection_before_incidence_and_staging() {
+    let ((), report) = run_async_under_lab(0xd31e_1004, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        for page in ["", " LIMIT 0"] {
+            let statement = PreparedGraphMutationQueryText::prepare(
+                &format!(
+                    "MATCH (a {{p:1}})-[r:R]->(b {{p:2}}) DELETE a,r \
+                     RETURN size(range(1,32)) AS size,b.p AS p{page}"
+                ),
+                R,
+                symbols,
+            )
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+            let rows = if page.is_empty() { 2 } else { 0 };
+            let mut measured: Option<[u64; 3]> = None;
+            let mut expected = None;
+            for attempt in 0..5 {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(R);
+                for id in 1..=3_u128 {
+                    seed.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(id as i64))]);
+                }
+                for id in [10, 11] {
+                    seed.add_edge(EId(id), VId(1), VId(2), vec![]);
+                }
+                seed.add_edge(EId(12), VId(2), VId(3), vec![(P, CanonicalScalar::Int(42))]);
+                db.write(&commit, seed).await.unwrap();
+                let before = (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap(),
+                );
+                let mut txn = db.begin(&txcx).unwrap();
+                let mut prefix = WriteBatch::new(R);
+                prefix.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(-3)));
+                txn.write(&mut db, prefix).unwrap();
+                let prefix_digest = txn.staged_effect_digest().unwrap();
+                let prefix_graph = (txn.vertices(&db).unwrap(), txn.edges(&db).unwrap());
+                let mut budget = GraphMutationPolicy::new(
+                    GqlQueryPolicy::new(10_000, rows, 2_000_000, 2_000_000),
+                    3,
+                );
+                if let Some([records, work, scratch]) = measured {
+                    budget.query = GqlQueryPolicy::new(
+                        records - u64::from(attempt == 4),
+                        rows,
+                        work - u64::from(attempt == 2),
+                        scratch - u64::from(attempt == 3),
+                    );
+                }
+                let result =
+                    txn.execute_graph_mutation_query_governed(&mut db, &query, &statement, budget);
+                if attempt < 2 {
+                    let (stats, result) = result.unwrap();
+                    assert_eq!(stats.effects, 3);
+                    assert_eq!(result.value.len() as u64, rows);
+                    for row in &result.value {
+                        assert_eq!(
+                            row.values(),
+                            &[
+                                fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(32)),
+                                fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(2)),
+                            ]
+                        );
+                    }
+                    assert!(result.evaluator.work_units > stats.evaluator.work_units);
+                    let usage = [
+                        result.rows.snapshot_records,
+                        result.evaluator.work_units,
+                        result.evaluator.scratch_entries,
+                    ];
+                    assert!(txn.vertex(&db, VId(1)).unwrap().is_none());
+                    let graph = (txn.vertices(&db).unwrap(), txn.edges(&db).unwrap());
+                    assert_eq!(graph.0.len(), 2);
+                    assert_eq!(graph.1, vec![before.2[2].clone()]);
+                    if let Some(prior) = measured {
+                        assert_eq!(usage, prior);
+                        assert_eq!(Some(&(stats, result, graph.clone())), expected.as_ref());
+                        txn.finish(&mut db, &commit).await.unwrap();
+                        assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
+                        assert_eq!((db.vertices().unwrap(), db.edges().unwrap()), graph);
+                    } else {
+                        measured = Some(usage);
+                        expected = Some((stats, result, graph));
+                        txn.abort();
+                    }
+                } else {
+                    let error = result.unwrap_err();
+                    match attempt {
+                        2 => assert!(
+                            matches!(error, GqlQueryError::Evaluator(limit)
+                            if limit.dimension == GlaLimitDimension::WorkUnits),
+                            "{error:?}"
+                        ),
+                        3 => assert!(
+                            matches!(error, GqlQueryError::Evaluator(limit)
+                            if limit.dimension == GlaLimitDimension::ScratchEntries),
+                            "{error:?}"
+                        ),
+                        4 => assert!(matches!(error, GqlQueryError::Rows(_)), "{error:?}"),
+                        _ => unreachable!(),
+                    }
+                    assert_eq!(txn.staged_effect_digest().unwrap(), prefix_digest);
+                    assert_eq!(
+                        (txn.vertices(&db).unwrap(), txn.edges(&db).unwrap()),
+                        prefix_graph
+                    );
+                    assert_eq!(
+                        (
+                            db.frontier().unwrap(),
+                            db.vertices().unwrap(),
+                            db.edges().unwrap()
+                        ),
+                        before
+                    );
+                    txn.abort();
+                }
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

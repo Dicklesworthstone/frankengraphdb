@@ -5,7 +5,9 @@ use super::{
     Authority, CapabilityToken, Database, Error, Execution, Vfs, Workspace, WriteTxn,
     WriteTxnError, insert, mutation, selection,
 };
-use crate::write_txn::{FrozenCreations, MutationProgramWorkspace, frozen_chain};
+use crate::write_txn::{
+    FrozenCreations, MutationProgramWorkspace, MutationProjectionTail, frozen_chain,
+};
 use crate::{PendingRow, WriteBatch};
 use fgdb_gql::algebra::{GraphValueRow, PreparedGraphPattern, ValueProjection};
 use fgdb_gql::insertion::{
@@ -14,9 +16,9 @@ use fgdb_gql::insertion::{
 use fgdb_gql::{
     GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
     GraphInsertBinding, GraphInsertQueryError, GraphMutationBatch, GraphMutationError,
-    GraphMutationPolicy, GraphMutationQueryError, GraphMutationStats, GraphPatternFactorExecution,
-    GraphSetSource, GraphWriteChainError, GraphWriteChainStep, PreparedGraphMutation,
-    PreparedGraphPatternFactors, PreparedGraphWriteChain,
+    GraphMutationPolicy, GraphMutationQueryError, GraphPatternFactorExecution, GraphSetSource,
+    GraphWriteChainError, GraphWriteChainStep, PreparedGraphMutation, PreparedGraphPatternFactors,
+    PreparedGraphWriteChain,
 };
 use fgdb_types::{CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
 use fgdb_warden::PlannerPredicates;
@@ -279,89 +281,6 @@ fn mutation_error(
     error: GraphMutationError<WriteTxnError>,
 ) -> GraphWriteChainError<WriteTxnError, WriteTxnError> {
     GraphWriteChainError::Mutation(GraphMutationQueryError::Mutation(error))
-}
-
-fn invalid_mutation_statistics() -> Fault {
-    GqlQueryError::Source(mutation_error(GraphMutationError::InvalidSourceStatistics))
-}
-
-struct MutationTail {
-    snapshot_records: u64,
-    work_units: u64,
-    scratch_entries: u64,
-}
-
-// The query result already includes its mutation prefix. Plain DELETE's
-// authorization owner adds an incidence proof after collection. Reserve the
-// projection's extra usage before that owner checks or allocates anything.
-fn mutation_staging_policy(
-    policy: GraphMutationPolicy,
-    prefix: GraphMutationStats,
-    result: &GqlQueryExecution<GraphValueRow>,
-) -> Result<(GraphMutationPolicy, MutationTail), Fault> {
-    let tail = MutationTail {
-        snapshot_records: result
-            .rows
-            .snapshot_records
-            .checked_sub(prefix.selection.snapshot_records)
-            .ok_or_else(invalid_mutation_statistics)?,
-        work_units: result
-            .evaluator
-            .work_units
-            .checked_sub(prefix.evaluator.work_units)
-            .ok_or_else(invalid_mutation_statistics)?,
-        scratch_entries: result
-            .evaluator
-            .scratch_entries
-            .checked_sub(prefix.evaluator.scratch_entries)
-            .ok_or_else(invalid_mutation_statistics)?,
-    };
-    let reserved = GqlQueryPolicy::new(
-        policy
-            .query
-            .rows
-            .max_snapshot_records()
-            .unwrap_or(u64::MAX)
-            .checked_sub(tail.snapshot_records)
-            .ok_or_else(invalid_mutation_statistics)?,
-        policy.query.rows.max_result_rows().unwrap_or(u64::MAX),
-        policy
-            .query
-            .evaluator
-            .max_work_units
-            .checked_sub(tail.work_units)
-            .ok_or_else(invalid_mutation_statistics)?,
-        policy
-            .query
-            .evaluator
-            .max_scratch_entries
-            .checked_sub(tail.scratch_entries)
-            .ok_or_else(invalid_mutation_statistics)?,
-    );
-    Ok((GraphMutationPolicy::new(reserved, policy.max_effects), tail))
-}
-
-fn finish_mutation_statistics(
-    result: &mut GqlQueryExecution<GraphValueRow>,
-    staged: GraphMutationStats,
-    tail: MutationTail,
-) -> Result<(), Fault> {
-    result.rows.snapshot_records = staged
-        .selection
-        .snapshot_records
-        .checked_add(tail.snapshot_records)
-        .ok_or_else(invalid_mutation_statistics)?;
-    result.evaluator.work_units = staged
-        .evaluator
-        .work_units
-        .checked_add(tail.work_units)
-        .ok_or_else(invalid_mutation_statistics)?;
-    result.evaluator.scratch_entries = staged
-        .evaluator
-        .scratch_entries
-        .checked_add(tail.scratch_entries)
-        .ok_or_else(invalid_mutation_statistics)?;
-    Ok(())
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -926,8 +845,12 @@ impl<V: Vfs + Clone> Database<V> {
                                 (stats, 0)
                             }
                             Proposal::Mutation(mutation, proposal, policy) => {
-                                let (staging_policy, tail) =
-                                    mutation_staging_policy(policy, proposal.stats(), &returning)?;
+                                let (staging_policy, tail) = MutationProjectionTail::reserve(
+                                    policy,
+                                    proposal.stats(),
+                                    &returning,
+                                )
+                                .map_err(|error| GqlQueryError::Source(mutation_error(error)))?;
                                 let (staged, _, _) = mutation::stage_proposal(
                                     workspace.transaction(),
                                     self,
@@ -940,7 +863,9 @@ impl<V: Vfs + Clone> Database<V> {
                                     false,
                                 )
                                 .map_err(|error| error.map_source(mutation_error))?;
-                                finish_mutation_statistics(&mut returning, staged, tail)?;
+                                tail.complete(staged, &mut returning).map_err(|error| {
+                                    GqlQueryError::Source(mutation_error(error))
+                                })?;
                                 (
                                     GraphInsertStats {
                                         selection: returning.rows,

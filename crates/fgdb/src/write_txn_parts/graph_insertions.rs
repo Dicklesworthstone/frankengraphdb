@@ -783,56 +783,9 @@ impl WriteTxn {
                             .map_err(|error| error.map_source(GraphWriteChainError::Mutation))?;
                         let (batch, mut returning) = proposal.into_parts();
                         let (targets, edges) = mutation_targets(&batch);
-                        let invalid = || {
-                            GqlQueryError::Source(mutation(
-                                fgdb_gql::GraphMutationError::InvalidSourceStatistics,
-                            ))
-                        };
-                        let prefix = batch.stats();
-                        // The RETURN/WITH result already contains collection.
-                        // Plain DELETE still owes its native incidence proof:
-                        // reserve only the projection's additional cost before
-                        // that proof consumes the same statement allowance.
-                        let tail_records = returning
-                            .rows
-                            .snapshot_records
-                            .checked_sub(prefix.selection.snapshot_records)
-                            .ok_or_else(invalid)?;
-                        let tail_work = returning
-                            .evaluator
-                            .work_units
-                            .checked_sub(prefix.evaluator.work_units)
-                            .ok_or_else(invalid)?;
-                        let tail_scratch = returning
-                            .evaluator
-                            .scratch_entries
-                            .checked_sub(prefix.evaluator.scratch_entries)
-                            .ok_or_else(invalid)?;
-                        let staging_policy = GraphMutationPolicy::new(
-                            GqlQueryPolicy::new(
-                                policy
-                                    .query
-                                    .rows
-                                    .max_snapshot_records()
-                                    .unwrap_or(u64::MAX)
-                                    .checked_sub(tail_records)
-                                    .ok_or_else(invalid)?,
-                                policy.query.rows.max_result_rows().unwrap_or(u64::MAX),
-                                policy
-                                    .query
-                                    .evaluator
-                                    .max_work_units
-                                    .checked_sub(tail_work)
-                                    .ok_or_else(invalid)?,
-                                policy
-                                    .query
-                                    .evaluator
-                                    .max_scratch_entries
-                                    .checked_sub(tail_scratch)
-                                    .ok_or_else(invalid)?,
-                            ),
-                            policy.max_effects,
-                        );
+                        let (staging_policy, tail) =
+                            MutationProjectionTail::reserve(policy, batch.stats(), &returning)
+                                .map_err(|error| GqlQueryError::Source(mutation(error)))?;
                         let stats = workspace.txn.stage_mutation_intents(
                             database,
                             cx,
@@ -841,24 +794,8 @@ impl WriteTxn {
                             staging_policy,
                             mutation,
                         )?;
-                        // Carry the proof forward exactly once, including when
-                        // LIMIT 0 hides rows or another write follows this WITH.
-                        // The outer workspace restores every effect on refusal.
-                        returning.rows.snapshot_records = stats
-                            .selection
-                            .snapshot_records
-                            .checked_add(tail_records)
-                            .ok_or_else(invalid)?;
-                        returning.evaluator.work_units = stats
-                            .evaluator
-                            .work_units
-                            .checked_add(tail_work)
-                            .ok_or_else(invalid)?;
-                        returning.evaluator.scratch_entries = stats
-                            .evaluator
-                            .scratch_entries
-                            .checked_add(tail_scratch)
-                            .ok_or_else(invalid)?;
+                        tail.complete(stats, &mut returning)
+                            .map_err(|error| GqlQueryError::Source(mutation(error)))?;
                         receipts.push(GraphWriteStepReceipt::Mutation { targets, edges });
                         effects = stats.effects;
                         (mutated(&stats), returning)

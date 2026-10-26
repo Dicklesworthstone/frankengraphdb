@@ -3,6 +3,7 @@
 
 use super::{Authority, CapabilityToken, Database, Error, Execution, Vfs};
 use super::{Workspace, WriteBatch, WriteTxn, WriteTxnError, selection, stage};
+use crate::write_txn::MutationProjectionTail;
 use fgdb_delta_types::ElementId;
 use fgdb_gql::{
     GqlQueryError, GraphMutationError, GraphMutationIntent, GraphMutationPolicy,
@@ -195,7 +196,11 @@ impl<V: Vfs + Clone> Database<V> {
                         None => result,
                     }
                 })?;
-                let (mutation, result) = proposal.into_parts();
+                let (mutation, mut result) = proposal.into_parts();
+                let (staging_policy, tail) =
+                    MutationProjectionTail::reserve(policy, mutation.stats(), &result).map_err(
+                        |error| GqlQueryError::Source(GraphMutationQueryError::Mutation(error)),
+                    )?;
                 let rows = u64::try_from(result.value.len())
                     .map_err(|_| query_source(WriteTxnError::Authorization(Error::TooLarge)))?;
                 execution
@@ -208,12 +213,15 @@ impl<V: Vfs + Clone> Database<V> {
                     query_cx,
                     query.mutation(),
                     mutation,
-                    policy,
+                    staging_policy,
                     verified.predicates(),
                     &mut execution,
                     false,
                 )
                 .map_err(|error| error.map_source(GraphMutationQueryError::Mutation))?;
+                tail.complete(stats, &mut result).map_err(|error| {
+                    GqlQueryError::Source(GraphMutationQueryError::Mutation(error))
+                })?;
                 query_cx
                     .with_restriction(|| {
                         admit(&result.value, &mut |work| {
