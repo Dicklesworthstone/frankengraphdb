@@ -11,8 +11,8 @@
 use crate::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, BodyError, Credential, Empty, ErrorBody,
     ErrorCode, Execute, ExecuteBatch, ExecuteMode, ExecutePrepared, Hello, HelloAck, Outcome, Ping,
-    Prepare, Prepared, PreparedHandle, PreparedReadMode, Ready, ReleasePrepared, ResultChunk,
-    ResultEnd, SelectDatabase, SubscriptionBatch, WindowUpdate, WireValue,
+    Prepare, PrepareMode, Prepared, PreparedHandle, PreparedReadMode, Ready, ReleasePrepared,
+    ResultChunk, ResultEnd, SelectDatabase, SubscriptionBatch, WindowUpdate, WireValue,
 };
 use crate::transport::{
     DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, TransportError, split_duplex,
@@ -356,6 +356,31 @@ impl Client {
         &mut self,
         cx: &Cx,
         statement: &str,
+        parameters: Vec<(String, WireValue)>,
+    ) -> Result<PreparedHandle, ClientError> {
+        self.prepare(cx, PrepareMode::Read, statement, parameters)
+            .await
+    }
+
+    /// Prepare a stats-only native write script without executing it. Every
+    /// execution supplies new operands and obtains fresh live Write authority.
+    /// RETURN is refused. Older peers refuse the additive write preparation
+    /// profile; the client never retries it as ordinary EXECUTE.
+    pub async fn prepare_write(
+        &mut self,
+        cx: &Cx,
+        statement: &str,
+        parameters: Vec<(String, WireValue)>,
+    ) -> Result<PreparedHandle, ClientError> {
+        self.prepare(cx, PrepareMode::Write, statement, parameters)
+            .await
+    }
+
+    async fn prepare(
+        &mut self,
+        cx: &Cx,
+        mode: PrepareMode,
+        statement: &str,
         mut parameters: Vec<(String, WireValue)>,
     ) -> Result<PreparedHandle, ClientError> {
         if self.selected.is_none() {
@@ -368,6 +393,7 @@ impl Client {
                 FrameKind::Prepare,
                 StreamId::CONTROL,
                 &Prepare {
+                    mode,
                     statement: statement.to_owned(),
                     parameters,
                 },
@@ -380,7 +406,7 @@ impl Client {
         Ok(expect::<Prepared>(&frame, FrameKind::Prepared)?.handle)
     }
 
-    /// Drop a connection-owned read template. Repeated/unknown releases have
+    /// Drop a connection-owned statement template. Repeated/unknown releases have
     /// the same response. This releases no transaction or durable result.
     pub async fn release_prepared(
         &mut self,
@@ -467,6 +493,11 @@ impl Client {
         on_columns: impl FnMut(&[String]) -> Result<(), ClientError>,
         on_row: impl FnMut(Vec<WireValue>) -> Result<(), ClientError>,
     ) -> Result<Outcome, ClientError> {
+        if mode == PreparedReadMode::Write {
+            return Err(ClientError::Protocol(
+                "a prepared read cannot request Write mode",
+            ));
+        }
         if self.selected.is_none() {
             return Err(ClientError::Protocol("select a database first"));
         }
@@ -487,6 +518,55 @@ impl Client {
         if !matches!(outcome, Outcome::Rows { .. }) {
             return Err(ClientError::Protocol(
                 "prepared read returned a write outcome",
+            ));
+        }
+        Ok(outcome)
+    }
+
+    /// Execute one prepared write as an atomic, stats-only autocommit. A read
+    /// handle is refused by the server. Repeating this call is a new write;
+    /// unknown completion is never retried or described as a rollback.
+    pub async fn execute_prepared_write(
+        &mut self,
+        cx: &Cx,
+        handle: PreparedHandle,
+        mut parameters: Vec<(String, WireValue)>,
+    ) -> Result<Outcome, ClientError> {
+        if self.selected.is_none() {
+            return Err(ClientError::Protocol("select a database first"));
+        }
+        parameters.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let request = self
+            .send(
+                cx,
+                FrameKind::ExecutePrepared,
+                StreamId::CONTROL,
+                &ExecutePrepared {
+                    handle,
+                    mode: PreparedReadMode::Write,
+                    parameters,
+                },
+            )
+            .await?;
+        let mut unexpected_columns = false;
+        let outcome = self
+            .receive_result(
+                cx,
+                request,
+                |columns| {
+                    unexpected_columns |= !columns.is_empty();
+                    Ok(())
+                },
+                |_| {
+                    Err(ClientError::Protocol(
+                        "a stats-only prepared write returned a row",
+                    ))
+                },
+            )
+            .await?;
+        if unexpected_columns || matches!(outcome, Outcome::Rows { .. }) {
+            return Err(ClientError::Protocol(
+                "a stats-only prepared write returned a query result",
             ));
         }
         Ok(outcome)
@@ -1608,6 +1688,151 @@ mod tests {
                 Err(ProtocolError::InvalidBinding),
             );
         }
+    }
+
+    #[test]
+    fn prepared_write_client_uses_explicit_modes_and_never_replays_unknown_completion() {
+        let ((), report) = run_async_under_lab(0x79a0_0321, |root| async move {
+            for scenario in 0..5 {
+                let handle = PreparedHandle([0x41; 16]);
+                let mut replies = vec![rpc(
+                    FrameKind::Prepared,
+                    4,
+                    StreamId::CONTROL,
+                    &Prepared { handle },
+                )];
+                match scenario {
+                    0 | 1 | 4 => {
+                        replies.push(rpc(
+                            FrameKind::SnapshotResultChunk,
+                            5,
+                            StreamId([5; 16]),
+                            &ResultChunk {
+                                columns: Some(vec![]),
+                                rows: vec![],
+                            },
+                        ));
+                        replies.push(rpc(
+                            FrameKind::SnapshotResultEnd,
+                            5,
+                            StreamId([5; 16]),
+                            &ResultEnd {
+                                outcome: match scenario {
+                                    0 => Outcome::WriteCommitted {
+                                        seq: 8,
+                                        statements: 2,
+                                    },
+                                    1 => Outcome::ReadClosed {
+                                        seq: 7,
+                                        statements: 2,
+                                    },
+                                    _ => Outcome::Rows { seq: 7 },
+                                },
+                                rows: 0,
+                            },
+                        ));
+                    }
+                    2 => replies.push(rpc(
+                        FrameKind::Error,
+                        5,
+                        StreamId([5; 16]),
+                        &ErrorBody {
+                            code: ErrorCode::OutcomeUnknown,
+                            message: "write outcome unknown; do not replay".into(),
+                        },
+                    )),
+                    _ => {}
+                }
+                let io = script(replies);
+                let written = std::sync::Arc::clone(&io.written);
+                let mut client = Client::connect_stream(&root, io, vec![1]).await.unwrap();
+                client.select(&root, "test").await.unwrap();
+                assert_eq!(
+                    client
+                        .prepare_write(
+                            &root,
+                            "CREATE (:Person {name:$name,age:$age})",
+                            vec![
+                                ("name".into(), WireValue::Text("sample".into())),
+                                ("age".into(), WireValue::Int(99))
+                            ],
+                        )
+                        .await
+                        .unwrap(),
+                    handle
+                );
+                assert!(
+                    matches!(
+                        client
+                            .execute_prepared_streaming(
+                                &root,
+                                PreparedReadMode::Write,
+                                handle,
+                                vec![],
+                                |_| Ok(()),
+                                |_| Ok(()),
+                            )
+                            .await,
+                        Err(ClientError::Protocol(_))
+                    ),
+                    "read APIs refuse locally before sending"
+                );
+                let result = client
+                    .execute_prepared_write(
+                        &root,
+                        handle,
+                        vec![
+                            ("name".into(), WireValue::Text("Ann".into())),
+                            ("age".into(), WireValue::Int(30)),
+                        ],
+                    )
+                    .await;
+                match scenario {
+                    0 => assert_eq!(
+                        result.unwrap(),
+                        Outcome::WriteCommitted {
+                            seq: 8,
+                            statements: 2
+                        }
+                    ),
+                    1 => assert_eq!(
+                        result.unwrap(),
+                        Outcome::ReadClosed {
+                            seq: 7,
+                            statements: 2
+                        }
+                    ),
+                    2 => assert!(matches!(
+                        result,
+                        Err(ClientError::Server {
+                            code: ErrorCode::OutcomeUnknown,
+                            ..
+                        })
+                    )),
+                    3 => assert!(matches!(result, Err(ClientError::Closed))),
+                    _ => assert!(matches!(result, Err(ClientError::Protocol(_)))),
+                }
+                let frames = sent_frames(&written.lock().unwrap());
+                assert_eq!(
+                    frames.len(),
+                    5,
+                    "no fallback or replay after a failed prepared write"
+                );
+                let preparation = Prepare::decode(frames[3].payload()).unwrap();
+                assert_eq!(preparation.mode, PrepareMode::Write);
+                let execution = ExecutePrepared::decode(frames[4].payload()).unwrap();
+                assert_eq!(execution.mode, PreparedReadMode::Write);
+                assert_eq!(execution.handle, handle);
+                assert_eq!(
+                    execution.parameters,
+                    [
+                        ("age".into(), WireValue::Int(30)),
+                        ("name".into(), WireValue::Text("Ann".into())),
+                    ]
+                );
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]

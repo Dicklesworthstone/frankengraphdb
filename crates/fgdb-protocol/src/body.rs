@@ -970,7 +970,7 @@ body!(
     }
 );
 
-/// A server-minted, connection-owned native read-template selector. It is
+/// A server-minted, connection-owned native statement-template selector. It is
 /// neither a transaction identity nor a durable result/resume capability.
 /// Zero is reserved. Knowledge of the bytes grants no authority on another
 /// connection, after AUTH_REFRESH, after release, or after database recovery.
@@ -987,11 +987,22 @@ impl PreparedHandle {
     }
 }
 
-/// PREPARE is the ephemeral native read-template profile. Representative
-/// parameters declare the same structural operand types as ordinary EXECUTE;
-/// their values are never retained as execution defaults. Writes refuse.
+/// The requested operation ceiling, checked against the native statement class.
+/// A read preparation can never admit a write. Write preparation admits only
+/// the stats-only native write-script profile; it does not execute the script.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrepareMode {
+    Read,
+    Write,
+}
+
+/// PREPARE retains an ephemeral native template. Representative parameters
+/// declare structural operand types; their values are never execution defaults.
+/// Read keeps the original wire encoding. Write appends the canonical tag 1,
+/// which older peers reject as trailing bytes before installing any template.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Prepare {
+    pub mode: PrepareMode,
     pub statement: String,
     pub parameters: Vec<(String, WireValue)>,
 }
@@ -1002,9 +1013,9 @@ pub struct Prepared {
     pub handle: PreparedHandle,
 }
 
-/// Select the physical delivery contract for a prepared read.
+/// Select the operation and delivery contract of a prepared statement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PreparedReadMode {
+pub enum PreparedExecutionMode {
     /// Execute the full admitted native profile before chunking its answer.
     Buffered,
     /// Pull an admitted native row or aggregate cursor under FGP flow credit.
@@ -1013,13 +1024,20 @@ pub enum PreparedReadMode {
     /// Complete the native order/window in host-owned bounded scratch before
     /// delivering final rows under FGP credit. Unsupported profiles refuse.
     OrderedStream,
+    /// Execute a write template as one atomic, stats-only autocommit. Read
+    /// templates and RETURN profiles refuse; no mode silently changes class.
+    Write,
 }
+
+/// Compatibility name for the original prepared read delivery selector.
+/// Read-only client methods reject `Write` before sending a request.
+pub type PreparedReadMode = PreparedExecutionMode;
 
 /// Rebind and execute at the current visible frontier under live authority.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExecutePrepared {
     pub handle: PreparedHandle,
-    pub mode: PreparedReadMode,
+    pub mode: PreparedExecutionMode,
     pub parameters: Vec<(String, WireValue)>,
 }
 
@@ -1113,11 +1131,26 @@ body!(
         check_len(s.statement.len(), MAX_STATEMENT_BYTES)?;
         out.text(&s.statement);
         put_parameters(&mut out, &s.parameters)?;
+        if s.mode == PrepareMode::Write {
+            out.u8(1);
+        }
     },
     |input| {
+        let statement = input.text(MAX_STATEMENT_BYTES)?;
+        let parameters = get_parameters(&mut input)?;
+        let mode = if input.at == input.bytes.len() {
+            PrepareMode::Read
+        } else if input.u8()? == 1 {
+            PrepareMode::Write
+        } else {
+            // Preserve the legacy read profile's structural error for every
+            // suffix except the explicitly admitted write extension.
+            return Err(BodyError::TrailingBytes);
+        };
         Prepare {
-            statement: input.text(MAX_STATEMENT_BYTES)?,
-            parameters: get_parameters(&mut input)?,
+            mode,
+            statement,
+            parameters,
         }
     }
 );
@@ -1144,6 +1177,7 @@ body!(
             PreparedReadMode::Buffered => 0,
             PreparedReadMode::SourceStream => 1,
             PreparedReadMode::OrderedStream => 2,
+            PreparedReadMode::Write => 3,
         });
         put_parameters(&mut out, &s.parameters)?;
     },
@@ -1154,6 +1188,7 @@ body!(
             0 => PreparedReadMode::Buffered,
             1 => PreparedReadMode::SourceStream,
             2 => PreparedReadMode::OrderedStream,
+            3 => PreparedReadMode::Write,
             _ => return Err(BodyError::Noncanonical),
         };
         ExecutePrepared {
@@ -1768,12 +1803,14 @@ mod tests {
     fn prepared_read_bodies_have_canonical_bounded_handles_and_operands() {
         let handle = PreparedHandle([0x31; 16]);
         let prepare = Prepare {
+            mode: PrepareMode::Read,
             statement: "a".into(),
             parameters: vec![],
         };
         assert_eq!(prepare.encode().unwrap(), [0, 0, 0, 1, b'a', 0, 0, 0, 0]);
         every_prefix_refuses::<Prepare>(&prepare.encode().unwrap());
         let prepare = Prepare {
+            mode: PrepareMode::Read,
             statement: "MATCH (n) WHERE n.age >= $min RETURN n".into(),
             parameters: vec![("min".into(), WireValue::Int(7))],
         };
@@ -1793,6 +1830,7 @@ mod tests {
             (PreparedReadMode::Buffered, 0),
             (PreparedReadMode::SourceStream, 1),
             (PreparedReadMode::OrderedStream, 2),
+            (PreparedReadMode::Write, 3),
         ] {
             let execution = ExecutePrepared {
                 handle,
@@ -1806,7 +1844,7 @@ mod tests {
             assert_eq!(ExecutePrepared::decode(&bytes).unwrap(), execution);
             every_prefix_refuses::<ExecutePrepared>(&bytes);
         }
-        for tag in [3, u8::MAX] {
+        for tag in [4, u8::MAX] {
             let mut unknown_mode = vec![0x31; 16];
             unknown_mode.extend_from_slice(&[tag, 0, 0, 0, 0]);
             assert_eq!(
@@ -1849,6 +1887,7 @@ mod tests {
         let duplicate = vec![("a".into(), WireValue::Null), ("a".into(), WireValue::Null)];
         assert_eq!(
             Prepare {
+                mode: PrepareMode::Read,
                 statement: "a".into(),
                 parameters: duplicate.clone()
             }
@@ -1872,6 +1911,39 @@ mod tests {
             ExecutePrepared::decode(&duplicate_bytes),
             Err(BodyError::Noncanonical)
         );
+    }
+
+    #[test]
+    fn prepared_write_mode_is_canonical_and_fails_closed_with_legacy_decoding() {
+        let request = Prepare {
+            mode: PrepareMode::Write,
+            statement: "CREATE ()".into(),
+            parameters: vec![],
+        };
+        let bytes = request.encode().unwrap();
+        assert_eq!(
+            bytes,
+            [
+                0, 0, 0, 9, b'C', b'R', b'E', b'A', b'T', b'E', b' ', b'(', b')', 0, 0, 0, 0, 1
+            ]
+        );
+        assert_eq!(Prepare::decode(&bytes).unwrap(), request);
+        // The original read PREPARE decoder consumes exactly text and operands.
+        // It cannot install this write template as a legacy read definition.
+        let mut legacy = In::new(&bytes);
+        assert_eq!(legacy.text(MAX_STATEMENT_BYTES).unwrap(), "CREATE ()");
+        assert!(get_parameters(&mut legacy).unwrap().is_empty());
+        assert_eq!(legacy.finish(), Err(BodyError::TrailingBytes));
+        let prefix = &bytes[..bytes.len() - 1];
+        assert_eq!(Prepare::decode(prefix).unwrap().mode, PrepareMode::Read);
+        for tag in [0, 2, u8::MAX] {
+            let mut invalid = prefix.to_vec();
+            invalid.push(tag);
+            assert_eq!(Prepare::decode(&invalid), Err(BodyError::TrailingBytes));
+        }
+        let mut duplicate = bytes;
+        duplicate.push(1);
+        assert_eq!(Prepare::decode(&duplicate), Err(BodyError::TrailingBytes));
     }
 
     #[test]

@@ -3,8 +3,8 @@
 
 use super::*;
 use fgdb::PreparedNativeRead;
-use fgdb_gql::{GqlParameters, PreparedGraphBranchText};
-use fgdb_protocol::body::Prepare;
+use fgdb_gql::{GqlParameters, PreparedGraphBranchText, PreparedGraphWriteScript};
+use fgdb_protocol::body::{Prepare, PrepareMode, PreparedExecutionMode};
 use std::sync::Arc;
 
 pub(crate) struct PreparedRead {
@@ -12,6 +12,64 @@ pub(crate) struct PreparedRead {
     pub(super) native: Arc<PreparedNativeRead>,
     pub(crate) generation: Generation,
     pub(crate) source_bytes: usize,
+}
+
+pub(crate) struct PreparedWrite {
+    script: PreparedGraphWriteScript,
+    generation: Generation,
+    source_bytes: usize,
+}
+
+/// The compiler determines a handle's class once. Client delivery modes can
+/// select a compatible executor, but can never promote a read into a write.
+pub(crate) enum PreparedDefinition {
+    Read(PreparedRead),
+    Write(PreparedWrite),
+}
+
+impl PreparedDefinition {
+    pub(crate) fn generation(&self) -> &Generation {
+        match self {
+            Self::Read(definition) => &definition.generation,
+            Self::Write(definition) => &definition.generation,
+        }
+    }
+
+    pub(crate) fn source_bytes(&self) -> usize {
+        match self {
+            Self::Read(definition) => definition.source_bytes,
+            Self::Write(definition) => definition.source_bytes,
+        }
+    }
+
+    pub(crate) fn read(&self) -> Option<&PreparedRead> {
+        match self {
+            Self::Read(definition) => Some(definition),
+            Self::Write(_) => None,
+        }
+    }
+}
+
+impl From<PreparedRead> for PreparedDefinition {
+    fn from(value: PreparedRead) -> Self {
+        Self::Read(value)
+    }
+}
+
+pub(crate) async fn prepare_statement(
+    cx: &Cx,
+    db: &Served,
+    token: &CapabilityToken,
+    request: &Prepare,
+) -> Result<PreparedDefinition, Refusal> {
+    match request.mode {
+        PrepareMode::Read => prepare_read(cx, db, token, request)
+            .await
+            .map(PreparedDefinition::Read),
+        PrepareMode::Write => prepare_write(cx, db, token, request)
+            .await
+            .map(PreparedDefinition::Write),
+    }
 }
 
 fn branch_error(error: fgdb_gql::GraphBranchTextError) -> Refusal {
@@ -35,6 +93,9 @@ pub(crate) async fn prepare_read(
     token: &CapabilityToken,
     request: &Prepare,
 ) -> Result<PreparedRead, Refusal> {
+    if request.mode != PrepareMode::Read {
+        return Err(mode_refusal());
+    }
     let _operation = db.db.enter().map_err(Refusal::from)?;
     let now = unix_millis();
     let capability = db
@@ -88,6 +149,131 @@ pub(crate) async fn prepare_read(
         native: Arc::new(native),
         generation,
         source_bytes: request.statement.len(),
+    })
+}
+
+async fn prepare_write(
+    cx: &Cx,
+    db: &Served,
+    token: &CapabilityToken,
+    request: &Prepare,
+) -> Result<PreparedWrite, Refusal> {
+    let generation = db.db.generation().map_err(Refusal::from)?;
+    let _operation = generation.enter().map_err(Refusal::from)?;
+    let now = unix_millis();
+    db.authority
+        .verify_at(token, TRUNK, now)
+        .and_then(|capability| capability.begin_write_at(TRUNK, now).map(|_| ()))
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    let query = crate::query_cx(&contexts);
+    let parameters = convert::parameters(&request.parameters, None)
+        .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
+    let guard = db.db.read(cx).await.map_err(Refusal::from)?;
+    generation.check().map_err(Refusal::from)?;
+    let script = guard.prepare_graph_write_script_authorized(
+        &query,
+        &contexts.commit(),
+        &db.authority,
+        token,
+        TRUNK,
+        &request.statement,
+        &parameters,
+        |kind, name| db.symbols.resolve(kind, name),
+        db.write_relation,
+        db.max_statements,
+        unix_millis,
+    );
+    generation.check().map_err(Refusal::from)?;
+    Ok(PreparedWrite {
+        script: script.map_err(|error| write_refusal(&error))?,
+        generation,
+        source_bytes: request.statement.len(),
+    })
+}
+
+fn mode_refusal() -> Refusal {
+    Refusal::new(
+        ErrorCode::Statement,
+        "prepared statement class does not permit the requested execution mode",
+    )
+}
+
+pub(crate) fn run_prepared<'a>(
+    cx: &'a Cx,
+    db: &'a Served,
+    token: &'a CapabilityToken,
+    definition: &'a PreparedDefinition,
+    mode: PreparedExecutionMode,
+    parameters: &'a [(String, WireValue)],
+) -> Execution<'a> {
+    match (definition, mode) {
+        (PreparedDefinition::Read(prepared), PreparedExecutionMode::Buffered) => {
+            read_prepared(cx, db, token, prepared, parameters)
+        }
+        (PreparedDefinition::Write(prepared), PreparedExecutionMode::Write) => {
+            Box::pin(write_prepared_inner(cx, db, token, prepared, parameters))
+        }
+        _ => Box::pin(async { Err(mode_refusal()) }),
+    }
+}
+
+async fn write_prepared_inner(
+    cx: &Cx,
+    db: &Served,
+    token: &CapabilityToken,
+    prepared: &PreparedWrite,
+    parameters: &[(String, WireValue)],
+) -> Result<Answer, Refusal> {
+    let _operation = prepared.generation.enter().map_err(Refusal::from)?;
+    let now = unix_millis();
+    db.authority
+        .verify_at(token, TRUNK, now)
+        .and_then(|capability| capability.begin_write_at(TRUNK, now).map(|_| ()))
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    let contexts = PurposeContexts::narrow_runtime_root(cx);
+    let parameters = convert::parameters(parameters, None)
+        .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
+    let mut guard = db.db.write(cx).await.map_err(Refusal::from)?;
+    // Waiting for another writer cannot revive metadata from an old recovery
+    // generation. No binding or identity allocation precedes this fence.
+    prepared.generation.check().map_err(Refusal::from)?;
+    let generation = guard.generation();
+    let (stats, completion) = guard
+        .execute_graph_write_script_authorized(
+            &contexts.txn(),
+            &crate::query_cx(&contexts),
+            &contexts.commit(),
+            &db.authority,
+            token,
+            TRUNK,
+            &prepared.script,
+            &parameters,
+            db.write_policy,
+            unix_millis,
+        )
+        .await
+        .map_err(|error| write_refusal(&error))?;
+    drop(guard);
+    let statements = stats.completed_statements as u64;
+    let outcome = match completion {
+        EmbeddedTxnCompletion::WriteCommitted { commit_seq } => {
+            db.commits.committed();
+            Outcome::WriteCommitted {
+                seq: commit_seq.0,
+                statements,
+            }
+        }
+        EmbeddedTxnCompletion::ReadClosed { snapshot_seq, .. } => Outcome::ReadClosed {
+            seq: snapshot_seq.0,
+            statements,
+        },
+    };
+    Ok(Answer {
+        columns: Vec::new(),
+        rows: Vec::new(),
+        outcome,
+        generation,
     })
 }
 

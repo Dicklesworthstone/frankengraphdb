@@ -830,6 +830,7 @@ fn published_read_admission_does_not_wait_for_a_writer_or_permanently_pin_histor
             db,
             &token,
             &fgdb_protocol::body::Prepare {
+                mode: fgdb_protocol::body::PrepareMode::Read,
                 statement: "MATCH (n) RETURN $v AS value".into(),
                 parameters: vec![("v".into(), fgdb_protocol::body::WireValue::Int(9))],
             },

@@ -8,8 +8,8 @@
 
 use crate::commits::CommitWatcher;
 use crate::execute::{
-    Answer, PreparedRead, Refusal, poll, prepare_read, read, read_prepared, subscribe, write,
-    write_batch,
+    Answer, PreparedDefinition, Refusal, poll, prepare_statement, read, run_prepared, subscribe,
+    write, write_batch,
 };
 use crate::recovery::{Generation, Unavailable};
 use crate::shutdown::Waiter;
@@ -20,8 +20,8 @@ use core::task::Poll;
 use fgdb_protocol::body::{
     Auth, AuthOk, AuthRefresh, AuthRefreshed, Body, Credential, Empty, ErrorBody, ErrorCode,
     Execute, ExecuteBatch, ExecuteMode, ExecutePrepared, Hello, HelloAck, Outcome, Ping, Prepare,
-    Prepared, PreparedHandle, PreparedReadMode, Ready, ReleasePrepared, ResultChunk, ResultEnd,
-    SelectDatabase, WindowUpdate, WireValue,
+    Prepared, PreparedExecutionMode, PreparedHandle, Ready, ReleasePrepared, ResultChunk,
+    ResultEnd, SelectDatabase, WindowUpdate, WireValue,
 };
 use fgdb_protocol::transport::{
     DuplexIo, DuplexReader, DuplexWriter, FrameReader, FrameWriter, split_duplex,
@@ -47,36 +47,41 @@ const CHUNK_OVERHEAD: usize = 1 + 4;
 
 /// These cap retained templates and original source bytes, not total compiler
 /// allocations. Native parser limits and signed preparation work still apply.
-const MAX_PREPARED_READS: usize = 64;
+const MAX_PREPARED_STATEMENTS: usize = 64;
 const MAX_PREPARED_SOURCE_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Default)]
-struct PreparedReads {
-    entries: BTreeMap<PreparedHandle, Arc<PreparedRead>>,
+struct PreparedStatements {
+    entries: BTreeMap<PreparedHandle, Arc<PreparedDefinition>>,
     source_bytes: usize,
 }
 
-impl PreparedReads {
+impl PreparedStatements {
     fn prune(&mut self) {
         self.entries
-            .retain(|_, entry| entry.generation.check().is_ok());
-        self.source_bytes = self.entries.values().map(|entry| entry.source_bytes).sum();
+            .retain(|_, entry| entry.generation().check().is_ok());
+        self.source_bytes = self
+            .entries
+            .values()
+            .map(|entry| entry.source_bytes())
+            .sum();
     }
 
     fn insert(
         &mut self,
         cx: &Cx,
-        definition: PreparedRead,
+        definition: impl Into<PreparedDefinition>,
     ) -> Result<(PreparedHandle, Generation), Refusal> {
         self.prune();
-        definition.generation.check().map_err(Refusal::from)?;
-        let next = self.source_bytes.checked_add(definition.source_bytes);
-        if self.entries.len() >= MAX_PREPARED_READS
+        let definition = definition.into();
+        definition.generation().check().map_err(Refusal::from)?;
+        let next = self.source_bytes.checked_add(definition.source_bytes());
+        if self.entries.len() >= MAX_PREPARED_STATEMENTS
             || next.is_none_or(|bytes| bytes > MAX_PREPARED_SOURCE_BYTES)
         {
             return Err(Refusal::new(
                 ErrorCode::Budget,
-                "this connection's prepared read allowance is exhausted; release a template",
+                "this connection's prepared statement allowance is exhausted; release a template",
             ));
         }
         let handle = loop {
@@ -87,25 +92,25 @@ impl PreparedReads {
                 break handle;
             }
         };
-        let generation = definition.generation.clone();
+        let generation = definition.generation().clone();
         self.source_bytes = next.expect("checked source byte allowance");
         self.entries.insert(handle, Arc::new(definition));
         Ok((handle, generation))
     }
 
-    fn get(&mut self, handle: PreparedHandle) -> Result<Arc<PreparedRead>, Refusal> {
+    fn get(&mut self, handle: PreparedHandle) -> Result<Arc<PreparedDefinition>, Refusal> {
         self.prune();
         self.entries.get(&handle).cloned().ok_or_else(|| {
             Refusal::new(
                 ErrorCode::Statement,
-                "prepared read not available on this connection; prepare it again",
+                "prepared statement not available on this connection; prepare it again",
             )
         })
     }
 
     fn release(&mut self, handle: PreparedHandle) {
         if let Some(entry) = self.entries.remove(&handle) {
-            self.source_bytes -= entry.source_bytes;
+            self.source_bytes -= entry.source_bytes();
         }
     }
 }
@@ -114,8 +119,8 @@ enum Statement {
     Native(Execute),
     Batch(ExecuteBatch),
     Prepared {
-        definition: Result<Arc<PreparedRead>, Refusal>,
-        mode: PreparedReadMode,
+        definition: Result<Arc<PreparedDefinition>, Refusal>,
+        mode: PreparedExecutionMode,
         parameters: Vec<(String, WireValue)>,
     },
 }
@@ -193,7 +198,7 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
     let mut transcript: Option<[u8; 32]> = None;
     let mut token: Option<CapabilityToken> = None;
     let mut selected: Option<Arc<Served>> = None;
-    let mut prepared_reads = PreparedReads::default();
+    let mut prepared_statements = PreparedStatements::default();
     loop {
         let frame = match lane.receive(cx, &waiter).await {
             Inbound::Frame(frame) => frame,
@@ -398,7 +403,7 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                 lane.send_authority = Some((chosen, replacement.clone()));
                 token = Some(replacement);
                 // No compiled template crosses an authorization generation.
-                prepared_reads = PreparedReads::default();
+                prepared_statements = PreparedStatements::default();
                 let binding = lane.conn.binding();
                 if !lane
                     .send(
@@ -523,9 +528,9 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                         .fatal(cx, request, ErrorCode::Protocol, "malformed PREPARE")
                         .await;
                 };
-                let outcome = prepare_read(cx, db, token, &prepare)
+                let outcome = prepare_statement(cx, db, token, &prepare)
                     .await
-                    .and_then(|definition| prepared_reads.insert(cx, definition));
+                    .and_then(|definition| prepared_statements.insert(cx, definition));
                 let binding = lane.conn.binding();
                 let delivered = match outcome {
                     Ok((handle, generation)) => {
@@ -544,7 +549,7 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                         };
                         match lane.write_frame(cx, &frame, Some(generation)).await {
                             Err(Stop::Recovery(error)) => {
-                                prepared_reads.release(handle);
+                                prepared_statements.release(handle);
                                 lane.refuse(
                                     cx,
                                     request,
@@ -586,7 +591,7 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                         .await;
                 };
                 // Uniform, idempotent release reveals no existence or owner.
-                prepared_reads.release(release.handle);
+                prepared_statements.release(release.handle);
                 let binding = lane.conn.binding();
                 if !lane
                     .send(
@@ -617,7 +622,7 @@ pub(crate) async fn run(cx: &Cx, server: &Server, stream: Box<dyn DuplexIo>) {
                         .await;
                 };
                 let statement = Statement::Prepared {
-                    definition: prepared_reads.get(statement.handle),
+                    definition: prepared_statements.get(statement.handle),
                     mode: statement.mode,
                     parameters: statement.parameters,
                 };
@@ -996,12 +1001,14 @@ impl Lane {
             )),
             Statement::Prepared {
                 definition: Ok(definition),
-                mode: PreparedReadMode::OrderedStream,
+                mode: PreparedExecutionMode::OrderedStream,
                 parameters,
-            } => Some((
-                source_stream::SourceStatement::Prepared(definition),
-                parameters.as_slice(),
-            )),
+            } => definition.read().map(|definition| {
+                (
+                    source_stream::SourceStatement::Prepared(definition),
+                    parameters.as_slice(),
+                )
+            }),
             _ => None,
         };
         if let Some((statement, parameters)) = ordered {
@@ -1031,12 +1038,14 @@ impl Lane {
             )),
             Statement::Prepared {
                 definition: Ok(definition),
-                mode: PreparedReadMode::SourceStream,
+                mode: PreparedExecutionMode::SourceStream,
                 parameters,
-            } => Some((
-                source_stream::SourceStatement::Prepared(definition),
-                parameters.as_slice(),
-            )),
+            } => definition.read().map(|definition| {
+                (
+                    source_stream::SourceStatement::Prepared(definition),
+                    parameters.as_slice(),
+                )
+            }),
             _ => None,
         };
         if let Some((source, parameters)) = source {
@@ -1071,9 +1080,9 @@ impl Lane {
             Statement::Prepared {
                 definition,
                 parameters,
-                ..
+                mode,
             } => match definition {
-                Ok(definition) => read_prepared(cx, db, token, &definition, &parameters).await,
+                Ok(definition) => run_prepared(cx, db, token, &definition, mode, &parameters).await,
                 Err(refusal) => Err(refusal),
             },
         };

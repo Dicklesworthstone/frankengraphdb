@@ -146,8 +146,8 @@ made beyond that suite.
 `fgdb_protocol::body` gives the frames `fgdbd` serves an exact canonical body
 encoding: fixed-width big-endian integers, `u32`-length-prefixed UTF-8 text
 and byte strings, explicit tags on every closed union, and counts that are
-bounded before any allocation. Decoding refuses trailing bytes, every
-truncated prefix, unknown tags, non-UTF-8 text, a non-0/1 boolean byte, an
+bounded before any allocation. Decoding refuses trailing bytes, truncated
+fields, unknown tags, non-UTF-8 text, a non-0/1 boolean byte, an
 unsorted or duplicated map key or parameter name, a zero-denominator average,
 nesting deeper than 64, and more than 2^22 value nodes. A credential is
 redacted from `Debug`.
@@ -164,9 +164,9 @@ redacted from `Debug`.
 | READY | `namespace [32]`, `incarnation [32]`, `service_epoch u64`, `posture u8`, `authority_commitment [32]`, `frontier u64` |
 | EXECUTE | `mode u8` (0 read, 1 write, 2 subscribe, 3 native source read stream, 4 external ordered read), `statement text`, `parameters [(name text, value)]` (names strictly ascending) |
 | EXECUTE_BATCH | `statement text`, `argument_sets u32`, then that many parameter maps (each `count u32`, then strictly ascending `(name text, value)` pairs) |
-| PREPARE | `statement text`, representative `parameters [(name text, value)]` (names strictly ascending) |
+| PREPARE | `statement text`, representative `parameters [(name text, value)]` (names strictly ascending), optional terminal `mode u8` (omitted = read, 1 = stats-only write; explicit 0 is noncanonical) |
 | PREPARED | nonzero connection-owned `handle [16]` |
-| EXECUTE_PREPARED | `handle [16]`, `mode u8` (0 buffered, 1 native source stream, 2 external ordered stream), execution `parameters [(name text, value)]` (names strictly ascending) |
+| EXECUTE_PREPARED | `handle [16]`, `mode u8` (0 buffered read, 1 native source read stream, 2 external ordered read stream, 3 stats-only write), execution `parameters [(name text, value)]` (names strictly ascending) |
 | RELEASE_PREPARED / PREPARED_RELEASED | `handle [16]` |
 | SNAPSHOT_RESULT_CHUNK | `columns: none \| [text]` (first chunk only), `rows [[value]]` |
 | SNAPSHOT_RESULT_END | `outcome` (`Rows{seq}`, `WriteCommitted{seq,statements}`, `ReadClosed{seq,statements}`), `rows u64` |
@@ -279,7 +279,7 @@ application output is admitted.
   resolve through the
   operator's bindings for that database, the CLI's `--label/--relation/
   --property` contract, because the engine has no durable catalog yet.
-- **Prepared native reads.** PREPARE parses and admits one native read template
+- **Prepared native statements.** Read PREPARE parses and admits one native read template
   under fresh read authority, charging the statement bytes to its signed work
   allowance before selector parsing or catalog resolution. Representative
   parameter values establish structural operand types; their values do not
@@ -291,10 +291,10 @@ application output is admitted.
   selector). Branch selectors remain restricted to the selected trunk. Writes
   and capability-prohibited `id()`/`elementId()` refuse during preparation.
 
-  Execution mode is explicit: `PreparedReadMode::Buffered` (wire 0) uses the
-  broader eager native profile; `PreparedReadMode::SourceStream` (wire 1)
+  Execution mode is explicit: `PreparedExecutionMode::Buffered` (wire 0) uses the
+  broader eager native profile; `PreparedExecutionMode::SourceStream` (wire 1)
   opens the same credit-driven row or aggregate source as native read-stream
-  execution below; `PreparedReadMode::OrderedStream` (wire 2) uses the host's
+  execution below; `PreparedExecutionMode::OrderedStream` (wire 2) uses the host's
   private external sorter and then streams its completed final rows. Unsupported
   profiles or a missing ordered-read host configuration refuse without an eager
   retry. Source and ordered execution import shared immutable catalog bindings
@@ -304,6 +304,33 @@ application output is admitted.
   `Database::authorized_prepared_ordered_read_session` with fresh private files.
   The retained template owns neither that snapshot, scratch nor execution
   arguments.
+
+  Write PREPARE appends the single canonical tag `1` after the parameter map.
+  The original read encoding is unchanged; an older peer refuses the extra
+  byte before installing a template. Omitting the byte selects read admission,
+  which refuses write syntax. Explicit `0`, unknown tags and additional trailing
+  bytes are noncanonical. The server compiles and binds one stats-only native
+  write script under fresh Write authority and signed preparation work, checks
+  the host statement ceiling, then discards representative operands. Preparation
+  performs no graph observation, identity allocation or mutation. `RETURN` and
+  the separate dynamic UNWIND mutation profile refuse. Read-dependent scripts
+  such as MATCH mutations and MERGE require ReadWrite rights even at preparation.
+  Template admission does not authorize every eventual effect: attempted-field
+  and before/after-image checks remain mandatory at execution. Symbol-existence
+  diagnostics retain the existing operator-owned catalog contract; preparation
+  is not a catalog masking or discovery boundary.
+
+  `PreparedExecutionMode::Write` (wire 3) executes only a write handle, using the
+  existing authorized native script executor and one fresh live allowance. All
+  operands bind before graph work; the complete script commits atomically at
+  the current frontier. Every invocation rechecks authority and recovery
+  generation, including after waiting for another writer. Empty columns/rows
+  precede `WriteCommitted` or no-effect `ReadClosed`; identity receipts are not
+  constructed, so `max_rows=0` ingestion grants remain usable. Any read delivery
+  mode on a write handle, or Write on a read handle, refuses without graph work.
+  Unknown completion is preserved and never automatically replayed. The legacy
+  `PreparedReadMode` type name aliases `PreparedExecutionMode`; read-only client
+  methods reject Write locally before sending a request.
 
   The execution body now requires this mode byte immediately after the handle.
   Clients and servers using the earlier handle-plus-parameters body must be
@@ -327,7 +354,8 @@ application output is admitted.
   transaction, durable result, or reconnect/resume token.
 
   The Rust client exposes `prepare_read`, `execute_prepared`,
-  `execute_prepared_streaming` and `release_prepared`. For example, after
+  `execute_prepared_streaming`, `prepare_write`, `execute_prepared_write`, and
+  `release_prepared`. For example, after
   selecting the database:
 
   ```rust

@@ -28,6 +28,9 @@ mod ordered_stream;
 #[path = "loopback/insertion_property_maps.rs"]
 mod insertion_property_maps;
 
+#[path = "loopback/prepared_write.rs"]
+mod prepared_write;
+
 fn issuer_key() -> AuthKey {
     AuthKey::from_seed(8501)
 }

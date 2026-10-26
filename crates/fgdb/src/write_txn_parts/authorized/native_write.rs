@@ -219,6 +219,60 @@ fn bind_native<Clock: FnMut() -> u64>(
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Admit immutable native write-script metadata for a trusted host cache.
+    ///
+    /// This is preparation only: no snapshot, graph read, identity allocation,
+    /// transaction or mutation is retained. Representative operands are checked
+    /// and discarded. Namespace, live Write authority, cancellation, signed work
+    /// and the host statement ceiling govern the same compiler/binder used by
+    /// authorized write sessions. The returned script grants no authority;
+    /// execute it through `execute_graph_write_script_authorized` with a fresh
+    /// capability check and a complete new operand map on every invocation.
+    ///
+    /// The host owns the catalog, branch route, clock, cache bounds and metadata
+    /// invalidation. This privileged host API does not export a session-owned
+    /// prepared handle or turn it into a transferable capability. Native RETURN
+    /// and the separate dynamic UNWIND mutation profile remain unsupported.
+    /// Template admission is not effect admission: the executor still checks
+    /// every attempted field and before/after image. As on native text writes,
+    /// symbol-existence diagnostics belong to the supplied trusted host catalog;
+    /// this method is not a catalog discovery or catalog masking boundary.
+    #[allow(clippy::too_many_arguments, clippy::result_large_err)]
+    pub fn prepare_graph_write_script_authorized(
+        &self,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        text: &str,
+        params: &GqlParameters,
+        resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        relation: RelationId,
+        max_statements: usize,
+        mut clock: impl FnMut() -> u64,
+    ) -> Result<PreparedGraphWriteScript, Fault> {
+        let refusal = |error| admission(WriteTxnError::Authorization(error));
+        if authority.namespace() != self.keys.namespace {
+            return Err(refusal(Error::WrongAuthority));
+        }
+        let now = clock();
+        let verified = authority.verify_at(token, branch, now).map_err(refusal)?;
+        let permit = verified.begin_write_at(branch, now).map_err(refusal)?;
+        let mut execution = Execution {
+            cx: commit_cx,
+            permit,
+            clock,
+        };
+        let script = prepare(query_cx, &mut execution, text, params, relation, resolver)?;
+        statement_limit(&script, max_statements)?;
+        let bound =
+            Input::Script(&script, params).bind(query_cx, verified.predicates(), &mut execution);
+        checkpoint(query_cx, &mut execution).map_err(admission)?;
+        drop(bound?);
+        Ok(script)
+    }
+
     /// Parse, bind and atomically execute native write text under one capability.
     ///
     /// Namespace, signature, branch and Write rights are verified BEFORE syntax,

@@ -6,7 +6,11 @@ mod edge_upsert_output;
 pub(crate) mod ordered;
 mod prepared;
 mod subscription;
-pub(crate) use prepared::{PreparedRead, prepare_read, read_prepared, read_prepared_session};
+pub(crate) use prepared::{
+    PreparedDefinition, PreparedRead, prepare_statement, read_prepared_session, run_prepared,
+};
+#[cfg(test)]
+pub(crate) use prepared::{prepare_read, read_prepared};
 pub(crate) use subscription::{poll, subscribe};
 
 use crate::recovery::{Generation, Unavailable};

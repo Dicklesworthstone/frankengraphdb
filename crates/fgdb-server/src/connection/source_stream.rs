@@ -7,7 +7,7 @@
 //! cancellation can be serviced during accumulation.
 
 use super::*;
-use crate::execute::{read_prepared_session, read_session};
+use crate::execute::{PreparedRead, read_prepared_session, read_session};
 use fgdb_types::PurposeContexts;
 
 pub(super) enum SourceStatement<'a> {
@@ -528,6 +528,7 @@ mod tests {
                         db,
                         &token,
                         &Prepare {
+                            mode: fgdb_protocol::body::PrepareMode::Read,
                             statement: text.into(),
                             parameters: vec![],
                         },
@@ -559,6 +560,7 @@ mod tests {
                     db,
                     &token,
                     &Prepare {
+                        mode: fgdb_protocol::body::PrepareMode::Read,
                         statement: "MATCH (n) RETURN 1 AS value".into(),
                         parameters: vec![],
                     },
@@ -584,6 +586,7 @@ mod tests {
                         db,
                         &token,
                         &Prepare {
+                            mode: fgdb_protocol::body::PrepareMode::Read,
                             statement: text.into(),
                             parameters: vec![],
                         },
