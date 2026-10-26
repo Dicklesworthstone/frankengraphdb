@@ -19,6 +19,11 @@ struct UnresolvedContinuation<'a> {
 
 enum UnresolvedContinuationOperation<'a> {
     Match(RowJoinSpec),
+    Exists {
+        pattern: Box<UnresolvedGraphText<'a>>,
+        join: RowJoinSpec,
+        negated: bool,
+    },
     Apply {
         body: Box<UnresolvedReadInput<'a>>,
         imports: Vec<usize>,
@@ -92,6 +97,10 @@ impl<'a> UnresolvedReadInput<'a> {
             if let UnresolvedContinuationOperation::Apply { body, .. } = &mut part.operation {
                 body.share_parameters(parameters, offsets);
             }
+            if let UnresolvedContinuationOperation::Exists { pattern, .. } = &mut part.operation {
+                pattern.syntax.parameters = parameters.to_vec();
+                pattern.syntax.parameter_offsets = offsets.to_vec();
+            }
         }
     }
     pub(crate) fn column_schema(&self) -> (Vec<String>, Vec<GraphSetColumnType>) {
@@ -111,6 +120,9 @@ impl<'a> UnresolvedReadInput<'a> {
                 .map(|part| {
                     let source_depth = match &part.operation {
                         UnresolvedContinuationOperation::Match(_) => 1,
+                        // Arguments + graph join + witness projection, then
+                        // Apply + filter + ordered removal of the witness.
+                        UnresolvedContinuationOperation::Exists { .. } => 6,
                         UnresolvedContinuationOperation::Apply { body, .. } => 1 + body.depth(),
                     };
                     source_depth
@@ -133,6 +145,7 @@ impl<'a> UnresolvedReadInput<'a> {
                 .iter()
                 .map(|part| match &part.operation {
                     UnresolvedContinuationOperation::Match(_) => 1,
+                    UnresolvedContinuationOperation::Exists { .. } => 1,
                     UnresolvedContinuationOperation::Apply { body, .. } => body.operand_count(),
                 })
                 .sum::<usize>()
@@ -165,6 +178,17 @@ impl<'a> UnresolvedReadInput<'a> {
                     UnresolvedContinuationOperation::Match(join) => {
                         BoundContinuationOperation::Match(join)
                     }
+                    UnresolvedContinuationOperation::Exists {
+                        pattern,
+                        join,
+                        negated,
+                    } => BoundContinuationOperation::Exists {
+                        pattern: Box::new(
+                            pattern.resolve(crate::graph_text::LentResolver(resolve))?,
+                        ),
+                        join,
+                        negated,
+                    },
                     UnresolvedContinuationOperation::Apply {
                         body,
                         imports,
@@ -191,7 +215,24 @@ impl PreparedGraphText {
         tokens: &[TextToken<'_>],
         zones: Option<&crate::GqlTimeZones>,
     ) -> Result<UnresolvedReadInput<'a>, GraphSetTextError> {
+        let mut row_graph_filter = false;
+        for at in crate::set_text::multipart::row_where_offsets(tokens) {
+            // Compound leaves borrow a slice of the statement but retain the
+            // original composition-token offsets.
+            let at = at - tokens.first().map_or(0, |token| token.at);
+            let mut lexer = Lexer {
+                text: statement,
+                at,
+                tokens: 0,
+            };
+            lexer.next()?; // WHERE itself, using the one native lexer.
+            if row_pattern_filter_starts(&mut lexer, |_| false)? {
+                row_graph_filter = true;
+                break;
+            }
+        }
         let multipart = has_continuation(tokens)
+            || row_graph_filter
             || Parser::deferred_where_continues(statement, declarations, tokens, zones);
         let read = |deferred: &[usize],
                     implicit: &[usize]|
@@ -372,7 +413,341 @@ fn join_spec(
         .map_err(|_| expected(at, "bounded, type-compatible MATCH comparisons"))
 }
 
+fn row_pattern_filter_starts(
+    lexer: &mut Lexer<'_>,
+    mut hoisted: impl FnMut(usize) -> bool,
+) -> Result<bool, GraphPatternTextError> {
+    let mut token = lexer.next()?;
+    let mut wrappers = 0_usize;
+    for _ in 0..MAX_FILTER_NESTING {
+        if hoisted(token.at) {
+            return Ok(false);
+        }
+        match token.kind {
+            TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT") => {
+                token = lexer.next()?;
+            }
+            TokenKind::Word(word) if word.eq_ignore_ascii_case("EXISTS") => {
+                if !crate::graph_text::scoped::exists_introducer_follows(&mut lexer.clone())? {
+                    return Ok(false);
+                }
+                let opening = lexer.next()?;
+                let TokenKind::Punct(opening @ (b'(' | b'{')) = opening.kind else {
+                    return Ok(false);
+                };
+                let Some(after) = after_balanced(lexer, opening)? else {
+                    return Ok(false);
+                };
+                return row_pattern_ends(lexer, after, wrappers);
+            }
+            TokenKind::Punct(b'(') => {
+                if crate::graph_text::scoped::pattern_predicate_follows(
+                    token.kind,
+                    &mut lexer.clone(),
+                )? {
+                    let Some((after, explicit_relationship)) = after_row_pattern(lexer)? else {
+                        return Ok(false);
+                    };
+                    // `(x)<--(y)` also spells the valid scalar comparison
+                    // `(x) < - -(y)`. Unhoisted bare row predicates therefore
+                    // require relationship brackets; EXISTS has no ambiguity.
+                    if !explicit_relationship {
+                        return Ok(false);
+                    }
+                    return row_pattern_ends(lexer, after, wrappers);
+                }
+                wrappers += 1;
+                token = lexer.next()?;
+            }
+            _ => return Ok(false),
+        }
+    }
+    Ok(false)
+}
+
+/// Consume one balanced token group, returning its first following token.
+/// This is a conservative routing probe: the normal parser still owns every
+/// symbol, bound, property expression and actual pattern admission.
+fn after_balanced<'a>(
+    lexer: &mut Lexer<'a>,
+    opening: u8,
+) -> Result<Option<Token<'a>>, GraphPatternTextError> {
+    let close = |opening| match opening {
+        b'(' => b')',
+        b'[' => b']',
+        _ => b'}',
+    };
+    let mut stack = vec![close(opening)];
+    loop {
+        let token = lexer.next()?;
+        match token.kind {
+            TokenKind::Punct(opening @ (b'(' | b'[' | b'{')) => {
+                if stack.len() == MAX_FILTER_NESTING {
+                    return Ok(None);
+                }
+                stack.push(close(opening));
+            }
+            TokenKind::Punct(closing @ (b')' | b']' | b'}')) => {
+                if stack.pop() != Some(closing) {
+                    return Ok(None);
+                }
+                if stack.is_empty() {
+                    return Ok(Some(lexer.next()?));
+                }
+            }
+            TokenKind::End => return Ok(None),
+            _ => {}
+        }
+    }
+}
+
+fn after_row_pattern<'a>(
+    lexer: &mut Lexer<'a>,
+) -> Result<Option<(Token<'a>, bool)>, GraphPatternTextError> {
+    // The current token is the first node's opening parenthesis. Requiring a
+    // complete node after every edge AND a clause boundary after the pattern
+    // distinguishes `(x)-->()` from `(x) - -1` and `(x) - -(y) > 2`.
+    let Some(mut token) = after_balanced(lexer, b'(')? else {
+        return Ok(None);
+    };
+    let mut explicit_relationship = false;
+    while matches!(token.kind, TokenKind::Punct(b'-' | b'<')) {
+        loop {
+            token = match token.kind {
+                TokenKind::Punct(b'-' | b'<' | b'>') => lexer.next()?,
+                TokenKind::Punct(b'[') => {
+                    explicit_relationship = true;
+                    let Some(after) = after_balanced(lexer, b'[')? else {
+                        return Ok(None);
+                    };
+                    after
+                }
+                _ => break,
+            };
+        }
+        if !matches!(token.kind, TokenKind::Punct(b'(')) {
+            return Ok(None);
+        }
+        let Some(after) = after_balanced(lexer, b'(')? else {
+            return Ok(None);
+        };
+        token = after;
+    }
+    Ok(Some((token, explicit_relationship)))
+}
+
+fn row_pattern_ends<'a>(
+    lexer: &mut Lexer<'a>,
+    mut token: Token<'a>,
+    wrappers: usize,
+) -> Result<bool, GraphPatternTextError> {
+    for _ in 0..wrappers {
+        if !matches!(token.kind, TokenKind::Punct(b')')) {
+            return Ok(false);
+        }
+        token = lexer.next()?;
+    }
+    Ok(matches!(token.kind, TokenKind::End)
+        || matches!(token.kind, TokenKind::Word(word)
+            if ["WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "CALL", "ORDER", "SKIP", "OFFSET", "LIMIT"]
+                .iter().any(|clause| word.eq_ignore_ascii_case(clause))))
+}
+
 impl<'a> Parser<'a> {
+    /// An unhoisted whole-pattern WHERE belongs to the multipart graph owner.
+    /// Existing graph-head expressions keep their own hidden columns. This is
+    /// only a routing probe over the shared lexer, never a second pattern parser.
+    pub(super) fn row_existence_filter(&self, width: usize) -> Result<bool, GraphPatternTextError> {
+        if !self.read_elements || !self.is_word("WHERE") {
+            return Ok(false);
+        }
+        row_pattern_filter_starts(&mut self.lexer.clone(), |at| {
+            hoisted_span(self.existence_reads.as_ref(), width, at).is_some()
+                || hoisted_span(self.comprehension_reads.as_ref(), width, at).is_some()
+        })
+    }
+
+    /// Lower a complete row WHERE to an optional Apply with one non-NULL
+    /// witness column. Only identity-correlated positive patterns are admitted;
+    /// user row expressions and enclosing comprehension locals stay with their
+    /// existing owners. The body never exposes its graph bindings to the tail.
+    fn multipart_existence_part(
+        &mut self,
+        statement: &'a str,
+        incoming: &RowSchema<'a>,
+        aggregate: bool,
+    ) -> Result<(UnresolvedContinuation<'a>, RowSchema<'a>, bool), GraphSetTextError> {
+        let at = self.current.at;
+        self.word("WHERE")?;
+        let mut negated = false;
+        let mut wrappers = 0_usize;
+        let mut prefix = 0_usize;
+        loop {
+            prefix += 1;
+            if prefix > MAX_FILTER_NESTING {
+                return Err(expected(at, "a bounded row-scope existence predicate"));
+            }
+            if self.take_word("NOT")? {
+                negated = !negated;
+            } else if self.is_word("EXISTS")
+                || crate::graph_text::scoped::pattern_predicate_follows(
+                    self.current.kind,
+                    &mut self.lexer.clone(),
+                )?
+            {
+                break;
+            } else {
+                self.punct(b'(', "a whole pattern existence predicate after WHERE")?;
+                wrappers += 1;
+            }
+        }
+        self.read_row_bindings = incoming.iter().map(|(name, _)| *name).collect();
+        let explicit = self.take_word("EXISTS")?;
+        let braces = explicit && self.take(b'{')?;
+        if braces {
+            self.word("MATCH")?;
+            self.syntax.match_mode = self.match_mode()?;
+        } else if explicit {
+            self.punct(b'(', "( before an EXISTS pattern")?;
+        }
+        self.positive_pattern()?;
+        self.syntax.root_variables = self.syntax.variables.len();
+        if explicit {
+            if braces {
+                self.punct(b'}', "} after an identity-correlated EXISTS pattern")?;
+            } else {
+                self.punct(b')', ") after an EXISTS pattern")?;
+            }
+        }
+        for _ in 0..wrappers {
+            self.punct(b')', ") after a row-scope existence predicate")?;
+        }
+        if !matches!(self.current.kind, TokenKind::End)
+            && ![
+                "WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "CALL", "ORDER", "SKIP", "OFFSET",
+                "LIMIT",
+            ]
+            .iter()
+            .any(|clause| self.is_word(clause))
+        {
+            return Err(expected(
+                self.current.at,
+                "a whole pattern existence predicate before the next clause",
+            ));
+        }
+        if !self.read_correlations.is_empty() || !self.read_row_fields.is_empty() {
+            return Err(expected(
+                at,
+                "element identity anchors and literal or parameter properties in a row-scope existence predicate",
+            ));
+        }
+        let mut inputs = Vec::new();
+        let mut keys = Vec::new();
+        for (left, &(name, kind)) in incoming.iter().enumerate() {
+            if let Some(variable) = self
+                .syntax
+                .variables
+                .iter()
+                .find(|variable| variable.text == name.text)
+                .copied()
+            {
+                if !matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Any) {
+                    return Err(expected(name.at, "a vertex-valued imported binding"));
+                }
+                let right = self.mutation_projection(&mut inputs, variable, None)?;
+                keys.push((left, right));
+            }
+            if self.syntax.names_path(name.text) {
+                return Err(expected(
+                    name.at,
+                    "new path bindings inside an existence predicate",
+                ));
+            }
+            if let Some((edge, scoped)) = self.syntax.visible_edge(name.text) {
+                let Some(variable) = edge.variable else {
+                    continue;
+                };
+                if scoped || edge.walk.is_some() || kind != GraphSetColumnType::Edge {
+                    return Err(expected(
+                        name.at,
+                        "an edge-valued imported root relationship",
+                    ));
+                }
+                let right = self.mutation_projection(&mut inputs, variable, None)?;
+                keys.push((left, right));
+            }
+        }
+        if keys.is_empty() {
+            return Err(expected(
+                at,
+                "an existence pattern anchored on a carried element",
+            ));
+        }
+        self.capacity(
+            incoming.len() + inputs.len() - 1,
+            MAX_PATTERN_VERTICES,
+            crate::algebra::PatternLimitDimension::Columns,
+        )?;
+        let types: Vec<_> = incoming.iter().map(|(_, kind)| *kind).collect();
+        let join = join_spec(&types, &inputs, &keys, &[], at)?;
+        self.syntax.columns = inputs
+            .into_iter()
+            .map(|input| Column {
+                variable: input.variable,
+                property: input.property,
+                path: input.path,
+                alias: input.variable,
+                collect: input.collect,
+            })
+            .collect();
+        self.syntax.return_at = at;
+        let pattern = UnresolvedGraphText {
+            statement,
+            syntax: self.take_part_syntax()?,
+            projection: None,
+            pipeline: Vec::new(),
+            singleton: false,
+            leading: Vec::new(),
+            leading_types: Vec::new(),
+            correlations: Vec::new(),
+            row_fields: Vec::new(),
+        };
+        self.read_row_bindings.clear();
+        let projection = incoming
+            .iter()
+            .enumerate()
+            .map(|(column, (name, _))| ReadProjectionTemplate {
+                name: name.text.to_owned(),
+                value: ReadValueTemplate::Column(column),
+            })
+            .collect();
+        let (pipeline, next, terminal) = self.multipart_row_tail(incoming.clone(), aggregate)?;
+        let mut syntax = self.take_part_syntax()?;
+        syntax.return_at = at;
+        Ok((
+            UnresolvedContinuation {
+                input: UnresolvedGraphText {
+                    statement,
+                    syntax,
+                    projection: Some(projection),
+                    pipeline,
+                    singleton: true,
+                    leading: Vec::new(),
+                    leading_types: types,
+                    correlations: Vec::new(),
+                    row_fields: Vec::new(),
+                },
+                operation: UnresolvedContinuationOperation::Exists {
+                    pattern: Box::new(pattern),
+                    join,
+                    negated,
+                },
+            },
+            next,
+            terminal,
+        ))
+    }
+
     /// A separable ON operand over the incoming row uses the existing private
     /// input projection. In particular it must not re-match a carried vertex:
     /// that vertex can be NULL, and only the new bindings are null-extended.
@@ -508,11 +883,14 @@ impl<'a> Parser<'a> {
             incoming = next;
             terminal = done;
             if !terminal
-                && !(self.is_word("MATCH") || self.is_word("OPTIONAL") || self.inline_call()?)
+                && !(self.is_word("MATCH")
+                    || self.is_word("OPTIONAL")
+                    || self.inline_call()?
+                    || self.row_existence_filter(incoming.len())?)
             {
                 return Err(expected(
                     self.current.at,
-                    "MATCH, OPTIONAL MATCH or inline CALL after row stages",
+                    "MATCH, OPTIONAL MATCH, inline CALL or a whole pattern WHERE after row stages",
                 ));
             }
             let syntax = self.take_part_syntax()?;
@@ -534,7 +912,13 @@ impl<'a> Parser<'a> {
         };
         while !terminal {
             self.refuse_call_write(call_depth)?;
-            if self.inline_call()? {
+            if self.row_existence_filter(incoming.len())? {
+                let (part, next, done) =
+                    self.multipart_existence_part(statement, &incoming, aggregate)?;
+                result.continuations.push(part);
+                incoming = next;
+                terminal = done;
+            } else if self.inline_call()? {
                 let (part, next, done) =
                     self.multipart_call_part(statement, &incoming, aggregate, call_depth)?;
                 result.continuations.push(part);
@@ -1603,6 +1987,86 @@ impl BoundReadInput {
         let mut input = self.first.bind_values(values)?;
         for part in &self.continuations {
             let source = &part.input;
+            if let BoundContinuationOperation::Exists {
+                pattern,
+                join,
+                negated,
+            } = &part.operation
+            {
+                let at = source.return_at;
+                let names = input.columns().to_vec();
+                let width = names.len();
+                let witness_name = (0..=width)
+                    .map(|candidate| {
+                        if candidate == 0 {
+                            "__fg_exists_witness".to_owned()
+                        } else {
+                            format!("__fg_exists_witness_{candidate}")
+                        }
+                    })
+                    .find(|candidate| !names.contains(candidate))
+                    .expect("one more private candidate than outer column names");
+                let arguments =
+                    PreparedGraphSet::arguments(names.clone(), input.column_types().to_vec())
+                        .map_err(|kind| GraphSetTextError {
+                            offset: at,
+                            kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                        })?;
+                let witness = GqlScalarParameter::new(CanonicalScalar::Bool(true))
+                    .expect("true is a bounded scalar");
+                // This row profile evaluates the governed witness relation
+                // before paging it. It is not the graph WHERE probe's
+                // first-witness short circuit: late source/budget failures
+                // remain failures, even when one witness already exists.
+                let body = arguments
+                    .join(pattern.bind_values(values)?, join.clone())
+                    .map_err(|kind| GraphSetTextError {
+                        offset: at,
+                        kind: GraphSetTextErrorKind::SetBuild(kind),
+                    })?
+                    .project_ordered_output(vec![GraphSetProjection::new(
+                        witness_name,
+                        GraphSetValue::Literal(witness),
+                    )])
+                    .map_err(|kind| GraphSetTextError {
+                        offset: at,
+                        kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                    })?
+                    .with_page(0, Some(1));
+                // At most one Boolean witness extends each outer occurrence.
+                // A missing witness is NULL, including when an Any anchor is
+                // NULL or another value kind. Native identity equality decides
+                // matching; no value is guessed or coerced into a vertex.
+                input = input
+                    .optional_apply(body, (0..width).collect())
+                    .map_err(|kind| GraphSetTextError {
+                        offset: at,
+                        kind: GraphSetTextErrorKind::SetBuild(kind),
+                    })?
+                    .filter(&[GraphSetPredicateOp::IsNull {
+                        operand: GraphSetOperand::Column(width),
+                        is_null: *negated,
+                    }])
+                    .map_err(|kind| GraphSetTextError {
+                        offset: at,
+                        kind: GraphSetTextErrorKind::FilterBuild(kind),
+                    })?
+                    .project_ordered_output(
+                        names
+                            .into_iter()
+                            .enumerate()
+                            .map(|(column, name)| {
+                                GraphSetProjection::new(name, GraphSetValue::Column(column))
+                            })
+                            .collect(),
+                    )
+                    .map_err(|kind| GraphSetTextError {
+                        offset: at,
+                        kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                    })?;
+                input = super::super::bind_stages(input, &source.pipeline, values)?;
+                continue;
+            }
             if let BoundContinuationOperation::Apply {
                 body,
                 imports,
@@ -1632,7 +2096,7 @@ impl BoundReadInput {
                 continue;
             }
             let BoundContinuationOperation::Match(join) = &part.operation else {
-                unreachable!("Apply handled above")
+                unreachable!("Apply and existence filters handled above")
             };
             let imported_width = input.column_types().len();
             input = source.bind_row_fields(input, values)?;

@@ -1983,3 +1983,239 @@ fn an_optional_match_where_over_imported_values_filters_before_null_extension() 
         expected(&|a, b| p(b) > p(a))
     );
 }
+
+#[test]
+fn row_scope_graph_predicates_preserve_collected_occurrences_and_local_pages() {
+    let head = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x";
+    for predicate in [
+        "(x)-[:R]->()",
+        "EXISTS((x)-[:R]->())",
+        "EXISTS((x)-->())",
+        "EXISTS { MATCH (x)-[:R]->() }",
+    ] {
+        for negated in [false, true] {
+            let negate = if negated { "NOT " } else { "" };
+            let statement = format!("{head} WHERE {negate}{predicate} RETURN x ORDER BY x");
+            let expected: Vec<_> = if negated { vec![4] } else { vec![1, 2, 3] }
+                .into_iter()
+                .map(|id| vertices(&[id]))
+                .collect();
+            assert_eq!(execute(&statement), expected, "{statement}");
+        }
+    }
+    // Each compound leaf has a different absolute token offset. Its WHERE
+    // probe must rebase against that leaf's actual statement slice.
+    assert_eq!(
+        execute(&format!(
+            "\u{2003}({head} WHERE EXISTS((x)-[:R]->()) RETURN x) \
+             UNION ALL ({head} WHERE NOT EXISTS((x)-[:R]->()) RETURN x) ORDER BY x"
+        )),
+        [1, 2, 3, 4]
+            .into_iter()
+            .map(|id| vertices(&[id]))
+            .collect::<Vec<_>>()
+    );
+    // Vertex 1 has three physical witnesses. Existence must retain each
+    // outer occurrence once, without multiplying it by those witnesses.
+    let duplicated = "MATCH (n) WITH n ORDER BY n DESC WITH collect(n) AS nodes \
+                      UNWIND nodes AS candidate UNWIND [candidate,candidate] AS x \
+                      WHERE (x)-[:R]->()";
+    assert_eq!(
+        execute(&format!("{duplicated} RETURN x ORDER BY x DESC")),
+        [3, 3, 2, 2, 1, 1]
+            .into_iter()
+            .map(|id| vertices(&[id]))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        execute(&format!("{duplicated} LIMIT 3 RETURN x ORDER BY x DESC")),
+        [3, 3, 2]
+            .into_iter()
+            .map(|id| vertices(&[id]))
+            .collect::<Vec<_>>()
+    );
+    let statement = "MATCH (n) WITH collect(n) AS nodes \
+                     UNWIND nodes AS __fg_exists_witness \
+                     WHERE EXISTS((__fg_exists_witness)-[:R]->()) \
+                     RETURN __fg_exists_witness ORDER BY __fg_exists_witness";
+    let query = prepare(statement);
+    assert_eq!(query.columns(), ["__fg_exists_witness"]);
+    assert_eq!(
+        run(&query, wide(), &mut || Ok(())).unwrap().value,
+        [1, 2, 3]
+            .into_iter()
+            .map(|id| vertices(&[id]))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn row_scope_graph_predicates_match_nullable_graph_head_existence() {
+    let head = "MATCH (n) OPTIONAL MATCH (n)-[:R]->(m) WITH n,m";
+    for negated in [false, true] {
+        let negate = if negated { "NOT " } else { "" };
+        // The unchanged graph-head owner already handles this nullable m.
+        let oracle = execute(&format!(
+            "{head} WHERE {negate}EXISTS((m)-[:R]->()) RETURN n,m ORDER BY n,m"
+        ));
+        let expected = if negated {
+            vec![
+                vertices(&[3, 4]),
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(4)),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                ]),
+            ]
+        } else {
+            vec![
+                vertices(&[1, 2]),
+                vertices(&[1, 2]),
+                vertices(&[1, 3]),
+                vertices(&[2, 3]),
+            ]
+        };
+        assert_eq!(oracle, expected);
+        // UNWIND preserves the NULL inside [m], instead of rebinding that
+        // missing identity to an arbitrary vertex in the predicate body.
+        assert_eq!(
+            execute(&format!(
+                "{head} UNWIND [m] AS x WHERE {negate}EXISTS((x)-[:R]->()) \
+                 RETURN n,x ORDER BY n,x"
+            )),
+            oracle,
+        );
+    }
+}
+
+#[test]
+fn row_scope_graph_predicate_arguments_rebind_without_coercing_any_values_to_vertices() {
+    let mixed = vec![
+        GraphValue::Vertex(VId(1)),
+        GraphValue::Vertex(VId(1)),
+        GraphValue::Vertex(VId(4)),
+        GraphValue::Vertex(VId(u128::MAX)),
+        GraphValue::Scalar(CanonicalScalar::Null),
+        GraphValue::Scalar(CanonicalScalar::Int(1)),
+        GraphValue::Edge(fgdb_types::EId(1)),
+    ];
+    for negated in [false, true] {
+        let negate = if negated { "NOT " } else { "" };
+        let statement = format!("UNWIND $items AS x WHERE {negate}EXISTS((x)-[:R]->()) RETURN x");
+        let template = PreparedGraphSetText::prepare(&statement, symbols).unwrap();
+        let frozen = template.canonical_template_bytes();
+        for values in [
+            mixed.clone(),
+            vec![GraphValue::Vertex(VId(2)), GraphValue::Vertex(VId(3))],
+            vec![],
+        ] {
+            let mut expected: Vec<_> = values
+                .iter()
+                .filter(|value| {
+                    let witness = matches!(value, GraphValue::Vertex(id)
+                        if EDGES.iter().any(|&(from, _, _)| from == *id));
+                    witness != negated
+                })
+                .map(|value| GraphValueRow::from_owned_values(vec![value.clone()]))
+                .collect();
+            expected.sort();
+            let arguments = GqlParameters::new().with_list("items", values).unwrap();
+            let query = template.bind_parameters(&arguments).unwrap();
+            let mut actual = run(&query, wide(), &mut || Ok(())).unwrap().value;
+            actual.sort();
+            assert_eq!(actual, expected, "{statement}");
+        }
+        assert_eq!(template.canonical_template_bytes(), frozen);
+        assert!(template.bind_parameters(&GqlParameters::new()).is_err());
+    }
+}
+
+#[test]
+fn row_graph_predicate_routing_preserves_scalar_minus_comparisons_and_not() {
+    for (predicate, ordinary) in [
+        ("(x) - -1 > 2", "x + 1 > 2"),
+        ("(x) - -(y) > 2", "x + y > 2"),
+        ("(x) < - -3", "x < 3"),
+        ("(x) < - -(y)", "x < y"),
+        ("((x) - -1 > 2)", "x + 1 > 2"),
+        ("NOT ((x) - -1 <= 2)", "x + 1 > 2"),
+        ("NOT x = 3", "x <> 3"),
+    ] {
+        let statement = format!("WITH 2 AS x,3 AS y WHERE {predicate} RETURN x,y");
+        let expected = execute(&format!("WITH 2 AS x,3 AS y WHERE {ordinary} RETURN x,y"));
+        assert_eq!(expected.len(), 1, "{ordinary}");
+        assert_eq!(execute(&statement), expected, "{statement}");
+    }
+}
+
+#[test]
+fn row_scope_graph_predicates_keep_late_body_errors_and_cumulative_budgets() {
+    let head = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x \
+                WHERE EXISTS((x)-[:R]->())";
+    for tail in ["RETURN x", "LIMIT 0 RETURN x", "RETURN x LIMIT 0"] {
+        let query = prepare(&format!("{head} {tail}"));
+        let mut calls = 0;
+        let result = query.execute_governed(
+            wide(),
+            |pattern, remaining| {
+                calls += 1;
+                if calls == 3 {
+                    return Err(GqlQueryError::Source("second-predicate-source-error"));
+                }
+                pattern.plan().execute_governed_with_properties(
+                    (4 + EDGES.len()) as u64,
+                    (1..=4).map(VId),
+                    EDGES,
+                    |_, _| Ok::<_, &'static str>(true),
+                    |_, _| Ok(None),
+                    remaining,
+                    || Ok::<_, usize>(()),
+                )
+            },
+            || Ok::<_, usize>(()),
+        );
+        // The graph leaf is call 1, and the first body's complete three
+        // witnesses are call 2. Neither its private LIMIT 1 nor an outer
+        // empty page may hide a later body source refusal.
+        assert_eq!(calls, 3, "{tail}");
+        assert!(matches!(
+            result,
+            Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+                "second-predicate-source-error"
+            )))
+        ));
+    }
+
+    for tail in ["RETURN x", "RETURN x LIMIT 0"] {
+        let query = prepare(&format!("{head} {tail}"));
+        let measured = run(&query, wide(), &mut || Ok(())).unwrap();
+        let caps = [
+            measured.rows.snapshot_records,
+            measured.rows.result_rows,
+            measured.evaluator.work_units,
+            measured.evaluator.scratch_entries,
+        ];
+        assert_eq!(
+            run(
+                &query,
+                GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+                &mut || Ok(()),
+            )
+            .unwrap(),
+            measured,
+        );
+        for dimension in [0, 2, 3] {
+            let mut limited = caps;
+            assert!(limited[dimension] > 0);
+            limited[dimension] -= 1;
+            assert!(
+                run(
+                    &query,
+                    GqlQueryPolicy::new(limited[0], limited[1], limited[2], limited[3]),
+                    &mut || Ok(()),
+                )
+                .is_err(),
+                "{tail}, dimension {dimension}"
+            );
+        }
+    }
+}

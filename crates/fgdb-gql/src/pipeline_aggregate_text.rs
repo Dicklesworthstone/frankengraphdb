@@ -353,6 +353,19 @@ impl PreparedGraphPipelineAggregateText {
                         input_operators(operators, body);
                         operators.push("Apply");
                     }
+                    BoundContinuationOperation::Exists { pattern, .. } => {
+                        operators.push("Arguments");
+                        let selection = pattern.selection.as_ref().expect("existence graph source");
+                        operators.push("ScanGraphText");
+                        operators.extend(selection.template_operators());
+                        operators.extend([
+                            "InnerJoin",
+                            "ProjectValues",
+                            "OrderByPage",
+                            "Apply",
+                            "Select",
+                        ]);
+                    }
                     BoundContinuationOperation::Match(join) => {
                         let selection = part
                             .input

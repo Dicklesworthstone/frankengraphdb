@@ -15,6 +15,13 @@ pub(crate) struct BoundContinuation {
 #[derive(Clone)]
 pub(crate) enum BoundContinuationOperation {
     Match(RowJoinSpec),
+    /// A whole row-scope existence filter. Its graph witnesses remain inside
+    /// an Apply body; the completed outer row keeps its order and multiplicity.
+    Exists {
+        pattern: Box<BoundSetTextInput>,
+        join: RowJoinSpec,
+        negated: bool,
+    },
     Apply {
         body: Box<BoundReadInput>,
         imports: Vec<usize>,
@@ -104,6 +111,40 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
         }
     }
     false
+}
+
+/// Candidate row WHERE positions. The shared graph lexer must still prove a
+/// graph-predicate introducer before any facade routing changes. Scalar NOT,
+/// parenthesized arithmetic, strings and nested comprehension WHEREs do not
+/// become multipart statements merely because they contain a WHERE token.
+pub(crate) fn row_where_offsets(tokens: &[TextToken<'_>]) -> Vec<usize> {
+    let mut positions = Vec::new();
+    let mut depth = 0_usize;
+    let mut row = false;
+    for (index, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TextKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+            TextKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+            _ if depth == 0 => {
+                let previous = index.checked_sub(1).and_then(|at| tokens.get(at));
+                if previous.is_some_and(|previous| previous.punct(b'.') || previous.word("AS")) {
+                    continue;
+                }
+                if token.word("MATCH") {
+                    row = false;
+                } else if (token.word("WITH") || token.word("UNWIND"))
+                    && !previous
+                        .is_some_and(|previous| previous.word("STARTS") || previous.word("ENDS"))
+                {
+                    row = true;
+                } else if row && token.word("WHERE") {
+                    positions.push(token.at);
+                }
+            }
+            _ => {}
+        }
+    }
+    positions
 }
 
 /// The offset of the WHERE keyword of a required MATCH over imported rows (a
@@ -349,6 +390,9 @@ impl BoundReadInput {
                 .iter()
                 .map(|part| match &part.operation {
                     BoundContinuationOperation::Match(_) => 1,
+                    BoundContinuationOperation::Exists { pattern, .. } => {
+                        usize::from(pattern.selection.is_some())
+                    }
                     BoundContinuationOperation::Apply { body, .. } => body.graph_source_count(),
                 })
                 .sum::<usize>()
@@ -364,11 +408,13 @@ impl BoundReadInput {
             self.first.append_template_transcript(bytes);
             return;
         }
-        if self
-            .continuations
-            .iter()
-            .any(|part| matches!(part.operation, BoundContinuationOperation::Apply { .. }))
-        {
+        if self.continuations.iter().any(|part| {
+            matches!(
+                part.operation,
+                BoundContinuationOperation::Apply { .. }
+                    | BoundContinuationOperation::Exists { .. }
+            )
+        }) {
             bytes.push(5);
             bytes.extend_from_slice(b"fgdb:gql:apply-continuations:v1\0");
             bytes.extend_from_slice(&(self.continuations.len() as u64).to_be_bytes());
@@ -378,6 +424,16 @@ impl BoundReadInput {
                     BoundContinuationOperation::Match(join) => {
                         bytes.push(0);
                         join.append_template_transcript(bytes);
+                    }
+                    BoundContinuationOperation::Exists {
+                        pattern,
+                        join,
+                        negated,
+                    } => {
+                        bytes.push(3);
+                        bytes.push(u8::from(*negated));
+                        join.append_template_transcript(bytes);
+                        pattern.append_template_transcript(bytes);
                     }
                     BoundContinuationOperation::Apply {
                         body,

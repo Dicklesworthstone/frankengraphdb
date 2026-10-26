@@ -1755,6 +1755,12 @@ impl<'a> Parser<'a> {
                 }
                 continue;
             }
+            // A graph predicate over a carried row has no graph head in which
+            // to gather a Collect scope. Its multipart owner inserts a governed
+            // Apply at this exact boundary, before any following page or stage.
+            if self.row_existence_filter(schema.len())? {
+                break;
+            }
             if self.take_word("WHERE")? {
                 self.row_selection(&schema, &mut stages, &mut depth, at)?;
                 // A page written after WHERE applies to the filtered rows.
