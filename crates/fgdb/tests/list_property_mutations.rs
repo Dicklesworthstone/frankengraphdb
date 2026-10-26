@@ -453,7 +453,9 @@ fn authorized_size_predicates_mask_hidden_list_contents_before_observation() {
         assert_eq!(hidden.0.effects, 0);
         assert_eq!(hidden.1, Some(CanonicalScalar::Int(1).into()));
         assert_eq!(hidden.2, Some(CanonicalScalar::Int(2).into()));
-        assert_eq!(outcome(false, 4096).await, hidden);
+        // 512 members, not more: a vertex row holds at most 16 KiB, and the
+        // store refuses a 4096-member list (82,021 bytes) at the setup write.
+        assert_eq!(outcome(false, 512).await, hidden);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
 }
