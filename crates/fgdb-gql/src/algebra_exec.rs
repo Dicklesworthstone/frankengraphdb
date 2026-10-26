@@ -1276,6 +1276,9 @@ impl<Row: GlaOutput> GlaPlan<Row> {
     /// Project borrowed canonical properties from the same immutable source as
     /// predicate reads. A property failure propagates unchanged, never as null.
     /// Execute captured values against admitted, real edge identities.
+    /// Labels, relationship types and captured-edge predicates require the
+    /// element-accessor executor. Incompatible plans refuse before reading
+    /// any input, including when the result limit is zero.
     pub fn execute_with_identified_properties_control<'a, E: From<crate::GraphIntegerError>>(
         &self,
         vertices: impl IntoIterator<Item = VId>,
@@ -1288,6 +1291,13 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             return Err(crate::GraphIntegerError {
                 instruction: 0,
                 kind: crate::GraphIntegerErrorKind::PropertyMapSourceRequired,
+            }
+            .into());
+        }
+        if self.projects_edge_properties() || self.projects_labels() || self.projects_types() {
+            return Err(crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::ElementSourceRequired,
             }
             .into());
         }
@@ -1453,6 +1463,8 @@ impl<Row: GlaOutput> GlaPlan<Row> {
 
     /// None means an absent property, not an unreadable source. The resolver's
     /// returned references must remain stable throughout this execution.
+    /// Plans that need element accessors refuse before consuming the source;
+    /// a missing accessor never produces NULL or an empty result.
     pub fn execute_with_properties_control<'a, E: From<crate::GraphIntegerError>>(
         &self,
         vertices: impl IntoIterator<Item = VId>,
@@ -1465,6 +1477,13 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             return Err(crate::GraphIntegerError {
                 instruction: 0,
                 kind: crate::GraphIntegerErrorKind::PropertyMapSourceRequired,
+            }
+            .into());
+        }
+        if self.projects_edge_properties() || self.projects_labels() || self.projects_types() {
+            return Err(crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::ElementSourceRequired,
             }
             .into());
         }

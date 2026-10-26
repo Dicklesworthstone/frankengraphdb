@@ -747,7 +747,13 @@ impl BoundBooleanExpression {
             bindings,
             &[],
             property,
-            &mut |_, _| panic!("edge properties require an explicit edge property source"),
+            &mut |_, _| {
+                Err(crate::GraphIntegerError {
+                    instruction: 0,
+                    kind: crate::GraphIntegerErrorKind::ElementSourceRequired,
+                }
+                .into())
+            },
             control,
         )
     }

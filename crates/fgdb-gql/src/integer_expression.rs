@@ -456,6 +456,9 @@ pub enum GraphIntegerErrorKind {
     NonText,
     NonBoolean,
     NonScalar,
+    /// The plan requires edge properties, vertex labels or relationship types,
+    /// but its executor supplies only vertex properties.
+    ElementSourceRequired,
     /// A bound graph element requires an enumerating property-map source.
     PropertyMapSourceRequired,
     /// A property-map source returned a non-map or a noncanonical map.
