@@ -720,7 +720,7 @@ impl PreparedGraphEdgeMergeText {
             // Identity-only continuations retain the compact row path. A
             // following property read needs the existing final-state query
             // owner, including its authorization and occurrence accounting.
-            if !parser.write_chain_reads(&output)?.is_empty() {
+            if parser.at_chained_read()? || !parser.write_chain_reads(&output)?.is_empty() {
                 let mut head = ParsedEdgeReturn::identity_head(
                     parsed.relationship,
                     schema,

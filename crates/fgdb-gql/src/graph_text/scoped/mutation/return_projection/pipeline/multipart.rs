@@ -395,16 +395,58 @@ impl<'a> Parser<'a> {
         self.multipart_parts_from(statement, aggregate, Vec::new(), 0)
     }
 
+    /// A terminal read after a write uses exactly the ordinary multipart
+    /// joins, scopes and projections. Its first relation is supplied by the
+    /// write host, not a unit row or an Apply argument frame. RETURN shares
+    /// the row-domain aggregate owner used by the other write families.
+    pub(in crate::graph_text::scoped::mutation) fn write_read_continuation(
+        mut self,
+        statement: &'a str,
+        incoming: RowSchema<'a>,
+    ) -> Result<UnresolvedReadInput<'a>, GraphSetTextError> {
+        self.read_elements = true;
+        self.call_element_reads = true;
+        let (mut result, schema) =
+            self.multipart_parts_with_input(statement, true, incoming, 0, true)?;
+        let stages = self.write_row_pipeline(schema)?;
+        result.append_stages(stages);
+        // The graph part has already lent its syntax. Terminal row expressions
+        // add property slots afterwards; resolve them with that final part so
+        // carried and optional element reads bind once with the template.
+        result
+            .continuations
+            .last_mut()
+            .map_or(&mut result.first, |part| &mut part.input)
+            .syntax
+            .element_keys
+            .append(&mut self.syntax.element_keys);
+        self.end()?;
+        result.share_parameters(&self.syntax.parameters, &self.syntax.parameter_offsets);
+        self.admit_multipart_size(&result)?;
+        Ok(result)
+    }
+
     fn multipart_parts_from(
+        &mut self,
+        statement: &'a str,
+        aggregate: bool,
+        incoming: RowSchema<'a>,
+        call_depth: usize,
+    ) -> Result<(UnresolvedReadInput<'a>, RowSchema<'a>), GraphSetTextError> {
+        self.multipart_parts_with_input(statement, aggregate, incoming, call_depth, false)
+    }
+
+    fn multipart_parts_with_input(
         &mut self,
         statement: &'a str,
         aggregate: bool,
         mut incoming: RowSchema<'a>,
         call_depth: usize,
+        owned: bool,
     ) -> Result<(UnresolvedReadInput<'a>, RowSchema<'a>), GraphSetTextError> {
         self.refuse_call_write(call_depth)?;
         let mut terminal = false;
-        let first = if self.is_word("MATCH") && incoming.is_empty() {
+        let first = if self.is_word("MATCH") && incoming.is_empty() && !owned {
             let (input, next, terminal, _) =
                 self.multipart_graph_part(statement, &incoming, None, aggregate, call_depth)?;
             if terminal {
@@ -415,13 +457,14 @@ impl<'a> Parser<'a> {
         } else {
             // A values-only leading pipeline is a unit relation followed by
             // the existing row stages, not a manufactured graph carrier.
-            let arguments = (!incoming.is_empty()).then(|| ReadStageTemplate::Arguments {
-                columns: incoming
-                    .iter()
-                    .map(|(name, _)| name.text.to_owned())
-                    .collect(),
-                types: incoming.iter().map(|(_, kind)| *kind).collect(),
-            });
+            let arguments =
+                (!owned && !incoming.is_empty()).then(|| ReadStageTemplate::Arguments {
+                    columns: incoming
+                        .iter()
+                        .map(|(name, _)| name.text.to_owned())
+                        .collect(),
+                    types: incoming.iter().map(|(_, kind)| *kind).collect(),
+                });
             let (mut pipeline, next, done) = self.multipart_row_tail(incoming, aggregate)?;
             self.refuse_call_write(call_depth)?;
             if let Some(arguments) = arguments {

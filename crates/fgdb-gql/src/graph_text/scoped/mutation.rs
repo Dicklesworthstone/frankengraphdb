@@ -1736,11 +1736,20 @@ impl<'a> Parser<'a> {
             && matches!(lexer.next()?.kind, TokenKind::Punct(b'-' | b'<')))
     }
 
-    /// The next write of a chain this slice compiles: a CREATE, a vertex or
-    /// relationship MERGE over the carried row, or a SET, REMOVE, DELETE or
-    /// DETACH DELETE of it (fgdb-cpny9).
+    /// A terminal graph read continues the write's private occurrence bag.
+    /// ON MATCH is consumed by the MERGE owner before this boundary is asked.
+    pub(super) fn at_chained_read(&self) -> Result<bool, GraphPatternTextError> {
+        Ok(self.is_word("MATCH")
+            || (self.is_word("OPTIONAL")
+                && matches!(self.lexer.clone().next()?.kind,
+                    TokenKind::Word(word) if word.eq_ignore_ascii_case("MATCH"))))
+    }
+
+    /// A next write or terminal graph read over the carried row (fgdb-cpny9).
+    /// The chain compiler dispatches the read to its native relational owner.
     pub(super) fn at_chained_write(&self) -> Result<bool, GraphPatternTextError> {
-        Ok(self.is_word("CREATE")
+        Ok(self.at_chained_read()?
+            || self.is_word("CREATE")
             || (self.is_word("MERGE")
                 && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
             || self.is_word("SET")

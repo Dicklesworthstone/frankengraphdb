@@ -565,6 +565,7 @@ impl<V: Vfs + Clone> Database<V> {
             clock,
         };
         let scope = verified.predicates();
+        let continuation = continuation.or_else(|| chain.read_continuation());
         if continuation.is_some_and(|read| !chain.accepts_read_continuation(read)) {
             return Err(GqlQueryError::Source(GraphWriteChainError::Read(
                 fgdb_gql::GraphSetExecutionError::InputSchema { operand: 0 },

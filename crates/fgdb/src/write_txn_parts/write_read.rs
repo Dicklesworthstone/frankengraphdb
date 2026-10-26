@@ -72,7 +72,7 @@ impl WriteTxn {
                 Some(limit) => GqlExecutionBudget::snapshot_records(limit),
                 None => GqlExecutionBudget::UNLIMITED,
             };
-            let (_, head, receipt) = workspace.txn.execute_graph_write_chain_governed(
+            let (_, head, receipt) = workspace.txn.execute_graph_write_chain_prefix_governed(
                 database,
                 cx,
                 chain,

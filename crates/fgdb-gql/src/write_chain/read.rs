@@ -36,7 +36,7 @@ impl PreparedGraphWriteChain {
     #[must_use]
     pub fn read_input(&self) -> Option<PreparedGraphSet> {
         Some(PreparedGraphSet::owned(
-            self.columns().to_vec(),
+            self.write_columns().to_vec(),
             self.read_input_types()?.to_vec(),
         ))
     }
@@ -48,7 +48,7 @@ impl PreparedGraphWriteChain {
     #[must_use]
     pub fn accepts_read_continuation(&self, continuation: &PreparedGraphSet) -> bool {
         self.read_input_types().is_some_and(|types| {
-            continuation.has_one_owned_input(self.columns(), types)
+            continuation.has_one_owned_input(self.write_columns(), types)
                 && continuation.check_parent_depth().is_ok()
         })
     }

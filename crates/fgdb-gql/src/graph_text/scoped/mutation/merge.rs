@@ -2575,7 +2575,7 @@ impl PreparedGraphVertexMergeRowsText {
             });
             carried.push((name, GraphSetColumnType::Vertex));
             let requested = parser.write_chain_reads(&carried)?;
-            let boundary = if requested.is_empty() {
+            let boundary = if requested.is_empty() && !parser.at_chained_read()? {
                 None
             } else {
                 // Keep identity-only MERGE chains on the compact row path.

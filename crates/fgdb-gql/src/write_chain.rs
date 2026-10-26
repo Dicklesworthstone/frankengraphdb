@@ -59,6 +59,8 @@ pub(crate) enum ChainTextStep {
 pub struct PreparedGraphWriteChainText {
     pub(crate) statement: String,
     pub(crate) steps: Vec<ChainTextStep>,
+    /// A terminal native read over the final write's private occurrence bag.
+    pub(crate) read: Option<crate::set_text::multipart::BoundReadInput>,
 }
 
 impl PreparedGraphWriteChainText {
@@ -66,6 +68,9 @@ impl PreparedGraphWriteChainText {
     /// binding, source expansion, identity allocation or graph observation.
     #[must_use]
     pub fn returns_rows(&self) -> bool {
+        if self.read.is_some() {
+            return true;
+        }
         match self.steps.last() {
             Some(ChainTextStep::Insert(step)) => step.1.is_some(),
             Some(ChainTextStep::EdgeMerge(step)) => step.1.is_some(),
@@ -92,6 +97,12 @@ pub enum GraphWriteChainTextError {
     EdgeMerge(GraphEdgeMergeTextError),
     VertexMerge(GraphVertexMergeTextError),
     Mutation(GraphMutationTextError),
+    Read(crate::GraphSetTextError),
+}
+impl From<crate::GraphSetTextError> for GraphWriteChainTextError {
+    fn from(error: crate::GraphSetTextError) -> Self {
+        Self::Read(error)
+    }
 }
 impl From<GraphMutationTextError> for GraphWriteChainTextError {
     fn from(error: GraphMutationTextError) -> Self {
@@ -125,6 +136,7 @@ impl core::fmt::Display for GraphWriteChainTextError {
             Self::EdgeMerge(error) => error.fmt(f),
             Self::VertexMerge(error) => error.fmt(f),
             Self::Mutation(error) => error.fmt(f),
+            Self::Read(error) => error.fmt(f),
         }
     }
 }
@@ -135,6 +147,7 @@ impl core::error::Error for GraphWriteChainTextError {
             Self::EdgeMerge(error) => Some(error),
             Self::VertexMerge(error) => Some(error),
             Self::Mutation(error) => Some(error),
+            Self::Read(error) => Some(error),
         }
     }
 }
@@ -368,6 +381,10 @@ pub struct PreparedGraphWriteChain {
     /// source. Hosts copy it under their cumulative execution allowance after
     /// whole-statement authorization and before the first write.
     pub(crate) initial_rows: Option<std::sync::Arc<[crate::algebra::GraphValueRow]>>,
+    /// The terminal MATCH/OPTIONAL MATCH and RETURN, with exactly one owned
+    /// input. Hosts execute it against the complete post-write overlay under
+    /// the same rollback workspace, capability and cumulative allowance.
+    pub(crate) read: Option<crate::PreparedGraphSet>,
 }
 
 impl core::fmt::Debug for PreparedGraphWriteChain {
@@ -452,9 +469,22 @@ impl PreparedGraphWriteChain {
         &self.steps
     }
 
-    /// The statement's result columns: the last step's RETURN, or none.
+    /// The statement's final result columns, after a terminal read if present.
     #[must_use]
     pub fn columns(&self) -> &[String] {
+        self.read
+            .as_ref()
+            .map_or_else(|| self.write_columns(), |read| read.columns())
+    }
+
+    /// An immutable native read of the final write's private output.
+    #[must_use]
+    pub fn read_continuation(&self) -> Option<&crate::PreparedGraphSet> {
+        self.read.as_ref()
+    }
+
+    /// The schema of the write prefix, before its optional terminal read.
+    pub(crate) fn write_columns(&self) -> &[String] {
         match self.steps.last() {
             Some(GraphWriteChainStep::Query(query)) => query.columns(),
             Some(GraphWriteChainStep::EdgeMergeQuery(query)) => query.columns(),

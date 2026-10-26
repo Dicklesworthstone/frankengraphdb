@@ -80,6 +80,16 @@ impl PreparedGraphWriteChainText {
                         ))
                     };
                     if clause
+                        && (written || merged || mutated)
+                        && (word.eq_ignore_ascii_case("MATCH")
+                            || (word.eq_ignore_ascii_case("OPTIONAL")
+                                && matches!(script::next_script_token(&mut lexer.clone())?.kind,
+                                    TokenKind::Word(next) if next.eq_ignore_ascii_case("MATCH"))))
+                    {
+                        // A graph read after the write consumes its private
+                        // rows and complete staged overlay in this statement.
+                        return Ok(true);
+                    } else if clause
                         && (word.eq_ignore_ascii_case("CREATE")
                             || word.eq_ignore_ascii_case("INSERT"))
                     {
@@ -416,13 +426,28 @@ impl PreparedGraphWriteChainText {
             steps.push(ChainTextStep::Insert(Box::new((first, returning))));
             after
         };
+        let mut read = None;
         while let Some(from) = next {
-            // The continuation is at the next write's own clause.
+            // The continuation is at the next write's or terminal read's clause.
             let mut lexer = Lexer {
                 text: body,
                 at: from.at,
                 tokens: 0,
             };
+            if matches!(lexer.clone().next()?.kind, TokenKind::Word(word)
+                if word.eq_ignore_ascii_case("MATCH") || word.eq_ignore_ascii_case("OPTIONAL"))
+            {
+                let (columns, types) = from.owned_columns();
+                let parser = Parser::new_with_parameter_types(body, declarations)?
+                    .with_zones(resolve.time_zones())
+                    .resume_after(from.boundary, &from.parameters, from.at)?;
+                let mut input = parser
+                    .write_read_continuation(body, from.row)?
+                    .resolve(&mut resolve)?;
+                input.first.owned = Some(Box::new((columns, types)));
+                read = Some(input);
+                break;
+            }
             // A SET, REMOVE or DELETE: a RETURN or the end of the statement
             // follows it, or a WITH head or another write, which reads its
             // post-write rows.
@@ -502,12 +527,13 @@ impl PreparedGraphWriteChainText {
             if matches!(merge.input, crate::mutation_text::VertexMergeRowsTextInput::Relation(_)));
         let row_actions = matches!(steps.as_slice(), [ChainTextStep::EdgeMerge(merge)]
             if merge.0.row_actions.is_some());
-        if steps.len() < 2 && !unwound_merge && !row_actions {
+        if steps.len() < 2 && !unwound_merge && !row_actions && read.is_none() {
             return Err(expected(body.len(), "another write after the first").into());
         }
         let chain = Self {
             statement: statement.to_owned(),
             steps,
+            read,
         };
         // Each step skipped the unused-declaration check, since another step
         // may read a declaration; every one must name a parameter some step
@@ -545,6 +571,13 @@ impl PreparedGraphWriteChainText {
                 ChainTextStep::Mutation(step) => step.0.parameter_schema(),
             };
             for spec in specs {
+                if !schema.iter().any(|known| known.name == spec.name) {
+                    schema.push(spec.clone());
+                }
+            }
+        }
+        if let Some(read) = &self.read {
+            for spec in read.parameter_schema() {
                 if !schema.iter().any(|known| known.name == spec.name) {
                     schema.push(spec.clone());
                 }
@@ -817,6 +850,15 @@ impl PreparedGraphWriteChainText {
                 }
             }
         }
+        let read = self
+            .read
+            .as_ref()
+            .map(|read| {
+                reads_previous(read.first.owned.as_deref(), &previous, self.statement.len())?;
+                read.bind_parameters(&own(read.parameter_schema())?)
+                    .map_err(GraphWriteChainTextError::from)
+            })
+            .transpose()?;
         if arguments
             .parameter_types()
             .any(|(name, _)| !named.contains(name))
@@ -827,10 +869,21 @@ impl PreparedGraphWriteChainText {
             ))
             .into());
         }
-        Ok(PreparedGraphWriteChain {
+        let chain = PreparedGraphWriteChain {
             steps,
             initial_rows: None,
-        })
+            read,
+        };
+        if let Some(read) = chain.read_continuation()
+            && !chain.accepts_read_continuation(read)
+        {
+            return Err(expected(
+                self.statement.len(),
+                "one complete write-row input to the read",
+            )
+            .into());
+        }
+        Ok(chain)
     }
 }
 
@@ -942,7 +995,6 @@ mod tests {
             "MATCH (create) WITH create CREATE (b)",
             "MATCH (n) WHERE n.name STARTS WITH 'x' CREATE (m) RETURN m",
             "CREATE (n {p: 'WITH CREATE (x)'}) WITH n RETURN n",
-            "MERGE (a) ON CREATE SET a.p = 1 WITH a MATCH (b) RETURN b",
             "CREATE (a); MATCH (n) WITH n CREATE (b)",
             "RETURN 1",
             // A lone MATCH-led or UNWIND-led relationship MERGE, a first

@@ -187,6 +187,31 @@ impl WriteTxn {
         cx: &fgdb_types::QueryCx,
         chain: &fgdb_gql::PreparedGraphWriteChain,
         policy: fgdb_gql::insertion::GraphInsertPolicy,
+        allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
+    ) -> WriteChainResult<A> {
+        if let Some(read) = chain.read_continuation() {
+            let (receipt, rows) = self.execute_graph_write_chain_then_read_governed(
+                database, cx, chain, read, policy, allocate,
+            )?;
+            let stats = fgdb_gql::insertion::GraphInsertStats {
+                selection: rows.rows,
+                evaluator: rows.evaluator,
+                created_vertices: receipt.stats().created_vertices,
+                created_edges: receipt.stats().created_edges,
+            };
+            return Ok((stats, rows, receipt));
+        }
+        self.execute_graph_write_chain_prefix_governed(database, cx, chain, policy, allocate)
+    }
+
+    // The write/read owner calls only this prefix, retaining its outer rollback
+    // guard until the final native read and output admission have succeeded.
+    fn execute_graph_write_chain_prefix_governed<V: Vfs + Clone, A>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        chain: &fgdb_gql::PreparedGraphWriteChain,
+        policy: fgdb_gql::insertion::GraphInsertPolicy,
         mut allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
     ) -> WriteChainResult<A> {
         use fgdb_gql::insertion::{GraphInsertError, GraphInsertPolicy, GraphInsertStats};

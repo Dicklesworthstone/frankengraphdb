@@ -1836,3 +1836,420 @@ fn authorized_post_write_read_shares_each_native_allowance_with_its_write_prefix
         }
     });
 }
+
+#[test]
+fn textual_post_write_match_preserves_bags_optional_nulls_and_durable_overlay() {
+    lab(0xc4a1_20e1, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 3), NOW).unwrap();
+        let program = chain(
+            "UNWIND [1,1,2] AS k MERGE (n:Visible {p:k}) WITH n \
+             OPTIONAL MATCH (m:Visible {p:1}) WHERE m=n \
+             RETURN n.p AS p,m.p AS found ORDER BY p",
+        );
+        assert_eq!(program.columns(), &["p", "found"]);
+        let mut authorized_usage = None;
+        for authorized in [false, true] {
+            for hidden in [0_u128, 16] {
+                let vfs = MemVfs::new().unwrap();
+                let path = vfs.database_dir();
+                let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+                    .await
+                    .unwrap();
+                if hidden != 0 {
+                    let mut seed = WriteBatch::new(R);
+                    for id in 1..=hidden {
+                        seed.create_vertex(
+                            VId(id),
+                            vec![HIDDEN],
+                            vec![(P, CanonicalScalar::Int(1))],
+                        );
+                    }
+                    db.write(&commit, seed).await.unwrap();
+                }
+                let before = db.frontier().unwrap();
+                let (stats, result, completion) = if authorized {
+                    db.execute_graph_write_chain_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        &program,
+                        policy(3),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap()
+                } else {
+                    let mut transaction = db.begin(&txn).unwrap();
+                    let (stats, rows, _) = transaction
+                        .execute_graph_write_chain_engine_governed(
+                            &mut db,
+                            &query,
+                            &program,
+                            policy(3),
+                        )
+                        .unwrap();
+                    let completion = transaction.finish(&mut db, &commit).await.unwrap();
+                    (stats, rows, completion)
+                };
+                assert_eq!((stats.created_vertices, stats.created_edges), (2, 0));
+                assert_eq!(stats.selection, result.rows);
+                assert_eq!(stats.evaluator, result.evaluator);
+                assert_eq!(
+                    result
+                        .value
+                        .iter()
+                        .map(|row| row.values().to_vec())
+                        .collect::<Vec<_>>(),
+                    vec![
+                        vec![
+                            GraphValue::Scalar(CanonicalScalar::Int(1)),
+                            GraphValue::Scalar(CanonicalScalar::Int(1))
+                        ],
+                        vec![
+                            GraphValue::Scalar(CanonicalScalar::Int(1)),
+                            GraphValue::Scalar(CanonicalScalar::Int(1))
+                        ],
+                        vec![
+                            GraphValue::Scalar(CanonicalScalar::Int(2)),
+                            GraphValue::Scalar(CanonicalScalar::Null)
+                        ],
+                    ]
+                );
+                if authorized {
+                    if let Some(expected) = authorized_usage {
+                        assert_eq!(
+                            stats, expected,
+                            "hidden vertices cannot change public counters"
+                        );
+                    } else {
+                        authorized_usage = Some(stats);
+                    }
+                }
+                let frontier = db.frontier().unwrap();
+                assert_eq!(frontier.0, before.0 + 1);
+                assert_eq!(
+                    completion,
+                    EmbeddedTxnCompletion::WriteCommitted {
+                        commit_seq: frontier
+                    }
+                );
+                let expected = db.vertices().unwrap();
+                drop(db);
+                let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+                    .await
+                    .unwrap();
+                assert_eq!(reopened.frontier().unwrap(), frontier);
+                assert_eq!(reopened.vertices().unwrap(), expected);
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+    });
+}
+
+#[test]
+fn public_write_text_reads_final_state_and_counts_private_occurrences_once() {
+    lab(0xc4a1_20e2, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let budget = fgdb_gql::GraphWriteProgramPolicy::new(
+            GqlQueryPolicy::new(10_000, 1, 1_000_000, 100_000),
+            100,
+            100,
+            100,
+        );
+        for (text, expected, vertices, edges) in [
+            (
+                "CREATE (n:Visible {p:7}) WITH n MATCH (n) RETURN sum(n.p) AS total",
+                7,
+                1,
+                0,
+            ),
+            (
+                "CREATE (n:Visible {p:1}) SET n.p=7 WITH n MATCH (n) RETURN sum(n.p) AS total",
+                7,
+                1,
+                0,
+            ),
+            (
+                "UNWIND [1,1,2] AS k MERGE (n:Visible {p:k}) OPTIONAL MATCH (m:Visible) RETURN count(m) AS total",
+                6,
+                2,
+                0,
+            ),
+            (
+                "MERGE (a:Visible {p:1}) MERGE (b:Visible {p:2}) MERGE (a)-[r:R]->(b) WITH a,r,b MATCH (a)-[r:R]->(b) RETURN count(*) AS total",
+                1,
+                2,
+                1,
+            ),
+            (
+                "CREATE (n:Visible {p:1}) WITH n MATCH (m:Visible {p:99}) RETURN count(*) AS total",
+                0,
+                1,
+                0,
+            ),
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = db.frontier().unwrap();
+            let result = db
+                .query_write_engine(
+                    &txn,
+                    &query,
+                    &commit,
+                    text,
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    budget,
+                )
+                .await
+                .expect(text);
+            let fgdb::QueryResult::Rows { columns, rows } = result else {
+                panic!("a final read must return its public schema and rows: {text}");
+            };
+            assert_eq!(columns, ["total"], "{text}");
+            assert_eq!(
+                rows,
+                vec![vec![fgdb::QueryValue::Value(GraphValue::Scalar(
+                    CanonicalScalar::Int(expected)
+                ),)]],
+                "{text}"
+            );
+            assert_eq!(db.vertices().unwrap().len(), vertices, "{text}");
+            assert_eq!(db.edges().unwrap().len(), edges, "{text}");
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1, "{text}");
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn textual_read_after_set_keeps_frozen_aliases_and_reads_current_properties() {
+    lab(0xc4a1_20e3, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 1), NOW).unwrap();
+        let program = chain(
+            "CREATE (n:Visible {p:1}) WITH n,n.p AS before \
+             SET n.p=before+1 WITH n,before MATCH (n) RETURN before,n.p AS after",
+        );
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let (_, rows, _) = db
+            .execute_graph_write_chain_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &program,
+                policy(1),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.value[0].values(),
+            &[
+                GraphValue::Scalar(CanonicalScalar::Int(1)),
+                GraphValue::Scalar(CanonicalScalar::Int(2)),
+            ]
+        );
+        assert_eq!(
+            db.vertices().unwrap()[0].props,
+            vec![(P, CanonicalScalar::Int(2).into())]
+        );
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn terminal_read_failure_even_at_limit_zero_restores_the_prior_transaction_prefix() {
+    lab(0xc4a1_20e4, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let before = db.frontier().unwrap();
+        let mut transaction = db.begin(&txn).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(7), vec![L], vec![(P, CanonicalScalar::Int(99))]);
+        transaction.write(&mut db, prefix).unwrap();
+        let digest = transaction.staged_effect_digest().unwrap();
+        for limit in ["", " LIMIT 0"] {
+            let program = chain(&format!(
+                "UNWIND [1,2] AS k MERGE (n:Visible {{p:k}}) WITH n \
+                 MATCH (m:Visible) RETURN 1/(m.p-2) AS value{limit}",
+            ));
+            transaction
+                .execute_graph_write_chain_engine_governed(&mut db, &query, &program, policy(100))
+                .expect_err("a late arithmetic error must discard every new effect");
+            assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+            assert_eq!(transaction.vertices(&db).unwrap().len(), 1);
+            assert_eq!(db.frontier().unwrap(), before);
+        }
+        transaction.finish(&mut db, &commit).await.unwrap();
+        assert_eq!(db.vertices().unwrap().len(), 1);
+        assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn textual_read_authority_and_final_host_admission_precede_publication() {
+    lab(0xc4a1_20e5, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        for case in 0..4 {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = db.frontier().unwrap();
+            let rights = if case == 0 {
+                Rights::Write
+            } else {
+                Rights::ReadWrite
+            };
+            let token = issuer.issue_at(&grant(rights, 1), NOW).unwrap();
+            let program = chain(if case == 1 {
+                "CREATE (n:Visible {p:1}) WITH n MATCH (n) RETURN n.secret"
+            } else if case == 2 {
+                "UNWIND [1,2] AS k CREATE (n:Visible {p:k}) WITH n MATCH (n) RETURN n.p"
+            } else {
+                "UNWIND [1,1,2] AS k MERGE (n:Visible {p:k}) WITH n \
+                 MATCH (m:Visible) RETURN count(*) AS total"
+            });
+            let mut called = 0;
+            let error = db
+                .execute_graph_write_chain_authorized_checked(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    policy(100),
+                    || NOW,
+                    |rows, meter| {
+                        called += 1;
+                        assert_eq!(
+                            case, 3,
+                            "earlier refusals cannot reach host output admission"
+                        );
+                        assert_eq!(
+                            rows[0].values(),
+                            &[GraphValue::Scalar(CanonicalScalar::Int(6))]
+                        );
+                        meter(1)?;
+                        Err(WriteTxnError::Authorization(Error::ScopeDenied))
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(called, usize::from(case == 3));
+            if case == 0 {
+                assert_eq!(authorization(&error), Some(Error::PermissionDenied));
+            } else if case == 1 || case == 3 {
+                assert_eq!(authorization(&error), Some(Error::ScopeDenied));
+            }
+            assert_eq!(db.frontier().unwrap(), before);
+            assert!(db.vertices().unwrap().is_empty());
+            assert!(db.edges().unwrap().is_empty());
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn textual_read_limits_are_cumulative_and_noop_merge_reads_do_not_replay_effects() {
+    lab(0xc4a1_20e6, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 1), NOW).unwrap();
+        let program = chain(
+            "UNWIND [1,1,2] AS k MERGE (n:Visible {p:k}) WITH n \
+             MATCH (m:Visible) RETURN count(*) AS total",
+        );
+        let mut reference = Database::open_memory(&commit, keys()).await.unwrap();
+        let (complete, rows, _) = reference
+            .execute_graph_write_chain_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &program,
+                policy(1),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.value[0].values(),
+            &[GraphValue::Scalar(CanonicalScalar::Int(6))]
+        );
+        for dimension in 0..3 {
+            let mut bounded = policy(1);
+            match dimension {
+                0 => {
+                    bounded.query = GqlQueryPolicy::new(
+                        complete.selection.snapshot_records - 1,
+                        1,
+                        bounded.query.evaluator.max_work_units,
+                        bounded.query.evaluator.max_scratch_entries,
+                    )
+                }
+                1 => bounded.query.evaluator.max_work_units = complete.evaluator.work_units - 1,
+                _ => {
+                    bounded.query.evaluator.max_scratch_entries =
+                        complete.evaluator.scratch_entries - 1
+                }
+            }
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = db.frontier().unwrap();
+            assert!(
+                db.execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    bounded,
+                    || NOW,
+                )
+                .await
+                .is_err(),
+                "dimension {dimension}"
+            );
+            assert_eq!(db.frontier().unwrap(), before);
+            assert!(db.vertices().unwrap().is_empty());
+        }
+        let before = reference.frontier().unwrap();
+        let (stats, rows, _) = reference
+            .execute_graph_write_chain_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &program,
+                policy(1),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(stats.created_vertices, 0);
+        assert_eq!(
+            rows.value[0].values(),
+            &[GraphValue::Scalar(CanonicalScalar::Int(6))]
+        );
+        assert_eq!(reference.frontier().unwrap(), before);
+        assert_eq!(reference.vertices().unwrap().len(), 2);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
