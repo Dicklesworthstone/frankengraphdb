@@ -2,12 +2,14 @@
 //!
 //! The existing compilers own syntax, types and lowering. This boundary only
 //! selects the bounded UNWIND mutation adapter or the ordinary write script,
-//! and retains input coordinates until execution/completion has succeeded.
+//! splices a script's map arguments that stand for property maps
+//! (GqlMapArgumentText), and retains input coordinates until
+//! execution/completion has succeeded.
 
 use crate::unwind_write::{GraphUnwindWriteError, GraphUnwindWriteText};
 use crate::{
-    BoundGraphWriteScriptBatch, GqlParameterType, GqlParameters, GraphSymbol, GraphSymbolKind,
-    GraphWriteProgramError, GraphWriteScriptError, GraphWriteScriptExecutionError,
+    BoundGraphWriteScriptBatch, GqlMapArgumentText, GqlParameterType, GqlParameters, GraphSymbol,
+    GraphSymbolKind, GraphWriteProgramError, GraphWriteScriptError, GraphWriteScriptExecutionError,
     PreparedGraphWriteProgram, PreparedGraphWriteScript,
 };
 use fgdb_delta_types::RelationId;
@@ -69,6 +71,10 @@ impl BoundNativeGraphWrite {
     /// only. Values, row shapes, downstream types and execution budgets still
     /// require the ordinary binder. Collection contents are never inspected.
     /// Native reads should be admitted by their own compiler before this probe.
+    /// The probe prepares the text as written, without splicing map
+    /// arguments as `bind` does: its caller (the server's autocommit
+    /// classifier) executes the text through a preparation that does not
+    /// splice them either, and must not admit a write its executor refuses.
     #[allow(clippy::result_large_err)]
     pub fn probe_definition(
         text: &str,
@@ -128,11 +134,21 @@ impl BoundNativeGraphWrite {
                 .map_err(NativeGraphWriteBindError::Unwind)?;
             return Ok(Self(BoundInput::Unwind(batch)));
         }
-        let script = Self::prepare_script(text, arguments, relation, resolve)
-            .map_err(NativeGraphWriteBindError::ScriptPreparation)?;
+        // A map argument standing for a property map (`SET n += $props`)
+        // binds as the literal map of its keys (fgdb-0s2pq).
+        let lowered = GqlMapArgumentText::lower(text, arguments);
+        let (text, arguments) = lowered
+            .as_ref()
+            .map_or((text, arguments), |(lowered, derived)| {
+                (lowered.text(), derived)
+            });
+        let lowered = lowered.as_ref().map(|(lowered, _)| lowered);
+        let script = Self::prepare_script(text, arguments, relation, resolve).map_err(|error| {
+            NativeGraphWriteBindError::ScriptPreparation(restored(lowered, error))
+        })?;
         let program = script
             .bind_parameters(arguments)
-            .map_err(NativeGraphWriteBindError::ScriptBinding)?;
+            .map_err(|error| NativeGraphWriteBindError::ScriptBinding(restored(lowered, error)))?;
         Ok(Self(BoundInput::Script(program)))
     }
 
@@ -192,6 +208,17 @@ impl BoundNativeGraphWrite {
             BoundInput::Unwind(batch) => batch.execution_error(source),
         }
     }
+}
+
+/// A script error of a lowered statement, at the caller's bytes.
+fn restored(
+    lowered: Option<&GqlMapArgumentText>,
+    mut error: GraphWriteScriptError,
+) -> GraphWriteScriptError {
+    if let Some(lowered) = lowered {
+        lowered.restore(&mut error);
+    }
+    error
 }
 
 #[cfg(test)]

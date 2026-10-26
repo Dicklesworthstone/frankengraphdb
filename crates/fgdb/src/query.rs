@@ -282,6 +282,46 @@ impl<A> From<NativeGraphWriteBindError> for QueryWriteError<A> {
     }
 }
 
+impl<A> QueryWriteError<A> {
+    /// A statement-text error of a lowered statement, at the caller's bytes.
+    /// Execution errors name no statement byte and stay as they are.
+    fn restored(mut self, lowered: Option<&GqlMapArgumentText>) -> Self {
+        let Some(lowered) = lowered else {
+            return self;
+        };
+        match &mut self {
+            Self::Prepare(error)
+            | Self::Execute(GraphWriteScriptExecutionError::Binding(error)) => {
+                lowered.restore(error)
+            }
+            Self::InsertText(error) => lowered.restore(error),
+            Self::MutationText(error) => lowered.restore(error),
+            Self::VertexUpsertText(error) => lowered.restore(error),
+            Self::EdgeMergeText(error) => lowered.restore(error),
+            Self::EdgeUpsertText(error) => lowered.restore(error),
+            Self::ChainText(error) => lowered.restore(error),
+            _ => {}
+        }
+        self
+    }
+}
+
+/// A write's map arguments standing for property maps (`SET n += $props`),
+/// spliced as the literal maps of their keys (fgdb-0s2pq). A bounded UNWIND
+/// mutation keeps its own row-map lowering, as BoundNativeGraphWrite does.
+fn map_arguments(
+    text: &str,
+    params: &GqlParameters,
+) -> Option<(GqlMapArgumentText, GqlParameters)> {
+    if matches!(
+        fgdb_gql::unwind_write::GraphUnwindWriteText::parse_if_supported(text),
+        Ok(Some(_))
+    ) {
+        return None;
+    }
+    GqlMapArgumentText::lower(text, params)
+}
+
 // Both public write entrypoints must bind the same native query. The parser,
 // not a text rewrite, owns statement framing, scopes and parameter occurrence
 // tables. Scalar and collection arguments may appear only in RETURN. Keep
@@ -502,6 +542,34 @@ impl<V: Vfs + Clone> Database<V> {
         resolver: impl GraphSymbolResolver,
         relation: RelationId,
         budget: GraphWriteProgramPolicy,
+        allocate: impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, A>,
+    ) -> Result<QueryResult, QueryWriteError<A>> {
+        let lowered = map_arguments(text, params);
+        let (text, params) = lowered
+            .as_ref()
+            .map_or((text, params), |(lowered, derived)| {
+                (lowered.text(), derived)
+            });
+        let lowered = lowered.as_ref().map(|(lowered, _)| lowered);
+        self.query_write_text(
+            txcx, cx, commit_cx, text, params, resolver, relation, budget, allocate,
+        )
+        .await
+        .map_err(|error| error.restored(lowered))
+    }
+
+    /// `query_write` over a statement whose map arguments are spliced.
+    #[allow(clippy::too_many_arguments, clippy::result_large_err)]
+    async fn query_write_text<A>(
+        &mut self,
+        txcx: &TxnCx,
+        cx: &QueryCx,
+        commit_cx: &CommitCx,
+        text: &str,
+        params: &GqlParameters,
+        resolver: impl GraphSymbolResolver,
+        relation: RelationId,
+        budget: GraphWriteProgramPolicy,
         mut allocate: impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, A>,
     ) -> Result<QueryResult, QueryWriteError<A>> {
         // A chain claims its text before CREATE RETURN, whose classifier
@@ -687,6 +755,32 @@ impl WriteTxn {
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::result_large_err)] // once-per-statement report, as above
     pub fn query_write<V: Vfs + Clone, A>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &QueryCx,
+        text: &str,
+        params: &GqlParameters,
+        resolver: impl GraphSymbolResolver,
+        relation: RelationId,
+        budget: GraphWriteProgramPolicy,
+        allocate: impl FnMut(GraphWriteIdentityRequest) -> Result<ElementId, A>,
+    ) -> Result<QueryResult, QueryWriteError<A>> {
+        let lowered = map_arguments(text, params);
+        let (text, params) = lowered
+            .as_ref()
+            .map_or((text, params), |(lowered, derived)| {
+                (lowered.text(), derived)
+            });
+        let lowered = lowered.as_ref().map(|(lowered, _)| lowered);
+        self.query_write_text(
+            database, cx, text, params, resolver, relation, budget, allocate,
+        )
+        .map_err(|error| error.restored(lowered))
+    }
+
+    /// `query_write` over a statement whose map arguments are spliced.
+    #[allow(clippy::too_many_arguments, clippy::result_large_err)]
+    fn query_write_text<V: Vfs + Clone, A>(
         &mut self,
         database: &mut Database<V>,
         cx: &QueryCx,

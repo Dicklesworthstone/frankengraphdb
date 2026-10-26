@@ -8,6 +8,7 @@
 mod aggregate;
 mod boolean;
 pub(crate) mod literal;
+mod map_arguments;
 mod ordering;
 mod parameters;
 mod row_fields;
@@ -22,6 +23,7 @@ use crate::algebra::{
 use crate::{GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters};
 pub use aggregate::{GraphAggregateTextSlot, PreparedGraphAggregateText};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+pub use map_arguments::{GqlMapArgumentError, GqlMapArgumentText, GqlTextOffsets};
 use scoped::{BoundScope, ScopeSyntax};
 use std::collections::BTreeMap;
 

@@ -27,7 +27,7 @@ mod expansion;
 mod offsets;
 pub use controlled::{GraphUnwindBindError, GraphUnwindBindEvent};
 pub(crate) use expansion::UnwindSource;
-pub(crate) use offsets::UnwindSourceOffset;
+pub(crate) use offsets::{UnwindSourceOffset, original_offset_in, restore_script_error};
 
 use crate::algebra::GraphValue;
 use crate::{

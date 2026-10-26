@@ -1243,3 +1243,85 @@ fn a_write_match_where_over_label_tests_filters_its_rows() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// fgdb-0s2pq: through the embedded API a map parameter stands for the
+/// property map it holds. `SET n += $props ... RETURN`, autocommit and inside
+/// a transaction, assigns the map's keys and keeps every other property, and
+/// `SET n = $props` replaces them. A key the catalog does not bind refuses at
+/// the `$` of the parameter, with nothing published.
+#[test]
+fn a_map_parameter_assigns_its_keys_through_query_write() {
+    let ((), report) = run_async_under_lab(0xa071_000a, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let props = |entries: &[(&str, i64)]| {
+            let entries = (entries.iter())
+                .map(|(key, value)| ((*key).into(), int(*value)))
+                .collect();
+            GqlParameters::new().with_map("props", entries).unwrap()
+        };
+        let merge = "MATCH (n:L {id: 1}) SET n += $props RETURN n.p AS p, n.id AS id";
+        let merged = db
+            .query_write(
+                &txcx,
+                &cx,
+                &commit,
+                merge,
+                &props(&[("p", 40)]),
+                symbols,
+                R,
+                policy(10, 10, 0),
+                no_allocate,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows(merged, &["p", "id"]), vec![vec![int(40), int(1)]]);
+
+        let mut txn = db.begin(&txcx).unwrap();
+        let replaced = txn
+            .query_write(
+                &mut db,
+                &cx,
+                "MATCH (n:L {id: 2}) SET n = $props RETURN n.p AS p, n.id AS id",
+                &props(&[("id", 2)]),
+                symbols,
+                R,
+                policy(10, 10, 0),
+                no_allocate,
+            )
+            .unwrap();
+        assert_eq!(
+            rows(replaced, &["p", "id"]),
+            vec![vec![GraphValue::Scalar(CanonicalScalar::Null), int(2)]]
+        );
+        txn.finish(&mut db, &commit).await.unwrap();
+
+        let before = db.frontier().unwrap();
+        let refused = db
+            .query_write(
+                &txcx,
+                &cx,
+                &commit,
+                merge,
+                &props(&[("zz", 1)]),
+                symbols,
+                R,
+                policy(10, 10, 0),
+                no_allocate,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&refused, QueryWriteError::MutationText(error)
+                if error.offset == merge.find('$').unwrap()),
+            "{refused:?}"
+        );
+        assert_eq!(db.frontier().unwrap(), before);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

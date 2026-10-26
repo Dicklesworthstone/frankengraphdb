@@ -10,12 +10,13 @@ use fgdb::{Database, WriteTxn};
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::insertion::GraphInsertPolicy;
 use fgdb_gql::{
-    GqlParameters, GqlQueryExecution, GqlQueryPolicy, GraphEdgeMergePolicy, GraphEdgeUpsertPolicy,
-    GraphMutationPolicy, GraphVertexMergePolicy, GraphVertexUpsertPolicy,
-    PreparedGraphEdgeMergeQuery, PreparedGraphEdgeMergeQueryText, PreparedGraphEdgeUpsertQuery,
-    PreparedGraphEdgeUpsertQueryText, PreparedGraphInsertQuery, PreparedGraphInsertQueryText,
-    PreparedGraphMutationQuery, PreparedGraphMutationQueryText, PreparedGraphVertexUpsertQuery,
-    PreparedGraphVertexUpsertQueryText, PreparedGraphWriteChain, PreparedGraphWriteChainText,
+    GqlMapArgumentText, GqlParameters, GqlQueryExecution, GqlQueryPolicy, GqlTextOffsets,
+    GraphEdgeMergePolicy, GraphEdgeUpsertPolicy, GraphMutationPolicy, GraphVertexMergePolicy,
+    GraphVertexUpsertPolicy, PreparedGraphEdgeMergeQuery, PreparedGraphEdgeMergeQueryText,
+    PreparedGraphEdgeUpsertQuery, PreparedGraphEdgeUpsertQueryText, PreparedGraphInsertQuery,
+    PreparedGraphInsertQueryText, PreparedGraphMutationQuery, PreparedGraphMutationQueryText,
+    PreparedGraphVertexUpsertQuery, PreparedGraphVertexUpsertQueryText, PreparedGraphWriteChain,
+    PreparedGraphWriteChainText,
 };
 use fgdb_types::{EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts, QueryCx};
 use std::io::{self, Write};
@@ -150,50 +151,65 @@ pub(super) fn prepare_statement(
     params: &GqlParameters,
     options: &Options,
 ) -> Result<Option<Returning>, Failure> {
+    // A map argument standing for a property map (`SET n += $props`) binds as
+    // the literal map of its keys (fgdb-0s2pq), reported at the caller's bytes.
+    let lowered = GqlMapArgumentText::lower(statement, params);
+    let (statement, params) = lowered
+        .as_ref()
+        .map_or((statement, params), |(lowered, derived)| {
+            (lowered.text(), derived)
+        });
+    let lowered = lowered.as_ref().map(|(lowered, _)| lowered);
     let declarations: Vec<_> = params.parameter_types().collect();
     // A chain claims its text first: its final RETURN would otherwise route
     // the whole statement to CREATE RETURN.
-    if PreparedGraphWriteChainText::is_chain(statement).map_err(Failure::statement)? {
+    if PreparedGraphWriteChainText::is_chain(statement)
+        .map_err(|error| statement_failure(lowered, error))?
+    {
         let template = PreparedGraphWriteChainText::prepare_with_parameter_types(
             statement,
             options.coordinate,
             &declarations,
             options,
         )
-        .map_err(Failure::statement)?;
+        .map_err(|error| statement_failure(lowered, error))?;
         return template
             .bind_parameters(params)
             .map(|chain| Some(Returning::Chain(Box::new(chain))))
-            .map_err(Failure::statement);
+            .map_err(|error| statement_failure(lowered, error));
     }
-    if PreparedGraphInsertQueryText::has_return_clause(statement).map_err(Failure::statement)? {
+    if PreparedGraphInsertQueryText::has_return_clause(statement)
+        .map_err(|error| statement_failure(lowered, error))?
+    {
         let template = PreparedGraphInsertQueryText::prepare_with_parameter_types(
             statement,
             options.coordinate,
             &declarations,
             options,
         )
-        .map_err(Failure::statement)?;
+        .map_err(|error| statement_failure(lowered, error))?;
         return template
             .bind_parameters(params)
             .map(|query| Some(Returning::Insert(Box::new(query))))
-            .map_err(Failure::statement);
+            .map_err(|error| statement_failure(lowered, error));
     }
-    if PreparedGraphMutationQueryText::has_return_clause(statement).map_err(Failure::statement)? {
+    if PreparedGraphMutationQueryText::has_return_clause(statement)
+        .map_err(|error| statement_failure(lowered, error))?
+    {
         let template = PreparedGraphMutationQueryText::prepare_with_parameter_types(
             statement,
             options.coordinate,
             &declarations,
             options,
         )
-        .map_err(Failure::statement)?;
+        .map_err(|error| statement_failure(lowered, error))?;
         return template
             .bind_parameters(params)
             .map(|query| Some(Returning::Mutation(Box::new(query))))
-            .map_err(Failure::statement);
+            .map_err(|error| statement_failure(lowered, error));
     }
     if PreparedGraphVertexUpsertQueryText::has_return_clause(statement)
-        .map_err(Failure::statement)?
+        .map_err(|error| statement_failure(lowered, error))?
     {
         let template = PreparedGraphVertexUpsertQueryText::prepare_with_parameter_types(
             statement,
@@ -201,42 +217,57 @@ pub(super) fn prepare_statement(
             &declarations,
             options,
         )
-        .map_err(Failure::statement)?;
+        .map_err(|error| statement_failure(lowered, error))?;
         return template
             .bind_parameters(params)
             .map(|query| Some(Returning::Merge(Box::new(query))))
-            .map_err(Failure::statement);
+            .map_err(|error| statement_failure(lowered, error));
     }
     // ON/SET uses the occurrence-preserving bulk executor. Classification
     // excludes plain MERGE and propagates binding errors without retrying a
     // different write family. Both CLI callers supply their configured budget.
-    if PreparedGraphEdgeUpsertQueryText::has_return_clause(statement).map_err(Failure::statement)? {
+    if PreparedGraphEdgeUpsertQueryText::has_return_clause(statement)
+        .map_err(|error| statement_failure(lowered, error))?
+    {
         let template = PreparedGraphEdgeUpsertQueryText::prepare_with_parameter_types(
             statement,
             options.coordinate,
             &declarations,
             options,
         )
-        .map_err(Failure::statement)?;
+        .map_err(|error| statement_failure(lowered, error))?;
         return template
             .bind_parameters(params)
             .map(|query| Some(Returning::EdgeUpsert(Box::new(query))))
-            .map_err(Failure::statement);
+            .map_err(|error| statement_failure(lowered, error));
     }
-    if PreparedGraphEdgeMergeQueryText::has_return_clause(statement).map_err(Failure::statement)? {
+    if PreparedGraphEdgeMergeQueryText::has_return_clause(statement)
+        .map_err(|error| statement_failure(lowered, error))?
+    {
         let template = PreparedGraphEdgeMergeQueryText::prepare_with_parameter_types(
             statement,
             options.coordinate,
             &declarations,
             options,
         )
-        .map_err(Failure::statement)?;
+        .map_err(|error| statement_failure(lowered, error))?;
         return template
             .bind_parameters(params)
             .map(|query| Some(Returning::EdgeMerge(Box::new(query))))
-            .map_err(Failure::statement);
+            .map_err(|error| statement_failure(lowered, error));
     }
     Ok(None)
+}
+
+/// A statement error of a lowered statement, at the caller's bytes.
+fn statement_failure<E>(lowered: Option<&GqlMapArgumentText>, mut error: E) -> Failure
+where
+    E: GqlTextOffsets + std::error::Error + 'static,
+{
+    if let Some(lowered) = lowered {
+        lowered.restore(&mut error);
+    }
+    Failure::statement(error)
 }
 
 struct BufferedRows {

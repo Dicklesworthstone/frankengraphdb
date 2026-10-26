@@ -1,4 +1,5 @@
-//! Public-binary regressions for bounded native UNWIND writes. Every command
+//! Public-binary regressions for bounded native UNWIND writes and the other
+//! driver ingest idioms (map parameters as property maps). Every command
 //! reopens the database, so successful reads also exercise durable publication.
 
 use std::fs::{self, OpenOptions};
@@ -264,6 +265,96 @@ fn existing_native_create_and_create_return_paths_are_preserved() {
     assert_eq!(row_count(&returning), 1);
     assert!(output(&returning).contains("Returned"));
     assert_eq!(row_count(&fixture.query("MATCH (n:Entity) RETURN n.id")), 3);
+}
+
+/// A driver sends a record as one map parameter (fgdb-0s2pq). `CREATE (n
+/// $props)`, `SET n += $props`, `SET n = $props` and `MERGE ... ON CREATE SET
+/// n += $props` bind as the literal map of the argument's keys, with or
+/// without RETURN, and `$props.key` beside them still reads the argument. A
+/// key the catalog does not bind refuses at the parameter's own byte.
+#[test]
+fn a_map_parameter_binds_as_the_property_map_it_holds() {
+    let fixture = Fixture::new(true);
+    let write = |json: &str, text: &str| {
+        let parameter = format!("props=json:{json}");
+        fixture.run("write", &["--param", &parameter, text])
+    };
+    // Each row event of `result` holds exactly the cells of one expected row.
+    let rows = |result: &Output, expected: &[&[String]]| {
+        let lines: Vec<String> = String::from_utf8_lossy(&result.stdout)
+            .lines()
+            .filter(|line| line.contains("\"event\":\"row\""))
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(lines.len(), expected.len(), "{}", output(result));
+        for (line, cells) in lines.iter().zip(expected) {
+            let cells = format!("\"cells\":[{}]", cells.join(","));
+            assert!(line.contains(&cells), "{line} lacks {cells}");
+        }
+    };
+    let int = |value: i64| format!(r#"{{"type":"int","value":"{value}"}}"#);
+    let text = |value: &str| format!(r#"{{"type":"text","value":"{value}"}}"#);
+    let null = || r#"{"type":"null"}"#.to_owned();
+
+    success(&write(
+        r#"{"id":1,"name":"Ada","score":3}"#,
+        "CREATE (n:Entity $props)",
+    ));
+    let created = write(
+        r#"{"id":2,"name":"Bob"}"#,
+        "CREATE (n:Entity $props) RETURN n.id, n.name",
+    );
+    success(&created);
+    rows(&created, &[&[int(2), text("Bob")]]);
+    // += keeps every key the map does not name.
+    let merged = write(
+        r#"{"score":7,"weight":2}"#,
+        "MATCH (n:Entity {id: 1}) SET n += $props RETURN n.name, n.score, n.weight",
+    );
+    success(&merged);
+    rows(&merged, &[&[text("Ada"), int(7), int(2)]]);
+    // = replaces every property with the map's own.
+    success(&write(
+        r#"{"id":2,"score":5}"#,
+        "MATCH (n:Entity {id: 2}) SET n = $props",
+    ));
+    let upsert = "MERGE (n:Entity {id: 3}) ON CREATE SET n += $props \
+                  ON MATCH SET n.score = n.score + 1 RETURN n.name, n.score";
+    let first = write(r#"{"name":"Cy","score":1}"#, upsert);
+    success(&first);
+    rows(&first, &[&[text("Cy"), int(1)]]);
+    let second = write(r#"{"name":"Cy","score":1}"#, upsert);
+    success(&second);
+    rows(&second, &[&[text("Cy"), int(2)]]);
+    let both = write(
+        r#"{"score":9}"#,
+        "MATCH (n:Entity {id: 3}) SET n += $props, n.weight = $props.score RETURN n.weight",
+    );
+    success(&both);
+    rows(&both, &[&[int(9)]]);
+    let graph = fixture.query(
+        "MATCH (n:Entity) RETURN n.id AS id, n.name AS name, n.score AS score, \
+         n.weight AS weight ORDER BY id",
+    );
+    rows(
+        &graph,
+        &[
+            &[int(1), text("Ada"), int(7), int(2)],
+            &[int(2), null(), int(5), null()],
+            &[int(3), text("Cy"), int(9), int(9)],
+        ],
+    );
+
+    for statement in [
+        "CREATE (n:Entity $props)",
+        "CREATE (n:Entity $props) RETURN n.id",
+    ] {
+        let refused = write(r#"{"id":4,"zz":1}"#, statement);
+        assert!(!refused.status.success(), "{statement}");
+        let at = format!("\"offset\":{}", statement.find('$').unwrap());
+        assert!(output(&refused).contains(&at), "{}", output(&refused));
+    }
+    assert_eq!(row_count(&fixture.query("MATCH (n:Entity) RETURN n")), 3);
 }
 
 #[path = "unwind_write/document_roots.rs"]
