@@ -7,7 +7,9 @@
 //! the shared write-RETURN kernels. A WITH continues those owned rows through
 //! the native relational pipeline, under the same statement budget.
 
-use crate::algebra::{GraphOrderError, GraphValue, GraphValueOrder, GraphValueRow};
+use crate::algebra::{
+    GraphOrderError, GraphPathFunction, GraphValue, GraphValueOrder, GraphValueRow,
+};
 use crate::row_projection::{RowProjectionBuildError, RowProjectionSpec};
 use crate::{
     GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
@@ -36,6 +38,14 @@ pub enum GraphEdgeMergeBinding {
     /// selection column: a carried element of a chain's row (fgdb-cpny9). A
     /// missing field or a NULL column reads NULL.
     InputProperty { column: usize, key: PropertyKeyId },
+    /// The one-edge path this MERGE occurrence resolved to, in the pattern's
+    /// written traversal order. `reverse` means the pattern used an incoming
+    /// arrow; an undirected match still starts at the written left endpoint,
+    /// independently of the stored relationship's orientation.
+    Path {
+        reverse: bool,
+        function: GraphPathFunction,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,6 +161,13 @@ impl PreparedGraphEdgeMergeQuery {
                     .copied()
                     .ok_or(GraphEdgeMergeQueryBuildError::Binding { binding: at })?,
                 GraphEdgeMergeBinding::Edge => GraphSetColumnType::Edge,
+                GraphEdgeMergeBinding::Path { function, .. } => match function {
+                    GraphPathFunction::Value => GraphSetColumnType::Path,
+                    GraphPathFunction::Length => GraphSetColumnType::Scalar,
+                    GraphPathFunction::Nodes => GraphSetColumnType::Vertices,
+                    GraphPathFunction::Edges => GraphSetColumnType::Edges,
+                    _ => return Err(GraphEdgeMergeQueryBuildError::Binding { binding: at }),
+                },
                 GraphEdgeMergeBinding::Endpoint { .. } => GraphSetColumnType::Vertex,
                 GraphEdgeMergeBinding::Property(_)
                 | GraphEdgeMergeBinding::EndpointProperty { .. } => GraphSetColumnType::Stored,
@@ -356,6 +373,24 @@ impl PreparedGraphEdgeMergeQuery {
                     | GraphEdgeMergeBinding::EndpointProperty { .. }
                     | GraphEdgeMergeBinding::InputProperty { .. } => kind.accepts(value),
                     GraphEdgeMergeBinding::Edge => matches!(value, GraphValue::Edge(_)),
+                    GraphEdgeMergeBinding::Path { function, .. } => match function {
+                        GraphPathFunction::Value => {
+                            matches!(value, GraphValue::Path(path) if path.len() == 1)
+                        }
+                        GraphPathFunction::Length => {
+                            matches!(
+                                value,
+                                GraphValue::Scalar(fgdb_types::CanonicalScalar::Int(1))
+                            )
+                        }
+                        GraphPathFunction::Nodes => {
+                            matches!(value, GraphValue::Vertices(vertices) if vertices.len() == 2)
+                        }
+                        GraphPathFunction::Edges => {
+                            matches!(value, GraphValue::Edges(edges) if edges.len() == 1)
+                        }
+                        _ => unreachable!("MERGE path projection admitted"),
+                    },
                     GraphEdgeMergeBinding::Endpoint { .. } => {
                         matches!(value, GraphValue::Vertex(_))
                     }
@@ -440,6 +475,17 @@ impl PreparedGraphEdgeMergeQuery {
                     bytes.push(5);
                     bytes.extend_from_slice(&(column as u64).to_be_bytes());
                     bytes.extend_from_slice(&key.0.to_be_bytes());
+                }
+                GraphEdgeMergeBinding::Path { reverse, function } => {
+                    bytes.push(6);
+                    bytes.push(u8::from(reverse));
+                    bytes.push(match function {
+                        GraphPathFunction::Value => 0,
+                        GraphPathFunction::Length => 1,
+                        GraphPathFunction::Nodes => 2,
+                        GraphPathFunction::Edges => 3,
+                        _ => unreachable!("MERGE path projection admitted"),
+                    });
                 }
             }
         }

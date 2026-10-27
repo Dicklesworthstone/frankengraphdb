@@ -535,6 +535,17 @@ impl WriteTxn {
                                 continue;
                             }
                             GraphEdgeMergeBinding::Edge => { cells.push(GraphValue::Edge(edge)); continue; }
+                            GraphEdgeMergeBinding::Path { reverse, function } => {
+                                let endpoint = |column| row.values().get(column)
+                                    .and_then(GraphValue::as_vertex)
+                                    .ok_or(GqlQueryError::Source(GraphEdgeUpsertError::Merge(
+                                        GraphEdgeMergeError::InputSchema { row: at, column },
+                                    )));
+                                let source = endpoint(query.merge().source_column())?;
+                                let destination = endpoint(query.merge().destination_column())?;
+                                cells.push(edge_merge_path_value(edge, (source, destination), reverse, function, &mut control)?);
+                                continue;
+                            }
                             GraphEdgeMergeBinding::Endpoint { start } => { cells.push(GraphValue::Vertex(endpoint(start))); continue; }
                             GraphEdgeMergeBinding::Property(key) => Some((ElementId::Edge(edge), key)),
                             GraphEdgeMergeBinding::EndpointProperty { start, key } => Some((ElementId::Vertex(endpoint(start)), key)),

@@ -16,6 +16,7 @@ struct ParsedEdgeMerge<'a> {
     source: Name<'a>,
     destination: Name<'a>,
     relationship: Option<Name<'a>>,
+    path: Option<(Name<'a>, bool)>,
     relation: Name<'a>,
     properties: Vec<super::merge::MergeProperty<'a>>,
     undirected: bool,
@@ -90,6 +91,22 @@ impl<'a> Parser<'a> {
     /// (fgdb-at06q). The caller ends the statement or parses its RETURN.
     fn edge_merge_pattern(&mut self) -> Result<ParsedEdgeMerge<'a>, GraphEdgeMergeTextError> {
         self.word("MERGE")?;
+        let path = if self.starts_path_binding()? {
+            let path = self.name()?;
+            self.punct(b'=', "=")?;
+            if self.insertion_match_kind(path.text).is_some() {
+                return Err(error(
+                    path.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "a path variable distinct from MATCH bindings",
+                    ),
+                )
+                .into());
+            }
+            Some(path)
+        } else {
+            None
+        };
         self.punct(b'(', "(")?;
         let left = self.edge_merge_endpoint()?;
         self.punct(b')', ")")?;
@@ -144,6 +161,17 @@ impl<'a> Parser<'a> {
         self.punct(b'(', "(")?;
         let right = self.edge_merge_endpoint()?;
         self.punct(b')', ")")?;
+        if let Some(path) = path
+            && (path.text == left.text
+                || path.text == right.text
+                || relationship.is_some_and(|edge| edge.text == path.text))
+        {
+            return Err(error(
+                path.at,
+                GraphPatternTextErrorKind::Build(PatternBuildError::DuplicateVariable),
+            )
+            .into());
+        }
         // An undirected MERGE creates left to right, as openCypher does.
         let (source, destination) = if incoming {
             (right, left)
@@ -154,6 +182,7 @@ impl<'a> Parser<'a> {
             source,
             destination,
             relationship,
+            path: path.map(|path| (path, incoming)),
             relation,
             properties,
             undirected: !incoming && !outgoing,
@@ -270,7 +299,13 @@ impl PreparedGraphEdgeMergeText {
         let source = parser.mutation_projection(&mut projections, parsed.source, None)?;
         let destination = parser.mutation_projection(&mut projections, parsed.destination, None)?;
         let parsed_return = if returning {
-            Some(parser.edge_merge_return("RETURN", parsed.relationship, &mut projections, None)?)
+            Some(parser.edge_merge_return(
+                "RETURN",
+                parsed.relationship,
+                parsed.path,
+                &mut projections,
+                None,
+            )?)
         } else {
             None
         };
@@ -692,6 +727,15 @@ impl PreparedGraphEdgeMergeText {
         };
         let source = endpoint(parsed.source)?;
         let destination = endpoint(parsed.destination)?;
+        if let Some((path, _)) = parsed.path
+            && schema.iter().any(|(row, _)| row.text == path.text)
+        {
+            return Err(error(
+                path.at,
+                GraphPatternTextErrorKind::Expected("a path variable distinct from the WITH row"),
+            )
+            .into());
+        }
         if let Some(relationship) = parsed.relationship
             && schema.iter().any(|(row, _)| row.text == relationship.text)
         {
@@ -726,6 +770,7 @@ impl PreparedGraphEdgeMergeText {
             let head = parser.edge_merge_return(
                 "WITH",
                 parsed.relationship,
+                parsed.path,
                 &mut Vec::new(),
                 Some(schema),
             )?;
@@ -743,6 +788,7 @@ impl PreparedGraphEdgeMergeText {
             Some(parser.edge_merge_return(
                 "RETURN",
                 parsed.relationship,
+                parsed.path,
                 &mut Vec::new(),
                 Some(schema),
             )?)
@@ -758,12 +804,19 @@ impl PreparedGraphEdgeMergeText {
                 at: parser.current.at,
             });
             output.push((name, GraphSetColumnType::Edge));
+            if let Some((path, _)) = parsed.path {
+                output.push((path, GraphSetColumnType::Path));
+            }
             // Identity-only continuations retain the compact row path. A
             // following property read needs the existing final-state query
             // owner, including its authorization and occurrence accounting.
-            if parser.at_chained_read()? || !parser.write_chain_reads(&output)?.is_empty() {
+            if parsed.path.is_some()
+                || parser.at_chained_read()?
+                || !parser.write_chain_reads(&output)?.is_empty()
+            {
                 let mut head = ParsedEdgeReturn::identity_head(
                     parsed.relationship,
+                    parsed.path,
                     schema,
                     keep,
                     name,
@@ -1035,6 +1088,10 @@ impl PreparedGraphEdgeMergeText {
 enum EdgeBinding<'a> {
     Input(usize),
     Edge,
+    Path {
+        reverse: bool,
+        function: GraphPathFunction,
+    },
     Property(Name<'a>),
     Endpoint {
         start: bool,
@@ -1061,6 +1118,16 @@ impl EdgeBinding<'_> {
                 },
             ) => column == other && key.text == other_key.text,
             (Self::Edge, Self::Edge) => true,
+            (
+                Self::Path {
+                    reverse: old,
+                    function: old_function,
+                },
+                Self::Path {
+                    reverse: new,
+                    function: new_function,
+                },
+            ) => old == new && old_function == new_function,
             (Self::Property(old), Self::Property(new)) => old.text == new.text,
             (Self::Endpoint { start: old }, Self::Endpoint { start: new }) => old == new,
             (
@@ -1080,6 +1147,7 @@ impl EdgeBinding<'_> {
 /// after the statement and its own endpoints are supplied by the write owner.
 struct ParsedEdgeReturn<'a> {
     relationship: Option<Name<'a>>,
+    path: Option<(Name<'a>, bool)>,
     bindings: Vec<(EdgeBinding<'a>, Name<'a>, GraphSetColumnType)>,
     projection: Vec<ReadProjectionTemplate>,
     grouping: Option<crate::mutation_text::WriteReturnGroupTemplate>,
@@ -1098,6 +1166,7 @@ impl<'a> ParsedEdgeReturn<'a> {
     /// added by the same compiler as an explicit WITH head.
     fn identity_head(
         relationship: Option<Name<'a>>,
+        path: Option<(Name<'a>, bool)>,
         row: &[(Name<'a>, GraphSetColumnType)],
         keep: usize,
         edge: Name<'a>,
@@ -1105,6 +1174,7 @@ impl<'a> ParsedEdgeReturn<'a> {
     ) -> Result<Self, GraphPatternTextError> {
         let mut head = Self {
             relationship,
+            path,
             bindings: Vec::new(),
             projection: Vec::new(),
             grouping: None,
@@ -1128,7 +1198,37 @@ impl<'a> ParsedEdgeReturn<'a> {
             name: edge.text.to_owned(),
             value: ReadValueTemplate::Column(column),
         });
+        if let Some((path, reverse)) = path {
+            let column = head.path_column(reverse, GraphPathFunction::Value, path)?;
+            head.projection.push(ReadProjectionTemplate {
+                name: path.text.to_owned(),
+                value: ReadValueTemplate::Column(column),
+            });
+        }
         Ok(head)
+    }
+
+    fn path_column(
+        &mut self,
+        reverse: bool,
+        function: GraphPathFunction,
+        name: Name<'a>,
+    ) -> Result<usize, GraphPatternTextError> {
+        let kind = match function {
+            GraphPathFunction::Value => GraphSetColumnType::Path,
+            GraphPathFunction::Length => GraphSetColumnType::Scalar,
+            GraphPathFunction::Nodes => GraphSetColumnType::Vertices,
+            GraphPathFunction::Edges => GraphSetColumnType::Edges,
+            _ => {
+                return Err(error(
+                    name.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "path value, length, nodes or relationships",
+                    ),
+                ));
+            }
+        };
+        self.column(EdgeBinding::Path { reverse, function }, name, kind)
     }
 
     fn column(
@@ -1181,6 +1281,9 @@ impl<'a> ParsedEdgeReturn<'a> {
             bindings.push(match binding {
                 EdgeBinding::Input(column) => GraphEdgeMergeBinding::Input(column),
                 EdgeBinding::Edge => GraphEdgeMergeBinding::Edge,
+                EdgeBinding::Path { reverse, function } => {
+                    GraphEdgeMergeBinding::Path { reverse, function }
+                }
                 EdgeBinding::Property(key) => GraphEdgeMergeBinding::Property(property(key)?),
                 EdgeBinding::Endpoint { start } => GraphEdgeMergeBinding::Endpoint { start },
                 EdgeBinding::EndpointProperty { start, key } => {
@@ -1240,6 +1343,35 @@ impl<'a> ReturnLeaves<'a> for EdgeMergeLeaves<'_, 'a> {
             return Ok(None);
         };
         let call = matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('));
+        if let Some((path, reverse)) = self.returning.path {
+            if !call && word == path.text {
+                parser.advance()?;
+                return self
+                    .returning
+                    .path_column(reverse, GraphPathFunction::Value, path)
+                    .map(Some);
+            }
+            let name = Name {
+                text: word,
+                at: parser.current.at,
+            };
+            if call && let Ok(function) = Parser::path_function(name) {
+                let mut lookahead = parser.lexer.clone();
+                lookahead.next()?;
+                if matches!(lookahead.next()?.kind, TokenKind::Word(argument) if argument == path.text)
+                    && matches!(lookahead.next()?.kind, TokenKind::Punct(b')'))
+                {
+                    parser.advance()?;
+                    parser.punct(b'(', "(")?;
+                    parser.name()?;
+                    parser.punct(b')', ")")?;
+                    return self
+                        .returning
+                        .path_column(reverse, function, name)
+                        .map(Some);
+                }
+            }
+        }
         let start = word.eq_ignore_ascii_case("startNode");
         if call && (start || word.eq_ignore_ascii_case("endNode")) {
             // startNode(r) / endNode(r) of the MERGE relationship are its own
@@ -1399,6 +1531,7 @@ impl<'a> Parser<'a> {
         &mut self,
         keyword: &'static str,
         relationship: Option<Name<'a>>,
+        path: Option<(Name<'a>, bool)>,
         columns: &mut Vec<Projection<'a>>,
         row: Option<&[(Name<'a>, GraphSetColumnType)]>,
     ) -> Result<ParsedEdgeReturn<'a>, GraphEdgeMergeTextError> {
@@ -1423,6 +1556,7 @@ impl<'a> Parser<'a> {
         }
         let mut returning = ParsedEdgeReturn {
             relationship,
+            path,
             bindings: Vec::new(),
             projection: Vec::new(),
             grouping: None,
@@ -1509,6 +1643,7 @@ impl<'a> Parser<'a> {
                     EdgeBinding::Input(column)
                 }
                 EdgeBinding::Property(_)
+                | EdgeBinding::Path { .. }
                 | EdgeBinding::EndpointProperty { .. }
                 | EdgeBinding::InputProperty { .. } => continue,
             };
@@ -1631,10 +1766,12 @@ impl PreparedGraphEdgeMergeQueryText {
                             return Ok(false);
                         }
                         if word.eq_ignore_ascii_case("MERGE")
-                            && matches!(
+                            && (matches!(
                                 script::next_script_token(&mut lexer.clone())?.kind,
                                 TokenKind::Punct(b'(')
-                            )
+                            ) || crate::PreparedGraphWriteChainText::named_merge_pattern(
+                                lexer.clone(),
+                            )?)
                         {
                             return Self::relationship_then_return(&mut lexer);
                         }

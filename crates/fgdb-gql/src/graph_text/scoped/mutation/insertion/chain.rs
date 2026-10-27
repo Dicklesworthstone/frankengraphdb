@@ -138,7 +138,10 @@ impl PreparedGraphWriteChainText {
                         matched = true;
                     } else if clause && parameter_unwound && word.eq_ignore_ascii_case("MATCH") {
                         parameter_matched = true;
-                    } else if clause && word.eq_ignore_ascii_case("MERGE") && pattern()? {
+                    } else if clause
+                        && word.eq_ignore_ascii_case("MERGE")
+                        && (pattern()? || Self::named_merge_pattern(lexer.clone())?)
+                    {
                         if written || merged || mutated {
                             return Ok(true);
                         }
@@ -171,7 +174,10 @@ impl PreparedGraphWriteChainText {
                             if !vertex
                                 && matched
                                 && !parameter_unwound
-                                && Self::edge_actions_need_rows(lookahead.clone())?
+                                && Self::edge_actions_need_rows(
+                                    lookahead.clone(),
+                                    Self::named_merge_pattern(lexer.clone())?,
+                                )?
                             {
                                 return Ok(true);
                             }
@@ -213,7 +219,10 @@ impl PreparedGraphWriteChainText {
     /// anonymous, or an assignment writes or reads (`a.key`) an element
     /// other than it. The unique upsert writes only its named relationship.
     /// `lexer` is just past the `-` or `<` after the first node pattern.
-    fn edge_actions_need_rows(mut lexer: Lexer<'_>) -> Result<bool, GraphPatternTextError> {
+    fn edge_actions_need_rows(
+        mut lexer: Lexer<'_>,
+        named_path: bool,
+    ) -> Result<bool, GraphPatternTextError> {
         const ENDS: [&str; 12] = [
             "RETURN", "WITH", "CREATE", "INSERT", "MERGE", "MATCH", "OPTIONAL", "UNWIND", "DELETE",
             "DETACH", "REMOVE", "FOREACH",
@@ -252,7 +261,7 @@ impl PreparedGraphWriteChainText {
                         && (word.eq_ignore_ascii_case("ON")
                             || word.eq_ignore_ascii_case("SET")) =>
                 {
-                    if relationship.is_none() {
+                    if named_path || relationship.is_none() {
                         return Ok(true);
                     }
                     actions = true;
@@ -300,10 +309,10 @@ impl PreparedGraphWriteChainText {
                         return Ok((!row_stages).then_some(MatchedWrite::Insert));
                     }
                     if word.eq_ignore_ascii_case("MERGE")
-                        && matches!(
+                        && (matches!(
                             script::next_script_token(&mut lexer.clone())?.kind,
                             TokenKind::Punct(b'(')
-                        )
+                        ) || Self::named_merge_pattern(lexer.clone())?)
                     {
                         // Both MERGE families read the complete MATCH
                         // relation. Inspect past the whole node pattern,
@@ -362,6 +371,24 @@ impl PreparedGraphWriteChainText {
             }
             previous = Some(token.kind);
         }
+    }
+
+    /// A named MERGE path has the same native pattern owner as an unnamed
+    /// one. This is token framing only; the pattern compiler checks the name,
+    /// complete pattern, scopes and endpoint types.
+    pub(in crate::graph_text::scoped::mutation) fn named_merge_pattern(
+        mut lexer: Lexer<'_>,
+    ) -> Result<bool, GraphPatternTextError> {
+        Ok(matches!(
+            script::next_script_token(&mut lexer)?.kind,
+            TokenKind::Word(_)
+        ) && matches!(
+            script::next_script_token(&mut lexer)?.kind,
+            TokenKind::Punct(b'=')
+        ) && matches!(
+            script::next_script_token(&mut lexer)?.kind,
+            TokenKind::Punct(b'(')
+        ))
     }
 
     /// DELETE and DETACH are also legal identifiers. A deletion clause
@@ -671,6 +698,14 @@ impl PreparedGraphWriteChainText {
             let merge = matched_vertex_merge
                 || matched_edge_merge
                 || matches!(lexer.next()?.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("MERGE"));
+            if merge
+                && !matched_vertex_merge
+                && !matched_edge_merge
+                && Self::named_merge_pattern(lexer.clone())?
+            {
+                lexer.next()?; // path name
+                lexer.next()?; // equals
+            }
             // A relationship MERGE names row vertices: `(a)-` or `(a)<-`.
             let relationship = matched_edge_merge
                 || (merge

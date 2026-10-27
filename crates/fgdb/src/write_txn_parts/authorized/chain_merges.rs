@@ -4,7 +4,9 @@
 
 use super::super::{Database, Execution, Vfs, WriteTxn, WriteTxnError, edge_merge, selection};
 use super::{Fault, admit_pattern};
-use crate::write_txn::{EdgeUpsertRowTargets, edge_merge_row_actions_controlled};
+use crate::write_txn::{
+    EdgeUpsertRowTargets, edge_merge_path_value, edge_merge_row_actions_controlled,
+};
 use fgdb_delta_types::ElementId;
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertStats};
@@ -246,6 +248,25 @@ fn returning_row<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 .ok_or_else(invalid)?
                 .copy_with_control(&mut |kind| event(cx, execution, policy, evaluator, kind))?,
             GraphEdgeMergeBinding::Edge => GraphValue::Edge(edge),
+            GraphEdgeMergeBinding::Path { reverse, function } => {
+                let source = input
+                    .values()
+                    .get(query.merge().source_column())
+                    .and_then(GraphValue::as_vertex)
+                    .ok_or_else(invalid)?;
+                let destination = input
+                    .values()
+                    .get(query.merge().destination_column())
+                    .and_then(GraphValue::as_vertex)
+                    .ok_or_else(invalid)?;
+                edge_merge_path_value(
+                    edge,
+                    (source, destination),
+                    reverse,
+                    function,
+                    &mut |kind| event(cx, execution, policy, evaluator, kind),
+                )?
+            }
             GraphEdgeMergeBinding::Endpoint { start } => GraphValue::Vertex(endpoint(start)),
             GraphEdgeMergeBinding::Property(key) => property(
                 transaction,

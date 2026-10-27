@@ -1846,6 +1846,10 @@ impl<'a> Parser<'a> {
             return Ok(false);
         }
         let mut lexer = self.lexer.clone();
+        if crate::PreparedGraphWriteChainText::named_merge_pattern(lexer.clone())? {
+            lexer.next()?; // path name
+            lexer.next()?; // equals
+        }
         Ok(matches!(lexer.next()?.kind, TokenKind::Punct(b'('))
             && matches!(lexer.next()?.kind, TokenKind::Word(_))
             && matches!(lexer.next()?.kind, TokenKind::Punct(b')'))
@@ -1867,7 +1871,10 @@ impl<'a> Parser<'a> {
         Ok(self.at_chained_read()?
             || self.is_word("CREATE")
             || (self.is_word("MERGE")
-                && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
+                && (matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+                    || crate::PreparedGraphWriteChainText::named_merge_pattern(
+                        self.lexer.clone(),
+                    )?))
             || self.is_word("SET")
             || self.is_word("REMOVE")
             || self.is_word("DELETE")

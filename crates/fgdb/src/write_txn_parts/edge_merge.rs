@@ -197,10 +197,13 @@ impl EdgeMergeOutput for fgdb_gql::GraphWriteStepReceipt {
 /// endpoint; a scoped host masks a hidden key there, before any storage
 /// read. A stored List or Map is the query value it holds (fgdb-k3nub); one
 /// beyond the query value bounds is a data exception, never truncated.
+#[allow(clippy::too_many_arguments)]
 fn edge_merge_query_rows<E, C>(
     query: &fgdb_gql::PreparedGraphEdgeMergeQuery,
     selected: &[fgdb_gql::algebra::GraphValueRow],
     resolved: &EdgeMergeRows,
+    policy: fgdb_gql::GqlQueryPolicy,
+    evaluator: &mut fgdb_gql::GlaExecutionStats,
     mut checkpoint: impl FnMut() -> Result<(), C>,
     mut property: impl FnMut(
         ElementId,
@@ -246,6 +249,43 @@ fn edge_merge_query_rows<E, C>(
                 cells.push(match *binding {
                     GraphEdgeMergeBinding::Input(column) => values[column].clone(),
                     GraphEdgeMergeBinding::Edge => GraphValue::Edge(edge),
+                    GraphEdgeMergeBinding::Path { reverse, function } => edge_merge_path_value(
+                        edge,
+                        (source, destination),
+                        reverse,
+                        function,
+                        &mut |event| {
+                            checkpoint().map_err(GqlQueryError::Interrupted)?;
+                            let work = u128::from(evaluator.work_units) + 1;
+                            let scratch = u128::from(evaluator.scratch_entries)
+                                + u128::from(event == fgdb_gql::GlaExecutionEvent::ScratchEntry);
+                            for (observed, limit, dimension) in [
+                                (
+                                    work,
+                                    policy.evaluator.max_work_units,
+                                    fgdb_gql::GlaLimitDimension::WorkUnits,
+                                ),
+                                (
+                                    scratch,
+                                    policy.evaluator.max_scratch_entries,
+                                    fgdb_gql::GlaLimitDimension::ScratchEntries,
+                                ),
+                            ] {
+                                if observed > u128::from(limit) {
+                                    return Err(GqlQueryError::Evaluator(
+                                        fgdb_gql::GlaLimitExceeded {
+                                            dimension,
+                                            limit,
+                                            observed,
+                                        },
+                                    ));
+                                }
+                            }
+                            evaluator.work_units = work as u64;
+                            evaluator.scratch_entries = scratch as u64;
+                            Ok(())
+                        },
+                    )?,
                     GraphEdgeMergeBinding::Endpoint { start } => {
                         GraphValue::Vertex(endpoint(start))
                     }
@@ -266,6 +306,43 @@ fn edge_merge_query_rows<E, C>(
         }
     }
     Ok(rows)
+}
+
+/// Construct a one-edge MERGE path only after admitting its complete payload.
+/// The normalized selection pair, rather than the stored edge's endpoints,
+/// determines traversal order for incoming and undirected patterns.
+pub(crate) fn edge_merge_path_value<E>(
+    edge: EId,
+    pair: (VId, VId),
+    reverse: bool,
+    function: fgdb_gql::algebra::GraphPathFunction,
+    control: &mut impl FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), E>,
+) -> Result<fgdb_gql::algebra::GraphValue, E> {
+    use fgdb_gql::GlaExecutionEvent;
+    use fgdb_gql::algebra::{
+        GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphPath, GraphPathFunction, GraphValue,
+    };
+    control(GlaExecutionEvent::Work)?;
+    let bytes = match function {
+        GraphPathFunction::Value => core::mem::size_of::<(EId, VId)>(),
+        GraphPathFunction::Length => 0,
+        GraphPathFunction::Nodes => core::mem::size_of::<[VId; 2]>(),
+        GraphPathFunction::Edges => core::mem::size_of::<EId>(),
+        _ => unreachable!("MERGE path projection admitted"),
+    };
+    for _ in 0..=bytes.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+        control(GlaExecutionEvent::ScratchEntry)?;
+    }
+    let (start, end) = if reverse { (pair.1, pair.0) } else { pair };
+    Ok(match function {
+        GraphPathFunction::Value => {
+            GraphValue::Path(GraphPath::new(start, Box::new([(edge, end)])))
+        }
+        GraphPathFunction::Length => GraphValue::Scalar(CanonicalScalar::Int(1)),
+        GraphPathFunction::Nodes => GraphValue::Vertices(Box::new([start, end])),
+        GraphPathFunction::Edges => GraphValue::Edges(Box::new([edge])),
+        _ => unreachable!("MERGE path projection admitted"),
+    })
 }
 
 type EdgeMergeFault<E, A, C> = fgdb_gql::GqlQueryError<fgdb_gql::GraphEdgeMergeError<E, A>, C>;
@@ -635,7 +712,7 @@ impl WriteTxn {
         })?;
         cx.with_restriction(|| {
             let workspace = MutationProgramWorkspace::new(self);
-            let (stats, resolved, selected) = workspace
+            let (mut stats, resolved, selected) = workspace
                 .txn
                 .execute_graph_edge_merge_output_governed::<EdgeMergeRows, V, A>(
                     database,
@@ -651,6 +728,8 @@ impl WriteTxn {
                 query,
                 &selected,
                 &resolved,
+                policy.query,
+                &mut stats.evaluator,
                 || cx.checkpoint(),
                 |element, key| workspace.txn.merge_return_property(database, element, key),
             )

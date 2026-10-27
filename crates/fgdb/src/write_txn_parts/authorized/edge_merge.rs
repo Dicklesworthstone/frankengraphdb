@@ -225,7 +225,7 @@ impl<V: Vfs + Clone> Database<V> {
                     self.begin(txn_cx)
                         .map_err(|error| merged(source(WriteTxnError::Write(error))))?,
                 ));
-                let (stats, resolved, selected) = apply_with_output::<EdgeMergeRows, V, _>(
+                let (mut stats, resolved, selected) = apply_with_output::<EdgeMergeRows, V, _>(
                     workspace.transaction(),
                     self,
                     query_cx,
@@ -247,6 +247,8 @@ impl<V: Vfs + Clone> Database<V> {
                         query,
                         &selected,
                         &resolved,
+                        policy.query,
+                        &mut stats.evaluator,
                         &mut checkpoint,
                         |element, key| {
                             // Mask BEFORE lookup: a hidden field is NULL with
