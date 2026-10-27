@@ -179,6 +179,11 @@ trait Rows {
         Self: 'a;
     fn node_count(&self) -> usize;
     fn degree(&self, source: usize) -> Option<usize>;
+    /// Only an admitted symmetric projection can prove that a zero outgoing
+    /// degree is an isolate. Unknown/directed providers must return false.
+    fn is_undirected(&self) -> bool {
+        false
+    }
     /// A trusted fact from complete projection admission, never a query hint.
     /// Unknown row providers keep the general weighted implementation.
     fn has_unit_weights(&self) -> bool {
@@ -209,6 +214,9 @@ impl Rows for SealedRows<'_> {
     }
     fn degree(&self, source: usize) -> Option<usize> {
         self.graph.degree(source)
+    }
+    fn is_undirected(&self) -> bool {
+        self.graph.spec().directedness == Directedness::Undirected
     }
     fn has_unit_weights(&self) -> bool {
         self.graph.has_unit_weights()
@@ -939,7 +947,7 @@ impl FnxCallSpec {
                 let kernel = if strong {
                     "fgdb-prism/sealed-tarjan-v1"
                 } else {
-                    "fgdb-prism/sealed-union-find-v1"
+                    "fgdb-prism/sealed-union-find-complete-v2"
                 };
                 (
                     kernel,
@@ -1652,6 +1660,9 @@ mod tests {
         fn degree(&self, source: usize) -> Option<usize> {
             self.0.neighbors_indices(source).map(<[usize]>::len)
         }
+        fn is_undirected(&self) -> bool {
+            !self.0.is_directed()
+        }
         fn open(&self, source: usize) -> Result<Self::Cursor<'_>> {
             let (targets, weights) = self
                 .0
@@ -2245,10 +2256,35 @@ mod tests {
                     .execute(&graph, limits(), || Ok::<(), Infallible>(()))
                     .unwrap();
                 assert_eq!(output.row_count, 3);
-                // Each directed edge and vertex is visited exactly once, even
-                // for WCC; no synthetic reverse adjacency is scanned.
-                assert_eq!(output.witness.nodes_touched, 3);
-                assert_eq!(output.witness.edges_scanned, graph.edge_count());
+                // Independently reconstruct the first complete row prefix proving
+                // universal weak reachability. SCC still requires every row.
+                let (nodes, edges) = if strong {
+                    (3, graph.edge_count())
+                } else {
+                    let mut reach = [1_u8, 2, 4];
+                    let (mut nodes, mut edges) = (0, 0);
+                    for source in 0..3 {
+                        nodes += 1;
+                        for target in 0..3 {
+                            if mask & (1 << (3 * source + target)) == 0 {
+                                continue;
+                            }
+                            edges += 1;
+                            let joined = reach[source] | reach[target];
+                            for reachable in &mut reach {
+                                if *reachable & joined != 0 {
+                                    *reachable = joined;
+                                }
+                            }
+                        }
+                        if reach.iter().all(|&reachable| reachable == 7) {
+                            break;
+                        }
+                    }
+                    (nodes, edges)
+                };
+                assert_eq!(output.witness.nodes_touched, nodes);
+                assert_eq!(output.witness.edges_scanned, edges);
                 let KernelValues::Components(labels) = output.values else {
                     panic!("components");
                 };
@@ -2356,7 +2392,10 @@ mod tests {
                 let output =
                     run_components(&PathRows { n, cycle }, strong, &admission, &mut || Ok(()))
                         .unwrap();
-                assert_eq!(output.witness.edges_scanned, if cycle { n } else { n - 1 });
+                assert_eq!(
+                    output.witness.edges_scanned,
+                    if strong && cycle { n } else { n - 1 }
+                );
                 assert_eq!(output.witness.queue_peak, if strong { n } else { 0 });
                 let KernelValues::Components(labels) = output.values else {
                     panic!("components");

@@ -573,7 +573,7 @@ impl FnxCallSpec {
                         if strong {
                             "fgdb-prism/sealed-tarjan-cooperative-v1"
                         } else {
-                            "fgdb-prism/sealed-union-find-cooperative-v1"
+                            "fgdb-prism/sealed-union-find-complete-cooperative-v2"
                         },
                         super::components::work(n, graph.adjacency_entry_count(), pass, strong)?,
                         super::components::workspace(n, strong)?,
@@ -930,13 +930,23 @@ where
     let n = graph.node_count();
     let mut parents = reserve(n)?;
     let mut sizes = reserve(n)?;
+    let symmetric = graph.spec().directedness == crate::Directedness::Undirected;
+    let mut remaining = if symmetric { 0 } else { n };
     for vertex in 0..n {
         control.tick().await?;
+        if symmetric
+            && graph
+                .degree(vertex)
+                .ok_or(ExecutionError::InvalidUpstreamResult)?
+                != 0
+        {
+            remaining = add(remaining, 1)?;
+        }
         parents.push(vertex);
         sizes.push(1usize);
     }
     let mut witness = ComplexityWitness {
-        algorithm: "weakly_connected_components_union_find".to_owned(),
+        algorithm: "weakly_connected_components_union_find_complete_v2".to_owned(),
         complexity_claim:
             "O(|V| log(1+H) + (H+|V|) log(1+|V|)) compressed row visits and bounded union-find"
                 .to_owned(),
@@ -944,7 +954,12 @@ where
         edges_scanned: 0,
         queue_peak: 0,
     };
+    // A successful union joins two eligible components, decrementing this
+    // count once. Test only between rows, preserving the synchronous prefix.
     for source in 0..n {
+        if remaining <= 1 {
+            break;
+        }
         control.tick().await?;
         witness.nodes_touched = add(witness.nodes_touched, 1)?;
         let mut row = graph.neighbor_cursor_controlled(control.cx, source, None)?;
@@ -964,6 +979,9 @@ where
             }
             sizes[a] = add(sizes[a], sizes[b])?;
             parents[b] = a;
+            remaining = remaining
+                .checked_sub(1)
+                .ok_or(ExecutionError::InvalidUpstreamResult)?;
         }
     }
     // Do not replace representatives with canonical minima until the ENTIRE

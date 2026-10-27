@@ -1032,6 +1032,152 @@ fn all_directions_reductions_loops_and_full_width_seeks_match_decoded_rows() {
 }
 
 #[test]
+fn completed_components_omit_compressed_tails_across_history_and_cooperative_quanta() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        let vertices: Vec<_> = (0..18)
+            .map(|i| {
+                VId(if i == 17 {
+                    u128::MAX
+                } else {
+                    ((i as u128) << 64) | 1
+                })
+            })
+            .collect();
+        let mut first = WriteBatch::new(RelationId(1));
+        for &vertex in &vertices {
+            first.create_vertex(vertex, vec![LabelId(1)], vec![]);
+        }
+        first.create_vertex(VId(99), vec![LabelId(2)], vec![]);
+        let mut eid = 1;
+        for &source in &vertices[..12] {
+            for &target in &vertices[..12] {
+                if source != target {
+                    first.add_edge(
+                        EId(eid),
+                        source,
+                        target,
+                        vec![(PropertyKeyId(1), CanonicalScalar::Int(-1))],
+                    );
+                    eid += 1;
+                }
+            }
+        }
+        // Hidden endpoints and their nonnumeric weights cannot connect the
+        // visible isolate or enter the admitted completion population.
+        first.add_edge(
+            EId(eid),
+            vertices[0],
+            VId(99),
+            vec![(PropertyKeyId(1), CanonicalScalar::Bool(true))],
+        );
+        first.add_edge(
+            EId(eid + 1),
+            VId(99),
+            vertices[17],
+            vec![(PropertyKeyId(1), CanonicalScalar::Bool(true))],
+        );
+        db.write(&commit, first).await.unwrap();
+        let historical = db.frontier().unwrap();
+        let mut bridge = WriteBatch::new(RelationId(1));
+        bridge.add_edge(
+            EId(eid + 2),
+            vertices[0],
+            vertices[12],
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(-1))],
+        );
+        db.write(&commit, bridge).await.unwrap();
+        let view = db.read_session().unwrap();
+        for (at, active) in [(historical, 12), (db.frontier().unwrap(), 13)] {
+            for direction in [
+                Directedness::Directed,
+                Directedness::Reversed,
+                Directedness::Undirected,
+            ] {
+                let mut opt = options(direction);
+                opt.as_of = Some(at);
+                let call = if direction == Directedness::Undirected {
+                    FnxCallSpec::connected_components()
+                } else {
+                    FnxCallSpec::weakly_connected_components()
+                };
+                let graph = project(&db, &query, opt).await;
+                let expected = view.execute_fnx(&query, &call, opt).unwrap();
+                let actual = db
+                    .execute_fnx_sealed(&query, &call, opt, memory(), SealedLimits::default())
+                    .await
+                    .unwrap()
+                    .analytics;
+                assert_eq!(actual.rows, expected.analytics.rows);
+                assert_eq!(
+                    actual.certificate.result_digest,
+                    expected.analytics.certificate.result_digest
+                );
+                for (index, row) in actual.rows.iter().enumerate() {
+                    assert_eq!(row[0], FnxValue::Vertex(vertices[index]));
+                    assert_eq!(
+                        row[1],
+                        FnxValue::Vertex(if index < active {
+                            vertices[0]
+                        } else {
+                            vertices[index]
+                        })
+                    );
+                }
+                if direction == Directedness::Undirected {
+                    assert_eq!(actual.certificate.witness.nodes_touched, 1);
+                    assert_eq!(actual.certificate.witness.edges_scanned, active - 1);
+                } else {
+                    // A zero outgoing degree is not an authorized isolate proof
+                    // for directed or reversed WCC: every row remains eligible.
+                    assert_eq!(actual.certificate.witness.nodes_touched, vertices.len());
+                    assert_eq!(
+                        actual.certificate.witness.edges_scanned,
+                        graph.adjacency_entry_count()
+                    );
+                }
+                exact_sealed_limits(&call, &query, &graph, opt.execution_limits, &actual);
+                let mut prior = None;
+                for quantum in [1, 7, 257] {
+                    let cooperative = call
+                        .execute_sealed_cooperative(
+                            &query,
+                            &graph,
+                            opt.execution_limits,
+                            memory(),
+                            std::num::NonZeroUsize::new(quantum).unwrap(),
+                            asupersync::runtime::yield_now::yield_now,
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(cooperative.rows, actual.rows);
+                    assert_eq!(cooperative.certificate.witness, actual.certificate.witness);
+                    assert_eq!(
+                        cooperative.certificate.estimated_work,
+                        actual.certificate.estimated_work
+                    );
+                    assert_eq!(
+                        cooperative.certificate.kernel_workspace_bytes,
+                        actual.certificate.kernel_workspace_bytes
+                    );
+                    if let Some(prior) = &prior {
+                        assert_eq!(&cooperative, prior);
+                    }
+                    prior = Some(cooperative);
+                }
+            }
+        }
+    });
+}
+
+#[test]
 fn registered_procedures_reach_directional_images_from_database_and_reusable_projection() {
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
@@ -1092,7 +1238,7 @@ fn registered_procedures_reach_directional_images_from_database_and_reusable_pro
                 if text == CC {
                     assert_eq!(
                         output.analytics.certificate.execution_kernel,
-                        "fgdb-prism/sealed-union-find-v1"
+                        "fgdb-prism/sealed-union-find-complete-v2"
                     );
                     assert!(
                         output

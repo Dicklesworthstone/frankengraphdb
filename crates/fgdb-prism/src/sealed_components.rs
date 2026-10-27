@@ -1,7 +1,12 @@
-//! Directed connectivity without incoming rows or a decoded adjacency cache.
+//! Connectivity without incoming rows or a decoded adjacency cache.
 //! WCC uses union-by-size; SCC retains one resumable cursor per active DFS
 //! frame. Both publish the minimum snapshot-local ordinal of each component,
 //! which the CALL boundary maps back to the full stable VId.
+//! WCC stops reading once unions prove the entire population connected. For
+//! admitted symmetric CC, the degree directory proves zero-degree vertices
+//! isolated, so only its nonzero-degree population must be joined. Remaining
+//! immutable edges cannot change that partition; no inverse graph or sample
+//! is needed to omit their compressed scans.
 
 use super::{
     ComplexityWitness, Cursor, ExecutionError, KernelOutput, KernelValues, Result, ResultAdmission,
@@ -63,13 +68,23 @@ pub(super) fn weak(
     admission.rows(n)?;
     let mut parents = reserve(n)?;
     let mut sizes = reserve(n)?;
+    let symmetric = graph.is_undirected();
+    let mut remaining = if symmetric { 0 } else { n };
     for vertex in 0..n {
         checkpoint()?;
+        if symmetric
+            && graph
+                .degree(vertex)
+                .ok_or(ExecutionError::InvalidUpstreamResult)?
+                != 0
+        {
+            remaining = add(remaining, 1)?;
+        }
         parents.push(vertex);
         sizes.push(1usize);
     }
     let mut witness = ComplexityWitness {
-        algorithm: "weakly_connected_components_union_find".to_owned(),
+        algorithm: "weakly_connected_components_union_find_complete_v2".to_owned(),
         complexity_claim:
             "O(|V| log(1+H) + (H+|V|) log(1+|V|)) compressed row visits and bounded union-find"
                 .to_owned(),
@@ -77,7 +92,14 @@ pub(super) fn weak(
         edges_scanned: 0,
         queue_peak: 0,
     };
+    // Remaining counts eligible components: each successful union joins two,
+    // so no union can take this count below one. Symmetric
+    // zero-degree vertices cannot be endpoints; directed WCC includes ALL n.
     for source in 0..n {
+        // Finish the current row before omitting later row opens entirely.
+        if remaining <= 1 {
+            break;
+        }
         checkpoint()?;
         witness.nodes_touched = add(witness.nodes_touched, 1)?;
         let mut row = graph.open(source)?;
@@ -97,6 +119,9 @@ pub(super) fn weak(
             }
             sizes[a] = add(sizes[a], sizes[b])?;
             parents[b] = a;
+            remaining = remaining
+                .checked_sub(1)
+                .ok_or(ExecutionError::InvalidUpstreamResult)?;
         }
     }
     // First flatten ALL parents while they still form a forest. Reuse sizes
@@ -243,4 +268,178 @@ pub(super) fn strong<G: Rows>(
         row_count: n,
         witness,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    struct CountedRows {
+        rows: Vec<Vec<usize>>,
+        symmetric: bool,
+        opened: Cell<usize>,
+        visited: Cell<usize>,
+    }
+    struct CountedRow<'a> {
+        row: std::slice::Iter<'a, usize>,
+        visited: &'a Cell<usize>,
+    }
+    impl Cursor for CountedRow<'_> {
+        fn next(&mut self) -> Result<Option<(usize, f64)>> {
+            Ok(self.row.next().map(|&neighbor| {
+                self.visited.set(self.visited.get() + 1);
+                (neighbor, -1.0)
+            }))
+        }
+    }
+    impl Rows for CountedRows {
+        type Cursor<'a> = CountedRow<'a>;
+        fn node_count(&self) -> usize {
+            self.rows.len()
+        }
+        fn degree(&self, source: usize) -> Option<usize> {
+            self.rows.get(source).map(Vec::len)
+        }
+        fn is_undirected(&self) -> bool {
+            self.symmetric
+        }
+        fn open(&self, source: usize) -> Result<CountedRow<'_>> {
+            self.opened.set(self.opened.get() + 1);
+            Ok(CountedRow {
+                row: self
+                    .rows
+                    .get(source)
+                    .ok_or(ExecutionError::InvalidUpstreamResult)?
+                    .iter(),
+                visited: &self.visited,
+            })
+        }
+    }
+    fn counted(rows: Vec<Vec<usize>>, symmetric: bool) -> CountedRows {
+        CountedRows {
+            rows,
+            symmetric,
+            opened: Cell::new(0),
+            visited: Cell::new(0),
+        }
+    }
+    fn execute(graph: &CountedRows) -> KernelOutput {
+        let admission = ResultAdmission {
+            row_bytes: 0,
+            column_bytes: 0,
+            max_rows: graph.node_count(),
+            max_bytes: 0,
+            delivery: super::super::Delivery::Collected,
+        };
+        let output = weak(graph, &admission, &mut || Ok(())).unwrap();
+        assert_eq!(output.witness.nodes_touched, graph.opened.get());
+        assert_eq!(output.witness.edges_scanned, graph.visited.get());
+        output
+    }
+
+    #[test]
+    fn complete_undirected_population_skips_remaining_rows_but_keeps_isolates() {
+        let (n, active) = (129, 65);
+        let rows: Vec<_> = (0..n)
+            .map(|source| {
+                if source < active {
+                    (0..active).filter(|&target| target != source).collect()
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect();
+        for symmetric in [false, true] {
+            let graph = counted(rows.clone(), symmetric);
+            let output = execute(&graph);
+            let KernelValues::Components(labels) = output.values else {
+                panic!("components")
+            };
+            let expected: Vec<_> = (0..n)
+                .map(|vertex| if vertex < active { 0 } else { vertex })
+                .collect();
+            assert_eq!(labels, expected);
+            if symmetric {
+                assert_eq!(graph.opened.get(), 1);
+                assert_eq!(graph.visited.get(), active - 1);
+            } else {
+                // Outdegree zero does not prove a directed vertex isolated.
+                assert_eq!(graph.opened.get(), n);
+                assert_eq!(graph.visited.get(), active * (active - 1));
+            }
+        }
+    }
+
+    #[test]
+    fn directed_sinks_and_late_incoming_bridges_remain_in_completion_population() {
+        let n = 65;
+        let mut forward = vec![Vec::new(); n];
+        forward[0] = (1..n).collect();
+        let mut reversed = vec![Vec::new(); n];
+        for row in &mut reversed[1..] {
+            row.push(0);
+        }
+        for (rows, opened) in [(forward, 1), (reversed, n)] {
+            let graph = counted(rows, false);
+            let output = execute(&graph);
+            let KernelValues::Components(labels) = output.values else {
+                panic!("components")
+            };
+            assert_eq!(labels, vec![0; n]);
+            assert_eq!(graph.opened.get(), opened);
+            assert_eq!(graph.visited.get(), n - 1);
+        }
+    }
+
+    #[test]
+    fn separate_nontrivial_components_and_loop_only_vertices_prevent_early_completion() {
+        let n = 65;
+        let rows: Vec<_> = (0..n)
+            .map(|source| {
+                if source == n - 1 {
+                    vec![source]
+                } else {
+                    (0..n - 1)
+                        .filter(|&target| source / 32 == target / 32 && source != target)
+                        .collect()
+                }
+            })
+            .collect();
+        let graph = counted(rows, true);
+        let output = execute(&graph);
+        let KernelValues::Components(labels) = output.values else {
+            panic!("components")
+        };
+        assert_eq!(
+            labels,
+            (0..n)
+                .map(|vertex| if vertex < 32 {
+                    0
+                } else if vertex < 64 {
+                    32
+                } else {
+                    64
+                })
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(graph.opened.get(), n);
+        assert_eq!(graph.visited.get(), 2 * 32 * 31 + 1);
+        for (rows, labels) in [
+            (vec![], vec![]),
+            (vec![vec![]], vec![0]),
+            (vec![vec![0]], vec![0]),
+        ] {
+            for symmetric in [false, true] {
+                let graph = counted(rows.clone(), symmetric);
+                let output = execute(&graph);
+                let KernelValues::Components(actual) = output.values else {
+                    panic!("components")
+                };
+                assert_eq!(actual, labels);
+                assert_eq!(graph.opened.get(), 0);
+                assert_eq!(graph.visited.get(), 0);
+            }
+        }
+    }
 }
