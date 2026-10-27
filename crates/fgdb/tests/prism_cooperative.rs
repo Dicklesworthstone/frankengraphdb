@@ -755,6 +755,15 @@ fn cooperative_bfs_and_pagerank_preserve_rows_scalar_bits_and_certificates_acros
                     calls.push(FnxCallSpec::pagerank(
                         PageRankOptions::global_l1(0.85, 1000, 1e-9, weighted).unwrap(),
                     ));
+                    for source in [VId(0), VId(u128::MAX)] {
+                        for options in [
+                            PageRankOptions::new(0.85, 1000, 1e-9, weighted).unwrap(),
+                            PageRankOptions::global_l1(0.85, 1000, 1e-9, weighted).unwrap(),
+                            PageRankOptions::fixed_iterations(0.85, 3, weighted).unwrap(),
+                        ] {
+                            calls.push(FnxCallSpec::pagerank(options.with_source(source)));
+                        }
+                    }
                 }
                 for source in [VId(0), VId(u128::MAX)] {
                     for cutoff in [None, Some(0), Some(1)] {
@@ -1002,6 +1011,104 @@ fn fixed_iteration_pagerank_and_cdlp_reach_public_and_prepared_authorized_calls(
                 );
             }
         }
+
+        // A vertex-valued parameter can personalize a prepared call without
+        // narrowing a stable ID to i64/u64 or rebuilding the query text.
+        let personalized_text = "CALL fnx.pagerank(source => $seeds[0], iterations => 5, \
+            weighted => true, label => 'Visible', relation => 'R', weight => 'weight', \
+            parallel => 'min', self_loops => 'keep') \
+            YIELD vertex,score RETURN vertex,score ORDER BY vertex";
+        let seed_arguments = |source| {
+            GqlParameters::new()
+                .with_list("seeds", vec![GraphValue::Vertex(source)])
+                .unwrap()
+        };
+        let personalized = session
+            .prepare(&cx, personalized_text, &seed_arguments(VId(1)))
+            .unwrap();
+        for (seed, ordinal) in [(VId(1), 0), (VId(u128::MAX), 3)] {
+            let parameters = seed_arguments(seed);
+            let standalone = "CALL fnx.pagerank(source => $seed, iterations => 5, weighted => true) YIELD vertex,score";
+            let native_parameters =
+                FnxParameters::from([("seed".to_owned(), FnxArgument::Vertex(seed))]);
+            let actual = db
+                .call_fnx_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    standalone,
+                    &native_parameters,
+                    native_options,
+                    || 100,
+                )
+                .unwrap();
+            let mut expected = [0.25_f64; 4];
+            for _ in 0..5 {
+                let mut next = [0.0; 4];
+                next[ordinal] = (1.0 - 0.85) + 0.85 * expected[3];
+                next[1] += 0.85 * expected[0];
+                next[1] += (0.85 * expected[1]) * 0.25;
+                next[2] += (0.85 * expected[1]) * 0.75;
+                next[0] += 0.85 * expected[2];
+                expected = next;
+            }
+            let expected_rows: Vec<_> = [1, 2, 3, u128::MAX]
+                .into_iter()
+                .zip(expected)
+                .map(|(id, score)| {
+                    vec![
+                        QueryValue::Value(GraphValue::Vertex(VId(id))),
+                        QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Float(
+                            fgdb_types::CanonicalF64::new(score),
+                        ))),
+                    ]
+                })
+                .collect();
+            for (row, expected) in actual.iter().zip(expected) {
+                let FnxValue::Score(score) = row[1] else {
+                    panic!("PageRank score");
+                };
+                assert_eq!(score.to_bits(), expected.to_bits());
+            }
+            for result in [
+                db.query(&cx, personalized_text, &parameters, symbols, policy)
+                    .unwrap(),
+                session.execute(&cx, &personalized, &parameters).unwrap(),
+            ] {
+                let QueryResult::Rows { rows, .. } = result else {
+                    panic!("PageRank rows");
+                };
+                assert_eq!(rows, expected_rows);
+            }
+        }
+        // Hidden vertices and absent IDs share the existing sourced-procedure
+        // refusal; neither can become a teleport target outside the mask.
+        let mut source_errors = Vec::new();
+        for seed in [VId(99), VId(98)] {
+            let error = db
+                .call_fnx_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    "CALL fnx.pagerank(source => $seed, iterations => 5)",
+                    &FnxParameters::from([("seed".to_owned(), FnxArgument::Vertex(seed))]),
+                    native_options,
+                    || 100,
+                )
+                .unwrap_err();
+            assert!(
+                matches!(&error, FnxReadError::Execution(FnxExecutionError::UnknownSource(source)) if *source == seed)
+            );
+            source_errors.push(error.to_string());
+            assert!(
+                session
+                    .execute(&cx, &personalized, &seed_arguments(seed))
+                    .is_err()
+            );
+        }
+        assert_eq!(source_errors[0], source_errors[1]);
 
         // Absolute residual control uses the same signed induced graph and
         // survives prepared argument rebinding through the public native host.
@@ -1312,33 +1419,22 @@ fn fixed_iteration_pagerank_observes_every_cooperative_cancellation_and_live_gua
         let graph = projection(&db, &cx, opt).await;
         let root_before = db.read_session().unwrap().partition_root();
         let call = FnxCallSpec::pagerank(PageRankOptions::fixed_iterations(0.85, 2, true).unwrap());
-        let probe = Arc::new(SimulationCheckpointProbe::new(None));
-        let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
-        let (expected, pending) = drive(
-            call.execute_sealed_cooperative(
-                &controlled,
-                &graph,
-                opt.execution_limits,
-                memory(),
-                quantum(7),
-                yield_now,
+        for call in [
+            call,
+            FnxCallSpec::pagerank(
+                PageRankOptions::fixed_iterations(0.85, 2, true)
+                    .unwrap()
+                    .with_source(VId(0)),
             ),
-            &probe,
-            7,
-        );
-        let expected = expected.unwrap();
-        assert!(pending > 2);
-        assert_eq!(expected.certificate.witness.nodes_touched, 6);
-        compare_execution(
-            &expected,
-            &call
-                .execute_sealed(&cx, &graph, opt.execution_limits, memory())
-                .unwrap(),
-        );
-        for stop in 1..=probe.calls() {
-            let refusal = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
-            let controlled = cx.with_checkpoint_probe(Arc::clone(&refusal));
-            let (actual, _) = drive(
+            FnxCallSpec::pagerank(
+                PageRankOptions::fixed_iterations(0.85, 2, true)
+                    .unwrap()
+                    .with_source(VId(2)),
+            ),
+        ] {
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+            let (expected, pending) = drive(
                 call.execute_sealed_cooperative(
                     &controlled,
                     &graph,
@@ -1347,37 +1443,42 @@ fn fixed_iteration_pagerank_observes_every_cooperative_cancellation_and_live_gua
                     quantum(7),
                     yield_now,
                 ),
-                &refusal,
+                &probe,
                 7,
             );
-            assert!(
-                matches!(actual, Err(FnxSealedExecutionError::Cancelled(_))),
-                "cut={stop}"
+            let expected = expected.unwrap();
+            assert!(pending > 2);
+            assert_eq!(expected.certificate.witness.nodes_touched, 6);
+            compare_execution(
+                &expected,
+                &call
+                    .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                    .unwrap(),
             );
-            assert_eq!(refusal.calls(), stop);
-        }
-        let mut guards = 0;
-        assert_eq!(
-            call.execute_sealed_cooperative_with_checkpoint(
-                &cx,
-                &graph,
-                opt.execution_limits,
-                memory(),
-                quantum(7),
-                yield_now,
-                || {
-                    guards += 1;
-                    Ok(())
-                },
-            )
-            .await
-            .unwrap(),
-            expected
-        );
-        for stop in 1..=guards {
-            let mut seen = 0;
-            let result = call
-                .execute_sealed_cooperative_with_checkpoint(
+            for stop in 1..=probe.calls() {
+                let refusal = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                let controlled = cx.with_checkpoint_probe(Arc::clone(&refusal));
+                let (actual, _) = drive(
+                    call.execute_sealed_cooperative(
+                        &controlled,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(7),
+                        yield_now,
+                    ),
+                    &refusal,
+                    7,
+                );
+                assert!(
+                    matches!(actual, Err(FnxSealedExecutionError::Cancelled(_))),
+                    "cut={stop}"
+                );
+                assert_eq!(refusal.calls(), stop);
+            }
+            let mut guards = 0;
+            assert_eq!(
+                call.execute_sealed_cooperative_with_checkpoint(
                     &cx,
                     &graph,
                     opt.execution_limits,
@@ -1385,74 +1486,96 @@ fn fixed_iteration_pagerank_observes_every_cooperative_cancellation_and_live_gua
                     quantum(7),
                     yield_now,
                     || {
-                        seen += 1;
-                        if seen == stop {
-                            Err(SealedProjectionError::Guard(Box::new(LiveRefusal(stop))))
-                        } else {
-                            Ok(())
-                        }
+                        guards += 1;
+                        Ok(())
                     },
                 )
-                .await;
-            live_refusal(result.unwrap_err(), stop);
-            assert_eq!(seen, stop);
+                .await
+                .unwrap(),
+                expected
+            );
+            for stop in 1..=guards {
+                let mut seen = 0;
+                let result = call
+                    .execute_sealed_cooperative_with_checkpoint(
+                        &cx,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(7),
+                        yield_now,
+                        || {
+                            seen += 1;
+                            if seen == stop {
+                                Err(SealedProjectionError::Guard(Box::new(LiveRefusal(stop))))
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await;
+                live_refusal(result.unwrap_err(), stop);
+                assert_eq!(seen, stop);
+            }
+            assert!(matches!(
+                call.execute_sealed_cooperative(
+                    &cx,
+                    &graph,
+                    FnxExecutionLimits {
+                        max_iterations: 1,
+                        ..opt.execution_limits
+                    },
+                    memory(),
+                    quantum(1),
+                    || -> std::future::Ready<()> {
+                        panic!("iteration admission must precede yielding")
+                    },
+                )
+                .await,
+                Err(FnxSealedExecutionError::Execution(
+                    FnxExecutionError::LimitExceeded {
+                        resource: "iterations",
+                        ..
+                    }
+                ))
+            ));
+            let huge = FnxCallSpec::pagerank(
+                PageRankOptions::fixed_iterations(0.85, usize::MAX, true).unwrap(),
+            );
+            assert!(matches!(
+                huge.execute_sealed_cooperative(
+                    &cx,
+                    &graph,
+                    FnxExecutionLimits {
+                        max_iterations: usize::MAX,
+                        ..opt.execution_limits
+                    },
+                    memory(),
+                    quantum(1),
+                    || -> std::future::Ready<()> {
+                        panic!("overflow admission must precede yielding")
+                    },
+                )
+                .await,
+                Err(FnxSealedExecutionError::Execution(
+                    FnxExecutionError::SizeOverflow
+                ))
+            ));
+            assert_eq!(
+                call.execute_sealed_cooperative(
+                    &cx,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(1),
+                    yield_now,
+                )
+                .await
+                .unwrap(),
+                expected
+            );
+            assert_eq!(db.read_session().unwrap().partition_root(), root_before);
         }
-        assert!(matches!(
-            call.execute_sealed_cooperative(
-                &cx,
-                &graph,
-                FnxExecutionLimits {
-                    max_iterations: 1,
-                    ..opt.execution_limits
-                },
-                memory(),
-                quantum(1),
-                || -> std::future::Ready<()> {
-                    panic!("iteration admission must precede yielding")
-                },
-            )
-            .await,
-            Err(FnxSealedExecutionError::Execution(
-                FnxExecutionError::LimitExceeded {
-                    resource: "iterations",
-                    ..
-                }
-            ))
-        ));
-        let huge = FnxCallSpec::pagerank(
-            PageRankOptions::fixed_iterations(0.85, usize::MAX, true).unwrap(),
-        );
-        assert!(matches!(
-            huge.execute_sealed_cooperative(
-                &cx,
-                &graph,
-                FnxExecutionLimits {
-                    max_iterations: usize::MAX,
-                    ..opt.execution_limits
-                },
-                memory(),
-                quantum(1),
-                || -> std::future::Ready<()> { panic!("overflow admission must precede yielding") },
-            )
-            .await,
-            Err(FnxSealedExecutionError::Execution(
-                FnxExecutionError::SizeOverflow
-            ))
-        ));
-        assert_eq!(
-            call.execute_sealed_cooperative(
-                &cx,
-                &graph,
-                opt.execution_limits,
-                memory(),
-                quantum(1),
-                yield_now,
-            )
-            .await
-            .unwrap(),
-            expected
-        );
-        assert_eq!(db.read_session().unwrap().partition_root(), root_before);
         assert_eq!(contexts.outstanding_obligations(), 0);
     });
 }
@@ -1505,7 +1628,8 @@ fn cooperative_admission_has_no_sync_fallback_and_uses_exact_independent_limits(
         for call in [FnxCallSpec::single_source_shortest_path_length(VId(0), None),
             FnxCallSpec::pagerank(PageRankOptions::default()),
             FnxCallSpec::pagerank(PageRankOptions::fixed_iterations(0.85, 2, true).unwrap()),
-            FnxCallSpec::pagerank(PageRankOptions::global_l1(0.85, 1000, 1e-9, true).unwrap())] {
+            FnxCallSpec::pagerank(PageRankOptions::global_l1(0.85, 1000, 1e-9, true).unwrap()),
+            FnxCallSpec::pagerank(PageRankOptions::fixed_iterations(0.85, 2, true).unwrap().with_source(VId(2)))] {
             let expected = call.execute_sealed_cooperative(&cx, &graph,
                 opt.execution_limits, memory(), quantum(7), yield_now).await.unwrap();
             let columns = call.outputs().len() * size_of::<String>()
@@ -1549,10 +1673,16 @@ fn cooperative_admission_has_no_sync_fallback_and_uses_exact_independent_limits(
                 .await.unwrap_err();
             assert_eq!(actual.to_string(), expected.to_string());
         }
-        let absent = FnxCallSpec::single_source_shortest_path_length(VId(u128::MAX), None);
+        for absent in [
+            FnxCallSpec::single_source_shortest_path_length(VId(u128::MAX), None),
+            FnxCallSpec::pagerank(PageRankOptions::default().with_source(VId(u128::MAX))),
+        ] {
+        assert!(matches!(absent.execute_sealed(&cx, &graph, opt.execution_limits, memory()),
+            Err(FnxSealedExecutionError::Execution(FnxExecutionError::UnknownSource(VId(u128::MAX))))));
         assert!(matches!(absent.execute_sealed_cooperative(&cx, &graph, opt.execution_limits, memory(),
             quantum(1), || -> std::future::Ready<()> { panic!("preflight must not yield") }).await,
             Err(FnxSealedExecutionError::Execution(FnxExecutionError::UnknownSource(VId(u128::MAX))))));
+        }
     });
 }
 
@@ -1631,6 +1761,33 @@ fn cooperative_numeric_refusal_nonconvergence_and_empty_or_isolated_populations_
                 1,
             );
             assert_eq!(result.unwrap().rows.len(), n);
+            let absent =
+                FnxCallSpec::pagerank(PageRankOptions::default().with_source(VId(u128::MAX)));
+            for error in [
+                absent
+                    .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                    .unwrap_err(),
+                absent
+                    .execute_sealed_cooperative(
+                        &cx,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(1),
+                        || -> std::future::Ready<()> {
+                            panic!("missing seed must refuse before yielding")
+                        },
+                    )
+                    .await
+                    .unwrap_err(),
+            ] {
+                assert!(matches!(
+                    error,
+                    FnxSealedExecutionError::Execution(FnxExecutionError::UnknownSource(VId(
+                        u128::MAX
+                    )))
+                ));
+            }
             if n != 0 {
                 // No edges can produce these yields: scalar initialization,
                 // convergence and result conversion must themselves cooperate.

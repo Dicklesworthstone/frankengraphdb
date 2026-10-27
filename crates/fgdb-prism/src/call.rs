@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 18;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 19;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -138,6 +138,12 @@ const PAGERANK_PARAMETERS: &[FnxParameterSpec] = &[
         positional: false,
         default: None,
     },
+    FnxParameterSpec {
+        name: "source",
+        value_type: FnxParameterType::Vertex,
+        positional: false,
+        default: None,
+    },
 ];
 const BFS_PARAMETERS: &[FnxParameterSpec] = &[
     FnxParameterSpec {
@@ -189,7 +195,7 @@ const SIGNATURES: &[FnxSignature] = &[
         graph_kind: FnxGraphKind::Any,
         numeric_profile: FNX_NUMERIC_PROFILE,
         rng_policy: "none",
-        graph_laws: "explicit projection; finite nonnegative weights when weighted; isolates retained; default convergence uses L1 < N*tol; named l1_tol selects L1 < l1_tol and conflicts with tol/iterations; named iterations selects exact updates and conflicts with max_iter/tol/l1_tol",
+        graph_laws: "explicit projection; finite nonnegative weights when weighted; isolates retained; uniform initial vector; optional named source concentrates teleportation and dangling redistribution at one admitted VId; default convergence uses L1 < N*tol; named l1_tol selects L1 < l1_tol and conflicts with tol/iterations; named iterations selects exact updates and conflicts with max_iter/tol/l1_tol",
         complexity: "O(k * (|V| + |E|))",
         execution_kernel: "fgdb-prism/pagerank-row-cursor-v1",
     },
@@ -527,6 +533,7 @@ pub struct PageRankOptions {
     tol: f64,
     weighted: bool,
     stopping_rule: PageRankStoppingRule,
+    source: Option<VId>,
 }
 impl PageRankOptions {
     pub fn new(
@@ -554,7 +561,23 @@ impl PageRankOptions {
             tol,
             weighted,
             stopping_rule: PageRankStoppingRule::Convergence,
+            source: None,
         })
+    }
+
+    /// Concentrate teleportation and dangling redistribution at one stable
+    /// vertex in the admitted projection. The initial vector stays uniform,
+    /// and the selected stopping rule and canonical arithmetic order remain
+    /// unchanged. An absent or excluded source refuses during execution.
+    /// This is single-source personalization, not an arbitrary seed vector.
+    pub const fn with_source(mut self, source: VId) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    /// None retains uniform teleportation and dangling redistribution.
+    pub const fn source(self) -> Option<VId> {
+        self.source
     }
     /// Converge when the global L1 change between successive rank vectors is
     /// below `l1_tol`, independently of the number of vertices. The graph,
@@ -627,10 +650,15 @@ impl PageRankOptions {
         }
     }
     pub(crate) const fn witness_algorithm(self) -> &'static str {
-        match self.stopping_rule {
-            PageRankStoppingRule::Convergence => "pagerank_power_iteration",
-            PageRankStoppingRule::GlobalL1 => "pagerank_global_l1",
-            PageRankStoppingRule::ExactIterations => "pagerank_fixed_iterations",
+        match (self.source.is_some(), self.stopping_rule) {
+            (false, PageRankStoppingRule::Convergence) => "pagerank_power_iteration",
+            (false, PageRankStoppingRule::GlobalL1) => "pagerank_global_l1",
+            (false, PageRankStoppingRule::ExactIterations) => "pagerank_fixed_iterations",
+            (true, PageRankStoppingRule::Convergence) => "personalized_pagerank_power_iteration",
+            (true, PageRankStoppingRule::GlobalL1) => "personalized_pagerank_global_l1",
+            (true, PageRankStoppingRule::ExactIterations) => {
+                "personalized_pagerank_fixed_iterations"
+            }
         }
     }
 }
@@ -642,6 +670,7 @@ impl Default for PageRankOptions {
             tol: 1e-6,
             weighted: true,
             stopping_rule: PageRankStoppingRule::Convergence,
+            source: None,
         }
     }
 }
@@ -1116,6 +1145,8 @@ impl FnxCallSpec {
     /// `iterations`. Omitting both named-only controls keeps the existing
     /// N * tol convergence rule. Names may not repeat, and this API never
     /// interprets a name as a positional slot.
+    /// Named-only `source` puts teleportation and dangling redistribution at
+    /// one full-width vertex without changing the four positional arguments.
     pub fn from_named_arguments(
         namespace: &str,
         name: &str,
@@ -1142,6 +1173,21 @@ impl FnxCallSpec {
                 return Err(invalid(index, "duplicate named argument"));
             }
         }
+        let source = registration
+            .parameters
+            .iter()
+            .zip(&named)
+            .find_map(|(parameter, value)| {
+                (parameter.name == "source" && !parameter.positional)
+                    .then_some(*value)
+                    .flatten()
+            })
+            .map(|(index, value)| match value {
+                FnxArgument::Vertex(vertex) => Ok(vertex),
+                FnxArgument::Integer(value) if value >= 0 => Ok(VId(value as u128)),
+                _ => Err(invalid(index, "VId or nonnegative integer source required")),
+            })
+            .transpose()?;
         let iterations =
             registration
                 .parameters
@@ -1240,7 +1286,7 @@ impl FnxCallSpec {
                 }
                 failure
             })?;
-        match (exact, global) {
+        let call = match (exact, global) {
             (None, None) => Ok(call),
             (None, Some(tolerance)) => {
                 let Some(options) = call.options() else {
@@ -1279,6 +1325,17 @@ impl FnxCallSpec {
                     call.outputs,
                 ))
             }
+        }?;
+        if let Some(source) = source {
+            let options = call
+                .options()
+                .ok_or_else(|| error(FnxCallSite::Procedure, FnxBindErrorKind::UnknownProcedure))?;
+            Ok(Self::compiled(
+                FnxAlgorithm::PageRank(options.with_source(source)),
+                call.outputs,
+            ))
+        } else {
+            Ok(call)
         }
     }
 
@@ -1298,6 +1355,15 @@ impl FnxCallSpec {
                     hash.update(&options.tol.to_bits().to_le_bytes());
                 }
                 hash.update(&[u8::from(options.weighted)]);
+                match options.source {
+                    None => {
+                        hash.update(&[0]);
+                    }
+                    Some(source) => {
+                        hash.update(&[1]);
+                        hash.update(&source.0.to_le_bytes());
+                    }
+                }
             }
             FnxAlgorithm::SingleSourceShortestPathLength { source, cutoff } => {
                 hash.update(&source.0.to_le_bytes());

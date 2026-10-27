@@ -61,11 +61,11 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    assert_eq!(FnxSignatureRegistry::version(), 18);
+    assert_eq!(FnxSignatureRegistry::version(), 19);
     assert_eq!(FnxSignatureRegistry::signatures().len(), 19);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
-    assert_eq!(signature.parameters.len(), 6);
+    assert_eq!(signature.parameters.len(), 7);
     assert_eq!(
         signature.parameters.iter().filter(|p| p.positional).count(),
         4
@@ -89,6 +89,15 @@ fn registry_describes_only_the_implemented_in_core_signatures() {
         }
     );
     assert_eq!(signature.outputs, &[FnxOutput::Vertex, FnxOutput::Score]);
+    assert_eq!(
+        signature.parameters[6],
+        FnxParameterSpec {
+            name: "source",
+            value_type: FnxParameterType::Vertex,
+            positional: false,
+            default: None,
+        }
+    );
     assert_eq!(
         signature.implementation,
         FnxImplementationClass::InCoreDecodedCache
@@ -412,6 +421,216 @@ fn named_iteration_refusals_identify_the_supplied_argument_and_reject_ambiguous_
             .site,
         FnxCallSite::Arguments
     );
+}
+
+#[test]
+fn source_personalized_pagerank_binds_full_width_identity_and_each_stopping_rule() {
+    let source = VId(u128::MAX - 17);
+    let parameters = FnxParameters::from([("seed".to_owned(), FnxArgument::Vertex(source))]);
+    for (controls, options) in [
+        ("", PageRankOptions::default()),
+        (
+            ", iterations => 7",
+            PageRankOptions::fixed_iterations(0.85, 7, true).unwrap(),
+        ),
+        (
+            ", l1_tol => 1e-9",
+            PageRankOptions::global_l1(0.85, 100, 1e-9, true).unwrap(),
+        ),
+    ] {
+        let text = format!("CALL fnx.pagerank(source => $seed{controls})");
+        let call = FnxCallSpec::bind(&text, &parameters).unwrap();
+        assert_eq!(call, FnxCallSpec::pagerank(options.with_source(source)));
+        assert_eq!(call.options().unwrap().source(), Some(source));
+        assert_ne!(call.digest(), FnxCallSpec::pagerank(options).digest());
+        assert_ne!(
+            call.digest(),
+            FnxCallSpec::pagerank(options.with_source(VId(source.0 as u64 as u128))).digest()
+        );
+        assert_eq!(
+            call,
+            bind(&format!(
+                "CALL fnx.pagerank(source => {}{controls})",
+                source.0
+            ))
+        );
+    }
+    assert_eq!(
+        bind("CALL fnx.pagerank(source => 17)"),
+        FnxCallSpec::pagerank(PageRankOptions::default().with_source(VId(17)))
+    );
+    for value in [
+        FnxArgument::Null,
+        FnxArgument::Integer(-1),
+        FnxArgument::Float(17.0),
+        FnxArgument::Boolean(true),
+    ] {
+        let error = FnxCallSpec::from_named_arguments(
+            "fnx",
+            "pagerank",
+            &[("alpha", FnxArgument::Float(0.5)), ("source", value)],
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(error.site, FnxCallSite::Argument(1));
+    }
+    for text in [
+        "CALL fnx.pagerank(source => 1, source => 2)",
+        "CALL fnx.pagerank(0.85,100,1e-6,true,17)",
+        "CALL fnx.pagerank(source => 1, iterations => 2, tol => 1e-6)",
+        "CALL fnx.pagerank(source => 1, l1_tol => 1e-6, tol => 1e-6)",
+    ] {
+        assert!(
+            FnxCallSpec::bind(text, &FnxParameters::new()).is_err(),
+            "{text}"
+        );
+    }
+    // The shared argument name retains its positional semantics in BFS.
+    assert_eq!(
+        FnxCallSpec::from_named_arguments(
+            "fnx",
+            "single_source_shortest_path_length",
+            &[("source", FnxArgument::Vertex(source))],
+            &[],
+        )
+        .unwrap(),
+        FnxCallSpec::single_source_shortest_path_length(source, None)
+    );
+}
+
+#[test]
+fn personalized_pagerank_matches_an_independent_transition_oracle_on_all_small_graphs() {
+    let vertices = [VId(0), VId(17), VId(u128::MAX)];
+    for mask in 0..512u16 {
+        // The oracle is built directly from the finite edge-set mask. It
+        // neither calls a production kernel nor inspects the projected CSR.
+        let mut weights = [[None; 3]; 3];
+        let mut edges = Vec::new();
+        for bit in 0..9 {
+            if mask & (1 << bit) != 0 {
+                let weight = [0.0, 0.1, 0.3, 1.0, 7.0][bit % 5];
+                weights[bit / 3][bit % 3] = Some(weight);
+                edges.push(edge(
+                    bit as u128,
+                    vertices[bit / 3].0,
+                    vertices[bit % 3].0,
+                    weight,
+                ));
+            }
+        }
+        edges.reverse();
+        let view = graph(
+            &[vertices[2], vertices[1], vertices[0]],
+            &edges,
+            Directedness::Directed,
+        );
+        for weighted in [false, true] {
+            let mut sums = [0.0; 3];
+            for source in 0..3 {
+                for weight in weights[source].into_iter().flatten() {
+                    sums[source] += if weighted { weight } else { 1.0 };
+                }
+            }
+            for seed in 0..3 {
+                for alpha in [0.0, 0.85] {
+                    for steps in [1, 3] {
+                        let mut expected = [1.0 / 3.0; 3];
+                        for _ in 0..steps {
+                            let mut dangling = 0.0;
+                            for source in 0..3 {
+                                if sums[source] == 0.0 {
+                                    dangling += expected[source];
+                                }
+                            }
+                            let mut next = [0.0; 3];
+                            next[seed] = (1.0 - alpha) + alpha * dangling;
+                            for source in 0..3 {
+                                for (target, weight) in weights[source].iter().enumerate() {
+                                    if let Some(weight) = weight {
+                                        let weight = if weighted { *weight } else { 1.0 };
+                                        let share = if sums[source] > 0.0 {
+                                            weight / sums[source]
+                                        } else {
+                                            weight
+                                        };
+                                        next[target] += (alpha * expected[source]) * share;
+                                    }
+                                }
+                            }
+                            expected = next;
+                        }
+                        let call = FnxCallSpec::pagerank(
+                            PageRankOptions::fixed_iterations(alpha, steps, weighted)
+                                .unwrap()
+                                .with_source(vertices[seed]),
+                        );
+                        let actual = execute(&call, &view);
+                        for (index, (actual, expected)) in
+                            scores(&actual).into_iter().zip(expected).enumerate()
+                        {
+                            assert_eq!(
+                                actual.to_bits(),
+                                expected.to_bits(),
+                                "mask={mask} seed={seed} target={index} weighted={weighted} alpha={alpha} steps={steps}"
+                            );
+                        }
+                        assert_eq!(actual.certificate.call_digest, call.digest());
+                        assert_eq!(actual.certificate.witness.nodes_touched, 3 * steps);
+                        assert_eq!(
+                            actual.certificate.witness.edges_scanned,
+                            edges.len() * steps
+                        );
+                        assert_eq!(
+                            actual.certificate.witness.algorithm,
+                            "personalized_pagerank_fixed_iterations"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn personalized_pagerank_rejects_absent_sources_and_keeps_convergence_refusals() {
+    let view = graph(&[VId(17), VId(u128::MAX)], &[], Directedness::Directed);
+    for options in [
+        PageRankOptions::new(0.85, 100, 1e-12, true).unwrap(),
+        PageRankOptions::global_l1(0.85, 100, 1e-12, false).unwrap(),
+        PageRankOptions::fixed_iterations(0.85, 7, true).unwrap(),
+    ] {
+        for seed in [VId(17), VId(u128::MAX)] {
+            let call = FnxCallSpec::pagerank(options.with_source(seed));
+            let result = execute(&call, &view);
+            assert_eq!(
+                scores(&result),
+                if seed == VId(17) {
+                    vec![1.0, 0.0]
+                } else {
+                    vec![0.0, 1.0]
+                }
+            );
+        }
+        let absent = FnxCallSpec::pagerank(options.with_source(VId(99)));
+        for view in [&view, &graph(&[], &[], Directedness::Directed)] {
+            assert!(matches!(
+                absent.execute(view, limits(), || Ok::<(), Infallible>(())),
+                Err(FnxExecutionError::UnknownSource(VId(99)))
+            ));
+        }
+    }
+    let insufficient = FnxCallSpec::pagerank(
+        PageRankOptions::global_l1(0.85, 1, 1e-12, true)
+            .unwrap()
+            .with_source(VId(17)),
+    );
+    assert!(matches!(
+        insufficient.execute(&view, limits(), || Ok::<(), Infallible>(())),
+        Err(FnxExecutionError::NotConverged {
+            max_iterations: 1,
+            ..
+        })
+    ));
 }
 
 #[test]

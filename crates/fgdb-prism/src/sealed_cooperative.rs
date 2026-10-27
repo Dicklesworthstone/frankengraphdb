@@ -528,11 +528,19 @@ impl FnxCallSpec {
                 FnxAlgorithm::PageRank(options) => {
                     admit("iterations", options.max_iter(), limits.max_iterations)?;
                     admission.rows(n)?;
+                    let source = options
+                        .source()
+                        .map(|source| {
+                            graph
+                                .vertex_ordinal(source)
+                                .ok_or(ExecutionError::UnknownSource(source))
+                        })
+                        .transpose()?;
                     (
                         "fgdb-prism/sealed-pagerank-cooperative-v1",
                         mul(pass, add(options.max_iter(), 1)?)?,
                         mul(n, 3 * size_of::<f64>())?,
-                        None,
+                        source,
                     )
                 }
                 FnxAlgorithm::SingleSourceShortestPathLength { source, .. } => {
@@ -612,7 +620,9 @@ impl FnxCallSpec {
                 FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality) => {
                     degree_centrality(graph, &mut control).await?
                 }
-                FnxAlgorithm::PageRank(options) => pagerank(graph, options, &mut control).await?,
+                FnxAlgorithm::PageRank(options) => {
+                    pagerank(graph, options, source, &mut control).await?
+                }
                 FnxAlgorithm::SingleSourceShortestPathLength { cutoff, .. } => {
                     bfs(
                         graph,
@@ -1207,6 +1217,7 @@ where
 async fn pagerank<Yield, YieldFuture>(
     graph: &SealedGraphView,
     options: PageRankOptions,
+    source: Option<usize>,
     control: &mut Cooperate<'_, Yield>,
 ) -> Result<KernelOutput>
 where
@@ -1214,6 +1225,9 @@ where
     YieldFuture: Future<Output = ()>,
 {
     let n = graph.node_count();
+    if source.is_some_and(|source| source >= n) || source.is_some() != options.source().is_some() {
+        return Err(ExecutionError::InvalidUpstreamResult.into());
+    }
     let mut witness = ComplexityWitness {
         algorithm: options.witness_algorithm().to_owned(),
         complexity_claim: "O(k * (|V| log(1+H) + H log(1+|V|))) compressed row visits".to_owned(),
@@ -1256,7 +1270,6 @@ where
         ranks.push(1.0 / population);
         next.push(0.0);
     }
-    let base = (1.0 - options.alpha()) / population;
     for iteration in 0..options.max_iter() {
         control.tick().await?;
         let mut dangling_mass = 0.0;
@@ -1266,10 +1279,15 @@ where
                 dangling_mass += ranks[source];
             }
         }
-        let initial = base + options.alpha() * dangling_mass / population;
-        for value in &mut next {
+        let initial = crate::execute::PageRankRestart::new(
+            source,
+            options.alpha(),
+            population,
+            dangling_mass,
+        );
+        for (target, value) in next.iter_mut().enumerate() {
             control.tick().await?;
-            *value = initial;
+            *value = initial.at(target);
         }
         for source in 0..n {
             control.tick().await?;

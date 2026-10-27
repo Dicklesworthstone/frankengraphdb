@@ -3,8 +3,8 @@
 //! an independent differential oracle, not a hidden fallback.
 
 use crate::execute::{
-    KernelOutput, KernelValues, hash_bfs_decision_card, hash_component_decision_card,
-    hash_result_value,
+    KernelOutput, KernelValues, PageRankRestart, hash_bfs_decision_card,
+    hash_component_decision_card, hash_result_value,
 };
 use crate::sealed_control::Control;
 use crate::{
@@ -501,9 +501,13 @@ fn directed_degree_centrality(
 fn pagerank(
     graph: &impl Rows,
     options: PageRankOptions,
+    source: Option<usize>,
     checkpoint: &mut impl FnMut() -> Result<()>,
 ) -> Result<KernelOutput> {
     let n = graph.node_count();
+    if source.is_some_and(|source| source >= n) || source.is_some() != options.source().is_some() {
+        return Err(ExecutionError::InvalidUpstreamResult.into());
+    }
     let mut witness = ComplexityWitness {
         algorithm: options.witness_algorithm().to_owned(),
         complexity_claim: "O(k * (|V| log(1+H) + H log(1+|V|))) compressed row visits".to_owned(),
@@ -546,7 +550,6 @@ fn pagerank(
         ranks.push(1.0 / population);
         next.push(0.0);
     }
-    let base = (1.0 - options.alpha()) / population;
     for iteration in 0..options.max_iter() {
         let mut dangling_mass = 0.0;
         for source in 0..n {
@@ -555,10 +558,10 @@ fn pagerank(
                 dangling_mass += ranks[source];
             }
         }
-        let initial = base + options.alpha() * dangling_mass / population;
-        for value in &mut next {
+        let initial = PageRankRestart::new(source, options.alpha(), population, dangling_mass);
+        for (target, value) in next.iter_mut().enumerate() {
             checkpoint()?;
-            *value = initial;
+            *value = initial.at(target);
         }
         for source in 0..n {
             checkpoint()?;
@@ -903,11 +906,19 @@ impl FnxCallSpec {
             FnxAlgorithm::PageRank(options) => {
                 admit("iterations", options.max_iter(), limits.max_iterations)?;
                 admission.rows(n)?;
+                let source = options
+                    .source()
+                    .map(|source| {
+                        graph
+                            .vertex_ordinal(source)
+                            .ok_or(ExecutionError::UnknownSource(source))
+                    })
+                    .transpose()?;
                 (
                     "fgdb-prism/sealed-pagerank-v1",
                     mul(pass, add(options.max_iter(), 1)?)?,
                     mul(n, 3 * size_of::<f64>())?,
-                    None,
+                    source,
                 )
             }
             FnxAlgorithm::SingleSourceShortestPathLength { source, .. } => {
@@ -983,7 +994,7 @@ impl FnxCallSpec {
             FnxAlgorithm::Foundation(FoundationAlgorithm::DegreeCentrality) => {
                 degree_centrality(&rows, &mut control)?
             }
-            FnxAlgorithm::PageRank(options) => pagerank(&rows, options, &mut control)?,
+            FnxAlgorithm::PageRank(options) => pagerank(&rows, options, source, &mut control)?,
             FnxAlgorithm::SingleSourceShortestPathLength { cutoff, .. } => bfs(
                 &rows,
                 source.ok_or(ExecutionError::InvalidUpstreamResult)?,
@@ -1886,7 +1897,7 @@ mod tests {
                     weighted.then_some(PROJECTED_WEIGHT_ATTRIBUTE),
                 );
                 assert!(oracle.converged);
-                let output = pagerank(&DecodedRows(&graph), options, &mut || Ok(())).unwrap();
+                let output = pagerank(&DecodedRows(&graph), options, None, &mut || Ok(())).unwrap();
                 let KernelValues::Scores(scores) = output.values else {
                     panic!("scores");
                 };
@@ -1912,34 +1923,41 @@ mod tests {
                 for iterations in [1, 2, 5] {
                     let options =
                         PageRankOptions::fixed_iterations(0.85, iterations, weighted).unwrap();
-                    let decoded = FnxCallSpec::pagerank(options)
-                        .execute(&graph, limits(), || Ok::<(), std::convert::Infallible>(()))
-                        .unwrap();
-                    let output = pagerank(&DecodedRows(&graph), options, &mut || Ok(())).unwrap();
-                    let KernelValues::Scores(scores) = output.values else {
-                        panic!("scores");
-                    };
-                    assert_eq!(scores.len(), decoded.rows.len());
-                    for (&actual, row) in scores.iter().zip(&decoded.rows) {
-                        let crate::FnxValue::Score(expected) = row[1] else {
-                            panic!("decoded score");
+                    for source in [None, Some(0), Some(2)] {
+                        let options = source.map_or(options, |source| {
+                            options.with_source(graph.vertex_id(source).unwrap())
+                        });
+                        let decoded = FnxCallSpec::pagerank(options)
+                            .execute(&graph, limits(), || Ok::<(), std::convert::Infallible>(()))
+                            .unwrap();
+                        let output =
+                            pagerank(&DecodedRows(&graph), options, source, &mut || Ok(()))
+                                .unwrap();
+                        let KernelValues::Scores(scores) = output.values else {
+                            panic!("scores");
                         };
+                        assert_eq!(scores.len(), decoded.rows.len());
+                        for (&actual, row) in scores.iter().zip(&decoded.rows) {
+                            let crate::FnxValue::Score(expected) = row[1] else {
+                                panic!("decoded score");
+                            };
+                            assert_eq!(
+                                actual.to_bits(),
+                                expected.to_bits(),
+                                "mask={mask} weighted={weighted} iterations={iterations}"
+                            );
+                        }
+                        assert_eq!(output.witness.algorithm, options.witness_algorithm());
                         assert_eq!(
-                            actual.to_bits(),
-                            expected.to_bits(),
-                            "mask={mask} weighted={weighted} iterations={iterations}"
+                            output.witness.nodes_touched,
+                            decoded.certificate.witness.nodes_touched
                         );
+                        assert_eq!(
+                            output.witness.edges_scanned,
+                            decoded.certificate.witness.edges_scanned
+                        );
+                        assert_eq!(output.witness.nodes_touched, 3 * iterations);
                     }
-                    assert_eq!(output.witness.algorithm, "pagerank_fixed_iterations");
-                    assert_eq!(
-                        output.witness.nodes_touched,
-                        decoded.certificate.witness.nodes_touched
-                    );
-                    assert_eq!(
-                        output.witness.edges_scanned,
-                        decoded.certificate.witness.edges_scanned
-                    );
-                    assert_eq!(output.witness.nodes_touched, 3 * iterations);
                 }
             }
         }
@@ -2010,7 +2028,7 @@ mod tests {
         for rank in [false, true] {
             let run = |control: &mut dyn FnMut() -> Result<()>| {
                 if rank {
-                    pagerank(&DecodedRows(&graph), options, &mut || control())
+                    pagerank(&DecodedRows(&graph), options, None, &mut || control())
                 } else {
                     bfs(&DecodedRows(&graph), 0, None, &admission, &mut || control())
                 }
@@ -2088,7 +2106,7 @@ mod tests {
         let graph = projection(2);
         let options = PageRankOptions::new(0.85, 1, 1e-30, true).unwrap();
         assert!(matches!(
-            pagerank(&DecodedRows(&graph), options, &mut || Ok(())),
+            pagerank(&DecodedRows(&graph), options, None, &mut || Ok(())),
             Err(Error::Execution(ExecutionError::NotConverged { .. }))
         ));
         let vertices = [VId(0), VId(1)];
@@ -2121,6 +2139,7 @@ mod tests {
             pagerank(
                 &DecodedRows(&graph),
                 PageRankOptions::default(),
+                None,
                 &mut || Ok(())
             ),
             Err(Error::Execution(ExecutionError::NegativeWeight))

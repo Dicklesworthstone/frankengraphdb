@@ -733,6 +733,59 @@ fn gather_partitions(
     }
 }
 
+/// Per-vertex restart mass without an additional graph-sized vector. Uniform
+/// calls retain the original scalar expressions; personalization changes only
+/// the seed's initial accumulator, before any source-ordered contributions.
+#[derive(Clone, Copy)]
+pub(crate) struct PageRankRestart {
+    source: Option<usize>,
+    value: f64,
+}
+
+impl PageRankRestart {
+    pub(crate) fn new(
+        source: Option<usize>,
+        alpha: f64,
+        population: f64,
+        dangling_mass: f64,
+    ) -> Self {
+        let value = if source.is_some() {
+            (1.0 - alpha) + alpha * dangling_mass
+        } else {
+            (1.0 - alpha) / population + alpha * dangling_mass / population
+        };
+        Self { source, value }
+    }
+
+    pub(crate) fn at(self, target: usize) -> f64 {
+        if self.source.is_none_or(|source| source == target) {
+            self.value
+        } else {
+            0.0
+        }
+    }
+
+    fn fill(self, low: usize, slots: &mut [f64]) {
+        if let Some(source) = self.source {
+            slots.fill(0.0);
+            if let Some(at) = source.checked_sub(low).and_then(|at| slots.get_mut(at)) {
+                *at = self.value;
+            }
+        } else {
+            slots.fill(self.value);
+        }
+    }
+}
+
+impl From<f64> for PageRankRestart {
+    fn from(value: f64) -> Self {
+        Self {
+            source: None,
+            value,
+        }
+    }
+}
+
 /// One PageRank pass as a gather: each target starts at the pass's initial
 /// value and adds what every arc into it carries, its sources ascending. That is the order a source-ascending
 /// scatter adds them in, and each arc's value is the scatter's `push * share`
@@ -746,22 +799,23 @@ fn gather_pass<C>(
     sources: &[usize],
     contrib: &[f64],
     shares: Option<&[f64]>,
-    initial: f64,
+    initial: impl Into<PageRankRestart>,
     next: &mut [f64],
     threads: usize,
     meter: &mut impl FnxMeter<C>,
 ) -> Result<(), FnxExecutionError<C>> {
     let n = next.len();
     let arcs = sources.len();
+    let initial = initial.into();
     let gather = |low: usize, rows: &mut [f64], poll: &mut dyn FnMut() -> bool| {
         if sources.is_empty() {
             // No target adds anything to its initial value. Keep the scalar
             // row walk's live-poll boundaries while filling admitted chunks.
-            for slots in rows.chunks_mut(ARITHMETIC_RUN) {
+            for (chunk, slots) in rows.chunks_mut(ARITHMETIC_RUN).enumerate() {
                 if !poll() {
                     return;
                 }
-                slots.fill(initial);
+                initial.fill(low + chunk * ARITHMETIC_RUN, slots);
             }
             return;
         }
@@ -775,7 +829,7 @@ fn gather_pass<C>(
             }
             remaining -= 1;
             let target = low + at;
-            let mut sum = initial;
+            let mut sum = initial.at(target);
             let (mut start, end) = (offsets[target], offsets[target + 1]);
             while start < end {
                 if remaining == 0 {
@@ -931,6 +985,14 @@ fn pagerank_with_threads<C>(
     meter: &mut impl FnxMeter<C>,
 ) -> Result<(Vec<f64>, ComplexityWitness, usize), FnxExecutionError<C>> {
     let n = graph.node_count();
+    let source = options
+        .source()
+        .map(|source| {
+            graph
+                .vertex_ordinal(source)
+                .ok_or(FnxExecutionError::UnknownSource(source))
+        })
+        .transpose()?;
     let mut witness = ComplexityWitness {
         algorithm: options.witness_algorithm().to_owned(),
         complexity_claim: "O(k * (|V| + |E|))".to_owned(),
@@ -1061,7 +1123,6 @@ fn pagerank_with_threads<C>(
         return Err(FnxExecutionError::InvalidUpstreamResult);
     }
     drop(cursor);
-    let base = (1.0 - options.alpha()) / population;
     for iteration in 0..options.max_iter() {
         // Each pass spends one unit per vertex or arc, as before, but asks
         // the meter for up to FNX_METER_RUN of them at once; the arithmetic
@@ -1071,7 +1132,7 @@ fn pagerank_with_threads<C>(
         // that skips the others does.
         charge_runs(n, meter)?;
         let dangling_mass = dangling_mass(&dangling, &ranks, meter)?;
-        let initial = base + options.alpha() * dangling_mass / population;
+        let initial = PageRankRestart::new(source, options.alpha(), population, dangling_mass);
         // The initial values are the gather's starting sums; the
         // contribution walk spends its unit per row first.
         charge_runs(n, meter)?;
@@ -2946,6 +3007,135 @@ mod tests {
     /// whatever the chunk boundaries. Full fixed-step PageRank also retains
     /// every score bit, witness count and scratch bound across those workers.
     #[test]
+    fn personalized_empty_gather_places_mass_once_across_live_chunks() {
+        let n = 2 * ARITHMETIC_RUN + 3;
+        let offsets = vec![0; n + 1];
+        for seed in [
+            0,
+            ARITHMETIC_RUN - 1,
+            ARITHMETIC_RUN,
+            ARITHMETIC_RUN + 1,
+            n - 1,
+        ] {
+            for threads in 1..=8 {
+                let mut complete = vec![f64::NAN; n];
+                let initial = PageRankRestart::new(Some(seed), 0.85, n as f64, 0.5);
+                let mut meter = EmptyGatherMeter {
+                    polls: 0,
+                    stop: None,
+                };
+                gather_pass(
+                    &offsets,
+                    &[],
+                    &[],
+                    None,
+                    initial,
+                    &mut complete,
+                    threads,
+                    &mut meter,
+                )
+                .unwrap();
+                for (target, &value) in complete.iter().enumerate() {
+                    assert_eq!(
+                        value,
+                        if target == seed {
+                            (1.0 - 0.85) + 0.85 * 0.5
+                        } else {
+                            0.0
+                        }
+                    );
+                }
+                for stop in 1..=meter.polls {
+                    let mut partial = vec![f64::NAN; n];
+                    let mut refusal = EmptyGatherMeter {
+                        polls: 0,
+                        stop: Some(stop),
+                    };
+                    assert!(matches!(
+                        gather_pass(&offsets, &[], &[], None, initial, &mut partial, threads, &mut refusal),
+                        Err(FnxExecutionError::Cancelled(at)) if at == stop
+                    ));
+                    let filled = (stop - 1) * ARITHMETIC_RUN;
+                    assert_eq!(&partial[..filled], &complete[..filled]);
+                    assert!(partial[filled..].iter().all(|value| value.is_nan()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn personalized_fixed_updates_keep_logical_charges_workspace_and_every_refusal() {
+        struct Live {
+            polls: usize,
+            stop: Option<usize>,
+        }
+        impl FnxMeter<usize> for Live {
+            fn unit(&mut self) -> Result<(), usize> {
+                Ok(())
+            }
+            fn poll(&mut self) -> Result<(), usize> {
+                self.polls += 1;
+                if self.stop == Some(self.polls) {
+                    Err(self.polls)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        for mask in [0, 2, 0b111_010_111] {
+            let graph = projection(mask, Directedness::Directed);
+            let arcs = graph.incoming_face().1.len();
+            for weighted in [false, true] {
+                let options = PageRankOptions::fixed_iterations(0.85, 3, weighted).unwrap();
+                let seeded = options.with_source(VId(u128::MAX));
+                let recorder = || Recording {
+                    calls: Vec::new(),
+                    stop: None,
+                    seen: 0,
+                    polls: 0,
+                };
+                let mut uniform_meter = recorder();
+                let uniform =
+                    pagerank_with_threads(&graph, options, arcs, 1, &mut uniform_meter).unwrap();
+                let mut seeded_meter = recorder();
+                let personalized =
+                    pagerank_with_threads(&graph, seeded, arcs, 1, &mut seeded_meter).unwrap();
+                assert_eq!(uniform_meter.calls, seeded_meter.calls);
+                assert_eq!(uniform_meter.seen, seeded_meter.seen);
+                assert_eq!(uniform_meter.polls, seeded_meter.polls);
+                assert_eq!(uniform.2, personalized.2);
+                for stop in 1..=seeded_meter.seen {
+                    let mut meter = Recording {
+                        stop: Some(stop),
+                        ..recorder()
+                    };
+                    assert!(matches!(
+                        pagerank_with_threads(&graph, seeded, arcs, 1, &mut meter),
+                        Err(FnxExecutionError::Cancelled("stop"))
+                    ));
+                    assert_eq!(meter.seen, stop);
+                }
+                let mut live = Live {
+                    polls: 0,
+                    stop: None,
+                };
+                pagerank_with_threads(&graph, seeded, arcs, 1, &mut live).unwrap();
+                for stop in 1..=live.polls {
+                    let mut meter = Live {
+                        polls: 0,
+                        stop: Some(stop),
+                    };
+                    assert!(
+                        matches!(pagerank_with_threads(&graph, seeded, arcs, 1, &mut meter),
+                        Err(FnxExecutionError::Cancelled(at)) if at == stop)
+                    );
+                    assert_eq!(meter.polls, stop);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn gather_is_bit_identical_on_every_thread_count() {
         let n = 2_000usize;
         let vertices: Vec<VId> = (0..n as u128).map(VId).collect();
@@ -3039,27 +3229,37 @@ mod tests {
             for iterations in [2, 7] {
                 let options =
                     PageRankOptions::fixed_iterations(0.85, iterations, weighted).unwrap();
-                let (one, witness, workspace) =
-                    pagerank_with_threads(&graph, options, sources.len(), 1, &mut || {
-                        Ok::<(), Infallible>(())
-                    })
-                    .unwrap();
-                assert_eq!(witness.nodes_touched, n * iterations);
-                assert_eq!(witness.edges_scanned, sources.len() * iterations);
-                for threads in 2..=8 {
-                    let (many, many_witness, many_workspace) =
-                        pagerank_with_threads(&graph, options, sources.len(), threads, &mut || {
+                for options in [
+                    options,
+                    options.with_source(VId(0)),
+                    options.with_source(VId(7)),
+                    options.with_source(VId((n - 1) as u128)),
+                ] {
+                    let (one, witness, workspace) =
+                        pagerank_with_threads(&graph, options, sources.len(), 1, &mut || {
                             Ok::<(), Infallible>(())
                         })
                         .unwrap();
-                    assert!(
-                        one.iter()
-                            .zip(&many)
-                            .all(|(a, b)| a.to_bits() == b.to_bits()),
-                        "fixed iterations={iterations} weighted={weighted} threads={threads}"
-                    );
-                    assert_eq!(many_witness, witness);
-                    assert_eq!(many_workspace, workspace);
+                    assert_eq!(witness.nodes_touched, n * iterations);
+                    assert_eq!(witness.edges_scanned, sources.len() * iterations);
+                    for threads in 2..=8 {
+                        let (many, many_witness, many_workspace) = pagerank_with_threads(
+                            &graph,
+                            options,
+                            sources.len(),
+                            threads,
+                            &mut || Ok::<(), Infallible>(()),
+                        )
+                        .unwrap();
+                        assert!(
+                            one.iter()
+                                .zip(&many)
+                                .all(|(a, b)| a.to_bits() == b.to_bits()),
+                            "fixed iterations={iterations} weighted={weighted} threads={threads}"
+                        );
+                        assert_eq!(many_witness, witness);
+                        assert_eq!(many_workspace, workspace);
+                    }
                 }
             }
         }
