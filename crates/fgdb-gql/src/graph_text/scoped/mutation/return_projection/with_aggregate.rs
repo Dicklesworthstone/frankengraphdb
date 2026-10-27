@@ -137,6 +137,25 @@ impl<'a> Parser<'a> {
             match token.kind {
                 TokenKind::End => return Ok(false),
                 TokenKind::Word(word) if !named => {
+                    if word.eq_ignore_ascii_case("EXISTS")
+                        && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'{'))
+                    {
+                        // Aggregation inside a returning existential body is
+                        // local to that body, never an enclosing RETURN/WITH
+                        // aggregate. The read-body owner admits the contents.
+                        lexer.next()?;
+                        let mut body_depth = 1_usize;
+                        while body_depth != 0 {
+                            match lexer.next()?.kind {
+                                TokenKind::Punct(b'(' | b'[' | b'{') => body_depth += 1,
+                                TokenKind::Punct(b')' | b']' | b'}') => body_depth -= 1,
+                                TokenKind::End => return Ok(false),
+                                _ => {}
+                            }
+                        }
+                        previous = Some(TokenKind::Punct(b'}'));
+                        continue;
+                    }
                     let text_with = word.eq_ignore_ascii_case("WITH")
                         && matches!(previous, Some(TokenKind::Word(word))
                             if word.eq_ignore_ascii_case("STARTS") || word.eq_ignore_ascii_case("ENDS"));

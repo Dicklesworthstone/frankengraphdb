@@ -278,6 +278,331 @@ fn inline_call_bodies_aggregate_once_per_outer_row() {
 }
 
 #[test]
+fn returning_exists_groups_and_filters_each_correlated_body_before_testing_presence() {
+    let template = PreparedGraphSetText::prepare(
+        "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) \
+         WITH n,count(*) AS degree WHERE degree = $wanted RETURN false } \
+         RETURN n ORDER BY n",
+        symbols,
+    )
+    .unwrap();
+    let frozen = template.canonical_template_bytes();
+    for wanted in [0, 1, 2, 3] {
+        let arguments = GqlParameters::new().with_int64("wanted", wanted).unwrap();
+        let query = template.bind_parameters(&arguments).unwrap();
+        let expected: Vec<_> = (1..=4)
+            .filter(|id| {
+                let degree = EDGES
+                    .iter()
+                    .filter(|(from, _, _)| *from == VId(*id))
+                    .count();
+                // A grouped aggregate over no matches has no group. Returning
+                // false still supplies a row, and therefore an EXISTS witness.
+                degree != 0 && degree as i64 == wanted
+            })
+            .map(|id| vertices(&[id]))
+            .collect();
+        assert_eq!(run(&query, wide(), &mut || Ok(())).unwrap().value, expected);
+    }
+    assert_eq!(template.canonical_template_bytes(), frozen);
+    assert!(template.bind_parameters(&GqlParameters::new()).is_err());
+
+    // Independent local patterns do not accidentally acquire an outer key.
+    assert_eq!(
+        execute(
+            "MATCH (n) WHERE EXISTS { MATCH (m)-[:R]->() \
+             WITH count(*) AS total WHERE total = 5 RETURN null } RETURN n ORDER BY n"
+        ),
+        (1..=4).map(|id| vertices(&[id])).collect::<Vec<_>>()
+    );
+    // Body pages apply to its completed groups before the existence test.
+    assert_eq!(
+        execute(
+            "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) \
+             WITH m,count(*) AS degree RETURN m ORDER BY m SKIP 1 LIMIT 1 } RETURN n"
+        ),
+        vec![vertices(&[1])]
+    );
+}
+
+#[test]
+fn returning_exists_keeps_global_empty_groups_and_never_multiplies_outer_rows() {
+    for body in [
+        "MATCH (n)-[:R]->(m) RETURN count(*) AS degree",
+        "MATCH (n)-[:R]->(m) WITH count(*) AS degree RETURN false",
+    ] {
+        let statement = format!("MATCH (n) RETURN n,EXISTS {{ {body} }} AS present ORDER BY n");
+        assert_eq!(
+            execute(&statement),
+            (1..=4)
+                .map(|id| GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(id)),
+                    GraphValue::Scalar(CanonicalScalar::Bool(true)),
+                ]))
+                .collect::<Vec<_>>(),
+            "{statement}"
+        );
+    }
+    assert_eq!(
+        execute(
+            "MATCH (n) RETURN n,EXISTS { MATCH (n)-[:R]->(m) \
+             WITH count(*) AS degree WHERE degree = 0 RETURN null } AS absent ORDER BY n"
+        ),
+        (1..=4)
+            .map(|id| GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(id)),
+                GraphValue::Scalar(CanonicalScalar::Bool(id == 4)),
+            ]))
+            .collect::<Vec<_>>()
+    );
+    for negated in [false, true] {
+        let negate = if negated { "NOT " } else { "" };
+        let statement = format!(
+            "UNWIND $items AS x WHERE {negate}EXISTS {{ MATCH (x)-[:R]->(m) \
+             WITH x,count(*) AS degree WHERE degree > 0 RETURN degree }} RETURN x"
+        );
+        let template = PreparedGraphSetText::prepare(&statement, symbols).unwrap();
+        let items = vec![
+            GraphValue::Vertex(VId(1)),
+            GraphValue::Vertex(VId(1)),
+            GraphValue::Vertex(VId(4)),
+            GraphValue::Vertex(VId(u128::MAX)),
+            GraphValue::Scalar(CanonicalScalar::Null),
+            GraphValue::Scalar(CanonicalScalar::Int(1)),
+        ];
+        let mut expected: Vec<_> = items
+            .iter()
+            .filter(|item| {
+                let present = matches!(item, GraphValue::Vertex(id)
+                if EDGES.iter().any(|(from, _, _)| from == id));
+                present != negated
+            })
+            .map(|item| GraphValueRow::from_owned_values(vec![item.clone()]))
+            .collect();
+        expected.sort();
+        let query = template
+            .bind_parameters(&GqlParameters::new().with_list("items", items).unwrap())
+            .unwrap();
+        let mut actual = run(&query, wide(), &mut || Ok(())).unwrap().value;
+        actual.sort();
+        assert_eq!(actual, expected, "{statement}");
+    }
+}
+
+#[test]
+fn returning_exists_composes_boolean_values_without_exporting_body_names() {
+    assert_eq!(
+        execute(
+            "MATCH (n) WITH n WHERE n.p > 1 AND EXISTS { MATCH (n)-[:R]->(m) \
+             WITH count(*) AS degree WHERE degree = 1 RETURN true } RETURN n ORDER BY n"
+        ),
+        vec![vertices(&[2]), vertices(&[3])]
+    );
+    assert_eq!(
+        execute(
+            "MATCH (n) WITH n RETURN n,CASE WHEN EXISTS { MATCH (n)-[:R]->(m) \
+             WITH count(*) AS degree WHERE degree = 0 RETURN false } \
+             THEN 7 ELSE 9 END AS score ORDER BY n"
+        ),
+        (1..=4)
+            .map(|id| GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(id)),
+                GraphValue::Scalar(CanonicalScalar::Int(if id == 4 { 7 } else { 9 })),
+            ]))
+            .collect::<Vec<_>>()
+    );
+    for statement in [
+        "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) \
+         WITH count(*) AS degree RETURN m } RETURN n",
+        "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) \
+         WITH count(*) AS degree RETURN degree } RETURN degree",
+        "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) \
+         WITH count(*) AS degree CREATE (:R) RETURN degree } RETURN n",
+    ] {
+        let calls = std::cell::Cell::new(0);
+        assert!(
+            PreparedGraphSetText::prepare(statement, |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{statement}"
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "scope/effect admission precedes catalog: {statement}"
+        );
+    }
+    let nested = |depth| {
+        (0..depth).fold("RETURN true AS ok".to_owned(), |body, _| {
+            format!("RETURN EXISTS {{ {body} }} AS ok")
+        })
+    };
+    assert_eq!(execute(&nested(3)).len(), 1);
+    assert!(
+        PreparedGraphSetText::prepare(&nested(9), |_, _: &str| panic!(
+            "subquery depth admission precedes catalog"
+        ))
+        .is_err()
+    );
+}
+
+#[test]
+fn returning_exists_shares_parameters_and_restores_outer_names_between_bodies() {
+    let template = PreparedGraphSetText::prepare(
+        "UNWIND $items AS x RETURN x,\
+         EXISTS { WITH x + $delta AS y WHERE y >= $minimum RETURN false } AS high,\
+         EXISTS { WITH x + $delta AS y WHERE y < $maximum RETURN null } AS low,\
+         x + $tail AS value",
+        |_, _: &str| panic!("source-free existential bodies have no catalog reads"),
+    )
+    .unwrap();
+    let frozen = template.canonical_template_bytes();
+    for delta in [2, 5] {
+        let arguments = GqlParameters::new()
+            .with_list(
+                "items",
+                [1, 2, 2]
+                    .map(|x| GraphValue::Scalar(CanonicalScalar::Int(x)))
+                    .to_vec(),
+            )
+            .unwrap()
+            .with_int64("delta", delta)
+            .unwrap()
+            .with_int64("minimum", 4)
+            .unwrap()
+            .with_int64("maximum", 5)
+            .unwrap()
+            .with_int64("tail", 10)
+            .unwrap();
+        let query = template.bind_parameters(&arguments).unwrap();
+        assert_eq!(query.columns(), ["x", "high", "low", "value"]);
+        let mut expected: Vec<_> = [1, 2, 2]
+            .into_iter()
+            .map(|x| {
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Scalar(CanonicalScalar::Int(x)),
+                    GraphValue::Scalar(CanonicalScalar::Bool(x + delta >= 4)),
+                    GraphValue::Scalar(CanonicalScalar::Bool(x + delta < 5)),
+                    GraphValue::Scalar(CanonicalScalar::Int(x + 10)),
+                ])
+            })
+            .collect();
+        expected.sort();
+        let mut actual = run(&query, wide(), &mut || Ok(())).unwrap().value;
+        actual.sort();
+        assert_eq!(actual, expected);
+    }
+    assert_eq!(template.canonical_template_bytes(), frozen);
+}
+
+#[test]
+fn returning_exists_retains_source_and_projection_failures_before_empty_pages() {
+    for statement in [
+        "WITH 0 AS x WHERE EXISTS { RETURN 1 / x AS bad } RETURN x LIMIT 0",
+        "WITH 0 AS x WHERE EXISTS { RETURN 1 / x AS bad LIMIT 0 } RETURN x",
+        "WITH 1 AS x WHERE EXISTS { UNWIND [1,0] AS d RETURN 1 / d AS bad } RETURN x",
+    ] {
+        assert!(
+            run(&prepare(statement), wide(), &mut || Ok(())).is_err(),
+            "{statement}"
+        );
+    }
+    let statement = "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) \
+                     WITH count(*) AS degree WHERE degree >= 0 RETURN true } RETURN n LIMIT 0";
+    let query = prepare(statement);
+    let mut calls = 0;
+    let result = query.execute_governed(
+        wide(),
+        |pattern, remaining| {
+            calls += 1;
+            if calls == 3 {
+                return Err(GqlQueryError::Source("second-body-source-error"));
+            }
+            pattern.plan().execute_governed_with_properties(
+                (4 + EDGES.len()) as u64,
+                (1..=4).map(VId),
+                EDGES,
+                |_, _| Ok::<_, &'static str>(true),
+                |_, _| Ok(None),
+                remaining,
+                || Ok::<_, usize>(()),
+            )
+        },
+        || Ok::<_, usize>(()),
+    );
+    assert_eq!(calls, 3);
+    assert!(matches!(
+        result,
+        Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+            "second-body-source-error"
+        )))
+    ));
+}
+
+#[test]
+fn returning_exists_uses_one_cumulative_allowance_and_restores_argument_frames_on_cancel() {
+    let query = prepare(
+        "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) \
+         WITH count(*) AS degree WHERE degree >= 0 RETURN degree } RETURN n",
+    );
+    let mut checkpoints = 0;
+    let measured = run(&query, wide(), &mut || {
+        checkpoints += 1;
+        Ok(())
+    })
+    .unwrap();
+    let caps = [
+        measured.rows.snapshot_records,
+        measured.rows.result_rows,
+        measured.evaluator.work_units,
+        measured.evaluator.scratch_entries,
+    ];
+    assert_eq!(
+        caps[1], 4,
+        "only outer results spend delivered-row allowance"
+    );
+    assert_eq!(
+        run(
+            &query,
+            GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+            &mut || Ok(())
+        )
+        .unwrap(),
+        measured
+    );
+    for dimension in 0..4 {
+        let mut limited = caps;
+        assert!(limited[dimension] > 0);
+        limited[dimension] -= 1;
+        assert!(
+            run(
+                &query,
+                GqlQueryPolicy::new(limited[0], limited[1], limited[2], limited[3]),
+                &mut || Ok(())
+            )
+            .is_err(),
+            "dimension {dimension}"
+        );
+    }
+    assert!(checkpoints > 0);
+    for stop in 0..checkpoints {
+        let mut seen = 0;
+        let result = run(&query, wide(), &mut || {
+            let current = seen;
+            seen += 1;
+            if current == stop { Err(stop) } else { Ok(()) }
+        });
+        assert!(
+            matches!(result, Err(GqlQueryError::Interrupted(at)) if at == stop),
+            "{stop}: {result:?}"
+        );
+    }
+    assert_eq!(run(&query, wide(), &mut || Ok(())).unwrap(), measured);
+}
+
+#[test]
 fn inline_call_parameters_governance_and_scope_bounds_span_the_whole_definition() {
     let text = "WITH $outer AS x CALL (x) { RETURN x+$inner AS y } RETURN y+$tail AS total";
     let template = PreparedGraphSetText::prepare(text, |_, _: &str| {

@@ -375,6 +375,13 @@ impl PreparedGraphPipelineAggregateText {
                             operators.push("Select");
                         }
                     }
+                    BoundContinuationOperation::ExistsBody { body, negated, .. } => {
+                        input_operators(operators, body);
+                        operators.extend(["ProjectValues", "OrderByPage", "Apply"]);
+                        if negated.is_some() {
+                            operators.push("Select");
+                        }
+                    }
                     BoundContinuationOperation::Match(join) => {
                         let selection = part
                             .input

@@ -22,6 +22,14 @@ pub(crate) enum BoundContinuationOperation {
         join: RowJoinSpec,
         result: RowPatternResult,
     },
+    /// A returning read subquery, including its grouping/filter/page stages.
+    /// Its complete output relation determines one existence witness per
+    /// outer occurrence; body columns never enter the outer namespace.
+    ExistsBody {
+        body: Box<BoundReadInput>,
+        imports: Vec<usize>,
+        negated: Option<bool>,
+    },
     Apply {
         body: Box<BoundReadInput>,
         imports: Vec<usize>,
@@ -48,6 +56,9 @@ pub(crate) struct BoundReadInput {
 // second lexer or a fallback after a failed parse. Nested EXISTS/MATCH bodies,
 // strings, property names and STARTS/ENDS WITH do not start a query part.
 pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
+    if has_returning_exists(tokens) {
+        return true;
+    }
     let mut depth = 0_usize;
     let mut with = false;
     // A leading UNWIND joins a MATCH as the correlated root, an inner join
@@ -115,6 +126,46 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
                 }
             }
             _ => {}
+        }
+    }
+    false
+}
+
+/// A returning EXISTS body needs the relational owner even when its enclosing
+/// query has only one MATCH. This lookahead does not parse its expressions:
+/// the shared graph lexer and multipart compiler still admit the whole body.
+fn has_returning_exists(tokens: &[TextToken<'_>]) -> bool {
+    for (index, token) in tokens.iter().enumerate() {
+        if !token.word("EXISTS")
+            || !tokens.get(index + 1).is_some_and(|next| next.punct(b'{'))
+            || index
+                .checked_sub(1)
+                .is_some_and(|previous| tokens[previous].punct(b'.') || tokens[previous].word("AS"))
+        {
+            continue;
+        }
+        let mut depth = 0_usize;
+        for (relative, body) in tokens[index + 2..].iter().enumerate() {
+            match body.kind {
+                TextKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TextKind::Punct(b')' | b']' | b'}') => {
+                    let Some(outer) = depth.checked_sub(1) else {
+                        break;
+                    };
+                    depth = outer;
+                }
+                _ if depth == 0 && (body.word("WITH") || body.word("RETURN")) => {
+                    let previous = &tokens[index + 1 + relative];
+                    if !previous.punct(b'.')
+                        && !previous.word("AS")
+                        && !(body.word("WITH")
+                            && (previous.word("STARTS") || previous.word("ENDS")))
+                    {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
         }
     }
     false
@@ -400,7 +451,10 @@ impl BoundReadInput {
                     BoundContinuationOperation::Pattern { pattern, .. } => {
                         usize::from(pattern.selection.is_some())
                     }
-                    BoundContinuationOperation::Apply { body, .. } => body.graph_source_count(),
+                    BoundContinuationOperation::Apply { body, .. }
+                    | BoundContinuationOperation::ExistsBody { body, .. } => {
+                        body.graph_source_count()
+                    }
                 })
                 .sum::<usize>()
     }
@@ -420,6 +474,7 @@ impl BoundReadInput {
                 part.operation,
                 BoundContinuationOperation::Apply { .. }
                     | BoundContinuationOperation::Pattern { .. }
+                    | BoundContinuationOperation::ExistsBody { .. }
             )
         }) {
             bytes.push(5);
@@ -455,6 +510,23 @@ impl BoundReadInput {
                         optional,
                     } => {
                         bytes.push(if *optional { 2 } else { 1 });
+                        bytes.extend_from_slice(&(imports.len() as u64).to_be_bytes());
+                        for &column in imports {
+                            bytes.extend_from_slice(&(column as u64).to_be_bytes());
+                        }
+                        body.append_template_transcript(bytes);
+                    }
+                    BoundContinuationOperation::ExistsBody {
+                        body,
+                        imports,
+                        negated,
+                    } => {
+                        bytes.push(6);
+                        bytes.push(match negated {
+                            None => 0,
+                            Some(false) => 1,
+                            Some(true) => 2,
+                        });
                         bytes.extend_from_slice(&(imports.len() as u64).to_be_bytes());
                         for &column in imports {
                             bytes.extend_from_slice(&(column as u64).to_be_bytes());

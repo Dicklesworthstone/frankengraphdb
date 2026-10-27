@@ -1119,3 +1119,151 @@ fn carried_pattern_counts_keep_multiplicity_snapshot_and_authorization() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn aggregate_exists_uses_the_pinned_staged_and_authorized_body_source() {
+    use fgdb_gql::algebra::GraphValue;
+
+    let ((), report) = run_async_under_lab(0xa681_0009, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = database(&commit).await;
+        let mut hidden_only = WriteBatch::new(S);
+        hidden_only.add_edge(EId(22), VId(1), VId(4), vec![]);
+        db.write(&commit, hidden_only).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let text = "MATCH (n) WHERE EXISTS { MATCH (n)-[:S]->(m) \
+                    WITH count(*) AS hits WHERE hits >= $minimum RETURN false } \
+                    RETURN n ORDER BY n";
+        let parameters = |minimum| GqlParameters::new().with_int64("minimum", minimum).unwrap();
+        let prepared = PreparedNativeRead::prepare(text, &parameters(1), symbols).unwrap();
+        let vertices = |result: QueryResult| {
+            let QueryResult::Rows { columns, rows } = result else {
+                panic!("expected read rows");
+            };
+            assert_eq!(columns, ["n"]);
+            rows.into_iter()
+                .map(|row| match row[0].as_value() {
+                    Some(GraphValue::Vertex(id)) => *id,
+                    other => panic!("expected an outer vertex: {other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            vertices(
+                db.query(&cx, text, &parameters(1), symbols, policy())
+                    .unwrap()
+            ),
+            [VId(1), VId(2)]
+        );
+        assert_eq!(
+            vertices(
+                prepared
+                    .execute(&db, &cx, &parameters(2), policy())
+                    .unwrap()
+            ),
+            [VId(2)]
+        );
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        // Hidden endpoints are absent before grouping. Vertex 1 has only a
+        // hidden target; vertex 2 has one visible and one hidden target.
+        for (minimum, expected) in [(1, vec![VId(2)]), (2, vec![])] {
+            assert_eq!(
+                vertices(
+                    prepared
+                        .execute_authorized(
+                            &db,
+                            &cx,
+                            &issuer,
+                            &token,
+                            BRANCH,
+                            &parameters(minimum),
+                            policy(),
+                            || 100,
+                        )
+                        .unwrap()
+                ),
+                expected
+            );
+        }
+        let mut relation_mask = grant();
+        relation_mask.relations = Scope::only([R]);
+        let masked = issuer.issue_at(&relation_mask, 100).unwrap();
+        assert!(
+            vertices(
+                db.query_authorized(
+                    &cx,
+                    &issuer,
+                    &masked,
+                    BRANCH,
+                    text,
+                    &parameters(1),
+                    symbols,
+                    policy(),
+                    || 100,
+                )
+                .unwrap()
+            )
+            .is_empty()
+        );
+
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut staged = WriteBatch::new(S);
+        staged.delete_edge(EId(21));
+        staged.add_edge(EId(30), VId(3), VId(5), vec![]);
+        txn.write(&mut db, staged).unwrap();
+        assert_eq!(
+            vertices(
+                prepared
+                    .execute_in_transaction(&txn, &db, &cx, &parameters(1), policy(),)
+                    .unwrap()
+            ),
+            [VId(1), VId(2), VId(3)]
+        );
+        assert!(
+            vertices(
+                txn.query(&db, &cx, text, &parameters(2), symbols, policy(),)
+                    .unwrap()
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            vertices(
+                prepared
+                    .execute(&db, &cx, &parameters(2), policy())
+                    .unwrap()
+            ),
+            [VId(2)]
+        );
+        assert_eq!(db.frontier().unwrap(), basis);
+        txn.commit(&mut db, &commit).await.unwrap();
+        assert_eq!(
+            vertices(
+                prepared
+                    .execute(&db, &cx, &parameters(1), policy())
+                    .unwrap()
+            ),
+            [VId(1), VId(2), VId(3)]
+        );
+        assert!(
+            vertices(
+                prepared
+                    .execute(&db, &cx, &parameters(2), policy())
+                    .unwrap()
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            vertices(
+                pinned
+                    .query(&cx, text, &parameters(2), symbols, policy())
+                    .unwrap()
+            ),
+            [VId(2)]
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
