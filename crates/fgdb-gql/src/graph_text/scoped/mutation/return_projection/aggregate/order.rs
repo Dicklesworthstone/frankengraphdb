@@ -19,6 +19,7 @@ pub(super) struct Order {
 pub(super) fn parse<'a>(
     parser: &mut Parser<'a>,
     schema: &[(Name<'a>, GraphSetColumnType)],
+    input_visible: usize,
     output: &[(Name<'a>, GraphSetColumnType)],
     visible_columns: &[GraphAggregateColumn],
     computed_outputs: &[usize],
@@ -52,6 +53,14 @@ pub(super) fn parse<'a>(
                 return Ok(None);
             }
             let at = parser.current.at;
+            let boundary = parser.boundary_reads.replace(BoundaryReads {
+                visible: input_visible,
+                width: schema.len(),
+                reads: Vec::new(),
+                functions: Vec::new(),
+                grouped: Vec::new(),
+                scoped: Vec::new(),
+            });
             let summary = if core::mem::take(&mut parser.percentile_leaf) {
                 let outer = core::mem::replace(&mut parser.aggregate_argument, true);
                 let column = inputs.read(parser, schema);
@@ -64,6 +73,7 @@ pub(super) fn parse<'a>(
                     Err(error) => Some(Err(error)),
                 }
             };
+            parser.boundary_reads = boundary;
             let column = if let Some(summary) = summary {
                 let (function, column) = match summary {
                     Ok(summary) => summary,
@@ -98,7 +108,7 @@ pub(super) fn parse<'a>(
                 if let Some(column) = output.iter().position(|(alias, _)| alias.text == word) {
                     parser.advance()?;
                     Column::Projected(column)
-                } else if let Some(column) = schema.iter().position(|(alias, _)| alias.text == word)
+                } else if let Some(column) = schema[..input_visible].iter().position(|(alias, _)| alias.text == word)
                     .and_then(|input| keys.iter().position(|column| *column == input))
                 {
                     parser.advance()?;

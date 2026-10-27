@@ -97,6 +97,137 @@ fn grant() -> Grant {
 }
 
 #[test]
+fn carried_graph_values_aggregate_inside_native_snapshot_and_authority_boundaries() {
+    let ((), report) = run_async_under_lab(0xa681_0010, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = database(&commit).await;
+        let mut extra = WriteBatch::new(S);
+        extra.add_edge(EId(22), VId(1), VId(4), vec![]);
+        extra.add_edge(EId(23), VId(2), VId(3), vec![]);
+        db.write(&commit, extra).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let text = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x \
+            RETURN EXISTS((x)-[:S]->()) AS has_s,count(*) AS vertices, \
+            sum(COUNT { MATCH (x)-[:S]->() }) AS edges ORDER BY has_s";
+        let params = GqlParameters::new();
+        let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+        let values = |result: QueryResult| {
+            let QueryResult::Rows { columns, rows } = result else {
+                panic!("expected aggregate rows");
+            };
+            assert_eq!(columns, ["has_s", "vertices", "edges"]);
+            rows.into_iter()
+                .map(|row| {
+                    let Some(CanonicalScalar::Bool(connected)) =
+                        row[0].as_value().and_then(|value| value.as_scalar())
+                    else {
+                        panic!("expected Boolean group key");
+                    };
+                    (
+                        *connected,
+                        row[1].as_count().expect("outer occurrence count"),
+                        row[2].as_integer().expect("exact pattern-count sum"),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        // EXISTS supplies one Boolean per vertex; COUNT preserves every
+        // parallel witness. Hidden endpoint filtering changes both together.
+        let before = vec![(false, 3, 0), (true, 2, 4)];
+        assert_eq!(
+            values(db.query(&cx, text, &params, symbols, policy()).unwrap()),
+            before
+        );
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &params, policy()).unwrap()),
+            before
+        );
+        let issuer = authority();
+        for (allowed, expected) in [
+            (grant(), vec![(false, 3, 0), (true, 1, 2)]),
+            (
+                {
+                    let mut restricted = grant();
+                    restricted.relations = Scope::only([R]);
+                    restricted
+                },
+                vec![(false, 4, 0)],
+            ),
+        ] {
+            let token = issuer.issue_at(&allowed, 100).unwrap();
+            for result in [
+                db.query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    text,
+                    &params,
+                    symbols,
+                    policy(),
+                    || 100,
+                )
+                .unwrap(),
+                prepared
+                    .execute_authorized(
+                        &db,
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        &params,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap(),
+            ] {
+                assert_eq!(values(result), expected);
+            }
+        }
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut staged = WriteBatch::new(S);
+        staged.delete_edge(EId(20));
+        staged.delete_edge(EId(23));
+        staged.add_edge(EId(30), VId(5), VId(3), vec![]);
+        txn.write(&mut db, staged).unwrap();
+        let after = vec![(false, 2, 0), (true, 3, 3)];
+        assert_eq!(
+            values(
+                txn.query(&db, &cx, text, &params, symbols, policy())
+                    .unwrap()
+            ),
+            after
+        );
+        assert_eq!(
+            values(
+                prepared
+                    .execute_in_transaction(&txn, &db, &cx, &params, policy())
+                    .unwrap()
+            ),
+            after
+        );
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &params, policy()).unwrap()),
+            before
+        );
+        txn.commit(&mut db, &commit).await.unwrap();
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &params, policy()).unwrap()),
+            after
+        );
+        assert_eq!(
+            values(pinned.query(&cx, text, &params, symbols, policy()).unwrap()),
+            before
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn multipart_transaction_reads_staged_second_source_without_committing_or_falling_back() {
     let ((), report) = run_async_under_lab(0xa681_0001, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

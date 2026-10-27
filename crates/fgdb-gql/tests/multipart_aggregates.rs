@@ -805,3 +805,303 @@ fn unwind_range_streams_past_the_list_value_bound() {
         "the list bound still caps a materialized range: {result:?}"
     );
 }
+
+#[test]
+fn carried_existence_values_group_without_multiplying_outer_occurrences() {
+    let prefix = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x \
+                  UNWIND [0,0] AS occurrence";
+    for (name, grouping) in [
+        ("outgoing", ""),
+        ("outgoing", " GROUP BY outgoing"),
+        ("__fg_boundary_0", " GROUP BY __fg_boundary_0"),
+    ] {
+        let rows = execute(&format!(
+            "{prefix} RETURN EXISTS((x)-[:R]->()) AS {name}, \
+             count(*) AS rows,count(DISTINCT x) AS vertices, \
+             sum(CASE WHEN EXISTS((x)<-[:R]-()) THEN 1 ELSE 0 END) AS incoming \
+             {grouping} ORDER BY {name}"
+        ));
+        assert_eq!(rows.len(), 2);
+        for (row, (outgoing, count, vertices, incoming)) in
+            rows.iter().zip([(false, 2, 1, 2), (true, 6, 3, 4)])
+        {
+            assert_eq!(
+                row.keys(),
+                &[GraphValue::Scalar(CanonicalScalar::Bool(outgoing))]
+            );
+            assert_eq!(row.values()[0].as_count(), Some(count));
+            assert_eq!(row.values()[1].as_count(), Some(vertices));
+            assert_eq!(row.values()[2].as_integer(), Some(incoming));
+        }
+    }
+}
+
+#[test]
+fn carried_existence_aggregate_arguments_rebind_any_values_and_empty_inputs() {
+    let text = "UNWIND $items AS x \
+        RETURN count(*) AS rows,count(EXISTS((x)-[:R]->())) AS predicates, \
+        sum(CASE WHEN EXISTS((x)-[:R]->()) THEN 1 ELSE 0 END) AS linked, \
+        collect(EXISTS((x)-[:R]->())) AS flags";
+    let mut seen = BTreeSet::new();
+    let template = PreparedGraphPipelineAggregateText::prepare(text, |kind, name| {
+        assert!(
+            seen.insert((kind, name.to_owned())),
+            "every probe shares the statement's resolver cache"
+        );
+        symbols(kind, name)
+    })
+    .unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(template.graph_source_count(), 3);
+    assert!(template.requires_relational_input());
+    let frozen = template.canonical_template_bytes();
+    for items in [
+        vec![
+            GraphValue::Vertex(VId(1)),
+            GraphValue::Vertex(VId(1)),
+            GraphValue::Vertex(VId(4)),
+            GraphValue::Vertex(VId(u128::MAX)),
+            GraphValue::Scalar(CanonicalScalar::Null),
+            GraphValue::Scalar(CanonicalScalar::Int(1)),
+            GraphValue::Edge(fgdb_types::EId(1)),
+            GraphValue::List(vec![].into()),
+        ],
+        vec![GraphValue::Vertex(VId(2)), GraphValue::Vertex(VId(3))],
+        vec![],
+    ] {
+        let mut expected: Vec<_> = items
+            .iter()
+            .map(|item| {
+                GraphValue::Scalar(CanonicalScalar::Bool(matches!(
+                    item,
+                    GraphValue::Vertex(id) if EDGES.iter().any(|&(from, _, _)| from == *id)
+                )))
+            })
+            .collect();
+        let linked = expected
+            .iter()
+            .filter(|value| **value == GraphValue::Scalar(CanonicalScalar::Bool(true)))
+            .count();
+        let arguments = GqlParameters::new()
+            .with_list("items", items.clone())
+            .unwrap();
+        let query = template.bind_relation_parameters(&arguments).unwrap();
+        let execution = run(&query, wide(), &mut || Ok(())).unwrap();
+        assert_eq!(execution.value.len(), 1);
+        let row = &execution.value[0];
+        assert!(row.keys().is_empty());
+        assert_eq!(row.values()[0].as_count(), Some(items.len() as u64));
+        assert_eq!(row.values()[1].as_count(), Some(items.len() as u64));
+        if items.is_empty() {
+            assert!(row.values()[2].is_null());
+        } else {
+            assert_eq!(row.values()[2].as_integer(), Some(linked as i128));
+        }
+        let mut actual = row.values()[3]
+            .as_value()
+            .unwrap()
+            .as_list()
+            .unwrap()
+            .to_vec();
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected);
+    }
+    assert_eq!(template.canonical_template_bytes(), frozen);
+    assert!(
+        template
+            .bind_relation_parameters(&GqlParameters::new())
+            .is_err()
+    );
+}
+
+#[test]
+fn inline_call_aggregates_consume_carried_existence_slots_inside_their_own_scope() {
+    let prefix = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x";
+    let rows = execute(&format!(
+        "{prefix} CALL (x) {{ RETURN collect(EXISTS((x)-[:R]->())) AS flags }} \
+         RETURN x,count(*) AS rows,collect(flags) AS flags ORDER BY x"
+    ));
+    assert_eq!(rows.len(), 4);
+    for (row, id) in rows.iter().zip(1..=4) {
+        assert_eq!(row.keys(), &[GraphValue::Vertex(VId(id))]);
+        assert_eq!(row.values()[0].as_count(), Some(1));
+        let expected = GraphValue::List(
+            vec![GraphValue::Scalar(CanonicalScalar::Bool(
+                EDGES.iter().any(|&(from, _, _)| from == VId(id)),
+            ))]
+            .into(),
+        );
+        assert_eq!(
+            row.values()[1].as_value().unwrap().as_list().unwrap(),
+            &[expected]
+        );
+    }
+    let text = format!(
+        "{prefix} CALL (x) {{ \
+         RETURN collect(EXISTS((x)-[:R]->())) AS flags,count(*) + __fg_boundary_0 AS leaked \
+         }} RETURN count(*) AS rows"
+    );
+    let mut calls = 0;
+    assert!(
+        PreparedGraphPipelineAggregateText::prepare(&text, |kind, name| {
+            calls += 1;
+            symbols(kind, name)
+        })
+        .is_err()
+    );
+    assert_eq!(calls, 0);
+}
+
+#[test]
+fn carried_pattern_counts_feed_exact_aggregates_and_group_by_witness_multiplicity() {
+    let prefix = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x \
+                  UNWIND [0,0] AS occurrence";
+    let rows = execute(&format!(
+        "{prefix} RETURN sum(COUNT {{ MATCH (x)-[:R]->() }}) AS witnesses, \
+         count(COUNT {{ MATCH (x)-[:R]->() }}) AS inputs, \
+         sum(CASE WHEN EXISTS((x)-[:R]->()) THEN 1 ELSE 0 END) AS linked"
+    ));
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].keys().is_empty());
+    assert_eq!(rows[0].values()[0].as_integer(), Some(10));
+    assert_eq!(rows[0].values()[1].as_count(), Some(8));
+    assert_eq!(rows[0].values()[2].as_integer(), Some(6));
+
+    let rows = execute(&format!(
+        "{prefix} RETURN COUNT {{ MATCH (x)-[:R]->() }} AS fanout, \
+         count(*) AS occurrences,collect(x) AS vertices ORDER BY fanout"
+    ));
+    let expected = [
+        (0, vec![VId(4), VId(4)]),
+        (1, vec![VId(2), VId(2), VId(3), VId(3)]),
+        (3, vec![VId(1), VId(1)]),
+    ];
+    assert_eq!(rows.len(), expected.len());
+    for (row, (fanout, vertices)) in rows.iter().zip(expected) {
+        assert_eq!(row.keys(), &[scalar(fanout)]);
+        assert_eq!(row.values()[0].as_count(), Some(vertices.len() as u64));
+        let mut actual = row.values()[1]
+            .as_value()
+            .unwrap()
+            .as_list()
+            .unwrap()
+            .to_vec();
+        actual.sort();
+        assert_eq!(
+            actual,
+            vertices
+                .into_iter()
+                .map(GraphValue::Vertex)
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn carried_existence_aggregate_scopes_refuse_private_and_local_bindings_before_catalog() {
+    let prefix = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x";
+    for tail in [
+        "RETURN EXISTS((x)-[:R]->()) AS linked,__fg_boundary_0,count(*) AS rows",
+        "RETURN EXISTS((x)-[:R]->()) AS linked,count(*) + __fg_boundary_0 AS leaked",
+        "RETURN EXISTS((x)-[:R]->()) AS linked,count(*) AS rows ORDER BY __fg_boundary_0",
+        "RETURN EXISTS((x)-[:R]->()) AS linked,count(*) AS rows ORDER BY count(__fg_boundary_0)",
+        "RETURN EXISTS((x)-[:R]->(inside)) AS linked,count(inside) AS leaked",
+        "RETURN count(EXISTS((fresh)-[:R]->())) AS unanchored",
+        "RETURN count(ANY(local IN nodes WHERE EXISTS((local)-[:R]->()))) AS nested",
+        "RETURN count(*) AS rows GROUP BY EXISTS((x)-[:R]->())",
+        "RETURN count(*) AS rows HAVING EXISTS((x)-[:R]->())",
+    ] {
+        let text = format!("{prefix} {tail}");
+        let mut calls = 0;
+        assert!(
+            PreparedGraphPipelineAggregateText::prepare(&text, |kind, name| {
+                calls += 1;
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(calls, 0, "{text}");
+    }
+}
+
+#[test]
+fn carried_existence_aggregate_sources_share_budgets_and_fail_before_empty_results() {
+    let template = PreparedGraphPipelineAggregateText::prepare(
+        "UNWIND $items AS x \
+         RETURN count(CASE WHEN false THEN EXISTS((x)-[:R]->()) ELSE true END) AS rows \
+         LIMIT 0",
+        symbols,
+    )
+    .unwrap();
+    for items in [vec![], vec![GraphValue::Vertex(VId(1))]] {
+        let arguments = GqlParameters::new().with_list("items", items).unwrap();
+        let query = template.bind_relation_parameters(&arguments).unwrap();
+        let mut calls = 0;
+        let result = query.execute_governed(
+            wide(),
+            |_, _| {
+                calls += 1;
+                Err(GqlQueryError::Source("aggregate-probe"))
+            },
+            || Ok::<_, usize>(()),
+        );
+        assert!(matches!(
+            result,
+            Err(GqlQueryError::Source(GraphAggregateError::InputRelation(
+                GraphSetExecutionError::Source("aggregate-probe")
+            )))
+        ));
+        assert_eq!(calls, 1);
+    }
+
+    let query = prepare(
+        "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x \
+         RETURN EXISTS((x)-[:R]->()) AS linked,count(*) AS rows ORDER BY linked",
+    );
+    let mut checkpoints = 0;
+    let measured = run(&query, wide(), &mut || {
+        checkpoints += 1;
+        Ok(())
+    })
+    .unwrap();
+    let caps = [
+        measured.rows.snapshot_records,
+        measured.rows.result_rows,
+        measured.evaluator.work_units,
+        measured.evaluator.scratch_entries,
+    ];
+    assert_eq!(
+        run(
+            &query,
+            GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+            &mut || Ok(())
+        )
+        .unwrap(),
+        measured
+    );
+    for dimension in 0..4 {
+        let mut limits = caps;
+        assert!(limits[dimension] > 0);
+        limits[dimension] -= 1;
+        assert!(
+            run(
+                &query,
+                GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3]),
+                &mut || Ok(())
+            )
+            .is_err()
+        );
+    }
+    assert!(checkpoints > 2);
+    for stop in [1, checkpoints / 2, checkpoints] {
+        let mut seen = 0;
+        let result = run(&query, wide(), &mut || {
+            seen += 1;
+            if seen == stop { Err(stop) } else { Ok(()) }
+        });
+        assert!(matches!(result, Err(GqlQueryError::Interrupted(at)) if at == stop));
+        assert_eq!(seen, stop);
+    }
+}

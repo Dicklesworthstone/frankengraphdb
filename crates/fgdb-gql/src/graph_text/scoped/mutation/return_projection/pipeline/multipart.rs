@@ -212,6 +212,33 @@ impl<'a> UnresolvedReadInput<'a> {
     }
 }
 
+/// Whether completed row clauses contain graph expressions that need an
+/// Apply owner. Read and aggregate facades share this native-lexer probe;
+/// ordinary aggregate calls and list-local pattern expressions keep their
+/// existing parser owners.
+pub(in crate::graph_text) fn has_row_graph_expressions(
+    statement: &str,
+    tokens: &[TextToken<'_>],
+) -> Result<bool, GraphSetTextError> {
+    for at in crate::set_text::multipart::row_existence_offsets(tokens) {
+        // Compound leaves borrow a slice of the statement but retain the
+        // original composition-token offsets.
+        let at = at - tokens.first().map_or(0, |token| token.at);
+        let mut lexer = Lexer {
+            text: statement,
+            at,
+            tokens: 0,
+        };
+        lexer.next()?;
+        if row_pattern_filter_starts(&mut lexer.clone(), |_| false)?
+            || !row_pattern_expressions(&mut lexer, |_| false)?.is_empty()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 impl PreparedGraphText {
     pub(crate) fn unresolved_read_input<'a>(
         statement: &'a str,
@@ -219,24 +246,7 @@ impl PreparedGraphText {
         tokens: &[TextToken<'_>],
         zones: Option<&crate::GqlTimeZones>,
     ) -> Result<UnresolvedReadInput<'a>, GraphSetTextError> {
-        let mut row_graph_filter = false;
-        for at in crate::set_text::multipart::row_existence_offsets(tokens) {
-            // Compound leaves borrow a slice of the statement but retain the
-            // original composition-token offsets.
-            let at = at - tokens.first().map_or(0, |token| token.at);
-            let mut lexer = Lexer {
-                text: statement,
-                at,
-                tokens: 0,
-            };
-            lexer.next()?; // The clause keyword, using the one native lexer.
-            if row_pattern_filter_starts(&mut lexer.clone(), |_| false)?
-                || !row_pattern_expressions(&mut lexer, |_| false)?.is_empty()
-            {
-                row_graph_filter = true;
-                break;
-            }
-        }
+        let row_graph_filter = has_row_graph_expressions(statement, tokens)?;
         let multipart = has_continuation(tokens)
             || row_graph_filter
             || Parser::deferred_where_continues(statement, declarations, tokens, zones);
@@ -486,8 +496,14 @@ fn row_pattern_expressions<'a>(
     loop {
         let key = matches!(previous, Some(TokenKind::Punct(b'.' | b':')))
             || matches!(previous, Some(TokenKind::Word(word)) if word.eq_ignore_ascii_case("AS"));
+        let group_by = depth == 0
+            && !key
+            && matches!(token.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("GROUP"))
+            && matches!(lexer.clone().next()?.kind,
+                TokenKind::Word(word) if word.eq_ignore_ascii_case("BY"));
         if matches!(token.kind, TokenKind::End)
             || (depth == 0 && matches!(token.kind, TokenKind::Punct(b'}')))
+            || group_by
             || matches!(token.kind, TokenKind::Word(word)
                 if depth == 0 && !key && Parser::ends_where(word, previous))
         {
@@ -649,11 +665,11 @@ impl<'a> Parser<'a> {
             .is_empty())
     }
 
-    /// An unhoisted graph value after UNWIND or a later WITH needs the
-    /// same graph witness owner as a row WHERE. Ordinary aggregate RETURNs
-    /// retain their separately typed owner.
+    /// An unhoisted graph value after UNWIND or a later WITH needs the same
+    /// Apply owner as a row WHERE. An aggregating RETURN reads its gathered
+    /// scalar values through the terminal aggregate compiler.
     fn row_existence_projection(&self, width: usize) -> Result<bool, GraphPatternTextError> {
-        if !self.read_elements || !self.is_word("RETURN") || self.return_has_aggregate()? {
+        if !self.read_elements || !self.is_word("RETURN") {
             return Ok(false);
         }
         Ok(!row_pattern_expressions(&mut self.lexer.clone(), |at| {
@@ -916,6 +932,13 @@ impl<'a> Parser<'a> {
             }
         }
         (self.lexer, self.current) = saved;
+        if returning && aggregate {
+            // The terminal aggregate compiler owns RETURN and consumes these
+            // values as grouping keys or aggregate arguments. Keep the exact
+            // expanded schema and private-span guards until that owner has
+            // read the clause; restoring the old maps here loses its slots.
+            return Ok((parts, schema, true));
+        }
         let mut pipeline = Vec::new();
         let mut depth = 0;
         let mut projected = None;
@@ -2078,7 +2101,11 @@ impl<'a> Parser<'a> {
             (graph_page.into_iter().collect(), schema)
         };
         // The body's RETURN may follow its own WITH stages, so ask again here.
-        if !terminal && self.call_body && self.return_has_aggregate()? {
+        if !terminal
+            && self.call_body
+            && self.return_has_aggregate()?
+            && !self.row_existence_projection(next.len())?
+        {
             let (stage, schema) = self.return_aggregate_stage(&next)?;
             pipeline.push(stage);
             if let Some(page) = self.row_expression_page(&schema)? {
@@ -2118,7 +2145,7 @@ impl<'a> Parser<'a> {
             next = schema;
             terminal = true;
         }
-        if aggregate && self.is_word("RETURN") {
+        if aggregate && self.is_word("RETURN") && !self.row_existence_projection(next.len())? {
             terminal = true;
         }
         if !row_fields.is_empty() {

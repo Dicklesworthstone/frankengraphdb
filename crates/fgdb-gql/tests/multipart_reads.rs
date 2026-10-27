@@ -3032,10 +3032,10 @@ fn row_scope_pattern_counts_compose_with_where_values_and_call_boundaries() {
             .collect::<Vec<_>>()
     );
     let query = prepare(&format!(
-        "{prefix} RETURN DISTINCT COUNT {{ (x)-[:R]->() }} AS MATCH \
-         ORDER BY MATCH DESC SKIP 1 LIMIT 2"
+        "{prefix} RETURN DISTINCT COUNT {{ (x)-[:R]->() }} AS degree \
+         ORDER BY degree DESC SKIP 1 LIMIT 2"
     ));
-    assert_eq!(query.columns(), ["MATCH"]);
+    assert_eq!(query.columns(), ["degree"]);
     assert_eq!(
         run(&query, wide(), &mut || Ok(())).unwrap().value,
         [1, 0]

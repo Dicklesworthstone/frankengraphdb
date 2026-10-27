@@ -307,6 +307,7 @@ impl PreparedGraphPipelineAggregateText {
         let zones = resolve.time_zones();
         let tokens = PreparedGraphText::composition_tokens(statement, declarations)?;
         let multipart = crate::set_text::multipart::has_continuation(&tokens)
+            || pipeline::multipart::has_row_graph_expressions(statement, &tokens)?
             || Parser::deferred_where_continues(statement, declarations, &tokens, zones.as_ref());
         let leading_match =
             !multipart && crate::set_text::multipart::leading_rows_then_match(&tokens);
@@ -470,8 +471,9 @@ impl PreparedGraphPipelineAggregateText {
                                 ) {
                                     return Ok(None);
                                 }
-                                let Some(column) =
-                                    schema.iter().position(|(name, _)| name.text == word)
+                                let Some(column) = schema[..parser.visible_width(&schema)]
+                                    .iter()
+                                    .position(|(name, _)| name.text == word)
                                 else {
                                     return Ok(None);
                                 };
@@ -562,7 +564,9 @@ impl PreparedGraphPipelineAggregateText {
                 };
                 let alias = if standalone
                     && let TokenKind::Word(word) = parser.current.kind
-                    && !schema.iter().any(|(alias, _)| alias.text == word)
+                    && !schema[..parser.visible_width(&schema)]
+                        .iter()
+                        .any(|(alias, _)| alias.text == word)
                 {
                     returned.iter().find_map(|item| match item.value {
                         ReturnedValue::Key(column) if item.name.text == word => Some(column),
@@ -733,6 +737,7 @@ impl PreparedGraphPipelineAggregateText {
         }
         // HAVING and the page address the output row. A boundary still live
         // here could resolve `n.p` to an output of the same width.
+        let input_visible = parser.visible_width(&schema);
         parser.boundary_reads = None;
         if !computed_at.is_empty() && parser.is_word("HAVING") {
             return Err(expected(
@@ -753,6 +758,7 @@ impl PreparedGraphPipelineAggregateText {
         let order = order::parse(
             &mut parser,
             &schema,
+            input_visible,
             &output_schema,
             &having_columns,
             &computed_at,
