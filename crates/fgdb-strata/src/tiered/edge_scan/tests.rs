@@ -524,6 +524,78 @@ fn relation_root_does_not_restrict_independent_join_incidence() {
 }
 
 #[test]
+fn nested_incidence_eof_returns_to_each_live_root_memory_baseline() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path, false).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let opened = pool.used();
+        let mut scan = view
+            .edge_scan_relation(&cx, CommitSeq(5), R)
+            .unwrap()
+            .into_join_scan();
+        let mut roots = Vec::new();
+        while let Some(root) = scan
+            .next_with_endpoints(&cx, None, &mut |_| Ok::<_, ()>(()))
+            .await
+            .unwrap()
+        {
+            roots.push(root.eid);
+            // Keep the parent edge/endpoints alive. Its heap and decoder
+            // position are legitimate retained state, not child allocations.
+            let parent = pool.used();
+            let nested = scan
+                .next_incident_retained_with_endpoints(
+                    &cx,
+                    VId(2),
+                    Some(S),
+                    BufferedEdgeDirection::Outgoing,
+                    None,
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(nested.eid, EId(0));
+            assert_eq!(nested.row.as_ref().unwrap().edge().entry.relation, S);
+            drop(nested);
+            assert!(
+                scan.next_incident_retained_with_endpoints(
+                    &cx,
+                    VId(2),
+                    Some(S),
+                    BufferedEdgeDirection::Outgoing,
+                    Some(EId(0)),
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .await
+                .unwrap()
+                .is_none()
+            );
+            assert_eq!(
+                pool.used(),
+                parent,
+                "child EOF retains no allocation beside root {:?}",
+                root.eid
+            );
+        }
+        assert_eq!(roots, [EId(4), EId(6), EId(90), EId(u128::MAX)]);
+        drop(scan);
+        assert_eq!(
+            pool.used(),
+            opened,
+            "closing the join releases every cursor"
+        );
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
 fn every_relation_root_control_refuses_and_fuses_without_leaking_reservations() {
     run(|contexts, path| async move {
         let (store, id) = fixture(&contexts, &path, false).await;
