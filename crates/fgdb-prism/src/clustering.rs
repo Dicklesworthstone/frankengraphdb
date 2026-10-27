@@ -68,6 +68,10 @@ pub(crate) fn estimated_work<C>(
     graph: &SnapshotGraphView,
     checkpoint: &mut impl FnxMeter<C>,
 ) -> Result<usize, FnxExecutionError<C>> {
+    #[cfg(test)]
+    if tests::scalar_preparation() {
+        return tests::estimated_work_scalar(graph, checkpoint);
+    }
     let mut work = graph
         .node_count()
         .checked_mul(4)
@@ -168,6 +172,10 @@ fn forward_rows<C>(
     witness: &mut ComplexityWitness,
     checkpoint: &mut impl FnxMeter<C>,
 ) -> Result<ForwardRows, FnxExecutionError<C>> {
+    #[cfg(test)]
+    if tests::scalar_preparation() {
+        return tests::forward_rows_scalar(graph, witness, checkpoint);
+    }
     let n = graph.node_count();
     let mut offsets = reserve(n.checked_add(1).ok_or(FnxExecutionError::SizeOverflow)?)?;
     let capacity = graph.edge_count();
@@ -524,6 +532,119 @@ mod tests {
     use fnx_classes::Graph;
     use std::convert::Infallible;
 
+    thread_local! {
+        static SCALAR_PREPARATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    pub(super) fn scalar_preparation() -> bool {
+        SCALAR_PREPARATION.with(std::cell::Cell::get)
+    }
+
+    fn with_scalar_preparation<T>(enabled: bool, work: impl FnOnce() -> T) -> T {
+        struct Reset(bool);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                SCALAR_PREPARATION.with(|mode| mode.set(self.0));
+            }
+        }
+        let _reset = Reset(SCALAR_PREPARATION.with(|mode| mode.replace(enabled)));
+        work()
+    }
+
+    // Exact previous preparation loops, kept only as differential and paired
+    // timing controls. Forcing a one-element batch in the new code would add
+    // its batch-safety checks to every old edge and bias that comparison.
+    pub(super) fn estimate_row_scalar<C>(
+        graph: &SnapshotGraphView,
+        source: usize,
+        row: &[usize],
+        work: &mut usize,
+        checkpoint: &mut impl FnxMeter<C>,
+    ) -> Result<(), FnxExecutionError<C>> {
+        for &target in row {
+            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+            if source < target {
+                let other = graph
+                    .neighbors_indices(target)
+                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                add(work, row.len().min(other.len()))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn forward_rows_scalar<C>(
+        graph: &SnapshotGraphView,
+        witness: &mut ComplexityWitness,
+        checkpoint: &mut impl FnxMeter<C>,
+    ) -> Result<ForwardRows, FnxExecutionError<C>> {
+        let n = graph.node_count();
+        let mut offsets = reserve(n.checked_add(1).ok_or(FnxExecutionError::SizeOverflow)?)?;
+        let capacity = graph.edge_count();
+        let mut targets = Vec::new();
+        let mut has_wedges = false;
+        offsets.push(0);
+        for source in 0..n {
+            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+            add(&mut witness.nodes_touched, 1)?;
+            let row = graph
+                .neighbors_indices(source)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+            if !can_participate(row, source) {
+                offsets.push(targets.len());
+                continue;
+            }
+            for &target in row {
+                checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+                add(&mut witness.edges_scanned, 1)?;
+                let other = graph
+                    .neighbors_indices(target)
+                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                if can_participate(other, target) && (other.len(), target) < (row.len(), source) {
+                    if targets.len() == capacity {
+                        return Err(FnxExecutionError::InvalidUpstreamResult);
+                    }
+                    if targets.is_empty() {
+                        targets = reserve(capacity)?;
+                    }
+                    targets.push(target);
+                }
+            }
+            has_wedges |= targets.len() - offsets[source] >= 2;
+            offsets.push(targets.len());
+        }
+        Ok(ForwardRows {
+            offsets,
+            targets,
+            has_wedges,
+        })
+    }
+
+    pub(super) fn estimated_work_scalar<C>(
+        graph: &SnapshotGraphView,
+        checkpoint: &mut impl FnxMeter<C>,
+    ) -> Result<usize, FnxExecutionError<C>> {
+        let mut work = graph
+            .node_count()
+            .checked_mul(4)
+            .ok_or(FnxExecutionError::SizeOverflow)?;
+        for source in 0..graph.node_count() {
+            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+            let row = graph
+                .neighbors_indices(source)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+            add(
+                &mut work,
+                row.len()
+                    .checked_mul(2)
+                    .ok_or(FnxExecutionError::SizeOverflow)?,
+            )?;
+            add(&mut work, bits(row.len()))?;
+            estimate_row_scalar(graph, source, row, &mut work, checkpoint)?;
+        }
+        Ok(work)
+    }
+
     fn graph(n: usize, edges: &[(usize, usize)]) -> SnapshotGraphView {
         let vertices: Vec<_> = (0..n).map(|i| VId(i as u128 * 17)).collect();
         let edges: Vec<_> = edges
@@ -705,6 +826,219 @@ mod tests {
                 ));
                 assert_eq!(meter.units, allowance + 1);
             }
+        }
+    }
+
+    #[test]
+    fn preparation_batches_preserve_both_stages_and_every_refusing_unit() {
+        let hub = FNX_METER_RUN + 11;
+        let mut hub_edges: Vec<_> = (1..hub).map(|vertex| (0, vertex)).collect();
+        hub_edges.extend((1..hub).map(|vertex| (vertex, 1 + vertex % (hub - 1))));
+        for view in [
+            graph(0, &[]),
+            graph(5, &[(0, 0), (0, 1), (0, 2), (1, 2), (3, 4)]),
+            graph(hub, &hub_edges),
+        ] {
+            for estimate in [false, true] {
+                let run = |scalar, allowance| {
+                    let mut counts = MeterCounts::default();
+                    let result = with_scalar_preparation(scalar, || {
+                        let mut meter = BulkMeter {
+                            counts: &mut counts,
+                            allowance,
+                        };
+                        if estimate {
+                            estimated_work(&view, &mut meter)
+                                .map(|work| (vec![work], vec![], false, 0, 0))
+                        } else {
+                            let mut witness = ComplexityWitness {
+                                algorithm: String::new(),
+                                complexity_claim: String::new(),
+                                nodes_touched: 0,
+                                edges_scanned: 0,
+                                queue_peak: 0,
+                            };
+                            forward_rows(&view, &mut witness, &mut meter).map(|rows| {
+                                (
+                                    rows.offsets,
+                                    rows.targets,
+                                    rows.has_wedges,
+                                    witness.nodes_touched,
+                                    witness.edges_scanned,
+                                )
+                            })
+                        }
+                    });
+                    (result, counts)
+                };
+                let (expected, scalar) = run(true, usize::MAX);
+                let expected = expected.unwrap();
+                let (actual, batched) = run(false, usize::MAX);
+                assert_eq!(actual.unwrap(), expected);
+                assert_eq!(batched.units, scalar.units);
+                if view.node_count() == hub {
+                    assert_eq!(batched.largest_run, FNX_METER_RUN);
+                    assert!(batched.calls < scalar.calls);
+                }
+                for allowance in 0..scalar.units {
+                    for scalar in [false, true] {
+                        let (result, counts) = run(scalar, allowance);
+                        assert!(matches!(result,
+                            Err(FnxExecutionError::Cancelled(unit)) if unit == allowance + 1
+                        ));
+                        assert_eq!(counts.units, allowance + 1);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn forward_preparation_overflow_keeps_scalar_error_and_cancellation_precedence() {
+        let n = FNX_METER_RUN + 4;
+        let mut edges: Vec<_> = (1..n).map(|vertex| (0, vertex)).collect();
+        edges.extend((1..n).map(|vertex| (vertex, 1 + vertex % (n - 1))));
+        let view = graph(n, &edges);
+        for allowance in [0, 1, 2, 3, 4, usize::MAX] {
+            let run = |scalar| {
+                let mut counts = MeterCounts::default();
+                let result = with_scalar_preparation(scalar, || {
+                    let mut meter = BulkMeter {
+                        counts: &mut counts,
+                        allowance,
+                    };
+                    let mut witness = ComplexityWitness {
+                        algorithm: String::new(),
+                        complexity_claim: String::new(),
+                        nodes_touched: 0,
+                        edges_scanned: usize::MAX - 2,
+                        queue_peak: 0,
+                    };
+                    forward_rows(&view, &mut witness, &mut meter).map(|_| ())
+                });
+                (format!("{result:?}"), counts.units)
+            };
+            assert_eq!(run(false), run(true));
+            if allowance == usize::MAX {
+                assert!(run(false).0.contains("SizeOverflow"));
+            }
+        }
+    }
+
+    /// Same-process full CALL comparison, including work admission, forward
+    /// construction, counting, row conversion and result hashing. The input
+    /// projection is already admitted. The opaque meter observes every host
+    /// call, but does not stand in for an authority/clock implementation.
+    #[test]
+    #[ignore = "paired full triangle CALL measurement; optimized, one test thread"]
+    fn preparation_batched_full_call_measurement() {
+        use crate::FnxCallSpec;
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        #[derive(Default)]
+        struct OpaqueMeter {
+            units: usize,
+            calls: usize,
+        }
+        impl FnxMeter<Infallible> for OpaqueMeter {
+            fn unit(&mut self) -> Result<(), Infallible> {
+                self.units(1)
+            }
+            #[inline(never)]
+            fn poll(&mut self) -> Result<(), Infallible> {
+                self.calls = black_box(self.calls + 1);
+                Ok(())
+            }
+            #[inline(never)]
+            fn units(&mut self, count: usize) -> Result<(), Infallible> {
+                self.calls = black_box(self.calls + 1);
+                self.units = black_box(self.units + count);
+                Ok(())
+            }
+        }
+        impl FnxMeter<Infallible> for &mut OpaqueMeter {
+            fn unit(&mut self) -> Result<(), Infallible> {
+                (**self).unit()
+            }
+            fn poll(&mut self) -> Result<(), Infallible> {
+                (**self).poll()
+            }
+            fn units(&mut self, count: usize) -> Result<(), Infallible> {
+                (**self).units(count)
+            }
+        }
+        for (shape, n, edges) in [
+            (
+                "triangle_free_bipartite",
+                256,
+                (0..128)
+                    .flat_map(|source| (128..256).map(move |target| (source, target)))
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "clique",
+                256,
+                (0..256)
+                    .flat_map(|source| (source + 1..256).map(move |target| (source, target)))
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "sparse_ring",
+                4096,
+                (0..4096)
+                    .map(|source| (source, (source + 1) % 4096))
+                    .collect::<Vec<_>>(),
+            ),
+        ] {
+            let view = graph(n, &edges);
+            let call = FnxCallSpec::triangles();
+            let mut samples = [Vec::new(), Vec::new()];
+            let mut accounting = [(0, 0); 2];
+            let mut expected = None;
+            for trial in 0..8 {
+                for step in 0..2 {
+                    let mode = (trial + step) % 2;
+                    let mut meter = OpaqueMeter::default();
+                    let start = Instant::now();
+                    let result = with_scalar_preparation(mode == 0, || {
+                        call.execute(&view, limits(), &mut meter).unwrap()
+                    });
+                    black_box((&result.rows, result.certificate.result_digest));
+                    let elapsed = start.elapsed().as_nanos();
+                    if let Some(expected) = &expected {
+                        assert_eq!(&result, expected);
+                    }
+                    expected = Some(result);
+                    accounting[mode] = (meter.units, meter.calls);
+                    if trial != 0 {
+                        samples[mode].push(elapsed);
+                    }
+                }
+            }
+            assert_eq!(accounting[0].0, accounting[1].0);
+            assert!(accounting[1].1 < accounting[0].1);
+            let triangle_incidence: u64 = expected
+                .as_ref()
+                .unwrap()
+                .rows
+                .iter()
+                .map(|row| match row[1] {
+                    crate::FnxValue::Integer(value) => value,
+                    _ => panic!("triangle CALL must return exact integer counts"),
+                })
+                .sum();
+            assert_eq!(triangle_incidence % 3, 0);
+            println!(
+                "triangle_preparation shape={shape} vertices={n} edges={} triangles={} units={} scalar_calls={} batch_calls={} scalar_ns={:?} batch_ns={:?}",
+                view.edge_count(),
+                triangle_incidence / 3,
+                accounting[0].0,
+                accounting[0].1,
+                accounting[1].1,
+                samples[0],
+                samples[1]
+            );
         }
     }
 
