@@ -334,6 +334,64 @@ fn map_scalar_field_certificates_replay_field_values_and_pinned_graph_state() {
     });
 }
 
+/// fgdb-8srlm: a map field keying a read pattern is the constant it holds,
+/// through Database::query and a certified read that replays. A missing key
+/// is NULL and matches nothing. The certificate keeps the caller's statement,
+/// and replay lowers it again.
+#[test]
+fn map_fields_key_read_patterns() {
+    run(async |commit, cx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let params = map_parameters(&[("name", text("b")), ("floor", int(20))]);
+        for (statement, expected) in [
+            (
+                "MATCH (n:Person {name: $payload.name}) RETURN n.p AS p",
+                vec![vec![int(20)]],
+            ),
+            (
+                "MATCH (n:Person {name: $payload.name}) RETURN n.p + $payload.floor AS p",
+                vec![vec![int(40)]],
+            ),
+            (
+                "MATCH (n:Person {p: $payload.floor})-[]->(m) RETURN m.name AS name",
+                Vec::new(),
+            ),
+            (
+                "MATCH (n:Person {name: $payload.missing}) RETURN n.p AS p",
+                Vec::new(),
+            ),
+        ] {
+            assert_eq!(
+                cells(
+                    db.query(cx, statement, &params, symbols, policy())
+                        .expect(statement)
+                ),
+                expected,
+                "{statement}"
+            );
+        }
+        let statement = "MATCH (n:Person {name: $payload.name}) RETURN n.p AS p";
+        let (result, certificate) = db
+            .execute_certified(cx, statement, &params, symbols, policy())
+            .unwrap();
+        assert_eq!(cells(result), vec![vec![int(20)]]);
+        assert_eq!(certificate.statement, statement);
+        assert_eq!(
+            cells(
+                db.replay(cx, &certificate, &params, symbols, policy())
+                    .unwrap()
+            ),
+            vec![vec![int(20)]]
+        );
+        let other = map_parameters(&[("name", text("c")), ("floor", int(20))]);
+        assert!(matches!(
+            db.replay(cx, &certificate, &other, symbols, policy()),
+            Err(fgdb::ReplayRefusal::ParameterValuesMismatch)
+        ));
+    });
+}
+
 /// Person vertices 1..=3: p = 10, 20, 30 and name = "a", "b", "c".
 fn graph() -> WriteBatch {
     let mut batch = WriteBatch::new(R);

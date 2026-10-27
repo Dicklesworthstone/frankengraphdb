@@ -723,6 +723,21 @@ fn bolt_map_parameters_bind_as_property_maps() {
             .unwrap();
         assert_eq!(answer.rows, people);
         assert_eq!(answer.outcome, Outcome::Rows { seq: 4 });
+        // A record field keys a Bolt read pattern too (fgdb-8srlm).
+        client
+            .expect(
+                0x10,
+                request(
+                    "MATCH (n:Person {name: $m.name}) RETURN n.age AS age",
+                    vec![("m".into(), map(&[("name", Value::string("Ann"))]))],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        let (rows, done) = client.pull_all().await;
+        assert_eq!(rows, vec![vec![Value::Int(35)]]);
+        assert_eq!(get(&done, "type").and_then(Value::as_str), Some("r"));
         client.send(0x02, vec![]).await;
         assert!(client.receive().await.is_none());
         observer.close(cx).await.unwrap();

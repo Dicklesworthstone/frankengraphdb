@@ -488,6 +488,13 @@ impl<V: Vfs + Clone> Database<V> {
         resolver: impl GraphSymbolResolver,
         budget: GqlQueryPolicy,
     ) -> Result<QueryResult, QueryError> {
+        // A record field keying a pattern is the constant it holds (fgdb-8srlm).
+        let lowered = GqlMapArgumentText::lower_fields(text, params);
+        let (text, params) = lowered
+            .as_ref()
+            .map_or((text, params), |(lowered, derived)| {
+                (lowered.text(), derived)
+            });
         if let Some(explain) = explain_prefix(text) {
             let (statement, certificate) = explain?;
             let (listing, certificate) = self.explain(statement, params, resolver, certificate)?;
@@ -508,6 +515,12 @@ impl<V: Vfs + Clone> Database<V> {
         resolver: impl GraphSymbolResolver,
         policy: GqlQueryPolicy,
     ) -> Result<NativeAggregateCursor<'q>, QueryError> {
+        let lowered = GqlMapArgumentText::lower_fields(text, params);
+        let (text, params) = lowered
+            .as_ref()
+            .map_or((text, params), |(lowered, derived)| {
+                (lowered.text(), derived)
+            });
         PreparedNativeRead::prepare(text, params, resolver)?
             .stream_aggregate(self, cx, params, policy)
     }

@@ -478,12 +478,21 @@ impl<V: Vfs + Clone> Database<V> {
         resolver: impl GraphSymbolResolver,
         budget: GqlQueryPolicy,
     ) -> Result<(QueryResult, NativeResultCertificate), QueryError> {
-        let prepared = PreparedNativeRead::prepare(text, params, resolver)?;
-        let snapshot_seq = prepared.snapshot_seq(self, params)?;
+        // A record field keying a pattern is the constant it holds
+        // (fgdb-8srlm). The certificate keeps the caller's statement and
+        // values; replay lowers them again, to the same plan.
+        let lowered = GqlMapArgumentText::lower_fields(text, params);
+        let (statement, bound) = lowered
+            .as_ref()
+            .map_or((text, params), |(lowered, derived)| {
+                (lowered.text(), derived)
+            });
+        let prepared = PreparedNativeRead::prepare(statement, bound, resolver)?;
+        let snapshot_seq = prepared.snapshot_seq(self, bound)?;
         let plan_certificate = NativePlanCertificate::new(&prepared, snapshot_seq);
         let mut evidence = Vec::new();
         let result =
-            prepared.execute_at_seq(self, cx, params, budget, snapshot_seq, &mut evidence)?;
+            prepared.execute_at_seq(self, cx, bound, budget, snapshot_seq, &mut evidence)?;
         let snapshot_identity = crate::chain_commitment_at(self.coordinator.chain(), snapshot_seq)
             .ok_or_else(|| QueryError::Unsupported {
                 diagnostics: vec!["certified history unavailable".to_owned()],
@@ -544,9 +553,17 @@ impl<V: Vfs + Clone> Database<V> {
         if crate::gql_cert::native_values_digest(params) != certificate.values_digest {
             return Err(ReplayRefusal::ParameterValuesMismatch);
         }
-        let prepared = PreparedNativeRead::prepare(&certificate.statement, params, resolver)
-            .map_err(|error| ReplayRefusal::Execution {
-                reason: error.to_string(),
+        // The certified statement lowers as execute_certified lowered it.
+        let lowered = GqlMapArgumentText::lower_fields(&certificate.statement, params);
+        let (statement, bound) = lowered.as_ref().map_or(
+            (certificate.statement.as_str(), params),
+            |(lowered, derived)| (lowered.text(), derived),
+        );
+        let prepared =
+            PreparedNativeRead::prepare(statement, bound, resolver).map_err(|error| {
+                ReplayRefusal::Execution {
+                    reason: error.to_string(),
+                }
             })?;
         if prepared.facade_class() != certificate.facade_class {
             return Err(ReplayRefusal::FacadeClassMismatch);
@@ -573,7 +590,7 @@ impl<V: Vfs + Clone> Database<V> {
                 | PreparedNativeRead::TemporalSet(_)
                 | PreparedNativeRead::TemporalAggregate(_)
         ) && prepared
-            .snapshot_seq(self, params)
+            .snapshot_seq(self, bound)
             .map_err(|error| ReplayRefusal::Execution {
                 reason: error.to_string(),
             })?
@@ -586,7 +603,7 @@ impl<V: Vfs + Clone> Database<V> {
             .execute_at_seq(
                 self,
                 cx,
-                params,
+                bound,
                 budget,
                 certificate.plan.snapshot_seq,
                 &mut evidence,

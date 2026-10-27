@@ -1189,6 +1189,14 @@ fn hydration_snapshot(
     parameters: &GqlParameters,
     default: CommitSeq,
 ) -> Result<CommitSeq, Failure> {
+    // The read lowers its pattern fields (fgdb-8srlm); so does this probe of
+    // the same statement.
+    let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(text, parameters);
+    let (text, parameters) = lowered
+        .as_ref()
+        .map_or((text, parameters), |(lowered, derived)| {
+            (lowered.text(), derived)
+        });
     let selector = PreparedGraphBranchText::prepare(text)
         .map_err(|error| Failure::invalid(error.to_string()))?;
     let selected = selector

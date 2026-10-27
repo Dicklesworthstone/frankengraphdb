@@ -162,18 +162,30 @@ impl GqlMapArgumentText {
     /// no site reads a map argument: bind `text` with `arguments` as they are.
     #[must_use]
     pub fn lower(text: &str, arguments: &GqlParameters) -> Option<(Self, GqlParameters)> {
-        let lowered = Self::splice(text, arguments)?;
+        let lowered = Self::splice(text, arguments, false)?;
         let derived = lowered.arguments(arguments).ok()?;
         Some((lowered, derived))
     }
 
-    fn splice(text: &str, arguments: &GqlParameters) -> Option<Self> {
+    /// As `lower`, splicing only the `$p.k` fields in patterns: the sites a
+    /// read has (fgdb-8srlm). Neo4j refuses a parameter map in MATCH, so a
+    /// read keeps `(n $p)` as written. A field keeps its length, so every
+    /// byte of the lowered read is the caller's and no diagnostic moves.
+    #[must_use]
+    pub fn lower_fields(text: &str, arguments: &GqlParameters) -> Option<(Self, GqlParameters)> {
+        let lowered = Self::splice(text, arguments, true)?;
+        let derived = lowered.arguments(arguments).ok()?;
+        Some((lowered, derived))
+    }
+
+    fn splice(text: &str, arguments: &GqlParameters, fields_only: bool) -> Option<Self> {
         let tokens = tokens(text)?;
         // Each site whose argument fits it: a map site needs a map with
         // delimitable keys, a field a map whose keys reach a value a
         // parameter carries, a rows site a list of maps with one key set.
         let sites: Vec<(Site, &str, GqlParameterValue)> = property_map_sites(text, &tokens)
             .into_iter()
+            .filter(|site| !fields_only || matches!(site, Site::Field(..)))
             .filter_map(|site| {
                 let TokenKind::Parameter(name) = tokens[site.parameter()].kind else {
                     return None;
@@ -1024,6 +1036,28 @@ mod tests {
         ] {
             assert!(
                 GqlMapArgumentText::lower(text, &arguments).is_none(),
+                "{text}"
+            );
+        }
+    }
+
+    /// A read lowers its pattern fields and nothing else: a parameter map in
+    /// MATCH, which Neo4j refuses, stays as written (fgdb-8srlm).
+    #[test]
+    fn a_read_lowers_only_its_pattern_fields() {
+        let arguments = map(&[("a", int(1))]);
+        let (lowered, derived) =
+            GqlMapArgumentText::lower_fields("MATCH (n {id: $m.a}) RETURN n", &arguments).unwrap();
+        assert_eq!(lowered.text(), "MATCH (n {id: $m_a}) RETURN n");
+        assert_eq!(names(&derived), ["m_a"]);
+        let (lowered, derived) =
+            GqlMapArgumentText::lower_fields("MATCH (n:L $m), (o {id: $m.a}) RETURN n", &arguments)
+                .unwrap();
+        assert_eq!(lowered.text(), "MATCH (n:L $m), (o {id: $m_a}) RETURN n");
+        assert_eq!(names(&derived), ["m", "m_a"]);
+        for text in ["MATCH (n:L $m) RETURN n", "MATCH (n) SET n += $m"] {
+            assert!(
+                GqlMapArgumentText::lower_fields(text, &arguments).is_none(),
                 "{text}"
             );
         }

@@ -797,6 +797,20 @@ fn fgp_map_parameters_bind_as_property_maps() {
                 vec![text("Cy"), WireValue::Int(50)],
             ]
         );
+        // A record field keys a read pattern too (fgdb-8srlm).
+        let keyed = client
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n:Person {name: $m.name}) RETURN n.age AS age",
+                vec![(
+                    "m".into(),
+                    WireValue::Map(vec![("name".into(), text("Bob"))]),
+                )],
+            )
+            .await
+            .unwrap();
+        assert_eq!(keyed.rows, [vec![WireValue::Int(41)]]);
         client.close(cx).await.unwrap();
         shutdown.trigger();
         task.join(cx).await.unwrap();

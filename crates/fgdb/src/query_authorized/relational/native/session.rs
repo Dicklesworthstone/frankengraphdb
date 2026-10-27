@@ -408,6 +408,13 @@ fn text_at<R: GraphSymbolResolver>(
     text: &str,
     params: &GqlParameters,
 ) -> Result<((QueryResult, CommitSeq), usize), QueryError> {
+    // A record field keying a pattern is the constant it holds (fgdb-8srlm).
+    let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(text, params);
+    let (text, params) = lowered
+        .as_ref()
+        .map_or((text, params), |(lowered, derived)| {
+            (lowered.text(), derived)
+        });
     let selector = PreparedGraphBranchText::prepare(text).map_err(selector_error)?;
     let selected = selector.bind_parameters(params).map_err(selector_error)?;
     check_branch(&selected, branch)?;

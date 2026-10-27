@@ -69,6 +69,13 @@ impl EmbeddedReadView {
         resolver: impl GraphSymbolResolver,
         policy: GqlQueryPolicy,
     ) -> Result<(QueryResult, CommitSeq), QueryError> {
+        // A record field keying a pattern is the constant it holds (fgdb-8srlm).
+        let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(text, params);
+        let (text, params) = lowered
+            .as_ref()
+            .map_or((text, params), |(lowered, derived)| {
+                (lowered.text(), derived)
+            });
         if let Some(explain) = explain_prefix(text) {
             let (statement, certificate) = explain?;
             let (listing, certificate) = self.explain(statement, params, resolver, certificate)?;
