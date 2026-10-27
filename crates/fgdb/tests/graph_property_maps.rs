@@ -1120,6 +1120,254 @@ mod transaction_dynamic_metadata {
     }
 }
 
+mod write_tail_dynamic_metadata {
+    use super::*;
+
+    #[test]
+    fn create_and_merge_returns_read_final_metadata_in_rows_and_aggregate_tails() {
+        let ((), report) = run_async_under_lab(0x6d61_0044, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            seed(&mut db, &commit, false).await;
+            let mut endpoint = WriteBatch::new(R);
+            endpoint.set_vertex_property(VId(2), SCORE, Some(CanonicalScalar::Int(20)));
+            let basis = db.write(&commit, endpoint).await.unwrap();
+            let params = GqlParameters::new();
+            let mut txn = db.begin(&txcx).unwrap();
+            for (statement, expected) in [
+                (
+                    "CREATE (n:Foo {score:30}) RETURN labels([n][0]) AS labels, properties([n][0]) AS props, keys([n][0]) AS names",
+                    vec![vec![
+                        list(&["Foo"]),
+                        map(&[("score", int(30))]),
+                        list(&["score"]),
+                    ]],
+                ),
+                (
+                    "MERGE (n:Foo {score:40}) ON CREATE SET n.name='created' RETURN labels([n][0]) AS labels, properties([n][0]) AS props, keys([n][0]) AS names",
+                    vec![vec![
+                        list(&["Foo"]),
+                        map(&[("name", text("created")), ("score", int(40))]),
+                        list(&["name", "score"]),
+                    ]],
+                ),
+                (
+                    "MERGE (n:Foo {score:40}) ON MATCH SET n.name='matched' RETURN labels([n][0]) AS labels, properties([n][0]) AS props, keys([n][0]) AS names",
+                    vec![vec![
+                        list(&["Foo"]),
+                        map(&[("name", text("matched")), ("score", int(40))]),
+                        list(&["name", "score"]),
+                    ]],
+                ),
+                (
+                    "MERGE (n:Foo {score:40}) RETURN labels(collect(n)[0]) AS labels, properties(collect(n)[0]) AS props, keys(collect(n)[0]) AS names",
+                    vec![vec![
+                        list(&["Foo"]),
+                        map(&[("name", text("matched")), ("score", int(40))]),
+                        list(&["name", "score"]),
+                    ]],
+                ),
+                (
+                    "CREATE (a:Foo)-[r:R {score:50}]->(b:Bar) RETURN type([r][0]) AS kind, properties([r][0]) AS props, keys([r][0]) AS names",
+                    vec![vec![
+                        text("R"),
+                        map(&[("score", int(50))]),
+                        list(&["score"]),
+                    ]],
+                ),
+                (
+                    "MATCH (a:Thing {score:10}), (b:Thing {score:20}) MERGE (a)-[r:R]->(b) ON MATCH SET r.score=60 RETURN type([r][0]) AS kind, properties([r][0]) AS props, keys([r][0]) AS names",
+                    vec![vec![
+                        text("R"),
+                        map(&[
+                            ("edge-note", GraphValue::Scalar(CanonicalScalar::Bool(true))),
+                            ("score", int(60)),
+                        ]),
+                        list(&["edge-note", "score"]),
+                    ]],
+                ),
+                (
+                    "MATCH (a:Thing {score:20}), (b:Thing {score:10}) MERGE (a)-[r:R]->(b) ON CREATE SET r.score=70 RETURN type([r][0]) AS kind, properties([r][0]) AS props, keys([r][0]) AS names",
+                    vec![vec![
+                        text("R"),
+                        map(&[("score", int(70))]),
+                        list(&["score"]),
+                    ]],
+                ),
+                (
+                    "UNWIND [80,81] AS score CREATE (n:Foo {score:score}) RETURN labels([n][0]) AS labels, properties([n][0]) AS props, keys([n][0]) AS names",
+                    vec![
+                        vec![list(&["Foo"]), map(&[("score", int(80))]), list(&["score"])],
+                        vec![list(&["Foo"]), map(&[("score", int(81))]), list(&["score"])],
+                    ],
+                ),
+            ] {
+                let returned = txn
+                    .query_write_engine(
+                        &mut db,
+                        &cx,
+                        statement,
+                        &params,
+                        Catalog::Full,
+                        R,
+                        write_policy(),
+                    )
+                    .unwrap_or_else(|error| panic!("{statement}: {error}"));
+                assert_eq!(cells(returned), expected, "{statement}");
+                assert_eq!(db.frontier().unwrap(), basis);
+            }
+            let vertices = txn.vertices(&db).unwrap();
+            let edges = txn.edges(&db).unwrap();
+            txn.commit(&mut db, &commit).await.unwrap();
+            // Publication assigns the durable creation sequence; compare the
+            // identities and fields whose staged metadata was returned.
+            assert_eq!(
+                db.vertices()
+                    .unwrap()
+                    .iter()
+                    .map(|vertex| (
+                        vertex.vid,
+                        vertex.birth_ordinal,
+                        &vertex.labels,
+                        &vertex.props
+                    ))
+                    .collect::<Vec<_>>(),
+                vertices
+                    .iter()
+                    .map(|vertex| (
+                        vertex.vid,
+                        vertex.birth_ordinal,
+                        &vertex.labels,
+                        &vertex.props
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                db.edges()
+                    .unwrap()
+                    .iter()
+                    .map(|edge| (&edge.entry.eid, &edge.props))
+                    .collect::<Vec<_>>(),
+                edges
+                    .iter()
+                    .map(|edge| (&edge.entry.eid, &edge.props))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn failing_metadata_return_restores_the_whole_statement_and_preserves_prior_staging() {
+        let ((), report) = run_async_under_lab(0x6d61_0045, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let basis = seed(&mut db, &commit, false).await;
+            let params = GqlParameters::new();
+            let mut txn = db.begin(&txcx).unwrap();
+            let mut prefix = WriteBatch::new(R);
+            prefix.set_vertex_property(VId(1), NOTE, Some(CanonicalScalar::Int(9)));
+            txn.write(&mut db, prefix).unwrap();
+            let digest = txn.staged_effect_digest().unwrap();
+            let vertices = txn.vertices(&db).unwrap();
+            let edges = txn.edges(&db).unwrap();
+            for (case, (statement, catalog)) in [
+                (
+                    "CREATE (n:Foo {score:99}) RETURN properties([n][0]) AS props",
+                    Catalog::MissingScore,
+                ),
+                (
+                    "CREATE (a:Foo)-[r:R {score:99}]->(b:Bar) RETURN properties([r][0]) AS props LIMIT 0",
+                    Catalog::MissingScore,
+                ),
+                (
+                    "MERGE (n:Thing {score:10}) ON MATCH SET n.score=99 RETURN properties([n][0]) AS props LIMIT 0",
+                    Catalog::MissingScore,
+                ),
+                (
+                    "MERGE (n:Foo {score:99}) ON CREATE SET n.name='refused' RETURN properties([n][0]) AS props",
+                    Catalog::MissingScore,
+                ),
+                (
+                    "CREATE (n:Foo {score:99}) RETURN properties([n][0]) AS props, 1/0 AS refused",
+                    Catalog::Full,
+                ),
+            ].into_iter().enumerate() {
+                let failure = txn.query_write_engine(
+                        &mut db,
+                        &cx,
+                        statement,
+                        &params,
+                        catalog,
+                        R,
+                        write_policy()
+                    )
+                    .unwrap_err();
+                if case == 0 {
+                    assert!(matches!(failure,
+                        fgdb::QueryWriteError::Insert(GqlQueryError::Source(
+                            fgdb_gql::GraphInsertQueryError::Returning(
+                                fgdb_gql::GraphSetExecutionError::Source(
+                                    fgdb::WriteTxnError::Read(ReadError::UnmappedProperty(SCORE))
+                                )
+                            )
+                        ))
+                    ), "{failure:?}");
+                }
+                assert_eq!(txn.staged_effect_digest().unwrap(), digest, "{statement}");
+                assert_eq!(txn.vertices(&db).unwrap(), vertices, "{statement}");
+                assert_eq!(txn.edges(&db).unwrap(), edges, "{statement}");
+                assert_eq!(db.frontier().unwrap(), basis, "{statement}");
+            }
+            assert_eq!(
+                cells(
+                    txn.query_write_engine(
+                        &mut db,
+                        &cx,
+                        "CREATE (n:Foo {score:77}) RETURN properties([n][0]) AS props",
+                        &params,
+                        Catalog::Full,
+                        R,
+                        write_policy()
+                    )
+                    .unwrap()
+                ),
+                vec![vec![map(&[("score", int(77))])]]
+            );
+            txn.commit(&mut db, &commit).await.unwrap();
+            assert_eq!(
+                cells(
+                    db.query(
+                        &cx,
+                        "MATCH (n:Foo) RETURN n.score AS score",
+                        &params,
+                        Catalog::Full,
+                        policy()
+                    )
+                    .unwrap()
+                ),
+                vec![vec![int(77)]]
+            );
+            assert_eq!(
+                db.vertex(VId(1))
+                    .unwrap()
+                    .unwrap()
+                    .props
+                    .iter()
+                    .find(|(key, _)| *key == NOTE)
+                    .unwrap()
+                    .1,
+                CanonicalScalar::Int(9).into()
+            );
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}
+
 #[test]
 fn graph_maps_cover_vertices_relationships_optional_scopes_and_row_composition() {
     let ((), report) = run_async_under_lab(0x6d61_0001, |root| async move {

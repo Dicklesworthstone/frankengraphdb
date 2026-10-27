@@ -2,6 +2,26 @@
 // canonical NET effects. No whole-row clone or second overlay is constructed.
 
 impl WriteTxn {
+    /// One source-bound reader for final RETURN/continuation expressions.
+    /// Its two capabilities share the same staged view and interruption latch.
+    fn element_reader_with_checkpoint<'a, V: Vfs + Clone>(
+        &'a self,
+        database: &'a Database<V>,
+        cx: &'a fgdb_types::QueryCx,
+        failure: &'a std::cell::RefCell<Option<Box<asupersync::error::Error>>>,
+    ) -> impl fgdb_gql::GraphElementReader<WriteTxnError> + 'a {
+        fgdb_gql::with_element_metadata(
+            move |element, key| {
+                self.element_property_with_checkpoint(database, cx, failure, element, key)
+            },
+            move |element, kind, catalog, control| {
+                self.element_metadata_with_checkpoint(
+                    database, cx, failure, element, kind, catalog, control,
+                )
+            },
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn element_metadata_with_checkpoint<V: Vfs + Clone>(
         &self,

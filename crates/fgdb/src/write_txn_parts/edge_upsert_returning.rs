@@ -35,10 +35,7 @@ fn edge_upsert_returning<E, A, C>(
         fgdb_delta_types::PropertyKeyId,
         &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> EdgeUpsertActionResult<(), E, A, C>,
     ) -> EdgeUpsertActionResult<CanonicalScalar, E, A, C>,
-    elements: impl FnMut(
-        ElementId,
-        fgdb_delta_types::PropertyKeyId,
-    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+    elements: impl fgdb_gql::GraphElementReader<E>,
 ) -> Result<
     fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
     fgdb_gql::GqlQueryError<fgdb_gql::GraphEdgeUpsertQueryError<E, A>, C>,
@@ -159,11 +156,9 @@ impl WriteTxn {
                 |edge, key, control| {
                     edge_upsert_property(&*workspace.txn, &*database, edge, key, control)
                 },
-                |element, key| {
-                    workspace
-                        .txn
-                        .element_property_with_checkpoint(database, cx, &failure, element, key)
-                },
+                workspace
+                    .txn
+                    .element_reader_with_checkpoint(database, cx, &failure),
             );
             match failure.into_inner() {
                 Some(error) => Err(GqlQueryError::Interrupted(error)),

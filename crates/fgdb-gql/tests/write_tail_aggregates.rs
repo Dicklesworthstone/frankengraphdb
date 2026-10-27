@@ -2,12 +2,14 @@
 //! to projection. The host-owned final relationship cells feed the real
 //! projection, grouping, sorting and pagination operators.
 
-use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{
-    GlaExecutionStats, GqlExecutionStats, GqlParameters, GqlQueryError, GqlQueryExecution,
-    GqlQueryPolicy, GraphEdgeReturnBinding, GraphSetExecutionError, GraphSymbol, GraphSymbolKind,
-    PreparedGraphEdgeUpsertQuery, PreparedGraphEdgeUpsertQueryText,
+    GlaExecutionEvent, GlaExecutionStats, GqlExecutionStats, GqlParameters, GqlQueryError,
+    GqlQueryExecution, GqlQueryPolicy, GraphEdgeReturnBinding, GraphElementMetadata,
+    GraphElementMetadataError, GraphSetExecutionError, GraphSymbol, GraphSymbolKind,
+    PreparedGraphEdgeUpsertQuery, PreparedGraphEdgeUpsertQueryText, ReverseSymbolCatalog,
+    with_element_metadata,
 };
 use fgdb_types::{CanonicalScalar, EId};
 
@@ -411,4 +413,89 @@ fn unwind_final_field_errors_are_not_suppressed_by_limit_zero() {
             Err(GqlQueryError::Source(_))
         ));
     }
+}
+
+#[test]
+fn final_metadata_reader_survives_write_projection_grouping_and_with_tails() {
+    let relation = GraphValue::Scalar(CanonicalScalar::ucs_basic_text("R").unwrap());
+    let properties = GraphValue::map(vec![("p".into(), int(8))]).unwrap();
+    let keys = GraphValue::List(
+        vec![GraphValue::Scalar(
+            CanonicalScalar::ucs_basic_text("p").unwrap(),
+        )]
+        .into(),
+    );
+    for (tail, expected) in [
+        (
+            "RETURN type([r][0]) AS kind, properties([r][0]) AS props, keys([r][0]) AS keys",
+            vec![relation.clone(), properties.clone(), keys.clone()],
+        ),
+        (
+            "WITH [r] AS edges UNWIND edges AS edge \
+             RETURN type(edge) AS kind, properties(edge) AS props, keys(edge) AS keys",
+            vec![relation.clone(), properties.clone(), keys.clone()],
+        ),
+        (
+            "WITH r AS edge RETURN [item IN collect(edge) | type(item)] AS kinds",
+            vec![GraphValue::List(vec![relation.clone()].into())],
+        ),
+    ] {
+        let query = prepare(tail);
+        let reader = with_element_metadata(
+            |_, _| Ok::<_, ()>(None),
+            |element,
+             kind,
+             catalog: &ReverseSymbolCatalog,
+             control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>| {
+                assert_eq!(element, ElementId::Edge(EDGE));
+                assert_eq!(catalog.relations.get(&R).map(String::as_str), Some("R"));
+                let value = match kind {
+                    GraphElementMetadata::Type => &relation,
+                    GraphElementMetadata::Properties => &properties,
+                    GraphElementMetadata::Keys => &keys,
+                    GraphElementMetadata::Labels => panic!("edge cannot have vertex labels"),
+                };
+                value
+                    .copy_with_control(&mut |event| control(event))
+                    .map(Some)
+                    .map_err(|()| GraphElementMetadataError::Interrupted)
+            },
+        );
+        let result = query
+            .project_governed_reading(
+                Some(input(&query, 8)),
+                GqlExecutionStats::default(),
+                GlaExecutionStats::default(),
+                policy(1),
+                reader,
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        assert_eq!(values(&result), vec![expected], "{tail}");
+    }
+}
+
+#[test]
+fn metadata_failure_in_final_write_tail_is_not_hidden_by_limit_zero() {
+    let query = prepare("WITH [r] AS edges UNWIND edges AS edge RETURN type(edge) AS kind LIMIT 0");
+    let result = query.project_rows_governed_reading(
+        vec![input(&query, 8)],
+        GqlExecutionStats::default(),
+        GlaExecutionStats::default(),
+        policy(0),
+        with_element_metadata(
+            |_, _| Ok::<_, ()>(None),
+            |_,
+             _,
+             _: &ReverseSymbolCatalog,
+             _: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>| {
+                Err(GraphElementMetadataError::Source(()))
+            },
+        ),
+        || Ok::<_, ()>(()),
+    );
+    assert!(matches!(
+        result,
+        Err(GqlQueryError::Source(GraphSetExecutionError::Source(())))
+    ));
 }

@@ -1071,10 +1071,7 @@ impl PreparedGraphVertexMergeRowsQuery {
         selection: GqlExecutionStats,
         evaluator: GlaExecutionStats,
         policy: GqlQueryPolicy,
-        mut elements: impl FnMut(
-            fgdb_delta_types::ElementId,
-            PropertyKeyId,
-        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        mut elements: impl crate::GraphElementReader<E>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<
         crate::GqlQueryExecution<GraphValueRow>,
@@ -1085,7 +1082,7 @@ impl PreparedGraphVertexMergeRowsQuery {
             selection,
             evaluator,
             policy,
-            &mut |element, key| Some(elements(element, key)),
+            &mut crate::set_ops::projection::HostElements(&mut elements),
             checkpoint,
         )
     }

@@ -560,9 +560,7 @@ impl WriteTxn {
                     stats.selection,
                     stats.evaluator,
                     policy.query,
-                    |element, key| {
-                        self.element_property_with_checkpoint(database, cx, &failure, element, key)
-                    },
+                    self.element_reader_with_checkpoint(database, cx, &failure),
                     || match failure.borrow_mut().take() {
                         Some(error) => Err(error),
                         None => cx.checkpoint(),

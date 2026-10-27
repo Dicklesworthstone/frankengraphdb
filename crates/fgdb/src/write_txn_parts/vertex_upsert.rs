@@ -142,11 +142,9 @@ impl WriteTxn {
                         control,
                     )
                 },
-                |element, key| {
-                    workspace
-                        .txn
-                        .element_property_with_checkpoint(database, cx, &failure, element, key)
-                },
+                workspace
+                    .txn
+                    .element_reader_with_checkpoint(database, cx, &failure),
             );
             match failure.into_inner() {
                 Some(error) => Err(fgdb_gql::GqlQueryError::Interrupted(error)),
@@ -213,10 +211,7 @@ fn vertex_upsert_returning<E, A, C>(
     mut labels: impl FnMut(
         &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> VertexUpsertActionResult<(), E, A, C>,
     ) -> VertexUpsertActionResult<fgdb_gql::algebra::GraphValue, E, A, C>,
-    elements: impl FnMut(
-        ElementId,
-        fgdb_delta_types::PropertyKeyId,
-    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+    elements: impl fgdb_gql::GraphElementReader<E>,
 ) -> VertexUpsertActionResult<fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>, E, A, C>
 {
     use fgdb_gql::algebra::GraphValue;

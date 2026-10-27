@@ -44,9 +44,9 @@ impl WriteTxn {
     /// Stage CREATE/INSERT and its native RETURN rows as one atomic operation.
     /// Selection and creation payloads are frozen before allocation. The whole
     /// admitted creation bag is staged in a rollback workspace before computed
-    /// RETURN/WITH properties are read, so output sees every occurrence's
-    /// effects over the original snapshot. Direct bindings retain their checked
-    /// values; computed reads use ordinary point witnesses, never a graph scan.
+    /// RETURN/WITH properties and metadata are read, so output sees every
+    /// occurrence's effects over the original snapshot. Direct bindings retain
+    /// their checked values; computed reads retain point or element witnesses.
     ///
     /// RETURN row limits govern the final rows independently of vertex/edge
     /// creation limits. In particular LIMIT 0 does not suppress the writes or
@@ -128,9 +128,7 @@ impl WriteTxn {
     > {
         let failure = std::cell::RefCell::new(None);
         let result = output.finish_governed_reading(
-            |element, key| {
-                self.element_property_with_checkpoint(database, cx, &failure, element, key)
-            },
+            self.element_reader_with_checkpoint(database, cx, &failure),
             || match failure.borrow_mut().take() {
                 Some(error) => Err(error),
                 None => cx.checkpoint(),
@@ -703,11 +701,9 @@ impl WriteTxn {
                                 stats.selection,
                                 stats.evaluator,
                                 allowance.query,
-                                |element, key| {
-                                    workspace.txn.element_property_with_checkpoint(
-                                        database, cx, &failure, element, key,
-                                    )
-                                },
+                                workspace
+                                    .txn
+                                    .element_reader_with_checkpoint(database, cx, &failure),
                                 || match failure.borrow_mut().take() {
                                     Some(error) => Err(error),
                                     None => cx.checkpoint(),

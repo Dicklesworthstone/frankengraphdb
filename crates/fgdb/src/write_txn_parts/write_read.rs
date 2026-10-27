@@ -79,22 +79,30 @@ impl WriteTxn {
                 write_policy,
                 allocate,
             )?;
-            // Both pattern and point reads use this same staged overlay. The
-            // owned row bag is moved through the native source wrapper once.
+            // Pattern, point and metadata reads use this same fully staged
+            // overlay. The owned row bag moves through the source once.
+            let failure = std::cell::RefCell::new(None);
             let source = WithElementReads {
                 source: InsertGraphSource {
                     transaction: workspace.txn,
                     database,
                     cx,
                 },
-                elements: |element, key| {
-                    workspace.txn.merge_return_property(database, element, key)
-                },
+                elements: workspace
+                    .txn
+                    .element_reader_with_checkpoint(database, cx, &failure),
             };
             let returning =
                 chain.finish_read_continuation(continuation, head, policy.query, source, || {
-                    cx.checkpoint()
-                })?;
+                    match failure.borrow_mut().take() {
+                        Some(error) => Err(error),
+                        None => cx.checkpoint(),
+                    }
+                });
+            let returning = match failure.into_inner() {
+                Some(error) => Err(GqlQueryError::Interrupted(error)),
+                None => returning,
+            }?;
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
             workspace.accept();
             Ok((receipt, returning))

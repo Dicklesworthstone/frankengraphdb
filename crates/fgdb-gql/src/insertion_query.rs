@@ -175,14 +175,11 @@ impl GraphInsertQueryOutput<'_> {
     /// Result paging cannot suppress expression evaluation or creation.
     pub fn finish_governed_reading<E, C>(
         self,
-        mut elements: impl FnMut(
-            ElementId,
-            PropertyKeyId,
-        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        mut elements: impl crate::GraphElementReader<E>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphSetExecutionError<E>, C>> {
         self.finish(
-            &mut |element, key| Some(elements(element, key)),
+            &mut crate::set_ops::projection::HostElements(&mut elements),
             &mut checkpoint,
         )
     }
