@@ -644,13 +644,11 @@ fn projected_row_existence_keeps_snapshot_transaction_and_capability_boundaries(
                         Some(GraphValue::Vertex(vertex)) => *vertex,
                         other => panic!("expected a carried vertex: {other:?}"),
                     };
-                    let boolean = |at: usize| match row[at]
-                        .as_value()
-                        .and_then(|value| value.as_scalar())
-                    {
-                        Some(CanonicalScalar::Bool(value)) => *value,
-                        other => panic!("expected an EXISTS boolean: {other:?}"),
-                    };
+                    let boolean =
+                        |at: usize| match row[at].as_value().and_then(|value| value.as_scalar()) {
+                            Some(CanonicalScalar::Bool(value)) => *value,
+                            other => panic!("expected an EXISTS boolean: {other:?}"),
+                        };
                     (vertex, boolean(1), boolean(2))
                 })
                 .collect::<Vec<_>>()

@@ -2474,9 +2474,7 @@ impl<'a> Parser<'a> {
         // (element_compared), where read whole here it would end at `=`.
         let scalar = operators
             && (self.composite_operand_continues()?
-                || (inputs.is_none()
-                    && resolve.is_none()
-                    && self.at_hoisted_existence_value())
+                || (inputs.is_none() && resolve.is_none() && self.at_hoisted_existence_value())
                 || (inputs.is_some()
                     && resolve.is_none()
                     && self.element_compared(Route {

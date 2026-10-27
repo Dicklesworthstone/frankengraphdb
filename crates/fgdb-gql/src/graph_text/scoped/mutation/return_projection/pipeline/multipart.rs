@@ -1244,19 +1244,18 @@ impl<'a> Parser<'a> {
             if self.row_existence_filter(incoming.len())?
                 || self.row_existence_projection(incoming.len())?
             {
-                let (next, done) = if self.is_word("WHERE")
-                    && self.whole_row_existence_filter(incoming.len())?
-                {
-                    let (part, next, done) =
-                        self.multipart_existence_part(statement, &incoming, aggregate)?;
-                    result.continuations.push(part);
-                    (next, done)
-                } else {
-                    let (parts, next, done) =
-                        self.multipart_existence_expression(statement, &incoming, aggregate)?;
-                    result.continuations.extend(parts);
-                    (next, done)
-                };
+                let (next, done) =
+                    if self.is_word("WHERE") && self.whole_row_existence_filter(incoming.len())? {
+                        let (part, next, done) =
+                            self.multipart_existence_part(statement, &incoming, aggregate)?;
+                        result.continuations.push(part);
+                        (next, done)
+                    } else {
+                        let (parts, next, done) =
+                            self.multipart_existence_expression(statement, &incoming, aggregate)?;
+                        result.continuations.extend(parts);
+                        (next, done)
+                    };
                 incoming = next;
                 terminal = done;
             } else if self.inline_call()? {

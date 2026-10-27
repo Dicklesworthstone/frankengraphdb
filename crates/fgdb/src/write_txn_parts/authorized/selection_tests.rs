@@ -564,7 +564,10 @@ fn carried_metadata_charges_each_visible_node_and_unique_edge_endpoint() {
                             ),
                             "{element:?} {kind:?}: {result:?}"
                         );
-                        assert_eq!(output_events, 0, "quota refuses before metadata construction");
+                        assert_eq!(
+                            output_events, 0,
+                            "quota refuses before metadata construction"
+                        );
                     } else {
                         assert!(
                             matches!(result, Ok(Some(_))),

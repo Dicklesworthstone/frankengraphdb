@@ -2661,7 +2661,10 @@ fn row_scope_existence_projection_composes_booleans_and_keeps_private_names_priv
     let prefix = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x";
     for (expression, expected) in [
         ("NOT ((x)-[:R]->())", [false, false, false, true]),
-        ("x.p = 2 AND EXISTS((x)-[:R]->())", [false, true, true, false]),
+        (
+            "x.p = 2 AND EXISTS((x)-[:R]->())",
+            [false, true, true, false],
+        ),
         (
             "EXISTS((x)-[:R]->()) XOR EXISTS { MATCH (x)<-[:R]-() }",
             [true, false, false, true],
@@ -2716,7 +2719,11 @@ fn row_scope_existence_projection_composes_booleans_and_keeps_private_names_priv
             .is_err(),
             "{statement}"
         );
-        assert_eq!(resolutions.get(), 0, "scope admission precedes catalog reads");
+        assert_eq!(
+            resolutions.get(),
+            0,
+            "scope admission precedes catalog reads"
+        );
     }
 }
 
@@ -2835,7 +2842,10 @@ fn row_scope_existence_projection_preserves_call_boundaries_aliases_and_distinct
         "{prefix} RETURN x AS WITH,EXISTS((x)-[:R]->()) AS CALL ORDER BY WITH"
     ));
     assert_eq!(aliased.columns(), ["WITH", "CALL"]);
-    assert_eq!(run(&aliased, wide(), &mut || Ok(())).unwrap().value, expected);
+    assert_eq!(
+        run(&aliased, wide(), &mut || Ok(())).unwrap().value,
+        expected
+    );
 
     // The CALL's RETURN probe must stop at its closing brace. The following
     // outer WHERE has an anchor that is deliberately not imported into CALL.
@@ -2880,10 +2890,12 @@ fn row_scope_existence_projection_preserves_call_boundaries_aliases_and_distinct
         let values: Vec<_> = expected
             .into_iter()
             .enumerate()
-            .map(|(at, value)| GraphValueRow::from_owned_values(vec![
-                GraphValue::Vertex(VId(at as u128 + 1)),
-                GraphValue::Scalar(CanonicalScalar::Bool(value)),
-            ]))
+            .map(|(at, value)| {
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(at as u128 + 1)),
+                    GraphValue::Scalar(CanonicalScalar::Bool(value)),
+                ])
+            })
             .collect();
         assert_eq!(rows, values, "{expression}");
     }
