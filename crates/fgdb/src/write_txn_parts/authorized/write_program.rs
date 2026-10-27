@@ -39,7 +39,8 @@ fn preflight(error: WriteTxnError) -> Fault {
 
 /// The compiler proves that these MERGE rows have disjoint keys or endpoint
 /// pairs, or that every INSERT reads only vertices and creates edges in one
-/// relation. The latter keeps duplicate inputs and parallel edge creations:
+/// relation, or every INSERT creates standalone vertices. Creation profiles
+/// keep duplicate inputs and parallel edge creations:
 /// every allocated identity remains distinct. Neither profile can observe
 /// another row's effects. Authorize each row through
 /// its ordinary native workspace, including its intermediate before/after
@@ -61,7 +62,7 @@ fn apply_independent_rows<V: Vfs + Clone, Clock: FnMut() -> u64>(
     debug_assert!(
         program.freezes_vertex_upsert_input()
             || program.freezes_edge_merge_input()
-            || crate::write_txn::IndependentEdgeWrites::admit(transaction, program).is_some()
+            || crate::write_txn::IndependentCreateWrites::admit(transaction, program).is_some()
     );
     let mut batches = Vec::new();
     let mut receipts = Vec::new();
@@ -195,6 +196,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// authorization and cumulative allowances, while earlier edge creations
     /// are not replayed for each following statement. Duplicate inputs still
     /// create distinct parallel edges in source order.
+    /// Same-relation standalone vertex CREATE programs also authorize each
+    /// original row before composing it once; they perform no graph selection.
     /// Each ordinary statement also freezes its own MATCH and expressions.
     /// Every field/image and every plain-DELETE incidence proof uses the same
     /// rules as the corresponding authorized single-statement method.
@@ -468,7 +471,7 @@ impl<V: Vfs + Clone> Database<V> {
                         }
                         if program.freezes_vertex_upsert_input()
                             || program.freezes_edge_merge_input()
-                            || crate::write_txn::IndependentEdgeWrites::admit(
+                            || crate::write_txn::IndependentCreateWrites::admit(
                                 workspace.transaction(),
                                 program,
                             )

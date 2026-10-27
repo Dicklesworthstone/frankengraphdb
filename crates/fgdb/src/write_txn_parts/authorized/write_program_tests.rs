@@ -1810,6 +1810,230 @@ fn independent_edge_rows_preserve_native_templates_receipts_and_dependent_fallba
 }
 
 #[test]
+fn independent_vertex_rows_preserve_authorized_templates_and_write_only_creation() {
+    lab(0xa9a1, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = authority();
+        let token = issuer.issue_at(&scoped_merge_grant(), NOW).unwrap();
+        let mut templates = Vec::new();
+        let mut rows = Vec::new();
+        for force_sequential in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = db.frontier().unwrap();
+            let mut steps = vec![
+                insert("CREATE (a:Visible {p:11}), (b:Visible {p:22})"),
+                insert("CREATE (a:Visible {p:33})"),
+            ];
+            if force_sequential {
+                steps.push(mutation("MATCH (n:Visible) WHERE n.p = -1 SET n.p = 0"));
+            }
+            let program = PreparedGraphWriteProgram::prepare(steps).unwrap();
+            let (receipt, completion) = db
+                .execute_graph_write_program_returning_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                (
+                    receipt.stats().created_vertices,
+                    receipt.stats().created_edges
+                ),
+                (3, 0)
+            );
+            assert_eq!(
+                &receipt.steps()[..2],
+                &[
+                    GraphWriteStepReceipt::Insert {
+                        vertices: vec![issued_vertex(1), issued_vertex(2)],
+                        edges: vec![],
+                    },
+                    GraphWriteStepReceipt::Insert {
+                        vertices: vec![issued_vertex(3)],
+                        edges: vec![],
+                    },
+                ]
+            );
+            assert_eq!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted {
+                    commit_seq: fgdb_types::CommitSeq(before.0 + 1),
+                }
+            );
+            templates.push(
+                db.delta_since(before)
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .coordinate_entries()
+                    .to_vec(),
+            );
+            rows.push(db.vertices().unwrap());
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+        assert_eq!(templates[0], templates[1]);
+        assert_eq!(rows[0], rows[1]);
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let write_only = Grant {
+            rights: Rights::Write,
+            limits: QueryLimits {
+                max_rows: 0,
+                ..grant().limits
+            },
+            ..scoped_merge_grant()
+        };
+        let token = issuer.issue_at(&write_only, NOW).unwrap();
+        let program = PreparedGraphWriteProgram::prepare(vec![
+            insert("CREATE (a:Visible {p:11})"),
+            insert("CREATE (a:Visible {p:22})"),
+        ])
+        .unwrap();
+        let (stats, _) = db
+            .execute_graph_write_program_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &program,
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(stats.created_vertices, 2);
+        assert_eq!(db.vertices().unwrap().len(), 2);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn independent_vertex_rows_keep_scope_receipt_and_creation_refusals_atomic() {
+    lab(0xa9a2, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = authority();
+        let token = issuer.issue_at(&scoped_merge_grant(), NOW).unwrap();
+        for refusal in 0..4 {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = db.frontier().unwrap();
+            let tail = match refusal {
+                0 => insert("CREATE (a:Visible {secret:1})"),
+                3 => insert("CREATE (a:Visible {p:100/0})"),
+                _ => insert("CREATE (a:Visible {p:22})"),
+            };
+            let program =
+                PreparedGraphWriteProgram::prepare(vec![insert("CREATE (a:Visible {p:11})"), tail])
+                    .unwrap();
+            let limited = if refusal == 1 {
+                token.attenuate(Restriction::MaxRows(1)).unwrap()
+            } else {
+                token.clone()
+            };
+            let mut allowance = policy();
+            if refusal == 2 {
+                allowance.max_created_vertices = 1;
+            }
+            let error = db
+                .execute_graph_write_program_returning_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &limited,
+                    "main",
+                    &program,
+                    allowance,
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            match refusal {
+                0 => assert_eq!(authorization(error), Error::ScopeDenied),
+                1 => assert_eq!(
+                    authorization(error),
+                    Error::LimitExceeded(LimitDimension::Rows)
+                ),
+                2 => assert!(matches!(
+                    error,
+                    Fault::CreationBudget {
+                        statement: 1,
+                        dimension: GraphInsertLimitDimension::Vertices,
+                        limit: 1,
+                        observed: 2,
+                    }
+                )),
+                3 => assert!(matches!(error, Fault::Insert { statement: 1, .. })),
+                _ => unreachable!(),
+            }
+            assert_eq!(db.frontier().unwrap(), before);
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn independent_vertex_rows_do_not_expose_hidden_or_spent_engine_id_collisions() {
+    lab(0xa9a3, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = authority();
+        let token = issuer.issue_at(&scoped_merge_grant(), NOW).unwrap();
+        for hidden in 0..3 {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            if hidden != 0 {
+                // Privileged callers may have chosen the engine's future ID.
+                // Allocation must skip it without exposing native liveness or
+                // spent-identity diagnostics through the authorized program.
+                let mut seed = crate::WriteBatch::new(R);
+                seed.create_vertex(issued_vertex(2), vec![LabelId(9)], vec![]);
+                db.write(&commit, seed).await.unwrap();
+                if hidden == 2 {
+                    let mut retire = crate::WriteBatch::new(R);
+                    retire.delete_vertex(issued_vertex(2));
+                    db.write(&commit, retire).await.unwrap();
+                }
+            }
+            let before = (db.frontier().unwrap(), db.vertices().unwrap());
+            let program = PreparedGraphWriteProgram::prepare(vec![
+                insert("CREATE (a:Visible {p:11})"),
+                insert("CREATE (a:Visible {secret:22})"),
+            ])
+            .unwrap();
+            let error = db
+                .execute_graph_write_program_returning_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(
+                authorization(error),
+                Error::ScopeDenied,
+                "hidden state {hidden}"
+            );
+            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
 fn independent_edge_rows_roll_back_late_scope_receipt_creation_and_expression_refusals() {
     lab(0xa99c, |contexts| async move {
         let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());

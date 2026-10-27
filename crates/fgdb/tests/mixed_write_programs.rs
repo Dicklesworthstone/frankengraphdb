@@ -655,7 +655,7 @@ mod independent_edges {
     /// still calls WriteTxn::write and prepares its complete staged prefix.
     /// The public savepoint gives this test driver the same error rollback as
     /// the program guard, without a production flag or another evaluator.
-    fn incumbent(
+    pub(super) fn incumbent(
         txn: &mut WriteTxn,
         db: &mut Database<MemVfs>,
         cx: &QueryCx,
@@ -1652,6 +1652,666 @@ mod independent_edges {
                 assert_eq!(edge.props, vec![(P, CanonicalScalar::Int(20).into())]);
             }
             assert_eq!(c.txn().outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}
+
+mod independent_vertices {
+    use super::independent_edges::incumbent;
+    use super::*;
+    use fgdb_delta_types::DeltaRow;
+    use fgdb_gql::{GqlQueryError, GraphWriteProgramReceipt, PreparedGraphWriteScript};
+    use fgdb_types::context::SimulationCheckpointProbe;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    fn vertices(count: usize) -> PreparedGraphWriteProgram {
+        program(&vec!["CREATE (n:New {p:7})"; count])
+    }
+
+    fn vertex_identity(request: GraphWriteIdentityRequest) -> Result<ElementId, &'static str> {
+        match request.request {
+            GraphInsertRequest::Vertex { row: 0, vertex: 0 } if request.statement == 0 => {
+                Ok(ElementId::Vertex(VId(u128::MAX)))
+            }
+            GraphInsertRequest::Vertex { .. } => identity(request),
+            GraphInsertRequest::Edge { .. } => panic!("vertex-only insertion allocated an edge"),
+        }
+    }
+
+    fn value_step(value: CanonicalScalar) -> GraphWriteStatement {
+        let args = GqlParameters::new().with_scalar("value", value).unwrap();
+        let declarations: Vec<_> = args.parameter_types().collect();
+        PreparedGraphInsertText::prepare_with_parameter_types(
+            "CREATE (n:New {p:$value})",
+            R,
+            &declarations,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&args)
+        .unwrap()
+        .into()
+    }
+
+    #[test]
+    fn chunks_match_sequential_receipts_effects_and_global_birth_order() {
+        let ((), report) = run_async_under_lab(0x6d17_0201, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&c.commit(), vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            seed(&mut db, &c.commit()).await;
+            let basis = db.frontier().unwrap();
+            let saved = db.read_session().unwrap();
+            let query = program(&[
+                "CREATE (a:New {p:3}), (b:Copy {p:1})",
+                "CREATE (a:Tail {p:5})",
+                "CREATE (a:New {p:9}), (b:New {p:9})",
+            ]);
+            assert!(query.statements().iter().all(|step| matches!(step,
+                GraphWriteStatement::Insert(input)
+                    if input.independent_vertex_append_relation() == Some(R)
+            )));
+            let frozen = query.canonical_bytes();
+            let mut old = db.begin(&c.txn()).unwrap();
+            let expected = incumbent(
+                &mut old,
+                &mut db,
+                &c.query(),
+                &query,
+                policy(),
+                vertex_identity,
+            )
+            .unwrap();
+            let expected_digest = old.staged_effect_digest().unwrap();
+            let expected_rows = old.vertices(&db).unwrap();
+            old.abort();
+            let mut txn = db.begin(&c.txn()).unwrap();
+            txn.savepoint(&db, "before").unwrap();
+            let requests = RefCell::new(Vec::new());
+            let actual = txn
+                .execute_graph_write_program_returning_governed(
+                    &mut db,
+                    &c.query(),
+                    &query,
+                    policy(),
+                    |request| {
+                        requests.borrow_mut().push(request);
+                        vertex_identity(request)
+                    },
+                )
+                .unwrap();
+            assert_eq!(actual.stats(), expected.stats());
+            assert_eq!(actual.steps(), expected.steps());
+            assert_eq!(
+                (
+                    actual.stats().created_vertices,
+                    actual.stats().created_edges
+                ),
+                (5, 0)
+            );
+            assert_eq!(txn.staged_effect_digest().unwrap(), expected_digest);
+            assert_eq!(txn.vertices(&db).unwrap(), expected_rows);
+            assert_eq!(db.vertices().unwrap().len(), 2);
+            assert_eq!(query.canonical_bytes(), frozen);
+            txn.rollback_to_savepoint(&db, "before").unwrap();
+            assert_eq!(txn.vertices(&db).unwrap().len(), 2);
+            let retry = txn
+                .execute_graph_write_program_governed(
+                    &mut db,
+                    &c.query(),
+                    &query,
+                    policy(),
+                    vertex_identity,
+                )
+                .unwrap();
+            assert_eq!(retry, actual.stats());
+            txn.commit(&mut db, &c.commit()).await.unwrap();
+            assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+            let births: BTreeMap<_, _> = db
+                .delta_since(basis)
+                .unwrap()
+                .flat_map(|batch| batch.coordinate_entries())
+                .flat_map(|coordinate| &coordinate.rows)
+                .map(|row| match row {
+                    DeltaRow::CreateVertex {
+                        vid, birth_ordinal, ..
+                    } => (*vid, *birth_ordinal),
+                    _ => panic!("vertex-only program published another effect kind"),
+                })
+                .collect();
+            let expected_births: BTreeMap<_, _> = requests
+                .borrow()
+                .iter()
+                .enumerate()
+                .map(|(ordinal, &request)| {
+                    let ElementId::Vertex(vid) = vertex_identity(request).unwrap() else {
+                        unreachable!();
+                    };
+                    (vid, ordinal as u64 + 1)
+                })
+                .collect();
+            assert_eq!(
+                births, expected_births,
+                "declaration order survives canonical sorting"
+            );
+            assert!(saved.vertex(VId(u128::MAX)).unwrap().is_none());
+            let committed: Vec<_> = expected_rows
+                .into_iter()
+                .map(|mut row| {
+                    if expected_births.contains_key(&row.vid) {
+                        row.created_at = fgdb_types::CommitSeq(basis.0 + 1);
+                    }
+                    row
+                })
+                .collect();
+            assert_eq!(db.vertices().unwrap(), committed);
+            db.compact(&c.commit()).await.unwrap();
+            drop(db);
+            let db = Database::open_with_vfs(&c.commit(), vfs, &path, keys())
+                .await
+                .unwrap();
+            assert_eq!(db.vertices().unwrap(), committed);
+            assert_eq!(c.txn().outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn late_refusals_preserve_value_identity_and_allocation_order() {
+        let ((), report) = run_async_under_lab(0x6d17_0202, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+            seed(&mut db, &c.commit()).await;
+            let mut retired = WriteBatch::new(R);
+            retired.create_vertex(VId(13), vec![], vec![]);
+            db.write(&c.commit(), retired).await.unwrap();
+            let mut retired = WriteBatch::new(R);
+            retired.delete_vertex(VId(13));
+            db.write(&c.commit(), retired).await.unwrap();
+            for mode in 0..7 {
+                let mut statements = vertices(3).statements().to_vec();
+                if mode == 3 {
+                    statements[1] = value_step(CanonicalScalar::bytes(vec![0x5a; 20_000]).unwrap());
+                } else if mode == 4 {
+                    statements[1] = program(&["CREATE (n:New {p:1/0})"]).statements()[0].clone();
+                } else if mode == 6 {
+                    statements[1] = value_step(CanonicalScalar::Timestamp(
+                        fgdb_types::CanonicalTimestamp::from_stored_zoned(
+                            0,
+                            0,
+                            "Etc/UTC",
+                            fgdb_types::ids::ObjectId([0x52; 32]),
+                        )
+                        .unwrap(),
+                    ));
+                }
+                let query = PreparedGraphWriteProgram::prepare(statements).unwrap();
+                let allocate = |request: GraphWriteIdentityRequest| {
+                    if request.statement != 1 {
+                        return vertex_identity(request);
+                    }
+                    match mode {
+                        0 | 6 => Ok(ElementId::Vertex(VId(u128::MAX))),
+                        1 => Ok(ElementId::Vertex(VId(1))),
+                        2 => Ok(ElementId::Vertex(VId(13))),
+                        5 => Err("second allocator refused"),
+                        _ => vertex_identity(request),
+                    }
+                };
+                let mut expected_requests = Vec::new();
+                let mut old = db.begin(&c.txn()).unwrap();
+                let expected =
+                    incumbent(&mut old, &mut db, &c.query(), &query, policy(), |request| {
+                        expected_requests.push(request);
+                        allocate(request)
+                    })
+                    .unwrap_err();
+                let mut requests = Vec::new();
+                let mut txn = db.begin(&c.txn()).unwrap();
+                let before = txn.staged_effect_digest().unwrap();
+                let actual = txn
+                    .execute_graph_write_program_returning_governed(
+                        &mut db,
+                        &c.query(),
+                        &query,
+                        policy(),
+                        |request| {
+                            requests.push(request);
+                            allocate(request)
+                        },
+                    )
+                    .unwrap_err();
+                assert_eq!(actual.to_string(), expected.to_string(), "mode={mode}");
+                assert!(matches!(
+                    &actual,
+                    GraphWriteProgramError::Insert { statement: 1, .. }
+                ));
+                if mode == 6 {
+                    assert!(
+                        matches!(
+                            actual,
+                            GraphWriteProgramError::Insert {
+                                source: GqlQueryError::Source(
+                                    fgdb_gql::insertion::GraphInsertError::Source(
+                                        WriteTxnError::Write(
+                                            WriteError::ZonedTimestampRequiresResolver { .. }
+                                        )
+                                    )
+                                ),
+                                ..
+                            }
+                        ),
+                        "value admission must precede the cross-chunk duplicate check"
+                    );
+                }
+                assert_eq!(requests, expected_requests, "mode={mode}");
+                assert!(requests.iter().all(|request| request.statement < 2));
+                assert_eq!(requests.len(), if mode == 4 { 1 } else { 2 });
+                assert_eq!(txn.staged_effect_digest().unwrap(), before);
+                assert_eq!(txn.state(), EmbeddedTxnState::Active);
+                assert_eq!(
+                    txn.execute_graph_write_program_governed(
+                        &mut db,
+                        &c.query(),
+                        &vertices(3),
+                        policy(),
+                        vertex_identity,
+                    )
+                    .unwrap()
+                    .created_vertices,
+                    3
+                );
+                old.abort();
+                txn.abort();
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn graph_inputs_mixed_kinds_relations_and_existing_work_keep_the_overlay() {
+        let ((), report) = run_async_under_lab(0x6d17_0203, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+            seed(&mut db, &c.commit()).await;
+            for text in [
+                "MATCH (n:Base) CREATE (copy:New {p:n.p})",
+                "UNWIND [1,2] AS x CREATE (copy:New {p:x})",
+                "CREATE (a:New)-[:R]->(b:New)",
+            ] {
+                let input = PreparedGraphInsertText::prepare(text, R, symbols)
+                    .unwrap()
+                    .bind_parameters(&GqlParameters::new())
+                    .unwrap();
+                assert_eq!(input.independent_vertex_append_relation(), None, "{text}");
+            }
+            let dependent = program(&[
+                "CREATE (n:New {p:5})",
+                "MATCH (n:New) CREATE (n)-[:R]->(n)",
+                "MATCH (n:New) CREATE (copy:Copy {p:n.p})",
+            ]);
+            let mut txn = db.begin(&c.txn()).unwrap();
+            let stats = txn
+                .execute_graph_write_program_governed(
+                    &mut db,
+                    &c.query(),
+                    &dependent,
+                    policy(),
+                    identity,
+                )
+                .unwrap();
+            assert_eq!((stats.created_vertices, stats.created_edges), (2, 1));
+            assert_eq!(
+                txn.vertex(&db, VId(21_000)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(5).into())]
+            );
+            txn.abort();
+
+            let query = vertices(3);
+            let mut old = db.begin(&c.txn()).unwrap();
+            let mut txn = db.begin(&c.txn()).unwrap();
+            old.write(&mut db, prefix()).unwrap();
+            txn.write(&mut db, prefix()).unwrap();
+            let expected = incumbent(
+                &mut old,
+                &mut db,
+                &c.query(),
+                &query,
+                policy(),
+                vertex_identity,
+            )
+            .unwrap();
+            let actual = txn
+                .execute_graph_write_program_returning_governed(
+                    &mut db,
+                    &c.query(),
+                    &query,
+                    policy(),
+                    vertex_identity,
+                )
+                .unwrap();
+            assert_eq!(actual.stats(), expected.stats());
+            assert_eq!(actual.steps(), expected.steps());
+            assert_eq!(
+                txn.staged_effect_digest().unwrap(),
+                old.staged_effect_digest().unwrap()
+            );
+            old.abort();
+            txn.abort();
+
+            let other = RelationId(2);
+            let second = PreparedGraphInsertText::prepare("CREATE (n:New {p:8})", other, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            assert_eq!(second.independent_vertex_append_relation(), Some(other));
+            let query = PreparedGraphWriteProgram::prepare(vec![
+                vertices(1).statements()[0].clone(),
+                second.into(),
+            ])
+            .unwrap();
+            let basis = db.frontier().unwrap();
+            let mut txn = db.begin(&c.txn()).unwrap();
+            txn.execute_graph_write_program_governed(
+                &mut db,
+                &c.query(),
+                &query,
+                policy(),
+                vertex_identity,
+            )
+            .unwrap();
+            txn.commit(&mut db, &c.commit()).await.unwrap();
+            let relations: Vec<_> = db
+                .delta_since(basis)
+                .unwrap()
+                .flat_map(|batch| batch.coordinate_entries())
+                .map(|coordinate| coordinate.relation)
+                .collect();
+            assert_eq!(relations, vec![R, other]);
+            assert_eq!(c.txn().outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn failed_and_unwound_private_chunks_retain_identity_observations() {
+        let ((), report) = run_async_under_lab(0x6d17_0204, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            for mode in 0..3 {
+                let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+                let mut seed = WriteBatch::new(R);
+                seed.create_vertex(VId(55), vec![BASE], vec![]);
+                db.write(&c.commit(), seed).await.unwrap();
+                let mut txn = db.begin(&c.txn()).unwrap();
+                let before = txn.staged_effect_digest().unwrap();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    txn.execute_graph_write_program_returning_governed(
+                        &mut db,
+                        &c.query(),
+                        &vertices(3),
+                        policy(),
+                        |request| {
+                            if request.statement == 1 {
+                                return match mode {
+                                    0 => Err("refuse after one private vertex chunk"),
+                                    1 => panic!("unwind after one private vertex chunk"),
+                                    _ => Ok(ElementId::Vertex(VId(55))),
+                                };
+                            }
+                            vertex_identity(request)
+                        },
+                    )
+                }));
+                if mode == 1 {
+                    assert!(result.is_err());
+                } else {
+                    assert!(result.unwrap().is_err());
+                }
+                assert_eq!(txn.staged_effect_digest().unwrap(), before);
+                // There were no graph selections or subsequent reads. Only
+                // successful/refused private preparation observed this ID.
+                let mut winner = WriteBatch::new(R);
+                if mode == 2 {
+                    winner.set_vertex_property(VId(55), P, Some(CanonicalScalar::Int(1)));
+                } else {
+                    winner.create_vertex(VId(u128::MAX), vec![], vec![]);
+                }
+                db.write(&c.commit(), winner).await.unwrap();
+                assert!(matches!(
+                    txn.finish(&mut db, &c.commit()).await,
+                    Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                        law: "FG-LAW-FCW-READ-01",
+                        ..
+                    }))
+                ));
+                assert_eq!(c.txn().outstanding_obligations(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn exact_creation_quota_and_every_checkpoint_preserve_atomic_retry() {
+        let ((), report) = run_async_under_lab(0x6d17_0205, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+            let query = vertices(3);
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let mut measured = db.begin(&c.txn()).unwrap();
+            let full = measured
+                .execute_graph_write_program_returning_governed(
+                    &mut db,
+                    &c.query().with_checkpoint_probe(Arc::clone(&probe)),
+                    &query,
+                    policy(),
+                    vertex_identity,
+                )
+                .unwrap();
+            let checkpoints = probe.calls();
+            let stats = full.stats();
+            measured.abort();
+            let exact = GraphWriteProgramPolicy::new(
+                GqlQueryPolicy::new(
+                    stats.selection.snapshot_records,
+                    stats.selection.result_rows,
+                    stats.evaluator.work_units,
+                    stats.evaluator.scratch_entries,
+                ),
+                0,
+                stats.created_vertices,
+                0,
+            );
+            let mut txn = db.begin(&c.txn()).unwrap();
+            let before = txn.staged_effect_digest().unwrap();
+            let mut short = exact;
+            short.max_created_vertices -= 1;
+            assert!(matches!(
+                txn.execute_graph_write_program_returning_governed(
+                    &mut db,
+                    &c.query(),
+                    &query,
+                    short,
+                    vertex_identity,
+                ),
+                Err(GraphWriteProgramError::CreationBudget { .. })
+            ));
+            assert_eq!(txn.staged_effect_digest().unwrap(), before);
+            txn.abort();
+            assert!(checkpoints > 3);
+            for stop in 1..=checkpoints {
+                let mut txn = db.begin(&c.txn()).unwrap();
+                let before = txn.staged_effect_digest().unwrap();
+                let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                let result = txn.execute_graph_write_program_returning_governed(
+                    &mut db,
+                    &c.query().with_checkpoint_probe(Arc::clone(&probe)),
+                    &query,
+                    exact,
+                    vertex_identity,
+                );
+                assert!(
+                    matches!(
+                        result,
+                        Err(GraphWriteProgramError::Program(
+                            GraphMutationProgramError::Interrupted { .. }
+                        )) | Err(GraphWriteProgramError::Insert {
+                            source: GqlQueryError::Interrupted(_),
+                            ..
+                        })
+                    ),
+                    "checkpoint {stop}/{checkpoints}: {result:?}"
+                );
+                assert_eq!(probe.calls(), stop);
+                assert_eq!(txn.staged_effect_digest().unwrap(), before);
+                let retry = txn
+                    .execute_graph_write_program_returning_governed(
+                        &mut db,
+                        &c.query(),
+                        &query,
+                        exact,
+                        vertex_identity,
+                    )
+                    .unwrap();
+                assert_eq!(retry.stats(), stats);
+                assert_eq!(retry.steps(), full.steps());
+                txn.abort();
+            }
+            assert_eq!(c.txn().outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    /// Both competitors execute the same bound parameter-set program, then use
+    /// the ordinary commit. Fixture creation/binding and exact-output inspection
+    /// are outside the timers. Report times, never assert a wall-clock ratio.
+    #[test]
+    #[ignore = "paired standalone vertex program preparation and MemVfs commit measurement"]
+    fn independent_vertex_program_paired_measurement() {
+        use std::time::{Duration, Instant};
+
+        async fn measure(
+            c: &PurposeContexts,
+            query: &PreparedGraphWriteProgram,
+            independent: bool,
+        ) -> (
+            Duration,
+            Duration,
+            GraphWriteProgramReceipt,
+            fgdb_crypto::Digest,
+            Vec<fgdb::VertexRow>,
+        ) {
+            let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+            let allowance = GraphWriteProgramPolicy::new(
+                GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX),
+                0,
+                query.statements().len() as u64,
+                0,
+            );
+            let mut txn = db.begin(&c.txn()).unwrap();
+            let started = Instant::now();
+            let receipt = if independent {
+                txn.execute_graph_write_program_returning_governed(
+                    &mut db,
+                    &c.query(),
+                    query,
+                    allowance,
+                    vertex_identity,
+                )
+            } else {
+                incumbent(
+                    &mut txn,
+                    &mut db,
+                    &c.query(),
+                    query,
+                    allowance,
+                    vertex_identity,
+                )
+            }
+            .unwrap();
+            let preparation = started.elapsed();
+            let digest = txn.staged_effect_digest().unwrap();
+            let started = Instant::now();
+            txn.commit(&mut db, &c.commit()).await.unwrap();
+            let commit = started.elapsed();
+            assert_eq!(db.frontier().unwrap().0, 1);
+            assert_eq!(c.txn().outstanding_obligations(), 0);
+            (preparation, commit, receipt, digest, db.vertices().unwrap())
+        }
+
+        let ((), report) = run_async_under_lab(0x6d17_02ff, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let script =
+                PreparedGraphWriteScript::prepare("CREATE (n:New {p:$value})", R, symbols).unwrap();
+            for records in [250, 1000, 4000] {
+                let args: Vec<_> = (0..records)
+                    .map(|row| {
+                        GqlParameters::new()
+                            .with_int64("value", row as i64)
+                            .unwrap()
+                    })
+                    .collect();
+                let batch = script
+                    .bind_parameter_sets_with_limit(&args, records)
+                    .unwrap();
+                let query = batch.program();
+                let expected: BTreeMap<_, _> = (0..records)
+                    .map(|row| {
+                        let id = if row == 0 {
+                            VId(u128::MAX)
+                        } else {
+                            VId(1_000 + row as u128 * 10_000)
+                        };
+                        (
+                            id,
+                            vec![(
+                                P,
+                                fgdb_types::CanonicalPropertyValue::from(CanonicalScalar::Int(
+                                    row as i64,
+                                )),
+                            )],
+                        )
+                    })
+                    .collect();
+                for pair in 0..4 {
+                    let (old, new) = if pair % 2 == 0 {
+                        (
+                            measure(&c, query, false).await,
+                            measure(&c, query, true).await,
+                        )
+                    } else {
+                        let new = measure(&c, query, true).await;
+                        (measure(&c, query, false).await, new)
+                    };
+                    assert_eq!(old.2.stats(), new.2.stats());
+                    assert_eq!(old.2.steps(), new.2.steps());
+                    assert_eq!(old.3, new.3);
+                    assert_eq!(old.4, new.4);
+                    assert_eq!(
+                        new.4
+                            .iter()
+                            .map(|row| (row.vid, row.props.clone()))
+                            .collect::<BTreeMap<_, _>>(),
+                        expected
+                    );
+                    if pair != 0 {
+                        eprintln!(
+                            "vertex_program_measurement storage=MemVfs debug_assertions={} records={records} pair={pair} old_prepare_ms={:.3} new_prepare_ms={:.3} old_commit_ms={:.3} new_commit_ms={:.3} old_total_ms={:.3} new_total_ms={:.3}",
+                            cfg!(debug_assertions),
+                            old.0.as_secs_f64() * 1000.0,
+                            new.0.as_secs_f64() * 1000.0,
+                            old.1.as_secs_f64() * 1000.0,
+                            new.1.as_secs_f64() * 1000.0,
+                            (old.0 + old.1).as_secs_f64() * 1000.0,
+                            (new.0 + new.1).as_secs_f64() * 1000.0,
+                        );
+                    }
+                }
+            }
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }

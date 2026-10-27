@@ -4282,15 +4282,16 @@ impl<V: Vfs + Clone> Database<V> {
     ///   edges, each in identity order, as the general path's ordered maps
     ///   ran it.
     fn build_create_template(&self, batch: WriteBatch) -> Result<LogicalDeltaTemplate, WriteError> {
-        self.build_create_template_with_edge_prefix(batch, None)
+        self.build_create_template_with_prefix(batch, None, None)
     }
 
-    /// A proved independent edge-creation program retains earlier created IDs
+    /// A proved independent creation program retains earlier created IDs
     /// without re-preparing their rows. All checks for this chunk, including
     /// the source-order choice of the first refusal, remain the ordinary ones.
-    fn build_create_template_with_edge_prefix(
+    fn build_create_template_with_prefix(
         &self,
         batch: WriteBatch,
+        earlier_vertices: Option<&fgdb_gql::id_hash::IdSet<VId>>,
         earlier_edges: Option<&fgdb_gql::id_hash::IdSet<EId>>,
     ) -> Result<LogicalDeltaTemplate, WriteError> {
         let relation = batch.relation;
@@ -4310,7 +4311,10 @@ impl<V: Vfs + Clone> Database<V> {
                     props,
                     ensure: false,
                 } => {
-                    if created_vertices.contains(&vid) || self.writer.is_vertex_live(vid) {
+                    if earlier_vertices.is_some_and(|vertices| vertices.contains(&vid))
+                        || created_vertices.contains(&vid)
+                        || self.writer.is_vertex_live(vid)
+                    {
                         return Err(WriteError::AlreadyLive {
                             elem: ElementId::Vertex(vid),
                         });

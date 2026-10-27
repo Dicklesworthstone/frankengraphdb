@@ -580,6 +580,20 @@ impl PreparedGraphInsert {
         self.edges.len()
     }
 
+    /// Standalone vertex creations have one implicit input occurrence and no
+    /// graph reads. Earlier vertex creations cannot change that occurrence or
+    /// its frozen property values. A host may prepare such statements in
+    /// independent chunks only while preserving their issued identities,
+    /// storage admission, source order and ordinary all-or-nothing staging.
+    ///
+    /// Pattern-selected and relational inputs, including source-free UNWIND,
+    /// are deliberately outside this proof, as are creations containing edges.
+    #[must_use]
+    pub fn independent_vertex_append_relation(&self) -> Option<RelationId> {
+        (self.is_standalone() && !self.vertices.is_empty() && self.edges.is_empty())
+            .then_some(self.relation)
+    }
+
     /// A native vertex-only selection followed solely by edge creations in
     /// one relation. Appending such edges cannot change this selection or its
     /// frozen property inputs. A host may reuse that fact only while no other

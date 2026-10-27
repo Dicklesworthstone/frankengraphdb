@@ -3,38 +3,57 @@
 
 include!("frozen_update_program.rs");
 
-/// Admitted edge chunks remain private until the program's last stage. Every
-/// selection in this profile reads only the unchanged vertex domain, so it
-/// sees exactly the same values as the ordinary canonical prefix overlay.
-struct IndependentEdgeWrites {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IndependentCreateKind {
+    Vertices,
+    Edges,
+}
+
+/// Admitted creation chunks remain private until the program's last stage.
+/// Standalone vertex creations read no graph; edge-only selections read only
+/// the unchanged vertex domain. Every statement therefore sees the same
+/// inputs as the ordinary canonical prefix overlay.
+struct IndependentCreateWrites {
+    kind: IndependentCreateKind,
     relation: RelationId,
     batches: Vec<WriteBatch>,
     chunks: Vec<crate::LogicalDeltaTemplate>,
-    created: fgdb_gql::id_hash::IdSet<EId>,
+    created_vertices: fgdb_gql::id_hash::IdSet<VId>,
+    created_edges: fgdb_gql::id_hash::IdSet<EId>,
     dependencies: crate::prepared_write::PreparedDependencies,
 }
 
-impl IndependentEdgeWrites {
+impl IndependentCreateWrites {
     fn admit(txn: &WriteTxn, program: &fgdb_gql::PreparedGraphWriteProgram) -> Option<Self> {
         if !txn.staged.is_empty() || txn.prepared.is_some() || program.statements().len() < 2 {
             return None;
         }
-        let mut relation = None;
+        let mut profile = None;
         for statement in program.statements() {
             let fgdb_gql::GraphWriteStatement::Insert(insertion) = statement else {
                 return None;
             };
-            let current = insertion.independent_edge_append_relation()?;
-            if relation.is_some_and(|previous| previous != current) {
+            let current = if let Some(relation) = insertion.independent_vertex_append_relation() {
+                (IndependentCreateKind::Vertices, relation)
+            } else {
+                (
+                    IndependentCreateKind::Edges,
+                    insertion.independent_edge_append_relation()?,
+                )
+            };
+            if profile.is_some_and(|previous| previous != current) {
                 return None;
             }
-            relation = Some(current);
+            profile = Some(current);
         }
+        let (kind, relation) = profile?;
         Some(Self {
-            relation: relation?,
+            kind,
+            relation,
             batches: Vec::new(),
             chunks: Vec::new(),
-            created: fgdb_gql::id_hash::IdSet::default(),
+            created_vertices: fgdb_gql::id_hash::IdSet::default(),
+            created_edges: fgdb_gql::id_hash::IdSet::default(),
             dependencies: crate::prepared_write::PreparedDependencies::default(),
         })
     }
@@ -47,10 +66,18 @@ impl IndependentEdgeWrites {
         // The checked insertion definition proves this shape. Keep the storage
         // seam closed even if a future caller forgets that eligibility proof.
         if batch.relation != self.relation
-            || batch
-                .rows
-                .iter()
-                .any(|row| !matches!(row, PendingRow::Edge { ensure: false, .. }))
+            || batch.rows.iter().any(|row| {
+                !matches!(
+                    (self.kind, row),
+                    (
+                        IndependentCreateKind::Vertices,
+                        PendingRow::Vertex { ensure: false, .. }
+                    ) | (
+                        IndependentCreateKind::Edges,
+                        PendingRow::Edge { ensure: false, .. }
+                    )
+                )
+            })
         {
             return Err(WriteTxnError::UnsupportedAtomicMutation);
         }
@@ -62,12 +89,24 @@ impl IndependentEdgeWrites {
                 &database.writer,
                 &batch,
             ));
-        let chunk = database.prepare_independent_edge_chunk(batch.clone(), &self.created)?;
+        let chunk = match self.kind {
+            IndependentCreateKind::Vertices => {
+                database.prepare_independent_vertex_chunk(batch.clone(), &self.created_vertices)?
+            }
+            IndependentCreateKind::Edges => {
+                database.prepare_independent_edge_chunk(batch.clone(), &self.created_edges)?
+            }
+        };
         for row in chunk.rows() {
-            let crate::DeltaRow::CreateEdge { eid, .. } = row else {
-                return Err(WriteTxnError::UnsupportedAtomicMutation);
-            };
-            self.created.insert(*eid);
+            match (self.kind, row) {
+                (IndependentCreateKind::Vertices, crate::DeltaRow::CreateVertex { vid, .. }) => {
+                    self.created_vertices.insert(*vid);
+                }
+                (IndependentCreateKind::Edges, crate::DeltaRow::CreateEdge { eid, .. }) => {
+                    self.created_edges.insert(*eid);
+                }
+                _ => return Err(WriteTxnError::UnsupportedAtomicMutation),
+            }
         }
         self.chunks.push(chunk);
         self.batches.push(batch);
@@ -80,26 +119,38 @@ impl<'txn> MutationProgramWorkspace<'txn> {
         txn: &'txn mut WriteTxn,
         program: &fgdb_gql::PreparedGraphWriteProgram,
     ) -> Self {
-        let independent_edges = IndependentEdgeWrites::admit(txn, program);
+        let independent_creates = IndependentCreateWrites::admit(txn, program);
         let mut workspace = Self::new(txn);
-        workspace.independent_edges = independent_edges;
+        workspace.independent_creates = independent_creates;
         workspace
     }
 
-    fn finish_independent_edges<V: Vfs + Clone>(
+    fn finish_independent_creates<V: Vfs + Clone>(
         &mut self,
         database: &Database<V>,
     ) -> Result<(), WriteTxnError> {
-        let Some(independent) = &mut self.independent_edges else {
+        let Some(independent) = &mut self.independent_creates else {
             return Ok(());
         };
         if independent.chunks.is_empty() {
             return Ok(());
         }
-        let prepared = database.compose_independent_edge_chunks(
+        // Every admitted standalone vertex intent creates exactly one distinct
+        // row. Keep ordinary preparation's replay allowance; the existing edge
+        // profile retains its conservative no-replay contract.
+        let replay_row_allowance = if independent.kind == IndependentCreateKind::Vertices {
+            Some(
+                u64::try_from(independent.created_vertices.len())
+                    .map_err(|_| WriteTxnError::AtomicOrdinalOverflow)?,
+            )
+        } else {
+            None
+        };
+        let prepared = database.compose_independent_create_chunks(
             independent.relation,
             &independent.chunks,
             independent.dependencies.clone(),
+            replay_row_allowance,
         )?;
         debug_assert_eq!(prepared.basis(), self.txn.basis);
         debug_assert!(self.txn.prepared.is_none() && self.txn.staged.is_empty());
@@ -274,7 +325,7 @@ impl WriteTxn {
                                     allocate(GraphWriteIdentityRequest { statement, request })
                                 },
                                 false,
-                                workspace.independent_edges.as_mut(),
+                                workspace.independent_creates.as_mut(),
                             )
                             .map(|(stats, _, _)| GraphWriteStepStats::Insert(stats))
                             .map_err(GraphWriteStepError::Insert),
@@ -352,7 +403,7 @@ impl WriteTxn {
                     }?;
                     if statement + 1 == program.statements().len() {
                         workspace
-                            .finish_independent_edges(database)
+                            .finish_independent_creates(database)
                             .map_err(|error| {
                                 GraphWriteStepError::Insert(fgdb_gql::GqlQueryError::Source(
                                     fgdb_gql::insertion::GraphInsertError::Source(error),
@@ -455,7 +506,7 @@ impl WriteTxn {
                                     allocate(GraphWriteIdentityRequest { statement, request })
                                 },
                                 true,
-                                workspace.independent_edges.as_mut(),
+                                workspace.independent_creates.as_mut(),
                             )
                             .map(|(stats, vertices, edges)| {
                                 receipts.push(GraphWriteStepReceipt::Insert { vertices, edges });
@@ -552,7 +603,7 @@ impl WriteTxn {
                     }?;
                     if statement + 1 == program.statements().len() {
                         workspace
-                            .finish_independent_edges(database)
+                            .finish_independent_creates(database)
                             .map_err(|error| {
                                 GraphWriteStepError::Insert(fgdb_gql::GqlQueryError::Source(
                                     fgdb_gql::insertion::GraphInsertError::Source(error),

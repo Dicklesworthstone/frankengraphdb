@@ -1000,7 +1000,7 @@ impl WriteTxn {
         policy: fgdb_gql::insertion::GraphInsertPolicy,
         allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
         retain_identities: bool,
-        independent: Option<&mut IndependentEdgeWrites>,
+        independent: Option<&mut IndependentCreateWrites>,
     ) -> Result<
         WithAffectedIds<fgdb_gql::insertion::GraphInsertStats>,
         TxnGqlError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>>,
@@ -1075,7 +1075,7 @@ impl WriteTxn {
         relation: RelationId,
         proposal: fgdb_gql::insertion::GraphInsertBatch,
         retain_identities: bool,
-        independent: Option<&mut IndependentEdgeWrites>,
+        independent: Option<&mut IndependentCreateWrites>,
     ) -> Result<
         WithAffectedIds<fgdb_gql::insertion::GraphInsertStats>,
         TxnGqlError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>>,

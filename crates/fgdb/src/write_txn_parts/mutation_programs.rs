@@ -8,7 +8,7 @@ struct MutationProgramWorkspace<'txn> {
     txn: &'txn mut WriteTxn,
     staged_len: usize,
     prepared: Option<std::sync::Arc<PreparedWrite>>,
-    independent_edges: Option<IndependentEdgeWrites>,
+    independent_creates: Option<IndependentCreateWrites>,
     program_multi_relation: bool,
     accepted: bool,
 }
@@ -24,7 +24,7 @@ impl<'txn> MutationProgramWorkspace<'txn> {
             txn,
             staged_len,
             prepared,
-            independent_edges: None,
+            independent_creates: None,
             program_multi_relation,
             accepted: false,
         }
@@ -55,8 +55,8 @@ impl Drop for MutationProgramWorkspace<'_> {
                 .borrow_mut()
                 .extend(prepared.dependencies.observations());
         }
-        if let Some(independent) = &self.independent_edges {
-            // These chunks were invisible to the proved vertex-only inputs,
+        if let Some(independent) = &self.independent_creates {
+            // These chunks were invisible to the proved independent inputs,
             // but their storage refusals still observed identities/endpoints.
             // A failed final composition must retain them too. The exclusive
             // transaction borrow lets this unwind path avoid RefCell borrowing.

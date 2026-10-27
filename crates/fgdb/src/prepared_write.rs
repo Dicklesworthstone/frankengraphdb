@@ -113,6 +113,30 @@ impl PreparedDependencies {
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Standalone vertex creations never read an earlier chunk. Retain those
+    /// identities for the same duplicate refusal as ordinary prefix staging,
+    /// while admitting each statement's values and storage content once.
+    pub(super) fn prepare_independent_vertex_chunk(
+        &mut self,
+        batch: WriteBatch,
+        earlier_vertices: &fgdb_gql::id_hash::IdSet<VId>,
+    ) -> Result<crate::LogicalDeltaTemplate, WriteError> {
+        self.ensure_writable()?;
+        if batch.is_empty() {
+            return Err(WriteError::EmptyBatch);
+        }
+        debug_assert!(
+            batch
+                .rows
+                .iter()
+                .all(|row| matches!(row, PendingRow::Vertex { ensure: false, .. }))
+        );
+        // Ordinary preparation admits every supplied value before checking
+        // identities, including collisions with earlier successful statements.
+        self.admit_write_values(&batch)?;
+        self.build_create_template_with_prefix(batch, Some(earlier_vertices), None)
+    }
+
     /// Prepare only the next edge-creation chunk of a program whose vertex
     /// selections cannot observe any earlier chunk. The program owner keeps
     /// both successful and refused preparation dependencies separately.
@@ -134,17 +158,18 @@ impl<V: Vfs + Clone> Database<V> {
         // This complete input pass must still precede every identity/liveness
         // check, including a collision with an earlier program chunk.
         self.admit_write_values(&batch)?;
-        self.build_create_template_with_edge_prefix(batch, Some(earlier_edges))
+        self.build_create_template_with_prefix(batch, None, Some(earlier_edges))
     }
 
     /// One ordinary canonical authority for already-admitted independent
     /// chunks. No row is re-derived from storage, and no earlier prefix is
     /// cloned or sorted while another program statement is being evaluated.
-    pub(super) fn compose_independent_edge_chunks(
+    pub(super) fn compose_independent_create_chunks(
         &self,
         relation: crate::RelationId,
         chunks: &[crate::LogicalDeltaTemplate],
         dependencies: PreparedDependencies,
+        replay_row_allowance: Option<u64>,
     ) -> Result<PreparedWrite, crate::WriteTxnError> {
         let mut rows = Vec::new();
         let mut offset = 0_u64;
@@ -162,8 +187,10 @@ impl<V: Vfs + Clone> Database<V> {
             }
             for row in &coordinate.rows {
                 let mut row = row.clone();
-                let crate::DeltaRow::CreateEdge { birth_ordinal, .. } = &mut row else {
-                    return Err(crate::WriteTxnError::UnsupportedAtomicMutation);
+                let birth_ordinal = match &mut row {
+                    crate::DeltaRow::CreateVertex { birth_ordinal, .. }
+                    | crate::DeltaRow::CreateEdge { birth_ordinal, .. } => birth_ordinal,
+                    _ => return Err(crate::WriteTxnError::UnsupportedAtomicMutation),
                 };
                 *birth_ordinal = birth_ordinal
                     .checked_add(offset)
@@ -195,7 +222,7 @@ impl<V: Vfs + Clone> Database<V> {
             basis: self.snapshot.frontier,
             handle_owner: Arc::clone(&self.handle_owner),
             dependencies,
-            replay_row_allowance: None,
+            replay_row_allowance,
             authorization_decision_digest: None,
         })
     }
