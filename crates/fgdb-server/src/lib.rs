@@ -46,11 +46,11 @@
 //! - Trusted embedding hosts can compact and scrub a served database through
 //!   [`Server::compact_database`] and [`Server::scrub_database`] while its
 //!   writer lease remains held. Maintenance shares ordinary write admission,
-//!   snapshot publication, and supervised recovery. These host operations are
-//!   not remote endpoints or rights granted by a query capability. Operators
+//!   snapshot publication, and supervised recovery. Operators
 //!   can opt in per database to fixed compaction/scrub intervals in `fgdbd`;
 //!   [`Server::run_maintenance`] drives the same operations under host ownership.
-//!   HTTP maintenance requires a separate unrestricted Warden Admin token;
+//!   The HTTP maintenance routes use the same engine operations and require
+//!   a separate unrestricted Warden Admin token;
 //!   ordinary read/write tokens cannot authorize it. Admin grants no queries.
 //!
 //! Not served, and refused with a typed error rather than approximated: the

@@ -2174,6 +2174,99 @@ fn http_adapter_serves_the_same_authorized_statements() {
             "{body}"
         );
 
+        // Exercise maintenance through the real HTTP parser, routing, bearer
+        // verification and physical writer, alongside ordinary query traffic.
+        let admin = token(&grant(Rights::Admin));
+        let masked_admin = token(&Grant {
+            properties: Scope::only([PropertyKeyId(1)]),
+            ..grant(Rights::Admin)
+        });
+        let before_maintenance = std::fs::read(path.join("manifest.root")).unwrap();
+        for operation in ["compact", "scrub"] {
+            let endpoint = format!("/v1/databases/social/{operation}");
+            for credential in [&ro, &rw, &masked_admin] {
+                let (status, answer) =
+                    http(addr, "POST", &endpoint, host, Some(credential), "").await;
+                assert_eq!(status, 403, "{operation}: {answer}");
+            }
+            assert_eq!(
+                std::fs::read(path.join("manifest.root")).unwrap(),
+                before_maintenance
+            );
+        }
+        let (status, body) = http(
+            addr,
+            "POST",
+            "/v1/databases/social/compact",
+            host,
+            Some(&admin),
+            "",
+        )
+        .await;
+        assert_eq!(
+            (status, body.as_str()),
+            (200, r#"{"v":1,"operation":"compact","completed":true}"#)
+        );
+        assert_ne!(
+            std::fs::read(path.join("manifest.root")).unwrap(),
+            before_maintenance,
+            "successful compaction must publish a physical replacement"
+        );
+        let (status, body) = http(
+            addr,
+            "POST",
+            "/v1/databases/social/scrub",
+            host,
+            Some(&admin),
+            "",
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        use fgdb_protocol::json::{Json, parse_json};
+        let Json::Object(summary) = parse_json(&body, 32, 64).unwrap() else {
+            panic!("scrub response must be an object: {body}");
+        };
+        assert_eq!(summary.get("v"), Some(&Json::Number("1".into())));
+        assert_eq!(
+            summary.get("operation"),
+            Some(&Json::String("scrub".into()))
+        );
+        assert_eq!(summary.get("repaired"), Some(&Json::Number("0".into())));
+        let Some(Json::Number(objects)) = summary.get("objects") else {
+            panic!("scrub must report the checked objects: {body}");
+        };
+        assert!(objects.parse::<u64>().unwrap() >= 3, "{body}");
+        assert_eq!(summary.get("clean"), summary.get("objects"));
+        for (endpoint, statement) in [
+            ("query", r#"{"statement":"MATCH (p:Person) RETURN p.name"}"#),
+            ("write", r#"{"statement":"CREATE (:Person {name:'Eve'})"}"#),
+        ] {
+            let (status, answer) = http(
+                addr,
+                "POST",
+                &format!("/v1/databases/social/{endpoint}"),
+                host,
+                Some(&admin),
+                statement,
+            )
+            .await;
+            assert_eq!(status, 403, "Admin must grant no queries: {answer}");
+        }
+        let (status, body) = http(
+            addr,
+            "POST",
+            "/v1/databases/social/query",
+            host,
+            Some(&ro),
+            r#"{"statement":"MATCH (p:Person) RETURN p.name AS name, p.age AS age ORDER BY name"}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            r#"{"v":1,"columns":["name","age"],"rows":[[{"type":"text","value":"Ann"},{"type":"int","value":"32"}],[{"type":"text","value":"Bob"},{"type":"int","value":"25"}]],"seq":3}"#
+        );
+
         // Typed refusals map onto statuses; none reveals a hidden fact.
         let refusals = [
             (
