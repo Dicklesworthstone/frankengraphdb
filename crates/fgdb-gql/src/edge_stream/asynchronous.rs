@@ -253,6 +253,8 @@ impl<S: AsyncEdgeScanSource, F> AsyncEdgeScanCursor<S, F> {
     /// Prove the pull's Send contract here instead of making downstream
     /// executors traverse the concrete source's complete I/O future again.
     /// Return the existing lazy future directly, without another allocation.
+    // An asynchronous pull returns a future, so Iterator::next cannot be it.
+    #[allow(clippy::should_implement_trait)]
     pub fn next<C>(
         &mut self,
     ) -> impl core::future::Future<

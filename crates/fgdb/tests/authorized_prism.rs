@@ -26,6 +26,8 @@ use std::sync::Arc;
 type Failure = FnxReadError<ReadError, QueryError>;
 // A signed limit restriction paired with the dimension its refusal reports.
 type SignedLimitCase = (fn(u64) -> Restriction, LimitDimension);
+// The same, with the ceiling a threshold search starts below.
+type CeilingLimitCase = (fn(u64) -> Restriction, LimitDimension, u64);
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x39; 32]);
 const BRANCH: &str = "host-analytics-branch";
 const BFS: &str = "CALL fnx.single_source_shortest_path_length(1) YIELD vertex,distance";
@@ -1453,7 +1455,7 @@ fn completed_analytics_pages_and_groups_preserve_masked_answers_and_signed_limit
                 );
             }
 
-            let dimensions: [(fn(u64) -> Restriction, LimitDimension, u64); 3] = [
+            let dimensions: [CeilingLimitCase; 3] = [
                 (Restriction::MaxNodes, LimitDimension::Nodes, 1_000),
                 (Restriction::MaxWork, LimitDimension::Work, 1_000_000),
                 (Restriction::MaxRows, LimitDimension::Rows, 1_000),

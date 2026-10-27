@@ -18,7 +18,7 @@ use crate::gql_exec::source::{self, SourceEvent};
 use crate::query::prism::{LiveCache, ProjectionRequest, push_staged, source_admit};
 use crate::{Database, QueryError, ReadError, Snapshot};
 use asupersync::fs::Vfs;
-use fgdb_gql::{GqlQueryPolicy, GraphProcedureRowCursor};
+use fgdb_gql::GqlQueryPolicy;
 use fgdb_prism::{
     Directedness, FnxCallSpec, FnxExecutionError, FnxGraphKind, FnxMeter, FnxParameters,
     FnxReadError, FnxReadOptions, FnxRowCursor, FnxRowSink, FnxValue, ParallelEdgePolicy,
