@@ -48,6 +48,52 @@ fn execute(call: &FnxCallSpec, view: &SnapshotGraphView) -> FnxResult {
 fn bind(text: &str) -> FnxCallSpec {
     FnxCallSpec::bind(text, &FnxParameters::new()).unwrap()
 }
+
+#[test]
+fn standalone_kernel_classification_does_not_admit_invalid_values() {
+    for text in [
+        "CALL fnx.cdlp(max_iter => -1) YIELD vertex,component",
+        "CALL fnx.cdlp(max_iter => NULL) YIELD vertex,component",
+        "CALL fnx.cdlp(max_iter => true) YIELD vertex,component",
+        "CALL fnx.cdlp(max_iter => $missing) YIELD vertex,component",
+        "CALL fnx.single_source_shortest_path_length(cutoff => 2) YIELD vertex,distance",
+        "CALL fnx.pagerank(l1_tol => 1e-9, tol => 1e-6) YIELD vertex,score",
+        "CALL fnx.pagerank(iterations => 2) YIELD missing",
+        "CALL fnx.pagerank(iterations => 2) YIELD vertex,vertex",
+    ] {
+        assert!(FnxCallSpec::is_standalone_kernel_call(text), "{text}");
+        assert!(
+            FnxCallSpec::bind(text, &FnxParameters::new()).is_err(),
+            "{text}"
+        );
+        let continued = format!("{text} RETURN vertex");
+        assert!(FnxCallSpec::continues_past_call(&continued), "{continued}");
+        assert!(!FnxCallSpec::is_standalone_kernel_call(&continued));
+    }
+    let text = "CALL fnx.cdlp(max_iter => $steps) YIELD vertex,component";
+    for value in [
+        FnxArgument::Integer(-1),
+        FnxArgument::Null,
+        FnxArgument::Boolean(true),
+    ] {
+        let parameters = FnxParameters::from([("steps".to_owned(), value)]);
+        assert!(FnxCallSpec::is_standalone_kernel_call(text));
+        assert!(FnxCallSpec::bind(text, &parameters).is_err(), "{value:?}");
+    }
+    let parameters = FnxParameters::from([("steps".to_owned(), FnxArgument::Integer(2))]);
+    assert!(FnxCallSpec::is_standalone_kernel_call(text));
+    FnxCallSpec::bind(text, &parameters).unwrap();
+    for native in [
+        "CALL fnx.pagerank({relation:'R', weighted:false}) YIELD vertex",
+        "CALL fnx.pagerank(label => $label, iterations => 2) YIELD vertex",
+        "CALL fnx.pagerank(label => 2, iterations => 2) YIELD vertex",
+        "CALL fnx.pagerank(iterations => n.steps) YIELD vertex",
+        "CALL fnx.pagerank(iterations => 1+1) YIELD vertex",
+    ] {
+        assert!(!FnxCallSpec::is_standalone_kernel_call(native), "{native}");
+    }
+}
+
 fn scores(result: &FnxResult) -> Vec<f64> {
     result
         .rows

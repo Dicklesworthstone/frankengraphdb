@@ -3508,11 +3508,10 @@ fn sealed_prism_cli_preflights_before_writable_open() {
                 "KNOWS",
                 "CALL fnx.cdlp(max_iter => -1) YIELD vertex,component",
             ],
-            // Invalid named calls retain native routing, which refuses
-            // explicit Prism flags. Both preserved and current CLI binaries
-            // produce this usage refusal before opening the database.
-            2,
-            "usage",
+            // A bad kernel value stays on the standalone route and receives
+            // its typed query refusal before either database open.
+            3,
+            "query",
         ),
         (
             &[
@@ -3709,6 +3708,72 @@ fn sealed_prism_cli_preflights_before_writable_open() {
     }
     db.command("create", &["--sealed"]).failure(2, "usage");
     assert!(!std::path::Path::new(&db.db).exists());
+}
+
+#[test]
+fn named_kernel_arguments_bind_before_open_in_decoded_and_sealed_modes() {
+    let db = TestDb::new("named-kernel-preflight");
+    for sealed in [false, true] {
+        for (call, parameters) in [
+            (
+                "CALL fnx.cdlp(max_iter => -1) YIELD vertex,component",
+                vec![],
+            ),
+            (
+                "CALL fnx.cdlp(max_iter => NULL) YIELD vertex,component",
+                vec![],
+            ),
+            (
+                "CALL fnx.cdlp(max_iter => true) YIELD vertex,component",
+                vec![],
+            ),
+            (
+                "CALL fnx.cdlp(max_iter => $missing) YIELD vertex,component",
+                vec![],
+            ),
+            (
+                "CALL fnx.cdlp(max_iter => $steps) YIELD vertex,component",
+                vec!["--param", "steps=int:-1"],
+            ),
+            (
+                "CALL fnx.cdlp(max_iter => $steps) YIELD vertex,component",
+                vec!["--param", "steps=float:2"],
+            ),
+            (
+                "CALL fnx.cdlp(max_iter => $steps) YIELD vertex,component",
+                vec!["--param", "steps=null"],
+            ),
+            (
+                "CALL fnx.single_source_shortest_path_length(cutoff => 2) YIELD vertex,distance",
+                vec![],
+            ),
+            (
+                "CALL fnx.pagerank(l1_tol => 1e-9, tol => 1e-6) YIELD vertex,score",
+                vec![],
+            ),
+        ] {
+            let mut args = parameters;
+            if sealed {
+                args.extend_from_slice(&["--sealed", "--graph-relation", "KNOWS"]);
+            }
+            args.push(call);
+            let output = db.command("query", &args);
+            output.failure(3, "query");
+            assert_eq!(
+                output.terminal().get("code").string(),
+                "invalid_value",
+                "{args:?}"
+            );
+            assert!(!std::path::Path::new(&db.db).exists(), "{args:?}");
+        }
+        let mut args = vec!["--param", "steps=int:2"];
+        if sealed {
+            args.extend_from_slice(&["--sealed", "--graph-relation", "KNOWS"]);
+        }
+        args.push("CALL fnx.cdlp(max_iter => $steps) YIELD vertex,component");
+        db.command("query", &args).failure(4, "open");
+        assert!(!std::path::Path::new(&db.db).exists());
+    }
 }
 
 #[test]
