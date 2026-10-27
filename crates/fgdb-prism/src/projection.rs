@@ -199,6 +199,9 @@ struct Projection {
     names: Vec<[u8; 32]>,
     outgoing: Rows,
     incoming: Option<Rows>,
+    // A proven unit-weight projection retains one row of ones, sized by the
+    // maximum outgoing degree. Every CSR row borrows its matching prefix;
+    // general weights remain position-aligned with the outgoing incidences.
     weights: Vec<f64>,
     // Evidence over the FINAL reduced incidence, not the raw input weights.
     // Immutable with the CSR, so eligible kernels need no repeated weight scan.
@@ -820,8 +823,12 @@ impl SnapshotGraphView {
 
         let directed = spec.directedness != Directedness::Undirected;
         let mut loops = 0;
+        let mut unit_weights = true;
         for edge in &work {
             poll(&mut checkpoint)?;
+            // Observe final reductions, including Sum/Minimum/Maximum. Raw
+            // unit edges can reduce to a nonunit weight, and conversely.
+            unit_weights &= edge.weight == 1.0;
             if edge.source == edge.target {
                 loops += 1;
             }
@@ -841,6 +848,9 @@ impl SnapshotGraphView {
             mul(mul(add(mul(n, 2)?, 1)?, faces)?, size_of::<usize>())?,
         )?;
         bytes = add(bytes, mul(mul(arcs, faces)?, size_of::<usize>())?)?;
+        // Keep the registered conservative construction allowance and its
+        // refusal position. Unit-weight storage below can use less physical
+        // memory; retained-cache accounting uses its actual vector capacity.
         bytes = add(bytes, mul(arcs, size_of::<f64>())?)?;
         limit("workspace bytes", bytes, limits.max_workspace_bytes)?;
 
@@ -885,7 +895,21 @@ impl SnapshotGraphView {
             max_weak_degree = max_weak_degree.max(add(*next, incoming)?);
             *next = end;
         }
-        let mut weights = filled(out_len, 0.0, &mut checkpoint)?;
+        let share_unit_weights = unit_weights;
+        #[cfg(test)]
+        let share_unit_weights = share_unit_weights && !tests::dense_weight_incumbent();
+        let mut weights = if share_unit_weights {
+            let values = filled(max_out_degree, 1.0, &mut checkpoint)?;
+            // The logical initialization transcript still charges every
+            // incidence. A tight caller budget must refuse at the same unit,
+            // including after the shared row has been fully initialized.
+            for _ in max_out_degree..out_len {
+                poll(&mut checkpoint)?;
+            }
+            values
+        } else {
+            filled(out_len, 0.0, &mut checkpoint)?
+        };
         let in_offsets = if directed {
             offsets(&in_counts, &mut checkpoint)?
         } else {
@@ -909,9 +933,7 @@ impl SnapshotGraphView {
         // prefix of out_nodes. Reversing both the traversal and row cursors
         // leaves neighbors ascending on both faces, without row sorting.
         let mut first_negative_weight_visit = None;
-        let mut unit_weights = true;
         let mut record_weight = |source, slot, weight: f64| {
-            unit_weights &= weight == 1.0;
             if weight < 0.0 {
                 // Each earlier row and weight contributes one checkpoint.
                 // Observe the reduced weight, never a raw parallel edge.
@@ -934,7 +956,9 @@ impl SnapshotGraphView {
             let slot = out_next[s];
             debug_assert!(slot >= index);
             out_nodes[slot] = t;
-            weights[slot] = edge.weight;
+            if !share_unit_weights {
+                weights[slot] = edge.weight;
+            }
             record_weight(s, slot, edge.weight)?;
             if directed {
                 in_next[t] -= 1;
@@ -944,7 +968,9 @@ impl SnapshotGraphView {
                 let slot = out_next[t];
                 debug_assert!(slot >= index);
                 out_nodes[slot] = s;
-                weights[slot] = edge.weight;
+                if !share_unit_weights {
+                    weights[slot] = edge.weight;
+                }
                 record_weight(t, slot, edge.weight)?;
             }
         }
@@ -1041,14 +1067,19 @@ impl SnapshotGraphView {
     /// Borrow one canonical outgoing row and its position-aligned weights.
     /// The two slices have equal length and share the immutable cache lifetime;
     /// no per-edge lookup, allocation, string conversion or adjacency copy is
-    /// needed. This borrows DECODED_CACHE, not compressed Strata storage.
+    /// needed. Proven unit-weight rows share prefixes of one immutable row of
+    /// ones. This borrows DECODED_CACHE, not compressed Strata storage.
     pub fn projected_row(&self, source: usize) -> Option<(&[usize], &[f64])> {
         let end = source.checked_add(1)?;
         let start = *self.0.outgoing.offsets.get(source)?;
         let end = *self.0.outgoing.offsets.get(end)?;
         Some((
             self.0.outgoing.neighbors.get(start..end)?,
-            self.0.weights.get(start..end)?,
+            if self.0.unit_weights {
+                self.0.weights.get(..end - start)?
+            } else {
+                self.0.weights.get(start..end)?
+            },
         ))
     }
 
@@ -1067,12 +1098,9 @@ impl SnapshotGraphView {
     }
 
     pub fn projected_weight(&self, source: usize, target: usize) -> Option<f64> {
-        let row = self.0.outgoing.row(source)?;
+        let (row, weights) = self.projected_row(source)?;
         let index = row.binary_search(&target).ok()?;
-        self.0
-            .weights
-            .get(self.0.outgoing.offsets[source] + index)
-            .copied()
+        weights.get(index).copied()
     }
 }
 

@@ -6,6 +6,7 @@ use std::convert::Infallible;
 
 thread_local! {
     static INCUMBENT_DIRECTORY: Cell<bool> = const { Cell::new(false) };
+    static DENSE_WEIGHT_INCUMBENT: Cell<bool> = const { Cell::new(false) };
 }
 
 pub(super) fn incumbent_directory() -> bool {
@@ -20,6 +21,21 @@ fn with_incumbent_directory<T>(enabled: bool, work: impl FnOnce() -> T) -> T {
         }
     }
     let _reset = Reset(INCUMBENT_DIRECTORY.with(|mode| mode.replace(enabled)));
+    work()
+}
+
+pub(super) fn dense_weight_incumbent() -> bool {
+    DENSE_WEIGHT_INCUMBENT.with(Cell::get)
+}
+
+fn with_dense_weights<T>(enabled: bool, work: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            DENSE_WEIGHT_INCUMBENT.with(|mode| mode.set(self.0));
+        }
+    }
+    let _reset = Reset(DENSE_WEIGHT_INCUMBENT.with(|mode| mode.replace(enabled)));
     work()
 }
 
@@ -1697,6 +1713,380 @@ fn unit_weight_evidence_describes_reduced_incidence_in_both_builders() {
             )
             .unwrap();
             assert_eq!(graph.has_unit_weights(), self_loops == SelfLoopPolicy::Drop);
+        }
+    }
+}
+
+fn unit_weight_build(
+    vertices: &[VId],
+    edges: &[ProjectionEdge],
+    spec: ProjectionSpec,
+    limits: ProjectionLimits,
+    owned: bool,
+    dense: bool,
+    stop: Option<usize>,
+) -> (
+    Result<SnapshotGraphView, ProjectionBuildError<usize>>,
+    usize,
+) {
+    let mut checks = 0;
+    let result = with_dense_weights(dense, || {
+        let checkpoint = || {
+            checks += 1;
+            if stop == Some(checks) {
+                Err(checks)
+            } else {
+                Ok(())
+            }
+        };
+        if owned {
+            SnapshotGraphView::build_owned_with_checkpoint(
+                binding(),
+                vertices.to_vec(),
+                edges.to_vec(),
+                spec,
+                limits,
+                checkpoint,
+            )
+        } else {
+            SnapshotGraphView::build_with_checkpoint(
+                binding(),
+                vertices,
+                edges,
+                spec,
+                limits,
+                checkpoint,
+            )
+        }
+    });
+    (result, checks)
+}
+
+fn same_weight_rows(shared: &SnapshotGraphView, dense: &SnapshotGraphView) {
+    let mut actual = contents(shared.clone());
+    let expected = contents(dense.clone());
+    let n = shared.node_count();
+    let mut expanded = Vec::new();
+    for source in 0..n {
+        let (neighbors, weights) = shared.projected_row(source).unwrap();
+        let start = dense.0.outgoing.offsets[source];
+        let end = dense.0.outgoing.offsets[source + 1];
+        let original = &dense.0.weights[start..end];
+        assert_eq!(neighbors, &dense.0.outgoing.neighbors[start..end]);
+        assert_eq!(weights.len(), neighbors.len());
+        let bits: Vec<_> = weights.iter().map(|weight| weight.to_bits()).collect();
+        assert_eq!(
+            bits,
+            original
+                .iter()
+                .map(|weight| weight.to_bits())
+                .collect::<Vec<_>>()
+        );
+        expanded.extend(bits);
+        for target in 0..=n {
+            let expected = neighbors.binary_search(&target).ok().map(|at| original[at]);
+            assert_eq!(shared.projected_weight(source, target), expected);
+        }
+        if shared.has_unit_weights() && !weights.is_empty() {
+            assert_eq!(weights.as_ptr(), shared.0.weights.as_ptr());
+        }
+    }
+    for source in [n, usize::MAX] {
+        assert!(shared.projected_row(source).is_none());
+        assert!(shared.projected_weight(source, 0).is_none());
+    }
+    let stored = if shared.has_unit_weights() {
+        shared.0.max_out_degree
+    } else {
+        shared.0.outgoing.neighbors.len()
+    };
+    assert_eq!(shared.0.weights.len(), stored);
+    let saved = (dense.0.weights.capacity() - shared.0.weights.capacity()) * size_of::<f64>();
+    assert_eq!(
+        shared.charged_resident_bytes() + saved,
+        dense.charged_resident_bytes()
+    );
+    // Compare the complete logical contents and unchanged admission bound;
+    // only the expanded weight representation and its retained bytes differ.
+    actual.weight_bits = expanded;
+    actual.counts_and_bytes[5] += saved;
+    assert_eq!(actual, expected);
+    let clone = shared.clone();
+    assert!(clone.shares_cache_with(shared));
+    assert_eq!(clone.0.weights.as_ptr(), shared.0.weights.as_ptr());
+}
+
+#[test]
+fn shared_unit_rows_match_dense_reductions_and_every_cancellation_prefix() {
+    let vertices = [VId(0), VId(17), VId(1u128 << 100), VId(u128::MAX)];
+    let cases = [
+        (ParallelEdgePolicy::Reject, vec![1.0]),
+        (ParallelEdgePolicy::Sum, vec![0.25, 0.75]),
+        (ParallelEdgePolicy::Sum, vec![1.0, 1.0]),
+        (ParallelEdgePolicy::Minimum, vec![2.0, 1.0]),
+        (ParallelEdgePolicy::Maximum, vec![-2.0, 1.0]),
+        (
+            ParallelEdgePolicy::CollapseUnit,
+            vec![f64::NAN, f64::NEG_INFINITY],
+        ),
+        (ParallelEdgePolicy::Sum, vec![-0.0]),
+        (ParallelEdgePolicy::Sum, vec![-2.0]),
+    ];
+    for directedness in [
+        Directedness::Directed,
+        Directedness::Reversed,
+        Directedness::Undirected,
+    ] {
+        for self_loops in [SelfLoopPolicy::Keep, SelfLoopPolicy::Drop] {
+            for (parallel_edges, weights) in &cases {
+                let mut edges = Vec::new();
+                for (source, target) in [(0, 1), (0, 2), (1, 2), (1, 1), (2, 0)] {
+                    for &weight in weights {
+                        edges.push(ProjectionEdge {
+                            eid: EId((1u128 << 110) + edges.len() as u128),
+                            source: vertices[source],
+                            target: vertices[target],
+                            weight,
+                        });
+                    }
+                }
+                edges.reverse();
+                let spec = ProjectionSpec {
+                    directedness,
+                    parallel_edges: *parallel_edges,
+                    self_loops,
+                };
+                for owned in [false, true] {
+                    let (shared, count) =
+                        unit_weight_build(&vertices, &edges, spec, limits(), owned, false, None);
+                    let (dense, previous_count) =
+                        unit_weight_build(&vertices, &edges, spec, limits(), owned, true, None);
+                    assert_eq!(count, previous_count);
+                    match (&shared, &dense) {
+                        (Ok(shared), Ok(dense)) => same_weight_rows(shared, dense),
+                        (Err(shared), Err(dense)) => assert_eq!(shared, dense),
+                        _ => panic!("shared and dense admission disagree"),
+                    }
+                    // In particular, cancellation after max_degree but before
+                    // the former weight vector ended must still refuse.
+                    for stop in 1..=count {
+                        for dense in [false, true] {
+                            let (result, observed) = unit_weight_build(
+                                &vertices,
+                                &edges,
+                                spec,
+                                limits(),
+                                owned,
+                                dense,
+                                Some(stop),
+                            );
+                            assert_eq!(result.unwrap_err(), ProjectionBuildError::Cancelled(stop));
+                            assert_eq!(observed, stop);
+                        }
+                    }
+                    if let Ok(shared) = shared {
+                        let ceiling = shared.charged_workspace_bytes();
+                        for max_workspace_bytes in [0, ceiling - 1, ceiling] {
+                            let budget = ProjectionLimits {
+                                max_workspace_bytes,
+                                ..limits()
+                            };
+                            let (shared, count) = unit_weight_build(
+                                &vertices, &edges, spec, budget, owned, false, None,
+                            );
+                            let (dense, previous_count) = unit_weight_build(
+                                &vertices, &edges, spec, budget, owned, true, None,
+                            );
+                            assert_eq!(count, previous_count);
+                            match (shared, dense) {
+                                (Ok(shared), Ok(dense)) => same_weight_rows(&shared, &dense),
+                                (Err(shared), Err(dense)) => assert_eq!(shared, dense),
+                                _ => panic!("shared and dense workspace refusal disagree"),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn unit_weight_storage_tracks_maximum_degree_and_empty_population() {
+    for n in [0usize, 1, 2, 127, 512] {
+        let vertices = directory_vertices(n, 0);
+        let mut edges = Vec::new();
+        if n > 1 {
+            for source in 0..n {
+                for step in 1..=n.min(6) {
+                    edges.push(ProjectionEdge {
+                        eid: EId(edges.len() as u128),
+                        source: vertices[source],
+                        target: vertices[(source + step) % n],
+                        weight: 1.0,
+                    });
+                }
+            }
+        }
+        let admission = ProjectionLimits {
+            max_vertices: n,
+            max_input_edges: edges.len(),
+            max_adjacency_entries: 2 * edges.len(),
+            max_workspace_bytes: usize::MAX,
+        };
+        for directedness in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            let spec = ProjectionSpec {
+                directedness,
+                parallel_edges: ParallelEdgePolicy::CollapseUnit,
+                self_loops: SelfLoopPolicy::Drop,
+            };
+            let (shared, checks) =
+                unit_weight_build(&vertices, &edges, spec, admission, true, false, None);
+            let (dense, prior_checks) =
+                unit_weight_build(&vertices, &edges, spec, admission, true, true, None);
+            assert_eq!(checks, prior_checks);
+            let (shared, dense) = (shared.unwrap(), dense.unwrap());
+            same_weight_rows(&shared, &dense);
+            if n >= 127 {
+                let arcs = shared.0.outgoing.neighbors.len();
+                let degree = shared.0.max_out_degree;
+                assert_eq!(dense.0.weights.capacity(), arcs);
+                assert_eq!(shared.0.weights.capacity(), degree);
+                assert_eq!(
+                    dense.charged_resident_bytes() - shared.charged_resident_bytes(),
+                    (arcs - degree) * 8
+                );
+                assert!(shared.0.weights.capacity() < dense.0.weights.capacity() / 100);
+            }
+        }
+    }
+}
+
+/// Paired layout measurement: complete cold borrowed-input construction,
+/// consumption of both adjacency faces and every logical weight, and release.
+/// The dense predecessor runs in the same invocation in alternating order.
+/// These are projection timings and actual retained-vector capacities, not
+/// database latency, process RSS, or an activated competitive performance gate.
+#[test]
+#[ignore = "manual paired release-mode unit-weight projection measurement"]
+fn shared_unit_weight_storage_paired_measurement() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    fn consume(view: &SnapshotGraphView, dense: bool) -> (Digest, u128) {
+        let mut consumed = 0u128;
+        for source in 0..view.node_count() {
+            consumed = consumed.rotate_left(7) ^ view.vertex_id(source).unwrap().0;
+            let (targets, shared_weights) = view.projected_row(source).unwrap();
+            // The old layout reads each row's own incidence-aligned weights;
+            // do not give it the compact layout's cache-local prefix access.
+            let weights = if dense {
+                let start = view.0.outgoing.offsets[source];
+                let end = view.0.outgoing.offsets[source + 1];
+                &view.0.weights[start..end]
+            } else {
+                shared_weights
+            };
+            for (&target, &weight) in targets.iter().zip(weights) {
+                consumed = consumed.rotate_left(11) ^ target as u128 ^ weight.to_bits() as u128;
+            }
+            for &incoming in view.in_neighbors_indices(source).unwrap() {
+                consumed = consumed.rotate_left(13) ^ incoming as u128;
+            }
+        }
+        black_box((view.digest(), consumed))
+    }
+
+    let n = 8192;
+    let vertices = directory_vertices(n, 0);
+    for shape in ["sparse", "hub", "clustered"] {
+        let mut edges = Vec::new();
+        let mut push = |source: usize, target: usize| {
+            edges.push(ProjectionEdge {
+                eid: EId(edges.len() as u128),
+                source: vertices[source],
+                target: vertices[target],
+                weight: 1.0,
+            });
+        };
+        for source in 0..n {
+            match shape {
+                "sparse" => {
+                    push(source, (source + 1) % n);
+                    push(source, (source + 128) % n);
+                }
+                "hub" => {
+                    if source != 0 {
+                        push(0, source);
+                        if source + 1 < n {
+                            push(source, source + 1);
+                        }
+                    }
+                }
+                "clustered" => {
+                    let end = (source / 32 + 1) * 32;
+                    for target in source + 1..end {
+                        push(source, target);
+                    }
+                    if source + 1 == end && end < n {
+                        push(source, end);
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        let admission = ProjectionLimits {
+            max_vertices: n,
+            max_input_edges: edges.len(),
+            max_adjacency_entries: 2 * edges.len(),
+            max_workspace_bytes: usize::MAX,
+        };
+        for directedness in [Directedness::Directed, Directedness::Undirected] {
+            let spec = ProjectionSpec {
+                directedness,
+                parallel_edges: ParallelEdgePolicy::CollapseUnit,
+                self_loops: SelfLoopPolicy::Drop,
+            };
+            for trial in 0..5 {
+                let mut pair = [None, None];
+                let mut retained = [0; 2];
+                for dense in [trial % 2 == 0, trial % 2 != 0] {
+                    let started = Instant::now();
+                    let (output, units, resident, weights, arcs, degree) = {
+                        let (view, units) = unit_weight_build(
+                            black_box(&vertices),
+                            black_box(&edges),
+                            spec,
+                            admission,
+                            false,
+                            dense,
+                            None,
+                        );
+                        let view = view.unwrap();
+                        (
+                            consume(&view, dense),
+                            units,
+                            view.charged_resident_bytes(),
+                            view.0.weights.capacity() * size_of::<f64>(),
+                            view.0.outgoing.neighbors.len(),
+                            view.0.max_out_degree,
+                        )
+                    };
+                    let elapsed = started.elapsed().as_nanos();
+                    pair[usize::from(dense)] = Some((output, units));
+                    retained[usize::from(dense)] = resident;
+                    eprintln!(
+                        "unit_weights_pair shape={shape} direction={directedness:?} vertices={n} edges={} arcs={arcs} maximum_degree={degree} trial={trial} dense={dense} elapsed_ns={elapsed} units={units} resident_bytes={resident} weight_bytes={weights}",
+                        edges.len(),
+                    );
+                }
+                assert_eq!(pair[0], pair[1], "{shape} {directedness:?} trial={trial}");
+                assert!(retained[0] < retained[1]);
+            }
         }
     }
 }
