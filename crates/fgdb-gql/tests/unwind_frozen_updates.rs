@@ -316,17 +316,25 @@ fn rekeys_swaps_and_repeated_targets_keep_the_entry_selection_and_input_order() 
 }
 
 #[test]
-fn overlapping_labels_and_rhs_freeze_while_disjoint_arithmetic_stays_sequential() {
+fn overlapping_labels_freeze_but_graph_reading_feedback_refuses_and_disjoint_rhs_stays_live() {
     let rows = [(1, 1), (1, 2)];
-    let frozen = bind(
-        "UNWIND $rows AS row MATCH (n:Entity {id:row.a}) \
-         SET n.id=n.id+row.b, n.p=n.p+1",
-        &rows,
-    );
-    assert!(frozen.program().freezes_vertex_update_input());
-    let mut graph = Graph::new(&[(10, 1, 10)]);
-    execute(&mut graph, frozen.program(), policy(), &Control::default()).unwrap();
-    assert_eq!(graph, Graph::new(&[(10, 3, 11)]));
+    // Eager MATCH buffers identities, not the graph properties subsequently
+    // read by SET. Reject the old lost-increment behavior until bindings can
+    // freeze independently from current-row RHS evaluation.
+    for text in [
+        "UNWIND $rows AS row MATCH (n:Entity {id:row.a}) SET n.id=n.id+row.b, n.p=n.p+1",
+        "UNWIND $rows AS row MATCH (n:Entity {id:row.a}) SET n.id=row.a, n.p=n.p+row.b",
+        "UNWIND $rows AS row MATCH (n:Entity {id:row.a}) SET n={id:row.b}",
+    ] {
+        let definition = GraphUnwindWriteText::parse(text).unwrap();
+        assert!(
+            matches!(
+                definition.bind_with_limit_resolver(&arguments(&rows), R, 64, Catalog),
+                Err(GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 })
+            ),
+            "{text}"
+        );
+    }
 
     let disjoint = bind(
         "UNWIND $rows AS row MATCH (n:Entity {id:row.a}) SET n.p=n.p+row.b",
@@ -358,9 +366,9 @@ fn overlapping_labels_and_rhs_freeze_while_disjoint_arithmetic_stays_sequential(
 
     let replacement = bind(
         "UNWIND $rows AS row MATCH (n:Entity {id:row.a}) SET n={id:row.b}",
-        &[(1, 2), (1, 3)],
+        &[(1, 3)],
     );
-    assert!(replacement.program().freezes_vertex_update_input());
+    assert!(!replacement.program().freezes_vertex_update_input());
     let mut graph = Graph::new(&[(10, 1, 10)]);
     graph
         .vertices
@@ -588,10 +596,10 @@ fn late_rhs_failure_retains_the_original_input_location_and_publishes_nothing() 
 fn row_local_conflicts_and_null_optional_targets_keep_the_native_mutation_laws() {
     let duplicate = bind(
         "UNWIND $rows AS row MATCH (n:Entity {id:row.a})-[:R]->(m) \
-         SET n.id=m.id+row.b",
+         SET n.p=m.id+row.b",
         &[(99, 0), (1, 0)],
     );
-    assert!(duplicate.program().freezes_vertex_update_input());
+    assert!(!duplicate.program().freezes_vertex_update_input());
     let mut graph = Graph::new(&[(10, 1, 10), (20, 2, 20), (30, 3, 30)]);
     graph.edges = vec![(VId(10), R, VId(20)), (VId(10), R, VId(30))];
     let initial = graph.clone();
@@ -613,7 +621,8 @@ fn row_local_conflicts_and_null_optional_targets_keep_the_native_mutation_laws()
     assert_eq!(graph, initial);
 
     // The OPTIONAL target is NULL, so its invalid RHS is never evaluated. The
-    // matched target still freezes its two proposals and takes the final row.
+    // matched target freezes its selections and takes the final row. The
+    // invalid scalar RHS is row-independent and retains NULL short-circuiting.
     let optional = bind(
         "UNWIND $rows AS row MATCH (n:Entity {id:row.a}) \
          OPTIONAL MATCH (n)-[:R]->(m) SET n.id=row.b, m.p=1/0",
@@ -713,10 +722,13 @@ fn cumulative_limits_and_every_checkpoint_refusal_restore_the_entry_graph() {
 
 #[test]
 fn definition_admission_precedes_mode_selection_and_unsupported_profiles_still_refuse() {
+    const EDGE_REKEY: &str =
+        "UNWIND $rows AS row MATCH (n:Entity)-[e:R {id:row.a}]->(m) SET e.id=row.b";
     let arguments = arguments(&[(1, 2), (2, 3)]);
     for text in [
         REKEY,
-        "UNWIND $rows AS row MATCH (n:Entity)-[e:R {id:row.a}]->(m) SET e.id=row.b",
+        EDGE_REKEY,
+        "UNWIND $rows AS row MATCH (n:Entity)-[e:R {id:row.a}]->(m) SET e.id=row.b, n.id=row.b",
         "UNWIND $rows AS row MATCH (n:Entity {id:row.a})-[:R]->(m) DETACH DELETE n",
         "UNWIND $rows AS row MATCH (n:Entity {id:row.a}), (anchor:Entity {id:1}) DELETE n",
     ] {
@@ -739,6 +751,8 @@ fn definition_admission_precedes_mode_selection_and_unsupported_profiles_still_r
         let admitted = definition.bind(&arguments, R, symbols);
         if text == REKEY {
             assert!(admitted.unwrap().program().freezes_vertex_update_input());
+        } else if text == EDGE_REKEY {
+            assert!(admitted.unwrap().program().freezes_edge_update_input());
         } else {
             assert!(matches!(
                 admitted,

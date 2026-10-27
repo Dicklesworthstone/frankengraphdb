@@ -1057,15 +1057,29 @@ mod frozen_updates {
     }
 
     #[test]
-    fn overlapping_targets_keep_frozen_rhs_and_sequential_image_checks() {
+    fn overlapping_targets_refuse_rhs_feedback_and_keep_sequential_image_checks() {
         lab(0xa611_0104, |contexts| async move {
-            // Both RHS values read the entry q=0. Re-evaluating the second
-            // occurrence after the first update would incorrectly produce 5.
-            let frozen = program(
+            // Eager selection does not freeze current property reads: the
+            // second increment must observe q=2 and produce 5. Feedback is
+            // refused until that RHS contract can accompany frozen bindings.
+            let feedback = GraphUnwindWriteText::parse(
                 "UNWIND $rows AS row MATCH (n {p:row.p}) SET n.q=n.q+row.q,n.p=row.p",
-                &[(1, 2), (1, 3)],
-            );
-            let (receipt, graph) = execute(&contexts, &frozen, grant(), true).await.unwrap();
+            )
+            .unwrap();
+            assert!(matches!(
+                feedback.bind(&arguments(&[(1, 2), (1, 3)]), R, symbols),
+                Err(GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 })
+            ));
+            let live = GraphUnwindWriteText::parse(
+                "UNWIND $rows AS row MATCH (n {p:row.p}) SET n.q=n.q+row.q",
+            )
+            .unwrap()
+            .bind(&arguments(&[(1, 2), (1, 3)]), R, symbols)
+            .unwrap();
+            assert!(!live.program().freezes_vertex_update_input());
+            let (receipt, graph) = execute(&contexts, live.program(), grant(), true)
+                .await
+                .unwrap();
             assert_eq!(receipt.steps().len(), 2);
             for step in receipt.steps() {
                 assert_eq!(step.mutation_targets(), Some([VId(1)].as_slice()));
@@ -1077,7 +1091,7 @@ mod frozen_updates {
                     .unwrap()
                     .props[1]
                     .1,
-                CanonicalScalar::Int(3).into()
+                CanonicalScalar::Int(5).into()
             );
             for (keyed, text) in [
                 (true, UPDATE),
@@ -1101,6 +1115,300 @@ mod frozen_updates {
                 } else {
                     assert_eq!(actual, expected);
                 }
+            }
+        });
+    }
+}
+
+mod frozen_edge_updates {
+    use super::*;
+    use fgdb_gql::PreparedGraphWriteProgram;
+    use fgdb_types::{CommitCx, EId};
+    use fgdb_warden::LimitDimension;
+
+    type ProgramFault =
+        fgdb_gql::GraphWriteProgramError<WriteTxnError, WriteTxnError, WriteTxnError>;
+
+    fn program(text: &str, values: &[(i64, i64)]) -> PreparedGraphWriteProgram {
+        let bound = GraphUnwindWriteText::parse(text)
+            .unwrap()
+            .bind(&arguments(values), R, symbols)
+            .unwrap();
+        assert!(bound.program().freezes_edge_update_input());
+        assert!(!bound.program().freezes_vertex_update_input());
+        bound.into_program()
+    }
+
+    async fn fixture(commit: &CommitCx, hidden: bool) -> Database<MemVfs> {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        batch.create_vertex(VId(1), vec![L], vec![]);
+        batch.create_vertex(VId(2), vec![L], vec![]);
+        for id in 1..=32 {
+            let mut props = vec![(P, CanonicalScalar::Int(id)), (Q, CanonicalScalar::Int(0))];
+            if hidden {
+                props.push((SECRET, CanonicalScalar::Int(777)));
+            }
+            batch.add_edge(EId(id as u128), VId(1), VId(2), props);
+        }
+        if hidden {
+            batch.create_vertex(VId(90), vec![HIDDEN], vec![]);
+            batch.add_edge(
+                EId(90),
+                VId(1),
+                VId(90),
+                vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(555))],
+            );
+        }
+        db.write(commit, batch).await.unwrap();
+        if hidden {
+            let mut other = WriteBatch::new(RelationId(2));
+            other.add_edge(
+                EId(91),
+                VId(1),
+                VId(2),
+                vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(666))],
+            );
+            db.write(commit, other).await.unwrap();
+        }
+        db
+    }
+
+    async fn execute(
+        contexts: &PurposeContexts,
+        program: &PreparedGraphWriteProgram,
+        scope: Grant,
+        hidden: bool,
+    ) -> Result<(GraphWriteProgramReceipt, Vec<fgdb::EdgeRecord>), ProgramFault> {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = authority();
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        let mut db = fixture(&commit, hidden).await;
+        let before = db.edges().unwrap();
+        let frontier = db.frontier().unwrap();
+        let result = db
+            .execute_graph_write_program_returning_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                program,
+                policy(),
+                || NOW,
+            )
+            .await;
+        assert_eq!(txn.outstanding_obligations(), 0);
+        match result {
+            Ok((receipt, completion)) => {
+                assert_eq!(
+                    completion,
+                    EmbeddedTxnCompletion::WriteCommitted {
+                        commit_seq: fgdb_types::CommitSeq(frontier.0 + 1)
+                    }
+                );
+                let after = db.edges().unwrap();
+                for original in &before {
+                    let actual = after
+                        .iter()
+                        .find(|row| row.entry.eid == original.entry.eid)
+                        .unwrap();
+                    assert_eq!(actual.entry.src, original.entry.src);
+                    assert_eq!(actual.entry.dst, original.entry.dst);
+                    assert_eq!(actual.entry.relation, original.entry.relation);
+                    if original.entry.eid.0 >= 90 {
+                        assert_eq!(actual, original, "hidden edges stay unchanged");
+                    }
+                    assert_eq!(
+                        actual.props.iter().find(|(key, _)| *key == SECRET),
+                        original.props.iter().find(|(key, _)| *key == SECRET),
+                    );
+                }
+                Ok((receipt, after))
+            }
+            Err(error) => {
+                assert_eq!(db.frontier().unwrap(), frontier);
+                assert_eq!(db.edges().unwrap(), before);
+                Err(error)
+            }
+        }
+    }
+
+    fn auth_error(error: &ProgramFault) -> Option<Error> {
+        let mut cause: Option<&(dyn core::error::Error + 'static)> = Some(error);
+        while let Some(error) = cause {
+            if let Some(WriteTxnError::Authorization(error)) = error.downcast_ref::<WriteTxnError>()
+            {
+                return Some(*error);
+            }
+            cause = error.source();
+        }
+        None
+    }
+
+    async fn minimum_work(
+        contexts: &PurposeContexts,
+        program: &PreparedGraphWriteProgram,
+        hidden: bool,
+    ) -> u64 {
+        let mut low = 0;
+        let mut high = grant().limits.max_work;
+        execute(contexts, program, grant(), hidden).await.unwrap();
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let mut scope = grant();
+            scope.limits.max_work = middle;
+            match execute(contexts, program, scope, hidden).await {
+                Ok(_) => high = middle,
+                Err(error) => {
+                    assert_eq!(
+                        auth_error(&error),
+                        Some(Error::LimitExceeded(LimitDimension::Work)),
+                        "{error:?}"
+                    );
+                    low = middle + 1;
+                }
+            }
+        }
+        low
+    }
+
+    #[test]
+    fn edge_swaps_and_repeated_targets_freeze_inputs_without_observing_hidden_edges() {
+        lab(0xa611_0201, |contexts| async move {
+            let feedback = GraphUnwindWriteText::parse(
+                "UNWIND $rows AS row MATCH (a)-[e:R]->(b) WHERE e.p=row.p \
+                 SET e.p=row.p, e.q=e.q+row.q",
+            )
+            .unwrap();
+            assert!(matches!(
+                feedback.bind(&arguments(&[(1, 2), (1, 3)]), R, symbols),
+                Err(GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 })
+            ));
+            let live = GraphUnwindWriteText::parse(
+                "UNWIND $rows AS row MATCH (a)-[e:R]->(b) WHERE e.p=row.p SET e.q=e.q+row.q",
+            )
+            .unwrap()
+            .bind(&arguments(&[(1, 2), (1, 3)]), R, symbols)
+            .unwrap();
+            assert!(!live.program().freezes_edge_update_input());
+            for hidden in [false, true] {
+                let (_, graph) = execute(&contexts, live.program(), grant(), hidden)
+                    .await
+                    .unwrap();
+                let edge = graph.iter().find(|row| row.entry.eid == EId(1)).unwrap();
+                assert_eq!(edge.props[1], (Q, CanonicalScalar::Int(5).into()));
+            }
+            for values in [[(1, 2), (2, 1)], [(1, 2), (1, 3)]] {
+                let program = program(
+                    "UNWIND $rows AS row MATCH (a)-[e]->(b) \
+                     WHERE e.p=row.p AND e.secret IS NULL SET e.p=row.q, e.q=row.q",
+                    &values,
+                );
+                let mut visible_receipt = None;
+                for hidden in [false, true] {
+                    let (receipt, graph) =
+                        execute(&contexts, &program, grant(), hidden).await.unwrap();
+                    assert_eq!(receipt.stats().completed_statements, 2);
+                    assert_eq!(receipt.stats().target_edge_visits, 2);
+                    assert_eq!(receipt.stats().target_vertex_visits, 0);
+                    for id in 1..=32 {
+                        let mut expected = (id, 0);
+                        for (p, q) in values {
+                            if p == id {
+                                expected = (q, q);
+                            }
+                        }
+                        let edge = graph
+                            .iter()
+                            .find(|row| row.entry.eid == EId(id as u128))
+                            .unwrap();
+                        assert_eq!(edge.props[0], (P, CanonicalScalar::Int(expected.0).into()));
+                        assert_eq!(edge.props[1], (Q, CanonicalScalar::Int(expected.1).into()));
+                    }
+                    if let Some(expected) = &visible_receipt {
+                        assert_eq!(
+                            &receipt, expected,
+                            "hidden data cannot change native statistics"
+                        );
+                    } else {
+                        visible_receipt = Some(receipt);
+                    }
+                }
+            }
+            // A denied original field must not disappear in normalization,
+            // even when the assignment would preserve its stored value.
+            let forbidden = program(
+                "UNWIND $rows AS row MATCH (a)-[e:R]->(b) WHERE e.p=row.p \
+                 OPTIONAL MATCH (a)-[f:R]->(b) WHERE f.p=row.q \
+                 SET e.p=row.q, f.secret=777",
+                &[(1, 99), (2, 3)],
+            );
+            let error = execute(&contexts, &forbidden, grant(), true)
+                .await
+                .unwrap_err();
+            assert_eq!(auth_error(&error), Some(Error::ScopeDenied));
+            assert!(matches!(
+                error,
+                fgdb_gql::GraphWriteProgramError::Program(
+                    fgdb_gql::GraphMutationProgramError::Statement { statement: 1, .. }
+                )
+            ));
+            let valid = program(
+                "UNWIND $rows AS row MATCH (a)-[e:R]->(b) WHERE e.p=row.p SET e.p=row.q",
+                &[(1, 2), (2, 1)],
+            );
+            let mut exhausted = grant();
+            exhausted.limits.max_rows = 1;
+            let error = execute(&contexts, &valid, exhausted, true)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                auth_error(&error),
+                Some(Error::LimitExceeded(LimitDimension::Rows))
+            );
+        });
+    }
+
+    #[test]
+    fn disjoint_edge_updates_match_live_sequential_execution_with_linear_signed_work() {
+        lab(0xa611_0202, |contexts| async move {
+            let mut measured = Vec::new();
+            for count in [8, 16, 32] {
+                let values: Vec<_> = (1..=count).map(|id| (id, id + 100)).collect();
+                let optimized = program(
+                    "UNWIND $rows AS row MATCH (a)-[e:R]->(b) WHERE e.p=row.p SET e.q=row.q",
+                    &values,
+                );
+                let sequential =
+                    PreparedGraphWriteProgram::prepare(optimized.statements().to_vec()).unwrap();
+                assert!(!sequential.freezes_edge_update_input());
+                let (actual, graph) = execute(&contexts, &optimized, grant(), true).await.unwrap();
+                let (expected, expected_graph) = execute(&contexts, &sequential, grant(), true)
+                    .await
+                    .unwrap();
+                assert_eq!(graph, expected_graph);
+                assert_eq!(actual.steps(), expected.steps());
+                assert_eq!(
+                    actual.stats().mutation_effects,
+                    expected.stats().mutation_effects
+                );
+                assert_eq!(
+                    actual.stats().target_edge_visits,
+                    expected.stats().target_edge_visits
+                );
+                let work = minimum_work(&contexts, &optimized, false).await;
+                assert_eq!(work, minimum_work(&contexts, &optimized, true).await);
+                assert!(work < minimum_work(&contexts, &sequential, false).await);
+                measured.push(work);
+            }
+            // Source size is fixed at 32 visible edges. A doubled number of
+            // statements may double real work, but may not replay a quadratic
+            // growing preparation prefix. The incumbent runs above in this
+            // invocation; no elapsed-time or throughput claim is made.
+            for pair in measured.windows(2) {
+                assert!(pair[1] <= pair[0] * 2, "{measured:?}");
             }
         });
     }

@@ -283,6 +283,7 @@ impl GraphUnwindWriteText {
             .map_err(GraphUnwindBindError::Interrupted)?;
 
         let mut freeze_vertex_update_input = false;
+        let mut freeze_edge_update_input = false;
         if rows.len() > 1 {
             // Inspect the resolved definition, not source spelling or current
             // graph contents. The definition callback still owns authorization
@@ -307,6 +308,13 @@ impl GraphUnwindWriteText {
                             if mutation.is_vertex_update_only())
                     {
                         freeze_vertex_update_input = true;
+                        continue;
+                    }
+                    if prepared.statements().len() == 1
+                        && matches!(input, GraphWriteTemplateStatement::Mutation(mutation)
+                            if mutation.is_edge_update_only())
+                    {
+                        freeze_edge_update_input = true;
                         continue;
                     }
                     return Err(GraphUnwindWriteError::RowFeedsLaterMatch { statement }.into());
@@ -352,6 +360,10 @@ impl GraphUnwindWriteText {
             // a future binder extension must not widen this staging contract.
             bound
                 .freeze_vertex_update_input()
+                .ok_or_else(|| GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 }.into())
+        } else if freeze_edge_update_input {
+            bound
+                .freeze_edge_update_input()
                 .ok_or_else(|| GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 }.into())
         } else {
             // The batch binder already staged distinct-key upserts and

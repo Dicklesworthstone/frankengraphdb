@@ -498,7 +498,7 @@ impl core::fmt::Debug for PreparedGraphMutation {
 impl PreparedGraphMutation {
     /// Closed profile used by the UNWIND clause-at-a-time adapter. Every
     /// target must be a resolved vertex column and every action a field update;
-    /// deletions and relationship updates need different staging contracts.
+    /// deletion and mixed vertex/relationship updates are excluded.
     pub(crate) fn is_vertex_update_only(&self) -> bool {
         self.actions.iter().all(|action| {
             !action.deletes()
@@ -507,19 +507,42 @@ impl PreparedGraphMutation {
         })
     }
 
-    /// Every assignment writes a bound constant (a literal or an argument) or
-    /// a label, or removes a field. No right-hand side reads the selected
-    /// row, so no earlier input row's staged effects can change its value.
+    /// Relationship field updates may freeze their input independently of
+    /// vertex updates. They cannot change endpoint images or topology; mixed
+    /// vertex/edge actions and deletion retain their own staging contracts.
+    pub(crate) fn is_edge_update_only(&self) -> bool {
+        !self.actions.is_empty()
+            && self.actions.iter().all(|action| {
+                matches!(
+                    action,
+                    GraphMutationAction::SetProperty { .. }
+                        | GraphMutationAction::RemoveProperty { .. }
+                        | GraphMutationAction::ClearProperties { .. }
+                ) && action.target().and_then(|target| self.columns.get(target))
+                    == Some(&GraphSetColumnType::Edge)
+            })
+    }
+
+    /// Every assignment writes a bound constant or row-independent scalar
+    /// expression, changes a label, or removes a field. The bytecode's own
+    /// dependency inventory proves it reads no selection column or element
+    /// local. An expression can still fail; normal execution must evaluate it
+    /// and preserve its original row's error and budget charges.
     pub(crate) fn writes_only_constants(&self) -> bool {
-        self.actions.iter().all(|action| {
-            matches!(
-                action,
-                GraphMutationAction::SetProperty {
-                    value: GraphMutationValue::Literal(_),
-                    ..
-                } | GraphMutationAction::RemoveProperty { .. }
-                    | GraphMutationAction::SetLabel { .. }
-            )
+        self.actions.iter().all(|action| match action {
+            GraphMutationAction::SetProperty { value, .. } => match value {
+                GraphMutationValue::Literal(_) => true,
+                GraphMutationValue::Expression(expression)
+                | GraphMutationValue::Composite(crate::GraphSetValue::Integer(expression)) => {
+                    expression.referenced_columns().next().is_none()
+                        && expression.referenced_locals().next().is_none()
+                }
+                GraphMutationValue::Column(_) | GraphMutationValue::Composite(_) => false,
+            },
+            GraphMutationAction::RemoveProperty { .. } | GraphMutationAction::SetLabel { .. } => {
+                true
+            }
+            _ => false,
         })
     }
 

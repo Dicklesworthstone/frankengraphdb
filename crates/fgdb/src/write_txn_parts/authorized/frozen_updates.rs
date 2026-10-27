@@ -1,4 +1,4 @@
-//! Frozen UNWIND vertex updates retain the authorized source and original
+//! Frozen UNWIND field updates retain the authorized source and original
 //! per-field staging checks while separating selection from ordered effects.
 
 use super::{
@@ -18,10 +18,11 @@ type Fault = GraphWriteProgramError<WriteTxnError, WriteTxnError, WriteTxnError>
 // staged until all native MATCH/RHS proposals have read that entry workspace.
 // Staging still authorizes every original intent, even a forbidden no-op that
 // a later row overwrites or a label action that leaves the capability's scope.
-// Statements with disjoint vertex targets can authorize against independent
+// Statements with disjoint element targets can authorize against independent
 // native row workspaces, then compose their checked intents once. Two statements
-// touching the same vertex retain the original sequential before/after checks,
-// even when they write different fields: either can change that vertex's scope.
+// touching the same element retain sequential before/after checks. The compiler
+// admits vertex-only or edge-only programs: independent edge property updates
+// cannot change another edge's endpoints, relation, or authorization images.
 #[allow(clippy::too_many_arguments)]
 pub(in super::super) fn apply_frozen_program<V: Vfs + Clone, Clock: FnMut() -> u64>(
     transaction: &mut WriteTxn,
@@ -74,19 +75,26 @@ pub(in super::super) fn apply_frozen_program<V: Vfs + Clone, Clock: FnMut() -> u
                                 .and_then(|()| controls.borrow_mut().poll())
                                 .map_err(source)
                                 .map_err(GraphWriteStepError::Mutation)?;
-                            let vertex = match intent {
+                            let target = match intent {
                                 GraphMutationIntent::Property { vertex, .. }
                                 | GraphMutationIntent::Label { vertex, .. }
                                 | GraphMutationIntent::StoredProperty {
                                     target: fgdb_delta_types::ElementId::Vertex(vertex),
                                     ..
-                                } => *vertex,
+                                } => fgdb_delta_types::ElementId::Vertex(*vertex),
+                                GraphMutationIntent::EdgeProperty { edge, .. }
+                                | GraphMutationIntent::StoredProperty {
+                                    target: fgdb_delta_types::ElementId::Edge(edge),
+                                    ..
+                                } if program.freezes_edge_update_input() => {
+                                    fgdb_delta_types::ElementId::Edge(*edge)
+                                }
                                 _ => {
                                     independent = false;
                                     break;
                                 }
                             };
-                            let owner = target_owners.entry(vertex).or_insert(statement);
+                            let owner = target_owners.entry(target).or_insert(statement);
                             if *owner != statement {
                                 independent = false;
                                 break;
@@ -155,7 +163,7 @@ pub(in super::super) fn apply_frozen_program<V: Vfs + Clone, Clock: FnMut() -> u
     }
     if independent && !batches.is_empty() {
         // Each statement's original field sequence already passed the real
-        // native evaluator and before/after authorization. Disjoint vertices
+        // native evaluator and before/after authorization. Disjoint elements
         // cannot alter one another's images. A single ordinary preparation of
         // those exact raw intents preserves canonical effects and still runs
         // all native checks; nothing publishes before the caller's completion.

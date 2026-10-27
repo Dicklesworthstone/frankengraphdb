@@ -8,7 +8,7 @@ use fgdb::{
 };
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
-use fgdb_gql::unwind_write::GraphUnwindWriteText;
+use fgdb_gql::unwind_write::{GraphUnwindWriteError, GraphUnwindWriteText};
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphMutationError,
     GraphMutationProgramDimension, GraphMutationProgramError, GraphSymbol, GraphSymbolKind,
@@ -157,13 +157,6 @@ fn frozen_rekeys_swaps_and_repeated_targets_keep_identity_and_reopen() {
                 vec![3],
                 vec![vec![VId(1)], vec![VId(1)]],
             ),
-            (
-                1,
-                "UNWIND $rows AS row MATCH (n:Entity {id:row.a}) SET n.id=n.id+row.b",
-                vec![(1, 2), (1, 3)],
-                vec![4],
-                vec![vec![VId(1)], vec![VId(1)]],
-            ),
         ] {
             let vfs = MemVfs::new().unwrap();
             let path = vfs.database_dir();
@@ -259,7 +252,7 @@ fn frozen_input_includes_caller_staging_and_direct_program_execution() {
 }
 
 #[test]
-fn frozen_map_replacement_removes_multiple_original_properties_and_reopens() {
+fn map_replacement_refuses_frozen_clears_but_single_row_removes_properties_and_reopens() {
     let ((), report) = run_async_under_lab(0x6672_6f07, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
@@ -282,8 +275,8 @@ fn frozen_map_replacement_removes_multiple_original_properties_and_reopens() {
         );
         db.write(&commit, initial).await.unwrap();
         let mut txn = db.begin(&txcx).unwrap();
-        let actual = receipt(
-            txn.query_write(
+        let error = txn
+            .query_write(
                 &mut db,
                 &query,
                 "UNWIND $rows AS row MATCH (n:Entity {id:row.a}) SET n={id:row.b}",
@@ -293,12 +286,31 @@ fn frozen_map_replacement_removes_multiple_original_properties_and_reopens() {
                 policy(),
                 no_allocation,
             )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            QueryWriteError::UnwindBinding(GraphUnwindWriteError::RowFeedsLaterMatch {
+                statement: 0
+            })
+        ));
+        assert_eq!(txn.vertex(&db, VId(1)).unwrap(), db.vertex(VId(1)).unwrap());
+        let actual = receipt(
+            txn.query_write(
+                &mut db,
+                &query,
+                "UNWIND $rows AS row MATCH (n:Entity {id:row.a}) SET n={id:row.b}",
+                &args(&[(1, 3)]),
+                MapCatalog,
+                R,
+                policy(),
+                no_allocation,
+            )
             .unwrap(),
         );
-        assert_eq!(actual.stats().completed_statements, 2);
-        assert_eq!(actual.stats().target_vertex_visits, 2);
-        // Each frozen row proposes both original removals plus its new id.
-        assert_eq!(actual.stats().mutation_effects, 6);
+        assert_eq!(actual.stats().completed_statements, 1);
+        assert_eq!(actual.stats().target_vertex_visits, 1);
+        // The native replacement still removes both original fields and sets id.
+        assert_eq!(actual.stats().mutation_effects, 3);
         for step in actual.steps() {
             assert_eq!(step.mutation_targets(), Some([VId(1)].as_slice()));
             assert_eq!(step.mutation_edges(), Some([].as_slice()));
@@ -387,8 +399,37 @@ fn late_rhs_refusal_keeps_prefix_savepoint_and_original_input_location() {
         prefix(&mut db, &mut txn);
         txn.savepoint(&db, "prefix").unwrap();
         let digest = txn.staged_effect_digest().unwrap();
-        let text =
-            "/* café */ UNWIND $rows AS row MATCH (n:Entity {id:row.a}) SET n.id=n.id+100/row.b";
+        // Neo4j evaluates SET against current state for each buffered binding.
+        // The old entry-RHS profile lost the second repeated-target increment.
+        for tail in [
+            "SET n.id=n.id+row.b",
+            "SET n.id=row.a, n.p=n.p+row.b",
+            "SET n.id=n.id+100/row.b",
+        ] {
+            let error = txn
+                .query_write(
+                    &mut db,
+                    &query,
+                    &format!("UNWIND $rows AS row MATCH (n:Entity {{id:row.a}}) {tail}"),
+                    &args(&[(1, 2), (1, 3)]),
+                    symbols,
+                    R,
+                    policy(),
+                    no_allocation,
+                )
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    QueryWriteError::UnwindBinding(GraphUnwindWriteError::RowFeedsLaterMatch {
+                        statement: 0
+                    })
+                ),
+                "{tail}: {error:?}"
+            );
+            assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        }
+        let text = "/* café */ UNWIND $rows AS row MATCH (n:Entity {id:row.a}) SET n.id=100/row.b";
         let error = txn
             .query_write(
                 &mut db,

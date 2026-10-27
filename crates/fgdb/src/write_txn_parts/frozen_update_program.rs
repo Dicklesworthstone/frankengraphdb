@@ -1,4 +1,4 @@
-// Batch binders admit three profiles here: vertex field updates, vertex
+// Batch binders admit field-update profiles for vertices or edges, vertex
 // upserts with pairwise distinct MERGE keys, and directed relationship MERGEs
 // with pairwise distinct endpoint keys (fgdb-2l3pt). Every selection and RHS
 // uses the real transaction overlay at entry; one ordered preparation then
@@ -6,7 +6,7 @@
 
 impl WriteTxn {
     #[allow(clippy::type_complexity)]
-    fn execute_frozen_vertex_updates_governed<V: Vfs + Clone, A>(
+    fn execute_frozen_field_updates_governed<V: Vfs + Clone, A>(
         &mut self,
         database: &mut Database<V>,
         cx: &fgdb_types::QueryCx,
@@ -25,7 +25,7 @@ impl WriteTxn {
             GraphWriteProgramError, GraphWriteStatement, GraphWriteStepError,
             GraphWriteStepReceipt, GraphWriteStepStats,
         };
-        debug_assert!(program.freezes_vertex_update_input());
+        debug_assert!(program.freezes_vertex_update_input() || program.freezes_edge_update_input());
         cx.with_restriction(|| {
             let workspace = MutationProgramWorkspace::new(self);
             workspace.txn.program_multi_relation = true;
@@ -58,10 +58,14 @@ impl WriteTxn {
                         cx.checkpoint()
                             .map_err(GqlQueryError::Interrupted)
                             .map_err(GraphWriteStepError::Mutation)?;
-                        let vertex = match intent {
+                        let target = match intent {
                             GraphMutationIntent::Property { vertex, key, value } => {
                                 batch.set_vertex_property_value(vertex, key, value);
-                                vertex
+                                ElementId::Vertex(vertex)
+                            }
+                            GraphMutationIntent::EdgeProperty { edge, key, value } => {
+                                batch.set_edge_property_value(edge, key, value);
+                                ElementId::Edge(edge)
                             }
                             GraphMutationIntent::StoredProperty {
                                 target: ElementId::Vertex(vertex),
@@ -69,7 +73,15 @@ impl WriteTxn {
                                 value,
                             } => {
                                 batch.set_vertex_property_value(vertex, key, Some(value));
-                                vertex
+                                ElementId::Vertex(vertex)
+                            }
+                            GraphMutationIntent::StoredProperty {
+                                target: ElementId::Edge(edge),
+                                key,
+                                value,
+                            } => {
+                                batch.set_edge_property_value(edge, key, Some(value));
+                                ElementId::Edge(edge)
                             }
                             GraphMutationIntent::Label {
                                 vertex,
@@ -77,18 +89,26 @@ impl WriteTxn {
                                 present,
                             } => {
                                 batch.set_vertex_label(vertex, label, present);
-                                vertex
+                                ElementId::Vertex(vertex)
                             }
                             _ => return Err(source(WriteTxnError::UnsupportedAtomicMutation)),
                         };
                         if returning {
-                            targets.insert(vertex);
+                            targets.insert(target);
                         }
                     }
                     if returning {
+                        let mut vertices = Vec::new();
+                        let mut edges = Vec::new();
+                        for target in targets {
+                            match target {
+                                ElementId::Vertex(vertex) => vertices.push(vertex),
+                                ElementId::Edge(edge) => edges.push(edge),
+                            }
+                        }
                         receipts.push(GraphWriteStepReceipt::Mutation {
-                            targets: targets.into_iter().collect(),
-                            edges: Vec::new(),
+                            targets: vertices,
+                            edges,
                         });
                     }
                     if !batch.is_empty() {

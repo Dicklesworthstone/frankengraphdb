@@ -399,8 +399,8 @@ pub struct GraphWriteScriptBatchLocation {
 
 /// All parameter sets have been checked and lowered before this value exists.
 /// Later sets execute after earlier sets in the canonical transaction overlay.
-/// A native UNWIND vertex-update batch can carry frozen input provenance;
-/// program().freezes_vertex_update_input() preserves that distinction even
+/// A native UNWIND vertex- or edge-update batch can carry frozen input provenance;
+/// the program's field-update flags preserve that distinction even
 /// when this wrapper is consumed with into_program().
 /// Give program() to the ordinary WriteTxn or autocommit program API: one shared
 /// allowance, one rollback boundary, one completion and no partial receipts.
@@ -428,6 +428,10 @@ impl core::fmt::Debug for BoundGraphWriteScriptBatch {
 impl BoundGraphWriteScriptBatch {
     pub(crate) fn freeze_vertex_update_input(mut self) -> Option<Self> {
         self.program.freeze_vertex_update_input().then_some(self)
+    }
+
+    pub(crate) fn freeze_edge_update_input(mut self) -> Option<Self> {
+        self.program.freeze_edge_update_input().then_some(self)
     }
 
     #[must_use]
@@ -621,6 +625,11 @@ impl PreparedGraphWriteScript {
             if mutation.is_vertex_update_only() && !mutation.feeds_own_match())
         {
             program.freeze_constant_vertex_update_input();
+        }
+        if matches!(self.statements(), [GraphWriteTemplateStatement::Mutation(mutation)]
+            if mutation.is_edge_update_only() && !mutation.feeds_own_match())
+        {
+            program.freeze_constant_edge_update_input();
         }
         program.freeze_vertex_upsert_input();
         program.freeze_edge_merge_input();

@@ -187,7 +187,7 @@ impl<V: Vfs + Clone> Database<V> {
     /// transaction overlay. Supports INSERT/CREATE, SET/REMOVE/DETACH DELETE
     /// plain DELETE, vertex/relationship MERGE and ON MATCH/ON CREATE actions.
     /// A later statement observes preceding checked effects. A compiler-marked
-    /// UNWIND vertex-update program freezes every row's MATCH and expressions
+    /// UNWIND vertex-only or edge-only update program freezes its MATCH and expressions
     /// against the entry overlay before applying its fields in input order.
     /// Compiler-proven distinct-key vertex MERGEs and distinct-endpoint edge
     /// MERGEs authorize each row against that same entry overlay, then prepare
@@ -456,7 +456,9 @@ impl<V: Vfs + Clone> Database<V> {
                 let mut receipts = Vec::new();
                 let stats = query_cx
                     .with_restriction(|| {
-                        if program.freezes_vertex_update_input() {
+                        if program.freezes_vertex_update_input()
+                            || program.freezes_edge_update_input()
+                        {
                             let (stats, frozen_receipts) = mutation::apply_frozen_program(
                                 workspace.transaction(),
                                 self,

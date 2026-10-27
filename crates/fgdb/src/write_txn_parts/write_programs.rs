@@ -292,9 +292,9 @@ impl WriteTxn {
                 live,
             }));
         }
-        if program.freezes_vertex_update_input() {
+        if program.freezes_vertex_update_input() || program.freezes_edge_update_input() {
             return self
-                .execute_frozen_vertex_updates_governed(database, cx, program, policy, false)
+                .execute_frozen_field_updates_governed(database, cx, program, policy, false)
                 .map(|(stats, _)| stats);
         }
         if program.freezes_vertex_upsert_input() {
@@ -469,9 +469,9 @@ impl WriteTxn {
                 live,
             }));
         }
-        if program.freezes_vertex_update_input() {
+        if program.freezes_vertex_update_input() || program.freezes_edge_update_input() {
             return self
-                .execute_frozen_vertex_updates_governed(database, cx, program, policy, true)
+                .execute_frozen_field_updates_governed(database, cx, program, policy, true)
                 .map(|(stats, receipts)| fgdb_gql::GraphWriteProgramReceipt::new(stats, receipts));
         }
         if program.freezes_vertex_upsert_input() {

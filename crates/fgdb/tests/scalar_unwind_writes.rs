@@ -280,6 +280,215 @@ fn rekey_and_label_feedback_freeze_while_cascades_refuse_and_disjoint_updates_co
 }
 
 #[test]
+fn relationship_rekey_batches_match_entry_edge_oracle_and_preserve_rollback_and_reopen() {
+    let ((), report) = run_async_under_lab(0x7363_6131, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let edge_ids = [EId(1), EId((1_u128 << 100) + 1), EId(3), EId(4)];
+        let entry_keys = [1_i64, 1, 2, 3];
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(1), vec![ENTITY], vec![]);
+        seed.create_vertex(VId(2), vec![ENTITY], vec![]);
+        for (eid, key) in edge_ids[..3].iter().zip(entry_keys) {
+            seed.add_edge(
+                *eid,
+                VId(1),
+                if key == 2 { VId(1) } else { VId(2) },
+                vec![
+                    (ID, CanonicalScalar::Int(key)),
+                    (P, CanonicalScalar::Int(0)),
+                ],
+            );
+        }
+        db.write(&commit, seed).await.unwrap();
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.add_edge(
+            edge_ids[3],
+            VId(2),
+            VId(1),
+            vec![(ID, CanonicalScalar::Int(3)), (P, CanonicalScalar::Int(0))],
+        );
+        txn.write(&mut db, prefix).unwrap();
+        txn.savepoint(&db, "edge-entry").unwrap();
+        let entry_digest = txn.staged_effect_digest().unwrap();
+        let cases = [
+            [(1, 2), (2, 1)], // swap, including parallel identities
+            [(1, 2), (2, 3)], // earlier writes must not become later matches
+            [(1, 2), (1, 9)], // a repeated input still matches the entry key
+            [(2, 3), (3, 4)], // the staged edge belongs to the frozen entry
+            [(9, 1), (1, 7)], // an empty first selection retains row coordinates
+            [(3, 1), (1, 3)],
+        ];
+        for pattern in ["(a)-[e:R]->(b)", "(a)<-[e:R]-(b)", "(a)-[e:R]-(b)"] {
+            let text = format!(
+                "UNWIND $rows AS row MATCH {pattern} WHERE e.id=row.a \
+                 SET e.id=row.b, e.p=row.b"
+            );
+            for rows in cases {
+                let input = args(
+                    rows.iter()
+                        .map(|&(a, b)| object(vec![("a", int(a)), ("b", int(b))]))
+                        .collect(),
+                );
+                let mut expected = entry_keys.map(|key| (key, 0_i64));
+                let mut expected_steps = Vec::new();
+                // Independent clause-at-a-time oracle: every input selects
+                // from immutable raw edge keys, then updates in input order.
+                for (a, b) in rows {
+                    let mut touched = Vec::new();
+                    for index in 0..edge_ids.len() {
+                        if entry_keys[index] == a {
+                            expected[index] = (b, b);
+                            touched.push(edge_ids[index]);
+                        }
+                    }
+                    touched.sort_unstable();
+                    expected_steps.push(touched);
+                }
+                let result = txn
+                    .query_write(
+                        &mut db,
+                        &cx,
+                        &text,
+                        &input,
+                        symbols,
+                        R,
+                        policy(20, 0),
+                        no_allocation,
+                    )
+                    .unwrap();
+                let QueryResult::Write {
+                    receipt,
+                    completion,
+                } = result
+                else {
+                    panic!("write receipt")
+                };
+                assert!(completion.is_none());
+                assert_eq!(receipt.stats().completed_statements, rows.len());
+                assert_eq!(receipt.stats().target_vertex_visits, 0);
+                for (step, expected) in receipt.steps().iter().zip(expected_steps) {
+                    let fgdb_gql::GraphWriteStepReceipt::Mutation { targets, edges } = step else {
+                        panic!("mutation receipt")
+                    };
+                    assert!(targets.is_empty());
+                    assert_eq!(*edges, expected, "{text}: {rows:?}");
+                }
+                for (eid, (key, value)) in edge_ids.into_iter().zip(expected) {
+                    assert_eq!(
+                        txn.edge(&db, eid).unwrap().unwrap().props,
+                        vec![
+                            (ID, CanonicalScalar::Int(key).into()),
+                            (P, CanonicalScalar::Int(value).into()),
+                        ],
+                        "{text}: {rows:?}, {eid:?}"
+                    );
+                }
+                txn.rollback_to_savepoint(&db, "edge-entry").unwrap();
+                assert_eq!(txn.staged_effect_digest().unwrap(), entry_digest);
+            }
+        }
+        // Graph-reading RHS feedback is refused until current-row RHS
+        // evaluation is supported over the frozen selection identities.
+        for tail in ["SET e.id=row.b, e.p=e.id+10", "SET e.id=e.id+row.b"] {
+            let error = txn
+                .query_write(
+                    &mut db,
+                    &cx,
+                    &format!("UNWIND $rows AS row MATCH (a)-[e:R]->(b) WHERE e.id=row.a {tail}"),
+                    &args(vec![
+                        object(vec![("a", int(1)), ("b", int(3))]),
+                        object(vec![("a", int(1)), ("b", int(2))]),
+                    ]),
+                    symbols,
+                    R,
+                    policy(20, 0),
+                    no_allocation,
+                )
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    QueryWriteError::UnwindBinding(GraphUnwindWriteError::RowFeedsLaterMatch {
+                        statement: 0
+                    })
+                ),
+                "{error:?}"
+            );
+            assert_eq!(txn.staged_effect_digest().unwrap(), entry_digest);
+        }
+        // The first proposal uses four effects for two parallel identities;
+        // the next row exceeds the shared allowance of five. No proposal or
+        // receipt may escape the program workspace on that later failure.
+        // Parameter-only arithmetic remains admissible and must preserve the
+        // late division-by-zero error too; it is not evaluated during binding.
+        for (tail, effects) in [
+            ("SET e.id=row.b, e.p=row.b", 5),
+            ("SET e.id=row.b, e.p=10/(row.b-2)", 20),
+        ] {
+            let error = txn
+                .query_write(
+                    &mut db,
+                    &cx,
+                    &format!("UNWIND $rows AS row MATCH (a)-[e:R]->(b) WHERE e.id=row.a {tail}"),
+                    &args(vec![
+                        object(vec![("a", int(1)), ("b", int(3))]),
+                        object(vec![("a", int(2)), ("b", int(2))]),
+                    ]),
+                    symbols,
+                    R,
+                    policy(effects, 0),
+                    no_allocation,
+                )
+                .unwrap_err();
+            assert!(
+                matches!(error, QueryWriteError::Execute(_)),
+                "{tail}: {error:?}"
+            );
+            assert_eq!(txn.staged_effect_digest().unwrap(), entry_digest);
+        }
+        staged(
+            txn.query_write(
+                &mut db,
+                &cx,
+                "UNWIND $rows AS row MATCH (a)-[e:R]->(b) WHERE e.id=row.a SET e.id=row.b",
+                &args(vec![
+                    object(vec![("a", int(1)), ("b", int(2))]),
+                    object(vec![("a", int(2)), ("b", int(1))]),
+                ]),
+                symbols,
+                R,
+                policy(20, 0),
+                no_allocation,
+            )
+            .unwrap(),
+            2,
+        );
+        let expected = txn.edges(&db).unwrap();
+        txn.finish(&mut db, &commit).await.unwrap();
+        assert_eq!(db.edges().unwrap(), expected);
+        let seq = db.frontier().unwrap();
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(reopened.frontier().unwrap(), seq);
+        assert_eq!(reopened.edges().unwrap(), expected);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn compound_and_edge_filtered_disjoint_batches_preserve_values_and_commit_together() {
     let ((), report) = run_async_under_lab(0x7363_6123, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -366,9 +575,10 @@ fn compound_and_edge_filtered_disjoint_batches_preserve_values_and_commit_togeth
             assert_eq!(db.frontier().unwrap(), CommitSeq(1));
         }
 
-        // The same edge key remains unsafe when it is also the selection
-        // predicate. Refusal must preserve all successful batches and prefix.
+        // Feedback on an edge key now freezes the whole input. All these
+        // spellings produce 102/103, then rollback keeps the successful prefix.
         let digest = txn.staged_effect_digest().unwrap();
+        txn.savepoint(&db, "edge-feedback").unwrap();
         let input = args(vec![
             object(vec![("id", int(101)), ("p", int(102))]),
             object(vec![("id", int(102)), ("p", int(103))]),
@@ -378,8 +588,8 @@ fn compound_and_edge_filtered_disjoint_batches_preserve_values_and_commit_togeth
             "MATCH (a:Entity)-[e:R {id:row.id}]->(b) SET e += {id:row.p}",
             "MATCH (a:Entity)-[e:R]->(b) WHERE abs(e.id)=row.id SET e.id=row.p",
         ] {
-            let error = txn
-                .query_write(
+            staged(
+                txn.query_write(
                     &mut db,
                     &cx,
                     &format!("UNWIND $rows AS row {tail}"),
@@ -389,13 +599,19 @@ fn compound_and_edge_filtered_disjoint_batches_preserve_values_and_commit_togeth
                     policy(16, 0),
                     no_allocation,
                 )
-                .unwrap_err();
-            assert!(matches!(
-                error,
-                QueryWriteError::UnwindBinding(GraphUnwindWriteError::RowFeedsLaterMatch {
-                    statement: 0
-                })
-            ));
+                .unwrap(),
+                2,
+            );
+            for (id, key, p) in [(1, 102, 50), (2, 103, 60)] {
+                assert_eq!(
+                    txn.edge(&db, EId(id)).unwrap().unwrap().props,
+                    [
+                        (ID, CanonicalScalar::Int(key).into()),
+                        (P, CanonicalScalar::Int(p).into()),
+                    ]
+                );
+            }
+            txn.rollback_to_savepoint(&db, "edge-feedback").unwrap();
             assert_eq!(txn.staged_effect_digest().unwrap(), digest);
             assert_eq!(db.frontier().unwrap(), CommitSeq(1));
         }

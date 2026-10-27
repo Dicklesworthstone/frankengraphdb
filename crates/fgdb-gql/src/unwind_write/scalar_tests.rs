@@ -78,11 +78,10 @@ fn multirow_vertex_updates_freeze_selection_feedback_across_fields_aliases_and_s
         assert!(!singleton.program().freezes_vertex_update_input());
     }
     for tail in [
-        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id SET e.id=row.p",
-        "MATCH (a:Entity)-[e:R {id:row.id}]->(b) SET e += {id:row.p}",
-        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id IS NULL SET e.id=row.p",
-        "MATCH (a:Entity)-[e:R]->(b) WHERE abs(e.id)=row.id SET e.id=row.p",
-        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=a.p REMOVE e.id",
+        "MATCH (n:Entity) WHERE n.id=row.id SET n.id=n.id+row.p",
+        "MATCH (n:Entity) WHERE n.id=row.id SET n.id=row.p, n.p=n.p+1",
+        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id SET e.id=row.p, a.id=row.p",
+        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id SET e.id=row.p, a:Other",
         "MATCH (n:Entity {id:row.id})-[:R]->(m) DETACH DELETE n",
         "MATCH (n:Entity {id:row.id}), (anchor:Entity {id:1}) DETACH DELETE n",
         "MATCH (n:Entity {id:row.id}), (anchor:Entity {id:1}) DELETE n",
@@ -106,6 +105,122 @@ fn multirow_vertex_updates_freeze_selection_feedback_across_fields_aliases_and_s
             "a single input row has no later MATCH: {tail}"
         );
     }
+}
+
+#[test]
+fn duplicate_vertex_and_relationship_feedback_cannot_freeze_current_property_reads() {
+    let input = rows(vec![
+        object(vec![("id", int(1)), ("p", int(2))]),
+        object(vec![("id", int(1)), ("p", int(3))]),
+    ]);
+    // Neo4j's EagerPipe buffers CypherRow identities; SetPipe evaluates each
+    // row's SetOperation against the current QueryState. Freezing RHS reads
+    // would lose an increment when these rows bind the same graph identity.
+    for tail in [
+        "MATCH (n:Entity {id:row.id}) SET n.id=row.id, n.p=n.p+row.p",
+        "MATCH (a)-[e:R {id:row.id}]->(b) SET e.id=row.id, e.p=e.p+row.p",
+    ] {
+        let definition =
+            GraphUnwindWriteText::parse(&format!("UNWIND $rows AS row {tail}")).unwrap();
+        assert!(
+            matches!(
+                definition.bind(&input, RelationId(1), symbols),
+                Err(GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 })
+            ),
+            "{tail}"
+        );
+    }
+}
+
+#[test]
+fn relationship_updates_freeze_match_feedback_and_keep_distinct_provenance() {
+    let input = rows(vec![
+        object(vec![("id", int(1)), ("p", int(2))]),
+        object(vec![("id", int(2)), ("p", int(3))]),
+    ]);
+    let single = rows(vec![object(vec![("id", int(1)), ("p", int(2))])]);
+    let original = input.canonical_bytes();
+    for tail in [
+        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id SET e.id=row.p",
+        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id SET e.id=row.p+1",
+        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id SET e.id=CASE WHEN row.p=0 THEN 0 ELSE 10/row.p END",
+        "MATCH (a:Entity)-[e:R {id:row.id}]->(b) SET e += {id:row.p}",
+        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id IS NULL SET e.id=row.p",
+        "MATCH (a:Entity)-[e:R]->(b) WHERE abs(e.id)=row.id SET e.id=row.p",
+        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=a.p REMOVE e.id",
+        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id OR e.id IS NULL SET e.id=row.p",
+        "MATCH (a:Entity)-[e:R]-(b) WHERE e.id=row.id SET e.id=row.p",
+        "MATCH (a:Entity)-[e:R]->(b)-[f:R]->(c) WHERE e.id=row.id SET e.id=row.p, f.p=row.p",
+    ] {
+        let definition =
+            GraphUnwindWriteText::parse(&format!("UNWIND $rows AS row {tail}")).unwrap();
+        let bound = definition
+            .bind(&input, RelationId(1), symbols)
+            .unwrap_or_else(|error| panic!("{tail}: {error:?}"));
+        assert!(bound.program().freezes_edge_update_input(), "{tail}");
+        assert!(!bound.program().freezes_vertex_update_input(), "{tail}");
+        assert!(!bound.program().freezes_edge_merge_input(), "{tail}");
+        let ordinary =
+            crate::PreparedGraphWriteProgram::prepare(bound.program().statements().to_vec())
+                .unwrap();
+        assert_eq!(ordinary.statements(), bound.program().statements());
+        assert_ne!(
+            ordinary.canonical_bytes(),
+            bound.program().canonical_bytes()
+        );
+        let singleton = definition.bind(&single, RelationId(1), symbols).unwrap();
+        assert!(!singleton.program().freezes_edge_update_input());
+    }
+    // Eager MATCH selection does not snapshot RHS graph reads across rows.
+    // Until those can be evaluated over the current staging image, reject
+    // feedback rather than silently turn repeated increments into one write.
+    for tail in [
+        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id SET e.id=e.id+row.p",
+        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id SET e.id=row.p, e.p=e.id+10",
+        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id SET e.id=row.p, e.p=coalesce(e.p,0)+1",
+    ] {
+        let definition =
+            GraphUnwindWriteText::parse(&format!("UNWIND $rows AS row {tail}")).unwrap();
+        assert!(
+            matches!(
+                definition.bind(&input, RelationId(1), symbols),
+                Err(GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 })
+            ),
+            "{tail}"
+        );
+        let singleton = definition.bind(&single, RelationId(1), symbols).unwrap();
+        assert!(!singleton.program().freezes_edge_update_input());
+    }
+    assert_eq!(input.canonical_bytes(), original);
+}
+
+#[test]
+fn constant_relationship_batches_freeze_but_row_reading_and_mixed_updates_do_not() {
+    let input = rows(vec![int(1), int(2), int(1)]);
+    for (tail, frozen) in [
+        ("MATCH (a)-[e:R {id:x}]->(b) SET e.p=x", true),
+        ("MATCH (a)-[e:R {id:x}]->(b) REMOVE e.p", true),
+        ("MATCH (a)-[e:R {id:x}]->(b) SET e.p=e.p+1", false),
+        ("MATCH (a)-[e:R {id:x}]->(b) SET e.p=x, a.p=x", false),
+    ] {
+        let definition = GraphUnwindWriteText::parse(&format!("UNWIND $rows AS x {tail}")).unwrap();
+        let bound = definition
+            .bind(&input, RelationId(1), symbols)
+            .unwrap_or_else(|error| panic!("{tail}: {error:?}"));
+        assert_eq!(
+            bound.program().freezes_edge_update_input(),
+            frozen,
+            "{tail}"
+        );
+        assert!(!bound.program().freezes_vertex_update_input(), "{tail}");
+    }
+    let deletion =
+        GraphUnwindWriteText::parse("UNWIND $rows AS x MATCH (a)-[e:R {id:x}]->(b) DELETE e")
+            .unwrap();
+    assert!(matches!(
+        deletion.bind(&input, RelationId(1), symbols),
+        Err(GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 })
+    ));
 }
 
 #[test]
@@ -230,10 +345,12 @@ fn nullable_first_rows_never_hide_later_boolean_property_dependencies() {
         "UNWIND $rows AS row MATCH (a:Entity)-[e:R {id:row.id}]->(b) SET e.id=row.p",
     )
     .unwrap();
-    assert!(matches!(
-        edge.bind(&input, RelationId(1), symbols),
-        Err(GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 })
-    ));
+    assert!(
+        edge.bind(&input, RelationId(1), symbols)
+            .unwrap()
+            .program()
+            .freezes_edge_update_input()
+    );
     let disjoint = GraphUnwindWriteText::parse(
         "UNWIND $rows AS row MATCH (n:Entity) WHERE n.id=row.id OR n.id IS NULL SET n.p=row.p",
     )

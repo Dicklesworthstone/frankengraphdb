@@ -16,11 +16,12 @@
 //! map keys and signed indexes as later sources, without copying that document.
 //! Alias rebinding, dynamic indexes, multiple statements and empty batches refuse.
 //!
-//! Vertex SET/REMOVE batches that write their MATCH's selection fields freeze
-//! all selections and assignment inputs against the entry transaction overlay,
-//! then apply their field updates in input order. MERGE and already-admitted
-//! disjoint row updates retain sequential visibility. Feedback involving
-//! relationship updates or multi-element deletion still refuses typed.
+//! Vertex-only or relationship-only SET/REMOVE batches that write their
+//! MATCH's selection fields freeze selections against the entry overlay for
+//! resolved constant assignments, then apply updates in input order.
+//! Graph-reading RHS feedback remains unsupported. MERGE and admitted disjoint row
+//! updates retain sequential visibility. Feedback involving mixed
+//! vertex/relationship updates or multi-element deletion still refuses typed.
 
 mod controlled;
 mod expansion;
@@ -102,7 +103,7 @@ pub enum GraphUnwindWriteError {
         observed: usize,
     },
     /// A multirow MATCH mutation could change a later input row's selection.
-    /// Its shape is outside the closed frozen vertex-update profile, so
+    /// Its shape is outside the closed frozen field-update profiles, so
     /// sequential execution would be a different query. It refuses before binding.
     RowFeedsLaterMatch {
         statement: usize,
@@ -311,10 +312,11 @@ impl GraphUnwindWriteText {
     /// definition size limits still apply to the lowered statement. Execution
     /// uses the ordinary program executor and its existing
     /// rollback, authorization, cancellation, allocation and commit semantics.
-    /// Vertex updates that write their own MATCH's property or label domain
-    /// freeze all row selections and RHS values against the entry overlay,
-    /// then stage fields in input order. Relationship feedback and deletion
-    /// whose MATCH depends on edges or another vertex binding still refuse.
+    /// Homogeneous vertex or relationship updates that write their own MATCH's
+    /// selection fields freeze all row selections against the entry overlay,
+    /// then stage resolved constant assignments in input order. Feedback with
+    /// graph-reading RHS values, mixed targets, or deletion whose MATCH depends
+    /// on edges or another vertex binding still refuses.
     /// Disjoint updates, simple single-vertex deletion and MERGE retain
     /// sequential program semantics.
     pub fn bind_with_limit(
