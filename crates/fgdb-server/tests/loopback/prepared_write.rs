@@ -646,6 +646,28 @@ fn fgp_map_parameters_bind_as_property_maps() {
             .await
             .unwrap();
         assert_eq!(returned.rows, [vec![text("Ann"), WireValue::Int(31)]]);
+        // A RETURN template keeps the splice of both MERGE branches.
+        let merge = "MERGE (n:Person {name: $name}) ON CREATE SET n += $props \
+                     ON MATCH SET n += $seen RETURN n.name AS name, n.age AS age";
+        for (name, expected) in [("Cy", 50), ("Ann", 32)] {
+            let merged = client
+                .execute(
+                    cx,
+                    ExecuteMode::Write,
+                    merge,
+                    vec![
+                        ("name".into(), text(name)),
+                        props(&[("age", WireValue::Int(50))]),
+                        (
+                            "seen".into(),
+                            WireValue::Map(vec![("age".into(), WireValue::Int(32))]),
+                        ),
+                    ],
+                )
+                .await
+                .unwrap();
+            assert_eq!(merged.rows, [vec![text(name), WireValue::Int(expected)]]);
+        }
 
         let set = client
             .prepare_write(
@@ -772,6 +794,7 @@ fn fgp_map_parameters_bind_as_property_maps() {
             [
                 vec![text("Ann"), WireValue::Int(33)],
                 vec![text("Bob"), WireValue::Int(41)],
+                vec![text("Cy"), WireValue::Int(50)],
             ]
         );
         client.close(cx).await.unwrap();
