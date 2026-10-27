@@ -267,6 +267,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                     sealing,
                     max_source_incidences,
                 },
+                query_policy: None,
             };
             if let Some(graph) = self
                 .sealed_cache

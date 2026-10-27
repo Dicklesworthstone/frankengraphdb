@@ -36,6 +36,8 @@ mod projection;
 mod sealed_cache;
 #[path = "query_prism/sealed_prepare.rs"]
 mod sealed_prepare;
+#[path = "query_prism/sealed_query.rs"]
+mod sealed_query;
 pub(crate) use cache::{
     CACHE_BYTES as PROJECTION_CACHE_BYTES, LiveCache, ProjectionCache, Request as ProjectionRequest,
 };
@@ -45,6 +47,7 @@ pub(crate) use sealed_cache::{
     Request as SealedProjectionRequest, SealedProjectionCache, Source as SealedProjectionSource,
 };
 pub(crate) use sealed_prepare::{CooperativeSealedBuild, ImmediateSealedBuild, SealedBuild};
+pub use sealed_query::SealedReadView;
 
 type Error = FnxReadError<ReadError, Cancel>;
 type SealedReadError = FnxSealedReadError<ReadError, Cancel>;
@@ -325,6 +328,15 @@ pub enum ProcedureError {
     /// cancellation is never a refusal: it surfaces as the read's own
     /// interruption, so this error cannot carry one.
     Read(Box<FnxReadError<ReadError, core::convert::Infallible>>),
+    /// The compressed source, projection or kernel refused. Native runtime
+    /// cancellation is lifted into the enclosing query's interruption.
+    SealedRead(Box<FnxSealedReadError<ReadError, core::convert::Infallible>>),
+    /// A query must explicitly select this prepared source's relation; the
+    /// source never substitutes its relation for a different or whole graph.
+    SealedRelationMismatch {
+        requested: Option<fgdb_delta_types::RelationId>,
+        retained: fgdb_delta_types::RelationId,
+    },
     /// A count beyond the GQL Int64 domain.
     ResultDomain,
     /// A `CALL hybrid.search` refused its arguments or its retrieval.
@@ -335,6 +347,10 @@ impl core::fmt::Display for ProcedureError {
         match self {
             Self::Bind(error) => error.fmt(f),
             Self::Read(error) => error.fmt(f),
+            Self::SealedRead(error) => error.fmt(f),
+            Self::SealedRelationMismatch { .. } => {
+                f.write_str("Prism query relation does not match the prepared sealed source")
+            }
             Self::ResultDomain => f.write_str("Prism count exceeds the Int64 domain"),
             Self::Search(error) => error.fmt(f),
         }
@@ -345,7 +361,8 @@ impl core::error::Error for ProcedureError {
         match self {
             Self::Bind(error) => Some(error),
             Self::Search(error) => Some(error),
-            Self::Read(_) | Self::ResultDomain => None,
+            Self::SealedRead(error) => Some(error),
+            Self::Read(_) | Self::ResultDomain | Self::SealedRelationMismatch { .. } => None,
         }
     }
 }
@@ -361,7 +378,15 @@ impl ProcedureError {
                 **error,
                 FnxReadError::Execution(fgdb_prism::FnxExecutionError::GraphKind { .. })
             ),
-            Self::ResultDomain | Self::Search(_) => false,
+            Self::SealedRead(error) => matches!(
+                **error,
+                FnxSealedReadError::Execution(
+                    FnxSealedExecutionError::Execution(FnxExecutionError::GraphKind { .. })
+                        | FnxSealedExecutionError::UnsupportedAlgorithm(_)
+                        | FnxSealedExecutionError::UnsupportedCooperativeAlgorithm(_)
+                )
+            ),
+            Self::ResultDomain | Self::Search(_) | Self::SealedRelationMismatch { .. } => false,
         }
     }
 }
@@ -1034,13 +1059,14 @@ impl<V: Vfs + Clone> Database<V> {
                     sealing,
                     limits: root_limits,
                 },
+                query_policy: None,
             };
             let cache = &view.snapshot.read_caches.sealed;
             if let Some(graph) = cache.lookup_controlled(&view.snapshot, request, &mut || {
                 cx.checkpoint().map_err(Error::Cancelled)
             })? {
                 cx.checkpoint().map_err(Error::Cancelled)?;
-                return Ok(graph);
+                return Ok(graph.graph);
             }
             // Refuse vertex admission before the potentially expensive seal.
             let mut control = source_control(cx, source_limits);
@@ -1084,7 +1110,7 @@ impl<V: Vfs + Clone> Database<V> {
             cache.remember(
                 &view.snapshot,
                 request,
-                graph.clone(),
+                sealed_cache::Retained::standalone(graph.clone()),
                 graph.charged_resident_bytes(),
                 &mut || cx.checkpoint().map_err(Error::Cancelled),
             )?;
@@ -1228,13 +1254,14 @@ impl EmbeddedReadView {
                     source_limits,
                 },
                 source: SealedProjectionSource::Admitted(partition.anchor()),
+                query_policy: None,
             };
             let cache = &self.snapshot.read_caches.sealed;
             if let Some(graph) = cache.lookup_controlled(&self.snapshot, request, &mut || {
                 cx.checkpoint().map_err(Error::Cancelled)
             })? {
                 cx.checkpoint().map_err(Error::Cancelled)?;
-                return Ok(graph);
+                return Ok(graph.graph);
             }
             let mut control = source_control(cx, source_limits);
             let mut staging_bytes = 0usize;
@@ -1262,7 +1289,7 @@ impl EmbeddedReadView {
             cache.remember(
                 &self.snapshot,
                 request,
-                graph.clone(),
+                sealed_cache::Retained::standalone(graph.clone()),
                 graph.charged_resident_bytes(),
                 &mut || cx.checkpoint().map_err(Error::Cancelled),
             )?;

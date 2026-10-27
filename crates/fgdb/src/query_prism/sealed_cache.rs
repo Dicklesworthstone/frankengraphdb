@@ -10,7 +10,9 @@
 use super::cache::Request as ProjectionRequest;
 use super::{RootReadLimits, SealedGraphView, SealedLimits};
 use crate::ReadCacheUsage;
+use crate::gql_exec::AdmissionUsage;
 use crate::query::read_cache::live::{CACHE_ENTRIES, LiveCache};
+use fgdb_gql::GqlQueryPolicy;
 use fgdb_strata::tiered::memory::{MemoryCharge, MemoryPool};
 use fgdb_strata::tiered::sealed::SealedAnchor;
 use fgdb_types::QueryCx;
@@ -39,9 +41,38 @@ pub(crate) enum Source {
 pub(crate) struct Request {
     pub(crate) projection: ProjectionRequest,
     pub(crate) source: Source,
+    /// A query retains its complete measured construction admission. Different
+    /// remaining allowances must rebuild and reach their own first refusal.
+    /// Standalone preparation has no GQL admission profile.
+    pub(crate) query_policy: Option<GqlQueryPolicy>,
 }
 
-pub(crate) type SealedProjectionCache = LiveCache<crate::Snapshot, Request, SealedGraphView>;
+#[derive(Clone)]
+pub(crate) struct Retained {
+    pub(crate) graph: SealedGraphView,
+    pub(crate) query_usage: Option<AdmissionUsage>,
+}
+
+impl Retained {
+    pub(crate) fn standalone(graph: SealedGraphView) -> Self {
+        Self {
+            graph,
+            query_usage: None,
+        }
+    }
+
+    pub(crate) fn charged_bytes(&self) -> Option<usize> {
+        let extra = if self.query_usage.is_some() {
+            std::mem::size_of::<Option<AdmissionUsage>>()
+                + std::mem::size_of::<Option<GqlQueryPolicy>>()
+        } else {
+            0
+        };
+        self.graph.charged_resident_bytes().checked_add(extra)
+    }
+}
+
+pub(crate) type SealedProjectionCache = LiveCache<crate::Snapshot, Request, Retained>;
 
 struct BufferedEntry {
     request: Request,
