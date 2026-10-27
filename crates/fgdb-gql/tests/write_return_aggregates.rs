@@ -92,6 +92,23 @@ fn rows(execution: &GqlQueryExecution<GraphValueRow>) -> Vec<Vec<GraphValue>> {
 }
 
 #[test]
+fn computed_write_return_pages_never_limit_the_statements_effects() {
+    let query = prepare(
+        "UNWIND [1,2,3] AS x CREATE (n:Item {p:x}) \
+         RETURN n.p AS p,count(*) AS occurrences ORDER BY p SKIP (2 - 1) LIMIT 3 - 2",
+    );
+    let batch = create(&query, policy(1), || Ok(())).unwrap();
+    assert_eq!(batch.insertion().stats().created_vertices, 3);
+    assert_eq!(rows(batch.returning()), vec![vec![int(2), int(1)]]);
+
+    let query =
+        prepare("UNWIND [1,2,3] AS x CREATE (n:Item {p:x}) RETURN count(*) AS n LIMIT (1 - 1)");
+    let batch = create(&query, policy(0), || Ok(())).unwrap();
+    assert_eq!(batch.insertion().stats().created_vertices, 3);
+    assert!(batch.returning().value.is_empty());
+}
+
+#[test]
 fn create_groups_actual_frozen_identities_and_null_keys() {
     let query = prepare(
         "UNWIND [1,1,2,NULL] AS x CREATE (n:Item {p:x}) \

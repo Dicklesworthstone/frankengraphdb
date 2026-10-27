@@ -2028,12 +2028,75 @@ impl<'a> Parser<'a> {
     }
     fn parse_pagination(&mut self) -> Result<(), GraphPatternTextError> {
         if self.take_word("SKIP")? {
-            self.syntax.offset = self.number(GqlParameterType::UInt64)?;
+            self.syntax.offset = self.page_number()?;
         }
         if self.take_word("LIMIT")? {
-            self.syntax.count = Some(self.number(GqlParameterType::UInt64)?);
+            self.syntax.count = Some(self.page_number()?);
         }
         Ok(())
+    }
+
+    /// A page is fixed before source access. Bare UInt64 operands retain their
+    /// full-width contract; a literal expression uses the ordinary scalar
+    /// compiler and folds once during preparation (fgdb-ebioe). Row reads,
+    /// random draws and parameters inside an expression are not constants.
+    fn page_number(&mut self) -> Result<Number, GraphPatternTextError> {
+        if matches!(self.current.kind, TokenKind::Parameter(_)) {
+            return self.number(GqlParameterType::UInt64);
+        }
+        if matches!(self.current.kind, TokenKind::Digits(_)) {
+            let mut lexer = self.lexer.clone();
+            if !matches!(
+                lexer.next()?.kind,
+                TokenKind::Punct(b'+' | b'-' | b'*' | b'/' | b'%' | b'^')
+            ) {
+                return self.number(GqlParameterType::UInt64);
+            }
+        }
+        let at = self.current.at;
+        let invalid = || {
+            error(
+                at,
+                GraphPatternTextErrorKind::Expected(
+                    "bounded constant nonnegative integer page expression",
+                ),
+            )
+        };
+        let uses = self
+            .syntax
+            .parameters
+            .iter()
+            .map(|spec| spec.occurrences)
+            .sum::<usize>();
+        let value = self.read_row_value(&[], 0).map_err(|_| invalid())?;
+        if !value.row_independent()
+            || self
+                .syntax
+                .parameters
+                .iter()
+                .map(|spec| spec.occurrences)
+                .sum::<usize>()
+                != uses
+        {
+            return Err(invalid());
+        }
+        let value = scoped::mutation::return_projection::bind_read_value(&value, &[])
+            .map_err(|_| invalid())?;
+        let row = GraphValueRow::from_owned_values(Vec::new());
+        // Preparation has no query Cx. Charge every native work/scratch event
+        // against a finite ceiling before allocation, including dead-result
+        // expressions such as size(range(...)). No graph reader is installed.
+        let mut remaining = 65_536_u32;
+        let value = crate::set_ops::evaluate_value(&value, &row, 0, &mut |_| {
+            remaining = remaining.checked_sub(1).ok_or(())?;
+            Ok::<_, ()>(())
+        })
+        .map_err(|_| invalid())?;
+        let Some(fgdb_types::CanonicalScalar::Int(value)) = value.as_scalar() else {
+            return Err(invalid());
+        };
+        let value = u64::try_from(*value).map_err(|_| invalid())?;
+        Ok(Number::Literal(GqlParameterValue::UInt64(value)))
     }
     fn end(&self) -> Result<(), GraphPatternTextError> {
         if !matches!(self.current.kind, TokenKind::End) {
@@ -2049,6 +2112,25 @@ impl<'a> Parser<'a> {
         }
         self.check_parameter_declarations()
     }
+}
+
+/// The compound-page framer uses the same constant compiler as a native
+/// MATCH/RETURN/WITH page. The returned byte offset is the first unconsumed
+/// token in the caller's original text; values are never interpolated.
+pub(crate) fn constant_page_number(
+    statement: &str,
+    at: usize,
+) -> Result<(u64, usize), GraphPatternTextError> {
+    let mut parser = Parser::new(statement)?;
+    parser.lexer.at = at;
+    parser.current = parser.lexer.next()?;
+    let Number::Literal(GqlParameterValue::UInt64(value)) = parser.page_number()? else {
+        return Err(error(
+            at,
+            GraphPatternTextErrorKind::Expected("constant page expression"),
+        ));
+    };
+    Ok((value, parser.current.at))
 }
 
 #[derive(Clone)]

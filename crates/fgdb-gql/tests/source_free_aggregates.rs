@@ -42,6 +42,26 @@ fn run(plan: &PreparedGraphSetAggregate) -> GqlQueryExecution<GraphAggregateRow>
 }
 
 #[test]
+fn constant_pagination_preserves_aggregate_completion_and_group_order() {
+    for (computed, literal) in [
+        (
+            "UNWIND [1,2,1,3] AS x RETURN x,count(*) AS n ORDER BY x SKIP 2 - 1 LIMIT toInteger(1.9)",
+            "UNWIND [1,2,1,3] AS x RETURN x,count(*) AS n ORDER BY x SKIP 1 LIMIT 1",
+        ),
+        (
+            "UNWIND [1,2,3] AS x RETURN sum(x) AS total LIMIT (1 - 1)",
+            "UNWIND [1,2,3] AS x RETURN sum(x) AS total LIMIT 0",
+        ),
+    ] {
+        assert_eq!(
+            run(&prepare(computed)),
+            run(&prepare(literal)),
+            "{computed}"
+        );
+    }
+}
+
+#[test]
 fn heterogeneous_extrema_use_language_order_and_keep_typed_numeric_ties() {
     let scalar = |value| GraphValue::Scalar(value);
     for (values, low, high) in [

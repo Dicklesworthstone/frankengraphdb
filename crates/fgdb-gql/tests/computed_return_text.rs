@@ -87,6 +87,118 @@ fn ints(rows: &[GraphValueRow]) -> Vec<Vec<Option<i64>>> {
 }
 
 #[test]
+fn constant_page_expressions_use_the_native_value_kernel_on_every_read_shape() {
+    let vertices = [VId(1), VId(2), VId(3), VId(4), VId(5)];
+    let props = Props::new();
+    for (computed, literal) in [
+        (
+            "MATCH (n) RETURN n SKIP (1 + 1) LIMIT 3 - 1",
+            "MATCH (n) RETURN n SKIP 2 LIMIT 2",
+        ),
+        (
+            "MATCH (n) WITH n SKIP abs(-1) LIMIT toInteger(2.9) RETURN n",
+            "MATCH (n) WITH n SKIP 1 LIMIT 2 RETURN n",
+        ),
+        (
+            "UNWIND [5,4,3,2,1] AS x RETURN x ORDER BY x SKIP size([0,1]) LIMIT 1 + 1",
+            "UNWIND [5,4,3,2,1] AS x RETURN x ORDER BY x SKIP 2 LIMIT 2",
+        ),
+        (
+            "(RETURN 1 AS x UNION ALL RETURN 2 AS x) SKIP (2 - 1) LIMIT 2 * 1",
+            "(RETURN 1 AS x UNION ALL RETURN 2 AS x) SKIP 1 LIMIT 2",
+        ),
+        (
+            "RETURN 1 AS x UNION ALL RETURN 2 AS x ORDER BY x + 1 DESC LIMIT toInteger(1.5)",
+            "RETURN 1 AS x UNION ALL RETURN 2 AS x ORDER BY x + 1 DESC LIMIT 1",
+        ),
+        (
+            "UNWIND [1,2,3] AS x RETURN x LIMIT CASE WHEN true THEN 2 ELSE 1 / 0 END",
+            "UNWIND [1,2,3] AS x RETURN x LIMIT 2",
+        ),
+    ] {
+        let actual = run(&prepare(computed), &vertices, &[], &props).unwrap();
+        let expected = run(&prepare(literal), &vertices, &[], &props).unwrap();
+        assert_eq!(actual, expected, "{computed}");
+    }
+
+    // The direct graph-pattern preparation API uses the same page compiler.
+    let native: PreparedGraphSet =
+        PreparedGraphText::prepare("MATCH (n) RETURN n SKIP 1 + 1 LIMIT (2 * 1)", symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .into();
+    assert_eq!(
+        run(&native, &vertices, &[], &props).unwrap(),
+        run(
+            &prepare("MATCH (n) RETURN n SKIP 2 LIMIT 2"),
+            &vertices,
+            &[],
+            &props
+        )
+        .unwrap(),
+    );
+}
+
+#[test]
+fn page_constants_refuse_row_reads_invalid_domains_and_unbounded_preparation() {
+    for expression in [
+        "NULL",
+        "true",
+        "1.5",
+        "'2'",
+        "-1",
+        "1 / 0",
+        "9223372036854775807 + 1",
+        "n.p",
+        "rand()",
+        "toInteger(rand() * 0)",
+        "1 + $offset",
+        "($offset)",
+        "size(range(0, 100000000))",
+    ] {
+        for clause in ["SKIP", "LIMIT"] {
+            let calls = Cell::new(0);
+            let text = format!("MATCH (n:R) RETURN n {clause} {expression}");
+            let result = PreparedGraphSetText::prepare(&text, |_, _| {
+                calls.set(calls.get() + 1);
+                None
+            });
+            assert!(result.is_err(), "{text}");
+            assert_eq!(
+                calls.get(),
+                0,
+                "invalid pagination resolves no catalog: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn constant_pages_keep_full_width_bare_arguments_and_eager_source_errors() {
+    let template = PreparedGraphSetText::prepare(
+        "UNWIND [1,2,3] AS x RETURN x SKIP $skip LIMIT toInteger(1.5)",
+        symbols,
+    )
+    .unwrap();
+    for (skip, expected) in [(0, vec![vec![Some(1)]]), (u64::MAX, vec![])] {
+        let query = template
+            .bind_parameters(&GqlParameters::new().with_uint64("skip", skip).unwrap())
+            .unwrap();
+        assert_eq!(
+            ints(&run(&query, &[], &[], &Props::new()).unwrap().value),
+            expected
+        );
+    }
+    for page in ["0", "(2 - 2)"] {
+        let query = prepare(&format!(
+            "UNWIND [1,0] AS x RETURN 10 / x AS value LIMIT {page}"
+        ));
+        assert!(run(&query, &[], &[], &Props::new()).is_err());
+    }
+}
+
+#[test]
 fn computed_order_keys_rank_before_paging_and_do_not_escape_the_return_schema() {
     let props = Props::from([
         ((VId(1), P), CanonicalScalar::Int(2).into()),

@@ -1555,6 +1555,7 @@ struct Span {
     last_token: usize,
 }
 struct Composition<'a> {
+    statement: &'a str,
     tokens: Vec<TextToken<'a>>,
     at: usize,
     spans: Vec<Span>,
@@ -1960,11 +1961,6 @@ impl<'a> Composition<'a> {
     fn page_number(&mut self) -> Result<PageNumber, GraphSetTextError> {
         let token = self.current();
         let result = match token.kind {
-            TextKind::Digits(digits) => {
-                PageNumber::Literal(crate::graph_text::integer_magnitude(digits).ok_or_else(
-                    || pattern_kind(token.at, GraphPatternTextErrorKind::IntegerOutOfRange),
-                )?)
-            }
             TextKind::Parameter(name) => {
                 let name = name.to_owned();
                 self.page_parameters.push((
@@ -1978,7 +1974,15 @@ impl<'a> Composition<'a> {
                 ));
                 PageNumber::Parameter(name)
             }
-            _ => return Err(expected(token.at, "unsigned integer or UInt64 parameter")),
+            _ => {
+                let (value, end) =
+                    crate::graph_text::constant_page_number(self.statement, token.at)
+                        .map_err(|error| pattern_error(0, error))?;
+                while self.current().at < end && !matches!(self.current().kind, TextKind::End) {
+                    self.advance();
+                }
+                return Ok(PageNumber::Literal(value));
+            }
         };
         self.advance();
         Ok(result)
@@ -2130,6 +2134,7 @@ impl PreparedGraphSetText {
         let tokens = PreparedGraphText::composition_tokens(statement, declarations)
             .map_err(|error| pattern_error(0, error))?;
         let mut parser = Composition {
+            statement,
             tokens,
             at: 0,
             spans: Vec::new(),

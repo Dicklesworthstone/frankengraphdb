@@ -2586,7 +2586,7 @@ impl<'a> Parser<'a> {
     }
 
     fn row_page_number(&mut self) -> Result<ReadPageNumber, GraphPatternTextError> {
-        Ok(match self.number(GqlParameterType::UInt64)? {
+        Ok(match self.page_number()? {
             Number::Literal(GqlParameterValue::UInt64(value)) => ReadPageNumber::Literal(value),
             Number::Parameter(index) => ReadPageNumber::Parameter(index),
             _ => unreachable!("UInt64 page parser returns its declared domain"),
