@@ -205,6 +205,44 @@ fn literal_map_updates_share_frozen_values_across_targets_and_other_assignments(
     assert_eq!(edge_map.canonical_bytes(), edge_direct.canonical_bytes());
 }
 
+/// openCypher Set5 [5]: `SET n += {}` has no effect. Beside other actions it
+/// adds none; alone it is a write that selects its rows and stages nothing.
+#[test]
+fn an_empty_literal_map_assigns_nothing() {
+    for (empty, spelled) in [
+        ("MATCH (a) SET a.p=1, a += {}", "MATCH (a) SET a.p=1"),
+        ("MATCH (a) SET a += {} SET a:Seen", "MATCH (a) SET a:Seen"),
+        // The map's target stays a column of the selection, as it is when
+        // another action names it.
+        (
+            "MATCH (a)-[e:R]->(b) SET e += { }, e += {p: a.p}",
+            "MATCH (a)-[e:R]->(b) SET e.p=a.p",
+        ),
+    ] {
+        assert_eq!(
+            prepare(empty).canonical_bytes(),
+            prepare(spelled).canonical_bytes(),
+            "{empty}"
+        );
+    }
+    for text in [
+        "MATCH (a) SET a += {}",
+        "MATCH (a)-[:R]->(b) SET a += {}, b += {}",
+    ] {
+        let result = run(
+            &prepare(text),
+            &[VId(1), VId(2)],
+            &[(VId(1), R, VId(2))],
+            &props(),
+            policy(),
+        )
+        .unwrap();
+        assert!(result.intents().is_empty(), "{text}");
+        assert_eq!(result.stats().effects, 0, "{text}");
+        assert!(result.stats().selection.result_rows > 0, "{text}");
+    }
+}
+
 #[test]
 fn literal_map_parameters_nulls_and_explicit_removals_keep_the_existing_contract() {
     let text = "MATCH (a) WHERE a.p >= $n SET a += {q: $n, text: $t, p: NULL} \
@@ -290,8 +328,6 @@ fn literal_maps_refuse_malformed_and_unsupported_shapes_before_catalog_access() 
         );
     }
     for text in [
-        "MATCH (a) SET a += {}",
-        "MATCH (a) SET a.p=1,a += {}",
         "MATCH (a) SET a += $map",
         "MATCH (a) SET a += a.p",
         // SET a = {...} replaces (fgdb-6vm3o); a malformed replace map still

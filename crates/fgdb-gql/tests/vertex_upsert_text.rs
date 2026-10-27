@@ -274,6 +274,15 @@ fn map_assignments_are_their_per_key_assignments() {
             "MERGE (n:Person {p:$p}) ON MATCH SET n:Seen, n += {q: n.q + $m}",
             "MERGE (n:Person {p:$p}) ON MATCH SET n:Seen, n.q = n.q + $m",
         ),
+        // `{}` assigns nothing (Set5 [5]): an empty branch is no branch.
+        (
+            "MERGE (n:Person {p:$p}) ON CREATE SET n += {} ON MATCH SET n += {q: $m}",
+            "MERGE (n:Person {p:$p}) ON MATCH SET n.q = $m",
+        ),
+        (
+            "MERGE (n:Person {p:$p}) SET n += {}, n.q = $m",
+            "MERGE (n:Person {p:$p}) SET n.q = $m",
+        ),
     ] {
         let bind = |text: &str| {
             PreparedGraphVertexUpsertText::prepare(text, R, symbols)
@@ -285,7 +294,7 @@ fn map_assignments_are_their_per_key_assignments() {
         assert_eq!(bind(map), bind(keys), "{map}");
     }
     for text in [
-        "MERGE (n:Person {p:1}) SET n += {}",
+        "MERGE (n:Person {p:1}) SET n += {,}",
         "MERGE (n:Person {p:1}) SET n += {q: 1, q: 2}",
         // A map parameter has no keys at preparation.
         "MERGE (n:Person {p:1}) SET n += $m",

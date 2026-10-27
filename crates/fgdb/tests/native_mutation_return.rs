@@ -1511,3 +1511,65 @@ fn a_map_parameter_assigns_its_keys_through_query_write() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// openCypher Set5 [5]: `SET n += {}` has no effect, and neither has an empty
+/// map argument, which stands for that literal. The statement still returns
+/// its rows, and commits nothing.
+#[test]
+fn an_empty_property_map_assigns_nothing() {
+    let ((), report) = run_async_under_lab(0xa071_000b, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let before = (db.frontier().unwrap(), db.vertices().unwrap());
+        let empty = GqlParameters::new().with_map("props", Vec::new()).unwrap();
+        for (text, arguments, expected) in [
+            (
+                "MATCH (n:L {id: 1}) SET n += {} RETURN n.p AS p, n.id AS id",
+                GqlParameters::new(),
+                Some(vec![vec![int(4), int(1)]]),
+            ),
+            (
+                "MATCH (n:L {id: 2}) SET n += $props RETURN n.p AS p, n.id AS id",
+                empty.clone(),
+                Some(vec![vec![int(7), int(2)]]),
+            ),
+            (
+                "MERGE (n:L {id: 1}) ON MATCH SET n += $props RETURN n.p AS p, n.id AS id",
+                empty.clone(),
+                Some(vec![vec![int(4), int(1)]]),
+            ),
+            ("MATCH (n:L) SET n += {}", GqlParameters::new(), None),
+            ("MATCH (n:L) SET n += $props", empty.clone(), None),
+        ] {
+            let result = db
+                .query_write(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    text,
+                    &arguments,
+                    symbols,
+                    R,
+                    policy(10, 10, 0),
+                    no_allocate,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            match expected {
+                Some(expected) => assert_eq!(rows(result, &["p", "id"]), expected, "{text}"),
+                None => assert!(matches!(result, QueryResult::Write { .. }), "{text}"),
+            }
+            assert_eq!(
+                (db.frontier().unwrap(), db.vertices().unwrap()),
+                before,
+                "{text}"
+            );
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

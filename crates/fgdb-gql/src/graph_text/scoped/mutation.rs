@@ -472,7 +472,8 @@ impl<'a> Parser<'a> {
             } else if self.take_word("DELETE")? {
                 (false, true, false)
             } else {
-                if actions.is_empty() {
+                // `SET n += {}` is a clause without actions.
+                if deletion_mode.is_none() {
                     return Err(error(
                         at,
                         GraphPatternTextErrorKind::Expected("SET, REMOVE, DELETE or DETACH DELETE"),
@@ -764,6 +765,7 @@ impl<'a> Parser<'a> {
     // A literal map is syntax for simultaneous property assignments, not a
     // runtime map value. Every field uses the original expression compiler and
     // consumes one slot in the whole statement's existing action allowance.
+    // `{}` assigns nothing and has no effect (TCK Set5 [5]).
     fn mutation_literal_map(
         &mut self,
         columns: &mut Vec<Projection<'a>>,
@@ -772,10 +774,9 @@ impl<'a> Parser<'a> {
         row: Option<&[(Name<'a>, crate::GraphSetColumnType)]>,
     ) -> Result<(), GraphMutationTextError> {
         self.punct(b'=', "=")?;
-        let at = self.current.at;
         self.punct(b'{', "literal property map after +=")?;
-        if self.is_punct(b'}') {
-            return Err(build_error(at, GraphMutationBuildError::EmptyActions));
+        if self.take(b'}')? {
+            return Ok(());
         }
         let mut keys = std::collections::BTreeSet::new();
         loop {

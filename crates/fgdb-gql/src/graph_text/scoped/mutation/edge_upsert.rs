@@ -89,17 +89,11 @@ impl<'a> Parser<'a> {
             }
             if self.take(b'+')? {
                 self.punct(b'=', "=")?;
-                let at = self.current.at;
                 self.punct(b'{', "literal property map after +=")?;
-                if self.is_punct(b'}') {
-                    return Err(error(
-                        at,
-                        GraphPatternTextErrorKind::Expected("a property in SET += map"),
-                    )
-                    .into());
-                }
+                // `{}` assigns nothing (TCK Set5 [5]).
                 let first = target.len();
-                loop {
+                let mut closed = self.take(b'}')?;
+                while !closed {
                     capacity(self, target.len())?;
                     let key = self.schema_name()?;
                     if target[first..]
@@ -117,10 +111,10 @@ impl<'a> Parser<'a> {
                     self.punct(b':', ":")?;
                     let action = self.edge_upsert_value(relationship, key)?;
                     target.push(action);
-                    if self.take(b'}')? {
-                        break;
+                    closed = self.take(b'}')?;
+                    if !closed {
+                        self.punct(b',', ", or }")?;
                     }
-                    self.punct(b',', ", or }")?;
                 }
             } else {
                 self.punct(b'.', "relationship property assignment")?;

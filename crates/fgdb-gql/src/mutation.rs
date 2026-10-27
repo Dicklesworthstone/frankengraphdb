@@ -176,7 +176,6 @@ impl core::fmt::Debug for GraphMutationAction {
 pub enum GraphMutationBuildError {
     RequiresSingleGraphSource,
     RelationalInput(crate::GraphSetBuildError),
-    EmptyActions,
     TooManyActions {
         limit: usize,
         observed: usize,
@@ -207,9 +206,6 @@ impl core::fmt::Display for GraphMutationBuildError {
                 f.write_str("a mutation requires exactly one graph source")
             }
             Self::RelationalInput(error) => error.fmt(f),
-            Self::EmptyActions => {
-                f.write_str("a mutation requires at least one SET, REMOVE or DELETE action")
-            }
             Self::TooManyActions { limit, observed } => {
                 write!(f, "mutation has {observed} actions, limit {limit}")
             }
@@ -569,6 +565,8 @@ impl PreparedGraphMutation {
     /// never guessed from a MATCH relation, a result value, or an ambient catalog.
     /// Property targets are vertex or edge columns; inputs are written values.
     /// Deletion and updates cannot be mixed in one simultaneous statement.
+    /// No actions is a write without effect, as `SET n += {}` is (TCK Set5
+    /// [5]): it still selects, and returns, its rows.
     pub fn prepare(
         selection: PreparedGraphPattern<GraphValueRow>,
         relation: RelationId,
@@ -583,9 +581,6 @@ impl PreparedGraphMutation {
         relation: RelationId,
         actions: Vec<GraphMutationAction>,
     ) -> Result<Self, GraphMutationBuildError> {
-        if actions.is_empty() {
-            return Err(GraphMutationBuildError::EmptyActions);
-        }
         if actions.len() > MAX_GRAPH_MUTATION_ACTIONS {
             return Err(GraphMutationBuildError::TooManyActions {
                 limit: MAX_GRAPH_MUTATION_ACTIONS,
@@ -601,8 +596,8 @@ impl PreparedGraphMutation {
                 .collect(),
             (None, None) => return Err(GraphMutationBuildError::RequiresSingleGraphSource),
         };
-        let deleting = actions[0].deletes();
-        let detaching = actions[0].detaches();
+        let deleting = actions.first().is_some_and(GraphMutationAction::deletes);
+        let detaching = actions.first().is_some_and(GraphMutationAction::detaches);
         for (at, action) in actions.iter().enumerate() {
             // A computed delete's value may be an element, a path or NULL;
             // which one is known only when it runs (TCK Delete5).

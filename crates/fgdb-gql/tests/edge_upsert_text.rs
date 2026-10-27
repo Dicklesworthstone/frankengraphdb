@@ -232,6 +232,12 @@ fn a_literal_map_assignment_is_the_same_branch_assignments() {
             "ON CREATE SET e += {w: 1} ON MATCH SET e += {w: 2} SET e += {p: 3}",
             "ON CREATE SET e.w = 1 ON MATCH SET e.w = 2 SET e.p = 3",
         ),
+        // `{}` assigns nothing (Set5 [5]): an empty branch is no branch.
+        (
+            "ON CREATE SET e += {} ON MATCH SET e += {w: 2}",
+            "ON MATCH SET e.w = 2",
+        ),
+        ("ON CREATE SET e += {}, e.p = 3", "ON CREATE SET e.p = 3"),
     ] {
         assert_eq!(
             bind(&format!("{head} {map}")).unwrap(),
@@ -240,7 +246,8 @@ fn a_literal_map_assignment_is_the_same_branch_assignments() {
         );
     }
     for refused in [
-        "ON CREATE SET e += {}",
+        "ON CREATE SET e += {,}",
+        "ON CREATE SET e += {w: 1,}",
         "ON CREATE SET e += {w: 1, w: 2}",
         "ON CREATE SET a += {w: 1}",
         "ON CREATE SET e += {w: a.p}",

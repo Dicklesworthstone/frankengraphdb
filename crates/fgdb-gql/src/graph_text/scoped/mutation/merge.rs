@@ -498,7 +498,8 @@ impl<'a> Parser<'a> {
     }
 
     /// `+= {key: value, ...}` after the MERGE vertex: each entry is exactly
-    /// the assignment `n.key = value`, in entry order.
+    /// the assignment `n.key = value`, in entry order. `{}` assigns nothing
+    /// (TCK Set5 [5]).
     fn upsert_map(
         &mut self,
         variable: Name<'a>,
@@ -507,14 +508,9 @@ impl<'a> Parser<'a> {
         row: Option<&[(Name<'a>, GraphSetColumnType)]>,
     ) -> Result<(), GraphVertexUpsertTextError> {
         self.punct(b'=', "=")?;
-        let at = self.current.at;
         self.punct(b'{', "literal property map after +=")?;
-        if self.is_punct(b'}') {
-            return Err(error(
-                at,
-                GraphPatternTextErrorKind::Expected("a property in SET += map"),
-            )
-            .into());
+        if self.take(b'}')? {
+            return Ok(());
         }
         let mut keys = std::collections::BTreeSet::new();
         loop {
