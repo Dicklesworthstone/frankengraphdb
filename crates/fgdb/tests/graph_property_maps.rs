@@ -729,6 +729,397 @@ mod dynamic_metadata {
     }
 }
 
+mod transaction_dynamic_metadata {
+    use super::*;
+    use fgdb::{WriteError, WriteTxnError};
+
+    fn sorted(mut rows: Vec<Vec<GraphValue>>) -> Vec<Vec<GraphValue>> {
+        rows.sort();
+        rows
+    }
+
+    #[test]
+    fn carried_metadata_reads_canonical_staging_in_rows_and_aggregate_outputs() {
+        let ((), report) = run_async_under_lab(0x6d61_0040, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let basis = seed(&mut db, &commit, false).await;
+            let pinned = db.read_session().unwrap();
+            let params = GqlParameters::new()
+                .with_list(
+                    "nodes",
+                    vec![
+                        GraphValue::Vertex(VId(1)),
+                        GraphValue::Vertex(VId(u128::MAX)),
+                    ],
+                )
+                .unwrap()
+                .with_list(
+                    "edges",
+                    vec![GraphValue::Edge(EId(1)), GraphValue::Edge(EId(u128::MAX))],
+                )
+                .unwrap();
+            let nodes = "UNWIND $nodes AS x RETURN labels(x) AS labels, properties(x) AS props, keys(x) AS names";
+            let edges = "UNWIND $edges AS x RETURN type(x) AS relation, properties(x) AS props, keys(x) AS names";
+            let before = cells(
+                db.query(&cx, nodes, &params, Catalog::Full, policy())
+                    .unwrap(),
+            );
+            let mut txn = db.begin(&txcx).unwrap();
+            let mut edits = WriteBatch::new(R);
+            edits.set_vertex_label(VId(1), THING, false);
+            edits.set_vertex_label(VId(1), FOO, true);
+            edits.set_vertex_property(VId(1), SCORE, Some(CanonicalScalar::Int(40)));
+            edits.set_vertex_property(VId(1), NAME, None);
+            edits.set_vertex_property(VId(1), NOTE, Some(CanonicalScalar::Int(5)));
+            edits.set_edge_property(EId(1), SCORE, None);
+            edits.set_edge_property(EId(1), NAME, Some(CanonicalScalar::Int(9)));
+            edits.create_vertex(
+                VId(u128::MAX),
+                vec![BAR],
+                vec![(SCORE, CanonicalScalar::Int(70))],
+            );
+            edits.add_edge(
+                EId(u128::MAX),
+                VId(u128::MAX),
+                VId(2),
+                vec![(NAME, CanonicalScalar::Int(8))],
+            );
+            txn.write(&mut db, edits).unwrap();
+            let digest = txn.staged_effect_digest().unwrap();
+            let node_props = map(&[("edge-note", int(5)), ("score", int(40))]);
+            let expected_nodes = sorted(vec![
+                vec![
+                    list(&["Foo"]),
+                    node_props.clone(),
+                    list(&["edge-note", "score"]),
+                ],
+                vec![list(&["Bar"]), map(&[("score", int(70))]), list(&["score"])],
+            ]);
+            let expected_edges = sorted(vec![
+                vec![
+                    text("R"),
+                    map(&[
+                        ("edge-note", GraphValue::Scalar(CanonicalScalar::Bool(true))),
+                        ("name", int(9)),
+                    ]),
+                    list(&["edge-note", "name"]),
+                ],
+                vec![text("R"), map(&[("name", int(8))]), list(&["name"])],
+            ]);
+            for (statement, expected) in [(nodes, &expected_nodes), (edges, &expected_edges)] {
+                assert_eq!(
+                    sorted(cells(
+                        txn.query(&db, &cx, statement, &params, Catalog::Full, policy())
+                            .unwrap()
+                    )),
+                    *expected
+                );
+            }
+            // Exercise the direct pattern aggregate and the relational aggregate
+            // independently; both evaluate carried identities after grouping.
+            for statement in [
+                "MATCH (n:Foo) RETURN labels(collect(n)[0]) AS labels, properties(collect(n)[0]) AS props, keys(collect(n)[0]) AS names",
+                "UNWIND $nodes AS x RETURN labels(collect(x)[0]) AS labels, properties(collect(x)[0]) AS props, keys(collect(x)[0]) AS names",
+            ] {
+                assert_eq!(
+                    cells(
+                        txn.query(&db, &cx, statement, &params, Catalog::Full, policy())
+                            .unwrap()
+                    ),
+                    vec![vec![
+                        list(&["Foo"]),
+                        node_props.clone(),
+                        list(&["edge-note", "score"])
+                    ]]
+                );
+            }
+            assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+            assert_eq!(db.frontier().unwrap(), basis);
+            assert_eq!(
+                cells(
+                    db.query(&cx, nodes, &params, Catalog::Full, policy())
+                        .unwrap()
+                ),
+                before
+            );
+            txn.commit(&mut db, &commit).await.unwrap();
+            assert_eq!(
+                sorted(cells(
+                    db.query(&cx, nodes, &params, Catalog::Full, policy())
+                        .unwrap()
+                )),
+                expected_nodes
+            );
+            assert_eq!(
+                cells(
+                    pinned
+                        .query(&cx, nodes, &params, Catalog::Full, policy())
+                        .unwrap()
+                ),
+                before
+            );
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn metadata_absence_and_edge_cascades_follow_staging_and_savepoint_rollback() {
+        let ((), report) = run_async_under_lab(0x6d61_0041, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            seed(&mut db, &commit, false).await;
+            let params = GqlParameters::new()
+                .with_list(
+                    "nodes",
+                    vec![
+                        GraphValue::Vertex(VId(2)),
+                        GraphValue::Vertex(VId(99)),
+                        null(),
+                    ],
+                )
+                .unwrap()
+                .with_list(
+                    "edges",
+                    vec![GraphValue::Edge(EId(1)), GraphValue::Edge(EId(99)), null()],
+                )
+                .unwrap();
+            let nodes = "UNWIND $nodes AS x RETURN labels(x), properties(x), keys(x)";
+            let edges = "UNWIND $edges AS x RETURN type(x), properties(x), keys(x)";
+            let mut txn = db.begin(&txcx).unwrap();
+            let before_nodes = cells(
+                txn.query(&db, &cx, nodes, &params, Catalog::Full, policy())
+                    .unwrap(),
+            );
+            let before_edges = cells(
+                txn.query(&db, &cx, edges, &params, Catalog::Full, policy())
+                    .unwrap(),
+            );
+            txn.savepoint(&db, "before_cascade").unwrap();
+            let mut deletion = WriteBatch::new(R);
+            deletion.delete_vertex(VId(2));
+            txn.write(&mut db, deletion).unwrap();
+            for statement in [nodes, edges] {
+                assert_eq!(
+                    cells(
+                        txn.query(&db, &cx, statement, &params, Catalog::Full, policy())
+                            .unwrap()
+                    ),
+                    vec![vec![null(), null(), null()]; 3]
+                );
+            }
+            txn.rollback_to_savepoint(&db, "before_cascade").unwrap();
+            assert_eq!(
+                cells(
+                    txn.query(&db, &cx, nodes, &params, Catalog::Full, policy())
+                        .unwrap()
+                ),
+                before_nodes
+            );
+            assert_eq!(
+                cells(
+                    txn.query(&db, &cx, edges, &params, Catalog::Full, policy())
+                        .unwrap()
+                ),
+                before_edges
+            );
+            txn.abort();
+            assert!(db.edge(EId(1)).unwrap().is_some());
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn metadata_observes_field_insertions_absent_identities_and_cascade_retirement() {
+        let ((), report) = run_async_under_lab(0x6d61_0042, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+            for case in 0..7 {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                seed(&mut db, &commit, false).await;
+                let mut txn = db.begin(&txcx).unwrap();
+                txn.savepoint(&db, "before_read").unwrap();
+                let (element, expression) = match case {
+                    0 => (GraphValue::Vertex(VId(1)), "labels(x)"),
+                    1 => (GraphValue::Vertex(VId(2)), "properties(x)"),
+                    2 => (GraphValue::Edge(EId(1)), "keys(x)"),
+                    3 => (GraphValue::Vertex(VId(99)), "labels(x)"),
+                    4 => (GraphValue::Edge(EId(99)), "type(x)"),
+                    5 => (GraphValue::Edge(EId(1)), "type(x)"),
+                    _ => (GraphValue::Vertex(VId(1)), "properties(x)"),
+                };
+                let params = GqlParameters::new()
+                    .with_list("elements", vec![element])
+                    .unwrap();
+                txn.query(
+                    &db,
+                    &cx,
+                    &format!("UNWIND $elements AS x RETURN {expression}"),
+                    &params,
+                    Catalog::Full,
+                    policy(),
+                )
+                .unwrap();
+                txn.rollback_to_savepoint(&db, "before_read").unwrap();
+                let mut winner = WriteBatch::new(R);
+                match case {
+                    0 => {
+                        winner.set_vertex_label(VId(1), FOO, true);
+                    }
+                    1 => {
+                        winner.set_vertex_property(VId(2), NOTE, Some(CanonicalScalar::Int(7)));
+                    }
+                    2 => {
+                        winner.set_edge_property(EId(1), NAME, Some(CanonicalScalar::Int(7)));
+                    }
+                    3 => {
+                        winner.create_vertex(VId(99), vec![], vec![]);
+                    }
+                    4 => {
+                        winner.add_edge(EId(99), VId(1), VId(2), vec![]);
+                    }
+                    5 => {
+                        winner.delete_vertex(VId(2));
+                    }
+                    _ => {
+                        winner.set_vertex_property(VId(1), SCORE, Some(CanonicalScalar::Int(99)));
+                    }
+                }
+                db.write(&commit, winner).await.unwrap();
+                if case == 6 {
+                    // Restoring the same answer cannot erase the observation
+                    // of an intervening write to an enumerated property.
+                    let mut restore = WriteBatch::new(R);
+                    restore.set_vertex_property(VId(1), SCORE, Some(CanonicalScalar::Int(10)));
+                    db.write(&commit, restore).await.unwrap();
+                }
+                let frontier = db.frontier().unwrap();
+                assert!(
+                    matches!(
+                        txn.finish(&mut db, &commit).await,
+                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                            law: "FG-LAW-FCW-READ-01",
+                            ..
+                        }))
+                    ),
+                    "metadata observation was lost in case {case}"
+                );
+                assert_eq!(db.frontier().unwrap(), frontier);
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn metadata_refusals_keep_staging_and_the_original_control_or_source_error() {
+        use fgdb::QueryError;
+        use fgdb_gql::{GlaLimitDimension, GraphSetExecutionError};
+        use fgdb_types::context::SimulationCheckpointProbe;
+        use std::sync::Arc;
+
+        let ((), report) = run_async_under_lab(0x6d61_0043, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let basis = seed(&mut db, &commit, false).await;
+            let mut txn = db.begin(&txcx).unwrap();
+            let mut prefix = WriteBatch::new(R);
+            prefix.create_vertex(VId(90), vec![BAR], vec![]);
+            txn.write(&mut db, prefix).unwrap();
+            let digest = txn.staged_effect_digest().unwrap();
+            let params = GqlParameters::new()
+                .with_list("elements", vec![GraphValue::Vertex(VId(1))])
+                .unwrap();
+            let statement = "UNWIND $elements AS x RETURN properties(x) AS props";
+            for suffix in ["", " LIMIT 0"] {
+                let failure = txn
+                    .query(
+                        &db,
+                        &cx,
+                        &format!("{statement}{suffix}"),
+                        &params,
+                        Catalog::MissingScore,
+                        policy(),
+                    )
+                    .unwrap_err();
+                assert!(
+                    matches!(&failure, QueryError::TransactionSet(error)
+                    if matches!(error.as_ref(), GqlQueryError::Source(GraphSetExecutionError::Source(WriteTxnError::Read(ReadError::UnmappedProperty(SCORE)))))),
+                    "{failure:?}"
+                );
+                assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+            }
+            for (budget, dimension) in [
+                (
+                    GqlQueryPolicy::new(100_000, 100_000, 0, 1_000_000),
+                    GlaLimitDimension::WorkUnits,
+                ),
+                (
+                    GqlQueryPolicy::new(100_000, 100_000, 1_000_000, 0),
+                    GlaLimitDimension::ScratchEntries,
+                ),
+            ] {
+                let failure = txn
+                    .query(&db, &cx, statement, &params, Catalog::Full, budget)
+                    .unwrap_err();
+                assert!(
+                    matches!(&failure, QueryError::TransactionSet(error)
+                    if matches!(error.as_ref(), GqlQueryError::Evaluator(limit) if limit.dimension == dimension)),
+                    "{failure:?}"
+                );
+                assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+            }
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let expected = txn
+                .query(
+                    &db,
+                    &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                    statement,
+                    &params,
+                    Catalog::Full,
+                    policy(),
+                )
+                .unwrap();
+            assert!(probe.calls() > 1);
+            for stop in [1, probe.calls() / 2, probe.calls()] {
+                let stopped = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                let failure = txn
+                    .query(
+                        &db,
+                        &cx.with_checkpoint_probe(Arc::clone(&stopped)),
+                        statement,
+                        &params,
+                        Catalog::Full,
+                        policy(),
+                    )
+                    .unwrap_err();
+                assert!(
+                    matches!(&failure, QueryError::TransactionSet(error)
+                    if matches!(error.as_ref(), GqlQueryError::Interrupted(_))),
+                    "checkpoint {stop}: {failure:?}"
+                );
+                assert_eq!(stopped.calls(), stop);
+                assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+            }
+            assert_eq!(
+                txn.query(&db, &cx, statement, &params, Catalog::Full, policy())
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(db.frontier().unwrap(), basis);
+            txn.abort();
+            assert!(db.vertex(VId(90)).unwrap().is_none());
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}
+
 #[test]
 fn graph_maps_cover_vertices_relationships_optional_scopes_and_row_composition() {
     let ((), report) = run_async_under_lab(0x6d61_0001, |root| async move {

@@ -64,21 +64,37 @@ impl<'a> PointLabels<'a> {
     /// Effective labels in identity order: every unedited historical label
     /// and every label a staged edit sets, each once.
     fn effective_labels(&self) -> Vec<LabelId> {
-        let mut labels: Vec<_> = self
-            .base
-            .iter()
-            .copied()
-            .filter(|label| !self.edits.contains_key(label))
-            .chain(
-                self.edits
-                    .iter()
-                    .filter(|(_, member)| **member)
-                    .map(|(label, _)| *label),
-            )
-            .collect();
-        labels.sort_unstable();
-        labels.dedup();
-        labels
+        self.effective_labels_iter().collect()
+    }
+
+    /// Merge the canonical historical labels and admitted membership edits
+    /// without allocating another identity vector before output admission.
+    fn effective_labels_iter(&self) -> impl Iterator<Item = LabelId> + '_ {
+        let mut base = self.base.iter().copied().peekable();
+        let mut edits = self.edits.iter().peekable();
+        std::iter::from_fn(move || {
+            loop {
+                match (base.peek().copied(), edits.peek().copied()) {
+                    (Some(label), Some((&edited, &member))) if edited <= label => {
+                        edits.next();
+                        if edited == label {
+                            base.next();
+                        }
+                        if member {
+                            return Some(edited);
+                        }
+                    }
+                    (Some(_), _) => return base.next(),
+                    (None, Some((&edited, &member))) => {
+                        edits.next();
+                        if member {
+                            return Some(edited);
+                        }
+                    }
+                    (None, None) => return None,
+                }
+            }
+        })
     }
 }
 

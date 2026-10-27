@@ -186,6 +186,7 @@ impl PointReads {
 include!("vertex_scan_reads.rs");
 include!("point_projection.rs");
 include!("governed_point_reads.rs");
+include!("element_metadata.rs");
 
 impl WriteTxn {
     /// Read only one vertex property at the pinned basis plus canonical effects.

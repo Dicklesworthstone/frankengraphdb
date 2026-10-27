@@ -54,71 +54,24 @@ pub(crate) fn metadata<E>(
                 MetadataRecord::Vertex(row) => row.props.as_slice(),
                 MetadataRecord::Edge(_, properties) => properties,
             };
-            control(SourceEvent::Work)?;
-            control(SourceEvent::ScratchEntry)?;
-            let mut visible_property = visible_property;
-            let mut names = BTreeMap::new();
-            for (key, _) in properties {
-                if !visible_property(*key) {
-                    continue;
-                }
-                control(SourceEvent::Work)?;
-                if names.len() >= GraphValue::MAX_LIST_NODES - 1 {
-                    return Err(failure(ReadError::InvalidPropertyMap));
-                }
-                let name = catalog
-                    .properties
-                    .get(key)
-                    .ok_or_else(|| failure(ReadError::UnmappedProperty(*key)))?;
-                // Retain a borrowed catalog name, not a stored property value.
-                // The ordered map both detects aliases and preserves keys()'s
-                // canonical name order without copying any nested payload.
-                control(SourceEvent::ScratchEntry)?;
-                if names.insert(name.as_str(), *key).is_some() {
-                    return Err(failure(ReadError::InvalidPropertyMap));
-                }
-            }
-            let mut values = Vec::new();
-            for (name, key) in names {
-                control(SourceEvent::Work)?;
-                control(SourceEvent::ScratchEntry)?;
-                payload(name.len(), control)?;
-                values.push(GraphValue::Scalar(
-                    CanonicalScalar::ucs_basic_text(name)
-                        .map_err(|_| failure(ReadError::UnmappedProperty(key)))?,
-                ));
-            }
-            Some(GraphValue::List(values.into_boxed_slice()))
-                .filter(GraphValue::validate_bounds)
-                .ok_or_else(|| failure(ReadError::InvalidPropertyMap))
+            collect_keys(
+                properties.iter().map(|(key, _)| *key),
+                catalog,
+                visible_property,
+                control,
+                failure,
+            )
         }
         (GraphElementMetadata::Labels, MetadataRecord::Vertex(row)) => {
-            control(SourceEvent::Work)?;
-            control(SourceEvent::ScratchEntry)?;
-            let mut names = Vec::new();
             // Stored vertex rows have canonical sorted, unique label IDs, the
             // same order used by labels() over a bound pattern variable.
-            for &label in &row.labels {
-                if !visible_label(label) {
-                    continue;
-                }
-                control(SourceEvent::Work)?;
-                if names.len() >= GraphValue::MAX_LIST_NODES - 1 {
-                    return Err(failure(ReadError::InvalidPropertyMap));
-                }
-                let name = catalog
-                    .labels
-                    .get(&label)
-                    .ok_or_else(|| failure(ReadError::UnmappedLabel(label)))?;
-                control(SourceEvent::ScratchEntry)?;
-                payload(name.len(), control)?;
-                let name = CanonicalScalar::ucs_basic_text(name)
-                    .map_err(|_| failure(ReadError::UnmappedLabel(label)))?;
-                names.push(GraphValue::Scalar(name));
-            }
-            Some(GraphValue::List(names.into_boxed_slice()))
-                .filter(GraphValue::validate_bounds)
-                .ok_or_else(|| failure(ReadError::InvalidPropertyMap))
+            collect_labels(
+                row.labels.iter().copied(),
+                catalog,
+                &mut visible_label,
+                control,
+                failure,
+            )
         }
         (GraphElementMetadata::Type, MetadataRecord::Edge(relation, _)) => {
             control(SourceEvent::Work)?;
@@ -136,6 +89,87 @@ pub(crate) fn metadata<E>(
         // Retain a typed failure if a host invokes this helper independently.
         _ => Err(failure(ReadError::InvalidPropertyMap)),
     }
+}
+
+/// Property names only, in canonical name order. The iterator exposes keys
+/// without inspecting stored values, including borrowed transaction overlays.
+pub(crate) fn collect_keys<E>(
+    properties: impl IntoIterator<Item = PropertyKeyId>,
+    catalog: &ReverseSymbolCatalog,
+    mut visible: impl FnMut(PropertyKeyId) -> bool,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    failure: &impl Fn(ReadError) -> E,
+) -> Result<GraphValue, E> {
+    control(SourceEvent::Work)?;
+    control(SourceEvent::ScratchEntry)?;
+    let mut names = BTreeMap::new();
+    for key in properties {
+        if !visible(key) {
+            continue;
+        }
+        control(SourceEvent::Work)?;
+        if names.len() >= GraphValue::MAX_LIST_NODES - 1 {
+            return Err(failure(ReadError::InvalidPropertyMap));
+        }
+        let name = catalog
+            .properties
+            .get(&key)
+            .ok_or_else(|| failure(ReadError::UnmappedProperty(key)))?;
+        // Borrow catalog names until final delivery; never copy a property
+        // value merely to learn its name. Aliases are a typed refusal.
+        control(SourceEvent::ScratchEntry)?;
+        if names.insert(name.as_str(), key).is_some() {
+            return Err(failure(ReadError::InvalidPropertyMap));
+        }
+    }
+    let mut values = Vec::new();
+    for (name, key) in names {
+        control(SourceEvent::Work)?;
+        control(SourceEvent::ScratchEntry)?;
+        payload(name.len(), control)?;
+        values.push(GraphValue::Scalar(
+            CanonicalScalar::ucs_basic_text(name)
+                .map_err(|_| failure(ReadError::UnmappedProperty(key)))?,
+        ));
+    }
+    Some(GraphValue::List(values.into_boxed_slice()))
+        .filter(GraphValue::validate_bounds)
+        .ok_or_else(|| failure(ReadError::InvalidPropertyMap))
+}
+
+/// Label names from an already canonical identity-ordered iterator. Borrowed
+/// overlay iterators avoid building an ungoverned intermediate label vector.
+pub(crate) fn collect_labels<E>(
+    labels: impl IntoIterator<Item = LabelId>,
+    catalog: &ReverseSymbolCatalog,
+    mut visible: impl FnMut(LabelId) -> bool,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    failure: &impl Fn(ReadError) -> E,
+) -> Result<GraphValue, E> {
+    control(SourceEvent::Work)?;
+    control(SourceEvent::ScratchEntry)?;
+    let mut names = Vec::new();
+    for label in labels {
+        if !visible(label) {
+            continue;
+        }
+        control(SourceEvent::Work)?;
+        if names.len() >= GraphValue::MAX_LIST_NODES - 1 {
+            return Err(failure(ReadError::InvalidPropertyMap));
+        }
+        let name = catalog
+            .labels
+            .get(&label)
+            .ok_or_else(|| failure(ReadError::UnmappedLabel(label)))?;
+        control(SourceEvent::ScratchEntry)?;
+        payload(name.len(), control)?;
+        let name = CanonicalScalar::ucs_basic_text(name)
+            .map_err(|_| failure(ReadError::UnmappedLabel(label)))?;
+        names.push(GraphValue::Scalar(name));
+    }
+    Some(GraphValue::List(names.into_boxed_slice()))
+        .filter(GraphValue::validate_bounds)
+        .ok_or_else(|| failure(ReadError::InvalidPropertyMap))
 }
 
 /// Enumerate effective source properties, never the catalog's known-key set.

@@ -64,15 +64,28 @@ impl WriteTxn {
                 |eid| names.edge_type(eid),
                 |vid| Ok(maps.vertices.get(&vid)),
                 |eid| Ok(maps.edges.get(&eid)),
-                |element, key| {
-                    self.element_property_with_checkpoint(
-                        database,
-                        cx,
-                        &element_failure,
-                        element,
-                        key,
-                    )
-                },
+                fgdb_gql::with_element_metadata(
+                    |element, key| {
+                        self.element_property_with_checkpoint(
+                            database,
+                            cx,
+                            &element_failure,
+                            element,
+                            key,
+                        )
+                    },
+                    |element, kind, catalog, control| {
+                        self.element_metadata_with_checkpoint(
+                            database,
+                            cx,
+                            &element_failure,
+                            element,
+                            kind,
+                            catalog,
+                            control,
+                        )
+                    },
+                ),
                 usage.remaining(policy),
                 || {
                     let stopped = element_failure.borrow_mut().take();
@@ -96,8 +109,9 @@ impl WriteTxn {
     /// Both positive and negative domains use the ordinary overlay read/scan
     /// tracking, even for an empty set or LIMIT 0. A later set-stage refusal
     /// never erases observations already retained by an operand.
-    /// Properties of carried vertex/edge values use that same basis and staged
-    /// effects, retaining their selected-field and element-lifetime witnesses.
+    /// Properties and metadata of carried vertex/edge values use that same
+    /// basis and staged effects, retaining selected-field or whole-element
+    /// witnesses, including absent identities and new fields.
     pub fn execute_graph_set_governed<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
@@ -127,15 +141,28 @@ impl WriteTxn {
                 |call, arguments, allowance| {
                     self.execute_procedure_governed(database, cx, call, arguments, allowance)
                 },
-                |element, key| {
-                    self.element_property_with_checkpoint(
-                        database,
-                        cx,
-                        &element_failure,
-                        element,
-                        key,
-                    )
-                },
+                fgdb_gql::with_element_metadata(
+                    |element, key| {
+                        self.element_property_with_checkpoint(
+                            database,
+                            cx,
+                            &element_failure,
+                            element,
+                            key,
+                        )
+                    },
+                    |element, kind, catalog, control| {
+                        self.element_metadata_with_checkpoint(
+                            database,
+                            cx,
+                            &element_failure,
+                            element,
+                            kind,
+                            catalog,
+                            control,
+                        )
+                    },
+                ),
                 || {
                     let stopped = element_failure.borrow_mut().take();
                     match stopped {

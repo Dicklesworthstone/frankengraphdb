@@ -230,8 +230,8 @@ mod set_aggregate_queries {
         /// operands. Each operand uses the existing positive/negative read and
         /// scan witnesses, including rows canceled by INTERSECT/EXCEPT or pages.
         /// Those observations survive late arithmetic, budget or source errors.
-        /// Carried vertex/edge property reads retain the same canonical overlay
-        /// and point witnesses in folded and materialized aggregate inputs.
+        /// Carried vertex/edge property and metadata reads retain the same
+        /// canonical overlay and witnesses in folded and materialized inputs.
         ///
         /// This is read-only with respect to staged effects and durability:
         /// it does not finish, commit, retry or replace the caller's workspace.
@@ -256,15 +256,28 @@ mod set_aggregate_queries {
                     |call, arguments, remaining| {
                         self.execute_procedure_governed(database, cx, call, arguments, remaining)
                     },
-                    |element, key| {
-                        self.element_property_with_checkpoint(
-                            database,
-                            cx,
-                            &element_failure,
-                            element,
-                            key,
-                        )
-                    },
+                    fgdb_gql::with_element_metadata(
+                        |element, key| {
+                            self.element_property_with_checkpoint(
+                                database,
+                                cx,
+                                &element_failure,
+                                element,
+                                key,
+                            )
+                        },
+                        |element, kind, catalog, control| {
+                            self.element_metadata_with_checkpoint(
+                                database,
+                                cx,
+                                &element_failure,
+                                element,
+                                kind,
+                                catalog,
+                                control,
+                            )
+                        },
+                    ),
                     || {
                         let stopped = element_failure.borrow_mut().take();
                         match stopped {
