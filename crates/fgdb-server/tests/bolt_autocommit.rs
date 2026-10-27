@@ -793,9 +793,36 @@ fn bolt_write_stats_report_what_the_write_created() {
                 "MATCH (n:Person {name: 'Nobody'}) SET n.age = 1",
                 stats(&[("contains-updates", Value::Bool(false))]),
             ),
+            // Chains run through the RETURN families with or without a
+            // RETURN; their creations count the same.
+            (
+                "CREATE (a:Person {name: 'Eve'}) WITH a \
+                 CREATE (a)-[:KNOWS]->(:Person {name: 'Fay'})",
+                stats(&[
+                    ("contains-updates", Value::Bool(true)),
+                    ("nodes-created", Value::Int(2)),
+                    ("relationships-created", Value::Int(1)),
+                ]),
+            ),
+            (
+                "UNWIND $rows AS row CREATE (n:Person) SET n += row",
+                stats(&[
+                    ("contains-updates", Value::Bool(true)),
+                    ("nodes-created", Value::Int(2)),
+                ]),
+            ),
         ] {
+            let rows = Value::List(vec![
+                Value::Map(vec![("name".into(), Value::string("Gus"))]),
+                Value::Map(vec![("name".into(), Value::string("Hal"))]),
+            ]);
+            let parameters = if query.contains("$rows") {
+                vec![("rows".into(), rows)]
+            } else {
+                vec![]
+            };
             client
-                .expect(0x10, request(query, vec![], vec![]), SUCCESS)
+                .expect(0x10, request(query, parameters, vec![]), SUCCESS)
                 .await;
             let (rows, done) = client.pull_all().await;
             assert!(rows.is_empty(), "{query}");

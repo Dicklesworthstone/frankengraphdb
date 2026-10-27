@@ -60,9 +60,9 @@ pub(crate) struct Answer<R = Vec<Vec<WireValue>>> {
     pub(crate) rows: R,
     pub(crate) outcome: Outcome,
     pub(crate) generation: Generation,
-    /// What a stats-only write (direct, batch or prepared) created, from its
-    /// program's exact stats; Bolt reports it as `stats` (fgdb-xwmqs). Reads
-    /// and RETURN writes, whose families report rows, leave it zero.
+    /// What a write created, from the exact stats of its program or of its
+    /// RETURN family (chains included, which run there with or without a
+    /// RETURN); Bolt reports it as `stats` (fgdb-xwmqs). Reads leave it zero.
     pub(crate) created: Created,
 }
 
@@ -923,7 +923,13 @@ async fn write_returning_in_guard<R: Send>(
                 },
             )
             .await
-            .map(|(_, rows, completion)| (rows, completion))
+            .map(|(stats, rows, completion)| {
+                let created = Created {
+                    vertices: stats.created_vertices,
+                    edges: stats.created_edges,
+                };
+                (rows, completion, created)
+            })
             .map_err(returning_refusal),
         Returning::Insert(prepared) => guard
             .execute_graph_insert_query_authorized_checked(
@@ -951,7 +957,13 @@ async fn write_returning_in_guard<R: Send>(
                 },
             )
             .await
-            .map(|(_, rows, completion)| (rows, completion))
+            .map(|(stats, rows, completion)| {
+                let created = Created {
+                    vertices: stats.created_vertices,
+                    edges: stats.created_edges,
+                };
+                (rows, completion, created)
+            })
             .map_err(returning_refusal),
         Returning::Mutation(prepared) => guard
             .execute_graph_mutation_query_authorized_checked(
@@ -979,7 +991,8 @@ async fn write_returning_in_guard<R: Send>(
                 },
             )
             .await
-            .map(|(_, rows, completion)| (rows, completion))
+            // SET, REMOVE and DELETE create nothing.
+            .map(|(_, rows, completion)| (rows, completion, Created::default()))
             .map_err(returning_refusal),
         Returning::Merge(prepared) => guard
             .execute_graph_vertex_upserts_query_authorized_checked(
@@ -1007,7 +1020,13 @@ async fn write_returning_in_guard<R: Send>(
                 },
             )
             .await
-            .map(|(_, rows, completion)| (rows, completion))
+            .map(|(stats, rows, completion)| {
+                let created = Created {
+                    vertices: stats.merge.created_vertices,
+                    edges: 0,
+                };
+                (rows, completion, created)
+            })
             .map_err(returning_refusal),
         Returning::EdgeUpsert(prepared) => guard
             .execute_graph_edge_upserts_query_authorized_checked(
@@ -1035,7 +1054,13 @@ async fn write_returning_in_guard<R: Send>(
                 },
             )
             .await
-            .map(|(_, rows, completion)| (rows, completion))
+            .map(|(stats, rows, completion)| {
+                let created = Created {
+                    vertices: 0,
+                    edges: stats.created_edges,
+                };
+                (rows, completion, created)
+            })
             .map_err(returning_refusal),
         Returning::EdgeMerge(prepared) => guard
             .execute_graph_edge_merge_query_authorized_checked(
@@ -1060,11 +1085,18 @@ async fn write_returning_in_guard<R: Send>(
                 },
             )
             .await
-            .map(|(_, rows, completion)| (rows, completion))
+            .map(|(stats, rows, completion)| {
+                let created = Created {
+                    vertices: 0,
+                    edges: stats.created_edges,
+                };
+                (rows, completion, created)
+            })
             .map_err(returning_refusal),
     };
     drop(guard);
-    let (_execution, completion) = result.map_err(|error| output_refusal.unwrap_or(error))?;
+    let (_execution, completion, created) =
+        result.map_err(|error| output_refusal.unwrap_or(error))?;
     // Every write-RETURN family is converted and body-admitted while its
     // rollback workspace is still private. A successful checked call must
     // therefore have installed the exact rows before native completion.
@@ -1087,7 +1119,7 @@ async fn write_returning_in_guard<R: Send>(
         rows,
         outcome,
         generation,
-        created: Created::default(),
+        created,
     })
 }
 
