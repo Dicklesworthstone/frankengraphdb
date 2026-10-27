@@ -220,6 +220,180 @@ fn terminal_read_parameters_rebind_without_catalog_reentry_or_template_mutation(
 }
 
 #[test]
+fn vertex_merge_with_unwind_feeds_a_matched_relationship_merge_without_rebinding() {
+    use crate::{GqlParameterType, GraphVertexMergeRowsBinding, GraphWriteChainStep};
+
+    let text = "MERGE (a {p:$created}) WITH a UNWIND $keys AS k \
+        MATCH (b {p:k}) MERGE (a)-[r:R]->(b) \
+        ON CREATE SET r.p=b.p ON MATCH SET r.p=r.p+$bump \
+        RETURN b.p AS target,r.p AS weight ORDER BY target,weight";
+    let calls = Cell::new(0);
+    let template = PreparedGraphWriteChainText::prepare_with_parameter_types(
+        text,
+        RelationId(1),
+        &[
+            ("created", GqlParameterType::Int64),
+            ("keys", GqlParameterType::List),
+            ("bump", GqlParameterType::Int64),
+        ],
+        |kind, name: &str| {
+            calls.set(calls.get() + 1);
+            text_symbols(kind, name)
+        },
+    )
+    .unwrap();
+    let prepared_calls = calls.get();
+    let parameters = |values: &[i64]| {
+        GqlParameters::new()
+            .with_int64("created", 7)
+            .unwrap()
+            .with_list("keys", values.iter().copied().map(int).collect())
+            .unwrap()
+            .with_int64("bump", 1)
+            .unwrap()
+    };
+    let first = template.bind_parameters(&parameters(&[2, 1, 2])).unwrap();
+    let empty = template.bind_parameters(&parameters(&[])).unwrap();
+    assert_eq!(calls.get(), prepared_calls);
+    assert_ne!(first, empty);
+    assert_eq!(first.columns(), &["target", "weight"]);
+    assert!(matches!(
+        first.steps(),
+        [
+            GraphWriteChainStep::VertexMergeQuery(_),
+            GraphWriteChainStep::EdgeUpsertQuery { .. }
+        ]
+    ));
+
+    for (chain, expected) in [
+        (
+            &first,
+            vec![
+                vec![vertex(WIDE), int(2)],
+                vec![vertex(WIDE), int(1)],
+                vec![vertex(WIDE), int(2)],
+            ],
+        ),
+        (&empty, Vec::new()),
+    ] {
+        let GraphWriteChainStep::VertexMergeQuery(query) = &chain.steps()[0] else {
+            unreachable!("the WITH head belongs to the first vertex MERGE")
+        };
+        assert_eq!(query.bindings(), &[GraphVertexMergeRowsBinding::Vertex]);
+        assert_eq!(query.columns(), &["a", "k"]);
+        let finished = query
+            .finish_governed::<(), ()>(
+                vec![vec![vertex(WIDE)]],
+                GqlExecutionStats {
+                    snapshot_records: 5,
+                    result_rows: 1,
+                },
+                GlaExecutionStats {
+                    work_units: 11,
+                    scratch_entries: 7,
+                },
+                GqlQueryPolicy::new(5, expected.len() as u64, HIGH, HIGH),
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(
+            finished
+                .value
+                .iter()
+                .map(|row| row.values().to_vec())
+                .collect::<Vec<_>>(),
+            expected,
+        );
+        assert_eq!(finished.rows.snapshot_records, 5);
+        assert_eq!(finished.rows.result_rows, expected.len() as u64);
+        assert!(finished.evaluator.work_units > 11);
+        assert!(finished.evaluator.scratch_entries > 7);
+    }
+}
+
+#[test]
+fn vertex_merge_tail_filters_final_properties_and_preserves_the_native_budget() {
+    use crate::{GraphVertexMergeRowsBinding, GraphWriteChainStep};
+
+    let text = "UNWIND [1,2,3] AS input MERGE (n {p:input}) \
+        WITH n WHERE n.p > 1 UNWIND [n.p,n.p+10] AS value \
+        WITH sum(value) AS total RETURN total";
+    let chain = PreparedGraphWriteChainText::prepare(text, RelationId(1), text_symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+    let [GraphWriteChainStep::VertexMergeQuery(query)] = chain.steps() else {
+        unreachable!("one MERGE and its native row tail")
+    };
+    assert_eq!(
+        query.bindings(),
+        &[
+            GraphVertexMergeRowsBinding::Vertex,
+            GraphVertexMergeRowsBinding::Property(PropertyKeyId(1)),
+        ],
+    );
+    assert_eq!(query.columns(), &["total"]);
+    let rows = || {
+        [1_u128, 2, 3]
+            .into_iter()
+            .map(|id| vec![vertex(VId(id)), int(id as i64)])
+            .collect()
+    };
+    let selected = GqlExecutionStats {
+        snapshot_records: 3,
+        result_rows: 3,
+    };
+    let before = GlaExecutionStats {
+        work_units: 13,
+        scratch_entries: 5,
+    };
+    let finished = query
+        .finish_governed::<(), ()>(
+            rows(),
+            selected,
+            before,
+            GqlQueryPolicy::new(3, 1, HIGH, HIGH),
+            || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(finished.value.len(), 1);
+    assert_eq!(finished.value[0].values(), &[int(30)]);
+    assert_eq!(finished.rows.snapshot_records, 3);
+    assert_eq!(finished.rows.result_rows, 1);
+    assert!(finished.evaluator.work_units > before.work_units);
+    assert!(finished.evaluator.scratch_entries > before.scratch_entries);
+    for budget in [
+        GqlQueryPolicy::new(3, 1, finished.evaluator.work_units - 1, HIGH),
+        GqlQueryPolicy::new(3, 1, HIGH, finished.evaluator.scratch_entries - 1),
+        GqlQueryPolicy::new(3, 0, HIGH, HIGH),
+    ] {
+        assert!(
+            query
+                .finish_governed::<(), ()>(rows(), selected, before, budget, || Ok(()))
+                .is_err(),
+        );
+    }
+    let mut checkpoints = 0;
+    assert!(matches!(
+        query.finish_governed::<(), &str>(
+            rows(),
+            selected,
+            before,
+            GqlQueryPolicy::new(3, 1, HIGH, HIGH),
+            || {
+                checkpoints += 1;
+                if checkpoints >= 20 {
+                    Err("cancelled")
+                } else {
+                    Ok(())
+                }
+            },
+        ),
+        Err(GqlQueryError::Interrupted("cancelled")),
+    ));
+}
+
+#[test]
 fn terminal_read_keeps_dropped_scope_and_refuses_another_write_or_missing_return() {
     for text in [
         "CREATE (n {p:1}) WITH n.p AS p MATCH (m) RETURN n.p",

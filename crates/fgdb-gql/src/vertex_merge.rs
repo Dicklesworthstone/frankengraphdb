@@ -890,6 +890,8 @@ pub struct PreparedGraphVertexMergeRowsQuery {
     order: Vec<crate::algebra::GraphValueOrder>,
     offset: u64,
     count: Option<u64>,
+    /// A WITH head supplies private rows to the shared relational executor.
+    tail: Option<crate::PreparedGraphSet>,
 }
 impl core::fmt::Debug for PreparedGraphVertexMergeRowsQuery {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -964,6 +966,7 @@ impl PreparedGraphVertexMergeRowsQuery {
             order: Vec::new(),
             offset: 0,
             count: None,
+            tail: None,
         })
     }
 
@@ -989,6 +992,10 @@ impl PreparedGraphVertexMergeRowsQuery {
         order: &[crate::algebra::GraphValueOrder],
     ) -> Result<Self, crate::algebra::GraphOrderError> {
         use crate::algebra::GraphOrderError;
+        if let Some(tail) = self.tail.take() {
+            self.tail = Some(tail.with_order_by(order)?);
+            return Ok(self);
+        }
         if order.is_empty() {
             return Err(GraphOrderError::EmptyOrder);
         }
@@ -1011,8 +1018,21 @@ impl PreparedGraphVertexMergeRowsQuery {
     }
     #[must_use]
     pub fn with_page(mut self, offset: u64, count: Option<u64>) -> Self {
-        self.offset = offset;
-        self.count = count;
+        if let Some(tail) = self.tail.take() {
+            self.tail = Some(tail.with_page(offset, count));
+        } else {
+            self.offset = offset;
+            self.count = count;
+        }
+        self
+    }
+
+    /// Continue a WITH over its frozen post-MERGE rows. The tail's schema is
+    /// the input of the next write, or the public schema of a terminal RETURN.
+    pub(crate) fn with_tail(mut self, tail: crate::PreparedGraphSet) -> Self {
+        self.columns = tail.columns().to_vec();
+        self.types = tail.column_types().to_vec();
+        self.tail = Some(tail);
         self
     }
 
@@ -1125,24 +1145,38 @@ impl PreparedGraphVertexMergeRowsQuery {
             rows: selection,
             evaluator,
         };
+        // The WITH head is private input, even when grouping reduces it. Only
+        // the complete tail spends final rows; every other allowance continues
+        // from the MERGE and the head without resetting its counters.
+        let head = if self.tail.is_some() {
+            crate::set_ops::owned_head_policy(policy)
+        } else {
+            policy
+        };
         if let Some(grouping) = &self.grouping {
             returning = crate::set_ops::finish_owned_aggregate_reading(
                 returning,
-                policy,
+                head,
                 grouping,
                 elements,
                 &mut checkpoint,
             )?;
         }
-        crate::set_ops::finish_owned_projection_reading(
+        let returning = crate::set_ops::finish_owned_projection_reading(
             returning,
-            policy,
+            head,
             &self.projection,
             self.quantifier,
             &self.order,
             (self.offset, self.count),
             elements,
-            checkpoint,
-        )
+            &mut checkpoint,
+        )?;
+        match &self.tail {
+            None => Ok(returning),
+            Some(tail) => crate::set_ops::finish_owned_tail_reading(
+                returning, tail, policy, elements, checkpoint,
+            ),
+        }
     }
 }

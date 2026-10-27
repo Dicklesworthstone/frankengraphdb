@@ -466,6 +466,8 @@ pub(crate) struct VertexMergeRowsReturnTemplate {
     pub(crate) offset: ReadPageNumber,
     pub(crate) count: Option<ReadPageNumber>,
     pub(crate) at: usize,
+    /// Relational stages after a WITH head, ending at the next write or RETURN.
+    pub(crate) tail: Option<Vec<crate::set_text::ReadStageTemplate>>,
 }
 
 /// A vertex MERGE step of a chained write (fgdb-cpny9), resolved: each map

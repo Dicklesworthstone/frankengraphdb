@@ -2109,6 +2109,7 @@ struct ParsedVertexRowsReturn<'r, 'a> {
     offset: ReadPageNumber,
     count: Option<ReadPageNumber>,
     at: usize,
+    tail: Option<Vec<ReadStageTemplate>>,
     /// The output row: each item's name and type.
     output: Vec<(Name<'a>, GraphSetColumnType)>,
 }
@@ -2237,6 +2238,7 @@ impl<'a> ParsedVertexRowsReturn<'_, 'a> {
             offset: self.offset,
             count: self.count,
             at: self.at,
+            tail: self.tail,
         })
     }
 }
@@ -2392,6 +2394,7 @@ impl<'a> Parser<'a> {
             offset: ReadPageNumber::Literal(0),
             count: None,
             at,
+            tail: None,
             output: Vec::new(),
         };
         if let Some(star_at) = star {
@@ -2493,12 +2496,19 @@ impl VertexMergeRowsReturnTemplate {
                     kind: crate::GraphSetTextErrorKind::OrderBuild(kind),
                 })?;
         }
-        Ok(query.with_page(
+        let query = query.with_page(
             return_projection::pipeline::page_value(&self.offset, values),
             self.count
                 .as_ref()
                 .map(|count| return_projection::pipeline::page_value(count, values)),
-        ))
+        );
+        let Some(stages) = &self.tail else {
+            return Ok(query);
+        };
+        let owned =
+            crate::PreparedGraphSet::owned(query.columns().to_vec(), query.column_types().to_vec());
+        let tail = return_projection::bind_stages(owned, stages, values)?;
+        Ok(query.with_tail(tail))
     }
 }
 
@@ -2641,6 +2651,7 @@ impl PreparedGraphVertexMergeRowsText {
                     offset: ReadPageNumber::Literal(0),
                     count: None,
                     at: parser.current.at,
+                    tail: None,
                     output: carried,
                 };
                 for (input, &(name, kind)) in row[..keep].iter().enumerate() {
@@ -2692,25 +2703,31 @@ impl PreparedGraphVertexMergeRowsText {
             if parser.is_word("WITH") {
                 // A WITH head: its output row is what the next write reads.
                 let mut head = parser.vertex_rows_return("WITH", variable, &row, written)?;
-                if !parser.at_chained_write()? {
-                    return Err(error(
-                        parser.current.at,
-                        GraphPatternTextErrorKind::Expected(
-                            "a CREATE or MERGE after the WITH of a MERGE step",
-                        ),
-                    )
-                    .into());
-                }
                 let requested = parser.write_chain_reads(&head.output)?;
                 let boundary = head.hoist_continuation_reads(requested)?;
-                let continuation = ChainContinuation {
-                    at: parser.current.at,
-                    row: head.output.clone(),
-                    boundary,
-                    parameters: parser.syntax.parameters.clone(),
+                let continuation = if parser.at_chained_write()? {
+                    Some(ChainContinuation {
+                        at: parser.current.at,
+                        row: head.output.clone(),
+                        boundary,
+                        parameters: parser.syntax.parameters.clone(),
+                    })
+                } else {
+                    // WHERE, UNWIND and further WITH stages read the complete
+                    // frozen head before a later MATCH or write. Use the same
+                    // typed row pipeline as CREATE and relationship MERGE;
+                    // its continuation carries the resulting names and types,
+                    // not the earlier WITH's schema (fgdb-vy1rf).
+                    parser.boundary_reads = boundary;
+                    head.tail = Some(parser.write_row_pipeline(head.output.clone())?);
+                    let continuation = parser.continuation();
+                    if continuation.is_none() {
+                        parser.end()?;
+                    }
+                    continuation
                 };
                 parsed_return = Some(head);
-                Some(continuation)
+                continuation
             } else {
                 if parser.is_word("RETURN") {
                     let returning = parser.vertex_rows_return("RETURN", variable, &row, written)?;
