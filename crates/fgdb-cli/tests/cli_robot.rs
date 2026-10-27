@@ -3660,7 +3660,13 @@ fn sealed_prism_cli_preflights_before_writable_open() {
     ];
     assert!(!std::path::Path::new(&db.db).exists());
     for (args, code, class) in cases {
-        db.command("query", args).failure(*code, class);
+        let output = db.command("query", args);
+        assert_eq!(
+            output.code, *code,
+            "preflight arguments: {args:?}; stdout: {}; stderr: {}",
+            output.stdout, output.stderr
+        );
+        output.failure(*code, class);
         assert!(!std::path::Path::new(&db.db).exists(), "{args:?}");
     }
     // These registered compressed procedures pass graph-kind preflight and

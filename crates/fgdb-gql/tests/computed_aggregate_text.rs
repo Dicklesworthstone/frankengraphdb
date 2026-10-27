@@ -584,9 +584,25 @@ fn aggregate_reduction_keeps_wide_sums_and_exact_average_accumulators() {
             "MATCH (n) RETURN reduce(total=avg(n.q), x IN collect(n.p) | COALESCE(total, x)) AS value",
             GraphAggregateValue::Average(GraphExactAverage::new(3, 2).unwrap()),
         ),
+        (
+            "MATCH (n) RETURN reduce(total=avg(n.q), x IN [0] | COALESCE(NULL, total, 1/x)) AS value",
+            GraphAggregateValue::Average(GraphExactAverage::new(3, 2).unwrap()),
+        ),
+        (
+            "MATCH (n) RETURN reduce(total=sum(n.p), x IN [0] | COALESCE(total, 1/x)) AS value",
+            GraphAggregateValue::Integer(i128::from(i64::MAX) * 2),
+        ),
     ] {
-        let rows = run(&prepare(text), &vertices, &[], &props).unwrap().value;
+        let plan = prepare(text);
+        let rows = run(&plan, &vertices, &[], &props).unwrap().value;
         assert_eq!(rows[0].values(), &[expected], "{text}");
+        let source = plan.incremental_source_definition().expect(text);
+        let complete = run(&source, &vertices, &[], &props).unwrap().value;
+        let projected = plan
+            .project_incremental_output(&complete[0], &mut |_| Ok::<_, ()>(()))
+            .unwrap()
+            .expect("same completed aggregate schema");
+        assert_eq!(projected, rows[0], "maintained output: {text}");
     }
     // A maintainer can hold a count larger than any scalar integer. A local
     // accumulator must retain that domain rather than truncate the input row.
@@ -603,6 +619,19 @@ fn aggregate_reduction_keeps_wide_sums_and_exact_average_accumulators() {
         projected.values(),
         &[GraphAggregateValue::Integer(i128::from(u64::MAX) - 3)]
     );
+    for body in ["COALESCE(total, 1/x)", "COALESCE(NULL, total, 1/x)"] {
+        let text = format!("MATCH (n) RETURN reduce(total=count(*), x IN [0] | {body}) AS value");
+        let plan = prepare(&text);
+        let projected = plan
+            .project_incremental_output(&complete, &mut |_| Ok::<_, ()>(()))
+            .unwrap()
+            .expect("a complete full-width count group");
+        assert_eq!(
+            projected.values(),
+            &[GraphAggregateValue::Count(u64::MAX)],
+            "{text}"
+        );
+    }
 }
 
 #[test]

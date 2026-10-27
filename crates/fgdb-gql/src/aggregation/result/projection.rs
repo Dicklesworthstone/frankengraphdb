@@ -353,7 +353,8 @@ fn expression<'g, E, C>(
                 }
             }
         }
-        // A composite coalesce, lazily as the row evaluator reads it.
+        // Selection does not materialize an aggregate as an ordinary scalar:
+        // keep exact averages, wide sums and counts, just as CASE does.
         GraphSetValue::Function {
             function: crate::GraphValueFunction::Coalesce,
             argument,
@@ -365,8 +366,7 @@ fn expression<'g, E, C>(
             let mut first = None;
             for argument in arguments {
                 let value = expression(argument, input, column, control)?.into_owned(control)?;
-                let value = graph_value(value, column)?;
-                if !value.is_null() {
+                if !result_cell(&value).is_null() {
                     first = Some(value);
                     break;
                 }
@@ -374,9 +374,11 @@ fn expression<'g, E, C>(
             if first.is_none() {
                 control(GlaExecutionEvent::ScratchEntry)?;
             }
-            OutputValue::Owned(GraphAggregateValue::Value(
-                first.unwrap_or(GraphValue::Scalar(CanonicalScalar::Null)),
-            ))
+            OutputValue::Owned(
+                first.unwrap_or(GraphAggregateValue::Value(GraphValue::Scalar(
+                    CanonicalScalar::Null,
+                ))),
+            )
         }
         // reverse() and split() with the row evaluator's law (fgdb-13l85).
         GraphSetValue::Function { function, argument } => {
