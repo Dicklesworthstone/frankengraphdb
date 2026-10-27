@@ -1431,3 +1431,576 @@ fn nested_existence_audits_imported_and_element_names_at_every_depth() {
             .unwrap();
     }
 }
+mod tuple_comprehensions {
+    use super::{L, P, R, S, symbols, wide};
+    use fgdb_delta_types::ElementId;
+    use fgdb_gql::algebra::{
+        GlaDirection, GraphColumn, GraphMatchClause, GraphPath, GraphPatternBuilder, GraphValue,
+        GraphValueRow, MAX_PATTERN_VERTICES, PatternBuildError, PatternLimitDimension,
+    };
+    use fgdb_gql::{
+        GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphSetExecutionError,
+        PreparedGraphSet, PreparedGraphSetText,
+    };
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+
+    type Edge = (EId, VId, fgdb_delta_types::RelationId, VId);
+    type Result = std::result::Result<
+        GqlQueryExecution<GraphValueRow>,
+        GqlQueryError<GraphSetExecutionError<&'static str>, usize>,
+    >;
+    fn int(value: i64) -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Int(value))
+    }
+    fn list(values: Vec<GraphValue>) -> GraphValue {
+        GraphValue::List(values.into_boxed_slice())
+    }
+    fn row(values: Vec<GraphValue>) -> GraphValueRow {
+        GraphValueRow::from_owned_values(values)
+    }
+    fn prepare(text: &str) -> PreparedGraphSet {
+        PreparedGraphSetText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+    }
+    fn vertex_property(vid: VId) -> i64 {
+        (vid.0 & 255) as i64 + 1
+    }
+    fn edge_property(eid: EId) -> i64 {
+        (eid.0 & 255) as i64 + 100
+    }
+    fn run(
+        query: &PreparedGraphSet,
+        vertices: &[VId],
+        edges: &[Edge],
+        policy: GqlQueryPolicy,
+        checkpoint: &mut impl FnMut() -> std::result::Result<(), usize>,
+        fail_edge_property: bool,
+    ) -> Result {
+        let values: BTreeMap<VId, CanonicalPropertyValue> = vertices
+            .iter()
+            .map(|&vid| (vid, CanonicalScalar::Int(vertex_property(vid)).into()))
+            .collect();
+        let checkpoint = RefCell::new(checkpoint);
+        query.execute_governed_with_elements(
+            policy,
+            |pattern, allowance| {
+                pattern.plan().execute_governed_with_identified_properties(
+                    (vertices.len() + edges.len()) as u64,
+                    vertices.iter().copied(),
+                    edges.iter().copied(),
+                    |vid, predicates| {
+                        Ok::<_, &'static str>(
+                            predicates.iter().all(|predicate| {
+                                predicate.matches(&[L], &[(P, values[&vid].clone())])
+                            }),
+                        )
+                    },
+                    |vid, key| Ok((key == P).then(|| &values[&vid])),
+                    allowance,
+                    || (checkpoint.borrow_mut())(),
+                )
+            },
+            |_, _, _| panic!("tuple fixture has no procedure source"),
+            |element, key| {
+                if key != P {
+                    return Ok(None);
+                }
+                Ok(Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(
+                    match element {
+                        ElementId::Vertex(vid) => vertex_property(vid),
+                        ElementId::Edge(eid) => {
+                            if fail_edge_property {
+                                return Err("tuple edge property failure");
+                            }
+                            edge_property(eid)
+                        }
+                    },
+                ))))
+            },
+            || (checkpoint.borrow_mut())(),
+        )
+    }
+    fn execute(text: &str, vertices: &[VId], edges: &[Edge]) -> Vec<GraphValueRow> {
+        run(
+            &prepare(text),
+            vertices,
+            edges,
+            wide(),
+            &mut || Ok(()),
+            false,
+        )
+        .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+        .value
+    }
+    fn neighbors(
+        edges: &[Edge],
+        relation: fgdb_delta_types::RelationId,
+        source: VId,
+        direction: usize,
+    ) -> Vec<(VId, EId)> {
+        let mut result = Vec::new();
+        for &(edge, from, actual, to) in edges {
+            if actual != relation {
+                continue;
+            }
+            if direction != 1 && from == source {
+                result.push((to, edge));
+            }
+            if direction != 0 && to == source && (direction == 1 || from != to) {
+                result.push((from, edge));
+            }
+        }
+        result.sort();
+        result
+    }
+
+    #[test]
+    fn witness_tuples_match_finite_multigraph_assignments_in_all_directions() {
+        let vertices = [VId(0), VId(1), VId(2), VId(0)];
+        let universe = [
+            (EId(10), VId(0), R, VId(1)),
+            (EId(11), VId(0), R, VId(1)),
+            (EId(12), VId(1), R, VId(2)),
+            (EId(13), VId(1), S, VId(0)),
+            (EId(14), VId(1), S, VId(2)),
+            (EId(15), VId(2), S, VId(2)),
+        ];
+        for (direction, pattern) in [
+            "(a)-[r:R]->(b)-[s:S]->(c)",
+            "(a)<-[r:R]-(b)<-[s:S]-(c)",
+            "(a)-[r:R]-(b)-[s:S]-(c)",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let text = format!("MATCH (a) RETURN ALL a,[{pattern} | [r,b,s,c]] AS witnesses");
+            let query = prepare(&text);
+            for mask in 0..(1_u32 << universe.len()) {
+                let mut edges: Vec<_> = universe
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(bit, &edge)| (mask & (1 << bit) != 0).then_some(edge))
+                    .collect();
+                let mut expected: Vec<_> = vertices
+                    .iter()
+                    .map(|&a| {
+                        let mut witnesses = Vec::new();
+                        for (b, r) in neighbors(&edges, R, a, direction) {
+                            for (c, s) in neighbors(&edges, S, b, direction) {
+                                witnesses.push(list(vec![
+                                    GraphValue::Edge(r),
+                                    GraphValue::Vertex(b),
+                                    GraphValue::Edge(s),
+                                    GraphValue::Vertex(c),
+                                ]));
+                            }
+                        }
+                        row(vec![GraphValue::Vertex(a), list(witnesses)])
+                    })
+                    .collect();
+                expected.sort();
+                // Source order changes must not change the tuple associations,
+                // parallel occurrences or canonical adjacency enumeration.
+                for reversed in [false, true] {
+                    if reversed {
+                        edges.reverse();
+                    }
+                    let mut actual = run(&query, &vertices, &edges, wide(), &mut || Ok(()), false)
+                        .unwrap()
+                        .value;
+                    actual.sort();
+                    assert_eq!(actual, expected, "{text}; mask={mask}; reversed={reversed}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tuple_projection_reads_nodes_edges_paths_and_outer_or_shadowed_locals() {
+        let vertices = [VId(0), VId(1), VId(2)];
+        let edges = [
+            (EId(10), VId(0), R, VId(1)),
+            (EId(11), VId(0), R, VId(1)),
+            (EId(12), VId(1), R, VId(2)),
+        ];
+        let documents: Vec<_> = vertices
+            .iter()
+            .map(|&a| {
+                row(vec![
+                    GraphValue::Vertex(a),
+                    list(
+                        neighbors(&edges, R, a, 0)
+                            .into_iter()
+                            .map(|(b, r)| {
+                                GraphValue::map(vec![
+                                    ("node".into(), GraphValue::Vertex(b)),
+                                    ("edge".into(), GraphValue::Edge(r)),
+                                    (
+                                        "sum".into(),
+                                        int(vertex_property(a)
+                                            + vertex_property(b)
+                                            + edge_property(r)),
+                                    ),
+                                ])
+                                .unwrap()
+                            })
+                            .collect(),
+                    ),
+                ])
+            })
+            .collect();
+        assert_eq!(
+            execute(
+                "MATCH (a) RETURN a,[(a)-[r:R]->(b) | {node:b, edge:r, sum:b.n+r.n+a.n}] AS docs ORDER BY a",
+                &vertices,
+                &edges
+            ),
+            documents
+        );
+        let paths: Vec<_> = vertices
+            .iter()
+            .map(|&a| {
+                row(vec![
+                    GraphValue::Vertex(a),
+                    list(
+                        neighbors(&edges, R, a, 0)
+                            .into_iter()
+                            .map(|(b, r)| {
+                                list(vec![
+                                    GraphValue::Path(GraphPath::new(a, Box::new([(r, b)]))),
+                                    GraphValue::Edge(r),
+                                    GraphValue::Vertex(b),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                ])
+            })
+            .collect();
+        assert_eq!(
+            execute(
+                "MATCH (a) RETURN a,[p=(a)-[r:R]->(b) | [p,r,b]] AS paths ORDER BY a",
+                &vertices,
+                &edges
+            ),
+            paths
+        );
+        for (body, expected) in [
+            (
+                "[b IN [10,20] | b+r.n]",
+                list(vec![
+                    list(vec![int(120), int(130)]),
+                    list(vec![int(121), int(131)]),
+                ]),
+            ),
+            (
+                "reduce(total=b.n,x IN [1,2] | total+x+r.n)",
+                list(vec![int(225), int(227)]),
+            ),
+            (
+                "single(b IN [0,110] WHERE b=r.n)",
+                list(vec![
+                    GraphValue::Scalar(CanonicalScalar::Bool(true)),
+                    GraphValue::Scalar(CanonicalScalar::Bool(false)),
+                ]),
+            ),
+            (
+                "{b:1,r:2}",
+                list(vec![
+                    GraphValue::map(vec![
+                        ("b".into(), int(1)),
+                        ("r".into(), int(2))
+                    ])
+                    .unwrap();
+                    2
+                ]),
+            ),
+        ] {
+            let text = format!("MATCH (a {{n:1}}) RETURN [(a)-[r:R]->(b) | {body}] AS v");
+            assert_eq!(
+                execute(&text, &vertices, &edges),
+                vec![row(vec![expected])],
+                "{text}"
+            );
+        }
+        // The inner pattern is independent of x, so it gathers once per graph
+        // row. Its tuple's Let fields must not displace the outer x binding.
+        assert_eq!(
+            execute(
+                "MATCH (a {n:1}) RETURN [x IN [10,20] | [(a)-[r:R]->(b) | x+b.n+r.n]] AS v",
+                &vertices,
+                &edges
+            ),
+            vec![row(vec![list(vec![
+                list(vec![int(122), int(123)]),
+                list(vec![int(132), int(133)])
+            ])])]
+        );
+        for text in [
+            "MATCH (a) RETURN [(a)-[r:R]->(b) | [r,b]] AS v,b",
+            "MATCH (a) RETURN [(a)-[r:R]->(b) | [r,b]] AS v,r",
+            "MATCH (a) RETURN [x IN [a] | [(x)-[r:R]->(b) | [r,b]]] AS v",
+        ] {
+            assert!(
+                PreparedGraphSetText::prepare(text, symbols).is_err(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn tuple_collectors_keep_nullable_correlations_sibling_groups_and_empty_lists() {
+        let vertices = [VId(0), VId(1), VId(2)];
+        let edges = [(EId(10), VId(0), S, VId(1)), (EId(11), VId(1), R, VId(2))];
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        let empty = list(vec![]);
+        assert_eq!(
+            execute(
+                "MATCH (a) OPTIONAL MATCH (a)-[:S]->(missing) RETURN a,missing,[(missing)-[r:R]->(b) | [r,b]] AS v ORDER BY a",
+                &vertices,
+                &edges
+            ),
+            vec![
+                row(vec![
+                    GraphValue::Vertex(VId(0)),
+                    GraphValue::Vertex(VId(1)),
+                    list(vec![list(vec![
+                        GraphValue::Edge(EId(11)),
+                        GraphValue::Vertex(VId(2))
+                    ])])
+                ]),
+                row(vec![
+                    GraphValue::Vertex(VId(1)),
+                    null.clone(),
+                    empty.clone()
+                ]),
+                row(vec![GraphValue::Vertex(VId(2)), null, empty.clone()]),
+            ]
+        );
+        assert_eq!(
+            execute(
+                "MATCH (a {n:1}) RETURN [(a)-[r:R]->(b) | [r,b]] AS first,[(a)-[r:S]->(b) | [b,r]] AS second",
+                &vertices,
+                &edges
+            ),
+            vec![row(vec![
+                empty,
+                list(vec![list(vec![
+                    GraphValue::Vertex(VId(1)),
+                    GraphValue::Edge(EId(10))
+                ])])
+            ])]
+        );
+    }
+
+    #[test]
+    fn tuple_projection_limits_interruptions_and_property_errors_never_return_partial_rows() {
+        let vertices = [VId(0), VId(1), VId(2)];
+        let edges = [(EId(10), VId(0), R, VId(1)), (EId(11), VId(0), R, VId(2))];
+        let query = prepare("MATCH (a) RETURN a,[(a)-[r:R]->(b) | [b.n,r.n]] AS v ORDER BY a");
+        let mut checkpoints = 0;
+        let complete = run(
+            &query,
+            &vertices,
+            &edges,
+            wide(),
+            &mut || {
+                checkpoints += 1;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        for stop in 1..=checkpoints {
+            let mut at = 0;
+            let refused = run(
+                &query,
+                &vertices,
+                &edges,
+                wide(),
+                &mut || {
+                    at += 1;
+                    if at == stop { Err(at) } else { Ok(()) }
+                },
+                false,
+            );
+            assert!(
+                matches!(refused,Err(GqlQueryError::Interrupted(at)) if at==stop),
+                "cut {stop}"
+            );
+            assert_eq!(at, stop, "no control resumes after refusal");
+        }
+        let exact = GqlQueryPolicy::new(
+            complete.rows.snapshot_records,
+            complete.rows.result_rows,
+            complete.evaluator.work_units,
+            complete.evaluator.scratch_entries,
+        );
+        assert_eq!(
+            run(&query, &vertices, &edges, exact, &mut || Ok(()), false).unwrap(),
+            complete
+        );
+        for dimension in 0..4 {
+            let mut limits = [
+                complete.rows.snapshot_records,
+                complete.rows.result_rows,
+                complete.evaluator.work_units,
+                complete.evaluator.scratch_entries,
+            ];
+            assert!(limits[dimension] > 0);
+            limits[dimension] -= 1;
+            let refused = run(
+                &query,
+                &vertices,
+                &edges,
+                GqlQueryPolicy::new(limits[0], limits[1], limits[2], limits[3]),
+                &mut || Ok(()),
+                false,
+            );
+            assert!(
+                matches!(
+                    refused,
+                    Err(GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_))
+                ),
+                "dimension {dimension}: {refused:?}"
+            );
+        }
+        assert!(matches!(
+            run(&query, &vertices, &edges, wide(), &mut || Ok(()), true),
+            Err(GqlQueryError::Source(_))
+        ));
+        // A dead CASE branch still refers to both locals, but its property
+        // failure stays dead; tuple capture itself never reads properties.
+        let dead = prepare(
+            "MATCH (a {n:1}) RETURN [(a)-[r:R]->(b) | CASE WHEN true THEN b ELSE r.n/0 END] AS v",
+        );
+        assert_eq!(
+            run(&dead, &vertices, &edges, wide(), &mut || Ok(()), true)
+                .unwrap()
+                .value,
+            vec![row(vec![list(vec![
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Vertex(VId(2))
+            ])])]
+        );
+        for (text, expected) in [
+            (
+                "MATCH (a {n:1}) RETURN [(a)-[r:R]->(b) | CASE WHEN true THEN b.n ELSE r.n/0 END] AS v",
+                vec![int(2), int(3)],
+            ),
+            (
+                "MATCH (a {n:1}) RETURN [(a)-[r:R]->(b) | CASE WHEN true THEN b.n WHEN r.n > 0 THEN 0 ELSE 1 END] AS v",
+                vec![int(2), int(3)],
+            ),
+            (
+                "MATCH (a {n:1}) RETURN [(a)-[r:R]->(b) | coalesce(b.n,1+r.n/0)] AS v",
+                vec![int(2), int(3)],
+            ),
+            (
+                "MATCH (a {n:1}) RETURN [(a)-[r:R]->() | CASE WHEN true THEN r ELSE r.n/0 END] AS v",
+                vec![GraphValue::Edge(EId(10)), GraphValue::Edge(EId(11))],
+            ),
+            (
+                "MATCH (a {n:1}) RETURN [(a)-[r:R]->() | coalesce(7,r.n/0)] AS v",
+                vec![int(7), int(7)],
+            ),
+            (
+                "MATCH (a {n:1}) WITH [(a)-[r:R]->() | r] AS edges RETURN [r IN edges | CASE WHEN true THEN 7 ELSE r.n/0 END] AS v",
+                vec![int(7), int(7)],
+            ),
+        ] {
+            assert_eq!(
+                run(
+                    &prepare(text),
+                    &vertices,
+                    &edges,
+                    wide(),
+                    &mut || Ok(()),
+                    true
+                )
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+                .value,
+                vec![row(vec![list(expected)])],
+                "{text}"
+            );
+        }
+        let failing = prepare("MATCH (a {n:1}) RETURN [(a)-[r:R]->(b) | b.n/(r.n-110)] AS v");
+        assert!(run(&failing, &vertices, &edges, wide(), &mut || Ok(()), false).is_err());
+        assert_eq!(
+            run(&query, &vertices, &edges, wide(), &mut || Ok(()), false).unwrap(),
+            complete
+        );
+    }
+
+    #[test]
+    fn typed_tuple_width_identity_and_full_width_bindings_are_bounded() {
+        let mut outer = GraphPatternBuilder::new();
+        outer.vertex("a").unwrap();
+        let mut inner = GraphPatternBuilder::new();
+        inner.vertex("a").unwrap().vertex("b").unwrap();
+        inner.edge("a", R, GlaDirection::Forward, "b").unwrap();
+        let compile = |clause| {
+            outer.prepare_values_with_clauses(
+                &[clause],
+                &[GraphColumn::collection("w", 0)],
+                0,
+                None,
+            )
+        };
+        let scalar = compile(GraphMatchClause::collect(&inner, Some("b"))).unwrap();
+        let singleton = compile(GraphMatchClause::collect_tuple(&inner, vec!["b"])).unwrap();
+        assert_ne!(
+            scalar.plan().canonical_bytes(),
+            singleton.plan().canonical_bytes()
+        );
+        let query = compile(GraphMatchClause::collect_tuple(
+            &inner,
+            vec!["b"; MAX_PATTERN_VERTICES],
+        ))
+        .unwrap();
+        let a = VId((1_u128 << 127) + 7);
+        let b = VId((1_u128 << 120) + 9);
+        let result = query
+            .plan()
+            .execute_governed_with_properties(
+                3,
+                [a, b],
+                [(a, R, b)],
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        // Typed value plans end with OrderByValues: the empty collection
+        // sorts before the nonempty one, independently of root scan order.
+        assert_eq!(
+            result.value,
+            vec![
+                row(vec![list(vec![])]),
+                row(vec![list(vec![list(vec![
+                    GraphValue::Vertex(b);
+                    MAX_PATTERN_VERTICES
+                ])])]),
+            ]
+        );
+        assert!(matches!(
+            compile(GraphMatchClause::collect_tuple(
+                &inner,
+                vec!["b"; MAX_PATTERN_VERTICES + 1]
+            )),
+            Err(PatternBuildError::LimitExceeded {
+                dimension: PatternLimitDimension::Columns,
+                ..
+            })
+        ));
+        assert!(matches!(
+            compile(GraphMatchClause::collect_tuple(&inner, vec!["missing"])),
+            Err(PatternBuildError::UnknownVariable)
+        ));
+    }
+}

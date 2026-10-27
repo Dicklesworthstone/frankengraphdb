@@ -424,6 +424,30 @@ fn pattern_comprehensions_collect_each_rows_witnesses() {
                 vec![int(40), ints(&[])],
             ]
         );
+        // Each projection sees all bindings from the same complete witness.
+        assert_eq!(
+            rows(
+                "MATCH (n:Person) RETURN n.p AS p, [(n)-[:R]->(m)-[:R]->(o) | m.p + o.p] AS out ORDER BY p"
+            ),
+            vec![
+                vec![int(10), ints(&[50])],
+                vec![int(20), ints(&[])],
+                vec![int(30), ints(&[])],
+                vec![int(40), ints(&[])],
+            ]
+        );
+        assert_eq!(
+            rows(
+                "MATCH (n:Person {p:10}) WITH [(n)-[r:R]->(m) | {next:m.p,edge:r}] AS docs RETURN docs"
+            ),
+            vec![vec![list([(10, 20), (11, 30)].map(|(edge, value)| {
+                GraphValue::map(vec![
+                    ("next".into(), int(value)),
+                    ("edge".into(), GraphValue::Edge(fgdb_types::EId(edge))),
+                ])
+                .unwrap()
+            }))]]
+        );
         // A literal projection collects one value per witness: the degree.
         assert_eq!(
             rows("MATCH (n:Person) RETURN n.p AS p, size([(n)-[:R]->() | 1]) AS d ORDER BY p"),
@@ -480,12 +504,10 @@ fn pattern_comprehensions_collect_each_rows_witnesses() {
             panic!("aggregate read must return rows");
         };
         assert_eq!(counted, vec![vec![QueryValue::Count(4)]]);
-        // Two pattern locals in one projection, a row
-        // scope, and a pattern over an enclosing list-comprehension local
+        // A scalar row scope and a pattern over an enclosing list-comprehension local
         // (gathered once per row, so it could not follow the local; TCK
         // Pattern2 [7]) refuse typed.
         for text in [
-            "MATCH (n:Person) RETURN [(n)-[:R]->(m)-[:R]->(o) | m.p + o.p] AS v",
             "WITH 1 AS x RETURN [(x)-[:R]->() | 1] AS v",
             "MATCH p = (n:Person)-[:R]->() RETURN [x IN nodes(p) | size([(x)-[:R]->() | 1])] AS v",
         ] {

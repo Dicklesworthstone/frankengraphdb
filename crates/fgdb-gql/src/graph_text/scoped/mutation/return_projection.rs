@@ -2343,12 +2343,48 @@ impl<'a> Parser<'a> {
         list_operand_at(self.current, &self.lexer, route)
     }
 
-    /// Whether a CASE with a list result starts here (case_has_list).
+    /// Whether a CASE needs branch-local value scopes. Element locals are
+    /// dynamically typed, and their property/subscript reads use let slots.
+    /// Those slots must stay inside the selected branch, even when the CASE
+    /// ultimately returns a scalar.
     pub(super) fn list_case_follows(
         &self,
         route: Route<'_, 'a>,
     ) -> Result<bool, GraphPatternTextError> {
-        Ok(self.is_word("CASE") && case_has_list(&self.lexer, route)?)
+        if !self.is_word("CASE") {
+            return Ok(false);
+        }
+        if case_has_list(&self.lexer, route)? {
+            return Ok(true);
+        }
+        if self.elements.is_empty() {
+            return Ok(false);
+        }
+        let mut lexer = self.lexer.clone();
+        let mut cases = 1_usize;
+        let mut property = false;
+        loop {
+            let token = lexer.next()?;
+            if let TokenKind::Word(word) = token.kind
+                && !property
+            {
+                if self.elements.contains(&word) {
+                    return Ok(true);
+                }
+                if word.eq_ignore_ascii_case("CASE") {
+                    cases += 1;
+                } else if word.eq_ignore_ascii_case("END") {
+                    cases -= 1;
+                    if cases == 0 {
+                        return Ok(false);
+                    }
+                }
+            }
+            if matches!(token.kind, TokenKind::End) {
+                return Ok(false);
+            }
+            property = matches!(token.kind, TokenKind::Punct(b'.'));
+        }
     }
 
     /// Whether a list operand here is a whole CASE result: WHEN, THEN, ELSE
@@ -2362,6 +2398,7 @@ impl<'a> Parser<'a> {
         if !list_operand_at(self.current, &self.lexer, route)?
             && !composite_result_at(self.current, &self.lexer)?
             && !element_column_at(self.current, &self.lexer, route)?
+            && !matches!(self.current.kind, TokenKind::Word(word) if self.elements.contains(&word))
         {
             return Ok(false);
         }
@@ -3110,6 +3147,12 @@ impl<'a> Parser<'a> {
         let mut first = true;
         loop {
             let token = lexer.next()?;
+            // As for CASE, a local may be an element or collection. Its
+            // value/property reads must be evaluated in this argument's
+            // scope, after earlier non-NULL arguments have been considered.
+            if matches!(token.kind, TokenKind::Word(word) if self.elements.contains(&word)) {
+                return Ok(true);
+            }
             if first && depth == 1 {
                 first = false;
                 match token.kind {
@@ -3510,14 +3553,11 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// The local of Collect scope `scope` that the projection after `|`
-    /// reads: its path, or a vertex or relationship the pattern introduces.
-    /// None when it reads no local (each witness then collects NULL); more
-    /// than one refuses, since one element per witness carries one value.
-    fn comprehension_element(
-        &self,
-        scope: usize,
-    ) -> Result<Option<Name<'a>>, GraphPatternTextError> {
+    /// The locals of Collect scope `scope` that the projection after `|`
+    /// reads: its path, or vertices/relationships the pattern introduces.
+    /// Keep their first-reference order so one witness tuple binds each name
+    /// once; no locals means each witness only contributes a NULL placeholder.
+    fn comprehension_elements(&self, scope: usize) -> Result<Vec<Name<'a>>, GraphPatternTextError> {
         let body = &self.syntax.scopes[scope].body;
         let local = |word: &str| {
             !word.starts_with(Self::ANONYMOUS_PREFIX)
@@ -3535,7 +3575,7 @@ impl<'a> Parser<'a> {
         let mut token = self.current;
         let mut depth = 0_usize;
         let mut after_dot = false;
-        let mut element: Option<Name<'a>> = None;
+        let mut elements: Vec<Name<'a>> = Vec::new();
         loop {
             match token.kind {
                 TokenKind::End => break,
@@ -3543,34 +3583,34 @@ impl<'a> Parser<'a> {
                 TokenKind::Punct(b']') if depth == 0 => break,
                 TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
                 TokenKind::Word(word) if !after_dot && local(word) => {
-                    if element.is_some_and(|seen| seen.text != word) {
-                        return Err(error(
-                            token.at,
-                            GraphPatternTextErrorKind::Expected(
-                                "a pattern comprehension projection that reads one local of its pattern",
-                            ),
-                        ));
+                    if !elements.iter().any(|seen| seen.text == word) {
+                        self.capacity(
+                            elements.len(),
+                            MAX_PATTERN_VERTICES,
+                            crate::algebra::PatternLimitDimension::Columns,
+                        )?;
+                        elements.push(Name {
+                            text: word,
+                            at: token.at,
+                        });
                     }
-                    element = Some(Name {
-                        text: word,
-                        at: token.at,
-                    });
                 }
                 _ => {}
             }
             after_dot = matches!(token.kind, TokenKind::Punct(b'.'));
             token = lexer.next()?;
         }
-        Ok(element)
+        Ok(elements)
     }
 
     /// openCypher pattern comprehension (fgdb-7nwox) over the MATCH bindings
     /// of a graph projection: `[p = (n)-->(m) WHERE pred | expr]`. The
     /// pattern is a Collect scope, which gathers one element per witness, in
-    /// enumeration order, into a list column: the local `expr` reads, or NULL
-    /// when it reads none. The list then maps through `expr` with that
-    /// element bound to its name, so `[p = (n)-->() | p]` is the column
-    /// itself. An empty match is the empty list, never NULL.
+    /// enumeration order, into a list column: the local `expr` reads, a tuple
+    /// when it reads several, or NULL when it reads none. The list maps through
+    /// `expr` with the locals bound through the ordinary value evaluator. A
+    /// direct single-local projection keeps its existing compact path, and an
+    /// empty match is the empty list, never NULL.
     fn pattern_comprehension(
         &mut self,
         inputs: &mut Vec<Projection<'a>>,
@@ -3596,8 +3636,13 @@ impl<'a> Parser<'a> {
                 )),
             });
         }
-        let element = self.comprehension_element(scope)?;
-        self.syntax.scopes[scope].element = element;
+        let elements = self.comprehension_elements(scope)?;
+        let tuple = elements.len() > 1;
+        if tuple {
+            self.syntax.scopes[scope].tuple = Some(elements.clone());
+        } else {
+            self.syntax.scopes[scope].element = elements.first().copied();
+        }
         let column = self.projection_slot(
             inputs,
             Projection {
@@ -3608,11 +3653,36 @@ impl<'a> Parser<'a> {
             },
         )?;
         self.punct(b'|', "| and the projection of a pattern comprehension")?;
-        self.elements.push(element.map_or("", |name| name.text));
+        let outer = self.elements.len();
+        if tuple {
+            // The comprehension supplies one tuple local. Let then extends
+            // that same row by each field, in first-reference order, exactly
+            // matching the parser's local offsets even inside nested lists.
+            self.elements.push("");
+            self.elements.extend(elements.iter().map(|name| name.text));
+        } else {
+            self.elements
+                .push(elements.first().map_or("", |name| name.text));
+        }
         let map = self.read_recursive_value(Some(inputs), schema, resolve, depth + 1);
-        self.elements.pop();
-        let map = map?;
+        self.elements.truncate(outer);
+        let mut map = map?;
         self.punct(b']', "]")?;
+        if tuple {
+            let values = (0..elements.len())
+                .map(|index| ReadValueTemplate::Index {
+                    list: Box::new(ReadValueTemplate::Local(0)),
+                    index: Box::new(ReadValueTemplate::Literal(
+                        GqlScalarParameter::new(CanonicalScalar::Int(index as i64))
+                            .expect("bounded tuple field index"),
+                    )),
+                })
+                .collect();
+            map = ReadValueTemplate::Let {
+                values,
+                body: Box::new(map),
+            };
+        }
         Ok(if matches!(map, ReadValueTemplate::Local(0)) {
             ReadValueTemplate::Column(column)
         } else {

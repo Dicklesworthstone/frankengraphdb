@@ -46,6 +46,8 @@ pub(super) struct ScopeSyntax<'a> {
     nested: Vec<ScopeSyntax<'a>>,
     /// A Collect scope's element: the local each witness contributes.
     element: Option<Name<'a>>,
+    /// Multiple locals are captured together, never as independent lists.
+    tuple: Option<Vec<Name<'a>>>,
 }
 
 #[derive(Clone)]
@@ -54,6 +56,7 @@ pub(super) struct BoundScope {
     builder: GraphPatternBuilder,
     filters: Vec<BoundFilter>,
     element: Option<String>,
+    tuple: Option<Vec<String>>,
     nested: Vec<BoundScope>,
 }
 
@@ -64,7 +67,13 @@ impl BoundScope {
             ScopeKind::Optional => GraphMatchClause::optional(&self.builder),
             ScopeKind::Exists => GraphMatchClause::exists(&self.builder),
             ScopeKind::NotExists => GraphMatchClause::not_exists(&self.builder),
-            ScopeKind::Collect => GraphMatchClause::collect(&self.builder, self.element.as_deref()),
+            ScopeKind::Collect => match &self.tuple {
+                Some(tuple) => GraphMatchClause::collect_tuple(
+                    &self.builder,
+                    tuple.iter().map(String::as_str).collect(),
+                ),
+                None => GraphMatchClause::collect(&self.builder, self.element.as_deref()),
+            },
         };
         clause.nested = self.nested.iter().map(Self::clause).collect();
         clause
@@ -84,6 +93,9 @@ impl BoundScope {
     /// A Collect scope's element name, for its transcript.
     pub(super) fn element(&self) -> Option<&str> {
         self.element.as_deref()
+    }
+    pub(super) fn tuple(&self) -> Option<&[String]> {
+        self.tuple.as_deref()
     }
     pub(super) fn builder(&self) -> &GraphPatternBuilder {
         &self.builder
@@ -112,6 +124,7 @@ impl BoundScope {
             builder: bind_builder(&self.builder, &self.filters, values, at)?,
             filters: Vec::new(),
             element: self.element.clone(),
+            tuple: self.tuple.clone(),
             nested: self
                 .nested
                 .iter()
@@ -177,6 +190,9 @@ impl<'a> ScopeSyntax<'a> {
             builder,
             filters,
             element: self.element.map(|name| name.text.to_owned()),
+            tuple: self
+                .tuple
+                .map(|tuple| tuple.into_iter().map(|name| name.text.to_owned()).collect()),
             nested: self
                 .nested
                 .into_iter()
@@ -1796,6 +1812,7 @@ impl<'a> Parser<'a> {
             body,
             nested,
             element: None,
+            tuple: None,
         });
         Ok(())
     }

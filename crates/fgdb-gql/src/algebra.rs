@@ -403,9 +403,11 @@ pub enum GlaOperator {
     },
     /// One complete witness of the Collect scope: append the element `value`
     /// projects (a vertex, a relationship or a path), or NULL for none.
+    /// A tuple instead captures all its fields in one list for this witness.
     CollectEnd {
         group: u32,
         value: Option<ValueProjection>,
+        tuple: Option<Vec<ValueProjection>>,
     },
     /// Copy a correlated identity into the inner scope, without scanning rows.
     BindVertex {
@@ -1184,12 +1186,26 @@ impl<Row> GlaPlan<Row> {
                     bytes.extend_from_slice(&end.to_be_bytes());
                     bytes.extend_from_slice(&slots.to_be_bytes());
                 }
-                GlaOperator::CollectEnd { group, value } => {
+                GlaOperator::CollectEnd {
+                    group,
+                    value,
+                    tuple,
+                } => {
                     bytes.push(38);
                     bytes.extend_from_slice(&group.to_be_bytes());
-                    bytes.push(u8::from(value.is_some()));
-                    if let Some(value) = value {
-                        append_value_projection_transcript(value, &mut bytes);
+                    if let Some(tuple) = tuple {
+                        // Existing scalar collection transcripts retain their
+                        // 0/1 tags and bytes. Tag 2 owns an ordered tuple.
+                        bytes.push(2);
+                        bytes.extend_from_slice(&(tuple.len() as u64).to_be_bytes());
+                        for value in tuple {
+                            append_value_projection_transcript(value, &mut bytes);
+                        }
+                    } else {
+                        bytes.push(u8::from(value.is_some()));
+                        if let Some(value) = value {
+                            append_value_projection_transcript(value, &mut bytes);
+                        }
                     }
                 }
                 GlaOperator::CompareProperties {

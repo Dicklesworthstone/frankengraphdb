@@ -84,6 +84,13 @@ impl GraphPatternBuilder {
                 PatternLimitDimension::Identities,
             )?;
             pending.extend(clause.nested.iter().rev());
+            if let Some(tuple) = &clause.tuple {
+                check_total(
+                    tuple.len(),
+                    MAX_PATTERN_VERTICES,
+                    PatternLimitDimension::Columns,
+                )?;
+            }
             if clause.pattern.variables.iter().any(|variable| {
                 self.path_captures
                     .iter()
@@ -494,33 +501,37 @@ impl GraphPatternBuilder {
                     };
                 } else if collect {
                     // Each witness contributes its local vertex, relationship or
-                    // path, at the slot or capture this clause gave it.
-                    let value = clause
-                        .element
-                        .map(|name| {
-                            if let Some(at) = inner.variables.iter().position(|v| v.name == name) {
-                                Ok(ValueProjection::Vertex {
-                                    slot: map(inner_slots[at]),
-                                })
-                            } else if let Some(capture) =
-                                inner.path_captures.iter().position(|c| c.name == name)
-                            {
-                                Ok(ValueProjection::Path {
-                                    capture: map_capture(capture as u32),
-                                    function: if inner.path_captures[capture].edge_identity {
-                                        GraphPathFunction::Edge
-                                    } else {
-                                        GraphPathFunction::Value
-                                    },
-                                })
-                            } else {
-                                Err(PatternBuildError::UnknownVariable)
-                            }
-                        })
+                    // path, or an ordered tuple of those exact bindings.
+                    let project = |name: &str| {
+                        if let Some(at) = inner.variables.iter().position(|v| v.name == name) {
+                            Ok(ValueProjection::Vertex {
+                                slot: map(inner_slots[at]),
+                            })
+                        } else if let Some(capture) =
+                            inner.path_captures.iter().position(|c| c.name == name)
+                        {
+                            Ok(ValueProjection::Path {
+                                capture: map_capture(capture as u32),
+                                function: if inner.path_captures[capture].edge_identity {
+                                    GraphPathFunction::Edge
+                                } else {
+                                    GraphPathFunction::Value
+                                },
+                            })
+                        } else {
+                            Err(PatternBuildError::UnknownVariable)
+                        }
+                    };
+                    let value = clause.element.map(project).transpose()?;
+                    let tuple = clause
+                        .tuple
+                        .as_ref()
+                        .map(|elements| elements.iter().map(|name| project(name)).collect())
                         .transpose()?;
                     operators.push(GlaOperator::CollectEnd {
                         group: group as u32,
                         value,
+                        tuple,
                     });
                     operators[start] = GlaOperator::Collect {
                         group: group as u32,

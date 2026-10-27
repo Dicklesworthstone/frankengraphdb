@@ -62,6 +62,9 @@ pub struct GraphMatchClause<'a> {
     /// A Collect clause's element: the local vertex, relationship or path
     /// each witness contributes, or none (each contributes NULL).
     pub(crate) element: Option<&'a str>,
+    /// An ordered tuple of witness bindings, used when a comprehension's
+    /// projection reads more than one local. `None` retains scalar collection.
+    pub(crate) tuple: Option<Vec<&'a str>>,
     /// Predicates evaluated inside this clause, before its witness is accepted.
     /// Their locals and transient bindings never enter the containing scope.
     pub(crate) nested: Vec<GraphMatchClause<'a>>,
@@ -77,6 +80,7 @@ impl<'a> GraphMatchClause<'a> {
             pattern,
             kind: GraphMatchKind::Required,
             element: None,
+            tuple: None,
             nested: Vec::new(),
         }
     }
@@ -87,6 +91,7 @@ impl<'a> GraphMatchClause<'a> {
             pattern,
             kind: GraphMatchKind::Optional,
             element: None,
+            tuple: None,
             nested: Vec::new(),
         }
     }
@@ -96,6 +101,7 @@ impl<'a> GraphMatchClause<'a> {
             pattern,
             kind: GraphMatchKind::Exists,
             element: None,
+            tuple: None,
             nested: Vec::new(),
         }
     }
@@ -105,6 +111,7 @@ impl<'a> GraphMatchClause<'a> {
             pattern,
             kind: GraphMatchKind::NotExists,
             element: None,
+            tuple: None,
             nested: Vec::new(),
         }
     }
@@ -118,6 +125,22 @@ impl<'a> GraphMatchClause<'a> {
             pattern,
             kind: GraphMatchKind::Collect,
             element,
+            tuple: None,
+            nested: Vec::new(),
+        }
+    }
+
+    /// Collect a list of binding tuples, one tuple per complete witness in
+    /// enumeration order. Every field names a vertex, relationship or path in
+    /// `pattern`; repeated names remain repeated fields. Tuple width is
+    /// checked against the ordinary projection bound during preparation.
+    #[must_use]
+    pub fn collect_tuple(pattern: &'a GraphPatternBuilder, elements: Vec<&'a str>) -> Self {
+        Self {
+            pattern,
+            kind: GraphMatchKind::Collect,
+            element: None,
+            tuple: Some(elements),
             nested: Vec::new(),
         }
     }

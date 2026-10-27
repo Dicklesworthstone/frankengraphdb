@@ -2423,12 +2423,20 @@ impl PreparedGraphText {
             bytes.push(scope.kind_tag() | if nested.is_empty() { 0 } else { 0x80 });
             // A Collect scope's element follows its tag (fgdb-7nwox).
             if scope.kind_tag() == 4 {
-                match scope.element() {
-                    Some(element) => {
-                        bytes.push(1);
+                if let Some(tuple) = scope.tuple() {
+                    bytes.push(2);
+                    bytes.extend_from_slice(&(tuple.len() as u64).to_be_bytes());
+                    for element in tuple {
                         append_name(bytes, element);
                     }
-                    None => bytes.push(0),
+                } else {
+                    match scope.element() {
+                        Some(element) => {
+                            bytes.push(1);
+                            append_name(bytes, element);
+                        }
+                        None => bytes.push(0),
+                    }
                 }
             }
             bytes.extend_from_slice(&scope.builder().canonical_template_bytes());

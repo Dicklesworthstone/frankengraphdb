@@ -33,6 +33,41 @@ pub enum GlaExecutionEvent {
     ResultRow,
 }
 
+/// Copy one already matched identity or path into a private collection. The
+/// caller reserves the element slot; path storage is charged before cloning.
+fn collect_witness_element<E>(
+    value: Option<&crate::algebra::ValueProjection>,
+    bindings: &[Option<VId>],
+    paths: &[Option<GraphPath>],
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<crate::algebra::GraphValue, E> {
+    use crate::algebra::{GraphPathFunction, GraphValue, ValueProjection};
+    let null = || GraphValue::Scalar(CanonicalScalar::Null);
+    Ok(match value {
+        Some(ValueProjection::Vertex { slot }) => bindings
+            .get(slot.ordinal() as usize)
+            .copied()
+            .flatten()
+            .map_or_else(null, GraphValue::Vertex),
+        Some(ValueProjection::Path { capture, function }) => {
+            match paths[*capture as usize].as_ref() {
+                Some(path) if *function == GraphPathFunction::Edge => path
+                    .steps()
+                    .first()
+                    .map_or_else(null, |(edge, _)| GraphValue::Edge(*edge)),
+                Some(path) => {
+                    for _ in 0..=path.len() {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                    }
+                    GraphValue::Path(path.clone())
+                }
+                None => null(),
+            }
+        }
+        _ => null(),
+    })
+}
+
 /// Logical-entry/work limits, not allocator-byte, I/O or wall-clock limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GlaExecutionLimits {
@@ -1104,33 +1139,35 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                         width: bindings.len(),
                     });
                 }
-                // One witness: its element (a NULL for none), then the next.
-                GlaOperator::CollectEnd { group, value } => {
-                    use crate::algebra::{GraphPathFunction, GraphValue, ValueProjection};
+                // One witness: its element (a NULL for none), or all fields
+                // of its tuple together. Independent lists would lose each
+                // vertex/edge/path association and parallel-edge occurrence.
+                GlaOperator::CollectEnd {
+                    group,
+                    value,
+                    tuple,
+                } => {
                     (self.control)(GlaExecutionEvent::ScratchEntry)?;
-                    let null = || GraphValue::Scalar(fgdb_types::CanonicalScalar::Null);
-                    let element = match value {
-                        Some(ValueProjection::Vertex { slot }) => bindings
-                            .get(slot.ordinal() as usize)
-                            .copied()
-                            .flatten()
-                            .map_or_else(null, GraphValue::Vertex),
-                        Some(ValueProjection::Path { capture, function }) => {
-                            match self.paths[*capture as usize].as_ref() {
-                                Some(path) if *function == GraphPathFunction::Edge => path
-                                    .steps()
-                                    .first()
-                                    .map_or_else(null, |(edge, _)| GraphValue::Edge(*edge)),
-                                Some(path) => {
-                                    for _ in 0..=path.len() {
-                                        (self.control)(GlaExecutionEvent::ScratchEntry)?;
-                                    }
-                                    GraphValue::Path(path.clone())
-                                }
-                                None => null(),
-                            }
+                    let element = if let Some(tuple) = tuple {
+                        let mut fields = Vec::new();
+                        for field in tuple {
+                            (self.control)(GlaExecutionEvent::Work)?;
+                            (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                            fields.push(collect_witness_element(
+                                Some(field),
+                                bindings,
+                                &self.paths,
+                                &mut self.control,
+                            )?);
                         }
-                        _ => null(),
+                        crate::algebra::GraphValue::List(fields.into_boxed_slice())
+                    } else {
+                        collect_witness_element(
+                            value.as_ref(),
+                            bindings,
+                            &self.paths,
+                            &mut self.control,
+                        )?
                     };
                     self.collecting[*group as usize].push(element);
                     next = None;
