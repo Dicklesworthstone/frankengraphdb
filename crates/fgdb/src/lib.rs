@@ -226,7 +226,7 @@ use fgdb_delta_types::{
 };
 use fgdb_strata::edge_props::BlockProps;
 use fgdb_strata::manifest::{ManifestRecord, ManifestVersion, encode_manifest, records_of};
-use fgdb_strata::root::{BlockRef, PatchRef, RootError, merge_all_edges_with_props};
+use fgdb_strata::root::{PartitionRoot, RootError, merge_all_edges_with_props};
 use fgdb_strata::store::{BlockStore, PublishReceipts, StoreError};
 use fgdb_strata::vertex::{VertexPatchRows, merge_all_vertices};
 use fgdb_strata::writer::{BlockWriter, WriteError as BlockWriteError};
@@ -1783,8 +1783,9 @@ pub struct EdgeRecord {
 /// The published tier-D snapshot a reader is served from.
 ///
 /// Every decoded object is immutable and individually shared. Cloning a pinned
-/// generation copies reference/index metadata and Arc handles, never the block,
-/// vertex-row, or hosted-property payloads of its unchanged history.
+/// generation copies decoded-object handles and index metadata, never the
+/// block, vertex-row, or hosted-property payloads of its unchanged history.
+/// Durable root membership belongs to the writer, not pinned readers.
 #[derive(Clone, Debug)]
 struct Snapshot {
     /// Shared by every generation of one opened database. Entries point back
@@ -1803,19 +1804,13 @@ struct Snapshot {
     /// Exact unrestricted current-cut cardinalities; lazy, bounded and
     /// derived. A successor updates only touched relation counters.
     exact_counts: gql_exec::source::exact_counts::ExactCounts,
-    /// The root's block references, aligned with `blocks`. Retained so the
-    /// next commit can tell which decoded blocks the new root carries forward
-    /// unchanged (fgdb-gieu) — content addressing makes the identity the
-    /// proof, so an unchanged reference means an unchanged decoded block.
-    refs: Vec<BlockRef>,
     /// Each block's decoded property sidecar, aligned with `blocks`
     /// (fgdb-yqor): the locator column plus the hosted patch's rows, or
     /// `None` for a propertyless block.
     block_props: Vec<Option<Arc<BlockProps>>>,
-    /// The decoded vertex row patches, aligned with `patch_refs` — the vertex
-    /// half of the snapshot (fgdb-3xoi), under the same carry-forward rule.
+    /// The decoded vertex row patches, in the root's publication order — the
+    /// vertex half of the snapshot (fgdb-3xoi), under the same carry-forward rule.
     patches: Vec<VertexPatchRows>,
-    patch_refs: Vec<PatchRef>,
     frontier: CommitSeq,
     root: PartitionRootVersion,
     /// The manifest published beside `root` (fgdb-63w2) — the identity a
@@ -2582,6 +2577,12 @@ pub struct Database<V: Vfs = UnixVfs> {
     slot_generation: u64,
     keys: DatabaseKeys,
     snapshot: Arc<Snapshot>,
+    /// Admitted membership of the published root, aligned with the snapshot's
+    /// decoded blocks and patches. Publication uses its unchanged prefix and
+    /// scrub retains this complete inventory even if a parent is damaged.
+    /// Readers need only the root identity and decoded objects, so retaining
+    /// a snapshot never copies these history-sized reference vectors.
+    published_root: PartitionRoot,
     /// The persistent fold over every committed row, retained so a commit can
     /// fold only its own template instead of re-reading the whole history
     /// (`fgdb-fujt`: the per-commit rebuild's capsule re-read loop measured at
@@ -3088,7 +3089,7 @@ impl<V: Vfs + Clone> Database<V> {
             } = published;
             let (root, blocks, block_props, patches) = store.reopen(cx, root_id).await?;
             let mut snapshot =
-                current_generation(manifest, root_id, root, blocks, block_props, patches);
+                current_generation(manifest, root_id, &root, blocks, block_props, patches);
             snapshot.delta_index = LocalDeltaBatchIndex::empty_at(snapshot.frontier);
             Ok(EmbeddedReadView {
                 snapshot: Arc::new(snapshot),
@@ -3202,7 +3203,7 @@ impl<V: Vfs + Clone> Database<V> {
             select_checkpoint(cx, coordinator.chain(), &store, &probe, &keys, path).await?
         };
         let checkpoint_selected = selected.is_some();
-        let (mut snapshot, writer, heads, receipts) = match selected {
+        let (mut snapshot, writer, heads, receipts, published_root) = match selected {
             Some(checkpoint) => {
                 reopen_from_verified_checkpoint(
                     cx,
@@ -3329,6 +3330,7 @@ impl<V: Vfs + Clone> Database<V> {
             keys,
             state: DatabaseState::Healthy { published_frontier },
             snapshot: Arc::new(snapshot),
+            published_root,
             writer,
             heads,
             // Earned by the rebuild's or suffix's publication, or seeded from
@@ -4705,8 +4707,10 @@ impl<V: Vfs + Clone> Database<V> {
                 }),
             })?;
         let (blocks, patches) = (folded.sealed(), folded.sealed_patches());
-        let (block_prefix, patch_prefix) =
-            (self.snapshot.refs.len(), self.snapshot.patch_refs.len());
+        let (block_prefix, patch_prefix) = (
+            self.published_root.blocks.len(),
+            self.published_root.vertex_patches.len(),
+        );
         assert!(block_prefix <= blocks.len());
         assert!(patch_prefix <= patches.len());
         // This writer only appends sealed objects. Its prior root already
@@ -4849,8 +4853,11 @@ impl<V: Vfs + Clone> Database<V> {
                         .map(fgdb_strata::writer::SealedPatch::reference)
                         .collect(),
                 };
-                assert!(root.blocks.starts_with(&self.snapshot.refs));
-                assert!(root.vertex_patches.starts_with(&self.snapshot.patch_refs));
+                assert!(root.blocks.starts_with(&self.published_root.blocks));
+                assert!(
+                    root.vertex_patches
+                        .starts_with(&self.published_root.vertex_patches)
+                );
                 self.store
                     .verify_root(cx, &root, &mut self.receipts)
                     .await
@@ -5045,10 +5052,6 @@ impl<V: Vfs + Clone> Database<V> {
             None => std::sync::OnceLock::new(),
         };
         let previous = Arc::make_mut(&mut self.snapshot);
-        let mut refs = std::mem::take(&mut previous.refs);
-        let mut patch_refs = std::mem::take(&mut previous.patch_refs);
-        refs.extend(new_refs);
-        patch_refs.extend(new_patch_refs);
         self.snapshot = Arc::new(Snapshot {
             read_caches: Arc::clone(&previous.read_caches),
             adjacency,
@@ -5056,14 +5059,18 @@ impl<V: Vfs + Clone> Database<V> {
             exact_counts,
             blocks: decoded,
             block_props: decoded_props,
-            refs,
             patches: decoded_patches,
-            patch_refs,
             frontier,
             root: root_id,
             manifest,
             delta_index: next_delta_index,
         });
+        // Writer-owned membership advances in the same no-await transition.
+        // Pinned readers retain their immutable generation without forcing a
+        // copy of either reference vector on this append.
+        self.published_root.blocks.extend(new_refs);
+        self.published_root.vertex_patches.extend(new_patch_refs);
+        self.published_root.published_at = frontier;
         self.state = DatabaseState::Healthy {
             published_frontier: self.snapshot.frontier,
         };
@@ -5579,7 +5586,7 @@ impl<V: Vfs + Clone> Database<V> {
         // exits next) does not pay for an index: road-ny spent 295 of its
         // 3,269 compaction samples building one nothing read. A serving
         // handle keeps its index warm across the compaction.
-        let (mut snapshot, writer, receipts) = publish_and_snapshot(
+        let (mut snapshot, writer, receipts, published_root) = publish_and_snapshot(
             cx,
             &self.store,
             &self.keys,
@@ -5634,6 +5641,7 @@ impl<V: Vfs + Clone> Database<V> {
         self.slot_generation = next_generation;
         self.heads.versions = versions;
         self.snapshot = Arc::new(snapshot);
+        self.published_root = published_root;
         self.writer = writer;
         // The receipts now hold every durable object of both generations, and
         // their root memo is the replacement root's.
@@ -6218,7 +6226,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     // statement histories or retaining an extra strong spent-set handle.
     let mut next_birth_ordinal =
         writer.spent_vertices().len() as u64 + writer.spent_edges().len() as u64;
-    let snapshot = current_generation(manifest, root_id, root, blocks, block_props, patches);
+    let snapshot = current_generation(manifest, root_id, &root, blocks, block_props, patches);
     let mut versions = VersionHeads::from_checkpoint(&snapshot);
 
     // The SUFFIX: everything the crash window or plain lag left past the
@@ -6248,7 +6256,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
         // publication syncs every object again and earns its own receipts.
         let published_chain_hash = chain_commitment_at(coordinator.chain(), frontier)
             .expect("the fold's frontier is on the recovered chain it folded");
-        let (snapshot, writer, receipts) = publish_and_snapshot(
+        let (snapshot, writer, receipts, published_root) = publish_and_snapshot(
             cx,
             store,
             keys,
@@ -6260,7 +6268,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
             true,
         )
         .await?;
-        return Ok((snapshot, writer, heads, receipts));
+        return Ok((snapshot, writer, heads, receipts, published_root));
     }
 
     // No suffix: the partition IS current, and the snapshot assembles from
@@ -6277,16 +6285,22 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     // commit. A copy made without syncing must be adopted before this open
     // ([`Database::adopt`]).
     let receipts = PublishReceipts::for_published_root(admission);
-    Ok((snapshot, writer, heads, receipts))
+    Ok((snapshot, writer, heads, receipts, root))
 }
 
 /// What an open derives: the generation readers share, the retained fold, the
-/// write heads beside it, and the receipts for what is already published.
-type OpenedGeneration = (Snapshot, BlockWriter, WriteHeads, PublishReceipts);
+/// write heads beside it, and the receipts and membership already published.
+type OpenedGeneration = (
+    Snapshot,
+    BlockWriter,
+    WriteHeads,
+    PublishReceipts,
+    PartitionRoot,
+);
 
 /// What a publication yields: the generation, the retained fold, and the
-/// receipts it earned.
-type PublishedGeneration = (Snapshot, BlockWriter, PublishReceipts);
+/// receipts and root membership it earned.
+type PublishedGeneration = (Snapshot, BlockWriter, PublishReceipts, PartitionRoot);
 
 /// Refuse a `path` that does not hold a database before anything is opened
 /// under it. Shared by the writable and the read-only open; see
@@ -6618,7 +6632,7 @@ async fn ensure_slot_target_resolves<V: Vfs>(
 fn current_generation(
     manifest: ManifestVersion,
     root_id: PartitionRootVersion,
-    root: fgdb_strata::root::PartitionRoot,
+    root: &PartitionRoot,
     blocks: Vec<Vec<AdjacencyEntry>>,
     block_props: Vec<Option<BlockProps>>,
     patches: Vec<VertexPatchRows>,
@@ -6634,13 +6648,11 @@ fn current_generation(
             blocks.is_empty() && patches.is_empty(),
         ),
         blocks: blocks.into_iter().map(Arc::from).collect(),
-        refs: root.blocks,
         block_props: block_props
             .into_iter()
             .map(|props| props.map(Arc::new))
             .collect(),
         patches,
-        patch_refs: root.vertex_patches,
         frontier: published_at,
         root: root_id,
         manifest,
@@ -6675,7 +6687,7 @@ async fn rebuild<V: Vfs>(
     .await?;
     let published_chain_hash = chain_commitment_at(coordinator.chain(), frontier)
         .expect("the fold's frontier is on the recovered chain it folded");
-    let (snapshot, writer, receipts) = publish_and_snapshot(
+    let (snapshot, writer, receipts, published_root) = publish_and_snapshot(
         cx,
         store,
         keys,
@@ -6695,6 +6707,7 @@ async fn rebuild<V: Vfs>(
             next_birth_ordinal,
         },
         receipts,
+        published_root,
     ))
 }
 
@@ -7319,13 +7332,11 @@ async fn publish_and_snapshot_inner<V: Vfs>(
                 std::sync::OnceLock::new()
             },
             blocks: decoded.into_iter().map(Arc::from).collect(),
-            refs: root.blocks,
             block_props: decoded_props
                 .into_iter()
                 .map(|props| props.map(Arc::new))
                 .collect(),
             patches: decoded_patches,
-            patch_refs: root.vertex_patches,
             frontier,
             root: root_id,
             manifest,
@@ -7333,6 +7344,7 @@ async fn publish_and_snapshot_inner<V: Vfs>(
         },
         writer,
         receipts,
+        root,
     ))
 }
 
@@ -8363,8 +8375,8 @@ mod shared_snapshot_payload_laws {
     use super::*;
 
     fn assert_payload_prefix_shared(before: &Snapshot, after: &Snapshot) {
-        assert!(after.refs.starts_with(&before.refs));
-        assert!(after.patch_refs.starts_with(&before.patch_refs));
+        assert!(after.blocks.len() >= before.blocks.len());
+        assert!(after.patches.len() >= before.patches.len());
         assert!(!before.blocks.is_empty());
         assert!(!before.patches.is_empty());
         assert!(!before.delta_index.is_empty());
@@ -8478,6 +8490,17 @@ mod shared_snapshot_payload_laws {
             let mut pinned = Vec::new();
 
             for step in 1..=12_u64 {
+                // Remove capacity growth from this law: a pinned publication
+                // must extend the writer's existing membership allocations,
+                // not copy their unchanged prefix with Snapshot::clone.
+                db.published_root.blocks.reserve(64);
+                db.published_root.vertex_patches.reserve(64);
+                let membership_allocations = (
+                    db.published_root.blocks.as_ptr(),
+                    db.published_root.vertex_patches.as_ptr(),
+                );
+                let carried_blocks = db.published_root.blocks.clone();
+                let carried_patches = db.published_root.vertex_patches.clone();
                 let view = db.pinned_read_view().unwrap();
                 let expected = history(&view.snapshot);
                 // Exercise Snapshot::clone itself as well as make_mut on the
@@ -8515,6 +8538,26 @@ mod shared_snapshot_payload_laws {
                     batch.delete_edge(EId(4));
                 }
                 runtime.block_on(db.write(&cx, batch)).unwrap();
+                assert_eq!(
+                    (
+                        db.published_root.blocks.as_ptr(),
+                        db.published_root.vertex_patches.as_ptr(),
+                    ),
+                    membership_allocations,
+                    "a pinned commit copied the unchanged root membership"
+                );
+                assert!(db.published_root.blocks.starts_with(&carried_blocks));
+                assert!(
+                    db.published_root
+                        .vertex_patches
+                        .starts_with(&carried_patches)
+                );
+                assert_eq!(db.published_root.published_at, db.snapshot.frontier);
+                assert_eq!(db.published_root.blocks.len(), db.snapshot.blocks.len());
+                assert_eq!(
+                    db.published_root.vertex_patches.len(),
+                    db.snapshot.patches.len()
+                );
                 assert_payload_prefix_shared(&view.snapshot, &db.snapshot);
                 assert_eq!(history(&view.snapshot), expected);
                 assert!(view.vertex(added).unwrap().is_none());
@@ -9465,13 +9508,17 @@ mod publish_receipt_laws {
     /// its published root names, with that whole root as its verified prefix.
     fn receipts_cover_the_root<V: Vfs + Clone>(db: &Database<V>) -> bool {
         let snapshot = &db.snapshot;
-        db.receipts.verified_root_prefix(PARTITION)
-            == (snapshot.refs.len(), snapshot.patch_refs.len())
-            && snapshot.refs.iter().all(|reference| {
+        let root = &db.published_root;
+        root.published_at == snapshot.frontier
+            && root.blocks.len() == snapshot.blocks.len()
+            && root.vertex_patches.len() == snapshot.patches.len()
+            && db.receipts.verified_root_prefix(PARTITION)
+                == (root.blocks.len(), root.vertex_patches.len())
+            && root.blocks.iter().all(|reference| {
                 db.receipts
                     .holds(fgdb_strata::DeltaBlockVersion(reference.block_id))
             })
-            && snapshot.patch_refs.iter().all(|reference| {
+            && root.vertex_patches.iter().all(|reference| {
                 db.receipts
                     .holds_patch(fgdb_strata::vertex::VertexPatchVersion(reference.patch_id))
             })
@@ -9521,7 +9568,7 @@ mod publish_receipt_laws {
         }
         assert_eq!(db.partition_root().unwrap(), twin.partition_root().unwrap());
         assert!(
-            db.snapshot.refs.len() > 1 && db.snapshot.patch_refs.len() > 1,
+            db.published_root.blocks.len() > 1 && db.published_root.vertex_patches.len() > 1,
             "the fixture must publish several blocks and vertex patches"
         );
         drop(db);

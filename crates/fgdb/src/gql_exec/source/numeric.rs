@@ -656,7 +656,6 @@ mod tests {
             adjacency: Default::default(),
             property_index: Default::default(),
             exact_counts: Default::default(),
-            refs: vec![],
             block_props: vec![],
             patches: patches
                 .iter()
@@ -665,7 +664,6 @@ mod tests {
                 .flat_map(|rows| rows.chunks(fgdb_strata::vertex::MAX_PATCH_ROWS as usize))
                 .map(|rows| decode_patch(&encode_patch(rows).unwrap()).unwrap())
                 .collect(),
-            patch_refs: vec![],
             frontier: CommitSeq(3),
             root: fgdb_strata::PartitionRootVersion(fgdb_types::ObjectId([0; 32])),
             manifest: fgdb_strata::manifest::ManifestVersion(fgdb_types::ObjectId([0; 32])),

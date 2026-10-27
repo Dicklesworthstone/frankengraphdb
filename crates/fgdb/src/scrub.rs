@@ -256,8 +256,8 @@ impl<V: Vfs + Clone> Database<V> {
             .receipts
             .root_segment_ids(
                 crate::PARTITION,
-                &self.snapshot.refs,
-                &self.snapshot.patch_refs,
+                &self.published_root.blocks,
+                &self.published_root.vertex_patches,
             )
             .ok_or_else(|| {
                 CommitError::Io(std::io::Error::new(
@@ -303,8 +303,8 @@ impl<V: Vfs + Clone> Database<V> {
             })
         })?;
         let mut objects: BTreeMap<_, _> = self
-            .snapshot
-            .refs
+            .published_root
+            .blocks
             .iter()
             .map(|reference| (reference.block_id, DataKind::Block))
             .collect();
@@ -317,7 +317,7 @@ impl<V: Vfs + Clone> Database<V> {
                 objects.insert(patch.patch_id, DataKind::EdgeProperties);
             }
         }
-        for reference in &self.snapshot.patch_refs {
+        for reference in &self.published_root.vertex_patches {
             objects.insert(reference.patch_id, DataKind::VertexPatch);
         }
         summary.block_objects = objects.len();
