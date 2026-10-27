@@ -455,43 +455,41 @@ impl BlockWriter {
         patches: &[VertexPatchRows],
         frontier: CommitSeq,
     ) -> Self {
-        // Collecting an identity map keeps the last pair of a repeated key,
-        // as inserting in order does.
+        // History merging already selected one live row per identity. Reserve
+        // those exact counts so recovery does not repeatedly allocate and
+        // rehash a growing live map. Keep the same insertion order and probe
+        // layout as the ordinary fold.
         let mut sealed_live_edges = BTreeSet::new();
-        let live: IdMap<EId, LiveEdge> = live_edges
-            .into_iter()
-            .map(|(entry, props)| {
-                // These births already have durable images. A same-frontier
-                // restatement may become pending again after reconstruction,
-                // but a following delete still cannot fold that image away.
-                if entry.created_at == frontier {
-                    sealed_live_edges.insert((entry.eid, entry.created_at));
-                }
-                (
-                    entry.eid,
-                    LiveEdge {
-                        src: entry.src,
-                        relation: entry.relation,
-                        dst: entry.dst,
-                        created_at: entry.created_at,
-                        props,
-                        incident: [IncidentLinks::EMPTY; 2],
-                    },
-                )
-            })
-            .collect();
+        let mut live = IdMap::with_capacity(live_edges.len());
+        for (entry, props) in live_edges {
+            // These births already have durable images. A same-frontier
+            // restatement may become pending again after reconstruction,
+            // but a following delete still cannot fold that image away.
+            if entry.created_at == frontier {
+                sealed_live_edges.insert((entry.eid, entry.created_at));
+            }
+            live.insert(
+                entry.eid,
+                LiveEdge {
+                    src: entry.src,
+                    relation: entry.relation,
+                    dst: entry.dst,
+                    created_at: entry.created_at,
+                    props,
+                    incident: [IncidentLinks::EMPTY; 2],
+                },
+            );
+        }
         let spent: IdSet<EId> = blocks.iter().flatten().map(|entry| entry.eid).collect();
         let mut sealed_live_vertices = BTreeSet::new();
-        let live_vertices: IdMap<VId, LiveVertex> =
-            crate::vertex::merge_all_vertices(patches, frontier)
-                .into_iter()
-                .map(|row| {
-                    if row.created_at == frontier {
-                        sealed_live_vertices.insert((row.vid, row.created_at));
-                    }
-                    (row.vid, LiveVertex::new(row))
-                })
-                .collect();
+        let live_rows = crate::vertex::merge_all_vertices(patches, frontier);
+        let mut live_vertices = IdMap::with_capacity(live_rows.len());
+        for row in live_rows {
+            if row.created_at == frontier {
+                sealed_live_vertices.insert((row.vid, row.created_at));
+            }
+            live_vertices.insert(row.vid, LiveVertex::new(row));
+        }
         let spent_vertices: IdSet<VId> = patches.iter().flatten().map(|row| row.vid).collect();
         // The chain head per family is the LAST published block of that
         // family — publication order IS the chain (fgdb-4391).

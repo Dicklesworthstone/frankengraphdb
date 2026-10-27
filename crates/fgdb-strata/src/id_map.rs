@@ -88,6 +88,43 @@ impl<K: IdKey, V> IdMap<K, V> {
         Self::default()
     }
 
+    /// Reserve a known number of distinct identities, as a recovered live
+    /// row vector supplies. The slot count is exactly the one ordinary
+    /// insertion reaches at this length, avoiding intermediate rehashes
+    /// without changing the final probe layout or its bounded overflow.
+    /// Keep the ordinary entry vector's geometric spare capacity as well,
+    /// so the first post-open insertion does not inherit a deferred copy.
+    /// Do not infer this count from an iterator that may repeat identities.
+    #[allow(
+        clippy::reserve_after_initialization,
+        reason = "reserve preserves Vec's type-dependent minimum and post-open spare capacity"
+    )]
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        if capacity == 0 {
+            return Self::new();
+        }
+        // The ordinary table grows when entries exceed three quarters of
+        // its slots. ceil(4 * capacity / 3), expressed without a multiply,
+        // chooses the same final power of two at every growth boundary.
+        let slots = capacity
+            .checked_add(capacity.div_ceil(3))
+            .and_then(usize::checked_next_power_of_two)
+            .expect("an identity map capacity fits usize")
+            .max(64);
+        let mut entries = Vec::new();
+        entries.reserve(
+            capacity
+                .checked_next_power_of_two()
+                .expect("an identity map capacity fits usize"),
+        );
+        Self {
+            entries,
+            slots: vec![EMPTY; slots],
+            tombstones: 0,
+            overflow: BTreeMap::new(),
+        }
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
