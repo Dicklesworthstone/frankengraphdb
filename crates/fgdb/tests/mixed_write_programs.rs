@@ -1657,6 +1657,319 @@ mod independent_edges {
     }
 }
 
+mod independent_subgraphs {
+    use super::independent_edges::incumbent;
+    use super::*;
+    use fgdb_delta_types::DeltaRow;
+    use fgdb_gql::GqlQueryError;
+    use std::collections::BTreeMap;
+
+    fn reverse_identity(request: GraphWriteIdentityRequest) -> Result<ElementId, &'static str> {
+        let at = u128::MAX - request.statement as u128 * 100;
+        Ok(match request.request {
+            GraphInsertRequest::Vertex { row: 0, vertex } => {
+                ElementId::Vertex(VId(at - vertex as u128))
+            }
+            GraphInsertRequest::Edge { row: 0, edge } => {
+                ElementId::Edge(EId(at - 1_000 - edge as u128))
+            }
+            _ => panic!("standalone statements have exactly one occurrence"),
+        })
+    }
+
+    fn subgraphs(count: usize) -> PreparedGraphWriteProgram {
+        program(&vec![
+            "CREATE (a:New {p:7})-[:R {p:9}]->(b:Copy {p:8})";
+            count
+        ])
+    }
+
+    #[test]
+    fn mixed_size_subgraphs_match_the_live_prefix_and_global_vertex_edge_births() {
+        let ((), report) = run_async_under_lab(0x6d17_0301, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&c.commit(), vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            seed(&mut db, &c.commit()).await;
+            let basis = db.frontier().unwrap();
+            let pinned = db.read_session().unwrap();
+            let query = program(&[
+                "CREATE (a:New {p:3})-[:R {p:7}]->(b:Copy {p:1}), (a)-[:R {p:8}]->(a)",
+                "CREATE (a:Tail {p:5})",
+                "CREATE (a:New {p:9})-[:R]->(b:New {p:9})-[:R]->(c:Copy {p:4})",
+            ]);
+            assert!(query.statements().iter().all(|step| matches!(step,
+                GraphWriteStatement::Insert(input)
+                    if input.independent_standalone_create_relation() == Some(R)
+            )));
+            let frozen = query.canonical_bytes();
+            let mut old = db.begin(&c.txn()).unwrap();
+            let expected = incumbent(
+                &mut old,
+                &mut db,
+                &c.query(),
+                &query,
+                policy(),
+                reverse_identity,
+            )
+            .unwrap();
+            let mut txn = db.begin(&c.txn()).unwrap();
+            txn.savepoint(&db, "before-subgraphs").unwrap();
+            let mut requests = Vec::new();
+            let actual = txn
+                .execute_graph_write_program_returning_governed(
+                    &mut db,
+                    &c.query(),
+                    &query,
+                    policy(),
+                    |request| {
+                        requests.push(request);
+                        reverse_identity(request)
+                    },
+                )
+                .unwrap();
+            assert_eq!(actual.stats(), expected.stats());
+            assert_eq!(actual.steps(), expected.steps());
+            assert_eq!(
+                (
+                    actual.stats().created_vertices,
+                    actual.stats().created_edges
+                ),
+                (6, 4)
+            );
+            assert_eq!(
+                txn.staged_effect_digest().unwrap(),
+                old.staged_effect_digest().unwrap()
+            );
+            assert_eq!(txn.vertices(&db).unwrap(), old.vertices(&db).unwrap());
+            assert_eq!(txn.edges(&db).unwrap(), old.edges(&db).unwrap());
+            assert_eq!(query.canonical_bytes(), frozen);
+            old.abort();
+            txn.rollback_to_savepoint(&db, "before-subgraphs").unwrap();
+            assert_eq!(txn.vertices(&db).unwrap().len(), 2);
+            assert_eq!(txn.edges(&db).unwrap().len(), 2);
+            let retry = txn
+                .execute_graph_write_program_returning_governed(
+                    &mut db,
+                    &c.query(),
+                    &query,
+                    policy(),
+                    reverse_identity,
+                )
+                .unwrap();
+            assert_eq!(retry.steps(), actual.steps());
+            txn.commit(&mut db, &c.commit()).await.unwrap();
+            let births: BTreeMap<_, _> = db
+                .delta_since(basis)
+                .unwrap()
+                .flat_map(|batch| batch.coordinate_entries())
+                .flat_map(|coordinate| &coordinate.rows)
+                .map(|row| match row {
+                    DeltaRow::CreateVertex {
+                        vid, birth_ordinal, ..
+                    } => (ElementId::Vertex(*vid), *birth_ordinal),
+                    DeltaRow::CreateEdge {
+                        eid, birth_ordinal, ..
+                    } => (ElementId::Edge(*eid), *birth_ordinal),
+                    _ => panic!("fresh subgraphs publish creation rows only"),
+                })
+                .collect();
+            let expected_births: BTreeMap<_, _> = requests
+                .iter()
+                .enumerate()
+                .map(|(ordinal, &request)| (reverse_identity(request).unwrap(), ordinal as u64 + 1))
+                .collect();
+            assert_eq!(
+                births, expected_births,
+                "vertex and edge ordinals share one input order"
+            );
+            assert!(pinned.vertex(VId(u128::MAX)).unwrap().is_none());
+            assert!(pinned.edge(EId(u128::MAX - 1_000)).unwrap().is_none());
+            let committed = (db.vertices().unwrap(), db.edges().unwrap());
+            db.compact(&c.commit()).await.unwrap();
+            drop(db);
+            let db = Database::open_with_vfs(&c.commit(), vfs, &path, keys())
+                .await
+                .unwrap();
+            assert_eq!((db.vertices().unwrap(), db.edges().unwrap()), committed);
+            assert_eq!(c.txn().outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn subgraph_refusals_preserve_both_identity_sets_and_whole_statement_value_admission() {
+        let ((), report) = run_async_under_lab(0x6d17_0302, |root| async move {
+            let c = PurposeContexts::narrow_runtime_root(&root);
+            let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
+            seed(&mut db, &c.commit()).await;
+            let mut retired = WriteBatch::new(R);
+            retired.create_vertex(VId(13), vec![], vec![]);
+            retired.create_vertex(VId(14), vec![], vec![]);
+            retired.add_edge(EId(13), VId(13), VId(14), vec![]);
+            db.write(&c.commit(), retired).await.unwrap();
+            let mut retired = WriteBatch::new(R);
+            retired.delete_edge(EId(13));
+            retired.delete_vertex(VId(13));
+            retired.delete_vertex(VId(14));
+            db.write(&c.commit(), retired).await.unwrap();
+            for mode in 0..10 {
+                let mut statements = subgraphs(3).statements().to_vec();
+                if mode == 6 || mode == 7 {
+                    let args = GqlParameters::new()
+                        .with_scalar(
+                            "bad",
+                            CanonicalScalar::Timestamp(
+                                fgdb_types::CanonicalTimestamp::from_stored_zoned(
+                                    0,
+                                    0,
+                                    "Etc/UTC",
+                                    fgdb_types::ids::ObjectId([0x53; 32]),
+                                )
+                                .unwrap(),
+                            ),
+                        )
+                        .unwrap();
+                    let declarations: Vec<_> = args.parameter_types().collect();
+                    statements[1] = PreparedGraphInsertText::prepare_with_parameter_types(
+                        "CREATE (a:New)-[:R {p:$bad}]->(b:Copy)",
+                        R,
+                        &declarations,
+                        symbols,
+                    )
+                    .unwrap()
+                    .bind_parameters(&args)
+                    .unwrap()
+                    .into();
+                } else if mode == 8 {
+                    statements[1] =
+                        program(&["CREATE (a:New)-[:R {p:1/0}]->(b:Copy)"]).statements()[0].clone();
+                }
+                let query = PreparedGraphWriteProgram::prepare(statements).unwrap();
+                let allocate = |request: GraphWriteIdentityRequest| {
+                    if request.statement != 1 {
+                        return reverse_identity(request);
+                    }
+                    match (mode, request.request) {
+                        (0 | 6, GraphInsertRequest::Vertex { vertex: 0, .. }) => {
+                            Ok(ElementId::Vertex(VId(u128::MAX)))
+                        }
+                        (1, GraphInsertRequest::Edge { .. }) => {
+                            Ok(ElementId::Edge(EId(u128::MAX - 1_000)))
+                        }
+                        (2 | 7, GraphInsertRequest::Vertex { vertex: 0, .. }) => {
+                            Ok(ElementId::Vertex(VId(1)))
+                        }
+                        (3, GraphInsertRequest::Edge { .. }) => Ok(ElementId::Edge(EId(11))),
+                        (4, GraphInsertRequest::Vertex { vertex: 0, .. }) => {
+                            Ok(ElementId::Vertex(VId(13)))
+                        }
+                        (5, GraphInsertRequest::Edge { .. }) => Ok(ElementId::Edge(EId(13))),
+                        (9, _) => Err("second statement allocation refused"),
+                        _ => reverse_identity(request),
+                    }
+                };
+                let mut old = db.begin(&c.txn()).unwrap();
+                let mut expected_requests = Vec::new();
+                let expected =
+                    incumbent(&mut old, &mut db, &c.query(), &query, policy(), |request| {
+                        expected_requests.push(request);
+                        allocate(request)
+                    })
+                    .unwrap_err();
+                let mut txn = db.begin(&c.txn()).unwrap();
+                let before = txn.staged_effect_digest().unwrap();
+                let mut requests = Vec::new();
+                let actual = txn
+                    .execute_graph_write_program_returning_governed(
+                        &mut db,
+                        &c.query(),
+                        &query,
+                        policy(),
+                        |request| {
+                            requests.push(request);
+                            allocate(request)
+                        },
+                    )
+                    .unwrap_err();
+                assert_eq!(actual.to_string(), expected.to_string(), "mode={mode}");
+                assert_eq!(requests, expected_requests, "mode={mode}");
+                assert!(requests.iter().all(|request| request.statement < 2));
+                if mode == 6 || mode == 7 {
+                    assert!(
+                        matches!(
+                            actual,
+                            GraphWriteProgramError::Insert {
+                                statement: 1,
+                                source: GqlQueryError::Source(
+                                    fgdb_gql::insertion::GraphInsertError::Source(
+                                        WriteTxnError::Write(
+                                            WriteError::ZonedTimestampRequiresResolver { .. }
+                                        )
+                                    )
+                                ),
+                            }
+                        ),
+                        "edge value admission precedes both prior and live vertex collisions"
+                    );
+                }
+                assert_eq!(txn.staged_effect_digest().unwrap(), before);
+                assert_eq!(txn.vertices(&db).unwrap(), db.vertices().unwrap());
+                assert_eq!(txn.edges(&db).unwrap(), db.edges().unwrap());
+                old.abort();
+                txn.abort();
+            }
+            // A vertex-reading edge statement must observe the preceding
+            // fresh subgraph, so this mixed profile retains sequential staging.
+            let dependent = program(&[
+                "CREATE (a:New {p:1})-[:R]->(b:Copy {p:2})",
+                "MATCH (a:New) CREATE (a)-[:R]->(a)",
+            ]);
+            let mut txn = db.begin(&c.txn()).unwrap();
+            let stats = txn
+                .execute_graph_write_program_governed(
+                    &mut db,
+                    &c.query(),
+                    &dependent,
+                    policy(),
+                    identity,
+                )
+                .unwrap();
+            assert_eq!((stats.created_vertices, stats.created_edges), (2, 2));
+            txn.abort();
+            // Existing staged work also keeps its original overlay and survives
+            // a whole-program refusal.
+            let mut txn = db.begin(&c.txn()).unwrap();
+            txn.write(&mut db, prefix()).unwrap();
+            let before = txn.staged_effect_digest().unwrap();
+            assert!(
+                txn.execute_graph_write_program_governed(
+                    &mut db,
+                    &c.query(),
+                    &subgraphs(2),
+                    policy(),
+                    |request| {
+                        if request.statement == 1 {
+                            Err("late allocation")
+                        } else {
+                            reverse_identity(request)
+                        }
+                    },
+                )
+                .is_err()
+            );
+            assert_eq!(txn.staged_effect_digest().unwrap(), before);
+            assert!(txn.vertex(&db, VId(777)).unwrap().is_some());
+            txn.abort();
+            assert_eq!(c.txn().outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}
+
 mod independent_vertices {
     use super::independent_edges::incumbent;
     use super::*;

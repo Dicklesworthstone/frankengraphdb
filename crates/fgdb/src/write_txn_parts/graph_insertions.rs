@@ -1098,12 +1098,21 @@ impl WriteTxn {
                         live,
                     }));
                 }
-                if batches.len() != 1 {
+                if batches
+                    .iter()
+                    .any(|batch| batch.relation != independent.relation)
+                {
                     return Err(source(WriteTxnError::UnsupportedAtomicMutation));
                 }
-                independent
-                    .stage(database, batches.remove(0))
-                    .map_err(source)?;
+                // The ordinary same-coordinate path below admits the entire
+                // statement before checking identities. Preserve its vertex-
+                // then-edge order, including value-error precedence, when the
+                // collector emitted separate groups for a fresh subgraph.
+                let mut combined = batches.remove(0);
+                for batch in batches {
+                    combined.rows.extend(batch.rows);
+                }
+                independent.stage(database, combined).map_err(source)?;
             }
         } else if let Some(first) = batches.first() {
             let relation = first.relation;

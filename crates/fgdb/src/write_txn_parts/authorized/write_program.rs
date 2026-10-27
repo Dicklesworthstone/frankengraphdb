@@ -39,7 +39,8 @@ fn preflight(error: WriteTxnError) -> Fault {
 
 /// The compiler proves that these MERGE rows have disjoint keys or endpoint
 /// pairs, or that every INSERT reads only vertices and creates edges in one
-/// relation, or every INSERT creates standalone vertices. Creation profiles
+/// relation, or every INSERT creates a complete standalone subgraph in one
+/// coordinate. The standalone and vertex-reading profiles never mix. Creation profiles
 /// keep duplicate inputs and parallel edge creations:
 /// every allocated identity remains distinct. Neither profile can observe
 /// another row's effects. Authorize each row through

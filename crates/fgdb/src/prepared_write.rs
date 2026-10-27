@@ -113,28 +113,28 @@ impl PreparedDependencies {
 }
 
 impl<V: Vfs + Clone> Database<V> {
-    /// Standalone vertex creations never read an earlier chunk. Retain those
-    /// identities for the same duplicate refusal as ordinary prefix staging,
+    /// Standalone creations read no earlier chunk and create their own edge
+    /// endpoints. Retain both identity sets for ordinary duplicate refusals,
     /// while admitting each statement's values and storage content once.
-    pub(super) fn prepare_independent_vertex_chunk(
+    /// Earlier vertices are collision witnesses, never candidate endpoints.
+    pub(super) fn prepare_independent_standalone_chunk(
         &mut self,
         batch: WriteBatch,
         earlier_vertices: &fgdb_gql::id_hash::IdSet<VId>,
+        earlier_edges: &fgdb_gql::id_hash::IdSet<crate::EId>,
     ) -> Result<crate::LogicalDeltaTemplate, WriteError> {
         self.ensure_writable()?;
         if batch.is_empty() {
             return Err(WriteError::EmptyBatch);
         }
-        debug_assert!(
-            batch
-                .rows
-                .iter()
-                .all(|row| matches!(row, PendingRow::Vertex { ensure: false, .. }))
-        );
+        debug_assert!(batch.rows.iter().all(|row| matches!(
+            row,
+            PendingRow::Vertex { ensure: false, .. } | PendingRow::Edge { ensure: false, .. }
+        )));
         // Ordinary preparation admits every supplied value before checking
         // identities, including collisions with earlier successful statements.
         self.admit_write_values(&batch)?;
-        self.build_create_template_with_prefix(batch, Some(earlier_vertices), None)
+        self.build_create_template_with_prefix(batch, Some(earlier_vertices), Some(earlier_edges))
     }
 
     /// Prepare only the next edge-creation chunk of a program whose vertex

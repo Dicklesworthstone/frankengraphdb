@@ -724,3 +724,119 @@ fn authorized_edge_batch_prepares_each_input_once_and_reuses_the_session() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn authorized_fresh_subgraph_batch_has_linear_signed_work_and_reopens() {
+    let ((), report) = run_async_under_lab(0xaa65, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let vfs = fgdb::MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let before = db.frontier().unwrap();
+        let issuer = authority();
+        let token = issuer
+            .issue_at(
+                &Grant {
+                    // The program reads no graph and emits no result rows. Its two
+                    // vertices and edge still receive all native scope/image checks.
+                    rights: Rights::Write,
+                    limits: QueryLimits {
+                        max_nodes: 100_000,
+                        // Re-preparing the three-intent prefix for 1000 statements
+                        // exceeds 1,500,000 signed work before other checks. This cap
+                        // admits per-row validation and one final composition.
+                        max_work: 400_000,
+                        max_rows: 0,
+                    },
+                    ..grant()
+                },
+                100,
+            )
+            .unwrap();
+        let allowance = GraphWriteProgramPolicy::new(
+            GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 1_000_000),
+            1_000,
+            2_000,
+            1_000,
+        );
+        let mut session = db
+            .authorized_write_session(
+                &txn,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                symbols,
+                RelationId(1),
+                allowance,
+                1_000,
+                || 100,
+            )
+            .unwrap();
+        let prepared = session
+            .prepare(
+                &query,
+                "CREATE (a:Visible {p:$value})-[:R {p:$value}]->(b:Visible {p:$value+1})",
+                &arguments(99),
+            )
+            .unwrap();
+        let inputs: Vec<_> = (0..1_000).map(arguments).collect();
+        let (stats, completion) = session
+            .execute_batch_stats(&query, &prepared, &inputs)
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                stats.completed_statements,
+                stats.created_vertices,
+                stats.created_edges
+            ),
+            (1_000, 2_000, 1_000)
+        );
+        assert_eq!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: fgdb_types::CommitSeq(before.0 + 1),
+            }
+        );
+        assert!(!session.is_closed());
+        let (stats, _) = session
+            .execute_batch_stats(&query, &prepared, &inputs[..2])
+            .await
+            .unwrap();
+        assert_eq!((stats.created_vertices, stats.created_edges), (4, 2));
+        drop(session);
+        let vertices = db.vertices().unwrap();
+        let edges = db.edges().unwrap();
+        assert_eq!((vertices.len(), edges.len()), (2_004, 1_002));
+        let properties: std::collections::BTreeMap<_, _> = vertices
+            .iter()
+            .map(|row| (row.vid, row.props[0].1.clone()))
+            .collect();
+        for edge in &edges {
+            let source = &properties[&edge.entry.src];
+            assert_eq!(edge.props, vec![(PropertyKeyId(1), source.clone())]);
+            let Some(CanonicalScalar::Int(value)) = source.as_scalar() else {
+                panic!("every edge comes from an integer input record");
+            };
+            assert!((0..1_000).contains(value));
+            assert_eq!(
+                properties[&edge.entry.dst],
+                CanonicalScalar::Int(value + 1).into()
+            );
+            assert_eq!(edge.entry.relation, RelationId(1));
+        }
+        assert_eq!(db.frontier().unwrap().0, before.0 + 2);
+        drop(db);
+        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(reopened.vertices().unwrap(), vertices);
+        assert_eq!(reopened.edges().unwrap(), edges);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

@@ -594,6 +594,24 @@ impl PreparedGraphInsert {
             .then_some(self.relation)
     }
 
+    /// One source-free creation of a complete fresh subgraph in one coordinate.
+    /// The checked zero-column input makes every edge endpoint a vertex created
+    /// by this same statement; properties cannot read earlier statements.
+    /// Independent chunks must still preserve all issued vertex and edge IDs,
+    /// storage admission, declaration order and atomic program publication.
+    ///
+    /// A host must not mix this profile with vertex-reading edge appends: those
+    /// reads could observe the vertices created by an earlier statement.
+    /// Pattern and relational inputs are outside this proof, even if a relation
+    /// happens to contain no graph operand.
+    #[must_use]
+    pub fn independent_standalone_create_relation(&self) -> Option<RelationId> {
+        (self.is_standalone()
+            && !self.vertices.is_empty()
+            && self.edges.iter().all(|edge| edge.relation == self.relation))
+        .then_some(self.relation)
+    }
+
     /// A native vertex-only selection followed solely by edge creations in
     /// one relation. Appending such edges cannot change this selection or its
     /// frozen property inputs. A host may reuse that fact only while no other

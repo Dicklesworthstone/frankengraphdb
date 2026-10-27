@@ -5,12 +5,12 @@ include!("frozen_update_program.rs");
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum IndependentCreateKind {
-    Vertices,
+    Standalone,
     Edges,
 }
 
 /// Admitted creation chunks remain private until the program's last stage.
-/// Standalone vertex creations read no graph; edge-only selections read only
+/// Standalone subgraph creations read no graph; edge-only selections read only
 /// the unchanged vertex domain. Every statement therefore sees the same
 /// inputs as the ordinary canonical prefix overlay.
 struct IndependentCreateWrites {
@@ -33,8 +33,9 @@ impl IndependentCreateWrites {
             let fgdb_gql::GraphWriteStatement::Insert(insertion) = statement else {
                 return None;
             };
-            let current = if let Some(relation) = insertion.independent_vertex_append_relation() {
-                (IndependentCreateKind::Vertices, relation)
+            let current = if let Some(relation) = insertion.independent_standalone_create_relation()
+            {
+                (IndependentCreateKind::Standalone, relation)
             } else {
                 (
                     IndependentCreateKind::Edges,
@@ -70,8 +71,9 @@ impl IndependentCreateWrites {
                 !matches!(
                     (self.kind, row),
                     (
-                        IndependentCreateKind::Vertices,
+                        IndependentCreateKind::Standalone,
                         PendingRow::Vertex { ensure: false, .. }
+                            | PendingRow::Edge { ensure: false, .. }
                     ) | (
                         IndependentCreateKind::Edges,
                         PendingRow::Edge { ensure: false, .. }
@@ -90,19 +92,21 @@ impl IndependentCreateWrites {
                 &batch,
             ));
         let chunk = match self.kind {
-            IndependentCreateKind::Vertices => {
-                database.prepare_independent_vertex_chunk(batch.clone(), &self.created_vertices)?
-            }
+            IndependentCreateKind::Standalone => database.prepare_independent_standalone_chunk(
+                batch.clone(),
+                &self.created_vertices,
+                &self.created_edges,
+            )?,
             IndependentCreateKind::Edges => {
                 database.prepare_independent_edge_chunk(batch.clone(), &self.created_edges)?
             }
         };
         for row in chunk.rows() {
             match (self.kind, row) {
-                (IndependentCreateKind::Vertices, crate::DeltaRow::CreateVertex { vid, .. }) => {
+                (IndependentCreateKind::Standalone, crate::DeltaRow::CreateVertex { vid, .. }) => {
                     self.created_vertices.insert(*vid);
                 }
-                (IndependentCreateKind::Edges, crate::DeltaRow::CreateEdge { eid, .. }) => {
+                (_, crate::DeltaRow::CreateEdge { eid, .. }) => {
                     self.created_edges.insert(*eid);
                 }
                 _ => return Err(WriteTxnError::UnsupportedAtomicMutation),
@@ -135,13 +139,19 @@ impl<'txn> MutationProgramWorkspace<'txn> {
         if independent.chunks.is_empty() {
             return Ok(());
         }
-        // Every admitted standalone vertex intent creates exactly one distinct
+        // Every admitted standalone creation intent creates exactly one distinct
         // row. Keep ordinary preparation's replay allowance; the existing edge
         // profile retains its conservative no-replay contract.
-        let replay_row_allowance = if independent.kind == IndependentCreateKind::Vertices {
+        let replay_row_allowance = if independent.kind == IndependentCreateKind::Standalone {
             Some(
                 u64::try_from(independent.created_vertices.len())
-                    .map_err(|_| WriteTxnError::AtomicOrdinalOverflow)?,
+                    .ok()
+                    .and_then(|vertices| {
+                        u64::try_from(independent.created_edges.len())
+                            .ok()
+                            .and_then(|edges| vertices.checked_add(edges))
+                    })
+                    .ok_or(WriteTxnError::AtomicOrdinalOverflow)?,
             )
         } else {
             None

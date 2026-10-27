@@ -471,3 +471,89 @@ fn empty_matches_never_allocate_and_untrusted_source_statistics_cannot_wrap() {
         assert_eq!(calls.get(), 0);
     }
 }
+
+#[test]
+fn independent_standalone_creations_keep_every_endpoint_in_their_own_statement() {
+    let prepare = |text| {
+        fgdb_gql::PreparedGraphInsertText::prepare(text, R, |kind, name| {
+            if kind == GraphSymbolKind::Relation && name == "S" {
+                Some(GraphSymbol::Relation(RelationId(2)))
+            } else {
+                symbols(kind, name)
+            }
+        })
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+    };
+    for text in [
+        "CREATE (a {p:7})",
+        "CREATE (a {p:7})-[:R {p:11}]->(b {p:9}), (a)-[:R]->(a)",
+    ] {
+        let insertion = prepare(text);
+        assert_eq!(insertion.independent_standalone_create_relation(), Some(R));
+        assert!(!insertion.requires_read());
+        let batch = insertion
+            .execute_governed(
+                policy(),
+                |_,
+                 _|
+                 -> Result<
+                    GqlQueryExecution<GraphValueRow>,
+                    GqlQueryError<&'static str, usize>,
+                > { panic!("a source-free insertion must not read a graph") },
+                identity,
+                || Ok(()),
+            )
+            .unwrap();
+        let vertices: Vec<_> = batch
+            .intents()
+            .iter()
+            .filter_map(|intent| match intent {
+                GraphInsertIntent::Vertex { vertex, .. } => Some(*vertex),
+                GraphInsertIntent::Edge { .. } => None,
+            })
+            .collect();
+        for intent in batch.intents() {
+            if let GraphInsertIntent::Edge {
+                source,
+                destination,
+                ..
+            } = intent
+            {
+                assert!(vertices.contains(source));
+                assert!(vertices.contains(destination));
+            }
+        }
+        assert_eq!(batch.stats().selection.result_rows, 1);
+    }
+    for text in [
+        "CREATE (a)-[:S]->(b)",
+        "CREATE (a)-[:R]->(b), (a)-[:S]->(b)",
+        "MATCH (a) CREATE (a)-[:R]->(b)",
+        "MATCH (a) CREATE (a)-[:R]->(a)",
+        "UNWIND [1,2] AS p CREATE (a {p:p})",
+    ] {
+        assert_eq!(
+            prepare(text).independent_standalone_create_relation(),
+            None,
+            "{text}"
+        );
+    }
+    assert!(matches!(
+        PreparedGraphInsert::prepare_standalone(
+            R,
+            vec![GraphInsertVertex {
+                labels: vec![],
+                properties: vec![]
+            }],
+            vec![GraphInsertEdge {
+                source: GraphInsertEndpoint::Column(0),
+                destination: GraphInsertEndpoint::CreatedVertex(0),
+                relation: R,
+                properties: vec![],
+            }],
+        ),
+        Err(GraphInsertBuildError::EndpointColumn { edge: 0, column: 0 })
+    ));
+}
