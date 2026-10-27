@@ -112,3 +112,67 @@ fn equality_and_collection_ignore_insertion_order() {
     assert_eq!(set.len(), oracle.len());
     assert!(set.contains(&VId(9)) && !set.contains(&VId(6)));
 }
+
+#[test]
+fn known_unique_counts_preserve_the_ordinary_final_probe_layout() {
+    fn check<K: IdKey + std::fmt::Debug>(all_keys: &[K]) {
+        let (keys, next) = all_keys.split_at(all_keys.len() - 9);
+        let mut ordinary = IdMap::new();
+        let mut reserved = IdMap::with_capacity(keys.len());
+        let entry_base = reserved.entries.as_ptr();
+        let slot_base = reserved.slots.as_ptr();
+        let slots = reserved.slots.len();
+        for (at, &key) in keys.iter().enumerate() {
+            assert_eq!(ordinary.insert(key, at as u64), None);
+            assert_eq!(reserved.insert(key, at as u64), None);
+            assert_eq!(reserved.entries.as_ptr(), entry_base);
+            assert_eq!(reserved.slots.as_ptr(), slot_base);
+            assert_eq!(reserved.slots.len(), slots, "no intermediate rehash");
+        }
+        assert_eq!(reserved.entries, ordinary.entries);
+        assert_eq!(reserved.entries.capacity(), ordinary.entries.capacity());
+        assert_eq!(reserved.slots, ordinary.slots);
+        assert_eq!(reserved.slots.capacity(), ordinary.slots.capacity());
+        assert_eq!(reserved.overflow, ordinary.overflow);
+        assert_eq!(reserved.tombstones, ordinary.tombstones);
+        assert_eq!(reserved, ordinary);
+        // Recovery must not move a whole-map allocation into the first
+        // ordinary write. Follow both exact layouts through more inserts,
+        // including growth boundaries and the empty-map case.
+        for (at, &key) in next.iter().enumerate() {
+            let value = keys.len() as u64 + at as u64;
+            assert_eq!(reserved.insert(key, value), ordinary.insert(key, value));
+            assert_eq!(reserved.entries, ordinary.entries);
+            assert_eq!(reserved.entries.capacity(), ordinary.entries.capacity());
+            assert_eq!(reserved.slots, ordinary.slots);
+            assert_eq!(reserved.slots.capacity(), ordinary.slots.capacity());
+            assert_eq!(reserved.overflow, ordinary.overflow);
+        }
+    }
+
+    for count in [
+        0, 1, 2, 31, 32, 33, 47, 48, 49, 63, 64, 65, 95, 96, 97, 127, 128, 129, 191, 192, 193, 255,
+        256, 257, 383, 384, 385, 767, 768, 769, 1_535, 1_536, 1_537, 3_072, 3_073, 12_289,
+    ] {
+        let mut spread: Vec<_> = (0..count as u128 + 9)
+            .map(|n| EId((n << 96) | (n.wrapping_mul(977) << 32) | (n % 11)))
+            .collect();
+        let mut collisions: Vec<_> = (0..count as u64 + 9).map(Colliding).collect();
+        check(&spread);
+        check(&collisions);
+        // Rehashing must preserve the original insertion order, including
+        // which of the colliding identities remain in bounded probe slots.
+        spread.reverse();
+        collisions.reverse();
+        check(&spread);
+        check(&collisions);
+        let mut rng = Rng(0x8379_4ab1_8d02_4a77);
+        for at in (1..spread.len()).rev() {
+            let other = rng.below(at as u64 + 1) as usize;
+            spread.swap(at, other);
+            collisions.swap(at, other);
+        }
+        check(&spread);
+        check(&collisions);
+    }
+}

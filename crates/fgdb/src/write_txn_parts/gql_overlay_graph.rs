@@ -234,6 +234,242 @@ mod query_source {
         Ok(target)
     }
 
+    /// Admit the conservative closure of one quantified atom. Every vertex
+    /// is expanded at its earliest depth only: revisiting it along a longer
+    /// walk can use only edges that its earlier expansion already admitted.
+    /// The endpoint set includes every positive depth through `maximum`,
+    /// plus the roots when zero hops are legal. The unchanged GLA evaluator
+    /// still owns the minimum, path modes, multiplicity and endpoint filters.
+    ///
+    /// `expand` is the same one-step basis/staged adjacency merge used by a
+    /// fixed atom. This closure never interprets intents or removes an edge;
+    /// the existing canonical effect application does that after admission.
+    fn bound_walk<E, C>(
+        roots: &BTreeSet<VId>,
+        zero: bool,
+        maximum: u32,
+        control: &mut C,
+        mut expand: impl FnMut(&BTreeSet<VId>, &mut C) -> Result<BTreeSet<VId>, E>,
+    ) -> Result<BTreeSet<VId>, E>
+    where
+        C: FnMut(SourceEvent) -> Result<(), E>,
+    {
+        let mut target = BTreeSet::new();
+        let mut seen = BTreeSet::new();
+        for &vertex in roots {
+            control(SourceEvent::Work)?;
+            if zero {
+                control(SourceEvent::ScratchEntry)?;
+                target.insert(vertex);
+            }
+            if maximum > 0 {
+                control(SourceEvent::ScratchEntry)?;
+                seen.insert(vertex);
+            }
+        }
+        // Borrow the original roots on the first level. Later frontiers own
+        // only newly reached vertices, in the same canonical identity order.
+        let mut frontier: Option<BTreeSet<VId>> = None;
+        let mut depth = 0;
+        while depth < maximum {
+            let near = frontier.as_ref().unwrap_or(roots);
+            if near.is_empty() {
+                break;
+            }
+            let reached = expand(near, control)?;
+            depth += 1;
+            let mut next = BTreeSet::new();
+            for vertex in reached {
+                control(SourceEvent::Work)?;
+                if !target.contains(&vertex) {
+                    control(SourceEvent::ScratchEntry)?;
+                    target.insert(vertex);
+                }
+                if depth < maximum && !seen.contains(&vertex) {
+                    control(SourceEvent::ScratchEntry)?;
+                    seen.insert(vertex);
+                    control(SourceEvent::ScratchEntry)?;
+                    next.insert(vertex);
+                }
+            }
+            frontier = Some(next);
+        }
+        Ok(target)
+    }
+
+    #[cfg(test)]
+    mod bound_walk_tests {
+        use super::{SourceEvent, bound_walk};
+        use fgdb_types::VId;
+        use std::collections::{BTreeMap, BTreeSet};
+
+        const IDS: [VId; 3] = [VId(0), VId((1_u128 << 96) + 17), VId(u128::MAX)];
+
+        fn far(src: VId, dst: VId, near: VId, direction: u8) -> Option<VId> {
+            match direction {
+                0 if src == near => Some(dst),
+                1 if dst == near => Some(src),
+                2 if src == near => Some(dst),
+                2 if dst == near => Some(src),
+                _ => None,
+            }
+        }
+
+        #[test]
+        fn every_three_vertex_closure_contains_exactly_the_edges_of_bounded_walks() {
+            for mask in 0..512_u16 {
+                let edges: Vec<_> = (0..9)
+                    .filter(|bit| mask & (1 << bit) != 0)
+                    .map(|bit| (IDS[bit / 3], IDS[bit % 3]))
+                    .collect();
+                for roots_mask in 0..8 {
+                    let roots: BTreeSet<_> = IDS
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(bit, vid)| (roots_mask & (1 << bit) != 0).then_some(vid))
+                        .collect();
+                    for direction in 0..3 {
+                        for maximum in 0..=3 {
+                            for zero in [false, true] {
+                                let mut selected = BTreeSet::new();
+                                let mut visits = BTreeMap::<_, usize>::new();
+                                let actual = bound_walk(
+                                    &roots,
+                                    zero,
+                                    maximum,
+                                    &mut |_| Ok::<_, ()>(()),
+                                    |near, _| {
+                                        let mut reached = BTreeSet::new();
+                                        for &vertex in near {
+                                            *visits.entry(vertex).or_default() += 1;
+                                            for (at, &(src, dst)) in edges.iter().enumerate() {
+                                                if let Some(other) =
+                                                    far(src, dst, vertex, direction)
+                                                {
+                                                    selected.insert(at);
+                                                    reached.insert(other);
+                                                }
+                                            }
+                                        }
+                                        Ok(reached)
+                                    },
+                                )
+                                .unwrap();
+
+                                // Independent enumeration keeps every walk
+                                // occurrence, including cycles and repeated
+                                // edges. It has no discovered/expanded set.
+                                let mut endpoints = BTreeSet::new();
+                                let mut used = BTreeSet::new();
+                                let mut paths: Vec<_> = roots.iter().copied().collect();
+                                if zero {
+                                    endpoints.extend(paths.iter().copied());
+                                }
+                                for _ in 0..maximum {
+                                    let mut next = Vec::new();
+                                    for vertex in paths {
+                                        for (at, &(src, dst)) in edges.iter().enumerate() {
+                                            if let Some(other) = far(src, dst, vertex, direction) {
+                                                used.insert(at);
+                                                endpoints.insert(other);
+                                                next.push(other);
+                                            }
+                                        }
+                                    }
+                                    paths = next;
+                                }
+                                assert_eq!(
+                                    actual, endpoints,
+                                    "{mask}/{roots_mask}/{direction}/{maximum}/{zero}"
+                                );
+                                assert_eq!(
+                                    selected, used,
+                                    "{mask}/{roots_mask}/{direction}/{maximum}/{zero}"
+                                );
+                                assert!(visits.values().all(|visits| *visits == 1));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn cyclic_closure_ends_without_following_the_hop_bound_or_unrelated_rows() {
+            let mut adjacency = BTreeMap::new();
+            adjacency.insert(IDS[0], BTreeSet::from([IDS[1]]));
+            adjacency.insert(IDS[1], BTreeSet::from([IDS[0], IDS[2]]));
+            adjacency.insert(IDS[2], BTreeSet::from([IDS[2]]));
+            for id in 1..=4096 {
+                adjacency.insert(VId(id), BTreeSet::from([VId(id + 1)]));
+            }
+            let mut visited = Vec::new();
+            let actual = bound_walk(
+                &BTreeSet::from([IDS[0]]),
+                false,
+                u32::MAX,
+                &mut |_| Ok::<_, ()>(()),
+                |near, _| {
+                    let mut reached = BTreeSet::new();
+                    for vertex in near {
+                        visited.push(*vertex);
+                        reached.extend(adjacency[vertex].iter().copied());
+                    }
+                    Ok(reached)
+                },
+            )
+            .unwrap();
+            assert_eq!(actual, BTreeSet::from(IDS));
+            assert_eq!(visited, IDS);
+        }
+
+        #[test]
+        fn every_refusing_event_and_expansion_error_propagates_without_more_work() {
+            fn run(fail_at: usize, events: &mut Vec<SourceEvent>) -> Result<BTreeSet<VId>, usize> {
+                bound_walk(
+                    &BTreeSet::from([IDS[0]]),
+                    true,
+                    3,
+                    &mut |event| {
+                        events.push(event);
+                        if events.len() == fail_at {
+                            Err(fail_at)
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    |near, control| {
+                        let mut reached = BTreeSet::new();
+                        for &vertex in near {
+                            control(SourceEvent::Work)?;
+                            let at = IDS.iter().position(|&id| id == vertex).unwrap();
+                            control(SourceEvent::ScratchEntry)?;
+                            reached.insert(IDS[(at + 1) % IDS.len()]);
+                        }
+                        Ok(reached)
+                    },
+                )
+            }
+            let mut complete = Vec::new();
+            assert_eq!(run(usize::MAX, &mut complete).unwrap(), BTreeSet::from(IDS));
+            for fail_at in 1..=complete.len() {
+                let mut events = Vec::new();
+                assert_eq!(run(fail_at, &mut events), Err(fail_at));
+                assert_eq!(events, complete[..fail_at]);
+            }
+            assert_eq!(
+                bound_walk(
+                    &BTreeSet::from([IDS[0]]),
+                    false,
+                    2,
+                    &mut |_| Ok::<_, usize>(()),
+                    |_, _| Err(73),
+                ),
+                Err(73),
+            );
+        }
+    }
+
     fn indexed_predicates<E>(
         predicates: &[VertexPredicate],
         control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
@@ -514,14 +750,14 @@ mod query_source {
     }
 
     impl WriteTxn {
-        /// Admit indexed flat fixed-hop patterns without scanning the two
+        /// Admit indexed flat patterns without scanning the two
         /// complete tables. Roots that gain a predicate field in this
         /// transaction join the historical index candidates. Walking the
         /// union of basis edges and staged creations is a superset of the
         /// final overlay even when a preceding statement deleted an edge or
         /// vertex. The existing effect application then removes those rows.
         ///
-        /// Scoped bodies, independent edge components and quantified paths
+        /// Scoped bodies and independent edge components
         /// retain complete admission until their closure has a completeness law.
         fn bound_query_source<'a, E, Row>(
             &'a self,
@@ -541,9 +777,6 @@ mod query_source {
             let Some(steps) = source::bound_edge_steps(prefix, width) else {
                 return Ok(None);
             };
-            if steps.iter().any(|step| step.walk.is_some()) {
-                return Ok(None);
-            }
             let mut root_selection = None;
             for operator in prefix {
                 control(SourceEvent::Work)?;
@@ -685,16 +918,23 @@ mod query_source {
                 )?;
             }
             for step in steps {
-                let target = extend_bound(
-                    snapshot,
-                    self.basis,
-                    &slots[step.source],
-                    step.relation,
-                    step.direction,
-                    &staged,
-                    &mut edges,
-                    control,
-                )?;
+                let mut expand = |roots: &BTreeSet<VId>, control: &mut _| {
+                    extend_bound(
+                        snapshot,
+                        self.basis,
+                        roots,
+                        step.relation,
+                        step.direction,
+                        &staged,
+                        &mut edges,
+                        control,
+                    )
+                };
+                let target = if let Some((zero, maximum)) = step.walk {
+                    bound_walk(&slots[step.source], zero, maximum, control, expand)?
+                } else {
+                    expand(&slots[step.source], control)?
+                };
                 slots.push(target);
             }
             let mut vertices = BTreeSet::new();

@@ -1018,6 +1018,363 @@ fn indexed_overlay_pattern(value: Option<i64>, direction: GlaDirection) -> Prepa
     builder.prepare("c", 0, None).unwrap()
 }
 
+fn indexed_overlay_walk(
+    value: Option<i64>,
+    direction: GlaDirection,
+    bounds: fgdb_gql::GraphWalkBounds,
+    continuation: bool,
+) -> PreparedGraphPattern {
+    let mut builder = GraphPatternBuilder::new();
+    builder.vertex("a").unwrap();
+    builder.vertex("b").unwrap();
+    builder.walk("a", R, direction, "b", bounds).unwrap();
+    builder.filter("a", VertexPredicate::HasLabel(L)).unwrap();
+    if let Some(value) = value {
+        builder
+            .filter(
+                "a",
+                VertexPredicate::IntegerProperty {
+                    key: N,
+                    comparison: IntegerComparison::Equal,
+                    value,
+                },
+            )
+            .unwrap();
+    }
+    if continuation {
+        builder.vertex("c").unwrap();
+        builder.edge("b", R, direction, "c").unwrap();
+    }
+    builder
+        .prepare(if continuation { "c" } else { "b" }, 0, None)
+        .unwrap()
+}
+
+#[test]
+fn indexed_overlay_quantified_paths_bound_admission_and_keep_exact_refusals() {
+    let ((), report) = run_async_under_lab(0xc0a4_0030, |root| async move {
+        use fgdb_gql::GraphWalkBounds;
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed_indexed_overlay_chain(&mut db, &commit).await;
+        let txn = db.begin(&txcx).unwrap();
+        let bounded = GqlQueryPolicy::new(32, 32, 1_000_000, 1_000_000);
+        for (direction, minimum, maximum, continuation, expected) in [
+            (GlaDirection::Forward, 0, 0, false, vec![100]),
+            (GlaDirection::Forward, 0, 0, true, vec![101]),
+            (GlaDirection::Forward, 1, 3, false, vec![101, 102, 103]),
+            (GlaDirection::Reverse, 1, 3, false, vec![97, 98, 99]),
+            (
+                GlaDirection::Undirected,
+                1,
+                3,
+                false,
+                vec![97, 98, 99, 100, 101, 102, 103],
+            ),
+            (GlaDirection::Forward, 2, 3, true, vec![103, 104]),
+            (GlaDirection::Reverse, 2, 3, true, vec![96, 97]),
+            (GlaDirection::Undirected, 0, 0, true, vec![99, 101]),
+        ] {
+            let pattern = indexed_overlay_walk(
+                Some(100),
+                direction,
+                GraphWalkBounds::new(minimum, maximum).unwrap(),
+                continuation,
+            );
+            let result = txn
+                .execute_graph_pattern_governed(&db, &cx, &pattern, bounded)
+                .unwrap();
+            assert_eq!(
+                result.value,
+                expected.into_iter().map(VId).collect::<Vec<_>>()
+            );
+            assert!(result.rows.snapshot_records <= 32);
+            assert_eq!(
+                result.value,
+                db.execute_graph_pattern_governed(&cx, &pattern, bounded)
+                    .unwrap()
+                    .value,
+            );
+            let exact = GqlQueryPolicy::new(
+                result.rows.snapshot_records,
+                result.rows.result_rows,
+                result.evaluator.work_units,
+                result.evaluator.scratch_entries,
+            );
+            assert_eq!(
+                txn.execute_graph_pattern_governed(&db, &cx, &pattern, exact)
+                    .unwrap(),
+                result,
+            );
+            assert!(matches!(
+                txn.execute_graph_pattern_governed(
+                    &db,
+                    &cx,
+                    &pattern,
+                    GqlQueryPolicy::new(result.rows.snapshot_records - 1, 32, 1_000_000, 1_000_000),
+                ),
+                Err(GqlQueryError::Rows(error))
+                    if error.dimension == GqlBudgetDimension::SnapshotRecords
+            ));
+            assert!(matches!(
+                txn.execute_graph_pattern_governed(
+                    &db,
+                    &cx,
+                    &pattern,
+                    GqlQueryPolicy::new(32, 32, result.evaluator.work_units - 1, 1_000_000),
+                ),
+                Err(GqlQueryError::Evaluator(error))
+                    if error.dimension == GlaLimitDimension::WorkUnits
+            ));
+        }
+        let unbound = indexed_overlay_walk(
+            None,
+            GlaDirection::Forward,
+            GraphWalkBounds::new(1, 3).unwrap(),
+            false,
+        );
+        assert!(matches!(
+            txn.execute_graph_pattern_governed(&db, &cx, &unbound, bounded),
+            Err(GqlQueryError::Rows(error))
+                if error.dimension == GqlBudgetDimension::SnapshotRecords
+        ));
+        txn.abort();
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn quantified_overlay_uses_staged_roots_cycles_retirements_and_savepoint_rollback() {
+    let ((), report) = run_async_under_lab(0xc0a4_0031, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed_indexed_overlay_chain(&mut db, &commit).await;
+        let pattern = indexed_overlay_walk(
+            Some(100),
+            GlaDirection::Forward,
+            fgdb_gql::GraphWalkBounds::new(2, 3).unwrap(),
+            false,
+        );
+        let bounded = GqlQueryPolicy::new(40, 16, 1_000_000, 1_000_000);
+        let new_root = VId(u128::MAX - 1);
+        let new_leaf = VId(u128::MAX);
+        let mut txn = db.begin(&txcx).unwrap();
+        txn.savepoint(&db, "before").unwrap();
+        let mut stage = WriteBatch::new(R);
+        stage.set_vertex_property(VId(100), N, Some(CanonicalScalar::Int(900)));
+        stage.set_vertex_property(VId(400), N, Some(CanonicalScalar::Int(100)));
+        stage.set_vertex_label(VId(550), L, true);
+        stage.create_vertex(new_root, vec![L], vec![(N, CanonicalScalar::Int(100))]);
+        stage.create_vertex(new_leaf, vec![L], vec![(N, CanonicalScalar::Int(777))]);
+        stage.delete_edge(EId(102));
+        stage.add_edge(EId(u128::MAX - 1), new_root, VId(101), vec![]);
+        stage.add_edge(EId(u128::MAX), VId(101), new_leaf, vec![]);
+        stage.add_edge(EId(u128::MAX - 2), new_leaf, new_root, vec![]);
+        txn.write(&mut db, stage).unwrap();
+        assert_eq!(
+            txn.execute_graph_pattern_governed(&db, &cx, &pattern, bounded)
+                .unwrap()
+                .value,
+            vec![VId(402), VId(403), VId(552), VId(553), new_root, new_leaf],
+        );
+        let mut cascade = WriteBatch::new(R);
+        cascade.delete_vertex(VId(101));
+        txn.write(&mut db, cascade).unwrap();
+        assert_eq!(
+            txn.execute_graph_pattern_governed(&db, &cx, &pattern, bounded)
+                .unwrap()
+                .value,
+            vec![VId(402), VId(403), VId(552), VId(553)],
+        );
+        txn.rollback_to_savepoint(&db, "before").unwrap();
+        assert_eq!(
+            txn.execute_graph_pattern_governed(&db, &cx, &pattern, bounded)
+                .unwrap()
+                .value,
+            vec![VId(102), VId(103)],
+        );
+        txn.abort();
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn quantified_overlay_keeps_intermediate_insertion_gaps_after_empty_or_refused_reads() {
+    let ((), report) = run_async_under_lab(0xc0a4_0032, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        for empty in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            seed_indexed_overlay_chain(&mut db, &commit).await;
+            if empty {
+                let mut cut = WriteBatch::new(R);
+                cut.delete_edge(EId(102));
+                db.write(&commit, cut).await.unwrap();
+            }
+            let pattern = indexed_overlay_walk(
+                Some(100),
+                GlaDirection::Forward,
+                fgdb_gql::GraphWalkBounds::new(2, 3).unwrap(),
+                false,
+            );
+            let mut txn = db.begin(&txcx).unwrap();
+            let result = txn.execute_graph_pattern_governed(
+                &db,
+                &cx,
+                &pattern,
+                GqlQueryPolicy::new(32, 0, 1_000_000, 1_000_000),
+            );
+            if empty {
+                assert!(result.unwrap().value.is_empty());
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(GqlQueryError::Rows(error))
+                        if error.dimension == GqlBudgetDimension::ResultRows
+                ));
+            }
+            // This source is an intermediate vertex, not the indexed root;
+            // in the empty case it had no eligible outgoing edge at all.
+            let mut winner = WriteBatch::new(R);
+            winner.add_edge(EId(u128::MAX), VId(101), VId(300), vec![]);
+            db.write(&commit, winner).await.unwrap();
+            assert!(matches!(
+                txn.finish(&mut db, &commit).await,
+                Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                    law: "FG-LAW-FCW-READ-01",
+                    ..
+                }))
+            ));
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn quantified_overlay_keeps_repeated_endpoints_and_zero_hop_self_loops() {
+    let ((), report) = run_async_under_lab(0xc0a4_0033, |root| async move {
+        use fgdb_gql::GraphWalkBounds;
+        use fgdb_gql::algebra::{EdgeRelation, GraphColumn, GraphMatchClause};
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed_indexed_overlay_chain(&mut db, &commit).await;
+        let mut loops = WriteBatch::new(S);
+        loops.add_edge(EId(u128::MAX), VId(100), VId(100), vec![]);
+        db.write(&commit, loops).await.unwrap();
+        let txn = db.begin(&txcx).unwrap();
+        let bounded = GqlQueryPolicy::new(32, 16, 1_000_000, 1_000_000);
+        for bounds in [
+            GraphWalkBounds::new(0, 0).unwrap(),
+            GraphWalkBounds::new(1, 2).unwrap(),
+            GraphWalkBounds::empty(),
+        ] {
+            let mut builder = GraphPatternBuilder::new();
+            builder.vertex("a").unwrap();
+            builder
+                .walk(
+                    "a",
+                    EdgeRelation::Any,
+                    GlaDirection::Undirected,
+                    "a",
+                    bounds,
+                )
+                .unwrap();
+            builder
+                .filter(
+                    "a",
+                    VertexPredicate::IntegerProperty {
+                        key: N,
+                        comparison: IntegerComparison::Equal,
+                        value: 100,
+                    },
+                )
+                .unwrap();
+            builder.filter("a", VertexPredicate::HasLabel(L)).unwrap();
+            let pattern = builder.prepare("a", 0, None).unwrap();
+            let expected = if bounds.minimum() > bounds.maximum() {
+                vec![]
+            } else {
+                vec![VId(100)]
+            };
+            assert_eq!(
+                txn.execute_graph_pattern_governed(&db, &cx, &pattern, bounded)
+                    .unwrap()
+                    .value,
+                expected,
+            );
+        }
+        // A quantified optional child has a separate null-extension domain.
+        // It keeps complete admission; the flat closure cannot seed or prune
+        // its root table. Zero hops still bind its endpoint to the anchor.
+        let mut outer = GraphPatternBuilder::new();
+        outer.vertex("a").unwrap();
+        outer.filter("a", VertexPredicate::HasLabel(L)).unwrap();
+        outer
+            .filter(
+                "a",
+                VertexPredicate::IntegerProperty {
+                    key: N,
+                    comparison: IntegerComparison::Equal,
+                    value: 100,
+                },
+            )
+            .unwrap();
+        let mut child = GraphPatternBuilder::new();
+        child.vertex("a").unwrap();
+        child.vertex("b").unwrap();
+        child
+            .walk(
+                "a",
+                R,
+                GlaDirection::Forward,
+                "b",
+                GraphWalkBounds::new(0, 0).unwrap(),
+            )
+            .unwrap();
+        let optional = outer
+            .prepare_values_with_clauses(
+                &[GraphMatchClause::optional(&child)],
+                &[GraphColumn::vertex("a", "a"), GraphColumn::vertex("b", "b")],
+                0,
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            txn.execute_graph_pattern_governed(&db, &cx, &optional, bounded),
+            Err(GqlQueryError::Rows(error))
+                if error.dimension == GqlBudgetDimension::SnapshotRecords
+        ));
+        let rows = txn
+            .execute_graph_pattern_governed(
+                &db,
+                &cx,
+                &optional,
+                GqlQueryPolicy::new(2_000, 16, 1_000_000, 1_000_000),
+            )
+            .unwrap();
+        assert_eq!(rows.value.len(), 1);
+        assert_eq!(rows.value[0].get(0).unwrap().as_vertex(), Some(VId(100)));
+        assert_eq!(rows.value[0].get(1).unwrap().as_vertex(), Some(VId(100)));
+        txn.abort();
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn indexed_overlay_expansions_admit_only_reached_rows_in_every_direction() {
     let ((), report) = run_async_under_lab(0xc0a4_0010, |root| async move {
@@ -1191,6 +1548,14 @@ fn indexed_overlay_native_match_write_commits_only_the_bounded_target() {
             (
                 "MATCH (a:Node)<-[:R]-(b:Node {n:$start})<-[:R]-(c) SET c.n=c.n+1",
                 VId(99),
+            ),
+            (
+                "MATCH (a:Node {n:$start})-[:R*2..2]->(c) SET c.n=c.n+1",
+                VId(102),
+            ),
+            (
+                "MATCH (a:Node {n:$start})-[:R*0..0]->(b)-[:R]->(c) SET c.n=c.n+1",
+                VId(101),
             ),
         ] {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
