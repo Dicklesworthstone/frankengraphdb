@@ -594,8 +594,10 @@ impl<'a> Parser<'a> {
             }) {
                 // A vertex an imported row carries is that row's endpoint: the
                 // WITH row of a write after WITH (fgdb-sl4ym), or a MATCH-first
-                // UNWIND row that projected the matched vertex.
-                if *kind != GraphSetColumnType::Vertex {
+                // UNWIND row that projected the matched vertex. A dynamically
+                // typed binding (`WITH nodes[i] AS n`, TCK Match4 [4]) is one
+                // when its row holds a vertex there; the write checks each row.
+                if !matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Any) {
                     return Err(expected(
                         name.at,
                         if self.write_row_scope {

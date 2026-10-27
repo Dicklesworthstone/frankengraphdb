@@ -481,8 +481,13 @@ impl PreparedGraphInsert {
         for (edge, declaration) in edges.iter().enumerate() {
             for endpoint in [declaration.source, declaration.destination] {
                 match endpoint {
+                    // A dynamically typed column (a list element, a map
+                    // value) is checked per row when it runs.
                     GraphInsertEndpoint::Column(column) => {
-                        if !matches!(columns.get(column), Some(GraphSetColumnType::Vertex)) {
+                        if !matches!(
+                            columns.get(column),
+                            Some(GraphSetColumnType::Vertex | GraphSetColumnType::Any)
+                        ) {
                             return Err(GraphInsertBuildError::EndpointColumn { edge, column });
                         }
                     }

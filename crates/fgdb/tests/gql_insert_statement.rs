@@ -462,12 +462,38 @@ fn create_after_with_reads_the_with_row() {
         .await
         .unwrap();
         assert_eq!(db.vertices().unwrap().len(), vertices + 1);
+        // A dynamically typed binding is an endpoint when its row holds a
+        // vertex there (TCK Match4 [4]): each row is checked when it runs.
+        let before = db.edges().unwrap().len();
+        write(
+            &mut db,
+            "MATCH (n:Source) WITH collect(n) AS ns WITH ns[0] AS s, ns[1] AS t \
+             CREATE (s)-[:R]->(t)",
+        )
+        .await
+        .unwrap();
+        let edges = db.edges().unwrap();
+        assert_eq!(edges.len(), before + 1);
+        assert_eq!(
+            edges
+                .iter()
+                .filter(|edge| {
+                    let ends = [edge.entry.src, edge.entry.dst];
+                    ends.contains(&VId(10)) && ends.contains(&VId(20))
+                })
+                .count(),
+            2,
+            "the seeded edge and the new one join the two sources"
+        );
         let frontier = db.frontier().unwrap();
         for refused in [
             "MATCH (n:Source) WITH n.p AS p CREATE (p)-[:R]->(:Copy)",
             "MATCH (n:Source) WITH n AS a CREATE (a:Person)",
             "MATCH (n:Source) WITH n AS a CREATE (:Copy {p: n.p})",
             "MATCH (n:Source) WITH n AS a CREATE (:Copy) RETURN n",
+            // An element that is not a vertex, or NULL, is no endpoint.
+            "MATCH (n:Source) WITH n, [n.p] AS ps WITH n, ps[0] AS s CREATE (n)-[:R]->(s)",
+            "MATCH (n:Source) WITH n, [NULL] AS ps WITH n, ps[0] AS s CREATE (n)-[:R]->(s)",
         ] {
             assert!(write(&mut db, refused).await.is_err(), "{refused}");
         }

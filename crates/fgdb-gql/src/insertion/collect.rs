@@ -83,14 +83,21 @@ fn endpoint<E, A, C>(
 ) -> ResultOf<Endpoint, E, A, C> {
     match endpoint {
         GraphInsertEndpoint::CreatedVertex(vertex) => Ok(Endpoint::Created(vertex)),
-        GraphInsertEndpoint::Column(column) => row[column]
-            .as_vertex()
-            .map(Endpoint::Existing)
-            .ok_or(GqlQueryError::Source(GraphInsertError::NullEndpoint {
+        // A dynamically typed column holds a vertex, NULL or another value.
+        GraphInsertEndpoint::Column(column) => match &row[column] {
+            GraphValue::Vertex(vertex) => Ok(Endpoint::Existing(*vertex)),
+            GraphValue::Scalar(CanonicalScalar::Null) => {
+                Err(GqlQueryError::Source(GraphInsertError::NullEndpoint {
+                    row: row_at,
+                    edge,
+                    column,
+                }))
+            }
+            _ => Err(GqlQueryError::Source(GraphInsertError::InputSchema {
                 row: row_at,
-                edge,
                 column,
             })),
+        },
     }
 }
 
