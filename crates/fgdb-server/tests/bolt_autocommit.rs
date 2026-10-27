@@ -87,6 +87,7 @@ async fn served(cx: &Cx, name: &str) -> Server {
         (GraphSymbolKind::Label, "Person", 1),
         (GraphSymbolKind::Property, "name", 1),
         (GraphSymbolKind::Property, "age", 2),
+        (GraphSymbolKind::Relation, "KNOWS", 1),
     ] {
         symbols.bind(kind, name, id).unwrap();
     }
@@ -741,6 +742,67 @@ fn bolt_map_parameters_bind_as_property_maps() {
         client.send(0x02, vec![]).await;
         assert!(client.receive().await.is_none());
         observer.close(cx).await.unwrap();
+        finish(cx, shutdown, serving).await;
+    });
+}
+
+/// fgdb-xwmqs: a Bolt write's SUCCESS carries `stats`, which official drivers
+/// read as their counters. The program reports exactly what it created and
+/// whether it published anything; a write that changes nothing says so.
+#[test]
+fn bolt_write_stats_report_what_the_write_created() {
+    run(async |cx| {
+        let (_, address, shutdown, serving) = start_both(cx, "write-stats").await;
+        let mut client = login(address, &grant(Rights::ReadWrite)).await;
+        let stats = |entries: &[(&str, Value)]| {
+            Value::Map(
+                (entries.iter())
+                    .map(|(key, value)| ((*key).into(), value.clone()))
+                    .collect(),
+            )
+        };
+        for (query, expected) in [
+            (
+                "CREATE (:Person {name: 'Ann'}), (:Person {name: 'Bob'})",
+                stats(&[
+                    ("contains-updates", Value::Bool(true)),
+                    ("nodes-created", Value::Int(2)),
+                ]),
+            ),
+            (
+                "MATCH (a:Person {name: 'Ann'}), (b:Person {name: 'Bob'}) \
+                 CREATE (a)-[:KNOWS]->(b)",
+                stats(&[
+                    ("contains-updates", Value::Bool(true)),
+                    ("relationships-created", Value::Int(1)),
+                ]),
+            ),
+            (
+                "CREATE (a:Person {name: 'Cy'})-[:KNOWS]->(b:Person {name: 'Di'})",
+                stats(&[
+                    ("contains-updates", Value::Bool(true)),
+                    ("nodes-created", Value::Int(2)),
+                    ("relationships-created", Value::Int(1)),
+                ]),
+            ),
+            (
+                "MATCH (n:Person {name: 'Ann'}) SET n.age = 33",
+                stats(&[("contains-updates", Value::Bool(true))]),
+            ),
+            (
+                "MATCH (n:Person {name: 'Nobody'}) SET n.age = 1",
+                stats(&[("contains-updates", Value::Bool(false))]),
+            ),
+        ] {
+            client
+                .expect(0x10, request(query, vec![], vec![]), SUCCESS)
+                .await;
+            let (rows, done) = client.pull_all().await;
+            assert!(rows.is_empty(), "{query}");
+            assert_eq!(get(&done, "stats"), Some(&expected), "{query}");
+        }
+        client.send(0x02, vec![]).await;
+        assert!(client.receive().await.is_none());
         finish(cx, shutdown, serving).await;
     });
 }

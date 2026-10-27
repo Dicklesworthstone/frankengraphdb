@@ -538,6 +538,10 @@ async fn write_prepared_inner(
         rows: Vec::new(),
         outcome,
         generation,
+        created: super::Created {
+            vertices: stats.created_vertices,
+            edges: stats.created_edges,
+        },
     })
 }
 
@@ -616,6 +620,7 @@ async fn read_prepared_inner(
                 .collect(),
             outcome: Outcome::Rows { seq: snapshot.0 },
             generation: prepared.generation.clone(),
+            created: super::Created::default(),
         }),
         QueryResult::Write { .. } => Err(Refusal::new(
             ErrorCode::Statement,

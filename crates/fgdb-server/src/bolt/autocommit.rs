@@ -180,6 +180,7 @@ impl<'s> Connection<'s> {
         .await
         .map_err(Failure::from_refusal)?;
         self.output_generation = Some(answer.generation);
+        let committed = matches!(answer.outcome, Outcome::WriteCommitted { .. });
         let (seq, statements) = match answer.outcome {
             Outcome::WriteCommitted { seq, statements }
             | Outcome::ReadClosed { seq, statements } => (CommitSeq(seq), statements),
@@ -192,12 +193,27 @@ impl<'s> Connection<'s> {
                 ));
             }
         };
-        let statements = i64::try_from(statements).map_err(|_| {
+        let unrepresentable = || {
             Failure::new(
                 "Neo.DatabaseError.Statement.ExecutionFailed",
                 "write completion cannot be represented; do not replay automatically",
             )
-        })?;
+        };
+        let statements = i64::try_from(statements).map_err(|_| unrepresentable())?;
+        // Drivers read their counters from `stats` (fgdb-xwmqs). The program
+        // knows exactly what it created and whether it published anything;
+        // its other effects are one count over every kind, so no
+        // per-kind key is invented for them: contains-updates carries them.
+        let mut stats = vec![("contains-updates".to_owned(), Value::Bool(committed))];
+        for (key, count) in [
+            ("nodes-created", answer.created.vertices),
+            ("relationships-created", answer.created.edges),
+        ] {
+            if count != 0 {
+                let count = i64::try_from(count).map_err(|_| unrepresentable())?;
+                stats.push((key.to_owned(), Value::Int(count)));
+            }
+        }
         Ok(vec![
             ("type".to_owned(), Value::string("w")),
             ("t_last".to_owned(), Value::Int(0)),
@@ -206,6 +222,7 @@ impl<'s> Connection<'s> {
                 "bookmark".to_owned(),
                 Value::string(bookmark(&pending.database, seq)),
             ),
+            ("stats".to_owned(), Value::Map(stats)),
             ("fgdb_statements".to_owned(), Value::Int(statements)),
         ])
     }

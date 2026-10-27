@@ -60,6 +60,17 @@ pub(crate) struct Answer<R = Vec<Vec<WireValue>>> {
     pub(crate) rows: R,
     pub(crate) outcome: Outcome,
     pub(crate) generation: Generation,
+    /// What a stats-only write (direct, batch or prepared) created, from its
+    /// program's exact stats; Bolt reports it as `stats` (fgdb-xwmqs). Reads
+    /// and RETURN writes, whose families report rows, leave it zero.
+    pub(crate) created: Created,
+}
+
+/// The vertices and relationships a write program created.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Created {
+    pub(crate) vertices: u64,
+    pub(crate) edges: u64,
 }
 
 /// A statement's type-erased future: one `Send` proof here keeps every
@@ -363,6 +374,7 @@ async fn read_inner(
                 .collect(),
             outcome: Outcome::Rows { seq: snapshot.0 },
             generation: session.generation(),
+            created: Created::default(),
         }),
         Ok((QueryResult::Write { .. }, _)) => Err(Refusal::new(
             ErrorCode::Statement,
@@ -500,6 +512,10 @@ async fn write_stats_in_guard(
         rows: Vec::new(),
         outcome,
         generation,
+        created: Created {
+            vertices: stats.created_vertices,
+            edges: stats.created_edges,
+        },
     })
 }
 
@@ -576,6 +592,10 @@ async fn write_batch_inner(
         rows: Vec::new(),
         outcome,
         generation,
+        created: Created {
+            vertices: stats.created_vertices,
+            edges: stats.created_edges,
+        },
     })
 }
 /// Prepared write projections share the same capability and native completion
@@ -1067,6 +1087,7 @@ async fn write_returning_in_guard<R: Send>(
         rows,
         outcome,
         generation,
+        created: Created::default(),
     })
 }
 
