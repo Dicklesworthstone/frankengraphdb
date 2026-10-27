@@ -18,19 +18,20 @@ use selector::EffectKey;
 
 const P: PropertyKeyId = PropertyKeyId(1);
 const R: RelationId = RelationId(1);
+const ID_BOUNDARIES: [u128; 8] = [
+    0,
+    1,
+    255,
+    256,
+    (1_u128 << 64) - 1,
+    1_u128 << 64,
+    1_u128 << 127,
+    u128::MAX,
+];
 
 fn encoded_fixture() -> Vec<(EffectKey, DeltaRow)> {
     let mut fixtures = Vec::new();
-    for id in [
-        0,
-        1,
-        255,
-        256,
-        (1_u128 << 64) - 1,
-        1_u128 << 64,
-        1_u128 << 127,
-        u128::MAX,
-    ] {
+    for id in ID_BOUNDARIES {
         let (vertex, edge) = (VId(id), EId(id));
         fixtures.extend([
             (
@@ -84,15 +85,17 @@ fn encoded_fixture() -> Vec<(EffectKey, DeltaRow)> {
         ]);
         for field in [0, 1, 255, 256, (1_u64 << 32) - 1, 1_u64 << 32, u64::MAX] {
             let label = LabelId(field);
-            fixtures.push((
-                EffectKey::Label(vertex, label),
-                DeltaRow::LabelMembership {
-                    vid: vertex,
-                    label,
-                    before: false,
-                    after: true,
-                },
-            ));
+            for (before, after) in [(false, true), (true, false)] {
+                fixtures.push((
+                    EffectKey::Label(vertex, label),
+                    DeltaRow::LabelMembership {
+                        vid: vertex,
+                        label,
+                        before,
+                        after,
+                    },
+                ));
+            }
             let property = PropertyKeyId(field);
             for element in [ElementId::Vertex(vertex), ElementId::Edge(edge)] {
                 // Distinct payload suffixes share a prefix and must both be
@@ -246,6 +249,173 @@ fn every_range_search_checkpoint_interrupts_hits_misses_and_empty_inputs() {
             assert_eq!(seen, cut);
         }
     }
+}
+
+fn metadata_ranges(id: u128) -> [(EffectKey, EffectKey); 3] {
+    [
+        (
+            EffectKey::Label(VId(id), LabelId(0)),
+            EffectKey::Label(VId(id), LabelId(u64::MAX)),
+        ),
+        (
+            EffectKey::Property(ElementId::Vertex(VId(id)), PropertyKeyId(0)),
+            EffectKey::Property(ElementId::Vertex(VId(id)), PropertyKeyId(u64::MAX)),
+        ),
+        (
+            EffectKey::Property(ElementId::Edge(EId(id)), PropertyKeyId(0)),
+            EffectKey::Property(ElementId::Edge(EId(id)), PropertyKeyId(u64::MAX)),
+        ),
+    ]
+}
+
+#[test]
+fn inclusive_metadata_ranges_follow_real_canonical_bytes() {
+    let fixture = encoded_fixture();
+    let rows: Vec<_> = fixture.iter().map(|(_, row)| row.clone()).collect();
+    let mut ranges: Vec<_> = ID_BOUNDARIES
+        .into_iter()
+        .chain([2, 99, u128::MAX - 1])
+        .flat_map(metadata_ranges)
+        .collect();
+    ranges.extend([
+        (
+            EffectKey::Label(VId(0), LabelId(0)),
+            EffectKey::Label(VId(0), LabelId(1)),
+        ),
+        (
+            EffectKey::Label(VId(u128::MAX), LabelId(u64::MAX)),
+            EffectKey::Label(VId(u128::MAX), LabelId(u64::MAX)),
+        ),
+        (
+            EffectKey::Property(ElementId::Vertex(VId(256)), PropertyKeyId(2)),
+            EffectKey::Property(ElementId::Vertex(VId(256)), PropertyKeyId(254)),
+        ),
+        (
+            EffectKey::Property(ElementId::Edge(EId(1_u128 << 127)), PropertyKeyId(256)),
+            EffectKey::Property(ElementId::Edge(EId(1_u128 << 127)), PropertyKeyId(u64::MAX)),
+        ),
+        (
+            EffectKey::CreateVertex(VId(0)),
+            EffectKey::Property(ElementId::Edge(EId(u128::MAX)), PropertyKeyId(u64::MAX)),
+        ),
+        (EffectKey::Other, EffectKey::Other),
+        (
+            EffectKey::Property(ElementId::Vertex(VId(0)), PropertyKeyId(u64::MAX)),
+            EffectKey::Property(ElementId::Vertex(VId(0)), PropertyKeyId(0)),
+        ),
+    ]);
+    for (first, last) in ranges {
+        let actual = selector::select_range(&rows, first, last, &mut || Ok::<_, ()>(())).unwrap();
+        // Prefixes were assigned independently beside each typed fixture;
+        // actual durable bytes determine ordering, including all suffixes.
+        let expected: Vec<_> = fixture
+            .iter()
+            .filter(|(key, _)| first <= *key && *key <= last)
+            .map(|(_, row)| row.canonical_bytes().unwrap())
+            .collect();
+        assert_eq!(
+            actual
+                .iter()
+                .map(|row| row.canonical_bytes().unwrap())
+                .collect::<Vec<_>>(),
+            expected,
+            "{first:?}..={last:?}"
+        );
+    }
+}
+
+#[test]
+fn every_metadata_range_checkpoint_preserves_the_exact_interruption() {
+    let rows: Vec<_> = encoded_fixture().into_iter().map(|(_, row)| row).collect();
+    let ranges: Vec<_> = ID_BOUNDARIES
+        .into_iter()
+        .chain([2, 99, u128::MAX - 1])
+        .flat_map(metadata_ranges)
+        .collect();
+    for input in [rows.as_slice(), &[][..]] {
+        for &(first, last) in &ranges {
+            // Reversed bounds are empty but must still be cancellable.
+            for (first, last) in [(first, last), (last, first)] {
+                let mut calls = 0;
+                let selected = selector::select_range(input, first, last, &mut || {
+                    calls += 1;
+                    Ok::<_, usize>(())
+                })
+                .unwrap();
+                assert!(calls > 0);
+                if input.is_empty() || first > last {
+                    assert!(selected.is_empty());
+                    assert_eq!(calls, 1);
+                }
+                for cut in 1..=calls {
+                    let mut seen = 0;
+                    let result = selector::select_range(input, first, last, &mut || {
+                        seen += 1;
+                        if seen == cut { Err(cut) } else { Ok(()) }
+                    });
+                    assert!(matches!(result, Err(at) if at == cut));
+                    assert_eq!(seen, cut, "{first:?}..={last:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn metadata_range_search_work_is_logarithmic_in_unrelated_canonical_rows() {
+    let base = 1_u128 << 100;
+    let mut observed = Vec::new();
+    for count in [64_u128, 4096] {
+        let mut rows = Vec::new();
+        for index in 0..count {
+            let id = base + 2 * index;
+            for field in [0, 1, u64::MAX] {
+                rows.push(DeltaRow::LabelMembership {
+                    vid: VId(id),
+                    label: LabelId(field),
+                    before: false,
+                    after: true,
+                });
+                for elem in [ElementId::Vertex(VId(id)), ElementId::Edge(EId(id))] {
+                    rows.push(DeltaRow::Property {
+                        elem,
+                        property: PropertyKeyId(field),
+                        before: None,
+                        after: Some(CanonicalScalar::Int(index as i64).into()),
+                    });
+                }
+            }
+        }
+        rows.sort_by_cached_key(|row| row.canonical_bytes().unwrap());
+        let bound = 1 + 2 * (usize::BITS - rows.len().leading_zeros()) as usize;
+        let mut maximum = 0;
+        for (id, expected) in [
+            (base, 3),
+            (base + count, 3),
+            (base + 2 * (count - 1), 3),
+            (base + 1, 0),
+            (0, 0),
+            (u128::MAX, 0),
+        ] {
+            for (first, last) in metadata_ranges(id) {
+                let mut calls = 0;
+                let selected = selector::select_range(&rows, first, last, &mut || {
+                    calls += 1;
+                    Ok::<_, ()>(())
+                })
+                .unwrap();
+                assert_eq!(selected.len(), expected, "{first:?}..={last:?}");
+                assert!(
+                    calls <= bound,
+                    "{} canonical rows, {first:?}..={last:?}: {calls} > {bound}",
+                    rows.len()
+                );
+                maximum = maximum.max(calls);
+            }
+        }
+        observed.push((rows.len(), maximum));
+    }
+    eprintln!("canonical metadata range rows/maximum search polls: {observed:?}");
 }
 
 fn keys() -> DatabaseKeys {

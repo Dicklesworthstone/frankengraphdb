@@ -50,12 +50,29 @@ pub(crate) fn select<'a, E>(
     requested: EffectKey,
     poll: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<&'a [DeltaRow], E> {
+    select_range(rows, requested, requested, poll)
+}
+
+/// Borrow every canonical row whose prefix lies in the inclusive interval.
+/// All suffixes of both endpoints remain in their original byte order. The
+/// two bounds need logarithmic comparisons regardless of the selected range's
+/// length; callers govern traversal of the returned rows. Empty or reversed
+/// ranges still poll once, and no payload is inspected, copied or indexed.
+pub(crate) fn select_range<'a, E>(
+    rows: &'a [DeltaRow],
+    first: EffectKey,
+    last: EffectKey,
+    poll: &mut impl FnMut() -> Result<(), E>,
+) -> Result<&'a [DeltaRow], E> {
     poll()?;
+    if first > last {
+        return Ok(&rows[..0]);
+    }
     let (mut low, mut high) = (0, rows.len());
     while low < high {
         poll()?;
         let middle = low + (high - low) / 2;
-        if EffectKey::of(&rows[middle]) < requested {
+        if EffectKey::of(&rows[middle]) < first {
             low = middle + 1;
         } else {
             high = middle;
@@ -66,7 +83,7 @@ pub(crate) fn select<'a, E>(
     while low < high {
         poll()?;
         let middle = low + (high - low) / 2;
-        if EffectKey::of(&rows[middle]) <= requested {
+        if EffectKey::of(&rows[middle]) <= last {
             low = middle + 1;
         } else {
             high = middle;

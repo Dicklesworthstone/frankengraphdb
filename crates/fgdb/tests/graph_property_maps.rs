@@ -746,6 +746,107 @@ mod transactional_metadata {
     }
 
     #[test]
+    fn metadata_lookups_skip_unrelated_staged_effects_without_losing_missing_ids() {
+        use fgdb_types::context::SimulationCheckpointProbe;
+        use std::sync::Arc;
+
+        let ((), report) = run_async_under_lab(0x6d71_0007, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+            let mut maximum = Vec::new();
+            for count in [64_u128, 4096] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut txn = db.begin(&txcx).unwrap();
+                let base = 1_u128 << 100;
+                let mut batch = WriteBatch::new(R);
+                for index in 0..count {
+                    batch.create_vertex(
+                        VId(base + index),
+                        vec![THING, FOO],
+                        vec![(SCORE, CanonicalScalar::Int(index as i64))],
+                    );
+                }
+                for index in 0..count {
+                    batch.add_edge(
+                        EId(base + index),
+                        VId(base + index),
+                        VId(base + (index + 1) % count),
+                        vec![(SCORE, CanonicalScalar::Int(index as i64 + 1))],
+                    );
+                }
+                txn.write(&mut db, batch).unwrap();
+                let digest = txn.staged_effect_digest().unwrap();
+                let mut calls = 0;
+                for index in [0, count / 2, count - 1, count] {
+                    let present = index < count;
+                    for (statement, identity, expected) in [
+                        (
+                            NODES,
+                            GraphValue::Vertex(VId(base + index)),
+                            if present {
+                                vec![
+                                    list(&["Thing", "Foo"]),
+                                    map(&[("score", int(index as i64))]),
+                                    list(&["score"]),
+                                ]
+                            } else {
+                                vec![null(), null(), null()]
+                            },
+                        ),
+                        (
+                            EDGES,
+                            GraphValue::Edge(EId(base + index)),
+                            if present {
+                                vec![
+                                    text("R"),
+                                    map(&[("score", int(index as i64 + 1))]),
+                                    list(&["score"]),
+                                ]
+                            } else {
+                                vec![null(), null(), null()]
+                            },
+                        ),
+                    ] {
+                        let params = GqlParameters::new()
+                            .with_list("refs", vec![identity.clone()])
+                            .unwrap();
+                        let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                        let actual = cells(
+                            txn.query(
+                                &db,
+                                &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                                statement,
+                                &params,
+                                Catalog::Full,
+                                policy(),
+                            )
+                            .unwrap(),
+                        );
+                        let mut row = vec![identity];
+                        row.extend(expected);
+                        assert_eq!(actual, vec![row]);
+                        calls = calls.max(probe.calls());
+                    }
+                }
+                // Physical NET traversal polls cancellation even when a hidden
+                // or unrelated field consumes no visible-data work allowance.
+                // Measuring actual host checkpoints catches a linear scan that
+                // would otherwise be invisible in evaluator work counters.
+                assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+                maximum.push(calls);
+                txn.abort();
+            }
+            assert!(maximum[0] > 0);
+            assert!(
+                maximum[1] < maximum[0] * 3,
+                "64/4096 metadata checkpoint counts: {maximum:?}"
+            );
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
     fn authorized_dynamic_write_metadata_names_only_visible_fields() {
         let ((), report) = run_async_under_lab(0x6d71_0005, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);

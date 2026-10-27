@@ -245,7 +245,8 @@ impl WriteTxn {
         source_error: &impl Fn(WriteTxnError) -> E,
     ) -> Result<Option<PointProperties<'a>>, E> {
         use crate::gql_exec::source::{SourceEvent, find_vertex};
-        use fgdb_delta_types::DeltaRow;
+        use fgdb_delta_types::{DeltaRow, PropertyKeyId};
+        use point_effect_selector::{EffectKey, select_range};
         let snapshot = self.query_snapshot(database).map_err(source_error)?;
         control(SourceEvent::Work)?;
         let mut properties = match find_vertex(snapshot, vertex, self.basis, control)? {
@@ -258,36 +259,49 @@ impl WriteTxn {
         if let Some(prepared) = &self.prepared {
             for coordinate in prepared.template.coordinate_entries() {
                 poll()?;
-                for effect in &coordinate.rows {
-                    poll()?;
-                    // Scan only identity/key metadata before visibility. A
-                    // hidden staged field must not add a per-field charge or
-                    // own its payload, even when it is the coordinate's only
-                    // effect. The uncharged poll still makes traversal of
-                    // hidden/unrelated prefixes cancellable. These are
-                    // canonical net rows, never raw intents.
-                    match effect {
-                        DeltaRow::CreateVertex { vid, props, .. } if *vid == vertex => {
-                            control(SourceEvent::Work)?;
-                            properties = Some(PointProperties::new(props));
-                        }
-                        DeltaRow::DeleteVertex { vid, .. } if *vid == vertex => {
-                            control(SourceEvent::Work)?;
-                            properties = None;
-                        }
-                        DeltaRow::Property {
-                            elem: ElementId::Vertex(vid),
-                            property,
-                            after,
-                            ..
-                        } if *vid == vertex && visible(*property) => {
-                            control(SourceEvent::Work)?;
-                            if let Some(properties) = &mut properties {
-                                control(SourceEvent::ScratchEntry)?;
-                                properties.edits.insert(*property, after.as_ref());
+                // Preserve canonical tag order while borrowing only this
+                // identity's lifetime and complete property-key intervals.
+                // Searches inspect no payload; hidden fields only poll until
+                // visibility admits a retained edit and its original charges.
+                for (first, last) in [
+                    (
+                        EffectKey::CreateVertex(vertex),
+                        EffectKey::CreateVertex(vertex),
+                    ),
+                    (
+                        EffectKey::DeleteVertex(vertex),
+                        EffectKey::DeleteVertex(vertex),
+                    ),
+                    (
+                        EffectKey::Property(ElementId::Vertex(vertex), PropertyKeyId(0)),
+                        EffectKey::Property(ElementId::Vertex(vertex), PropertyKeyId(u64::MAX)),
+                    ),
+                ] {
+                    for effect in select_range(&coordinate.rows, first, last, poll)? {
+                        poll()?;
+                        match effect {
+                            DeltaRow::CreateVertex { vid, props, .. } if *vid == vertex => {
+                                control(SourceEvent::Work)?;
+                                properties = Some(PointProperties::new(props));
                             }
+                            DeltaRow::DeleteVertex { vid, .. } if *vid == vertex => {
+                                control(SourceEvent::Work)?;
+                                properties = None;
+                            }
+                            DeltaRow::Property {
+                                elem: ElementId::Vertex(vid),
+                                property,
+                                after,
+                                ..
+                            } if *vid == vertex && visible(*property) => {
+                                control(SourceEvent::Work)?;
+                                if let Some(properties) = &mut properties {
+                                    control(SourceEvent::ScratchEntry)?;
+                                    properties.edits.insert(*property, after.as_ref());
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
             }
@@ -310,6 +324,7 @@ impl WriteTxn {
     ) -> Result<Option<PointLabels<'a>>, E> {
         use crate::gql_exec::source::{SourceEvent, find_vertex};
         use fgdb_delta_types::DeltaRow;
+        use point_effect_selector::{EffectKey, select_range};
         let snapshot = self.query_snapshot(database).map_err(source_error)?;
         control(SourceEvent::Work)?;
         let mut labels = match find_vertex(snapshot, vertex, self.basis, control)? {
@@ -322,31 +337,46 @@ impl WriteTxn {
         if let Some(prepared) = &self.prepared {
             for coordinate in prepared.template.coordinate_entries() {
                 poll()?;
-                for effect in &coordinate.rows {
-                    poll()?;
-                    match effect {
-                        DeltaRow::CreateVertex {
-                            vid,
-                            labels: created,
-                            ..
-                        } if *vid == vertex => {
-                            control(SourceEvent::Work)?;
-                            labels = Some(PointLabels::new(created));
-                        }
-                        DeltaRow::DeleteVertex { vid, .. } if *vid == vertex => {
-                            control(SourceEvent::Work)?;
-                            labels = None;
-                        }
-                        DeltaRow::LabelMembership {
-                            vid, label, after, ..
-                        } if *vid == vertex && visible(*label) => {
-                            control(SourceEvent::Work)?;
-                            if let Some(labels) = &mut labels {
-                                control(SourceEvent::ScratchEntry)?;
-                                labels.edits.insert(*label, *after);
+                for (first, last) in [
+                    (
+                        EffectKey::CreateVertex(vertex),
+                        EffectKey::CreateVertex(vertex),
+                    ),
+                    (
+                        EffectKey::DeleteVertex(vertex),
+                        EffectKey::DeleteVertex(vertex),
+                    ),
+                    (
+                        EffectKey::Label(vertex, LabelId(0)),
+                        EffectKey::Label(vertex, LabelId(u64::MAX)),
+                    ),
+                ] {
+                    for effect in select_range(&coordinate.rows, first, last, poll)? {
+                        poll()?;
+                        match effect {
+                            DeltaRow::CreateVertex {
+                                vid,
+                                labels: created,
+                                ..
+                            } if *vid == vertex => {
+                                control(SourceEvent::Work)?;
+                                labels = Some(PointLabels::new(created));
                             }
+                            DeltaRow::DeleteVertex { vid, .. } if *vid == vertex => {
+                                control(SourceEvent::Work)?;
+                                labels = None;
+                            }
+                            DeltaRow::LabelMembership {
+                                vid, label, after, ..
+                            } if *vid == vertex && visible(*label) => {
+                                control(SourceEvent::Work)?;
+                                if let Some(labels) = &mut labels {
+                                    control(SourceEvent::ScratchEntry)?;
+                                    labels.edits.insert(*label, *after);
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
             }
@@ -367,7 +397,8 @@ impl WriteTxn {
         source_error: &impl Fn(WriteTxnError) -> E,
     ) -> Result<Option<PointEdgeMetadata<'a>>, E> {
         use crate::gql_exec::source::{SourceEvent, edge_properties_at};
-        use fgdb_delta_types::DeltaRow;
+        use fgdb_delta_types::{DeltaRow, PropertyKeyId};
+        use point_effect_selector::{EffectKey, select_range};
         let snapshot = self.query_snapshot(database).map_err(source_error)?;
         control(SourceEvent::Work)?;
         let coordinate = snapshot.adjacency_index().statement_at_controlled(
@@ -393,53 +424,98 @@ impl WriteTxn {
         if let Some(prepared) = &self.prepared {
             for coordinate in prepared.template.coordinate_entries() {
                 poll()?;
-                for effect in &coordinate.rows {
+                let rows = &coordinate.rows;
+                // Creation precedes every retirement in canonical order and
+                // supplies the endpoints of an entirely staged edge.
+                for effect in select_range(
+                    rows,
+                    EffectKey::CreateEdge(edge),
+                    EffectKey::CreateEdge(edge),
+                    poll,
+                )? {
                     poll()?;
-                    match effect {
-                        DeltaRow::CreateEdge {
-                            eid,
-                            src,
-                            relation,
-                            dst,
-                            props,
-                            ..
-                        } if *eid == edge => {
-                            control(SourceEvent::Work)?;
-                            endpoints = Some((*src, *dst));
-                            projected = Some(PointEdgeMetadata {
-                                relation: *relation,
-                                properties: PointProperties::new(props),
-                            });
-                        }
-                        DeltaRow::DeleteVertex {
-                            vid,
-                            sorted_retired_incident_edges,
-                            ..
-                        } if endpoints.is_some_and(|(src, dst)| *vid == src || *vid == dst) => {
-                            control(SourceEvent::Work)?;
-                            if point_find(sorted_retired_incident_edges, edge, |id| *id, control)?
+                    if let DeltaRow::CreateEdge {
+                        eid,
+                        src,
+                        relation,
+                        dst,
+                        props,
+                        ..
+                    } = effect
+                        && *eid == edge
+                    {
+                        control(SourceEvent::Work)?;
+                        endpoints = Some((*src, *dst));
+                        projected = Some(PointEdgeMetadata {
+                            relation: *relation,
+                            properties: PointProperties::new(props),
+                        });
+                    }
+                }
+                // PreparedWrite admits complete physical incidence. Only
+                // these endpoints' retirements can contain this edge. Sort
+                // the two IDs to retain canonical order and visit loops once.
+                let endpoints = endpoints.map(|(src, dst)| (src.min(dst), src.max(dst)));
+                for (first, last) in [
+                    endpoints.map(|(first, _)| {
+                        (
+                            EffectKey::DeleteVertex(first),
+                            EffectKey::DeleteVertex(first),
+                        )
+                    }),
+                    endpoints.and_then(|(first, last)| {
+                        (first != last).then_some((
+                            EffectKey::DeleteVertex(last),
+                            EffectKey::DeleteVertex(last),
+                        ))
+                    }),
+                    Some((EffectKey::DeleteEdge(edge), EffectKey::DeleteEdge(edge))),
+                    Some((
+                        EffectKey::Property(ElementId::Edge(edge), PropertyKeyId(0)),
+                        EffectKey::Property(ElementId::Edge(edge), PropertyKeyId(u64::MAX)),
+                    )),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    for effect in select_range(rows, first, last, poll)? {
+                        poll()?;
+                        match effect {
+                            DeltaRow::DeleteVertex {
+                                vid,
+                                sorted_retired_incident_edges,
+                                ..
+                            } if endpoints.is_some_and(|(src, dst)| *vid == src || *vid == dst) => {
+                                control(SourceEvent::Work)?;
+                                if point_find(
+                                    sorted_retired_incident_edges,
+                                    edge,
+                                    |id| *id,
+                                    control,
+                                )?
                                 .is_some()
-                            {
+                                {
+                                    projected = None;
+                                }
+                            }
+                            DeltaRow::DeleteEdge { eid, .. } if *eid == edge => {
+                                control(SourceEvent::Work)?;
                                 projected = None;
                             }
-                        }
-                        DeltaRow::DeleteEdge { eid, .. } if *eid == edge => {
-                            control(SourceEvent::Work)?;
-                            projected = None;
-                        }
-                        DeltaRow::Property {
-                            elem: ElementId::Edge(eid),
-                            property,
-                            after,
-                            ..
-                        } if *eid == edge && visible(*property) => {
-                            if let Some(projected) = &mut projected {
-                                control(SourceEvent::Work)?;
-                                control(SourceEvent::ScratchEntry)?;
-                                projected.properties.edits.insert(*property, after.as_ref());
+                            DeltaRow::Property {
+                                elem: ElementId::Edge(eid),
+                                property,
+                                after,
+                                ..
+                            } if *eid == edge && visible(*property) => {
+                                if let Some(projected) = &mut projected {
+                                    control(SourceEvent::Work)?;
+                                    control(SourceEvent::ScratchEntry)?;
+                                    projected.properties.edits.insert(*property, after.as_ref());
+                                }
                             }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
             }
