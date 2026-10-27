@@ -240,7 +240,8 @@ where
     Checkpoint: FnMut() -> Result<(), C>,
 {
     meter.event(GlaExecutionEvent::Work)?;
-    if page::supports(query) {
+    if page::supports(query) && query.has_foldable_node_for_source(source.supports_procedure_rows())
+    {
         return page::collect(query, source, meter, operand);
     }
     let rows = if let Some(inputs @ (left, right, code, projection)) = query.filtered_cross_inputs()

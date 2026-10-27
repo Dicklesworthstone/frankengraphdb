@@ -402,45 +402,58 @@ impl<V: Vfs + Clone> Database<V> {
         // A CALL stage runs in Prism at this same snapshot, so its rows and
         // every pattern leaf read one generation.
         cx.with_restriction(|| {
-            query.execute_governed_with_seeded_elements(
+            let evidence = std::cell::RefCell::new(evidence);
+            query.execute_governed_from_source(
                 policy,
-                |pattern, allowance| {
-                    crate::gql_exec::execute_pattern_at(self, pattern, as_of, allowance, || {
-                        cx.checkpoint()
-                    })
-                },
-                |pattern, seeds, allowance| {
-                    Some(crate::gql_exec::execute_seeded_pattern_at(
-                        self,
-                        pattern,
-                        Some(seeds),
-                        as_of,
-                        allowance,
-                        || cx.checkpoint(),
-                    ))
-                },
-                |call, arguments, remaining| {
-                    if crate::query::is_hybrid(call) {
-                        return crate::query::hybrid_procedure_with_registry(
-                            &self.snapshot,
-                            Some(self.maintained_beacon.query_indexes()),
+                fgdb_gql::procedure_row_source(
+                    |pattern, allowance| {
+                        crate::gql_exec::execute_pattern_at(self, pattern, as_of, allowance, || {
+                            cx.checkpoint()
+                        })
+                    },
+                    |pattern, seeds, allowance| {
+                        Some(crate::gql_exec::execute_seeded_pattern_at(
+                            self,
+                            pattern,
+                            Some(seeds),
                             as_of,
+                            allowance,
+                            || cx.checkpoint(),
+                        ))
+                    },
+                    |call, arguments, remaining| {
+                        if crate::query::is_hybrid(call) {
+                            return crate::query::hybrid_procedure_with_registry(
+                                &self.snapshot,
+                                Some(self.maintained_beacon.query_indexes()),
+                                as_of,
+                                call,
+                                arguments,
+                                remaining,
+                                cx,
+                            );
+                        }
+                        crate::query::fnx_procedure(
                             call,
                             arguments,
+                            as_of,
                             remaining,
-                            cx,
-                        );
-                    }
-                    crate::query::fnx_procedure(
-                        call,
-                        arguments,
-                        as_of,
-                        remaining,
-                        evidence,
-                        |spec, options, sink| self.execute_fnx_into(cx, spec, options, sink),
-                    )
-                },
-                |element, key| crate::gql_exec::element_property_at(self, element, key, as_of),
+                            &mut evidence.borrow_mut(),
+                            |spec, options, sink| self.execute_fnx_into(cx, spec, options, sink),
+                        )
+                    },
+                    |call, arguments, remaining| {
+                        Some(crate::query::fnx_procedure_rows(
+                            call,
+                            arguments,
+                            as_of,
+                            remaining,
+                            &mut evidence.borrow_mut(),
+                            |spec, options| self.execute_fnx_rows(cx, spec, options),
+                        ))
+                    },
+                    |element, key| crate::gql_exec::element_property_at(self, element, key, as_of),
+                ),
                 || cx.checkpoint(),
             )
         })
@@ -479,45 +492,57 @@ impl EmbeddedReadView {
             )))
         })?;
         cx.with_restriction(|| {
-            query.execute_governed_with_seeded_elements(
+            query.execute_governed_from_source(
                 policy,
-                |pattern, allowance| {
-                    crate::gql_exec::execute_pattern_at(self, pattern, as_of, allowance, || {
-                        cx.checkpoint()
-                    })
-                },
-                |pattern, seeds, allowance| {
-                    Some(crate::gql_exec::execute_seeded_pattern_at(
-                        self,
-                        pattern,
-                        Some(seeds),
-                        as_of,
-                        allowance,
-                        || cx.checkpoint(),
-                    ))
-                },
-                |call, arguments, remaining| {
-                    if crate::query::is_hybrid(call) {
-                        return crate::query::hybrid_procedure(
-                            &self.snapshot,
-                            Some(&self.beacon_indexes),
+                fgdb_gql::procedure_row_source(
+                    |pattern, allowance| {
+                        crate::gql_exec::execute_pattern_at(self, pattern, as_of, allowance, || {
+                            cx.checkpoint()
+                        })
+                    },
+                    |pattern, seeds, allowance| {
+                        Some(crate::gql_exec::execute_seeded_pattern_at(
+                            self,
+                            pattern,
+                            Some(seeds),
                             as_of,
+                            allowance,
+                            || cx.checkpoint(),
+                        ))
+                    },
+                    |call, arguments, remaining| {
+                        if crate::query::is_hybrid(call) {
+                            return crate::query::hybrid_procedure(
+                                &self.snapshot,
+                                Some(&self.beacon_indexes),
+                                as_of,
+                                call,
+                                arguments,
+                                remaining,
+                                cx,
+                            );
+                        }
+                        crate::query::fnx_procedure(
                             call,
                             arguments,
+                            as_of,
                             remaining,
-                            cx,
-                        );
-                    }
-                    crate::query::fnx_procedure(
-                        call,
-                        arguments,
-                        as_of,
-                        remaining,
-                        &mut Vec::new(),
-                        |spec, options, sink| self.execute_fnx_into(cx, spec, options, sink),
-                    )
-                },
-                |element, key| crate::gql_exec::element_property_at(self, element, key, as_of),
+                            &mut Vec::new(),
+                            |spec, options, sink| self.execute_fnx_into(cx, spec, options, sink),
+                        )
+                    },
+                    |call, arguments, remaining| {
+                        Some(crate::query::fnx_procedure_rows(
+                            call,
+                            arguments,
+                            as_of,
+                            remaining,
+                            &mut Vec::new(),
+                            |spec, options| self.execute_fnx_rows(cx, spec, options),
+                        ))
+                    },
+                    |element, key| crate::gql_exec::element_property_at(self, element, key, as_of),
+                ),
                 || cx.checkpoint(),
             )
         })

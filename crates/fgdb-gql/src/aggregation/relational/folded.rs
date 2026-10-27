@@ -121,14 +121,20 @@ impl PreparedGraphAggregate {
     /// Physical admission only. COLLECT retains visitation-ordered lists and
     /// remains on its ordinary implementation; no function is approximated.
     /// A missing fusion opportunity is not retried after runtime failure.
+    #[cfg(test)]
     pub(super) fn folded_definition(&self) -> Option<Self> {
+        self.folded_definition_for_source(true)
+    }
+
+    pub(super) fn folded_definition_for_source(&self, procedure_rows: bool) -> Option<Self> {
         let input = self.relational_input.as_ref()?;
         // COUNT(*) depends on bag cardinality, not the order or values of
         // Cartesian pairs. Value-sensitive barriers still execute normally.
         if self.uses_factorized_cardinality() {
             return self.prepare_complete_group_output();
         }
-        if !(input.has_foldable_expansion() || input.has_repeated_factor(&self.repeated_columns()))
+        if !(input.has_foldable_expansion_for_source(procedure_rows)
+            || input.has_repeated_factor(&self.repeated_columns()))
             || !self.aggregates().iter().all(|aggregate| {
                 match aggregate.function() {
                     GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct => {

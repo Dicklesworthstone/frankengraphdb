@@ -17,21 +17,69 @@ type Consumer<'a, S, Checkpoint, E, C> =
 impl PreparedGraphSet {
     /// A terminal expansion can be folded even if its children need a sort.
     /// Never elide a projection's implicit canonicalization or explicit order.
+    #[cfg(test)]
     pub(crate) fn has_foldable_expansion(&self) -> bool {
-        self.order.is_empty() && self.has_foldable_node()
+        self.has_foldable_expansion_for_source(true)
+    }
+
+    pub(crate) fn has_foldable_expansion_for_source(&self, procedure_rows: bool) -> bool {
+        self.order.is_empty() && self.has_foldable_node_for_source(procedure_rows)
     }
 
     /// Ignore ONLY this node's tail when a caller owns its exact ordering/page.
     /// Every descendant must still retain its own sequence boundaries.
     pub(super) fn has_foldable_node(&self) -> bool {
+        self.has_foldable_node_for_source(true)
+    }
+
+    pub(super) fn has_foldable_node_for_source(&self, procedure_rows: bool) -> bool {
         match &self.node {
+            SetNode::ProcedureCall(call) => procedure_rows && canonical_vertex_call(call),
             SetNode::Unwind { .. } | SetNode::CrossJoin { .. } | SetNode::Binary { .. } => true,
-            SetNode::Scope(input) | SetNode::Filter { input, .. } => input.has_foldable_expansion(),
+            SetNode::Scope(input) | SetNode::Filter { input, .. } => {
+                input.has_foldable_expansion_for_source(procedure_rows)
+            }
             SetNode::Project {
                 input,
                 quantifier: GraphSetQuantifier::All,
+                projection,
                 ..
-            } if input.preserves_row_order() => input.has_foldable_expansion(),
+            } if input.preserves_row_order()
+                || (procedure_rows
+                    && input.has_canonical_vertex_prefix()
+                    && projection
+                        .first()
+                        .is_some_and(|item| matches!(item.value(), GraphSetValue::Column(0)))) =>
+            {
+                input.has_foldable_expansion_for_source(procedure_rows)
+            }
+            _ => false,
+        }
+    }
+
+    /// A leading unique vertex key proves tuple order independently of all
+    /// later scalar cells. Preserve that key through ALL projections only;
+    /// dropping/reordering it retains the ordinary canonical sorting barrier.
+    fn has_canonical_vertex_prefix(&self) -> bool {
+        if !self.order.is_empty() {
+            return false;
+        }
+        match &self.node {
+            SetNode::ProcedureCall(call) => canonical_vertex_call(call),
+            SetNode::Scope(input) | SetNode::Filter { input, .. } => {
+                input.has_canonical_vertex_prefix()
+            }
+            SetNode::Project {
+                input,
+                projection,
+                quantifier: GraphSetQuantifier::All,
+                ..
+            } => {
+                input.has_canonical_vertex_prefix()
+                    && projection
+                        .first()
+                        .is_some_and(|item| matches!(item.value(), GraphSetValue::Column(0)))
+            }
             _ => false,
         }
     }
@@ -75,6 +123,14 @@ impl PreparedGraphSet {
         meter.event(GlaExecutionEvent::Work)?;
         Ok((meter.rows, meter.evaluator))
     }
+}
+
+fn canonical_vertex_call(call: &PreparedProcedureCall) -> bool {
+    call.namespace() == "fnx"
+        && call
+            .outputs()
+            .first()
+            .is_some_and(|name| name == "vertex" || name == "node")
 }
 
 /// Selection is downstream of a stage's own validation. Remembering a sink
@@ -167,7 +223,7 @@ where
     // Nonfoldable sorting/projection barriers keep their complete selected
     // output in its declared order. Binary sets use the same canonical merge
     // below, without retaining a second bag for the terminal consumer.
-    if !query.has_foldable_expansion() {
+    if !query.has_foldable_expansion_for_source(source.supports_procedure_rows()) {
         let rows = run(query, source, meter, operand)?;
         let mut forward = Window::new(0, None);
         for row in rows {
@@ -199,7 +255,7 @@ where
     S: GraphSetSource<E, C> + ?Sized,
     Checkpoint: FnMut() -> Result<(), C>,
 {
-    debug_assert!(query.has_foldable_node());
+    debug_assert!(query.has_foldable_node_for_source(source.supports_procedure_rows()));
     visit_expansion(query, source, meter, operand, Window::new(0, None), consume)
 }
 
@@ -216,6 +272,17 @@ where
     Checkpoint: FnMut() -> Result<(), C>,
 {
     meter.event(GlaExecutionEvent::Work)?;
+    if !source.supports_procedure_rows()
+        && matches!(&query.node, SetNode::Project { input, .. } if !input.preserves_row_order())
+    {
+        // An ordinary custom procedure host need not promise unique leading
+        // vertices. Preserve its projection's canonical sort and duplicate
+        // semantics; only the checked cursor capability proves the shortcut.
+        for row in run_node(query, source, meter, operand)? {
+            window.push(row, source, meter, consume)?;
+        }
+        return window.finish();
+    }
     if let Some(inputs @ (left, right, code, projection)) = query.filtered_cross_inputs() {
         // The materialized and folded paths share the exact selected-pair walk.
         // Complete both original children first; even LIMIT 0 cannot hide a
@@ -247,6 +314,71 @@ where
     }
     let mut local = None;
     match &query.node {
+        SetNode::ProcedureCall(call) => {
+            let at = *operand;
+            *operand += 1;
+            let unit = GraphValueRow::unit();
+            let mut arguments = Vec::with_capacity(call.arguments.len());
+            for (column, argument) in call.arguments.iter().enumerate() {
+                arguments.push(
+                    projection::evaluate_value(argument, &unit, column, &mut |event| {
+                        meter.event(event)
+                    })
+                    .map_err(|error| projected(error, 0))?,
+                );
+            }
+            if source.supports_procedure_rows() {
+                let execution = source
+                    .procedure_rows(call, &arguments, meter.remaining())
+                    .ok_or(GqlQueryError::Source(
+                        GraphSetExecutionError::InvalidSourceStatistics { operand: at },
+                    ))?;
+                let mut execution = execution.map_err(|error| meter.source_error(error))?;
+                let count = execution.rows.result_rows;
+                // Complete source admission is charged before the first
+                // reducer/comparator/property read, never after callbacks.
+                meter.absorb_statistics(execution.rows, execution.evaluator, Some(count), at)?;
+                let mut consumed = 0_u64;
+                let mut previous = None;
+                while let Some(row) = execution
+                    .cursor
+                    .next_row(&mut meter.checkpoint)
+                    .map_err(|error| meter.source_error(error))?
+                {
+                    check_source_rows(core::slice::from_ref(&row), &query.types, at, meter)?;
+                    let Some(GraphValue::Vertex(vertex)) = row.values().first() else {
+                        return Err(GqlQueryError::Source(GraphSetExecutionError::InputSchema {
+                            operand: at,
+                        }));
+                    };
+                    if previous.is_some_and(|prior| prior >= *vertex) || consumed == count {
+                        return Err(GqlQueryError::Source(
+                            GraphSetExecutionError::InvalidSourceStatistics { operand: at },
+                        ));
+                    }
+                    previous = Some(*vertex);
+                    consumed += 1;
+                    window.push(row, source, meter, consume)?;
+                }
+                if consumed != count {
+                    return Err(GqlQueryError::Source(
+                        GraphSetExecutionError::InvalidSourceStatistics { operand: at },
+                    ));
+                }
+            } else {
+                // Unsupported hosts retain their source implementation and
+                // canonical sorting. Arguments and the source execute once.
+                let execution = source
+                    .procedure(call, &arguments, meter.remaining())
+                    .ok_or(GqlQueryError::Source(
+                        GraphSetExecutionError::ProcedureUnavailable { operand: at },
+                    ))?
+                    .map_err(|error| meter.source_error(error))?;
+                for row in admit_source_rows(query, execution, at, meter)? {
+                    window.push(row, source, meter, consume)?;
+                }
+            }
+        }
         SetNode::Binary {
             operation,
             quantifier,

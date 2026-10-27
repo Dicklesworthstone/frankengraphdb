@@ -5,6 +5,568 @@ use crate::{
 };
 use fgdb_types::CanonicalScalar;
 
+mod completed_procedures {
+    use super::*;
+    use crate::{GraphProcedureExecution, GraphProcedureRowCursor};
+    use fgdb_types::VId;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    #[derive(Clone, Copy)]
+    enum Fault {
+        Schema,
+        Order,
+        Short,
+        Long,
+        Source,
+    }
+
+    struct Rows {
+        at: usize,
+        count: usize,
+        fault: Option<Fault>,
+        pulled: Rc<Cell<usize>>,
+    }
+
+    fn row(at: usize) -> GraphValueRow {
+        GraphValueRow::from_owned_values(vec![
+            GraphValue::Vertex(VId((1_u128 << 100) + at as u128)),
+            scalar(Some((at * 17 % 101) as i64)),
+        ])
+    }
+
+    impl GraphProcedureRowCursor<&'static str, usize> for Rows {
+        fn next_row(
+            &mut self,
+            checkpoint: &mut dyn FnMut() -> Result<(), usize>,
+        ) -> Result<Option<GraphValueRow>, GqlQueryError<&'static str, usize>> {
+            checkpoint().map_err(GqlQueryError::Interrupted)?;
+            if self.at == self.count {
+                return Ok(None);
+            }
+            let at = self.at;
+            self.at += 1;
+            self.pulled.set(self.pulled.get() + 1);
+            if at + 1 == self.count {
+                match self.fault {
+                    Some(Fault::Schema) => return Ok(Some(GraphValueRow::unit())),
+                    Some(Fault::Order) => return Ok(Some(row(0))),
+                    Some(Fault::Source) => return Err(GqlQueryError::Source("late source")),
+                    _ => {}
+                }
+            }
+            Ok(Some(row(at)))
+        }
+    }
+
+    struct Host {
+        count: usize,
+        cursor: bool,
+        cursor_only: bool,
+        fault: Option<Fault>,
+        pulled: Rc<Cell<usize>>,
+        opened: Rc<Cell<usize>>,
+    }
+
+    impl Host {
+        fn new(count: usize, cursor: bool) -> Self {
+            Self {
+                count,
+                cursor,
+                cursor_only: false,
+                fault: None,
+                pulled: Rc::new(Cell::new(0)),
+                opened: Rc::new(Cell::new(0)),
+            }
+        }
+    }
+
+    impl GraphSetSource<&'static str, usize> for Host {
+        fn pattern(
+            &mut self,
+            _: &PreparedGraphPattern<GraphValueRow>,
+            _: GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<&'static str, usize>> {
+            panic!("a direct analytics relation has no graph leaf")
+        }
+        fn supports_procedure_rows(&self) -> bool {
+            self.cursor
+        }
+        fn procedure(
+            &mut self,
+            _: &PreparedProcedureCall,
+            _: &[GraphValue],
+            _: GqlQueryPolicy,
+        ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<&'static str, usize>>>
+        {
+            assert!(!self.cursor_only, "the parsed query must use its cursor");
+            self.opened.set(self.opened.get() + 1);
+            Some(Ok(GqlQueryExecution {
+                value: (0..self.count).map(row).collect(),
+                rows: GqlExecutionStats {
+                    snapshot_records: 11,
+                    result_rows: self.count as u64,
+                },
+                evaluator: GlaExecutionStats {
+                    work_units: 13,
+                    scratch_entries: self.count as u64,
+                },
+            }))
+        }
+        fn procedure_rows(
+            &mut self,
+            _: &PreparedProcedureCall,
+            _: &[GraphValue],
+            _: GqlQueryPolicy,
+        ) -> Option<
+            Result<
+                GraphProcedureExecution<&'static str, usize>,
+                GqlQueryError<&'static str, usize>,
+            >,
+        > {
+            assert!(self.cursor);
+            self.opened.set(self.opened.get() + 1);
+            let actual = match self.fault {
+                Some(Fault::Short) => self.count - 1,
+                Some(Fault::Long) => self.count + 1,
+                _ => self.count,
+            };
+            Some(Ok(GraphProcedureExecution {
+                cursor: Box::new(Rows {
+                    at: 0,
+                    count: actual,
+                    fault: self.fault,
+                    pulled: Rc::clone(&self.pulled),
+                }),
+                rows: GqlExecutionStats {
+                    snapshot_records: 11,
+                    result_rows: self.count as u64,
+                },
+                evaluator: GlaExecutionStats {
+                    work_units: 13,
+                    scratch_entries: self.count as u64,
+                },
+            }))
+        }
+    }
+
+    fn call() -> PreparedGraphSet {
+        PreparedGraphSet::singleton()
+            .procedure_call(
+                "fnx".into(),
+                "pagerank".into(),
+                vec![],
+                vec![],
+                vec![("vertex".into(), "v".into()), ("score".into(), "s".into())],
+                vec![],
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn completed_cursor_folds_before_next_row_and_absorbs_source_costs_first() {
+        let host = Host::new(300, true);
+        let pulled = Rc::clone(&host.pulled);
+        let opened = Rc::clone(&host.opened);
+        let mut consumed = 0;
+        let (stats, _) = call()
+            .fold_governed(
+                wide(),
+                host,
+                || Ok(()),
+                |value, _| {
+                    consumed += 1;
+                    assert_eq!(
+                        pulled.get(),
+                        consumed,
+                        "the source never produces the next row early"
+                    );
+                    assert_eq!(value, row(consumed - 1));
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(consumed, 300);
+        assert_eq!(opened.get(), 1);
+        assert_eq!(stats.snapshot_records, 11);
+        assert_eq!(stats.result_rows, 0);
+        for policy in [
+            GqlQueryPolicy::new(10, u64::MAX, u64::MAX, u64::MAX),
+            GqlQueryPolicy::new(u64::MAX, u64::MAX, 12, u64::MAX),
+            GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, 299),
+        ] {
+            let host = Host::new(300, true);
+            let pulled = Rc::clone(&host.pulled);
+            assert!(
+                call()
+                    .fold_governed(policy, host, || Ok(()), |_, _| panic!("unadmitted row"))
+                    .is_err()
+            );
+            assert_eq!(pulled.get(), 0, "complete source costs precede every pull");
+        }
+    }
+
+    #[test]
+    fn cursor_pages_and_vertex_preserving_projections_equal_materialized_rows() {
+        let input = call()
+            .project(
+                vec![
+                    GraphSetProjection::new("v", GraphSetValue::Column(0)),
+                    GraphSetProjection::new("s", GraphSetValue::Column(1)),
+                ],
+                GraphSetQuantifier::All,
+            )
+            .unwrap();
+        for order in [vec![], vec![crate::algebra::GraphValueOrder::descending(1)]] {
+            for (skip, count) in [(0, 0), (0, 5), (3, 8), (298, 9)] {
+                let query = input
+                    .clone()
+                    .with_order_by(&order)
+                    .unwrap()
+                    .with_page(skip, Some(count));
+                let expected = query
+                    .execute_governed_from_source(wide(), Host::new(300, false), || Ok(()))
+                    .unwrap();
+                let host = Host::new(300, true);
+                let pulled = Rc::clone(&host.pulled);
+                let actual = query
+                    .execute_governed_from_source(wide(), host, || Ok(()))
+                    .unwrap();
+                assert_eq!(actual.value, expected.value);
+                assert_eq!(actual.rows, expected.rows);
+                assert_eq!(
+                    pulled.get(),
+                    300,
+                    "pages still drain their completed source"
+                );
+            }
+        }
+        let reordered = call()
+            .project(
+                vec![
+                    GraphSetProjection::new("s", GraphSetValue::Column(1)),
+                    GraphSetProjection::new("v", GraphSetValue::Column(0)),
+                ],
+                GraphSetQuantifier::All,
+            )
+            .unwrap();
+        assert!(
+            !reordered.has_foldable_expansion(),
+            "dropping the unique leading key retains its sort"
+        );
+        let host = Host::new(300, true);
+        let pulled = Rc::clone(&host.pulled);
+        reordered
+            .execute_governed_from_source(wide(), host, || Ok(()))
+            .unwrap();
+        assert_eq!(
+            pulled.get(),
+            0,
+            "unproved ordering uses the materialized source"
+        );
+    }
+
+    #[test]
+    fn completed_cursor_reuses_exact_group_reducers_and_the_cumulative_allowance() {
+        let query = crate::PreparedGraphSetAggregate::prepare(
+            call(),
+            &[1],
+            &[
+                crate::GraphAggregate::count_rows("n"),
+                crate::GraphAggregate::sum_int("total", 1),
+                crate::GraphAggregate::average_int("mean", 1),
+            ],
+            0,
+            None,
+        )
+        .unwrap();
+        let expected = query
+            .execute_governed_from_source(wide(), Host::new(303, false), || Ok(()))
+            .unwrap();
+        let host = Host::new(303, true);
+        let pulled = Rc::clone(&host.pulled);
+        let actual = query
+            .execute_governed_from_source(wide(), host, || Ok(()))
+            .unwrap();
+        assert_eq!(actual.value, expected.value);
+        assert_eq!(pulled.get(), 303);
+        assert_eq!(actual.value.len(), 101);
+        for (score, row) in actual.value.iter().enumerate() {
+            assert_eq!(row.keys(), [scalar(Some(score as i64))]);
+            assert_eq!(row.values()[0].as_count(), Some(3));
+            assert_eq!(row.values()[1].as_integer(), Some(3 * score as i128));
+            assert_eq!(
+                row.values()[2].as_average(),
+                crate::GraphExactAverage::new(score as i128, 1)
+            );
+        }
+        let exact = GqlQueryPolicy::new(
+            actual.rows.snapshot_records,
+            actual.rows.result_rows,
+            actual.evaluator.work_units,
+            actual.evaluator.scratch_entries,
+        );
+        assert_eq!(
+            query
+                .execute_governed_from_source(exact, Host::new(303, true), || Ok(()))
+                .unwrap(),
+            actual
+        );
+        for dimension in 0..4 {
+            let mut short = exact;
+            match dimension {
+                0 => {
+                    short = GqlQueryPolicy::new(
+                        10,
+                        actual.rows.result_rows,
+                        actual.evaluator.work_units,
+                        actual.evaluator.scratch_entries,
+                    )
+                }
+                1 => {
+                    short = GqlQueryPolicy::new(
+                        11,
+                        actual.rows.result_rows - 1,
+                        actual.evaluator.work_units,
+                        actual.evaluator.scratch_entries,
+                    )
+                }
+                2 => short.evaluator.max_work_units -= 1,
+                _ => short.evaluator.max_scratch_entries -= 1,
+            }
+            assert!(
+                query
+                    .execute_governed_from_source(short, Host::new(303, true), || Ok(()))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn parsed_component_and_computed_key_groups_activate_the_completed_cursor() {
+        use crate::{
+            GqlParameters, GraphAggregateTextSlot, GraphAggregateValue,
+            PreparedGraphPipelineAggregateText,
+        };
+        for (text, groups) in [
+            (
+                "CALL fnx.weakly_connected_components() YIELD vertex, component \
+                 RETURN component, COUNT(*) AS n GROUP BY component ORDER BY component",
+                101,
+            ),
+            (
+                "CALL fnx.single_source_shortest_path_length(1) YIELD vertex, distance \
+                 WITH vertex, distance, distance % 2 AS parity \
+                 RETURN parity, COUNT(*) AS n, SUM(distance) AS total \
+                 GROUP BY parity ORDER BY parity",
+                2,
+            ),
+        ] {
+            let prepared =
+                PreparedGraphPipelineAggregateText::prepare(text, |_, _: &str| None).unwrap();
+            let slots = prepared.output_slots().to_vec();
+            let query = prepared
+                .bind_relation_parameters(&GqlParameters::new())
+                .unwrap();
+            assert!(query.input().has_foldable_expansion_for_source(true));
+            assert!(!query.input().has_foldable_expansion_for_source(false));
+            let expected = query
+                .execute_governed_from_source(wide(), Host::new(303, false), || Ok(()))
+                .unwrap();
+            let mut host = Host::new(303, true);
+            host.cursor_only = true;
+            let pulled = Rc::clone(&host.pulled);
+            let opened = Rc::clone(&host.opened);
+            let actual = query
+                .execute_governed_from_source(wide(), host, || Ok(()))
+                .unwrap();
+            assert_eq!(actual.value, expected.value);
+            assert_eq!(actual.value.len(), groups);
+            assert_eq!(pulled.get(), 303);
+            assert_eq!(opened.get(), 1);
+            let visible: Vec<Vec<_>> = actual
+                .value
+                .iter()
+                .map(|row| {
+                    slots
+                        .iter()
+                        .map(|slot| match *slot {
+                            GraphAggregateTextSlot::GroupKey(at) => {
+                                GraphAggregateValue::Value(row.keys()[at].clone())
+                            }
+                            GraphAggregateTextSlot::Aggregate(at) => row.values()[at].clone(),
+                        })
+                        .collect()
+                })
+                .collect();
+            if groups == 101 {
+                for (component, row) in visible.iter().enumerate() {
+                    assert_eq!(
+                        row,
+                        &[
+                            GraphAggregateValue::Value(scalar(Some(component as i64))),
+                            GraphAggregateValue::Count(3),
+                        ]
+                    );
+                }
+            } else {
+                assert_eq!(
+                    visible,
+                    vec![
+                        vec![
+                            GraphAggregateValue::Value(scalar(Some(0))),
+                            GraphAggregateValue::Count(153),
+                            GraphAggregateValue::Integer(7650),
+                        ],
+                        vec![
+                            GraphAggregateValue::Value(scalar(Some(1))),
+                            GraphAggregateValue::Count(150),
+                            GraphAggregateValue::Integer(7500),
+                        ],
+                    ]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn completed_cursor_releases_its_host_for_element_reads_and_drains_zero_pages() {
+        use crate::{GraphElementKey, WithElementReads};
+        use fgdb_delta_types::{ElementId, PropertyKeyId};
+        let query = call()
+            .project(
+                vec![
+                    GraphSetProjection::new("v", GraphSetValue::Column(0)),
+                    GraphSetProjection::new(
+                        "p",
+                        GraphSetValue::MapGet {
+                            map: Box::new(GraphSetValue::Column(0)),
+                            key: "p".into(),
+                            property: GraphElementKey::Property(PropertyKeyId(3)),
+                        },
+                    ),
+                ],
+                GraphSetQuantifier::All,
+            )
+            .unwrap();
+        for count in [0, 2] {
+            let reads = Cell::new(0);
+            let host = WithElementReads {
+                source: Host::new(8, true),
+                elements: |element, key| {
+                    assert_eq!(
+                        element,
+                        ElementId::Vertex(VId((1_u128 << 100) + reads.get()))
+                    );
+                    assert_eq!(key, PropertyKeyId(3));
+                    reads.set(reads.get() + 1);
+                    if reads.get() == 8 {
+                        Err("last element refused")
+                    } else {
+                        Ok(Some(CanonicalScalar::Int(9).into()))
+                    }
+                },
+            };
+            let result = query
+                .clone()
+                .with_page(0, Some(count))
+                .execute_governed_from_source(wide(), host, || Ok(()));
+            assert_eq!(reads.get(), 8);
+            assert!(matches!(
+                result,
+                Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+                    "last element refused"
+                )))
+            ));
+        }
+    }
+
+    #[test]
+    fn late_cursor_contract_failure_wins_over_downstream_error_even_with_zero_page() {
+        for fault in [
+            Fault::Schema,
+            Fault::Order,
+            Fault::Short,
+            Fault::Long,
+            Fault::Source,
+        ] {
+            for limit in [None, Some(0)] {
+                let mut host = Host::new(8, true);
+                host.fault = Some(fault);
+                let result = call().with_page(0, limit).fold_governed(
+                    wide(),
+                    host,
+                    || Ok(()),
+                    |_, _| {
+                        Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+                            "sink failure",
+                        )))
+                    },
+                );
+                match fault {
+                    Fault::Schema => assert!(matches!(
+                        result,
+                        Err(GqlQueryError::Source(GraphSetExecutionError::InputSchema {
+                            operand: 0
+                        }))
+                    )),
+                    Fault::Source => assert!(matches!(
+                        result,
+                        Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+                            "late source"
+                        )))
+                    )),
+                    _ => assert!(matches!(
+                        result,
+                        Err(GqlQueryError::Source(
+                            GraphSetExecutionError::InvalidSourceStatistics { operand: 0 }
+                        ))
+                    )),
+                }
+            }
+        }
+        let result = call().fold_governed(
+            wide(),
+            Host::new(8, true),
+            || Ok(()),
+            |_, _| {
+                Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+                    "sink failure",
+                )))
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+                "sink failure"
+            )))
+        ));
+    }
+
+    #[test]
+    fn every_completed_cursor_checkpoint_refuses_without_reopening_source() {
+        let query = call().with_page(2, Some(3));
+        let mut calls = 0;
+        query
+            .execute_governed_from_source(wide(), Host::new(20, true), || {
+                calls += 1;
+                Ok(())
+            })
+            .unwrap();
+        for stop in 1..=calls {
+            let mut calls = 0;
+            let host = Host::new(20, true);
+            let opened = Rc::clone(&host.opened);
+            let result = query.execute_governed_from_source(wide(), host, || {
+                calls += 1;
+                if calls == stop { Err(stop) } else { Ok(()) }
+            });
+            assert!(matches!(result, Err(GqlQueryError::Interrupted(at)) if at == stop));
+            assert!(opened.get() <= 1);
+        }
+    }
+}
+
 fn wide() -> GqlQueryPolicy {
     GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
 }
