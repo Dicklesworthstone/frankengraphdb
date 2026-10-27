@@ -42,8 +42,10 @@
 
 use crate::LogicalDeltaBatch;
 use fgdb_types::{CommitSeq, CommitSeqExhausted as CommitSeqExhaustion};
-use std::collections::BTreeMap;
 use std::sync::Arc;
+
+mod entries;
+use entries::Entries;
 
 /// Index format version (§16.6: durable formats are versioned from day one).
 pub const INDEX_FORMAT_V1: u16 = 1;
@@ -191,15 +193,16 @@ impl From<CommitSeqExhaustion> for IndexError {
 
 /// The bounded window of retained local delta batches.
 ///
-/// Cloning copies the map's entries and shares each immutable batch allocation.
-/// Scalar-bearing historical rows are never recursively copied just to retain
-/// an older generation while its successor appends or retires a prefix.
+/// Cloning shares the ordered tree and each immutable batch allocation. An
+/// append copies only a balanced search path when an older generation remains
+/// pinned; retirement detaches a prefix without copying the retained suffix.
+/// Historical rows are never recursively copied just to retain a generation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalDeltaBatchIndex {
     format: u16,
     retained_after_commit_seq: CommitSeq,
     frontier: CommitSeq,
-    entries: BTreeMap<u64, Arc<LogicalDeltaBatch>>,
+    entries: Entries<LogicalDeltaBatch>,
     // Only the exact boundary identity, not its rows or a prefix commitment.
     // Set by retiring a present, envelope-checked batch or by the recovered
     // marker authority when checkpoint open omits its capsule. This is
@@ -223,7 +226,7 @@ impl LocalDeltaBatchIndex {
             format: INDEX_FORMAT_V1,
             retained_after_commit_seq: CommitSeq::ORIGIN,
             frontier: CommitSeq::ORIGIN,
-            entries: BTreeMap::new(),
+            entries: Entries::new(),
             retired_boundary: None,
         }
     }
@@ -239,7 +242,7 @@ impl LocalDeltaBatchIndex {
             format: INDEX_FORMAT_V1,
             retained_after_commit_seq: frontier,
             frontier,
-            entries: BTreeMap::new(),
+            entries: Entries::new(),
             retired_boundary: None,
         }
     }
@@ -284,7 +287,7 @@ impl LocalDeltaBatchIndex {
         frontier: CommitSeq,
         keyed_batches: Vec<(CommitSeq, LogicalDeltaBatch)>,
     ) -> Self {
-        let mut entries = BTreeMap::new();
+        let mut entries = Entries::new();
         for (stored_seq, batch) in keyed_batches {
             entries.insert(stored_seq.0, Arc::new(batch));
         }
@@ -368,13 +371,7 @@ impl LocalDeltaBatchIndex {
                 frontier: self.frontier,
             });
         }
-        Ok(self
-            .entries
-            .range((
-                std::ops::Bound::Excluded(after.0),
-                std::ops::Bound::Unbounded,
-            ))
-            .map(|(_, batch)| batch.as_ref()))
+        Ok(self.entries.after(after.0).map(|(_, batch)| batch.as_ref()))
     }
 
     /// The sequence the next insertion must carry.
@@ -516,17 +513,12 @@ impl LocalDeltaBatchIndex {
                 *batch.source_template_digest(),
             ))
         };
-        let mut retired = Vec::new();
-        let keys: Vec<u64> = self
+        let retired = self
             .entries
-            .range(..=through.0)
-            .map(|(seq, _)| *seq)
+            .take_through(through.0)
+            .into_iter()
+            .map(Arc::unwrap_or_clone)
             .collect();
-        for key in keys {
-            if let Some(batch) = self.entries.remove(&key) {
-                retired.push(Arc::unwrap_or_clone(batch));
-            }
-        }
         self.retired_boundary = boundary;
         self.retained_after_commit_seq = through;
         Ok(retired)
@@ -570,7 +562,7 @@ impl LocalDeltaBatchIndex {
             });
         }
         let mut previous = self.retained_after_commit_seq.0;
-        for (stored_seq, batch) in &self.entries {
+        for (stored_seq, batch) in self.entries.iter() {
             if *stored_seq <= self.retained_after_commit_seq.0 || *stored_seq > self.frontier.0 {
                 return Err(IndexError::UnretirableInterval {
                     retained_after: self.retained_after_commit_seq,
