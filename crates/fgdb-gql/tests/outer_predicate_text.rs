@@ -197,12 +197,36 @@ fn existential_outer_only_correlations_keep_local_names_private_and_do_not_multi
     assert_eq!(rows[0].values()[0].as_vertex(), Some(VId(4)));
     let joined = "MATCH (a) MATCH (b) WHERE b.p=a.p OPTIONAL MATCH (c) WHERE c.p=b.p RETURN a,b,c";
     assert_eq!(run(joined, &[]).len(), 9);
+    // EXISTS is a semi-join even in an OPTIONAL clause: the two witnesses
+    // for p=7 do not multiply b. The NULL outer property gets one null row.
+    let rows = run(
+        "MATCH (a) OPTIONAL MATCH (b) WHERE EXISTS { MATCH (c) WHERE c.p=a.p } RETURN b",
+        &[],
+    );
+    assert_eq!(rows.len(), 13);
+    for id in VERTICES {
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.values()[0].as_vertex() == Some(id))
+                .count(),
+            3,
+        );
+    }
+    assert_eq!(
+        rows.iter()
+            .filter(|row| matches!(
+                row.values()[0],
+                fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Null)
+            ))
+            .count(),
+        1,
+    );
     for text in [
         "MATCH (a) WHERE EXISTS { MATCH (hidden) WHERE hidden.p=a.p } MATCH (b) WHERE hidden.p=b.p RETURN b",
         "MATCH (a) MATCH (b) WHERE later.p=b.p MATCH (later) RETURN later",
         "MATCH (a) MATCH (b) WHERE missing IS NULL RETURN b",
         "MATCH (a) WHERE EXISTS { MATCH (b) WHERE a.p=b.p } RETURN b",
-        "MATCH (a) OPTIONAL MATCH (b) WHERE EXISTS { MATCH (c) WHERE c.p=a.p } RETURN b",
+        "MATCH (a) OPTIONAL MATCH (b) WHERE EXISTS { MATCH (c) WHERE c.p=a.p } RETURN c",
     ] {
         let mut calls = 0;
         assert!(

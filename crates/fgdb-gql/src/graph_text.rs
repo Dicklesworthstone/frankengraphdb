@@ -915,6 +915,9 @@ struct Parser<'a> {
     /// routed by its type as in a row scope. `None` keeps resolved columns
     /// untyped.
     resolved_row: Option<Vec<(Name<'a>, crate::GraphSetColumnType)>>,
+    /// Created path names only while compiling a write's RETURN/WITH items.
+    /// Scalar routing sees their domain; MATCH never gains source bindings.
+    write_paths: Vec<&'a str>,
     boundary_reads: Option<BoundaryReads<'a>>,
     /// A resolved leaf followed by `.key` reads that entry (an imported
     /// map's `row.key` beside MATCH reads, fgdb-0s2pq). Read scopes enable it
@@ -1123,6 +1126,7 @@ impl<'a> Parser<'a> {
             read_row_fields: Vec::new(),
             read_comparisons: None,
             resolved_row: None,
+            write_paths: Vec::new(),
             boundary_reads: None,
             resolved_entries: false,
             call_element_reads: false,
@@ -3207,7 +3211,7 @@ mod tests {
             "MATCH (a) WHERE a.n = -9223372036854775809 RETURN a",
             "MATCH (a {n:}) RETURN a",
             "MATCH (a) RETURN *,a",
-            "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b) } RETURN a",
+            "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b) RETURN a",
         ] {
             let mut calls = 0;
             assert!(
@@ -3220,6 +3224,30 @@ mod tests {
             );
             assert_eq!(calls, 0, "failed syntax called the catalog: {text}");
         }
+        // Nested EXISTS is supported in OPTIONAL MATCH. Keep the malformed
+        // brace above as a pre-catalog refusal, and pin the original valid
+        // query's multiplicity and null-extension instead of rejecting it.
+        let pattern =
+            query("MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b) } RETURN a");
+        let rows = pattern
+            .plan()
+            .execute_governed_with_identified_properties(
+                5,
+                [VId(1), VId(2), VId(3)],
+                [
+                    (fgdb_types::EId(1), VId(1), RelationId(1), VId(2)),
+                    (fgdb_types::EId(2), VId(1), RelationId(1), VId(3)),
+                ],
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                policy(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        assert_eq!(
+            vertex_rows(&rows.value),
+            vec![vec![VId(1)], vec![VId(1)], vec![VId(2)], vec![VId(3)]]
+        );
     }
     #[test]
     fn named_relationship_captures_prepare_and_reach_name_resolution() {
