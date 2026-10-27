@@ -629,3 +629,103 @@ fn bolt_unsupported_write_options_and_future_bookmarks_publish_nothing() {
         finish(cx, shutdown, serving).await;
     });
 }
+
+/// fgdb-ch9re: a driver's map parameter is the property map it holds in a
+/// Bolt autocommit write: `CREATE (:Person $props)`, `SET n += $props` and
+/// both MERGE branches, each published on PULL. A key no symbol binds makes
+/// no native write, and the RUN fails without publishing.
+#[test]
+fn bolt_map_parameters_bind_as_property_maps() {
+    run(async |cx| {
+        let (fgp, address, shutdown, serving) = start_both(cx, "map-parameters").await;
+        let mut client = login(address, &grant(Rights::ReadWrite)).await;
+        let mut observer = Client::connect(cx, fgp, token(&grant(Rights::Read)))
+            .await
+            .unwrap();
+        observer.select(cx, "social").await.unwrap();
+        let map = |entries: &[(&str, Value)]| {
+            Value::Map(
+                (entries.iter())
+                    .map(|(key, value)| ((*key).into(), value.clone()))
+                    .collect(),
+            )
+        };
+        let merge = "MERGE (n:Person {name: $name}) ON CREATE SET n += $props \
+                     ON MATCH SET n += $seen";
+        let statements = [
+            (
+                "CREATE (:Person $props)",
+                vec![(
+                    "props".into(),
+                    map(&[("name", Value::string("Ann")), ("age", Value::Int(33))]),
+                )],
+            ),
+            (
+                "MATCH (n:Person {name: 'Ann'}) SET n += $props",
+                vec![("props".into(), map(&[("age", Value::Int(34))]))],
+            ),
+            (
+                merge,
+                vec![
+                    ("name".into(), Value::string("Bob")),
+                    ("props".into(), map(&[("age", Value::Int(41))])),
+                    ("seen".into(), map(&[("age", Value::Int(0))])),
+                ],
+            ),
+            (
+                merge,
+                vec![
+                    ("name".into(), Value::string("Ann")),
+                    ("props".into(), map(&[("age", Value::Int(0))])),
+                    ("seen".into(), map(&[("age", Value::Int(35))])),
+                ],
+            ),
+        ];
+        for (seq, (query, parameters)) in (1..).zip(statements) {
+            client
+                .expect(0x10, request(query, parameters, vec![]), SUCCESS)
+                .await;
+            let (rows, done) = client.pull_all().await;
+            assert!(rows.is_empty(), "{query}");
+            assert_eq!(get(&done, "type").and_then(Value::as_str), Some("w"));
+            assert_eq!(
+                get(&done, "bookmark").and_then(Value::as_str),
+                Some(format!("fgdb:social:{seq}").as_str()),
+                "{query}"
+            );
+        }
+        let read = "MATCH (n:Person) RETURN n.name AS name, n.age AS age ORDER BY name";
+        let people = vec![
+            vec![text("Ann"), WireValue::Int(35)],
+            vec![text("Bob"), WireValue::Int(41)],
+        ];
+        let answer = observer
+            .execute(cx, ExecuteMode::Read, read, vec![])
+            .await
+            .unwrap();
+        assert_eq!(answer.rows, people);
+        assert_eq!(answer.outcome, Outcome::Rows { seq: 4 });
+        client
+            .expect(
+                0x10,
+                request(
+                    "MATCH (n:Person) SET n += $props",
+                    vec![("props".into(), map(&[("nickname", Value::string("A"))]))],
+                    vec![],
+                ),
+                FAILURE,
+            )
+            .await;
+        client.expect(0x0f, vec![], SUCCESS).await;
+        let answer = observer
+            .execute(cx, ExecuteMode::Read, read, vec![])
+            .await
+            .unwrap();
+        assert_eq!(answer.rows, people);
+        assert_eq!(answer.outcome, Outcome::Rows { seq: 4 });
+        client.send(0x02, vec![]).await;
+        assert!(client.receive().await.is_none());
+        observer.close(cx).await.unwrap();
+        finish(cx, shutdown, serving).await;
+    });
+}

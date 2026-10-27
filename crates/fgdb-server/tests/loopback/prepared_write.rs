@@ -740,6 +740,24 @@ fn fgp_map_parameters_bind_as_property_maps() {
             .await
             .unwrap_err();
         assert_eq!(server_code(other), ErrorCode::Statement);
+        // A key no symbol binds refuses at the `$` of its map, not at a byte
+        // of the spliced text the client never sent.
+        let unbound = "MATCH (n:Person {name: 'Ann'}) SET n += $props";
+        let refused = client
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                unbound,
+                vec![props(&[("nickname", text("A"))])],
+            )
+            .await
+            .unwrap_err();
+        let ClientError::Server { code, message } = refused else {
+            panic!("expected a server refusal, got {refused:?}");
+        };
+        assert_eq!(code, ErrorCode::Statement);
+        let site = format!("byte {}:", unbound.find('$').unwrap());
+        assert!(message.contains(&site), "{message}");
         let people = client
             .execute(
                 cx,
