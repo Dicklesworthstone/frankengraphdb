@@ -12,6 +12,11 @@ use fgdb::{
     ReadCacheLimits, WriteBatch,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_gql::algebra::{GraphValue, GraphValueRow};
+use fgdb_gql::{
+    GqlParameters, GqlQueryPolicy, GraphAggregateTextSlot, GraphSymbol, GraphSymbolKind,
+    PreparedGraphSet, PreparedGraphSetText,
+};
 use fgdb_prism::{
     Directedness, FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadOptions, FnxSealedReadError,
     FnxValue, FnxWeightSpec, MissingWeightPolicy, ParallelEdgePolicy, SealedGraphView,
@@ -21,10 +26,10 @@ use fgdb_strata::store::{BlockStore, RootReadLimits};
 use fgdb_strata::tiered::sealed::SealedLimits;
 use fgdb_types::context::SimulationCheckpointProbe;
 use fgdb_types::{
-    CanonicalList, CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq,
+    CanonicalF64, CanonicalList, CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq,
     DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
 };
-use std::sync::Arc;
+use std::{mem::size_of, sync::Arc};
 
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x73; 32]);
 const R: RelationId = RelationId(7);
@@ -829,5 +834,595 @@ fn buffered_slots_do_not_displace_live_entries_and_selection_keys_do_not_alias()
         assert!(!overflow.shares_cache_with(&buffered_project(&mut view, &cx, extra).await));
         assert!(first.shares_cache_with(&buffered_project(&mut view, &cx, options()).await));
         assert_eq!(view.sealed_read_cache_usage().entries, 8);
+    });
+}
+
+fn sealed_sql_symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+    match (kind, name) {
+        (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(L)),
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+        (GraphSymbolKind::Relation, "Other") => Some(GraphSymbol::Relation(RelationId(8))),
+        (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+        _ => None,
+    }
+}
+
+fn sealed_sql_policy() -> GqlQueryPolicy {
+    GqlQueryPolicy::new(1_000_000, 100_000, 100_000_000, 10_000_000)
+}
+
+fn sealed_sql_rows(text: &str) -> PreparedGraphSet {
+    PreparedGraphSetText::prepare(text, sealed_sql_symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+}
+
+fn sealed_sql_bfs(yields: &str, tail: &str) -> String {
+    format!(
+        "CALL fnx.single_source_shortest_path_length(\
+         args => [1], label => 'L', relation => 'R', direction => 'directed', \
+         parallel => 'collapse', self_loops => 'drop') YIELD {yields} {tail}"
+    )
+}
+
+fn sealed_sql_distances(pairs: &[(u128, i64)]) -> Vec<GraphValueRow> {
+    pairs
+        .iter()
+        .map(|&(vertex, distance)| {
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(vertex)),
+                GraphValue::Scalar(CanonicalScalar::Int(distance)),
+            ])
+        })
+        .collect()
+}
+
+fn sealed_sql_weighted(direction: &str, parallel: &str) -> String {
+    format!(
+        "CALL fnx.single_source_dijkstra_path_length(\
+         args => [1], label => 'L', relation => 'R', weight => 'p', missing => 'reject', \
+         direction => '{direction}', parallel => '{parallel}', self_loops => 'drop') \
+         YIELD vertex, distance RETURN vertex, distance ORDER BY vertex"
+    )
+}
+
+fn sealed_sql_costs(pairs: &[(u128, f64)]) -> Vec<GraphValueRow> {
+    pairs
+        .iter()
+        .map(|&(vertex, distance)| {
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(vertex)),
+                GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(distance))),
+            ])
+        })
+        .collect()
+}
+
+#[test]
+fn composed_sealed_calls_match_decoded_queries_for_sparse_pages_aliases_and_projections() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let database = seed(&contexts.commit(), &vfs).await;
+        let view = database
+            .prepare_sealed_read(
+                &cx,
+                None,
+                R,
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(view.snapshot_seq(), CommitSeq(3));
+        assert_eq!(view.frontier(), CommitSeq(3));
+        assert_eq!(view.relation(), R);
+        let texts = [
+            sealed_sql_bfs(
+                "vertex, distance",
+                "RETURN vertex, distance ORDER BY vertex",
+            ),
+            sealed_sql_bfs(
+                "vertex AS n, distance AS hops",
+                "RETURN n, hops ORDER BY hops DESC, n SKIP 1 LIMIT 1",
+            ),
+            sealed_sql_bfs("vertex, distance", "RETURN vertex, distance LIMIT 0"),
+            sealed_sql_bfs(
+                "vertex, distance",
+                "RETURN vertex, distance ORDER BY distance DESC SKIP 9223372036854775807 LIMIT 2",
+            ),
+            sealed_sql_bfs(
+                "vertex, distance",
+                "WHERE distance >= 1 WITH vertex, distance + 10 AS score \
+                 RETURN vertex, score ORDER BY score DESC, vertex",
+            ),
+            "CALL fnx.triangles(label => 'L', relation => 'R', direction => 'undirected', \
+             parallel => 'collapse', self_loops => 'drop') YIELD vertex AS n, triangles AS count \
+             RETURN n, count ORDER BY count DESC, n"
+                .to_owned(),
+            sealed_sql_weighted("directed", "sum"),
+            sealed_sql_weighted("reversed", "min"),
+            sealed_sql_bfs(
+                "vertex AS n, distance",
+                "MATCH (n)-[:R]->(m) RETURN n, m, distance ORDER BY n, m, distance LIMIT 5",
+            ),
+        ];
+        let queries: Vec<_> = texts.iter().map(|text| sealed_sql_rows(text)).collect();
+        let mut actual = Vec::new();
+        for (text, query) in texts.iter().zip(&queries) {
+            actual.push(
+                view.execute_graph_set_governed(&cx, query, sealed_sql_policy(), memory())
+                    .unwrap_or_else(|error| panic!("{text}: {error}")),
+            );
+        }
+        assert_eq!(
+            actual[0].value,
+            sealed_sql_distances(&[(1, 0), (2, 1), (3, 2)])
+        );
+        assert_eq!(actual[1].value, sealed_sql_distances(&[(2, 1)]));
+        assert_eq!(queries[1].columns(), &["n", "hops"]);
+        assert!(actual[2].value.is_empty());
+        assert!(actual[3].value.is_empty());
+        assert_eq!(actual[4].value, sealed_sql_distances(&[(3, 12), (2, 11)]));
+        assert_eq!(
+            actual[5].value,
+            sealed_sql_distances(&[(1, 1), (2, 1), (3, 1), (u128::MAX, 0)])
+        );
+        // Thirteen parallel 1->2 identities have weights 5 + twelve ones at
+        // this cut. The excluded-label Boolean edge must never be read as a weight.
+        assert_eq!(
+            actual[6].value,
+            sealed_sql_costs(&[(1, 0.0), (2, 17.0), (3, 18.0)])
+        );
+        assert_eq!(
+            actual[7].value,
+            sealed_sql_costs(&[(1, 0.0), (2, 2.0), (3, 1.0)])
+        );
+        // This is a retention witness, not an allocator/RSS measurement. Run
+        // every compressed query before the independent decoded oracle can
+        // populate the owner's decoded analytics cache.
+        let cache = database.read_cache_status(&cx).unwrap();
+        assert_eq!(cache.projections.entries, 0);
+        assert_eq!(cache.projections.retained_bytes, 0);
+        for ((text, query), actual) in texts.iter().zip(&queries).zip(actual) {
+            let decoded = database
+                .execute_graph_set_governed_at(&cx, query, view.snapshot_seq(), sealed_sql_policy())
+                .unwrap_or_else(|error| panic!("decoded {text}: {error}"));
+            assert_eq!(actual.value, decoded.value, "{text}");
+        }
+    });
+}
+
+#[test]
+fn composed_sealed_grouping_matches_decoded_and_hand_counted_components_and_distances() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let database = seed(&contexts.commit(), &vfs).await;
+        let view = database
+            .prepare_sealed_read(
+                &cx,
+                None,
+                R,
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+        let params = GqlParameters::new();
+        let texts = [
+            "CALL fnx.weakly_connected_components(label => 'L', relation => 'R', \
+             parallel => 'collapse', self_loops => 'drop') YIELD vertex, component \
+             RETURN component, COUNT(*) AS n GROUP BY component ORDER BY component"
+                .to_owned(),
+            sealed_sql_bfs(
+                "vertex, distance",
+                "WITH vertex, distance, distance % 2 AS parity \
+                 RETURN parity, COUNT(*) AS n, SUM(distance) AS total \
+                 GROUP BY parity ORDER BY parity",
+            ),
+        ];
+        let expected = [
+            vec![
+                vec![
+                    fgdb::QueryValue::Value(GraphValue::Vertex(VId(1))),
+                    fgdb::QueryValue::Count(3),
+                ],
+                vec![
+                    fgdb::QueryValue::Value(GraphValue::Vertex(VId(u128::MAX))),
+                    fgdb::QueryValue::Count(1),
+                ],
+            ],
+            vec![
+                vec![
+                    fgdb::QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(0))),
+                    fgdb::QueryValue::Count(2),
+                    fgdb::QueryValue::Integer(2),
+                ],
+                vec![
+                    fgdb::QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(1))),
+                    fgdb::QueryValue::Count(1),
+                    fgdb::QueryValue::Integer(1),
+                ],
+            ],
+        ];
+        for (text, expected) in texts.iter().zip(expected) {
+            let fgdb::PreparedNativeRead::PipelineAggregate(prepared) =
+                fgdb::PreparedNativeRead::prepare(text, &params, sealed_sql_symbols).unwrap()
+            else {
+                panic!("CALL grouping must retain its relational input");
+            };
+            let slots = prepared.output_slots().to_vec();
+            let query = prepared.bind_relation_parameters(&params).unwrap();
+            let actual = view
+                .execute_graph_set_aggregate_governed(&cx, &query, sealed_sql_policy(), memory())
+                .unwrap();
+            let cells: Vec<Vec<_>> = actual
+                .value
+                .iter()
+                .map(|row| {
+                    slots
+                        .iter()
+                        .map(|slot| match *slot {
+                            GraphAggregateTextSlot::GroupKey(index) => {
+                                fgdb::QueryValue::Value(row.keys()[index].clone())
+                            }
+                            GraphAggregateTextSlot::Aggregate(index) => row.values()[index].clone(),
+                        })
+                        .collect()
+                })
+                .collect();
+            assert_eq!(cells, expected, "{text}");
+            let decoded = database
+                .execute_graph_set_aggregate_governed_at(
+                    &cx,
+                    &query,
+                    view.snapshot_seq(),
+                    sealed_sql_policy(),
+                )
+                .unwrap();
+            assert_eq!(actual.value, decoded.value, "{text}");
+            let exact = GqlQueryPolicy::new(
+                sealed_sql_policy().rows.max_snapshot_records().unwrap(),
+                actual.rows.result_rows,
+                actual.evaluator.work_units,
+                actual.evaluator.scratch_entries,
+            );
+            assert_eq!(
+                view.execute_graph_set_aggregate_governed(&cx, &query, exact, memory())
+                    .unwrap(),
+                actual
+            );
+            let mut short = exact;
+            short.evaluator.max_work_units -= 1;
+            assert!(
+                view.execute_graph_set_aggregate_governed(&cx, &query, short, memory())
+                    .is_err()
+            );
+        }
+    });
+}
+
+#[test]
+fn composed_sealed_queries_keep_their_cut_after_writer_advance_drop_and_reopen() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let vfs = MemVfs::new().unwrap();
+        let mut database = seed(&commit, &vfs).await;
+        let historical = database
+            .prepare_sealed_read(
+                &cx,
+                Some(CommitSeq(1)),
+                R,
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+        let pinned = database
+            .prepare_sealed_read(
+                &cx,
+                None,
+                R,
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(historical.snapshot_seq(), CommitSeq(1));
+        assert_eq!(historical.frontier(), CommitSeq(3));
+        assert_eq!(historical.partition_root(), pinned.partition_root());
+        let prior_root = pinned.partition_root();
+        let weighted = sealed_sql_rows(&sealed_sql_weighted("directed", "sum"));
+        let bfs = sealed_sql_rows(&sealed_sql_bfs(
+            "vertex, distance",
+            "RETURN vertex, distance ORDER BY vertex",
+        ));
+        let before = historical
+            .execute_graph_set_governed(&cx, &weighted, sealed_sql_policy(), memory())
+            .unwrap();
+        let old_head = pinned
+            .execute_graph_set_governed(&cx, &weighted, sealed_sql_policy(), memory())
+            .unwrap();
+        assert_eq!(
+            before.value,
+            sealed_sql_costs(&[(1, 0.0), (2, 13.0), (3, 14.0)])
+        );
+        assert_eq!(
+            old_head.value,
+            sealed_sql_costs(&[(1, 0.0), (2, 17.0), (3, 18.0)])
+        );
+
+        let mut change = WriteBatch::new(R);
+        change.set_edge_property(EId(1), P, Some(CanonicalScalar::Int(9)));
+        change.add_edge(
+            EId(101),
+            VId(3),
+            VId(u128::MAX),
+            vec![(P, CanonicalScalar::Int(1))],
+        );
+        let now = database.write(&commit, change).await.unwrap();
+        let latest = database
+            .prepare_sealed_read(
+                &cx,
+                None,
+                R,
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(latest.snapshot_seq(), now);
+        assert_ne!(latest.partition_root(), prior_root);
+        let reached = latest
+            .execute_graph_set_governed(&cx, &bfs, sealed_sql_policy(), memory())
+            .unwrap();
+        assert_eq!(
+            reached.value,
+            sealed_sql_distances(&[(1, 0), (2, 1), (3, 2), (u128::MAX, 3)])
+        );
+        drop(database);
+
+        assert_eq!(
+            historical
+                .execute_graph_set_governed(&cx, &weighted, sealed_sql_policy(), memory())
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            pinned
+                .execute_graph_set_governed(&cx, &weighted, sealed_sql_policy(), memory())
+                .unwrap(),
+            old_head
+        );
+        assert_eq!(pinned.partition_root(), prior_root);
+        assert_eq!(
+            pinned
+                .execute_graph_set_governed(&cx, &bfs, sealed_sql_policy(), memory())
+                .unwrap()
+                .value,
+            sealed_sql_distances(&[(1, 0), (2, 1), (3, 2)])
+        );
+        let reopened = Database::open_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+        for (cut, expected) in [(CommitSeq(1), before.value), (CommitSeq(3), old_head.value)] {
+            let after_reopen = reopened
+                .prepare_sealed_read(
+                    &cx,
+                    Some(cut),
+                    R,
+                    SealedLimits::default(),
+                    RootReadLimits::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                after_reopen
+                    .execute_graph_set_governed(&cx, &weighted, sealed_sql_policy(), memory())
+                    .unwrap()
+                    .value,
+                expected
+            );
+            assert_eq!(
+                reopened
+                    .execute_graph_set_governed_at(&cx, &weighted, cut, sealed_sql_policy())
+                    .unwrap()
+                    .value,
+                expected
+            );
+        }
+        assert_eq!(
+            latest
+                .execute_graph_set_governed(&cx, &bfs, sealed_sql_policy(), memory())
+                .unwrap(),
+            reached
+        );
+    });
+}
+
+#[test]
+fn composed_sealed_queries_keep_exact_admission_and_source_failures_before_empty_pages() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let database = seed(&contexts.commit(), &vfs).await;
+        let view = database
+            .prepare_sealed_read(&cx, None, R, SealedLimits::default(), RootReadLimits::default())
+            .await
+            .unwrap();
+        let ranked = sealed_sql_rows(&sealed_sql_bfs(
+            "vertex, distance",
+            "RETURN vertex, distance ORDER BY distance DESC, vertex LIMIT 1",
+        ));
+        let zero = sealed_sql_rows(&sealed_sql_bfs(
+            "vertex, distance",
+            "RETURN vertex, distance LIMIT 0",
+        ));
+        cache_limit(&database, &cx, 0);
+        let cold = view.execute_graph_set_governed(&cx, &ranked, sealed_sql_policy(), memory()).unwrap();
+        assert_eq!(database.read_cache_status(&cx).unwrap().sealed_projections.entries, 0);
+        cache_limit(&database, &cx, 1 << 20);
+        let actual = view.execute_graph_set_governed(&cx, &ranked, sealed_sql_policy(), memory()).unwrap();
+        assert_eq!(actual, cold, "retaining a projection preserves complete query accounting");
+        let retained = database.read_cache_status(&cx).unwrap().sealed_projections;
+        assert_eq!(retained.entries, 1);
+        assert!(retained.retained_bytes > 0 && retained.retained_bytes <= retained.max_bytes);
+        assert_eq!(view.execute_graph_set_governed(&cx, &ranked, sealed_sql_policy(), memory()).unwrap(), cold, "warm admission replays the cold source and construction cost");
+        assert_eq!(database.read_cache_status(&cx).unwrap().sealed_projections, retained);
+        assert_eq!(actual.value, sealed_sql_distances(&[(3, 2)]));
+        let exact = GqlQueryPolicy::new(
+            sealed_sql_policy().rows.max_snapshot_records().unwrap(),
+            actual.rows.result_rows,
+            actual.evaluator.work_units,
+            actual.evaluator.scratch_entries,
+        );
+        assert_eq!(view.execute_graph_set_governed(&cx, &ranked, exact, memory()).unwrap(), actual);
+        for dimension in 0..3 {
+            let mut short = exact;
+            match dimension {
+                0 => short.evaluator.max_work_units -= 1,
+                1 => short.evaluator.max_scratch_entries -= 1,
+                2 => short = GqlQueryPolicy::new(
+                    exact.rows.max_snapshot_records().unwrap(),
+                    actual.rows.result_rows - 1,
+                    exact.evaluator.max_work_units,
+                    exact.evaluator.max_scratch_entries,
+                ),
+                _ => unreachable!(),
+            }
+            assert!(view.execute_graph_set_governed(&cx, &ranked, short, memory()).is_err(), "dimension {dimension}");
+        }
+        let after_short = database.read_cache_status(&cx).unwrap().sealed_projections;
+        // At most the original, exact, and three short-policy projections can
+        // have completed; no result or failed projection occupies a cache slot.
+        assert!((1..=5).contains(&after_short.entries));
+        assert!(after_short.retained_bytes <= after_short.max_bytes);
+        assert_eq!(view.execute_graph_set_governed(&cx, &ranked, sealed_sql_policy(), memory()).unwrap(), cold);
+
+        let mut opt = options();
+        opt.projection.directedness = Directedness::Directed;
+        let completed = database.execute_fnx_sealed(
+            &cx,
+            &call("CALL fnx.single_source_shortest_path_length(1) YIELD vertex, distance"),
+            opt,
+            memory(),
+            SealedLimits::default(),
+        ).await.unwrap();
+        assert_eq!(completed.analytics.rows.len(), 3);
+        // Retained delivery preserves the registered complete-result admission,
+        // including aliases and every reachable row, even for a one/zero-row page.
+        let bytes = 2 * size_of::<String>() + "vertex".len() + "distance".len()
+            + 3 * (size_of::<Vec<FnxValue>>() + 2 * size_of::<FnxValue>());
+        let exact_memory = FnxMemoryLimits {
+            max_kernel_workspace_bytes: completed.analytics.certificate.kernel_workspace_bytes,
+            max_result_bytes: bytes,
+        };
+        assert_eq!(view.execute_graph_set_governed(&cx, &ranked, sealed_sql_policy(), exact_memory).unwrap(), actual);
+        assert!(view.execute_graph_set_governed(&cx, &zero, sealed_sql_policy(), exact_memory).unwrap().value.is_empty());
+        for workspace in [false, true] {
+            let mut short = exact_memory;
+            if workspace {
+                short.max_kernel_workspace_bytes -= 1;
+            } else {
+                short.max_result_bytes -= 1;
+            }
+            for query in [&ranked, &zero] {
+                assert!(view.execute_graph_set_governed(&cx, query, sealed_sql_policy(), short).is_err());
+            }
+        }
+
+        for (relation, expected) in [(Some("Other"), Some(RelationId(8))), (None, None)] {
+            let relation = relation.map_or_else(String::new, |name| format!(", relation => '{name}'"));
+            let query = sealed_sql_rows(&format!(
+                "CALL fnx.single_source_shortest_path_length(args => [1]{relation}) \
+                 YIELD vertex, distance RETURN vertex, distance LIMIT 0"
+            ));
+            let error = view.execute_graph_set_governed(&cx, &query, sealed_sql_policy(), memory()).unwrap_err();
+            assert!(matches!(error,
+                fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(
+                    fgdb::GqlError::Procedure(fgdb::ProcedureError::SealedRelationMismatch { requested, retained })
+                )) if requested == expected && retained == R
+            ));
+        }
+        for (index, text) in [
+            "CALL fnx.single_source_shortest_path_length(args => [42], relation => 'R', \
+             parallel => 'collapse') YIELD vertex, distance RETURN vertex, distance LIMIT 0",
+            // Removing the label selector admits edge99's Boolean property.
+            "CALL fnx.single_source_dijkstra_path_length(args => [1], relation => 'R', \
+             weight => 'p', missing => 'reject', parallel => 'min', self_loops => 'drop') \
+             YIELD vertex, distance RETURN vertex, distance LIMIT 0",
+        ].into_iter().enumerate() {
+            let query = sealed_sql_rows(text);
+            let error = view.execute_graph_set_governed(&cx, &query, sealed_sql_policy(), memory()).unwrap_err();
+            let fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(
+                fgdb::GqlError::Procedure(fgdb::ProcedureError::SealedRead(error)),
+            )) = error else {
+                panic!("expected compressed source/kernel refusal for {text}: {error}");
+            };
+            match index {
+                0 => assert!(matches!(*error,
+                    FnxSealedReadError::Execution(fgdb_prism::FnxSealedExecutionError::Execution(
+                        fgdb_prism::FnxExecutionError::UnknownSource(VId(42))
+                    ))
+                )),
+                1 => assert!(matches!(*error,
+                    FnxSealedReadError::Projection(fgdb_prism::SealedProjectionError::Weight {
+                        edge: EId(99), reason: fgdb_prism::FnxWeightError::NotNumeric,
+                    })
+                )),
+                _ => unreachable!(),
+            }
+        }
+        let late = sealed_sql_rows(&sealed_sql_bfs(
+            "vertex, distance",
+            "WITH vertex, 1 / (2 - distance) AS value \
+             RETURN vertex, value ORDER BY vertex LIMIT 1",
+        ));
+        assert!(matches!(
+            view.execute_graph_set_governed(&cx, &late, sealed_sql_policy(), memory()),
+            Err(fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Projection { .. }))
+                | Err(fgdb_gql::GqlQueryError::Data(_))
+        ));
+        let no_source = GqlQueryPolicy::new(0, 0, 100_000_000, 10_000_000);
+        assert!(view.execute_graph_set_governed(&cx, &zero, no_source, memory()).is_err());
+        let measured = Arc::new(SimulationCheckpointProbe::new(None));
+        let observed = cx.with_checkpoint_probe(Arc::clone(&measured));
+        assert_eq!(view.execute_graph_set_governed(&observed, &ranked, sealed_sql_policy(), memory()).unwrap(), actual);
+        assert!(measured.calls() > 2);
+        for stop in [1, measured.calls() / 2, measured.calls()] {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let interrupted = cx.with_checkpoint_probe(Arc::clone(&probe));
+            assert!(view.execute_graph_set_governed(&interrupted, &ranked, sealed_sql_policy(), memory()).is_err());
+            assert_eq!(probe.calls(), stop);
+        }
+        assert_eq!(view.execute_graph_set_governed(&cx, &ranked, sealed_sql_policy(), memory()).unwrap(), actual);
+
+        assert!(database.prepare_sealed_read(
+            &cx, None, R, SealedLimits::default(),
+            RootReadLimits { max_source_bytes: 0, ..RootReadLimits::default() },
+        ).await.is_err());
+        assert!(database.prepare_sealed_read(
+            &cx, None, R,
+            SealedLimits { max_incidences: 0, ..SealedLimits::default() },
+            RootReadLimits::default(),
+        ).await.is_err());
+        assert!(database.prepare_sealed_read(
+            &cx, Some(CommitSeq(4)), R, SealedLimits::default(), RootReadLimits::default(),
+        ).await.is_err());
     });
 }
