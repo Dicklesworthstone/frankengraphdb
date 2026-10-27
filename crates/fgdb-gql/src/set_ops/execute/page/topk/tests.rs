@@ -547,3 +547,284 @@ fn ordered_pipeline_cancellation_and_exact_quotas_cover_input_heap_sort_and_deli
     }
     assert_eq!(query.canonical_bytes(), frozen);
 }
+
+#[test]
+fn materialized_pages_match_full_sort_for_nulls_ties_and_wide_offsets() {
+    let values = [
+        [Some(3), Some(1)],
+        [None, Some(2)],
+        [Some(1), None],
+        [Some(3), Some(1)],
+        [Some(3), Some(0)],
+        [Some(2), Some(3)],
+    ];
+    for mask in 0..(1 << values.len()) {
+        let input: Vec<_> = values
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| mask & (1 << at) != 0)
+            .map(|(_, value)| row(value))
+            .collect();
+        for descending in [false, true] {
+            for nulls_first in [false, true] {
+                let order = [
+                    GraphValueOrder {
+                        column: 0,
+                        descending,
+                        nulls_first,
+                    },
+                    GraphValueOrder::descending(1),
+                ];
+                let mut all = input.clone();
+                merge::sort(
+                    &mut all,
+                    &mut |_| Ok::<_, usize>(()),
+                    &mut |a, b, control| compare_rows(a, b, &order, control),
+                )
+                .unwrap();
+                for (skip, count) in [
+                    (0, 0),
+                    (0, 1),
+                    (1, 3),
+                    (4, 20),
+                    (u64::MAX, 0),
+                    (u64::MAX, u64::MAX),
+                ] {
+                    let expected: Vec<_> = all
+                        .iter()
+                        .enumerate()
+                        .filter(|(at, _)| {
+                            (*at as u128) >= u128::from(skip)
+                                && (*at as u128) - u128::from(skip) < u128::from(count)
+                        })
+                        .map(|(_, value)| value.clone())
+                        .collect();
+                    assert_eq!(
+                        select_rows(input.clone(), &order, skip, count, &mut |_| {
+                            Ok::<_, usize>(())
+                        })
+                        .unwrap(),
+                        expected
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn procedure_leaf() -> PreparedGraphSet {
+    PreparedGraphSet::singleton()
+        .procedure_call(
+            "fnx".into(),
+            "pagerank".into(),
+            vec![],
+            vec![],
+            // A score-first YIELD cannot borrow the kernel's VId row order.
+            vec![
+                ("score".into(), "score".into()),
+                ("node".into(), "node".into()),
+            ],
+            vec![],
+        )
+        .unwrap()
+        .with_order_by(&[GraphValueOrder::descending(0)])
+        .unwrap()
+}
+
+fn execute_procedure_rows(
+    query: &PreparedGraphSet,
+    rows: &[GraphValueRow],
+    allowance: GqlQueryPolicy,
+    checkpoint: impl FnMut() -> Result<(), usize>,
+) -> SetResult<GqlQueryExecution<GraphValueRow>, usize, usize> {
+    let mut calls = 0;
+    let result = query.execute_governed_with_procedures(
+        allowance,
+        |_, _| panic!("a procedure leaf must not open a graph-pattern source"),
+        |call, arguments, _| {
+            calls += 1;
+            assert_eq!(call.namespace(), "fnx");
+            assert_eq!(call.name(), "pagerank");
+            assert!(arguments.is_empty());
+            Ok(GqlQueryExecution {
+                value: rows.to_vec(),
+                rows: GqlExecutionStats {
+                    snapshot_records: rows.len() as u64,
+                    result_rows: rows.len() as u64,
+                },
+                evaluator: GlaExecutionStats::default(),
+            })
+        },
+        checkpoint,
+    );
+    assert!(calls <= 1, "a refusal cannot reopen the procedure");
+    if result.is_ok() {
+        assert_eq!(calls, 1, "even LIMIT 0 must admit the procedure");
+    }
+    result
+}
+
+#[test]
+fn complete_procedure_bags_use_bounded_ranking_with_exact_quotas_and_refusals() {
+    let rows: Vec<_> = [1, 8, 3, 7, 2, 9, 5, 9, 0]
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Scalar(CanonicalScalar::Int(value)),
+                GraphValue::Vertex(VId((1_u128 << 100) + index as u128)),
+            ])
+        })
+        .collect();
+    let complete = procedure_leaf();
+    let query = complete.clone().with_page(1, Some(3));
+    assert!(!supports(&query)); // This exercises ordinary materialized CALL.
+    let frozen = query.canonical_bytes();
+    let full = execute_procedure_rows(&complete, &rows, policy(), || Ok(())).unwrap();
+    for (offset, count) in [(0, 0), (u64::MAX, 0), (u64::MAX, u64::MAX), (0, u64::MAX)] {
+        let result = execute_procedure_rows(
+            &complete.clone().with_page(offset, Some(count)),
+            &rows,
+            policy(),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(result.rows.snapshot_records, rows.len() as u64);
+        assert_eq!(
+            result.value,
+            if offset == 0 && count != 0 {
+                full.value.clone()
+            } else {
+                vec![]
+            }
+        );
+    }
+    let mut callbacks = 0;
+    let observed = execute_procedure_rows(&query, &rows, policy(), || {
+        callbacks += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(observed.value, full.value[1..4]);
+    assert_eq!(observed.rows.snapshot_records, rows.len() as u64);
+    assert_eq!(observed.rows.result_rows, 3);
+    let work = observed.evaluator.work_units;
+    let scratch = observed.evaluator.scratch_entries;
+    let exact = GqlQueryPolicy::new(rows.len() as u64, 3, work, scratch);
+    assert_eq!(
+        execute_procedure_rows(&query, &rows, exact, || Ok(()))
+            .unwrap()
+            .value,
+        observed.value
+    );
+    for denied in [
+        GqlQueryPolicy::new(rows.len() as u64 - 1, 3, work, scratch),
+        GqlQueryPolicy::new(rows.len() as u64, 2, work, scratch),
+        GqlQueryPolicy::new(rows.len() as u64, 3, work - 1, scratch),
+        GqlQueryPolicy::new(rows.len() as u64, 3, work, scratch - 1),
+    ] {
+        assert!(execute_procedure_rows(&query, &rows, denied, || Ok(())).is_err());
+    }
+    for stop in 1..=callbacks {
+        let mut seen = 0;
+        assert!(matches!(
+            execute_procedure_rows(&query, &rows, policy(), || {
+                seen += 1;
+                if seen == stop { Err(stop) } else { Ok(()) }
+            }),
+            Err(GqlQueryError::Interrupted(at)) if at == stop
+        ));
+        assert_eq!(seen, stop);
+    }
+    // A malformed late row remains a source-schema refusal even when no row
+    // can be delivered, and must not become a successful top-k prefix.
+    let mut malformed = rows.clone();
+    malformed.push(row(&[Some(100)]));
+    for count in [0, 1] {
+        assert!(matches!(
+            execute_procedure_rows(
+                &complete.clone().with_page(0, Some(count)),
+                &malformed,
+                policy(),
+                || Ok(())
+            ),
+            Err(GqlQueryError::Source(GraphSetExecutionError::InputSchema {
+                operand: 0
+            }))
+        ));
+    }
+    assert_eq!(query.canonical_bytes(), frozen);
+}
+
+#[test]
+fn ordinary_match_ranked_page_matches_full_execution_and_uses_less_work() {
+    let query = PreparedGraphSetText::prepare(
+        "MATCH (n) RETURN n, n.p AS value ORDER BY value DESC SKIP 2 LIMIT 5",
+        |kind, name| {
+            (kind == crate::GraphSymbolKind::Property && name == "p").then_some(
+                crate::GraphSymbol::Property(fgdb_delta_types::PropertyKeyId(1)),
+            )
+        },
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    assert!(!supports(&query)); // No UNWIND/product fold may cover this case.
+    let values: Vec<_> = (0..1024)
+        .map(|index| CanonicalPropertyValue::from(CanonicalScalar::Int((index * 37) % 97)))
+        .collect();
+    let run = |query: &PreparedGraphSet| {
+        let mut calls = 0;
+        let result = query
+            .execute_governed(
+                policy(),
+                |pattern, remaining| {
+                    calls += 1;
+                    pattern.plan().execute_governed_with_properties(
+                        values.len() as u64,
+                        (0..values.len()).map(|index| VId(index as u128 + 1)),
+                        [],
+                        |_, _| Ok::<_, usize>(true),
+                        |vertex, _| Ok(values.get(vertex.0 as usize - 1)),
+                        remaining,
+                        || Ok::<_, usize>(()),
+                    )
+                },
+                || Ok::<_, usize>(()),
+            )
+            .unwrap();
+        assert_eq!(calls, 1);
+        result
+    };
+    let full = run(&query.clone().with_page(0, None));
+    let selected = run(&query);
+    assert_eq!(selected.value, full.value[2..7]);
+    assert_eq!(selected.rows.snapshot_records, 1024);
+    assert_eq!(selected.rows.result_rows, 5);
+    assert!(selected.evaluator.work_units < full.evaluator.work_units);
+    assert_eq!(
+        selected.evaluator.scratch_entries,
+        full.evaluator.scratch_entries + 5
+    );
+    eprintln!(
+        "materialized MATCH ranking: vertices=1024 offset=2 limit=5 full_work={} selected_work={} full_scratch={} selected_scratch={}",
+        full.evaluator.work_units,
+        selected.evaluator.work_units,
+        full.evaluator.scratch_entries,
+        selected.evaluator.scratch_entries,
+    );
+    // This is a same-invocation logical-work comparison, not elapsed time or
+    // a claim that snapshot admission/materialization became bounded by k.
+    let mut expected: Vec<_> = (0..1024_u128).collect();
+    expected.sort_by_key(|index| (std::cmp::Reverse((index * 37) % 97), *index));
+    let expected: Vec<_> = expected[2..7]
+        .iter()
+        .map(|&index| {
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(index + 1)),
+                GraphValue::Scalar(CanonicalScalar::Int(((index * 37) % 97) as i64)),
+            ])
+        })
+        .collect();
+    assert_eq!(selected.value, expected);
+}

@@ -280,6 +280,23 @@ where
     Checkpoint: FnMut() -> Result<(), C>,
 {
     if !order.is_empty() {
+        if let Some(count) = count {
+            let retained = if count == 0 {
+                0
+            } else {
+                u128::from(offset) + u128::from(count)
+            };
+            // Source admission, child pages, DISTINCT and every expression
+            // have already completed. A finite ranked page needs only this
+            // prefix; reuse the same whole-row comparator and bounded heap
+            // as folded expansions. A page covering the whole input keeps
+            // the in-place sort instead of building another full-size heap.
+            if retained < rows.len() as u128 {
+                return page::select_rows(rows, order, offset, count, &mut |event| {
+                    meter.event(event)
+                });
+            }
+        }
         merge::sort(
             &mut rows,
             &mut |event| meter.event(event),

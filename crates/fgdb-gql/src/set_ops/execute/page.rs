@@ -8,6 +8,7 @@
 use super::*;
 
 mod topk;
+pub(super) use topk::select_rows;
 
 pub(super) fn supports(query: &PreparedGraphSet) -> bool {
     query.count.is_some() && query.has_foldable_node()

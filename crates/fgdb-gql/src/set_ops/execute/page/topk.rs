@@ -61,28 +61,7 @@ impl<'a> Ranked<'a> {
             // admitted the new row's owned cells and payload copy.
             control(GlaExecutionEvent::Work)?;
             self.rows[0] = row;
-            let mut at = 0;
-            while at < self.rows.len() / 2 {
-                let mut child = 2 * at + 1;
-                if child + 1 < self.rows.len()
-                    && compare_rows(
-                        &self.rows[child],
-                        &self.rows[child + 1],
-                        self.order,
-                        control,
-                    )? == Ordering::Less
-                {
-                    child += 1;
-                }
-                if compare_rows(&self.rows[at], &self.rows[child], self.order, control)?
-                    != Ordering::Less
-                {
-                    break;
-                }
-                control(GlaExecutionEvent::Work)?;
-                self.rows.swap(at, child);
-                at = child;
-            }
+            sift_down(&mut self.rows, 0, self.order, control)?;
         }
         Ok(())
     }
@@ -114,6 +93,68 @@ impl<'a> Ranked<'a> {
         control(GlaExecutionEvent::Work)?;
         Ok(output)
     }
+}
+
+/// Repair a max-heap after replacing its root, or build one bottom-up from
+/// admitted rows. Folded and already-materialized producers use identical
+/// comparisons, tie decisions and per-swap cancellation points.
+fn sift_down<E>(
+    rows: &mut [GraphValueRow],
+    mut at: usize,
+    order: &[GraphValueOrder],
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<(), E> {
+    while at < rows.len() / 2 {
+        let mut child = 2 * at + 1;
+        if child + 1 < rows.len()
+            && compare_rows(&rows[child], &rows[child + 1], order, control)? == Ordering::Less
+        {
+            child += 1;
+        }
+        if compare_rows(&rows[at], &rows[child], order, control)? != Ordering::Less {
+            break;
+        }
+        control(GlaExecutionEvent::Work)?;
+        rows.swap(at, child);
+        at = child;
+    }
+    Ok(())
+}
+
+/// Rank a complete, already admitted bag without sorting its discarded tail.
+/// All source/schema/expression errors precede this selection. The rows move
+/// within their original allocation, with the same heap repair and finalizer
+/// as a folded producer. No second heap allocation or scratch-entry charge is
+/// introduced. Duplicates, NULL placement and the canonical whole-row tie break
+/// are unchanged; only the requested prefix participates in heap repairs.
+pub(in crate::set_ops::execute) fn select_rows<E>(
+    rows: Vec<GraphValueRow>,
+    order: &[GraphValueOrder],
+    offset: u64,
+    count: u64,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Vec<GraphValueRow>, E> {
+    let mut ranked = Ranked::new(order, offset, count);
+    ranked.rows = rows;
+    let retained = ranked.bound.min(ranked.rows.len() as u128) as usize;
+    for root in (0..retained / 2).rev() {
+        sift_down(&mut ranked.rows[..retained], root, order, control)?;
+    }
+    while ranked.rows.len() > retained {
+        control(GlaExecutionEvent::Work)?;
+        let at = ranked.rows.len() - 1;
+        if retained != 0
+            && compare_rows(&ranked.rows[at], &ranked.rows[0], order, control)? == Ordering::Less
+        {
+            control(GlaExecutionEvent::Work)?;
+            ranked.rows.swap(0, at);
+            sift_down(&mut ranked.rows[..retained], 0, order, control)?;
+        }
+        // Drop one rejected occurrence at its own cancellation point instead
+        // of retaining all payloads for a final uninterruptible truncate.
+        drop(ranked.rows.pop());
+    }
+    ranked.finish(offset, count, control)
 }
 
 pub(super) fn collect<E, C, S, Checkpoint>(
