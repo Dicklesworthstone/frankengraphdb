@@ -3388,6 +3388,20 @@ impl RootAdmission {
         )
     }
 
+    pub(crate) fn live_vertices(&self) -> Vec<crate::vertex::VertexRow> {
+        self.walk
+            .vertex_history
+            .live_rows(self.binding.published_at)
+    }
+
+    pub(crate) fn edge_identities(&self) -> impl ExactSizeIterator<Item = fgdb_types::EId> + '_ {
+        self.walk.history.identities()
+    }
+
+    pub(crate) fn vertex_identities(&self) -> impl Iterator<Item = fgdb_types::VId> + '_ {
+        self.walk.vertex_history.identities()
+    }
+
     #[allow(clippy::type_complexity)]
     pub(crate) fn live_edges(
         &self,

@@ -232,6 +232,15 @@ fn per_eid_chains_decide_exactly_as_the_global_statement_map() {
         }
         // The same statements, refused block's prefix included.
         assert_eq!(chains.statements(), global.statements, "trial {trial}");
+        let identities = chains.identities();
+        let count = identities.len();
+        let identities: std::collections::BTreeSet<_> = identities.collect();
+        assert_eq!(count, identities.len(), "one entry per identity");
+        assert_eq!(
+            identities,
+            global.statements.keys().map(|(eid, _)| *eid).collect(),
+            "spent identities include retired statements and accepted prefixes"
+        );
         let (collapsed, superseded) = chains.into_canonical();
         assert_eq!(collapsed, global.statements, "trial {trial}");
         assert_eq!(

@@ -406,6 +406,7 @@ impl BlockWriter {
             blocks,
             patches,
             frontier,
+            None,
         ))
     }
 
@@ -439,6 +440,7 @@ impl BlockWriter {
             blocks,
             patches,
             frontier,
+            None,
         ))
     }
 
@@ -446,6 +448,8 @@ impl BlockWriter {
     /// Unlike [`Self::from_admitted_partition`], this consumes the root walk's
     /// latest-statement coordinates directly, without constructing a sorted
     /// map of every historical statement or sorting its property locations.
+    /// Live vertices and spent identities likewise come from the walk's
+    /// validated histories, without merging or probing every restatement again.
     /// The supplied sealed/decoded collections must be the exact collections
     /// returned beside `admission` by [`crate::store::BlockStore::reopen_sealed`].
     pub fn from_root_admission(
@@ -468,6 +472,7 @@ impl BlockWriter {
             blocks,
             patches,
             frontier,
+            Some(admission),
         ))
     }
 
@@ -483,6 +488,7 @@ impl BlockWriter {
         blocks: &[Vec<AdjacencyEntry>],
         patches: &[VertexPatchRows],
         frontier: CommitSeq,
+        admission: Option<&crate::store::RootAdmission>,
     ) -> Self {
         // History merging already selected one live row per identity. Reserve
         // those exact counts so recovery does not repeatedly allocate and
@@ -509,9 +515,19 @@ impl BlockWriter {
                 },
             );
         }
-        let spent: IdSet<EId> = blocks.iter().flatten().map(|entry| entry.eid).collect();
+        let spent: IdSet<EId> = match admission {
+            Some(admission) => admission.edge_identities().collect(),
+            None => blocks.iter().flatten().map(|entry| entry.eid).collect(),
+        };
         let mut sealed_live_vertices = BTreeSet::new();
-        let live_rows = crate::vertex::merge_all_vertices(patches, frontier);
+        // Defer cloning live vertex payloads until the edge map has consumed
+        // its row vector, keeping the same allocation order as reconstruction
+        // from raw history. The admitted face already owns the canonical
+        // collapse, including permanently spent identities and retirements.
+        let live_rows = match admission {
+            Some(admission) => admission.live_vertices(),
+            None => crate::vertex::merge_all_vertices(patches, frontier),
+        };
         let mut live_vertices = IdMap::with_capacity(live_rows.len());
         for row in live_rows {
             if row.created_at == frontier {
@@ -519,7 +535,10 @@ impl BlockWriter {
             }
             live_vertices.insert(row.vid, LiveVertex::new(row));
         }
-        let spent_vertices: IdSet<VId> = patches.iter().flatten().map(|row| row.vid).collect();
+        let spent_vertices: IdSet<VId> = match admission {
+            Some(admission) => admission.vertex_identities().collect(),
+            None => patches.iter().flatten().map(|row| row.vid).collect(),
+        };
         // The chain head per family is the LAST published block of that
         // family — publication order IS the chain (fgdb-4391).
         let chain_heads = last_wins(

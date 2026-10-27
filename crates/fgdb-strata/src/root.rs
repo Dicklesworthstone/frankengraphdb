@@ -2124,6 +2124,12 @@ impl EdgeChain {
 }
 
 impl EdgeHistoryValidator {
+    /// Every admitted identity once, in its first-admission order. Retired
+    /// identities remain spent; content versions and restatements add no IDs.
+    pub(crate) fn identities(&self) -> impl ExactSizeIterator<Item = EId> + '_ {
+        self.chains.iter().map(EdgeChain::eid)
+    }
+
     /// Admit one block at its publication position.
     pub(crate) fn observe_block(
         &mut self,
@@ -2457,6 +2463,27 @@ pub(crate) struct VertexHistoryValidator {
 }
 
 impl VertexHistoryValidator {
+    /// The already admitted collapse, in canonical identity order. Reusing it
+    /// avoids rebuilding a second map from every published vertex restatement
+    /// solely to recover the current writer's live rows.
+    pub(crate) fn live_rows(&self, frontier: CommitSeq) -> Vec<crate::vertex::VertexRow> {
+        self.rows
+            .values()
+            .filter(|row| row.visible_at(frontier))
+            .cloned()
+            .collect()
+    }
+
+    /// Every admitted identity once, including vertices no longer live.
+    pub(crate) fn identities(&self) -> impl Iterator<Item = VId> + '_ {
+        let mut previous = None;
+        self.rows.keys().filter_map(move |&(vid, _)| {
+            let first = previous != Some(vid);
+            previous = Some(vid);
+            first.then_some(vid)
+        })
+    }
+
     /// Admit one patch at its publication position.
     pub(crate) fn observe_patch(
         &mut self,
@@ -2722,6 +2749,78 @@ mod vertex_history_tests {
                 rows.iter()
                     .map(|row| ((row.vid, row.created_at), row.clone()))
                     .collect(),
+            );
+        }
+    }
+
+    #[test]
+    fn admitted_vertex_reconstruction_matches_patch_history_and_keeps_spent_ids() {
+        let mut first = birth();
+        first.retired_at = Some(CommitSeq(5));
+        let mut second = first.clone();
+        second.created_at = CommitSeq(5);
+        second.retired_at = Some(CommitSeq(9));
+        second.labels.clear();
+        second.props[0].1 = CanonicalScalar::Int(41).into();
+        let mut current = second.clone();
+        current.created_at = CommitSeq(9);
+        current.retired_at = None;
+        current.props[0].1 = CanonicalScalar::Bool(true).into();
+        let mut retired = birth();
+        retired.vid = VId(2);
+        retired.birth_ordinal = 7;
+        retired.retired_at = Some(CommitSeq(4));
+        let rows = [first, second, current, retired];
+
+        // The unchanged validator refuses a missing middle interval; an
+        // eventual complete chain does not authorize a temporarily gapped
+        // publication. Refusal leaves the accepted live row and ID intact.
+        let mut gap = VertexHistoryValidator::default();
+        gap.observe_patch(0, core::slice::from_ref(&rows[2]))
+            .unwrap();
+        assert!(matches!(
+            gap.observe_patch(1, core::slice::from_ref(&rows[0])),
+            Err(RootError::VertexIdentityMismatch { .. })
+        ));
+        assert_eq!(gap.live_rows(CommitSeq(12)), [rows[2].clone()]);
+        assert_eq!(gap.identities().collect::<Vec<_>>(), [rows[2].vid]);
+
+        for order in [[0, 1, 2, 3], [3, 2, 1, 0], [1, 3, 0, 2], [1, 2, 3, 0]] {
+            let mut history = VertexHistoryValidator::default();
+            let mut patches = Vec::new();
+            for index in order.into_iter().chain([0, 1, 2, 3]) {
+                let row = &rows[index];
+                history
+                    .observe_patch(patches.len(), core::slice::from_ref(row))
+                    .unwrap();
+                patches.extend(crate::vertex::pack_rows(vec![row.clone()]).unwrap());
+            }
+            for cut in 0..=12 {
+                assert_eq!(
+                    history.live_rows(CommitSeq(cut)),
+                    crate::vertex::merge_all_vertices(&patches, CommitSeq(cut)),
+                    "cut {cut}, publication order {order:?}"
+                );
+            }
+            assert_eq!(
+                history.identities().collect::<Vec<_>>(),
+                [VId(2), rows[0].vid]
+            );
+            let expected = history.live_rows(CommitSeq(12));
+            assert_eq!(expected, [rows[2].clone()]);
+            let mut independent = history.live_rows(CommitSeq(12));
+            independent[0].props.clear();
+            assert_eq!(history.live_rows(CommitSeq(12)), expected);
+            let mut malformed = rows[2].clone();
+            malformed.birth_ordinal += 1;
+            assert!(matches!(
+                history.observe_patch(patches.len(), &[malformed]),
+                Err(RootError::VertexIdentityMismatch { .. })
+            ));
+            assert_eq!(history.live_rows(CommitSeq(12)), expected);
+            assert_eq!(
+                history.identities().collect::<Vec<_>>(),
+                [VId(2), rows[0].vid]
             );
         }
     }
