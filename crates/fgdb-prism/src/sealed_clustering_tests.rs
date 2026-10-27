@@ -346,7 +346,146 @@ fn empty_isolated_loop_only_and_malformed_rows_have_explicit_outcomes() {
 }
 
 #[test]
-fn twenty_thousand_vertex_hub_uses_vertex_workspace_and_linear_row_opens() {
+fn leaves_and_loop_only_rows_are_validated_once_and_never_reopened_for_counting() {
+    let mut rows = vec![Vec::new(); 12];
+    for (source, target) in [(0, 1), (1, 2), (2, 0)]
+        .into_iter()
+        .chain((3..10).map(|leaf| (0, leaf)))
+        .chain([(3, 3), (5, 5), (11, 11)])
+    {
+        rows[source].push(target);
+        if source != target {
+            rows[target].push(source);
+        }
+    }
+    for row in &mut rows {
+        row.sort_unstable();
+    }
+    let (counts, scores) = oracle(&rows);
+    // Expensive hidden history must not make a leaf eligible, and a retained
+    // row of length two containing its self-loop still has only one neighbor.
+    let graph = Fixture::new(rows, vec![10, 2, 2, 50_000, 1, 80_000, 1, 1, 1, 1, 30, 90]);
+    for coefficients in [false, true] {
+        graph.reset();
+        let (output, _) = graph
+            .execute(coefficients, usize::MAX, &mut || Ok(()))
+            .unwrap();
+        match output.values {
+            KernelValues::Counts(actual) => assert_eq!(actual, counts),
+            KernelValues::Scores(actual) => assert_eq!(
+                actual
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                scores
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            ),
+            _ => panic!("wrong output"),
+        }
+        for source in 3..12 {
+            assert_eq!(graph.opens[source].get(), 1, "source={source}");
+        }
+        // Each actual planning/counting open, pull and EOF still propagates
+        // its error immediately, including the mandatory leaf validations.
+        let operations = graph.steps.get();
+        for stop in 1..=operations {
+            let mut interrupted = Fixture::new(graph.rows.clone(), graph.retained.clone());
+            interrupted.fail_at = stop;
+            assert!(matches!(
+                interrupted.execute(coefficients, usize::MAX, &mut || Ok(())),
+                Err(Error::Source(SealedProjectionError::UnknownOrdinal(
+                    usize::MAX
+                )))
+            ));
+            assert_eq!(interrupted.steps.get(), stop);
+        }
+    }
+}
+
+#[test]
+fn a_source_needs_two_eligible_lower_neighbors_before_any_repeated_inner_scan() {
+    let n = 17;
+    let mut rows: Vec<_> = (0..n)
+        .map(|source| {
+            let mut row = vec![(source + n - 1) % n, (source + 1) % n];
+            row.sort_unstable();
+            row
+        })
+        .collect();
+    // A separate leaf pair selects pruning; the cycle's non-leaf rows then
+    // exercise the independent two-lower-neighbor proof.
+    rows.push(vec![n + 1]);
+    rows.push(vec![n]);
+    let graph = Fixture::new(rows, vec![2; n + 2]);
+    let (output, _) = graph.execute(false, usize::MAX, &mut || Ok(())).unwrap();
+    let KernelValues::Counts(counts) = output.values else {
+        panic!("counts");
+    };
+    assert_eq!(counts, vec![0; n + 2]);
+    assert_eq!(graph.opens.iter().map(Cell::get).sum::<usize>(), 2 * n + 5);
+    assert_eq!(output.witness.edges_scanned, 2 * n + 6);
+    assert_eq!(output.witness.nodes_touched, n + 2);
+}
+
+#[test]
+fn isolates_alone_do_not_select_neighbor_pruning_for_the_connected_population() {
+    let graph = Fixture::new(
+        vec![vec![1, 2], vec![0, 2], vec![0, 1], vec![]],
+        vec![2, 2, 2, 1000],
+    );
+    let plan = prepare(
+        &graph,
+        graph.retained.iter().sum(),
+        |source| Ok(graph.retained[source]),
+        false,
+        usize::MAX,
+        &mut || Ok(()),
+    )
+    .unwrap();
+    assert!(!plan.prune);
+    assert_eq!(plan.costs[3], 0);
+    let output = run(&graph, plan, false, &mut || Ok(())).unwrap();
+    let KernelValues::Counts(counts) = output.values else {
+        panic!("counts");
+    };
+    assert_eq!(counts, [1, 1, 1, 0]);
+    assert_eq!(graph.opens[3].get(), 3);
+    assert_eq!(output.witness.edges_scanned, 18);
+}
+
+#[test]
+fn all_eligible_rows_keep_the_original_counting_scan_and_control_schedule() {
+    let n = 17;
+    let rows: Vec<_> = (0..n)
+        .map(|source| {
+            let mut row = vec![(source + n - 1) % n, (source + 1) % n];
+            row.sort_unstable();
+            row
+        })
+        .collect();
+    let graph = Fixture::new(rows, vec![2; n]);
+    let mut controls = 0;
+    let (output, _) = graph
+        .execute(false, usize::MAX, &mut || {
+            controls += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        output.witness.algorithm,
+        "triangles_retained_cost_oriented_rows"
+    );
+    assert_eq!(output.witness.edges_scanned, 6 * n);
+    assert_eq!(output.witness.nodes_touched, n);
+    assert_eq!(graph.opens.iter().map(Cell::get).sum::<usize>(), 4 * n);
+    assert_eq!(graph.steps.get(), 16 * n);
+    assert_eq!(controls, 12 * n + 3);
+}
+
+#[test]
+fn twenty_thousand_vertex_hub_keeps_vertex_workspace_and_avoids_all_leaf_rescans() {
     struct Star {
         n: usize,
         opens: Cell<usize>,
@@ -401,8 +540,8 @@ fn twenty_thousand_vertex_hub_uses_vertex_workspace_and_linear_row_opens() {
     )
     .unwrap();
     let output = run(&graph, plan, true, &mut || Ok(())).unwrap();
-    assert_eq!(graph.opens.get(), 4 * graph.n - 1);
-    assert_eq!(output.witness.edges_scanned, 5 * (graph.n - 1));
+    assert_eq!(graph.opens.get(), graph.n + 1);
+    assert_eq!(output.witness.edges_scanned, graph.n - 1);
     assert_eq!(output.witness.nodes_touched, graph.n);
     let KernelValues::Scores(scores) = output.values else {
         panic!("scores");
