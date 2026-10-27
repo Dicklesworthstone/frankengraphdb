@@ -52,9 +52,12 @@ success** — one line, revert, next lever, no retraction narrative.
 
 ## Branch Policy
 
-- Primary branch is `main`.
-- Do not reference `master` in docs/scripts.
-- If release instructions require sync, push `main:master` after `main`.
+- `main` is the single canonical development branch and checkout (owner ruling, 2026-10-27).
+- Mirror the exact `main` commit to `master`; the mirror is not a development branch.
+- Do not create any other branches, linked worktrees, or pull requests. Integrate useful
+  existing work directly into canonical `main`, preserving stronger behavior from every variant.
+- Preserve unique history and dirty files in verified recovery archives before retiring
+  existing branches or worktrees. The deletion authorization rules still apply.
 
 ---
 
@@ -267,19 +270,24 @@ so a reader who greps anyway gets a true answer. `$?` is still the verdict.
 
 Beyond the bare gate, **every verification domain in §15 is a permanent CI gate** — semantics conformance, transaction-anomaly oracles, the crash-point matrix, format fuzzers, representation-equivalence, incremental correctness, and complexity-witness regression locks (an operator whose observed op-count exceeds its declared bound *fails CI*). A release may bypass a gate only with a public, expiring waiver recorded in the ledger.
 
-### No toolchain? Push to `staging`, never `main` (owner ruling 2026-09-22)
+### Exact-tree proof on canonical `main` (owner ruling 2026-10-27)
 
-**An environment that cannot run the pinned Rust toolchain must push only to the `staging` branch.** This applies whenever `cargo` is absent, or when checks would otherwise be recorded as UNRUN. `bash scripts/merge_train.sh run` is the only path from `staging` to `main`:
+The main-only ruling supersedes the 2026-09-22 staging-branch workflow. Do not run
+the historical `scripts/merge_train.sh run` workflow, create a staging branch, or
+make a private integration checkout. Work directly in the canonical checkout.
 
-1. It merges `main` + `staging` with `--no-ff` in a private clone.
-2. It proves that exact tree with `scripts/local_proof.sh` and verifies the bundle.
-3. It fast-forwards `main` **only** on a verified pass.
+The quality standard is unchanged: run the pinned toolchain and every mandatory
+gate against the exact integrated tree, retain the `scripts/local_proof.sh` bundle,
+and verify it with `scripts/local_proof_verify.sh`. Remote compiler results must
+identify their immutable source commit and complete with an acknowledged terminal
+verdict. An unavailable toolchain or interrupted remote job is UNRUN, never a pass;
+keep the work and its qualification task open on `main` until proof is complete.
 
-Every verdict is written as a git note under the notes ref named merge-train. A promoted merge carries `verdict=pass`. A bounced `staging` tip carries `verdict=red`, `conflict` or `void`, plus the gate's `FAIL` lines. Read them with `git fetch origin refs/notes/*:refs/notes/*` and then `git notes --ref=merge-train show <staging-sha>`. Fix the batch on `staging`; a batch that bounced against the same `main` is not re-proved.
-
-Why this exists: 662 of 912 commits between 2026-09-08 and 2026-09-22 reached `main` uncompiled, and `cargo test --workspace` ran zero tests at HEAD (NE-0045 recurring; bead `fgdb-verified-landing-queue-kqglu`). An honest "UNRUN" paragraph in a commit message is a disclosure, not a verdict.
-
-`bash scripts/merge_train.sh audit --since <rev>` measures the rule. It reports every first-parent commit on `main` without a pass note, and exits 1 when one carries commits by the toolchain-less identity. Its controls are `scripts/merge_train_selftest.sh`.
+This distinction remains load-bearing: 662 of 912 commits between 2026-09-08 and
+2026-09-22 reached `main` uncompiled (NE-0045; bead
+`fgdb-verified-landing-queue-kqglu`). A disclosure in a commit message is not a
+passing verdict. Historical merge-train notes and audit tools remain evidence for
+their original source cuts; they do not authorize recreating the retired topology.
 
 ---
 

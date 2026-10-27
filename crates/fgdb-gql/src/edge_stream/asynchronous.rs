@@ -250,14 +250,19 @@ impl<S: AsyncEdgeScanSource, F> AsyncEdgeScanCursor<S, F> {
         self.source = None;
     }
 
-    pub async fn next<C>(
+    /// Prove the pull's Send contract here instead of making downstream
+    /// executors traverse the concrete source's complete I/O future again.
+    /// Return the existing lazy future directly, without another allocation.
+    pub fn next<C>(
         &mut self,
-    ) -> Option<ScanResult<AsyncEdgeScanOutput<S::OutputGuard>, S::Error, C>>
+    ) -> impl core::future::Future<
+        Output = Option<ScanResult<AsyncEdgeScanOutput<S::OutputGuard>, S::Error, C>>,
+    > + Send
     where
         F: FnMut() -> Result<(), C> + Send,
         C: Send,
     {
-        self.next_inner::<true, C>().await
+        self.next_inner::<true, C>()
     }
 
     async fn next_inner<const EMIT: bool, C>(
