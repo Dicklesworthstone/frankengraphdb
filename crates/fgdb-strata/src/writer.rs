@@ -366,6 +366,10 @@ pub struct BlockWriter {
     /// Live identities whose same-seq creation has already been sealed in
     /// this run. A later same-seq delete cannot fold those away — the
     /// durable image already exists, and an empty interval is illegal.
+    /// Only `last_seq` can still use these guards: an older sequence cannot
+    /// be applied again, and a newer sequence retires a nonempty interval.
+    /// A successful sequence advance clears both sets; refused advances
+    /// leave them intact with the rest of the fold.
     sealed_live_edges: BTreeSet<(EId, CommitSeq)>,
     sealed_live_vertices: BTreeSet<(VId, CommitSeq)>,
     last_seq: Option<CommitSeq>,
@@ -453,9 +457,16 @@ impl BlockWriter {
     ) -> Self {
         // Collecting an identity map keeps the last pair of a repeated key,
         // as inserting in order does.
+        let mut sealed_live_edges = BTreeSet::new();
         let live: IdMap<EId, LiveEdge> = live_edges
             .into_iter()
             .map(|(entry, props)| {
+                // These births already have durable images. A same-frontier
+                // restatement may become pending again after reconstruction,
+                // but a following delete still cannot fold that image away.
+                if entry.created_at == frontier {
+                    sealed_live_edges.insert((entry.eid, entry.created_at));
+                }
                 (
                     entry.eid,
                     LiveEdge {
@@ -470,10 +481,16 @@ impl BlockWriter {
             })
             .collect();
         let spent: IdSet<EId> = blocks.iter().flatten().map(|entry| entry.eid).collect();
+        let mut sealed_live_vertices = BTreeSet::new();
         let live_vertices: IdMap<VId, LiveVertex> =
             crate::vertex::merge_all_vertices(patches, frontier)
                 .into_iter()
-                .map(|row| (row.vid, LiveVertex::new(row)))
+                .map(|row| {
+                    if row.created_at == frontier {
+                        sealed_live_vertices.insert((row.vid, row.created_at));
+                    }
+                    (row.vid, LiveVertex::new(row))
+                })
                 .collect();
         let spent_vertices: IdSet<VId> = patches.iter().flatten().map(|row| row.vid).collect();
         // The chain head per family is the LAST published block of that
@@ -506,8 +523,8 @@ impl BlockWriter {
             incident_indexed: true,
             spent_vertices: Arc::new(spent_vertices),
             sealed_patches,
-            sealed_live_edges: BTreeSet::new(),
-            sealed_live_vertices: BTreeSet::new(),
+            sealed_live_edges,
+            sealed_live_vertices,
             last_seq: (frontier.0 > 0).then_some(frontier),
         };
         for slot in 0..writer.live.len() {
@@ -1103,6 +1120,15 @@ impl BlockWriter {
             // silently folding them would be worse than not storing them.
             _ => {}
         }
+        if self.last_seq != Some(seq) {
+            // Do this only after the entire row succeeds. In particular, a
+            // refused next-sequence row must not erase the guards protecting
+            // a subsequent same-sequence delete of an already sealed birth.
+            // Any early seal inside this first advancing row only encountered
+            // older births, so none of its guards can be needed at `seq`.
+            self.sealed_live_edges.clear();
+            self.sealed_live_vertices.clear();
+        }
         self.last_seq = Some(seq);
         Ok(())
     }
@@ -1433,7 +1459,10 @@ impl BlockWriter {
         deferred: &BTreeSet<EdgeStatementKey>,
     ) {
         for (key, statement) in &self.pending {
-            if !deferred.contains(key) && statement.entry.retired_at.is_none() {
+            if !deferred.contains(key)
+                && statement.entry.retired_at.is_none()
+                && Some(statement.entry.created_at) == self.last_seq
+            {
                 self.sealed_live_edges
                     .insert((statement.entry.eid, statement.entry.created_at));
             }
@@ -1731,7 +1760,7 @@ impl BlockWriter {
 
     fn commit_vertex_seal(&mut self, sealed: Vec<SealedPatch>) {
         for row in self.pending_vertices.values() {
-            if row.retired_at.is_none() {
+            if row.retired_at.is_none() && Some(row.created_at) == self.last_seq {
                 self.sealed_live_vertices.insert((row.vid, row.created_at));
             }
         }
@@ -1889,6 +1918,364 @@ mod tests {
             props: vec![],
             valid_time: None,
         }
+    }
+
+    #[test]
+    fn sealed_fold_guards_are_bounded_by_current_sequence_not_statement_history() {
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        for vid in [VId(1), VId(2)] {
+            writer
+                .apply(keys(), CommitSeq(1), &incident_vertex(vid, vid.0 as u64))
+                .expect("vertex");
+        }
+        writer
+            .apply(
+                keys(),
+                CommitSeq(1),
+                &incident_edge(EId(10), VId(1), VId(2)),
+            )
+            .expect("edge");
+        writer.seal(keys()).expect("initial edge seal");
+        writer.seal_vertices(keys()).expect("initial vertex seal");
+        let original = writer.clone();
+
+        for seq in 2..=128 {
+            for elem in [ElementId::Vertex(VId(1)), ElementId::Edge(EId(10))] {
+                writer
+                    .apply(
+                        keys(),
+                        CommitSeq(seq),
+                        &DeltaRow::Property {
+                            elem,
+                            property: PropertyKeyId(7),
+                            before: None,
+                            after: Some(CanonicalScalar::Int(seq as i64).into()),
+                        },
+                    )
+                    .expect("content successor");
+            }
+            assert!(writer.sealed_live_edges.is_empty());
+            assert!(writer.sealed_live_vertices.is_empty());
+            writer.seal(keys()).expect("edge seal");
+            writer.seal_vertices(keys()).expect("vertex seal");
+            assert_eq!(writer.sealed_live_edges.len(), 1);
+            assert_eq!(writer.sealed_live_vertices.len(), 1);
+            assert!(
+                writer
+                    .sealed_live_edges
+                    .contains(&(EId(10), CommitSeq(seq)))
+            );
+            assert!(
+                writer
+                    .sealed_live_vertices
+                    .contains(&(VId(1), CommitSeq(seq)))
+            );
+        }
+        // Advancing the clone cannot clear the old generation's guards.
+        assert_eq!(original.sealed_live_edges.len(), 1);
+        assert_eq!(original.sealed_live_vertices.len(), 2);
+        assert_eq!(original.last_seq, Some(CommitSeq(1)));
+
+        let mut blocks = Vec::new();
+        let mut props = Vec::new();
+        for block in writer.sealed() {
+            let (entries, hosted) = crate::decode_block_with_properties(&block.bytes).unwrap();
+            blocks.push(entries);
+            props.push(hosted.map(|(_, locators)| {
+                crate::edge_props::BlockProps {
+                    locators,
+                    rows: crate::edge_props::decode_property_patch(
+                        &block.property_patch.as_ref().unwrap().bytes,
+                    )
+                    .unwrap(),
+                }
+            }));
+        }
+        let patches: Vec<_> = writer
+            .sealed_patches()
+            .iter()
+            .map(|patch| crate::vertex::decode_patch(&patch.bytes).unwrap())
+            .collect();
+        // The retired guard history is not durable history: every old cut
+        // must still recover the content visible when that commit sealed.
+        for seq in 1..=128 {
+            let expected = if seq == 1 {
+                vec![]
+            } else {
+                vec![(PropertyKeyId(7), CanonicalScalar::Int(seq as i64).into())]
+            };
+            let vertex = crate::vertex::merge_vertex(&patches, VId(1), CommitSeq(seq)).unwrap();
+            let (_, edge_props) =
+                crate::root::merge_edge_with_props(&blocks, &props, EId(10), CommitSeq(seq))
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(vertex.props, expected);
+            assert_eq!(edge_props, expected);
+        }
+    }
+
+    #[test]
+    fn refused_sequence_advances_preserve_sealed_same_sequence_delete_guards() {
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        for vid in [VId(1), VId(2)] {
+            writer
+                .apply(keys(), CommitSeq(7), &incident_vertex(vid, vid.0 as u64))
+                .unwrap();
+        }
+        writer
+            .apply(
+                keys(),
+                CommitSeq(7),
+                &incident_edge(EId(10), VId(2), VId(2)),
+            )
+            .unwrap();
+        writer.seal(keys()).unwrap();
+        writer.seal_vertices(keys()).unwrap();
+        for seq in [8, 100, 6] {
+            let before = format!("{writer:?}");
+            assert!(
+                writer
+                    .apply(keys(), CommitSeq(seq), &incident_vertex(VId(1), 1))
+                    .is_err()
+            );
+            assert_eq!(format!("{writer:?}"), before, "refused sequence {seq}");
+        }
+        for elem in [ElementId::Vertex(VId(1)), ElementId::Edge(EId(10))] {
+            writer
+                .apply(
+                    keys(),
+                    CommitSeq(7),
+                    &DeltaRow::Property {
+                        elem,
+                        property: PropertyKeyId(7),
+                        before: None,
+                        after: Some(CanonicalScalar::Int(9).into()),
+                    },
+                )
+                .expect("same-sequence restatement");
+        }
+        let before = format!("{writer:?}");
+        let seq = CommitSeq(7);
+        assert_eq!(
+            writer.apply(
+                keys(),
+                seq,
+                &DeltaRow::DeleteEdge {
+                    eid: EId(10),
+                    before_version: fgdb_types::ObjectId([0; 32]),
+                },
+            ),
+            Err(WriteError::Block(BlockError::RetiredBeforeCreated {
+                at: 0,
+                created_at: seq,
+                retired_at: seq,
+            }))
+        );
+        assert_eq!(format!("{writer:?}"), before);
+        assert_eq!(
+            writer.apply(
+                keys(),
+                seq,
+                &DeltaRow::DeleteVertex {
+                    vid: VId(1),
+                    before_version: fgdb_types::ObjectId([0; 32]),
+                    sorted_retired_incident_edges: vec![],
+                },
+            ),
+            Err(WriteError::Patch(VertexPatchError::RetiredBeforeCreated {
+                at: 0,
+                created_at: seq,
+                retired_at: seq,
+            }))
+        );
+        assert_eq!(format!("{writer:?}"), before);
+    }
+
+    #[test]
+    fn reconstructed_writers_preserve_current_frontier_sealed_birth_guards() {
+        let mut original = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        for vid in [VId(1), VId(2)] {
+            original
+                .apply(keys(), CommitSeq(1), &incident_vertex(vid, vid.0 as u64))
+                .unwrap();
+        }
+        original
+            .apply(
+                keys(),
+                CommitSeq(1),
+                &incident_edge(EId(10), VId(2), VId(2)),
+            )
+            .unwrap();
+        original.seal(keys()).unwrap();
+        original.seal_vertices(keys()).unwrap();
+        let update = |elem| DeltaRow::Property {
+            elem,
+            property: PropertyKeyId(7),
+            before: None,
+            after: Some(CanonicalScalar::Int(9).into()),
+        };
+        let seq = CommitSeq(7);
+        for elem in [ElementId::Vertex(VId(1)), ElementId::Edge(EId(10))] {
+            original.apply(keys(), seq, &update(elem)).unwrap();
+        }
+        original.seal(keys()).unwrap();
+        original.seal_vertices(keys()).unwrap();
+        let mut blocks = Vec::new();
+        let mut props = Vec::new();
+        for block in original.sealed() {
+            let (entries, hosted) = crate::decode_block_with_properties(&block.bytes).unwrap();
+            blocks.push(entries);
+            props.push(hosted.map(|(_, locators)| {
+                crate::edge_props::BlockProps {
+                    locators,
+                    rows: crate::edge_props::decode_property_patch(
+                        &block.property_patch.as_ref().unwrap().bytes,
+                    )
+                    .unwrap(),
+                }
+            }));
+        }
+        let patches: Vec<_> = original
+            .sealed_patches()
+            .iter()
+            .map(|patch| crate::vertex::decode_patch(&patch.bytes).unwrap())
+            .collect();
+        let mut admission = crate::root::EdgeHistoryValidator::default();
+        for (index, block) in blocks.iter().enumerate() {
+            admission.observe_block(index, block).unwrap();
+        }
+        let revalidated = BlockWriter::from_published_partition(
+            GraphId(1),
+            BranchId(1),
+            0,
+            original.sealed().to_vec(),
+            original.sealed_patches().to_vec(),
+            &blocks,
+            &props,
+            &patches,
+            seq,
+        )
+        .unwrap();
+        let admitted = BlockWriter::from_admitted_partition(
+            GraphId(1),
+            BranchId(1),
+            0,
+            original.sealed().to_vec(),
+            original.sealed_patches().to_vec(),
+            &admission.statements(),
+            &blocks,
+            &props,
+            &patches,
+            seq,
+        )
+        .unwrap();
+        for mut writer in [revalidated, admitted] {
+            for elem in [ElementId::Vertex(VId(1)), ElementId::Edge(EId(10))] {
+                writer.apply(keys(), seq, &update(elem)).unwrap();
+            }
+            let before = format!("{writer:?}");
+            let edge_delete = DeltaRow::DeleteEdge {
+                eid: EId(10),
+                before_version: fgdb_types::ObjectId([0; 32]),
+            };
+            let vertex_delete = DeltaRow::DeleteVertex {
+                vid: VId(1),
+                before_version: fgdb_types::ObjectId([0; 32]),
+                sorted_retired_incident_edges: vec![],
+            };
+            assert_eq!(
+                writer.apply(keys(), seq, &edge_delete),
+                Err(WriteError::Block(BlockError::RetiredBeforeCreated {
+                    at: 0,
+                    created_at: seq,
+                    retired_at: seq,
+                }))
+            );
+            assert_eq!(format!("{writer:?}"), before);
+            assert_eq!(
+                writer.apply(keys(), seq, &vertex_delete),
+                Err(WriteError::Patch(VertexPatchError::RetiredBeforeCreated {
+                    at: 0,
+                    created_at: seq,
+                    retired_at: seq,
+                }))
+            );
+            assert_eq!(format!("{writer:?}"), before);
+            assert_eq!(writer.sealed_live_edges.len(), 1);
+            assert_eq!(writer.sealed_live_vertices.len(), 1);
+            assert!(
+                !writer
+                    .sealed_live_vertices
+                    .contains(&(VId(2), CommitSeq(1)))
+            );
+            writer.apply(keys(), CommitSeq(8), &edge_delete).unwrap();
+            writer.apply(keys(), CommitSeq(8), &vertex_delete).unwrap();
+            assert!(writer.sealed_live_edges.is_empty());
+            assert!(writer.sealed_live_vertices.is_empty());
+            writer.publish(keys(), CommitSeq(8)).unwrap();
+        }
+    }
+
+    #[test]
+    fn delayed_and_early_seals_do_not_retain_previous_sequence_guards() {
+        let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        for vid in [VId(1), VId(2)] {
+            writer
+                .apply(keys(), CommitSeq(1), &incident_vertex(vid, vid.0 as u64))
+                .unwrap();
+        }
+        for eid in 1..=u128::from(MAX_BLOCK_ENTRIES) {
+            writer
+                .apply(
+                    keys(),
+                    CommitSeq(1),
+                    &incident_edge(EId(eid), VId(1), VId(2)),
+                )
+                .unwrap();
+        }
+        assert!(
+            writer.sealed().is_empty(),
+            "same-sequence births stay pending"
+        );
+        let next = EId(u128::from(MAX_BLOCK_ENTRIES) + 1);
+        writer
+            .apply(keys(), CommitSeq(2), &incident_edge(next, VId(1), VId(2)))
+            .unwrap();
+        assert!(
+            !writer.sealed().is_empty(),
+            "advancing row early-seals old births"
+        );
+        assert!(writer.sealed_live_edges.is_empty());
+        writer
+            .apply(keys(), CommitSeq(2), &incident_vertex(VId(3), 3))
+            .unwrap();
+        writer.seal(keys()).unwrap();
+        writer.seal_vertices(keys()).unwrap();
+        assert_eq!(
+            writer.sealed_live_edges.iter().copied().collect::<Vec<_>>(),
+            vec![(next, CommitSeq(2))]
+        );
+        assert_eq!(
+            writer
+                .sealed_live_vertices
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![(VId(3), CommitSeq(2))]
+        );
+        // A later retirement of an old sealed birth closes a nonempty interval.
+        writer
+            .apply(
+                keys(),
+                CommitSeq(2),
+                &DeltaRow::DeleteEdge {
+                    eid: EId(1),
+                    before_version: fgdb_types::ObjectId([0; 32]),
+                },
+            )
+            .unwrap();
+        assert!(writer.live_edge(EId(1)).is_none());
+        writer.publish(keys(), CommitSeq(2)).unwrap();
     }
 
     // The previous production implementation, independent of the links.
