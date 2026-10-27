@@ -2155,11 +2155,17 @@ impl Snapshot {
     }
 
     fn vertex_at(&self, vid: VId, as_of: CommitSeq) -> Result<Option<VertexRow>, ReadError> {
+        Ok(self.vertex_row_at(vid, as_of)?.cloned())
+    }
+
+    /// Borrow the winning retained row without copying unrelated properties.
+    /// The same frontier and MVCC selection govern owned and borrowed reads.
+    fn vertex_row_at(&self, vid: VId, as_of: CommitSeq) -> Result<Option<&VertexRow>, ReadError> {
         self.check_frontier(as_of)?;
         let Ok(row) = gql_exec::source::find_vertex(self, vid, as_of, &mut |_| {
             Ok::<_, core::convert::Infallible>(())
         });
-        Ok(row.cloned())
+        Ok(row)
     }
 
     fn vertices_at(&self, as_of: CommitSeq) -> Result<Vec<VertexRow>, ReadError> {

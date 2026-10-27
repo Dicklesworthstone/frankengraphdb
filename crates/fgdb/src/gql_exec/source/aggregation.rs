@@ -117,14 +117,7 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
                 GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
             })?;
     let mut usage = AdmissionUsage::default();
-    let elements = |element, key| {
-        crate::gql_exec::read_element_property(
-            element,
-            key,
-            |vid| reader.gql_vertex_at(vid, as_of),
-            |eid| reader.gql_edge_at(eid, as_of),
-        )
-    };
+    let elements = |element, key| crate::gql_exec::element_property_at(reader, element, key, as_of);
     // Exact metadata is available only on the private unrestricted source at
     // its own frontier. A label count has a separate cold path: its predicate
     // still runs through the ordinary executor, preserving source errors and

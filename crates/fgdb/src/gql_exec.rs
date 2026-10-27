@@ -69,11 +69,23 @@ impl GqlSnapshotReader for EmbeddedReadView {
 /// element value an expression produced (fgdb-xnd7x). The element came from a
 /// pattern at this same cut. Should it be absent there anyway, it reads NULL.
 pub(crate) fn element_property_at(
-    reader: &impl GqlSnapshotReader,
+    reader: &(impl GqlSnapshotReader + ?Sized),
     element: fgdb_delta_types::ElementId,
     key: PropertyKeyId,
     as_of: CommitSeq,
 ) -> Result<Option<CanonicalPropertyValue>, GqlError> {
+    if matches!(element, fgdb_delta_types::ElementId::Vertex(_))
+        && let Some(snapshot) = reader
+            .gql_admitted_snapshot(as_of)
+            .map_err(GqlError::Read)?
+    {
+        return read_element_property(
+            element,
+            key,
+            |vid| snapshot.vertex_row_at(vid, as_of),
+            |eid| reader.gql_edge_at(eid, as_of),
+        );
+    }
     read_element_property(
         element,
         key,
@@ -84,10 +96,10 @@ pub(crate) fn element_property_at(
 
 /// The one property row lookup behind every host's element reader: the
 /// vertex row or edge record at the host's cut, then its key, if present.
-pub(crate) fn read_element_property(
+pub(crate) fn read_element_property<Row: std::borrow::Borrow<VertexRow>>(
     element: fgdb_delta_types::ElementId,
     key: PropertyKeyId,
-    vertex: impl FnOnce(VId) -> Result<Option<VertexRow>, ReadError>,
+    vertex: impl FnOnce(VId) -> Result<Option<Row>, ReadError>,
     edge: impl FnOnce(EId) -> Result<Option<EdgeRecord>, ReadError>,
 ) -> Result<Option<CanonicalPropertyValue>, GqlError> {
     let lookup = |props: &[(PropertyKeyId, CanonicalPropertyValue)]| {
@@ -99,7 +111,7 @@ pub(crate) fn read_element_property(
     Ok(match element {
         fgdb_delta_types::ElementId::Vertex(vid) => vertex(vid)
             .map_err(GqlError::Read)?
-            .and_then(|row| lookup(&row.props)),
+            .and_then(|row| lookup(&row.borrow().props)),
         fgdb_delta_types::ElementId::Edge(eid) => edge(eid)
             .map_err(GqlError::Read)?
             .and_then(|record| lookup(&record.props)),
@@ -943,6 +955,147 @@ mod admission_meter_tests {
         GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded, GqlExecutionStats, GqlQueryError,
         GqlQueryExecution, GqlQueryPolicy,
     };
+
+    #[test]
+    fn element_properties_borrow_retained_history_and_preserve_pinned_cuts() {
+        use asupersync::lab::run_async_under_lab;
+        use fgdb_delta_types::ElementId;
+        use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+
+        // Observe the owned-row hook, not allocator bytes or elapsed time.
+        // Both routes delegate to the same real committed read view.
+        struct ObservedReader<'a> {
+            view: &'a EmbeddedReadView,
+            borrow_snapshot: bool,
+            owned_reads: std::cell::Cell<usize>,
+        }
+        impl GqlSnapshotReader for ObservedReader<'_> {
+            fn gql_vertex_at(
+                &self,
+                vid: VId,
+                at: CommitSeq,
+            ) -> Result<Option<VertexRow>, ReadError> {
+                self.owned_reads.set(self.owned_reads.get() + 1);
+                self.view.vertex_at(vid, at)
+            }
+            fn gql_edge_at(
+                &self,
+                eid: EId,
+                at: CommitSeq,
+            ) -> Result<Option<EdgeRecord>, ReadError> {
+                self.view.edge_at(eid, at)
+            }
+            fn gql_vertices_at(&self, at: CommitSeq) -> Result<Vec<VertexRow>, ReadError> {
+                self.view.vertices_at(at)
+            }
+            fn gql_edges_at(&self, at: CommitSeq) -> Result<Vec<EdgeRecord>, ReadError> {
+                self.view.edges_at(at)
+            }
+            fn gql_admitted_snapshot(&self, at: CommitSeq) -> Result<Option<&Snapshot>, ReadError> {
+                if self.borrow_snapshot {
+                    self.view.gql_admitted_snapshot(at)
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+
+        let ((), report) = run_async_under_lab(0x518a_d487, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let keys = crate::DatabaseKeys::new(
+                [0x51; 32],
+                DatabaseSecurityNamespaceId([0x8a; 32]),
+                [0xd4; 32],
+            );
+            let mut database = Database::open_memory(&commit, keys).await.unwrap();
+            let key = PropertyKeyId(1);
+            let mut create = crate::WriteBatch::new(RelationId(1));
+            create.create_vertex(
+                VId(1),
+                vec![LabelId(1)],
+                vec![
+                    (key, CanonicalScalar::Int(11)),
+                    (
+                        PropertyKeyId(2),
+                        CanonicalScalar::Bytes(vec![0x5a; 16_384].into()),
+                    ),
+                ],
+            );
+            assert_eq!(database.write(&commit, create).await.unwrap(), CommitSeq(1));
+            let pinned = database.read_session().unwrap();
+            let mut update = crate::WriteBatch::new(RelationId(1));
+            update.set_vertex_property(VId(1), key, Some(CanonicalScalar::Int(22)));
+            assert_eq!(database.write(&commit, update).await.unwrap(), CommitSeq(2));
+            let mut delete = crate::WriteBatch::new(RelationId(1));
+            delete.delete_vertex(VId(1));
+            assert_eq!(database.write(&commit, delete).await.unwrap(), CommitSeq(3));
+
+            let element = ElementId::Vertex(VId(1));
+            for (cut, expected) in [(0, None), (1, Some(11)), (2, Some(22)), (3, None)] {
+                let at = CommitSeq(cut);
+                assert_eq!(
+                    element_property_at(&database, element, key, at).unwrap(),
+                    expected
+                        .map(|value| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))),
+                );
+                if let Some(row) = database.snapshot.vertex_row_at(VId(1), at).unwrap() {
+                    assert!(
+                        database
+                            .snapshot
+                            .patches
+                            .iter()
+                            .any(|patch| patch.iter().any(|stored| std::ptr::eq(stored, row))),
+                        "the borrowed row must be retained patch storage, not a copied row"
+                    );
+                    assert_eq!(row.props.len(), 2);
+                }
+            }
+            let current = database.read_session().unwrap();
+            for borrow_snapshot in [false, true] {
+                let reader = ObservedReader {
+                    view: &current,
+                    borrow_snapshot,
+                    owned_reads: std::cell::Cell::new(0),
+                };
+                for (cut, expected) in [(0, None), (1, Some(11)), (2, Some(22)), (3, None)] {
+                    assert_eq!(
+                        element_property_at(&reader, element, key, CommitSeq(cut)).unwrap(),
+                        expected.map(|value| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(
+                            value
+                        ))),
+                    );
+                }
+                assert_eq!(
+                    reader.owned_reads.get(),
+                    if borrow_snapshot { 0 } else { 4 }
+                );
+            }
+            assert_eq!(
+                element_property_at(&pinned, element, key, CommitSeq(1)).unwrap(),
+                Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(11))),
+            );
+            assert_eq!(
+                element_property_at(&database, element, PropertyKeyId(3), CommitSeq(1)).unwrap(),
+                None,
+            );
+            assert!(matches!(
+                element_property_at(&database, element, key, CommitSeq(4)),
+                Err(GqlError::Read(ReadError::BeyondFrontier {
+                    asked: CommitSeq(4),
+                    frontier: CommitSeq(3)
+                }))
+            ));
+            assert!(matches!(
+                element_property_at(&pinned, element, key, CommitSeq(2)),
+                Err(GqlError::Read(ReadError::BeyondFrontier {
+                    asked: CommitSeq(2),
+                    frontier: CommitSeq(1)
+                }))
+            ));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
 
     /// **N WORK UNITS IN ONE STEP ARE N WORK EVENTS.** From every starting
     /// count around the limit, `observe_work(n)` leaves the usage and returns
