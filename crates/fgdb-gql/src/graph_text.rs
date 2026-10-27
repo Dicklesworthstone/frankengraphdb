@@ -839,7 +839,8 @@ struct Syntax<'a> {
 impl<'a> Syntax<'a> {
     /// What a bare name denotes when it names the path or a relationship:
     /// the path, or the edge list of a captured variable-length relationship
-    /// (`path_edges`), or the identity of a fixed relationship.
+    /// (`path_edges`, or one standing anywhere in a chain), or the identity
+    /// of a fixed relationship.
     fn bare_path_function(&self, name: &str) -> Option<GraphPathFunction> {
         if self.path.is_some_and(|path| path.text == name) {
             Some(if self.path_edges {
@@ -853,8 +854,12 @@ impl<'a> Syntax<'a> {
             } else {
                 GraphPathFunction::Value
             })
-        } else if self.visible_edge(name).is_some() {
-            Some(GraphPathFunction::Edge)
+        } else if let Some((edge, _)) = self.visible_edge(name) {
+            Some(if edge.walk.is_some() {
+                GraphPathFunction::Edges
+            } else {
+                GraphPathFunction::Edge
+            })
         } else {
             None
         }
@@ -1785,10 +1790,11 @@ impl<'a> Parser<'a> {
                     MAX_PATTERN_VERTICES,
                     PatternLimitDimension::Columns,
                 )?;
+                let path = self.syntax.bare_path_function(name.text);
                 self.syntax.columns.push(Column {
                     variable: name,
                     property: None,
-                    path: Some(GraphPathFunction::Edge),
+                    path,
                     alias: name,
                     collect: None,
                 });
@@ -1839,7 +1845,9 @@ impl<'a> Parser<'a> {
                     } else {
                         None
                     };
-                    (expression, property, Some(GraphPathFunction::Edge))
+                    // A quantified relationship is its walk's edge list.
+                    let path = self.syntax.bare_path_function(expression.text);
+                    (expression, property, path)
                 } else {
                     if !self
                         .syntax

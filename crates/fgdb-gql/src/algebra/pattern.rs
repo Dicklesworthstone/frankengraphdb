@@ -763,8 +763,11 @@ impl GraphPatternBuilder {
         Ok(self)
     }
 
-    /// Capture one declared, fixed-length relationship using the same admitted
-    /// traversal segment as path values. No endpoint-to-edge reconstruction.
+    /// Capture one declared relationship using the same admitted traversal
+    /// segment as path values. No endpoint-to-edge reconstruction. A fixed
+    /// relationship is its edge's identity; a quantified one is the path of
+    /// its walk, from its written source, wherever it stands in the chain
+    /// (openCypher `(a)-[:R]->(b)-[r:S*2]->(c)`: `r` lists that walk's edges).
     pub fn capture_edge(
         &mut self,
         name: &str,
@@ -774,9 +777,7 @@ impl GraphPatternBuilder {
             .edges
             .get(edge)
             .ok_or(PatternBuildError::InvalidPathCapture)?;
-        if definition.walk.is_some() {
-            return Err(PatternBuildError::InvalidPathCapture);
-        }
+        let edge_identity = definition.walk.is_none();
         let start = definition.source;
         let bytes = name.as_bytes();
         if bytes.is_empty()
@@ -806,7 +807,7 @@ impl GraphPatternBuilder {
             start,
             first_edge: edge,
             edge_count: 1,
-            edge_identity: true,
+            edge_identity,
         });
         Ok(self)
     }

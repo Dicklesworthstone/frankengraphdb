@@ -100,6 +100,70 @@ fn a_lone_named_variable_length_relationship_is_its_edge_list() {
     }
 }
 
+/// A named variable-length relationship anywhere in a chain is the list of
+/// relationships its own walk matched, in the written direction, even when
+/// the plan expands it from its far end (TCK Match5 [28]). A path named over
+/// the same chain keeps every edge; the walk's name keeps its own.
+#[test]
+fn a_named_variable_length_relationship_in_a_chain_is_its_walks_edge_list() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::{EId, VId};
+    let edges = [
+        (EId(91), VId(1), RelationId(1), VId(2)),
+        (EId(92), VId(2), RelationId(2), VId(3)),
+        (EId(93), VId(3), RelationId(2), VId(4)),
+    ];
+    let list = |ids: &[u128]| {
+        GraphValue::Edges(
+            ids.iter()
+                .map(|id| EId(*id))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        )
+    };
+    for (text, expected) in [
+        (
+            "MATCH (a)-[:R]->(m)-[r:S*2]->(c) RETURN r",
+            vec![list(&[92, 93])],
+        ),
+        (
+            "MATCH (a)-[:R]->()-[r:S*1..2]->(c) RETURN r",
+            vec![list(&[92]), list(&[92, 93])],
+        ),
+        (
+            "MATCH (c)<-[r:S*2]-(m)<-[:R]-(a) RETURN r",
+            vec![list(&[93, 92])],
+        ),
+        (
+            "MATCH p = (a)-[:R]->(m)-[r:S*2]->(c) RETURN r",
+            vec![list(&[92, 93])],
+        ),
+        (
+            "MATCH (a)-[q:R]->(m)-[r:S*2]->(c) RETURN q, r",
+            vec![list(&[92, 93])],
+        ),
+    ] {
+        let rows = execute(text, &edges);
+        let column = usize::from(text.contains("q, r"));
+        let found: Vec<_> = rows
+            .iter()
+            .map(|row| row.values()[column].clone())
+            .collect();
+        assert_eq!(found.len(), expected.len(), "{text}: {found:?}");
+        for value in &expected {
+            assert!(found.contains(value), "{text}: {found:?}");
+        }
+        if column == 1 {
+            assert_eq!(rows[0].values()[0], GraphValue::Edge(EId(91)), "{text}");
+        }
+    }
+    let path = execute("MATCH p = (a)-[:R]->(m)-[r:S*2]->(c) RETURN p", &edges);
+    assert_eq!(
+        path[0].values()[0].as_path().unwrap().steps(),
+        &[(EId(91), VId(2)), (EId(92), VId(3)), (EId(93), VId(4))]
+    );
+}
+
 #[test]
 fn fixed_path_functions_preserve_traversal_order_and_filter_rows() {
     use fgdb_gql::algebra::GraphValue;
