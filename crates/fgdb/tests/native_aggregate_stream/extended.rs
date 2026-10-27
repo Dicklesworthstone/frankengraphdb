@@ -338,7 +338,11 @@ fn ordinary_queries_use_the_selected_numeric_cursor_and_its_exact_allowances() {
                 256,
             ),
         ] {
-            let prepared = PreparedGraphAggregateText::prepare(text, symbols()).unwrap();
+            let mut resolver = symbols();
+            let prepared = PreparedGraphAggregateText::prepare(text, |kind, name| {
+                fgdb_gql::GraphSymbolResolver::resolve_symbol(&mut resolver, kind, name)
+            })
+            .unwrap();
             let definition = prepared.bind_parameters(&args).unwrap();
             assert!(
                 fgdb_gql::scan_stream::AggregateScanPlan::compile_numeric(&definition).is_some()
