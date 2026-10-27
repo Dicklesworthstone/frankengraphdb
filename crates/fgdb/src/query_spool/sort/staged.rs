@@ -33,6 +33,27 @@ struct ElementSource<'v, 'q, V: Vfs> {
     view: &'v mut BufferedReadView<V>,
     cx: &'q QueryCx,
     as_of: CommitSeq,
+    budget: GqlExecutionBudget,
+    records: u64,
+}
+
+impl<V: Vfs> ElementSource<'_, '_, V> {
+    fn admit_record(&mut self) -> Result<()> {
+        // A reached identity is one logical record even when absent, retired,
+        // or repeated. Keep every stage on the completed source's allowance,
+        // and refuse before admitting a cold record or its I/O.
+        let records = self
+            .records
+            .checked_add(1)
+            .ok_or(SpillError::SizeOverflow)?;
+        self.budget
+            .check(GqlBudgetDimension::SnapshotRecords, records)
+            .map_err(|error| {
+                NativeSpoolError::BufferedExecute(Box::new(GqlQueryError::Rows(error)))
+            })?;
+        self.records = records;
+        Ok(())
+    }
 }
 
 impl<V: Vfs + Clone> AsyncSpillElementSource for ElementSource<'_, '_, V> {
@@ -44,6 +65,9 @@ impl<V: Vfs + Clone> AsyncSpillElementSource for ElementSource<'_, '_, V> {
         element: ElementId,
         key: PropertyKeyId,
     ) -> Option<Result<Option<PinnedProperty>>> {
+        if let Err(error) = self.admit_record() {
+            return Some(Err(error));
+        }
         let cx = self.cx;
         let as_of = self.as_of;
         let view = &mut *self.view;
@@ -74,6 +98,78 @@ impl<V: Vfs + Clone> AsyncSpillElementSource for ElementSource<'_, '_, V> {
                             .ok()
                             .map(|at| PinnedProperty::Edge(record, at))
                     }))
+                }
+            }
+        };
+        Some(cx.with_restriction_async(read).await)
+    }
+
+    async fn element_metadata_with_control(
+        &mut self,
+        element: ElementId,
+        kind: fgdb_gql::GraphElementMetadata,
+        catalog: &fgdb_gql::ReverseSymbolCatalog,
+        control: &mut (impl FnMut(GlaExecutionEvent) -> Result<()> + Send),
+    ) -> Option<Result<Option<GraphValue>>> {
+        use crate::gql_exec::property_maps::{self, MetadataRecord};
+        if let Err(error) = self.admit_record() {
+            return Some(Err(error));
+        }
+        let cx = self.cx;
+        let as_of = self.as_of;
+        let view = &mut *self.view;
+        let read = async move {
+            let failure = |error| {
+                NativeSpoolError::Execute(Box::new(GqlQueryError::Source(match element {
+                    ElementId::Vertex(_) => ScanError::Vertex(VertexScanError::Source(error)),
+                    ElementId::Edge(_) => ScanError::Edge(EdgeScanError::Source(error)),
+                })))
+            };
+            let mut physical = |event| {
+                control(match event {
+                    SourceEvent::Work | SourceEvent::SnapshotRecord => GlaExecutionEvent::Work,
+                    SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                })
+            };
+            physical(SourceEvent::Work)?;
+            match element {
+                ElementId::Vertex(id) => {
+                    let Some(record) = view
+                        .vertex_at(cx, id, as_of)
+                        .await
+                        .map_err(|error| NativeSpoolError::BufferedRead(Box::new(error)))?
+                    else {
+                        return Ok(None);
+                    };
+                    property_maps::metadata(
+                        MetadataRecord::Vertex(&record),
+                        kind,
+                        catalog,
+                        |_| true,
+                        |_| true,
+                        &mut physical,
+                        &failure,
+                    )
+                    .map(Some)
+                }
+                ElementId::Edge(id) => {
+                    let Some(record) = view
+                        .edge_at(cx, id, as_of)
+                        .await
+                        .map_err(|error| NativeSpoolError::BufferedRead(Box::new(error)))?
+                    else {
+                        return Ok(None);
+                    };
+                    property_maps::metadata(
+                        MetadataRecord::Edge(record.entry.relation, &record.props),
+                        kind,
+                        catalog,
+                        |_| true,
+                        |_| true,
+                        &mut physical,
+                        &failure,
+                    )
+                    .map(Some)
                 }
             }
         };
@@ -282,8 +378,10 @@ where
         view,
         cx,
         as_of: input.snapshot_seq(),
+        budget: policy.rows,
+        records: input.row_stats().snapshot_records,
     };
-    execute_with_elements(
+    let (mut output, work) = execute_with_elements(
         plan,
         input,
         &mut elements,
@@ -300,7 +398,9 @@ where
         prior_work,
         resolver,
     )
-    .await
+    .await?;
+    output.rows.snapshot_records = elements.records;
+    Ok((output, work))
 }
 
 /// Continue the same native stage program over an already completed source.

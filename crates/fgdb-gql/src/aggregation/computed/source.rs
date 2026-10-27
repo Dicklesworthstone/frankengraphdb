@@ -68,7 +68,7 @@ impl PreparedGraphAggregate {
         admit_input(&self.input, &mut input, policy, &mut checkpoint)?;
         self.finish_materialized_governed(
             input,
-            &mut |element, key| source.element_property(element, key),
+            &mut crate::set_ops::projection::SourceElements::new(&mut source),
             policy,
             checkpoint,
         )

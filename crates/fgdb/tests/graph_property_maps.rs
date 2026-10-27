@@ -163,6 +163,572 @@ async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx, hidden: bool) -> CommitS
     db.write(cx, batch).await.unwrap()
 }
 
+mod dynamic_metadata {
+    use super::*;
+    use fgdb::{PreparedNativeRead, QueryError};
+    use fgdb_gql::{GlaLimitDimension, GraphIntegerErrorKind, GraphSetExecutionError};
+    use fgdb_types::context::SimulationCheckpointProbe;
+    use fgdb_warden::{Error as AuthorizationError, LimitDimension};
+    use std::sync::Arc;
+
+    fn values(values: Vec<GraphValue>) -> GraphValue {
+        GraphValue::List(values.into_boxed_slice())
+    }
+
+    fn node() -> GraphValue {
+        map(&[("name", text("one")), ("score", int(10))])
+    }
+
+    fn edge() -> GraphValue {
+        map(&[
+            ("edge-note", GraphValue::Scalar(CanonicalScalar::Bool(true))),
+            ("score", int(3)),
+        ])
+    }
+
+    fn sorted(mut rows: Vec<Vec<GraphValue>>) -> Vec<Vec<GraphValue>> {
+        rows.sort();
+        rows
+    }
+
+    #[test]
+    fn carried_nodes_edges_subscripts_locals_and_aggregate_outputs_read_native_metadata() {
+        let ((), report) = run_async_under_lab(0x6d61_0101, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            seed(&mut db, &commit, false).await;
+            let params = GqlParameters::new();
+            let node_rows = vec![
+                vec![list(&["Thing"]), node(), list(&["name", "score"])],
+                vec![list(&["Thing"]), map(&[]), list(&[])],
+            ];
+            let edge_rows = vec![vec![text("R"), edge(), list(&["edge-note", "score"])]];
+            for (statement, expected) in [
+                (
+                    "MATCH p=(a:Thing)-[:R]->(b:Thing) WITH nodes(p) AS ns \
+                     UNWIND ns AS x RETURN labels(x) AS labels,properties(x) AS props,keys(x) AS keys",
+                    node_rows.clone(),
+                ),
+                (
+                    "MATCH p=(a)-[:R]->(b) WITH relationships(p) AS rs \
+                     UNWIND rs AS x RETURN type(x) AS kind,properties(x) AS props,keys(x) AS keys",
+                    edge_rows.clone(),
+                ),
+                (
+                    "MATCH p=(a)-[:R]->(b) RETURN labels(nodes(p)[-1]) AS labels,\
+                     properties(nodes(p)[0]) AS props,type(relationships(p)[0]) AS kind,\
+                     keys(relationships(p)[0]) AS keys",
+                    vec![vec![
+                        list(&["Thing"]),
+                        node(),
+                        text("R"),
+                        list(&["edge-note", "score"]),
+                    ]],
+                ),
+                (
+                    "MATCH (n:Thing) WITH collect(n) AS ns UNWIND ns AS x \
+                     RETURN labels(x) AS labels,properties(x) AS props,keys(x) AS keys",
+                    node_rows,
+                ),
+                (
+                    "MATCH (a)-[r:R]->(b) WITH collect(r) AS rs UNWIND rs AS x \
+                     RETURN type(x) AS kind,properties(x) AS props,keys(x) AS keys",
+                    edge_rows.clone(),
+                ),
+                (
+                    "MATCH p=(a)-[:R]->(b) RETURN [x IN nodes(p) | labels(x)] AS labels,\
+                     [x IN nodes(p) | properties(x)] AS props,\
+                     [x IN relationships(p) | type(x)] AS kinds,\
+                     [x IN relationships(p) | keys(x)] AS keys",
+                    vec![vec![
+                        values(vec![list(&["Thing"]), list(&["Thing"])]),
+                        values(vec![node(), map(&[])]),
+                        list(&["R"]),
+                        values(vec![list(&["edge-note", "score"])]),
+                    ]],
+                ),
+                (
+                    "MATCH (n:Thing {score:10}) RETURN labels(collect(n)[0]) AS labels,\
+                     properties(collect(n)[0]) AS props,keys(collect(n)[0]) AS keys",
+                    vec![vec![list(&["Thing"]), node(), list(&["name", "score"])]],
+                ),
+                (
+                    "MATCH (a)-[r:R]->(b) RETURN type(collect(r)[0]) AS kind,\
+                     properties(collect(r)[0]) AS props,keys(collect(r)[0]) AS keys",
+                    edge_rows,
+                ),
+                (
+                    "MATCH p=(a)-[:R]->(b) WITH nodes(p) AS ns UNWIND ns AS x \
+                     RETURN labels(x) AS labels,count(*) AS count",
+                    vec![vec![list(&["Thing"]), int(2)]],
+                ),
+            ] {
+                let actual = db
+                    .query(&cx, statement, &params, Catalog::Full, policy())
+                    .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+                assert_eq!(sorted(cells(actual)), sorted(expected), "{statement}");
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn metadata_nulls_type_errors_catalog_failures_and_precharge_keep_their_native_causes() {
+        let ((), report) = run_async_under_lab(0x6d61_0102, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            seed(&mut db, &commit, false).await;
+            for (statement, expected) in [
+                (
+                    "UNWIND [NULL] AS x RETURN labels(x),type(x),properties(x),keys(x)",
+                    vec![vec![null(), null(), null(), null()]],
+                ),
+                (
+                    "UNWIND [{score:7}] AS x RETURN properties(x),keys(x)",
+                    vec![vec![map(&[("score", int(7))]), list(&["score"])]],
+                ),
+            ] {
+                assert_eq!(
+                    cells(
+                        db.query(
+                            &cx,
+                            statement,
+                            &GqlParameters::new(),
+                            Catalog::Full,
+                            policy()
+                        )
+                        .unwrap()
+                    ),
+                    expected
+                );
+            }
+            for (function, operand) in [
+                ("labels", GraphValue::Edge(EId(1))),
+                ("type", GraphValue::Vertex(VId(1))),
+                ("labels", int(1)),
+                ("type", text("R")),
+                ("properties", int(1)),
+                ("keys", int(1)),
+            ] {
+                let parameters = GqlParameters::new()
+                    .with_list("refs", vec![operand])
+                    .unwrap();
+                let statement = format!("UNWIND $refs AS x RETURN {function}(x) AS value");
+                let error = db
+                    .query(&cx, &statement, &parameters, Catalog::Full, policy())
+                    .unwrap_err();
+                assert!(
+                    matches!(error,
+                        QueryError::Set(GqlQueryError::Source(GraphSetExecutionError::Projection { error, .. }))
+                            if error.kind == GraphIntegerErrorKind::IncompatibleOperands
+                    ),
+                    "{statement}: {error:?}"
+                );
+            }
+            let parameters = GqlParameters::new()
+                .with_list("refs", vec![GraphValue::Vertex(VId(1))])
+                .unwrap();
+            let statement = "UNWIND $refs AS x RETURN properties(x) AS props";
+            for suffix in ["", " LIMIT 0"] {
+                let statement = format!("{statement}{suffix}");
+                assert!(
+                    matches!(
+                        db.query(
+                            &cx,
+                            &statement,
+                            &parameters,
+                            Catalog::MissingScore,
+                            policy()
+                        ),
+                        Err(QueryError::Set(GqlQueryError::Source(
+                            GraphSetExecutionError::Source(GqlError::Read(
+                                ReadError::UnmappedProperty(SCORE)
+                            ))
+                        )))
+                    ),
+                    "{statement}"
+                );
+            }
+            let error = db
+                .query(
+                    &cx,
+                    statement,
+                    &parameters,
+                    Catalog::MissingScore,
+                    GqlQueryPolicy::new(100_000, 100_000, 0, 1_000_000),
+                )
+                .unwrap_err();
+            assert!(
+                matches!(error, QueryError::Set(GqlQueryError::Evaluator(limit))
+                if limit.dimension == GlaLimitDimension::WorkUnits),
+                "{error:?}"
+            );
+            let cancelled =
+                cx.with_checkpoint_probe(Arc::new(SimulationCheckpointProbe::new(Some(1))));
+            let error = db
+                .query(
+                    &cancelled,
+                    statement,
+                    &parameters,
+                    Catalog::MissingScore,
+                    policy(),
+                )
+                .unwrap_err();
+            assert!(
+                matches!(error, QueryError::Set(GqlQueryError::Interrupted(_))),
+                "{error:?}"
+            );
+
+            // Every reached native checkpoint is a refusal boundary; none may
+            // return a successful metadata prefix or spoil a later execution.
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let expected = db
+                .query(
+                    &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                    statement,
+                    &parameters,
+                    Catalog::Full,
+                    policy(),
+                )
+                .unwrap();
+            assert!(probe.calls() > 0);
+            for stop in 1..=probe.calls() {
+                let stopped = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                let error = db
+                    .query(
+                        &cx.with_checkpoint_probe(Arc::clone(&stopped)),
+                        statement,
+                        &parameters,
+                        Catalog::Full,
+                        policy(),
+                    )
+                    .unwrap_err();
+                assert!(
+                    matches!(error, QueryError::Set(GqlQueryError::Interrupted(_))),
+                    "checkpoint {stop}: {error:?}"
+                );
+                assert_eq!(stopped.calls(), stop);
+            }
+            assert_eq!(
+                db.query(&cx, statement, &parameters, Catalog::Full, policy())
+                    .unwrap(),
+                expected
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn dynamic_metadata_keeps_pinned_data_and_catalog_through_edits_compaction_and_reopen() {
+        let ((), report) = run_async_under_lab(0x6d61_0103, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let basis = seed(&mut db, &commit, false).await;
+            let pinned = db.read_session().unwrap();
+            let parameters = GqlParameters::new();
+            let statement = "MATCH p=(a)-[:R]->(b) WITH nodes(p) AS ns,relationships(p) AS rs \
+                RETURN labels(ns[0]) AS labels,properties(ns[0]) AS node,\
+                type(rs[0]) AS kind,properties(rs[0]) AS edge,keys(rs[0]) AS keys";
+            let prepared =
+                PreparedNativeRead::prepare(statement, &parameters, Catalog::Full).unwrap();
+            let renamed =
+                PreparedNativeRead::prepare(statement, &parameters, Catalog::RenamedScore).unwrap();
+            let before = vec![vec![
+                list(&["Thing"]),
+                node(),
+                text("R"),
+                edge(),
+                list(&["edge-note", "score"]),
+            ]];
+            assert_eq!(
+                cells(
+                    prepared
+                        .execute_in_view(&pinned, &cx, &parameters, policy())
+                        .unwrap()
+                ),
+                before
+            );
+            let mut edit = WriteBatch::new(R);
+            edit.set_vertex_label(VId(1), FOO, true);
+            edit.set_vertex_property(VId(1), SCORE, Some(CanonicalScalar::Int(20)));
+            edit.set_vertex_property(
+                VId(1),
+                NAME,
+                Some(CanonicalScalar::ucs_basic_text("two").unwrap()),
+            );
+            edit.set_edge_property(EId(1), SCORE, None);
+            edit.set_edge_property(
+                EId(1),
+                NAME,
+                Some(CanonicalScalar::ucs_basic_text("edge").unwrap()),
+            );
+            db.write(&commit, edit).await.unwrap();
+            db.compact(&commit).await.unwrap();
+            drop(db);
+            let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+                .await
+                .unwrap();
+            let expected = vec![vec![
+                list(&["Thing", "Foo"]),
+                map(&[("name", text("two")), ("score", int(20))]),
+                text("R"),
+                map(&[
+                    ("edge-note", GraphValue::Scalar(CanonicalScalar::Bool(true))),
+                    ("name", text("edge")),
+                ]),
+                list(&["edge-note", "name"]),
+            ]];
+            assert_eq!(
+                cells(prepared.execute(&db, &cx, &parameters, policy()).unwrap()),
+                expected
+            );
+            let (result, selected) = pinned
+                .query_with_snapshot(&cx, statement, &parameters, Catalog::Full, policy())
+                .unwrap();
+            assert_eq!(selected, basis);
+            assert_eq!(cells(result), before);
+            let temporal = statement.replacen(
+                " WITH ",
+                &format!(" FOR SYSTEM_TIME AS OF SEQ {} WITH ", basis.0),
+                1,
+            );
+            let current = db.read_session().unwrap();
+            let (result, selected) = current
+                .query_with_snapshot(&cx, &temporal, &parameters, Catalog::Full, policy())
+                .unwrap();
+            assert_eq!(selected, basis);
+            assert_eq!(cells(result), before);
+            let renamed_before = vec![vec![
+                list(&["Thing"]),
+                map(&[("name", text("one")), ("renamed-score", int(10))]),
+                text("R"),
+                map(&[
+                    ("edge-note", GraphValue::Scalar(CanonicalScalar::Bool(true))),
+                    ("renamed-score", int(3)),
+                ]),
+                list(&["edge-note", "renamed-score"]),
+            ]];
+            assert_eq!(
+                cells(
+                    renamed
+                        .execute_in_view(&pinned, &cx, &parameters, policy())
+                        .unwrap()
+                ),
+                renamed_before
+            );
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn hidden_metadata_and_forged_identities_match_the_removed_graph_and_signed_work_boundary() {
+        let ((), report) = run_async_under_lab(0x6d61_0104, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let mut hidden = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut removed = Database::open_memory(&commit, keys()).await.unwrap();
+            seed(&mut hidden, &commit, true).await;
+            seed(&mut removed, &commit, false).await;
+            let mut extra = WriteBatch::new(R);
+            extra.set_vertex_label(VId(1), LabelId(99), true);
+            extra.add_edge(
+                EId(3),
+                VId(3),
+                VId(1),
+                vec![(PropertyKeyId(99), CanonicalScalar::Int(999))],
+            );
+            hidden.write(&commit, extra).await.unwrap();
+            let mut extra = WriteBatch::new(RelationId(99));
+            extra.add_edge(
+                EId(4),
+                VId(1),
+                VId(2),
+                vec![(PropertyKeyId(99), CanonicalScalar::Int(999))],
+            );
+            hidden.write(&commit, extra).await.unwrap();
+            let issuer = Authority::new(
+                AuthKey::from_seed(0x6d61_0114),
+                NS,
+                "graph",
+                SchemaEpoch(0),
+                1,
+            )
+            .unwrap();
+            let mut grant = Grant::read_only(
+                "main",
+                1000,
+                QueryLimits {
+                    max_nodes: 100_000,
+                    max_work: 100_000,
+                    max_rows: 100_000,
+                },
+            );
+            grant.labels = Scope::only([THING]);
+            grant.relations = Scope::only([R]);
+            grant.properties = Scope::only([SCORE, NAME, NOTE]);
+            let read =
+                |db: &Database<MemVfs>, statement: &str, parameters: &GqlParameters, maximum| {
+                    let mut grant = grant.clone();
+                    grant.limits.max_work = maximum;
+                    let token = issuer.issue_at(&grant, 100).unwrap();
+                    db.query_authorized(
+                        &cx,
+                        &issuer,
+                        &token,
+                        "main",
+                        statement,
+                        parameters,
+                        Catalog::Full,
+                        policy(),
+                        || 100,
+                    )
+                };
+            let node_rows = vec![
+                vec![list(&["Thing"]), node(), list(&["name", "score"])],
+                vec![list(&["Thing"]), map(&[]), list(&[])],
+            ];
+            let mut cases = vec![
+                (
+                    "MATCH p=(a)-[r]->(b) WITH nodes(p) AS ns UNWIND ns AS x RETURN labels(x),properties(x),keys(x)",
+                    GqlParameters::new(),
+                    node_rows.clone(),
+                ),
+                (
+                    "MATCH p=(a)-[r]->(b) WITH relationships(p) AS rs UNWIND rs AS x RETURN type(x),properties(x),keys(x)",
+                    GqlParameters::new(),
+                    vec![vec![text("R"), edge(), list(&["edge-note", "score"])]],
+                ),
+                (
+                    "MATCH (n:Thing) WITH collect(n) AS ns UNWIND ns AS x RETURN labels(x),properties(x),keys(x)",
+                    GqlParameters::new(),
+                    node_rows,
+                ),
+                (
+                    "MATCH p=(a)-[r]->(b) RETURN [x IN nodes(p) | labels(x)],\
+                    [x IN relationships(p) | properties(x)]",
+                    GqlParameters::new(),
+                    vec![vec![
+                        values(vec![list(&["Thing"]), list(&["Thing"])]),
+                        values(vec![edge()]),
+                    ]],
+                ),
+            ];
+            for (identity, expected) in [
+                (
+                    VId(1),
+                    vec![list(&["Thing"]), node(), list(&["name", "score"])],
+                ),
+                (VId(2), vec![list(&["Thing"]), map(&[]), list(&[])]),
+                (VId(3), vec![null(), null(), null()]),
+                (VId(999), vec![null(), null(), null()]),
+            ] {
+                cases.push((
+                    "UNWIND $refs AS x RETURN labels(x),properties(x),keys(x)",
+                    GqlParameters::new()
+                        .with_list("refs", vec![GraphValue::Vertex(identity)])
+                        .unwrap(),
+                    vec![expected],
+                ));
+            }
+            for identity in [EId(1), EId(2), EId(3), EId(4), EId(999)] {
+                let expected = if identity == EId(1) {
+                    vec![text("R"), edge(), list(&["edge-note", "score"])]
+                } else {
+                    vec![null(), null(), null()]
+                };
+                cases.push((
+                    "UNWIND $refs AS x RETURN type(x),properties(x),keys(x)",
+                    GqlParameters::new()
+                        .with_list("refs", vec![GraphValue::Edge(identity)])
+                        .unwrap(),
+                    vec![expected],
+                ));
+            }
+            let mut hidden_vertex_work = None;
+            let mut hidden_edge_work = None;
+            for (statement, parameters, expected) in cases {
+                let expected = sorted(expected);
+                assert_eq!(
+                    sorted(cells(
+                        removed
+                            .query(&cx, statement, &parameters, Catalog::Full, policy())
+                            .unwrap()
+                    )),
+                    expected
+                );
+                for db in [&hidden, &removed] {
+                    assert_eq!(
+                        sorted(cells(
+                            read(db, statement, &parameters, 100_000)
+                                .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+                        )),
+                        expected
+                    );
+                }
+                let minimum = |db: &Database<MemVfs>| {
+                    let (mut low, mut high) = (0, 100_000);
+                    while low < high {
+                        let middle = low + (high - low) / 2;
+                        match read(db, statement, &parameters, middle) {
+                            Ok(_) => high = middle,
+                            Err(error) => {
+                                assert!(
+                                    matches!(
+                                        error,
+                                        QueryError::Authorization(
+                                            AuthorizationError::LimitExceeded(LimitDimension::Work)
+                                        )
+                                    ),
+                                    "{statement}: {error:?}"
+                                );
+                                low = middle + 1;
+                            }
+                        }
+                    }
+                    low
+                };
+                let work = minimum(&removed);
+                assert!(work > 0 && work < 100_000);
+                assert_eq!(minimum(&hidden), work, "hidden metadata work: {statement}");
+                assert!(matches!(
+                    read(&hidden, statement, &parameters, work - 1),
+                    Err(QueryError::Authorization(
+                        AuthorizationError::LimitExceeded(LimitDimension::Work)
+                    ))
+                ));
+                assert_eq!(
+                    sorted(cells(read(&hidden, statement, &parameters, work).unwrap())),
+                    expected
+                );
+                if expected == vec![vec![null(), null(), null()]] {
+                    let same_kind = if statement.contains("labels(x)") {
+                        &mut hidden_vertex_work
+                    } else {
+                        &mut hidden_edge_work
+                    };
+                    if let Some(prior) = *same_kind {
+                        assert_eq!(work, prior, "hidden and absent identity work: {statement}");
+                    } else {
+                        *same_kind = Some(work);
+                    }
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}
+
 #[test]
 fn graph_maps_cover_vertices_relationships_optional_scopes_and_row_composition() {
     let ((), report) = run_async_under_lab(0x6d61_0001, |root| async move {

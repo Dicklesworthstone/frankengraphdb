@@ -784,6 +784,112 @@ impl<'s, C: FnMut() -> u64> ScopedElements<'s, '_, C> {
         }
         Ok(None)
     }
+
+    fn metadata(
+        &mut self,
+        element: ElementId,
+        kind: fgdb_gql::GraphElementMetadata,
+        catalog: &fgdb_gql::ReverseSymbolCatalog,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<()>,
+    ) -> Result<Option<fgdb_gql::algebra::GraphValue>> {
+        use crate::gql_exec::property_maps::{self, MetadataRecord};
+
+        self.poll()?;
+        let snapshot: &'s crate::Snapshot = &self.view.snapshot;
+        let record = match element {
+            ElementId::Vertex(id) => {
+                let Some(row) = self.visible_vertex(id)? else {
+                    return Ok(None);
+                };
+                self.admit_vertex(row, control)?;
+                MetadataRecord::Vertex(row)
+            }
+            ElementId::Edge(id) => {
+                let Some((block, row)) = snapshot.adjacency_index().statement_at_controlled(
+                    &snapshot.blocks,
+                    id,
+                    self.at,
+                    &mut |_| self.poll(),
+                )?
+                else {
+                    return Ok(None);
+                };
+                let edge = &snapshot.blocks[block][row];
+                if !self
+                    .execution
+                    .borrow()
+                    .permit
+                    .predicates()
+                    .allows_relation(edge.relation)
+                {
+                    return Ok(None);
+                }
+                let Some(src) = self.visible_vertex(edge.src)? else {
+                    return Ok(None);
+                };
+                let dst = if edge.dst == edge.src {
+                    None
+                } else {
+                    let Some(dst) = self.visible_vertex(edge.dst)? else {
+                        return Ok(None);
+                    };
+                    Some(dst)
+                };
+                // As for a scalar property read, no visible counter is spent
+                // until the edge and both endpoint predicates have passed.
+                control(GlaExecutionEvent::Work)?;
+                self.admit_vertex(src, control)?;
+                if let Some(dst) = dst {
+                    self.admit_vertex(dst, control)?;
+                }
+                MetadataRecord::Edge(
+                    edge.relation,
+                    source::edge_properties_at(&snapshot.block_props, block, row),
+                )
+            }
+        };
+        let records = self
+            .records
+            .checked_add(1)
+            .ok_or(SpillError::SizeOverflow)?;
+        self.budget
+            .check(GqlBudgetDimension::SnapshotRecords, records)
+            .map_err(|error| authorized(QueryError::Set(GqlQueryError::Rows(error))))?;
+        self.records = records;
+        property_maps::metadata(
+            record,
+            kind,
+            catalog,
+            |label| {
+                self.execution
+                    .borrow()
+                    .permit
+                    .predicates()
+                    .allows_label(label)
+            },
+            |key| {
+                self.execution
+                    .borrow()
+                    .permit
+                    .predicates()
+                    .allows_property(key)
+            },
+            &mut |event| {
+                control(match event {
+                    source::SourceEvent::Work | source::SourceEvent::SnapshotRecord => {
+                        GlaExecutionEvent::Work
+                    }
+                    source::SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                })
+            },
+            &|error| {
+                authorized(QueryError::Set(GqlQueryError::Source(
+                    fgdb_gql::GraphSetExecutionError::Source(GqlError::Read(error)),
+                )))
+            },
+        )
+        .map(Some)
+    }
 }
 
 impl<'s, C: FnMut() -> u64 + Send> AsyncSpillElementSource for ScopedElements<'s, '_, C> {
@@ -808,6 +914,17 @@ impl<'s, C: FnMut() -> u64 + Send> AsyncSpillElementSource for ScopedElements<'s
     ) -> Option<Result<Option<Self::Property>>> {
         let cx = self.cx;
         Some(cx.with_restriction(|| self.read(element, key, control)))
+    }
+
+    async fn element_metadata_with_control(
+        &mut self,
+        element: ElementId,
+        kind: fgdb_gql::GraphElementMetadata,
+        catalog: &fgdb_gql::ReverseSymbolCatalog,
+        control: &mut (impl FnMut(GlaExecutionEvent) -> Result<()> + Send),
+    ) -> Option<Result<Option<fgdb_gql::algebra::GraphValue>>> {
+        let cx = self.cx;
+        Some(cx.with_restriction(|| self.metadata(element, kind, catalog, control)))
     }
 }
 

@@ -405,66 +405,73 @@ impl SealedReadView {
         memory: FnxMemoryLimits,
         evidence: &'a RefCell<&'e mut Vec<FnxCertificate>>,
     ) -> impl GraphSetSource<GqlError, Cancel> + 'a {
-        fgdb_gql::procedure_row_source(
-            move |pattern, remaining| {
-                crate::gql_exec::execute_seeded_pattern_at(
-                    &self.view,
-                    pattern,
-                    None,
-                    self.as_of,
-                    remaining,
-                    || cx.checkpoint(),
-                )
-            },
-            move |pattern, seeds, remaining| {
-                Some(crate::gql_exec::execute_seeded_pattern_at(
-                    &self.view,
-                    pattern,
-                    Some(seeds),
-                    self.as_of,
-                    remaining,
-                    || cx.checkpoint(),
-                ))
-            },
-            move |call, arguments, remaining| {
-                if crate::query::is_hybrid(call) {
-                    return crate::query::hybrid_procedure(
-                        &self.view.snapshot,
-                        Some(&self.view.beacon_indexes),
+        fgdb_gql::with_element_metadata(
+            fgdb_gql::procedure_row_source(
+                move |pattern, remaining| {
+                    crate::gql_exec::execute_seeded_pattern_at(
+                        &self.view,
+                        pattern,
+                        None,
                         self.as_of,
-                        call,
-                        arguments,
                         remaining,
-                        cx,
-                    );
-                }
-                let mut completed =
-                    self.procedure(cx, call, arguments, remaining, memory, false, evidence)?;
-                let mut value = Vec::new();
-                value
-                    .try_reserve_exact(completed.count)
-                    .map_err(|_| procedure_failure(Error::AllocationFailed))?;
-                while let Some(row) = completed.cursor.next_row(&mut || cx.checkpoint())? {
-                    value.push(row);
-                }
-                Ok(GqlQueryExecution {
-                    value,
-                    rows: completed.rows,
-                    evaluator: completed.evaluator,
-                })
-            },
-            move |call, arguments, remaining| {
-                Some(
-                    self.procedure(cx, call, arguments, remaining, memory, true, evidence)
-                        .map(|completed| GraphProcedureExecution {
-                            cursor: Box::new(completed.cursor),
-                            rows: completed.rows,
-                            evaluator: completed.evaluator,
-                        }),
+                        || cx.checkpoint(),
+                    )
+                },
+                move |pattern, seeds, remaining| {
+                    Some(crate::gql_exec::execute_seeded_pattern_at(
+                        &self.view,
+                        pattern,
+                        Some(seeds),
+                        self.as_of,
+                        remaining,
+                        || cx.checkpoint(),
+                    ))
+                },
+                move |call, arguments, remaining| {
+                    if crate::query::is_hybrid(call) {
+                        return crate::query::hybrid_procedure(
+                            &self.view.snapshot,
+                            Some(&self.view.beacon_indexes),
+                            self.as_of,
+                            call,
+                            arguments,
+                            remaining,
+                            cx,
+                        );
+                    }
+                    let mut completed =
+                        self.procedure(cx, call, arguments, remaining, memory, false, evidence)?;
+                    let mut value = Vec::new();
+                    value
+                        .try_reserve_exact(completed.count)
+                        .map_err(|_| procedure_failure(Error::AllocationFailed))?;
+                    while let Some(row) = completed.cursor.next_row(&mut || cx.checkpoint())? {
+                        value.push(row);
+                    }
+                    Ok(GqlQueryExecution {
+                        value,
+                        rows: completed.rows,
+                        evaluator: completed.evaluator,
+                    })
+                },
+                move |call, arguments, remaining| {
+                    Some(
+                        self.procedure(cx, call, arguments, remaining, memory, true, evidence)
+                            .map(|completed| GraphProcedureExecution {
+                                cursor: Box::new(completed.cursor),
+                                rows: completed.rows,
+                                evaluator: completed.evaluator,
+                            }),
+                    )
+                },
+                move |element, key| {
+                    crate::gql_exec::element_property_at(&self.view, element, key, self.as_of)
+                },
+            ),
+            move |element, kind, catalog, control| {
+                crate::gql_exec::element_metadata_at(
+                    &self.view, element, kind, catalog, self.as_of, control,
                 )
-            },
-            move |element, key| {
-                crate::gql_exec::element_property_at(&self.view, element, key, self.as_of)
             },
         )
     }

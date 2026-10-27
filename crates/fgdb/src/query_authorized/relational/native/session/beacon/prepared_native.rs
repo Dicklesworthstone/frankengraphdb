@@ -340,6 +340,58 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                         .map(|position| row.props[position].1.clone())
                 }))
             };
+            let mut metadata = |element,
+                                kind,
+                                catalog: &fgdb_gql::ReverseSymbolCatalog,
+                                control: &mut dyn FnMut(
+                fgdb_gql::GlaExecutionEvent,
+            ) -> Result<(), ()>| {
+                use crate::gql_exec::property_maps::{self, MetadataRecord};
+                use fgdb_gql::GraphElementMetadataError;
+                let ElementId::Vertex(id) = element else {
+                    return Err(GraphElementMetadataError::Source(source_refusal(
+                        "prepared index metadata reads require a retrieved vertex",
+                    )));
+                };
+                if !retrieved.borrow().contains(&id) {
+                    return Err(GraphElementMetadataError::Source(source_refusal(
+                        "prepared index metadata reads require a retrieved vertex",
+                    )));
+                }
+                let row = returned_vertex_at(view, id, index.sequence, &mut || {
+                    execution.borrow_mut().poll()
+                })
+                .map_err(|error| {
+                    element_failure.borrow_mut().get_or_insert(error);
+                    GraphElementMetadataError::Source(source_refusal(
+                        "prepared index metadata read interrupted",
+                    ))
+                })?;
+                let Some(row) = row.filter(|row| scope.allows_vertex(&row.labels)) else {
+                    return Ok(None);
+                };
+                property_maps::metadata(
+                    MetadataRecord::Vertex(row),
+                    kind,
+                    catalog,
+                    |label| scope.allows_label(label),
+                    |key| scope.allows_property(key),
+                    &mut |event| {
+                        control(match event {
+                            crate::gql_exec::source::SourceEvent::Work
+                            | crate::gql_exec::source::SourceEvent::SnapshotRecord => {
+                                fgdb_gql::GlaExecutionEvent::Work
+                            }
+                            crate::gql_exec::source::SourceEvent::ScratchEntry => {
+                                fgdb_gql::GlaExecutionEvent::ScratchEntry
+                            }
+                        })
+                        .map_err(|()| GraphElementMetadataError::Interrupted)
+                    },
+                    &|error| GraphElementMetadataError::Source(GqlError::Read(error)),
+                )
+                .map(Some)
+            };
             let mut checkpoint = || {
                 if let Some(error) = element_failure.borrow_mut().take() {
                     return Err(error);
@@ -352,15 +404,27 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                         .bind_parameters(&params)
                         .map_err(QueryError::SetText)?;
                     let result = bound
-                        .execute_governed_with_elements(
+                        .execute_governed_from_source(
                             policy,
-                            |pattern, remaining| {
-                                identity_at(
-                                    index, view, scope, execution, pattern, remaining, &identity,
-                                )
-                            },
-                            &mut procedures,
-                            &mut elements,
+                            fgdb_gql::with_element_metadata(
+                                fgdb_gql::WithElementReads {
+                                    source: fgdb_gql::WithProcedures {
+                                        patterns:
+                                            |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
+                                                GraphValueRow,
+                                            >,
+                                             remaining| {
+                                                identity_at(
+                                                    index, view, scope, execution, pattern,
+                                                    remaining, &identity,
+                                                )
+                                            },
+                                        procedures: &mut procedures,
+                                    },
+                                    elements: &mut elements,
+                                },
+                                &mut metadata,
+                            ),
                             &mut checkpoint,
                         )
                         .map_err(set_error)?;
@@ -378,15 +442,27 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                         .bind_relation_parameters(&params)
                         .map_err(QueryError::PipelineText)?;
                     let result = bound
-                        .execute_governed_with_elements(
+                        .execute_governed_from_source(
                             policy,
-                            |pattern, remaining| {
-                                identity_at(
-                                    index, view, scope, execution, pattern, remaining, &identity,
-                                )
-                            },
-                            &mut procedures,
-                            &mut elements,
+                            fgdb_gql::with_element_metadata(
+                                fgdb_gql::WithElementReads {
+                                    source: fgdb_gql::WithProcedures {
+                                        patterns:
+                                            |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
+                                                GraphValueRow,
+                                            >,
+                                             remaining| {
+                                                identity_at(
+                                                    index, view, scope, execution, pattern,
+                                                    remaining, &identity,
+                                                )
+                                            },
+                                        procedures: &mut procedures,
+                                    },
+                                    elements: &mut elements,
+                                },
+                                &mut metadata,
+                            ),
                             &mut checkpoint,
                         )
                         .map_err(aggregate_gql_error)?;

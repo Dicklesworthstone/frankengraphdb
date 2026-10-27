@@ -31,10 +31,11 @@ pub(crate) use procedure::{
     BorrowedSource, DynPatterns, DynProcedures, DynSeeded, PatternSource, WithSeededPatterns,
 };
 pub use procedure::{
-    GraphPatternFactorExecution, GraphProcedureExecution, GraphProcedureRowCursor, GraphSetSource,
-    PreparedProcedureCall, ProcedureGraphDirection, ProcedureGraphProjection, ProcedureGraphWeight,
-    ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops, WithElementReads,
-    WithProcedureRows, WithProcedures, procedure_row_source,
+    GraphElementReader, GraphPatternFactorExecution, GraphProcedureExecution,
+    GraphProcedureRowCursor, GraphSetSource, PreparedProcedureCall, ProcedureGraphDirection,
+    ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
+    ProcedureSelfLoops, WithElementMetadata, WithElementReads, WithProcedureRows, WithProcedures,
+    procedure_row_source, with_element_metadata,
 };
 pub(crate) use projection::{
     ElementRead, ProjectionFailure, construct_temporal, evaluate_equality, evaluate_membership,
@@ -44,8 +45,9 @@ pub(crate) use projection::{
     value_function,
 };
 pub use projection::{
-    GqlTimeZones, GraphElementKey, GraphListQuantifier, GraphSetProjection,
-    GraphSetProjectionError, GraphSetValue, GraphTemporalFunction, GraphValueFunction,
+    GqlTimeZones, GraphElementKey, GraphElementMetadata, GraphElementMetadataError,
+    GraphListQuantifier, GraphSetProjection, GraphSetProjectionError, GraphSetValue,
+    GraphTemporalFunction, GraphValueFunction,
 };
 
 use crate::algebra::{
@@ -1438,7 +1440,17 @@ impl PreparedGraphSet {
                 element: fgdb_delta_types::ElementId,
                 key: fgdb_delta_types::PropertyKeyId,
             ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
-                (self.elements)(element, key)
+                self.elements.property(element, key)
+            }
+            fn element_metadata(
+                &mut self,
+                element: fgdb_delta_types::ElementId,
+                kind: GraphElementMetadata,
+                catalog: &crate::ReverseSymbolCatalog,
+                control: &mut dyn FnMut(crate::GlaExecutionEvent) -> Result<(), ()>,
+            ) -> Option<Result<Option<crate::algebra::GraphValue>, GraphElementMetadataError<E>>>
+            {
+                self.elements.metadata(element, kind, catalog, control)
             }
         }
         let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;

@@ -2,10 +2,10 @@
 //! Visibility is applied before catalog access, payload inspection or charging.
 
 use super::source::SourceEvent;
-use crate::ReadError;
-use fgdb_delta_types::PropertyKeyId;
-use fgdb_gql::ReverseSymbolCatalog;
+use crate::{ReadError, VertexRow};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue};
+use fgdb_gql::{GraphElementMetadata, ReverseSymbolCatalog};
 use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::collections::BTreeMap;
 
@@ -13,6 +13,129 @@ use std::collections::BTreeMap;
 pub(crate) struct PropertyMaps {
     pub(crate) vertices: BTreeMap<VId, GraphValue>,
     pub(crate) edges: BTreeMap<EId, GraphValue>,
+}
+
+/// A borrowed, visible record at the executing statement's pinned cut. The
+/// host admits the element and both edge endpoints before constructing this
+/// view; field masking still precedes every catalog lookup and allocation.
+pub(crate) enum MetadataRecord<'a> {
+    Vertex(&'a VertexRow),
+    Edge(RelationId, &'a [(PropertyKeyId, CanonicalPropertyValue)]),
+}
+
+/// Materialize metadata through the caller's cumulative control. Reusing the
+/// ordinary property-map collector keeps nested values, missing catalog names,
+/// cancellation and pre-copy reservations identical to bound element reads.
+pub(crate) fn metadata<E>(
+    record: MetadataRecord<'_>,
+    kind: GraphElementMetadata,
+    catalog: &ReverseSymbolCatalog,
+    mut visible_label: impl FnMut(LabelId) -> bool,
+    visible_property: impl FnMut(PropertyKeyId) -> bool,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    failure: &impl Fn(ReadError) -> E,
+) -> Result<GraphValue, E> {
+    match (kind, record) {
+        (GraphElementMetadata::Properties, record) => {
+            let properties = match record {
+                MetadataRecord::Vertex(row) => row.props.as_slice(),
+                MetadataRecord::Edge(_, properties) => properties,
+            };
+            collect(
+                properties.iter().map(|(key, value)| (*key, value)),
+                Some(catalog),
+                visible_property,
+                control,
+                failure,
+            )
+        }
+        (GraphElementMetadata::Keys, record) => {
+            let properties = match record {
+                MetadataRecord::Vertex(row) => row.props.as_slice(),
+                MetadataRecord::Edge(_, properties) => properties,
+            };
+            control(SourceEvent::Work)?;
+            control(SourceEvent::ScratchEntry)?;
+            let mut visible_property = visible_property;
+            let mut names = BTreeMap::new();
+            for (key, _) in properties {
+                if !visible_property(*key) {
+                    continue;
+                }
+                control(SourceEvent::Work)?;
+                if names.len() >= GraphValue::MAX_LIST_NODES - 1 {
+                    return Err(failure(ReadError::InvalidPropertyMap));
+                }
+                let name = catalog
+                    .properties
+                    .get(key)
+                    .ok_or_else(|| failure(ReadError::UnmappedProperty(*key)))?;
+                // Retain a borrowed catalog name, not a stored property value.
+                // The ordered map both detects aliases and preserves keys()'s
+                // canonical name order without copying any nested payload.
+                control(SourceEvent::ScratchEntry)?;
+                if names.insert(name.as_str(), *key).is_some() {
+                    return Err(failure(ReadError::InvalidPropertyMap));
+                }
+            }
+            let mut values = Vec::new();
+            for (name, key) in names {
+                control(SourceEvent::Work)?;
+                control(SourceEvent::ScratchEntry)?;
+                payload(name.len(), control)?;
+                values.push(GraphValue::Scalar(
+                    CanonicalScalar::ucs_basic_text(name)
+                        .map_err(|_| failure(ReadError::UnmappedProperty(key)))?,
+                ));
+            }
+            Some(GraphValue::List(values.into_boxed_slice()))
+                .filter(GraphValue::validate_bounds)
+                .ok_or_else(|| failure(ReadError::InvalidPropertyMap))
+        }
+        (GraphElementMetadata::Labels, MetadataRecord::Vertex(row)) => {
+            control(SourceEvent::Work)?;
+            control(SourceEvent::ScratchEntry)?;
+            let mut names = Vec::new();
+            // Stored vertex rows have canonical sorted, unique label IDs, the
+            // same order used by labels() over a bound pattern variable.
+            for &label in &row.labels {
+                if !visible_label(label) {
+                    continue;
+                }
+                control(SourceEvent::Work)?;
+                if names.len() >= GraphValue::MAX_LIST_NODES - 1 {
+                    return Err(failure(ReadError::InvalidPropertyMap));
+                }
+                let name = catalog
+                    .labels
+                    .get(&label)
+                    .ok_or_else(|| failure(ReadError::UnmappedLabel(label)))?;
+                control(SourceEvent::ScratchEntry)?;
+                payload(name.len(), control)?;
+                let name = CanonicalScalar::ucs_basic_text(name)
+                    .map_err(|_| failure(ReadError::UnmappedLabel(label)))?;
+                names.push(GraphValue::Scalar(name));
+            }
+            Some(GraphValue::List(names.into_boxed_slice()))
+                .filter(GraphValue::validate_bounds)
+                .ok_or_else(|| failure(ReadError::InvalidPropertyMap))
+        }
+        (GraphElementMetadata::Type, MetadataRecord::Edge(relation, _)) => {
+            control(SourceEvent::Work)?;
+            let name = catalog
+                .relations
+                .get(&relation)
+                .ok_or_else(|| failure(ReadError::UnmappedRelation(relation)))?;
+            control(SourceEvent::ScratchEntry)?;
+            payload(name.len(), control)?;
+            CanonicalScalar::ucs_basic_text(name)
+                .map(GraphValue::Scalar)
+                .map_err(|_| failure(ReadError::UnmappedRelation(relation)))
+        }
+        // The value evaluator rejects these domains before calling its host.
+        // Retain a typed failure if a host invokes this helper independently.
+        _ => Err(failure(ReadError::InvalidPropertyMap)),
+    }
 }
 
 /// Enumerate effective source properties, never the catalog's known-key set.
@@ -126,6 +249,133 @@ fn payload<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_masks_unknown_fields_before_errors_and_every_allocation() {
+        let visible = VertexRow {
+            vid: VId(u128::MAX),
+            birth_ordinal: 0,
+            created_at: fgdb_types::CommitSeq(1),
+            retired_at: None,
+            labels: vec![LabelId(1), LabelId(2)],
+            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(7).into())],
+        };
+        let mut hidden = visible.clone();
+        hidden.labels.push(LabelId(99));
+        hidden.props.push((
+            PropertyKeyId(99),
+            CanonicalScalar::ucs_basic_text(&"secret".repeat(2048))
+                .unwrap()
+                .into(),
+        ));
+        let mut catalog = ReverseSymbolCatalog::new();
+        catalog.insert_label(LabelId(1), "zeta");
+        catalog.insert_label(LabelId(2), "alpha");
+        catalog.insert_property(PropertyKeyId(1), "value");
+        catalog.insert_relation(RelationId(1), "LINK");
+        let run = |row: &VertexRow, kind| {
+            let mut events = Vec::new();
+            let value = metadata(
+                MetadataRecord::Vertex(row),
+                kind,
+                &catalog,
+                |id| id != LabelId(99),
+                |id| id != PropertyKeyId(99),
+                &mut |event| {
+                    events.push(event);
+                    Ok::<_, ReadError>(())
+                },
+                &core::convert::identity,
+            )
+            .unwrap();
+            (value, events)
+        };
+        for kind in [
+            GraphElementMetadata::Labels,
+            GraphElementMetadata::Properties,
+            GraphElementMetadata::Keys,
+        ] {
+            assert_eq!(run(&hidden, kind), run(&visible, kind));
+        }
+        let mut large = visible.clone();
+        large.props[0].1 = GraphValue::map(vec![(
+            "nested".into(),
+            GraphValue::List(
+                vec![GraphValue::Scalar(
+                    CanonicalScalar::ucs_basic_text(&"payload".repeat(8192)).unwrap(),
+                )]
+                .into_boxed_slice(),
+            ),
+        )])
+        .unwrap()
+        .to_property_value()
+        .unwrap();
+        assert_eq!(
+            run(&large, GraphElementMetadata::Keys),
+            run(&visible, GraphElementMetadata::Keys),
+            "keys must not inspect or copy a visible property's nested payload"
+        );
+        let expected_labels = GraphValue::List(
+            vec![
+                GraphValue::Scalar(CanonicalScalar::ucs_basic_text("zeta").unwrap()),
+                GraphValue::Scalar(CanonicalScalar::ucs_basic_text("alpha").unwrap()),
+            ]
+            .into_boxed_slice(),
+        );
+        assert_eq!(
+            run(&visible, GraphElementMetadata::Labels).0,
+            expected_labels
+        );
+        assert!(matches!(
+            metadata(
+                MetadataRecord::Vertex(&hidden),
+                GraphElementMetadata::Labels,
+                &catalog,
+                |_| true,
+                |_| true,
+                &mut |_| Ok::<_, ReadError>(()),
+                &core::convert::identity,
+            ),
+            Err(ReadError::UnmappedLabel(LabelId(99)))
+        ));
+
+        for kind in [
+            GraphElementMetadata::Labels,
+            GraphElementMetadata::Type,
+            GraphElementMetadata::Properties,
+            GraphElementMetadata::Keys,
+        ] {
+            let execute = |stop| {
+                let mut calls = 0;
+                let record = if kind == GraphElementMetadata::Type {
+                    MetadataRecord::Edge(RelationId(1), &visible.props)
+                } else {
+                    MetadataRecord::Vertex(&visible)
+                };
+                let result = metadata(
+                    record,
+                    kind,
+                    &catalog,
+                    |_| true,
+                    |_| true,
+                    &mut |_| {
+                        calls += 1;
+                        if calls == stop { Err(calls) } else { Ok(()) }
+                    },
+                    &|_| usize::MAX,
+                );
+                (result, calls)
+            };
+            let (complete, calls) = execute(usize::MAX);
+            assert!(complete.is_ok());
+            assert!(calls > 0);
+            for stop in 1..=calls {
+                let (result, observed) = execute(stop);
+                assert_eq!(result, Err(stop), "{kind:?} stop={stop}");
+                assert_eq!(observed, stop);
+            }
+        }
+    }
 
     #[test]
     fn masked_unknown_properties_match_physical_removal_in_values_and_charges() {

@@ -88,23 +88,38 @@ pub(super) fn graph_execution_at<Clock: FnMut() -> u64>(
     } else {
         query.execute_with_element_source_governed(
             policy,
-            fgdb_gql::WithElementReads {
-                source: |pattern: &PreparedGraphPattern<GraphValueRow>, remaining| {
-                    pattern_at(snapshot, at, pattern, scope, execution, remaining)
-                        .map_err(|error| error.map_source(GqlError::Read))
+            fgdb_gql::with_element_metadata(
+                fgdb_gql::WithElementReads {
+                    source: |pattern: &PreparedGraphPattern<GraphValueRow>, remaining| {
+                        pattern_at(snapshot, at, pattern, scope, execution, remaining)
+                            .map_err(|error| error.map_source(GqlError::Read))
+                    },
+                    elements: |element, key| {
+                        scoped_element_property(
+                            snapshot,
+                            at,
+                            scope,
+                            execution,
+                            &element_failure,
+                            element,
+                            key,
+                        )
+                    },
                 },
-                elements: |element, key| {
-                    scoped_element_property(
+                |element, kind, catalog, control| {
+                    scoped_element_metadata(
                         snapshot,
                         at,
                         scope,
                         execution,
                         &element_failure,
                         element,
-                        key,
+                        kind,
+                        catalog,
+                        control,
                     )
                 },
-            },
+            ),
             || {
                 if let Some(error) = element_failure.borrow_mut().take() {
                     return Err(error);
@@ -240,17 +255,32 @@ fn visit_at<Clock: FnMut() -> u64>(
         if let Some((records, count)) = count_summary {
             let result = count.execute_governed_with_element_reads(
                 records,
-                |element, key| {
-                    scoped_element_property(
-                        snapshot,
-                        at,
-                        scope,
-                        execution,
-                        element_failure,
-                        element,
-                        key,
-                    )
-                },
+                fgdb_gql::with_element_metadata(
+                    |element, key| {
+                        scoped_element_property(
+                            snapshot,
+                            at,
+                            scope,
+                            execution,
+                            element_failure,
+                            element,
+                            key,
+                        )
+                    },
+                    |element, kind, catalog, control| {
+                        scoped_element_metadata(
+                            snapshot,
+                            at,
+                            scope,
+                            execution,
+                            element_failure,
+                            element,
+                            kind,
+                            catalog,
+                            control,
+                        )
+                    },
+                ),
                 usage.remaining(policy),
                 ElementCheckpoint {
                     checkpoint: WorkCheckpoint(execution),
@@ -297,17 +327,32 @@ fn visit_at<Clock: FnMut() -> u64>(
             checkpoint: WorkCheckpoint(execution),
             failure: element_failure,
         };
-        let elements = |element, key| {
-            scoped_element_property(
-                snapshot,
-                at,
-                scope,
-                execution,
-                element_failure,
-                element,
-                key,
-            )
-        };
+        let elements = fgdb_gql::with_element_metadata(
+            |element, key| {
+                scoped_element_property(
+                    snapshot,
+                    at,
+                    scope,
+                    execution,
+                    element_failure,
+                    element,
+                    key,
+                )
+            },
+            |element, kind, catalog, control| {
+                scoped_element_metadata(
+                    snapshot,
+                    at,
+                    scope,
+                    execution,
+                    element_failure,
+                    element,
+                    kind,
+                    catalog,
+                    control,
+                )
+            },
+        );
         // A vertex-only aggregate tests and reads the vertex its scan has just
         // yielded: `scan` remembers it, so neither finds it again (count_vertices
         // 1.9-2.3x). An edge-reading one keeps the plain lookups. Its endpoint

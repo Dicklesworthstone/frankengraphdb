@@ -664,7 +664,10 @@ mod buffered_elements {
         PreparedBufferedOrder,
     };
     use fgdb_gql::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValueRow};
-    use fgdb_gql::{GlaLimitDimension, GraphIntegerErrorKind, GraphSetExecutionError};
+    use fgdb_gql::{
+        GlaLimitDimension, GqlBudgetDimension, GraphIntegerErrorKind, GraphSetExecutionError,
+        GraphSymbolResolver, ReverseSymbolCatalog,
+    };
     use fgdb_types::{CommitCx, CommitSeq};
 
     const PAYLOAD: usize = 513;
@@ -769,6 +772,297 @@ mod buffered_elements {
         }
         assert!(reader.next_row(cx).await.unwrap().is_none());
         rows
+    }
+
+    struct MetadataCatalog;
+
+    impl GraphSymbolResolver for MetadataCatalog {
+        fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            resolve(kind, name)
+        }
+
+        fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+            let mut catalog = ReverseSymbolCatalog::new();
+            catalog.insert_label(L, "L");
+            catalog.insert_relation(R, "R");
+            catalog.insert_property(P, "p");
+            catalog.insert_property(Q, "q");
+            Some(catalog)
+        }
+    }
+
+    fn assert_record_refusal(error: NativeSpoolError, limit: u64) {
+        assert!(
+            matches!(error, NativeSpoolError::BufferedExecute(ref inner)
+                if matches!(**inner, GqlQueryError::Rows(ref exceeded)
+                    if exceeded.dimension == GqlBudgetDimension::SnapshotRecords
+                        && exceeded.limit == limit && exceeded.observed == limit + 1)),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn cold_element_reads_admit_records_before_io_and_publish_exact_usage() {
+        let ((), report) = run_async_under_lab(0x5749_5363, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let commit = contexts.commit();
+            let (_db, vfs) = fixture(&commit).await;
+            let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+            let spill_pool = MemoryPool::new(2 * 1024 * 1024, 0).unwrap();
+            let mut view = cold(&commit, &vfs, &source_pool).await;
+            let text_value =
+                |name: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(name).unwrap());
+            let list = |values: Vec<_>| GraphValue::List(values.into_boxed_slice());
+            for (identity, expression, expected) in [
+                (
+                    GraphValue::Vertex(VId(u128::MAX)),
+                    "labels(x)",
+                    list(vec![text_value("L")]),
+                ),
+                (GraphValue::Edge(EId(u128::MAX)), "type(x)", text_value("R")),
+                (
+                    GraphValue::Vertex(VId(u128::MAX)),
+                    "keys(x)",
+                    list(vec![text_value("p"), text_value("q")]),
+                ),
+                (
+                    GraphValue::Vertex(VId(u128::MAX)),
+                    "properties(x)",
+                    GraphValue::map(vec![("p".into(), scalar(7)), ("q".into(), payload())])
+                        .unwrap(),
+                ),
+                (GraphValue::Vertex(VId(u128::MAX)), "x.p", scalar(7)),
+                (GraphValue::Edge(EId(u128::MAX)), "x.p", scalar(19)),
+                (GraphValue::Vertex(VId(999)), "labels(x)", null()),
+                (GraphValue::Edge(EId(999)), "x.p", null()),
+            ] {
+                let args = GqlParameters::new()
+                    .with_list("refs", vec![identity.clone()])
+                    .unwrap();
+                let text = format!(
+                    "UNWIND $refs AS x RETURN x AS owner,{expression} AS value ORDER BY owner"
+                );
+                let prepared = PreparedNativeRead::prepare(&text, &args, MetadataCatalog)
+                    .unwrap()
+                    .prepare_buffered_order(&args)
+                    .unwrap();
+                let mut io = files(&cx, &spill_pool).await;
+                let source_stats = view.buffer_stats();
+                let source_bytes = source_pool.used();
+                let error = execute(
+                    &prepared,
+                    &mut view,
+                    &cx,
+                    GqlQueryPolicy::new(0, 1, 100_000_000, 10_000_000),
+                    &mut io,
+                )
+                .await
+                .unwrap_err();
+                assert_record_refusal(error, 0);
+                // Values and UNWIND can write scratch, but a refused graph
+                // identity must not touch even a cached source extent.
+                assert_eq!(view.buffer_stats(), source_stats, "{text}");
+                assert_eq!(source_pool.used(), source_bytes, "{text}");
+                assert_eq!(spill_pool.used(), 0, "{text}");
+
+                let mut io = files(&cx, &spill_pool).await;
+                let (spool, _) = execute(
+                    &prepared,
+                    &mut view,
+                    &cx,
+                    GqlQueryPolicy::new(1, 1, 100_000_000, 10_000_000),
+                    &mut io,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+                assert_eq!(spool.row_stats().snapshot_records, 1, "{text}");
+                assert_eq!(spool.row_count(), 1, "{text}");
+                assert_eq!(
+                    contents(&spool, &mut io.b, &cx).await,
+                    vec![vec![identity, expected]],
+                    "{text}"
+                );
+                assert_eq!(spill_pool.used(), 0, "{text}");
+            }
+            drop(view);
+            assert_eq!(source_pool.used(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn cold_element_record_allowance_spans_stages_repeated_ids_and_graph_input() {
+        let ((), report) = run_async_under_lab(0x5749_5364, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let commit = contexts.commit();
+            let (_db, vfs) = fixture(&commit).await;
+            let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+            let spill_pool = MemoryPool::new(2 * 1024 * 1024, 0).unwrap();
+            let mut view = cold(&commit, &vfs, &source_pool).await;
+            let text_value =
+                |name: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(name).unwrap());
+            let list = |values: Vec<_>| GraphValue::List(values.into_boxed_slice());
+            let labels = list(vec![text_value("L")]);
+            let keys = list(vec![text_value("p"), text_value("q")]);
+            let args = GqlParameters::new()
+                .with_list("refs", vec![GraphValue::Vertex(VId(u128::MAX)); 2])
+                .unwrap();
+            for (text, args, required, refusals, expected) in [
+                (
+                    "UNWIND $refs AS x \
+                    WITH x,labels(x) AS ls ORDER BY x LIMIT 2 \
+                    WITH x,ls,keys(x) AS ks ORDER BY x LIMIT 2 \
+                    RETURN x AS owner,ls,ks,x.p AS value ORDER BY owner",
+                    args,
+                    6,
+                    vec![2, 4, 5],
+                    vec![
+                        vec![
+                            GraphValue::Vertex(VId(u128::MAX)),
+                            labels.clone(),
+                            keys,
+                            scalar(7),
+                        ];
+                        2
+                    ],
+                ),
+                (
+                    "MATCH (n:L) WITH {owner:n} AS state \
+                    RETURN state.owner AS owner,labels(state.owner) AS ls,\
+                    state.owner.p AS value ORDER BY owner",
+                    GqlParameters::new(),
+                    9,
+                    vec![3, 8],
+                    vec![
+                        vec![GraphValue::Vertex(VId(1)), labels.clone(), scalar(2)],
+                        vec![GraphValue::Vertex(VId(2)), labels.clone(), null()],
+                        vec![GraphValue::Vertex(VId(u128::MAX)), labels, scalar(7)],
+                    ],
+                ),
+            ] {
+                let prepared = PreparedNativeRead::prepare(text, &args, MetadataCatalog)
+                    .unwrap()
+                    .prepare_buffered_order(&args)
+                    .unwrap();
+                for limit in refusals {
+                    let mut io = files(&cx, &spill_pool).await;
+                    let error = execute(
+                        &prepared,
+                        &mut view,
+                        &cx,
+                        GqlQueryPolicy::new(limit, 100, 100_000_000, 10_000_000),
+                        &mut io,
+                    )
+                    .await
+                    .unwrap_err();
+                    assert_record_refusal(error, limit);
+                    assert_eq!(spill_pool.used(), 0, "{text}");
+                }
+                let mut io = files(&cx, &spill_pool).await;
+                let (spool, _) = execute(
+                    &prepared,
+                    &mut view,
+                    &cx,
+                    GqlQueryPolicy::new(required, 100, 100_000_000, 10_000_000),
+                    &mut io,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+                assert_eq!(spool.row_stats().snapshot_records, required, "{text}");
+                assert_eq!(contents(&spool, &mut io.b, &cx).await, expected, "{text}");
+                assert_eq!(spill_pool.used(), 0, "{text}");
+            }
+            drop(view);
+            assert_eq!(source_pool.used(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn spilled_dynamic_metadata_matches_resident_values_and_keeps_the_opened_snapshot() {
+        let ((), report) = run_async_under_lab(0x5749_5362, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let commit = contexts.commit();
+            let (mut db, vfs) = fixture(&commit).await;
+            let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+            let spill_pool = MemoryPool::new(2 * 1024 * 1024, 0).unwrap();
+            let mut view = cold(&commit, &vfs, &source_pool).await;
+            let args = GqlParameters::new();
+            let text = "MATCH p=(a:L)-[r:R]->(b:L) \
+                WITH r AS edge,nodes(p) AS ns,relationships(p) AS rs \
+                RETURN edge AS owner,type(rs[0]) AS kind,properties(rs[0]) AS props,\
+                keys(rs[0]) AS keys,[n IN ns | labels(n)] AS labels,\
+                [n IN ns | properties(n)] AS nodes ORDER BY owner";
+            let text_value =
+                |name: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(name).unwrap());
+            let list = |values: Vec<_>| GraphValue::List(values.into_boxed_slice());
+            let node = |p: Option<i64>| {
+                let mut fields = vec![("q".into(), payload())];
+                if let Some(p) = p {
+                    fields.push(("p".into(), scalar(p)));
+                }
+                GraphValue::map(fields).unwrap()
+            };
+            let expected: Vec<_> = [
+                (EId(11), 11, Some(2), Some(7)),
+                (EId(12), 17, Some(2), Some(7)),
+                (EId(u128::MAX), 19, Some(7), None),
+            ]
+            .into_iter()
+            .map(|(id, weight, from, to)| {
+                vec![
+                    GraphValue::Edge(id),
+                    text_value("R"),
+                    GraphValue::map(vec![("p".into(), scalar(weight))]).unwrap(),
+                    list(vec![text_value("p")]),
+                    list(vec![
+                        list(vec![text_value("L")]),
+                        list(vec![text_value("L")]),
+                    ]),
+                    list(vec![node(from), node(to)]),
+                ]
+            })
+            .collect();
+            let native = PreparedNativeRead::prepare(text, &args, MetadataCatalog).unwrap();
+            let QueryResult::Rows { rows, .. } =
+                native.execute(&db, &cx, &args, policy(100)).unwrap()
+            else {
+                panic!("resident metadata rows");
+            };
+            let actual: Vec<Vec<_>> = rows
+                .into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|value| match value {
+                            GraphAggregateValue::Value(value) => value,
+                            value => panic!("unexpected metadata cell {value:?}"),
+                        })
+                        .collect()
+                })
+                .collect();
+            assert_eq!(actual, expected);
+            let prepared = native.prepare_buffered_order(&args).unwrap();
+            let mut edit = WriteBatch::new(R);
+            edit.set_vertex_property(VId(u128::MAX), P, Some(CanonicalScalar::Int(70)));
+            edit.set_edge_property(EId(u128::MAX), P, Some(CanonicalScalar::Int(190)));
+            assert_eq!(db.write(&commit, edit).await.unwrap(), CommitSeq(2));
+            db.compact(&commit).await.unwrap();
+            let mut io = files(&cx, &spill_pool).await;
+            let (spool, _) = execute(&prepared, &mut view, &cx, policy(100), &mut io)
+                .await
+                .unwrap();
+            assert_eq!(spool.snapshot_seq(), CommitSeq(1));
+            assert_eq!(spool.row_count(), 3);
+            assert_eq!(contents(&spool, &mut io.b, &cx).await, expected);
+            assert!(io.partition_io.writes.load(Ordering::SeqCst) > 0);
+            assert_eq!(spill_pool.used(), 0);
+            drop(view);
+            assert_eq!(source_pool.used(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]

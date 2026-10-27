@@ -368,7 +368,7 @@ impl PreparedGraphAggregate {
         // failures or aggregation. No row payload clone is needed at this seam.
         let value = self.summarize_projected_rows_with_elements(
             &input.value,
-            &mut |element, key| source.element_property(element, key),
+            &mut crate::set_ops::projection::SourceElements::new(&mut source),
             &mut control,
         )?;
         control(GlaExecutionEvent::Work)?;

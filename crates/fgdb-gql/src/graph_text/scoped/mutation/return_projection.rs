@@ -234,7 +234,7 @@ fn list_operand_at(
         TokenKind::Punct(b'[') => Ok(true),
         TokenKind::Word(word) if word.eq_ignore_ascii_case("CASE") => case_has_list(lexer, route),
         TokenKind::Word(word) => Ok(match lexer.clone().next()?.kind {
-            TokenKind::Punct(b'(') => ["REVERSE", "SPLIT", "TAIL", "RANGE", "KEYS"]
+            TokenKind::Punct(b'(') => ["REVERSE", "SPLIT", "TAIL", "RANGE", "KEYS", "LABELS"]
                 .iter()
                 .any(|name| word.eq_ignore_ascii_case(name)),
             TokenKind::Punct(b'.' | b'[') => false,
@@ -294,7 +294,13 @@ fn case_has_list(lexer: &Lexer<'_>, route: Route<'_, '_>) -> Result<bool, GraphP
 fn composite_result_at(token: Token<'_>, lexer: &Lexer<'_>) -> Result<bool, GraphPatternTextError> {
     Ok(match token.kind {
         TokenKind::Punct(b'{') => true,
-        TokenKind::Word(_) => matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'[')),
+        TokenKind::Word(word) => match lexer.clone().next()?.kind {
+            TokenKind::Punct(b'[') => true,
+            TokenKind::Punct(b'(') => ["LABELS", "TYPE", "PROPERTIES", "KEYS"]
+                .iter()
+                .any(|name| word.eq_ignore_ascii_case(name)),
+            _ => false,
+        },
         _ => false,
     })
 }
@@ -404,6 +410,10 @@ fn map_capable(
         | ReadValueTemplate::Index { .. }
         | ReadValueTemplate::Reduce { .. }
         | ReadValueTemplate::Temporal { .. } => true,
+        ReadValueTemplate::ElementMetadata {
+            kind: crate::GraphElementMetadata::Properties,
+            ..
+        } => true,
         // A scalar column (a stored property, say) may hold a temporal value,
         // so it reads that value's fields. Any other key could only be NULL
         // or an error, and stays refused here.
@@ -1909,10 +1919,10 @@ impl<'a> Parser<'a> {
             return Ok(true);
         }
         let call = matches!(lexer.next()?.kind, TokenKind::Punct(b'('));
-        if !call || !(self.is_word("KEYS") || self.is_word("SIZE")) {
+        if !call || !(self.is_word("KEYS") || self.is_word("PROPERTIES") || self.is_word("SIZE")) {
             return Ok(false);
         }
-        if self.is_word("KEYS") {
+        if self.is_word("KEYS") || self.is_word("PROPERTIES") {
             return Ok(true);
         }
         // A literal keeps the scalar SIZE too, with its preparation-time
@@ -1965,9 +1975,12 @@ impl<'a> Parser<'a> {
         let entry = self.call_element_reads && self.property_dot_follows()?;
         let size = self.is_word("SIZE")
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('));
+        let metadata = (self.is_word("LABELS") || self.is_word("TYPE"))
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('));
         if !subscript
             && !entry
             && !size
+            && !metadata
             && !self.starts_let_operand()?
             && !self.collected_aggregate_call()?
         {
@@ -2000,6 +2013,23 @@ impl<'a> Parser<'a> {
     /// or `>=`, as in `[1, 0] >= [1]`. The scalar compiler reads such a
     /// comparison whole in the value language; it never compares composites.
     pub(super) fn starts_composite_comparison(&self) -> Result<bool, GraphPatternTextError> {
+        // Element metadata produces ordinary lists/maps. Compare the
+        // complete value rather than coercing labels()/keys()/properties()
+        // into a scalar let reference.
+        if (self.is_word("LABELS") || self.is_word("KEYS") || self.is_word("PROPERTIES"))
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+        {
+            let mut lexer = self.lexer.clone();
+            lexer.next()?;
+            skip_group(&mut lexer)?;
+            return Ok(match after_postfix(&mut lexer)?.kind {
+                TokenKind::Punct(b'=') => !matches!(lexer.next()?.kind, TokenKind::Punct(b'~')),
+                TokenKind::Punct(b'<' | b'>') => true,
+                TokenKind::Punct(b'!') => matches!(lexer.next()?.kind, TokenKind::Punct(b'=')),
+                TokenKind::Word(word) => word.eq_ignore_ascii_case("IN"),
+                _ => false,
+            });
+        }
         // A list- or map-typed parameter compared whole (`$rows = [1]`), as
         // its literal is and as `[1] = $rows` already was. `$rows[0]` and
         // `$map.key` keep their element and entry reads.
@@ -2357,9 +2387,6 @@ impl<'a> Parser<'a> {
         if case_has_list(&self.lexer, route)? {
             return Ok(true);
         }
-        if self.elements.is_empty() {
-            return Ok(false);
-        }
         let mut lexer = self.lexer.clone();
         let mut cases = 1_usize;
         let mut property = false;
@@ -2369,6 +2396,16 @@ impl<'a> Parser<'a> {
                 && !property
             {
                 if self.elements.contains(&word) {
+                    return Ok(true);
+                }
+                // Metadata is a source read even when its result is scalar.
+                // Its let slots belong to the selected branch, including
+                // calls nested in scalar functions such as upper(type(x)).
+                if ["LABELS", "TYPE", "PROPERTIES", "KEYS"]
+                    .iter()
+                    .any(|name| word.eq_ignore_ascii_case(name))
+                    && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+                {
                     return Ok(true);
                 }
                 if word.eq_ignore_ascii_case("CASE") {
@@ -2627,11 +2664,27 @@ impl<'a> Parser<'a> {
                 values,
                 guard: None,
             }
+        } else if let Some(kind) = self.value_metadata_call(inputs.is_some(), schema)? {
+            self.advance()?;
+            self.punct(b'(', "(")?;
+            let value =
+                self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
+            self.punct(b')', ")")?;
+            ReadValueTemplate::ElementMetadata {
+                kind,
+                value: Box::new(value),
+                catalog: self.syntax.element_catalog.request(),
+            }
         } else if (self.is_word("KEYS") || self.is_word("PROPERTIES"))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
             let keys = self.is_word("KEYS");
-            let resolved = if inputs.is_none() && schema.is_empty() {
+            let mut argument = self.lexer.clone();
+            argument.next()?;
+            let graph_argument = matches!(argument.next()?.kind, TokenKind::Word(word)
+                if !self.elements.contains(&word) && self.graph_element(word))
+                && matches!(argument.next()?.kind, TokenKind::Punct(b')'));
+            let resolved = if inputs.is_none() && schema.is_empty() && graph_argument {
                 match resolve.as_mut() {
                     Some(resolve) => resolve.leaf(self)?,
                     None => None,
@@ -2692,16 +2745,22 @@ impl<'a> Parser<'a> {
                 self.punct(b')', ")")?;
                 (map, graph)
             };
-            if keys {
-                ReadValueTemplate::Keys(Box::new(map))
-            } else if graph {
+            if graph {
                 graph_map = true;
-                map
+                if keys {
+                    ReadValueTemplate::Keys(Box::new(map))
+                } else {
+                    map
+                }
             } else {
-                ReadValueTemplate::MapOverlay {
-                    base: Box::new(map),
-                    keys: Box::new([]),
-                    values: Vec::new(),
+                ReadValueTemplate::ElementMetadata {
+                    kind: if keys {
+                        crate::GraphElementMetadata::Keys
+                    } else {
+                        crate::GraphElementMetadata::Properties
+                    },
+                    value: Box::new(map),
+                    catalog: self.syntax.element_catalog.request(),
                 }
             }
         } else if let Some(function) = self.list_function()? {
@@ -3114,6 +3173,55 @@ impl<'a> Parser<'a> {
         Ok((!carried && schema.iter().any(|(column, _)| column.text == name)).then_some(function))
     }
 
+    /// Keep existing graph-column metadata reads where available. Every
+    /// other argument is an ordinary value expression, including subscripts,
+    /// comprehension locals and elements carried through UNWIND or grouping.
+    pub(super) fn value_metadata_call(
+        &self,
+        graph: bool,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<Option<crate::GraphElementMetadata>, GraphPatternTextError> {
+        let (kind, function) = if self.is_word("LABELS") {
+            (
+                crate::GraphElementMetadata::Labels,
+                GraphPathFunction::Labels,
+            )
+        } else if self.is_word("TYPE") {
+            (crate::GraphElementMetadata::Type, GraphPathFunction::Type)
+        } else {
+            return Ok(None);
+        };
+        let mut lexer = self.lexer.clone();
+        if !matches!(lexer.next()?.kind, TokenKind::Punct(b'(')) {
+            return Ok(None);
+        }
+        if let TokenKind::Word(name) = lexer.next()?.kind
+            && matches!(lexer.next()?.kind, TokenKind::Punct(b')'))
+            && !self.elements.contains(&name)
+        {
+            if graph
+                && (self
+                    .syntax
+                    .variables
+                    .iter()
+                    .any(|variable| variable.text == name)
+                    || self.syntax.visible_edge(name).is_some())
+            {
+                return Ok(None);
+            }
+            if self.boundary_reads.as_ref().is_some_and(|boundary| {
+                boundary.width == schema.len()
+                    && boundary
+                        .functions
+                        .iter()
+                        .any(|&(read, known, _)| read == name && known == function)
+            }) {
+                return Ok(None);
+            }
+        }
+        Ok(Some(kind))
+    }
+
     /// REVERSE or SPLIT directly followed by `(` (fgdb-13l85).
     fn value_function(&self) -> Result<Option<crate::GraphValueFunction>, GraphPatternTextError> {
         let TokenKind::Word(word) = self.current.kind else {
@@ -3151,6 +3259,14 @@ impl<'a> Parser<'a> {
             // value/property reads must be evaluated in this argument's
             // scope, after earlier non-NULL arguments have been considered.
             if matches!(token.kind, TokenKind::Word(word) if self.elements.contains(&word)) {
+                return Ok(true);
+            }
+            if matches!(token.kind, TokenKind::Word(word)
+                if ["LABELS", "TYPE", "PROPERTIES", "KEYS"]
+                    .iter()
+                    .any(|name| word.eq_ignore_ascii_case(name)))
+                && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+            {
                 return Ok(true);
             }
             if first && depth == 1 {
@@ -4132,6 +4248,15 @@ pub(in crate::graph_text) fn bind_read_value(
         ReadValueTemplate::Function { function, argument } => GraphSetValue::Function {
             function: *function,
             argument: Box::new(bind_read_value(argument, values)?),
+        },
+        ReadValueTemplate::ElementMetadata {
+            kind,
+            value,
+            catalog,
+        } => GraphSetValue::ElementMetadata {
+            kind: *kind,
+            value: Box::new(bind_read_value(value, values)?),
+            catalog: catalog.bind(),
         },
         ReadValueTemplate::Case { arms, otherwise } => GraphSetValue::Case {
             arms: arms

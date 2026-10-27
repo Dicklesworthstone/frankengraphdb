@@ -1218,6 +1218,7 @@ impl PreparedGraphVertexUpsertText {
         // This standalone MERGE constructs its pattern directly, bypassing
         // the read relation's key-binding pass. Computed RETURN/WITH reads
         // still bind their property slots through the same catalog now.
+        syntax.element_catalog.resolve(&mut resolve, statement);
         for (key, slot) in &syntax.element_keys {
             slot.resolve(
                 match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
@@ -2789,6 +2790,10 @@ impl PreparedGraphVertexMergeRowsText {
         // directly. Graph-backed inputs below resolve the same slots through
         // their normal read preparation instead.
         if owned.is_some() || leading.is_some() || matched.is_none() && unwound_match.is_none() {
+            parser
+                .syntax
+                .element_catalog
+                .resolve(&mut *resolve, statement);
             for (key, slot) in &parser.syntax.element_keys {
                 slot.resolve(
                     match resolve.resolve_symbol(GraphSymbolKind::Property, key) {

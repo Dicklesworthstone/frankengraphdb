@@ -118,6 +118,102 @@ pub(crate) fn read_element_property<Row: std::borrow::Borrow<VertexRow>>(
     })
 }
 
+/// Metadata for a carried element is resolved at the same snapshot as its
+/// source, never against a newer database head. Every output allocation is
+/// admitted through the expression evaluator before copying stored payloads.
+pub(crate) fn element_metadata_at(
+    reader: &(impl GqlSnapshotReader + ?Sized),
+    element: fgdb_delta_types::ElementId,
+    kind: fgdb_gql::GraphElementMetadata,
+    catalog: &fgdb_gql::ReverseSymbolCatalog,
+    as_of: CommitSeq,
+    control: &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), ()>,
+) -> Result<Option<GraphValue>, fgdb_gql::GraphElementMetadataError<GqlError>> {
+    use fgdb_delta_types::ElementId;
+    use fgdb_gql::{GlaExecutionEvent, GraphElementMetadataError};
+    use property_maps::MetadataRecord;
+
+    let failure = |error| GraphElementMetadataError::Source(GqlError::Read(error));
+    let mut control = |event| {
+        control(match event {
+            SourceEvent::Work | SourceEvent::SnapshotRecord => GlaExecutionEvent::Work,
+            SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+        })
+        .map_err(|()| GraphElementMetadataError::Interrupted)
+    };
+    control(SourceEvent::Work)?;
+    if let Some(snapshot) = reader.gql_admitted_snapshot(as_of).map_err(failure)? {
+        let record = match element {
+            ElementId::Vertex(id) => {
+                let Some(row) = source::find_vertex(snapshot, id, as_of, &mut control)? else {
+                    return Ok(None);
+                };
+                MetadataRecord::Vertex(row)
+            }
+            ElementId::Edge(id) => {
+                let Some((block, row)) = snapshot.adjacency_index().statement_at_controlled(
+                    &snapshot.blocks,
+                    id,
+                    as_of,
+                    &mut |_| control(SourceEvent::Work),
+                )?
+                else {
+                    return Ok(None);
+                };
+                MetadataRecord::Edge(
+                    snapshot.blocks[block][row].relation,
+                    source::edge_properties_at(&snapshot.block_props, block, row),
+                )
+            }
+        };
+        return property_maps::metadata(
+            record,
+            kind,
+            catalog,
+            |_| true,
+            |_| true,
+            &mut control,
+            &failure,
+        )
+        .map(Some);
+    }
+    // Nonresident internal readers retain their authoritative point-lookup
+    // contract. The metadata construction itself is shared with the borrowed
+    // snapshot path, including field bounds and pre-copy accounting.
+    match element {
+        ElementId::Vertex(id) => reader
+            .gql_vertex_at(id, as_of)
+            .map_err(failure)?
+            .map(|row| {
+                property_maps::metadata(
+                    MetadataRecord::Vertex(&row),
+                    kind,
+                    catalog,
+                    |_| true,
+                    |_| true,
+                    &mut control,
+                    &failure,
+                )
+            })
+            .transpose(),
+        ElementId::Edge(id) => reader
+            .gql_edge_at(id, as_of)
+            .map_err(failure)?
+            .map(|row| {
+                property_maps::metadata(
+                    MetadataRecord::Edge(row.entry.relation, &row.props),
+                    kind,
+                    catalog,
+                    |_| true,
+                    |_| true,
+                    &mut control,
+                    &failure,
+                )
+            })
+            .transpose(),
+    }
+}
+
 fn bind_plan(statement: &str, bind: &RelationBind) -> Result<BoundPlan, GqlError> {
     bind.bind(statement).map_err(|error| match error {
         fgdb_gql::BindError::Parse(parse) => GqlError::Parse(parse),

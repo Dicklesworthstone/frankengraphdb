@@ -59,6 +59,20 @@ pub trait AsyncSpillElementSource: Send {
     ) -> impl Future<Output = Option<Result<Option<Self::Property>, Self::Error>>> + Send {
         self.element_property(element, key)
     }
+
+    /// Metadata uses the same cumulative evaluator control and snapshot as
+    /// property reads. Hosts must charge before constructing any list/map or
+    /// copying a payload, and stop on the first control error. The supplied
+    /// catalog is immutable statement evidence, not a source-side lookup.
+    fn element_metadata_with_control(
+        &mut self,
+        _element: ElementId,
+        _kind: super::projection::GraphElementMetadata,
+        _catalog: &crate::ReverseSymbolCatalog,
+        _control: &mut (impl FnMut(GlaExecutionEvent) -> Result<(), Self::Error> + Send),
+    ) -> impl Future<Output = Option<Result<Option<GraphValue>, Self::Error>>> + Send {
+        async { None }
+    }
 }
 
 /// A refusal found before any graph source or scratch writer is opened.

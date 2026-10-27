@@ -446,12 +446,10 @@ where
         ))?,
         SetNode::Unwind { input, value } => {
             let input = run(input, source, meter, operand)?;
-            let mut read = |element, key| {
-                source.element_property(element, key).map(|read| {
-                    read.map_err(|error| {
-                        GqlQueryError::Source(GraphSetExecutionError::Source(error))
-                    })
-                })
+            let mut source_elements = projection::SourceElements::new(source);
+            let mut read = projection::MappedElements {
+                read: &mut source_elements,
+                error: |error| GqlQueryError::Source(GraphSetExecutionError::Source(error)),
             };
             let mut output = Vec::new();
             for (row_at, row) in input.into_iter().enumerate() {
@@ -634,12 +632,10 @@ where
         } => {
             let preserve_order = *preserve_order || input.preserves_row_order();
             let input = run(input, source, meter, operand)?;
-            let mut read = |element, key| {
-                source.element_property(element, key).map(|read| {
-                    read.map_err(|error| {
-                        GqlQueryError::Source(GraphSetExecutionError::Source(error))
-                    })
-                })
+            let mut source_elements = projection::SourceElements::new(source);
+            let mut read = projection::MappedElements {
+                read: &mut source_elements,
+                error: |error| GqlQueryError::Source(GraphSetExecutionError::Source(error)),
             };
             project_rows(
                 input,
@@ -767,10 +763,9 @@ pub(crate) fn finish_owned_aggregate_reading<E, C>(
         GraphSetQuantifier::All,
         true,
         &mut meter,
-        &mut |element, key| {
-            elements(element, key).map(|read| {
-                read.map_err(|error| GqlQueryError::Source(GraphSetExecutionError::Source(error)))
-            })
+        &mut projection::MappedElements {
+            read: elements,
+            error: |error| GqlQueryError::Source(GraphSetExecutionError::Source(error)),
         },
     )?;
     let value = grouping
@@ -847,10 +842,9 @@ pub(crate) fn finish_owned_projection_reading<E, C>(
         quantifier,
         true,
         &mut meter,
-        &mut |element, key| {
-            elements(element, key).map(|read| {
-                read.map_err(|error| GqlQueryError::Source(GraphSetExecutionError::Source(error)))
-            })
+        &mut projection::MappedElements {
+            read: elements,
+            error: |error| GqlQueryError::Source(GraphSetExecutionError::Source(error)),
         },
     )?;
     let rows = order_page(rows, order, page.0, page.1, &mut meter)?;

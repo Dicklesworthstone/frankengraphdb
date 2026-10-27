@@ -1098,7 +1098,7 @@ impl PreparedGraphAggregate {
         edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
         test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
-        mut elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalPropertyValue>, E>,
+        mut elements: impl crate::GraphElementReader<E>,
         policy: GqlQueryPolicy,
         checkpoint: impl crate::GovernedCheckpoint<C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
@@ -1111,7 +1111,7 @@ impl PreparedGraphAggregate {
             None::<(&PositionedGraph<'_, ()>, NoTest<E>)>,
             test_vertex,
             property,
-            &mut |element, key| Some(elements(element, key)),
+            &mut crate::set_ops::projection::HostElements(&mut elements),
             policy,
             checkpoint,
         )
@@ -1160,7 +1160,7 @@ impl PreparedGraphAggregate {
         test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         test_at: impl FnMut(u32, &[VertexPredicate]) -> Result<bool, E>,
         property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
-        mut elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalPropertyValue>, E>,
+        mut elements: impl crate::GraphElementReader<E>,
         policy: GqlQueryPolicy,
         checkpoint: impl crate::GovernedCheckpoint<C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
@@ -1172,7 +1172,7 @@ impl PreparedGraphAggregate {
             Some((graph, test_at)),
             test_vertex,
             property,
-            &mut |element, key| Some(elements(element, key)),
+            &mut crate::set_ops::projection::HostElements(&mut elements),
             policy,
             checkpoint,
         )

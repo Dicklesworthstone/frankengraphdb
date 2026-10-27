@@ -1598,6 +1598,10 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
         } else {
             // The direct owned-row step bypasses UnresolvedGraphText::resolve.
             // Its computed fields bind at the same catalog boundary.
+            parser
+                .syntax
+                .element_catalog
+                .resolve(&mut *resolve, statement);
             for (key, slot) in &parser.syntax.element_keys {
                 slot.resolve(
                     match resolve.resolve_symbol(GraphSymbolKind::Property, key) {

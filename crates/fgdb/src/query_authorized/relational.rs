@@ -21,8 +21,8 @@ use super::*;
 use fgdb_delta_types::ElementId;
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::{
-    GraphAggregateError, GraphAggregateRow, GraphSetExecutionError, PreparedGraphSet,
-    PreparedGraphSetAggregate,
+    GlaExecutionEvent, GraphAggregateError, GraphAggregateRow, GraphSetExecutionError,
+    PreparedGraphSet, PreparedGraphSetAggregate,
 };
 
 fn set_error(error: GqlQueryError<GraphSetExecutionError<GqlError>, QueryError>) -> QueryError {
@@ -132,6 +132,109 @@ fn scoped_element_property<Clock: FnMut() -> u64>(
     })
 }
 
+/// Carried identities do not carry authority. Re-admit the complete record at
+/// this statement's cut, mask fields before catalog access, then construct the
+/// requested metadata through the evaluator's existing cumulative controls.
+#[allow(clippy::too_many_arguments)]
+fn scoped_element_metadata<Clock: FnMut() -> u64>(
+    snapshot: &Snapshot,
+    at: CommitSeq,
+    scope: &PlannerPredicates,
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    failure: &RefCell<Option<QueryError>>,
+    element: ElementId,
+    kind: fgdb_gql::GraphElementMetadata,
+    catalog: &fgdb_gql::ReverseSymbolCatalog,
+    control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>,
+) -> Result<Option<fgdb_gql::algebra::GraphValue>, fgdb_gql::GraphElementMetadataError<GqlError>> {
+    use crate::gql_exec::property_maps::{self, MetadataRecord};
+    use fgdb_gql::GraphElementMetadataError;
+
+    let interrupted_source = || {
+        GqlError::Procedure(crate::query::ProcedureError::Search(
+            crate::query::HybridCallError::Combination(
+                "authorized element metadata read interrupted",
+            ),
+        ))
+    };
+    let retain = |error| {
+        failure.borrow_mut().get_or_insert(error);
+        GraphElementMetadataError::Source(interrupted_source())
+    };
+    if failure.borrow().is_some() {
+        return Err(GraphElementMetadataError::Source(interrupted_source()));
+    }
+    let mut physical = |_: source::SourceEvent| execution.borrow_mut().poll().map_err(&retain);
+    physical(source::SourceEvent::Work)?;
+    let record = match element {
+        ElementId::Vertex(id) => {
+            let Some(row) = source::find_vertex(snapshot, id, at, &mut physical)? else {
+                return Ok(None);
+            };
+            if !scope.allows_vertex(&row.labels) {
+                return Ok(None);
+            }
+            execution.borrow_mut().node().map_err(&retain)?;
+            MetadataRecord::Vertex(row)
+        }
+        ElementId::Edge(id) => {
+            let Some((block, row)) = snapshot.adjacency_index().statement_at_controlled(
+                &snapshot.blocks,
+                id,
+                at,
+                &mut |_| physical(source::SourceEvent::Work),
+            )?
+            else {
+                return Ok(None);
+            };
+            let edge = &snapshot.blocks[block][row];
+            if !scope.allows_relation(edge.relation) {
+                return Ok(None);
+            }
+            let Some(src) = source::find_vertex(snapshot, edge.src, at, &mut physical)? else {
+                return Ok(None);
+            };
+            if !scope.allows_vertex(&src.labels) {
+                return Ok(None);
+            }
+            if edge.dst != edge.src {
+                let Some(dst) = source::find_vertex(snapshot, edge.dst, at, &mut physical)? else {
+                    return Ok(None);
+                };
+                if !scope.allows_vertex(&dst.labels) {
+                    return Ok(None);
+                }
+                execution.borrow_mut().node().map_err(&retain)?;
+            }
+            // Both predicates precede every logical source charge. A hidden
+            // destination cannot change visible usage or expose a relation.
+            execution.borrow_mut().node().map_err(&retain)?;
+            MetadataRecord::Edge(
+                edge.relation,
+                source::edge_properties_at(&snapshot.block_props, block, row),
+            )
+        }
+    };
+    property_maps::metadata(
+        record,
+        kind,
+        catalog,
+        |label| scope.allows_label(label),
+        |property| scope.allows_property(property),
+        &mut |event| {
+            control(match event {
+                source::SourceEvent::Work | source::SourceEvent::SnapshotRecord => {
+                    GlaExecutionEvent::Work
+                }
+                source::SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+            })
+            .map_err(|()| GraphElementMetadataError::Interrupted)
+        },
+        &|error| GraphElementMetadataError::Source(GqlError::Read(error)),
+    )
+    .map(Some)
+}
+
 fn set_at<Clock: FnMut() -> u64>(
     snapshot: &Arc<Snapshot>,
     at: CommitSeq,
@@ -181,39 +284,54 @@ fn set_execution_in_runs<Clock: FnMut() -> u64>(
     let cursor_control = super::analytics::CursorControl::default();
     let result = query.execute_governed_from_source(
         policy,
-        fgdb_gql::procedure_row_source(
-            |pattern, remaining| {
-                pattern_at(snapshot, at, pattern, scope, execution, remaining)
-                    .map_err(|error| error.map_source(GqlError::Read))
-            },
-            |pattern, seeds, remaining| {
-                seeded::pattern_at(snapshot, at, pattern, seeds, scope, execution, remaining)
-                    .map(|result| result.map_err(|error| error.map_source(GqlError::Read)))
-            },
-            |call, arguments, remaining| {
-                procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
-            },
-            |call, arguments, remaining| {
-                Some(procedure_rows_at(
-                    snapshot,
-                    at,
-                    call,
-                    arguments,
-                    scope,
-                    execution,
-                    remaining,
-                    &cursor_control,
-                ))
-            },
-            |element, key| {
-                scoped_element_property(
+        fgdb_gql::with_element_metadata(
+            fgdb_gql::procedure_row_source(
+                |pattern, remaining| {
+                    pattern_at(snapshot, at, pattern, scope, execution, remaining)
+                        .map_err(|error| error.map_source(GqlError::Read))
+                },
+                |pattern, seeds, remaining| {
+                    seeded::pattern_at(snapshot, at, pattern, seeds, scope, execution, remaining)
+                        .map(|result| result.map_err(|error| error.map_source(GqlError::Read)))
+                },
+                |call, arguments, remaining| {
+                    procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
+                },
+                |call, arguments, remaining| {
+                    Some(procedure_rows_at(
+                        snapshot,
+                        at,
+                        call,
+                        arguments,
+                        scope,
+                        execution,
+                        remaining,
+                        &cursor_control,
+                    ))
+                },
+                |element, key| {
+                    scoped_element_property(
+                        snapshot,
+                        at,
+                        scope,
+                        execution,
+                        &element_failure,
+                        element,
+                        key,
+                    )
+                },
+            ),
+            |element, kind, catalog, control| {
+                scoped_element_metadata(
                     snapshot,
                     at,
                     scope,
                     execution,
                     &element_failure,
                     element,
-                    key,
+                    kind,
+                    catalog,
+                    control,
                 )
             },
         ),
@@ -399,39 +517,54 @@ fn aggregate_execution_at<Clock: FnMut() -> u64>(
     let cursor_control = super::analytics::CursorControl::default();
     let result = query.execute_governed_from_source(
         policy,
-        fgdb_gql::procedure_row_source(
-            |pattern, remaining| {
-                pattern_at(snapshot, at, pattern, scope, execution, remaining)
-                    .map_err(|error| error.map_source(GqlError::Read))
-            },
-            |pattern, seeds, remaining| {
-                seeded::pattern_at(snapshot, at, pattern, seeds, scope, execution, remaining)
-                    .map(|result| result.map_err(|error| error.map_source(GqlError::Read)))
-            },
-            |call, arguments, remaining| {
-                procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
-            },
-            |call, arguments, remaining| {
-                Some(procedure_rows_at(
-                    snapshot,
-                    at,
-                    call,
-                    arguments,
-                    scope,
-                    execution,
-                    remaining,
-                    &cursor_control,
-                ))
-            },
-            |element, key| {
-                scoped_element_property(
+        fgdb_gql::with_element_metadata(
+            fgdb_gql::procedure_row_source(
+                |pattern, remaining| {
+                    pattern_at(snapshot, at, pattern, scope, execution, remaining)
+                        .map_err(|error| error.map_source(GqlError::Read))
+                },
+                |pattern, seeds, remaining| {
+                    seeded::pattern_at(snapshot, at, pattern, seeds, scope, execution, remaining)
+                        .map(|result| result.map_err(|error| error.map_source(GqlError::Read)))
+                },
+                |call, arguments, remaining| {
+                    procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
+                },
+                |call, arguments, remaining| {
+                    Some(procedure_rows_at(
+                        snapshot,
+                        at,
+                        call,
+                        arguments,
+                        scope,
+                        execution,
+                        remaining,
+                        &cursor_control,
+                    ))
+                },
+                |element, key| {
+                    scoped_element_property(
+                        snapshot,
+                        at,
+                        scope,
+                        execution,
+                        &element_failure,
+                        element,
+                        key,
+                    )
+                },
+            ),
+            |element, kind, catalog, control| {
+                scoped_element_metadata(
                     snapshot,
                     at,
                     scope,
                     execution,
                     &element_failure,
                     element,
-                    key,
+                    kind,
+                    catalog,
+                    control,
                 )
             },
         ),

@@ -861,6 +861,7 @@ fn bind_fields(
             | ReadValueTemplate::Ordered { .. }
             | ReadValueTemplate::Temporal { .. }
             | ReadValueTemplate::Function { .. }
+            | ReadValueTemplate::ElementMetadata { .. }
             | ReadValueTemplate::Case { .. }
             | ReadValueTemplate::Random { .. }
             | ReadValueTemplate::Quantifier { .. }
@@ -1194,6 +1195,7 @@ impl PreparedGraphInsertText {
         // Computed RETURN/WITH values can dereference created identities even
         // for a standalone CREATE with no relational input or hidden fields.
         // Bind every parsed key at the same catalog boundary as source keys.
+        syntax.element_catalog.resolve(&mut resolve, statement);
         for (key, slot) in &syntax.element_keys {
             slot.resolve(
                 match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
@@ -1475,6 +1477,10 @@ impl PreparedGraphInsertText {
         // This input is already bound owned rows, so it does not pass through
         // ReadSetTextInput::resolve. Resolve the new CREATE's computed output
         // keys here, including reads that mix carried and newly created IDs.
+        parser
+            .syntax
+            .element_catalog
+            .resolve(&mut resolve, statement);
         for (key, slot) in &parser.syntax.element_keys {
             slot.resolve(
                 match resolve.resolve_symbol(GraphSymbolKind::Property, key) {

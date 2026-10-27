@@ -2084,7 +2084,13 @@ impl<'a> Parser<'a> {
         if self.lets.is_some() {
             let collected = matches!(columns, ExpressionColumns::Resolved(_))
                 && self.collected_aggregate_call()?;
-            if self.let_operand_here()? || collected {
+            let metadata = self
+                .value_metadata_call(
+                    matches!(columns, ExpressionColumns::Graph(_)),
+                    self.routing_row(columns).unwrap_or(&[]),
+                )?
+                .is_some();
+            if self.let_operand_here()? || collected || metadata {
                 self.composite_slot(columns, depth, program, at)?;
                 return Ok(());
             }

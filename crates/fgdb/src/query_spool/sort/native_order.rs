@@ -290,6 +290,78 @@ impl<'s> AsyncSpillElementSource for ResidentElements<'s> {
     ) -> Option<Result<Option<Self::Property>>> {
         Some(self.read(element, key, control))
     }
+
+    async fn element_metadata_with_control(
+        &mut self,
+        element: ElementId,
+        kind: fgdb_gql::GraphElementMetadata,
+        catalog: &fgdb_gql::ReverseSymbolCatalog,
+        control: &mut (impl FnMut(GlaExecutionEvent) -> Result<()> + Send),
+    ) -> Option<Result<Option<fgdb_gql::algebra::GraphValue>>> {
+        use crate::gql_exec::property_maps::{self, MetadataRecord};
+
+        Some((|| {
+            let failure = |error| {
+                NativeSpoolError::Execute(Box::new(GqlQueryError::Source(match element {
+                    ElementId::Vertex(_) => ScanError::Vertex(VertexScanError::Source(error)),
+                    ElementId::Edge(_) => ScanError::Edge(EdgeScanError::Source(error)),
+                })))
+            };
+            let snapshot = &self.view.snapshot;
+            snapshot.check_frontier(self.as_of).map_err(&failure)?;
+            let records = self
+                .records
+                .checked_add(1)
+                .ok_or(SpillError::SizeOverflow)?;
+            self.budget
+                .check(GqlBudgetDimension::SnapshotRecords, records)
+                .map_err(|error| NativeSpoolError::Execute(Box::new(GqlQueryError::Rows(error))))?;
+            self.records = records;
+            let mut physical = |event| {
+                control(match event {
+                    SourceEvent::Work | SourceEvent::SnapshotRecord => GlaExecutionEvent::Work,
+                    SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                })
+            };
+            let record = match element {
+                ElementId::Vertex(id) => {
+                    let Some(row) = find_vertex(snapshot, id, self.as_of, &mut physical)? else {
+                        return Ok(None);
+                    };
+                    MetadataRecord::Vertex(row)
+                }
+                ElementId::Edge(id) => {
+                    let Some((block, row)) = snapshot.adjacency_index().statement_at_controlled(
+                        &snapshot.blocks,
+                        id,
+                        self.as_of,
+                        &mut physical,
+                    )?
+                    else {
+                        return Ok(None);
+                    };
+                    MetadataRecord::Edge(
+                        snapshot.blocks[block][row].relation,
+                        crate::gql_exec::source::edge_properties_at(
+                            &snapshot.block_props,
+                            block,
+                            row,
+                        ),
+                    )
+                }
+            };
+            property_maps::metadata(
+                record,
+                kind,
+                catalog,
+                |_| true,
+                |_| true,
+                &mut physical,
+                &failure,
+            )
+            .map(Some)
+        })())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

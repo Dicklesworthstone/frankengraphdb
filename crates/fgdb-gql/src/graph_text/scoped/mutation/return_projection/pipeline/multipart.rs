@@ -1707,6 +1707,7 @@ impl<'a> Parser<'a> {
         // Reset only graph-local bindings. The live lexer, declaration map and
         // definition-wide predicate/edge/identity counters are never reset.
         let mut next: Syntax<'a> = Parser::new("")?.syntax;
+        next.element_catalog = self.syntax.element_catalog.clone();
         next.parameters.clone_from(&self.syntax.parameters);
         next.parameter_offsets
             .clone_from(&self.syntax.parameter_offsets);

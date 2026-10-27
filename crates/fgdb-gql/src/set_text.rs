@@ -208,6 +208,11 @@ pub(crate) enum ReadValueTemplate {
         property: ElementKeySlot,
     },
     Keys(Box<ReadValueTemplate>),
+    ElementMetadata {
+        kind: crate::GraphElementMetadata,
+        value: Box<ReadValueTemplate>,
+        catalog: ElementCatalogSlot,
+    },
     /// A scalar expression over composite operands (fgdb-o5o9t): `values`
     /// evaluate over the enclosing row, then `body` over that row extended
     /// by one slot per value, value `i` at `Local(values.len() - 1 - i)`.
@@ -265,6 +270,44 @@ impl ElementKeySlot {
     }
 }
 
+/// Shared across every part parsed by one statement parser. A terminal
+/// aggregate or write tail may request metadata after its graph input has
+/// lent its syntax, so the request and frozen catalog live in shared slots.
+#[derive(Clone, Default)]
+pub(crate) struct ElementCatalogSlot(std::sync::Arc<ElementCatalogBinding>);
+
+#[derive(Default)]
+struct ElementCatalogBinding {
+    requested: std::sync::atomic::AtomicBool,
+    catalog: std::sync::OnceLock<std::sync::Arc<crate::ReverseSymbolCatalog>>,
+}
+
+impl ElementCatalogSlot {
+    pub(crate) fn request(&self) -> Self {
+        self.0
+            .requested
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.clone()
+    }
+
+    pub(crate) fn resolve<R: crate::GraphSymbolResolver + ?Sized>(
+        &self,
+        resolver: &mut R,
+        text: &str,
+    ) {
+        if self.0.requested.load(std::sync::atomic::Ordering::Relaxed)
+            && self.0.catalog.get().is_none()
+        {
+            let catalog = crate::ReverseSymbolCatalog::from_resolver(resolver, text);
+            let _ = self.0.catalog.set(std::sync::Arc::new(catalog));
+        }
+    }
+
+    pub(crate) fn bind(&self) -> Option<std::sync::Arc<crate::ReverseSymbolCatalog>> {
+        self.0.catalog.get().cloned()
+    }
+}
+
 impl ReadValueTemplate {
     /// Whether this expression can run after grouping without an input row.
     /// Element locals belong to their enclosing comprehension/LET; random
@@ -292,9 +335,11 @@ impl ReadValueTemplate {
             Self::Equal { left, right } | Self::Ordered { left, right, .. } => {
                 left.row_independent() && right.row_independent()
             }
-            Self::Temporal { argument, .. } | Self::Function { argument, .. } => {
-                argument.row_independent()
-            }
+            Self::Temporal { argument, .. }
+            | Self::Function { argument, .. }
+            | Self::ElementMetadata {
+                value: argument, ..
+            } => argument.row_independent(),
             Self::Comprehension { list, filter, map } => {
                 list.row_independent()
                     && filter.as_deref().is_none_or(Self::row_independent)
@@ -365,6 +410,13 @@ impl ReadValueTemplate {
             | Self::MapGet { .. }
             | Self::Temporal { .. } => GraphSetColumnType::Any,
             Self::Keys(_) => GraphSetColumnType::List,
+            Self::ElementMetadata { kind, .. } => match kind {
+                crate::GraphElementMetadata::Labels | crate::GraphElementMetadata::Keys => {
+                    GraphSetColumnType::List
+                }
+                crate::GraphElementMetadata::Type => GraphSetColumnType::Scalar,
+                crate::GraphElementMetadata::Properties => GraphSetColumnType::Any,
+            },
             // reverse() is a list or a text; split() is a list; a sum with a
             // list operand is a list or, over scalars, a scalar.
             Self::Function { function, .. } => match function {
@@ -599,6 +651,19 @@ impl ReadValueTemplate {
             Self::Function { function, argument } => {
                 bytes.extend_from_slice(&[23, function.tag()]);
                 argument.append_template_transcript(bytes);
+            }
+            Self::ElementMetadata {
+                kind,
+                value,
+                catalog,
+            } => {
+                bytes.extend_from_slice(&[28, kind.tag()]);
+                value.append_template_transcript(bytes);
+                crate::set_ops::projection::append_metadata_catalog(
+                    *kind,
+                    catalog.bind().as_deref(),
+                    bytes,
+                );
             }
             Self::Ordered {
                 comparison,

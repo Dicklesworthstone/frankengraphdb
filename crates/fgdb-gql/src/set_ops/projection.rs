@@ -145,6 +145,14 @@ pub enum GraphSetValue {
     },
     /// `keys(m)`: the map's keys as text, ascending; NULL for a NULL map.
     Keys(Box<GraphSetValue>),
+    /// Metadata of an element value at the executing source's pinned cut.
+    /// Maps pass through `Properties`; NULL propagates without a source read.
+    /// The catalog is frozen at preparation, never supplied by the data source.
+    ElementMetadata {
+        kind: GraphElementMetadata,
+        value: Box<GraphSetValue>,
+        catalog: Option<std::sync::Arc<crate::ReverseSymbolCatalog>>,
+    },
     /// A scalar expression over composite operands (fgdb-o5o9t), such as
     /// `none(x IN l WHERE p) = (NOT any(x IN l WHERE p))`. Each of `values`
     /// evaluates once over the enclosing row; `body` then evaluates over that
@@ -203,6 +211,37 @@ pub enum GraphElementKey {
     Missing,
     /// The element's stored property under this key, read at the source's cut.
     Property(PropertyKeyId),
+}
+
+/// The metadata requested by `labels`, `type`, `properties`, or `keys` on a value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphElementMetadata {
+    Labels,
+    Type,
+    Properties,
+    /// Visible property names only; reading keys must not copy property
+    /// values or inspect their nested payloads.
+    Keys,
+}
+
+impl GraphElementMetadata {
+    pub(crate) const fn tag(self) -> u8 {
+        match self {
+            Self::Labels => 0,
+            Self::Type => 1,
+            Self::Properties => 2,
+            Self::Keys => 3,
+        }
+    }
+}
+
+/// A metadata host either reports its source error or acknowledges the
+/// evaluator's stop signal. The adapter retains the original control error;
+/// `Interrupted` is never exposed in its place or converted to an absent value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GraphElementMetadataError<E> {
+    Source(E),
+    Interrupted,
 }
 
 /// The openCypher value functions over lists and text (fgdb-13l85).
@@ -513,6 +552,7 @@ impl GraphSetValue {
                 matches!(property, GraphElementKey::Property(_))
                     || map.may_read_element_properties()
             }
+            Self::ElementMetadata { .. } => true,
             Self::List(values) => values.iter().any(Self::may_read_element_properties),
             Self::Size(value)
             | Self::Keys(value)
@@ -1140,6 +1180,16 @@ fn admit(
             admit(map, types, column, depth + 1, nodes, locals)?;
             GraphSetColumnType::List
         }
+        GraphSetValue::ElementMetadata { kind, value, .. } => {
+            admit(value, types, column, depth + 1, nodes, locals)?;
+            match kind {
+                GraphElementMetadata::Labels | GraphElementMetadata::Keys => {
+                    GraphSetColumnType::List
+                }
+                GraphElementMetadata::Type => GraphSetColumnType::Scalar,
+                GraphElementMetadata::Properties => GraphSetColumnType::Any,
+            }
+        }
         GraphSetValue::MapOverlay { base, keys, values } => {
             if keys.len() != values.len()
                 || keys
@@ -1380,6 +1430,15 @@ pub(super) fn append_value_transcript(value: &GraphSetValue, bytes: &mut Vec<u8>
             bytes.push(16);
             append_value_transcript(map, bytes);
         }
+        GraphSetValue::ElementMetadata {
+            kind,
+            value,
+            catalog,
+        } => {
+            bytes.extend_from_slice(&[28, kind.tag()]);
+            append_value_transcript(value, bytes);
+            append_metadata_catalog(*kind, catalog.as_deref(), bytes);
+        }
         GraphSetValue::MapOverlay { base, keys, values } => {
             bytes.push(18);
             append_value_transcript(base, bytes);
@@ -1455,6 +1514,49 @@ fn append_optional_transcript(value: Option<&GraphSetValue>, bytes: &mut Vec<u8>
             append_value_transcript(value, bytes);
         }
         None => bytes.push(0),
+    }
+}
+
+pub(crate) fn append_metadata_catalog(
+    kind: GraphElementMetadata,
+    catalog: Option<&crate::ReverseSymbolCatalog>,
+    bytes: &mut Vec<u8>,
+) {
+    let Some(catalog) = catalog else {
+        bytes.push(0);
+        return;
+    };
+    bytes.push(1);
+    fn names<'a>(entries: impl ExactSizeIterator<Item = (u64, &'a str)>, bytes: &mut Vec<u8>) {
+        bytes.extend_from_slice(&(entries.len() as u64).to_be_bytes());
+        for (id, name) in entries {
+            bytes.extend_from_slice(&id.to_be_bytes());
+            bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(name.as_bytes());
+        }
+    }
+    match kind {
+        GraphElementMetadata::Labels => names(
+            catalog
+                .labels
+                .iter()
+                .map(|(id, name)| (id.0, name.as_str())),
+            bytes,
+        ),
+        GraphElementMetadata::Type => names(
+            catalog
+                .relations
+                .iter()
+                .map(|(id, name)| (id.0, name.as_str())),
+            bytes,
+        ),
+        GraphElementMetadata::Properties | GraphElementMetadata::Keys => names(
+            catalog
+                .properties
+                .iter()
+                .map(|(id, name)| (id.0, name.as_str())),
+            bytes,
+        ),
     }
 }
 
@@ -1823,8 +1925,179 @@ pub(crate) fn evaluate_value_reading<E>(
 /// source's cut (fgdb-xnd7x). `Ok(None)` is an absent property. `None` means
 /// this host reads no element properties, so the read stays a typed error,
 /// never a guessed NULL.
-pub(crate) type ElementRead<'r, E> = dyn FnMut(ElementId, PropertyKeyId) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>>
-    + 'r;
+pub(crate) type ElementRead<'r, E> = dyn ElementReader<E> + 'r;
+
+pub(crate) trait ElementReader<E> {
+    fn property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>>;
+
+    fn metadata(
+        &mut self,
+        _element: ElementId,
+        _kind: GraphElementMetadata,
+        _catalog: &crate::ReverseSymbolCatalog,
+        _control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<Result<Option<GraphValue>, GraphElementMetadataError<E>>> {
+        None
+    }
+}
+
+impl<E, F> ElementReader<E> for F
+where
+    F: FnMut(
+        ElementId,
+        PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>>,
+{
+    fn property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
+        self(element, key)
+    }
+}
+
+pub(crate) struct SourceElements<'a, S: ?Sized, E, C> {
+    source: &'a mut S,
+    marker: std::marker::PhantomData<fn() -> (E, C)>,
+}
+
+impl<'a, S: super::GraphSetSource<E, C> + ?Sized, E, C> SourceElements<'a, S, E, C> {
+    pub(crate) fn new(source: &'a mut S) -> Self {
+        Self {
+            source,
+            marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<S: super::GraphSetSource<E, C> + ?Sized, E, C> ElementReader<E>
+    for SourceElements<'_, S, E, C>
+{
+    fn property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
+        self.source.element_property(element, key)
+    }
+    fn metadata(
+        &mut self,
+        element: ElementId,
+        kind: GraphElementMetadata,
+        catalog: &crate::ReverseSymbolCatalog,
+        control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<Result<Option<GraphValue>, GraphElementMetadataError<E>>> {
+        self.source
+            .element_metadata(element, kind, catalog, control)
+    }
+}
+
+/// Preserve optional metadata when an aggregate uses its binding visitor
+/// directly instead of a GraphSetSource.
+pub(crate) struct HostElements<'a, E>(pub(crate) &'a mut dyn super::GraphElementReader<E>);
+
+impl<E> ElementReader<E> for HostElements<'_, E> {
+    fn property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
+        Some(self.0.element_property(element, key))
+    }
+
+    fn metadata(
+        &mut self,
+        element: ElementId,
+        kind: GraphElementMetadata,
+        catalog: &crate::ReverseSymbolCatalog,
+        control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<Result<Option<GraphValue>, GraphElementMetadataError<E>>> {
+        self.0.element_metadata(element, kind, catalog, control)
+    }
+}
+
+pub(crate) struct MappedElements<'a, 'r, E, F> {
+    pub(crate) read: &'a mut ElementRead<'r, E>,
+    pub(crate) error: F,
+}
+
+impl<E, T, F: FnMut(E) -> T> ElementReader<T> for MappedElements<'_, '_, E, F> {
+    fn property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, T>> {
+        self.read
+            .property(element, key)
+            .map(|result| result.map_err(&mut self.error))
+    }
+    fn metadata(
+        &mut self,
+        element: ElementId,
+        kind: GraphElementMetadata,
+        catalog: &crate::ReverseSymbolCatalog,
+        control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<Result<Option<GraphValue>, GraphElementMetadataError<T>>> {
+        self.read
+            .metadata(element, kind, catalog, control)
+            .map(|result| {
+                result.map_err(|error| match error {
+                    GraphElementMetadataError::Source(error) => {
+                        GraphElementMetadataError::Source((self.error)(error))
+                    }
+                    GraphElementMetadataError::Interrupted => {
+                        GraphElementMetadataError::Interrupted
+                    }
+                })
+            })
+    }
+}
+
+pub(crate) fn read_metadata<E>(
+    read: &mut ElementRead<'_, E>,
+    element: ElementId,
+    kind: GraphElementMetadata,
+    catalog: &crate::ReverseSymbolCatalog,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Option<Result<Option<GraphValue>, E>> {
+    let mut interrupted = None;
+    let result = read.metadata(element, kind, catalog, &mut |event| {
+        if interrupted.is_some() {
+            return Err(());
+        }
+        control(event).map_err(|error| interrupted = Some(error))
+    });
+    if let Some(error) = interrupted {
+        return Some(Err(error));
+    }
+    match result {
+        Some(Ok(value)) => Some(Ok(value)),
+        Some(Err(GraphElementMetadataError::Source(error))) => Some(Err(error)),
+        // A host cannot invent a cancellation. Such a contract violation
+        // keeps the typed unavailable-source refusal and exposes no value.
+        Some(Err(GraphElementMetadataError::Interrupted)) | None => None,
+    }
+}
+
+pub(crate) fn metadata_value_valid(kind: GraphElementMetadata, value: &GraphValue) -> bool {
+    value.validate_bounds()
+        && match (kind, value) {
+            (
+                GraphElementMetadata::Labels | GraphElementMetadata::Keys,
+                GraphValue::List(labels),
+            ) => labels
+                .iter()
+                .all(|label| matches!(label, GraphValue::Scalar(CanonicalScalar::Text(_)))),
+            (GraphElementMetadata::Type, GraphValue::Scalar(CanonicalScalar::Text(_))) => true,
+            (GraphElementMetadata::Properties, GraphValue::Map { .. }) => true,
+            _ => false,
+        }
+}
 
 /// The element reader of a host that reads no element properties.
 pub(crate) fn no_element_reads<E>(
@@ -1908,15 +2181,17 @@ trait SynchronousElementSource {
     ) -> Option<Result<Option<Self::Property>, Self::Error>> {
         self.element_property(element, key)
     }
+
+    fn element_metadata_with_control(
+        &mut self,
+        element: ElementId,
+        kind: GraphElementMetadata,
+        catalog: &crate::ReverseSymbolCatalog,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), Self::Error>,
+    ) -> Option<Result<Option<GraphValue>, Self::Error>>;
 }
 
-impl<E, F: ?Sized> SynchronousElementSource for F
-where
-    F: FnMut(
-        ElementId,
-        PropertyKeyId,
-    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>>,
-{
+impl<E> SynchronousElementSource for dyn ElementReader<E> + '_ {
     type Error = E;
     type Property = fgdb_types::CanonicalPropertyValue;
 
@@ -1925,7 +2200,17 @@ where
         element: ElementId,
         key: PropertyKeyId,
     ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
-        self(element, key)
+        self.property(element, key)
+    }
+
+    fn element_metadata_with_control(
+        &mut self,
+        element: ElementId,
+        kind: GraphElementMetadata,
+        catalog: &crate::ReverseSymbolCatalog,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Option<Result<Option<GraphValue>, E>> {
+        read_metadata(self, element, kind, catalog, control)
     }
 }
 
@@ -2608,6 +2893,48 @@ where
                     Err(_) => {
                         control(GlaExecutionEvent::ScratchEntry)
                             .map_err(ProjectionFailure::Control)?;
+                        GraphValue::Scalar(CanonicalScalar::Null)
+                    }
+                }
+            }
+        }
+        GraphSetValue::ElementMetadata { kind, value, catalog } => {
+            let value = projection_await!(
+                $mode,
+                operand(value, row, column, control, depth + 1, nodes, reserve)
+            )?;
+            if value.is_null() {
+                control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                GraphValue::Scalar(CanonicalScalar::Null)
+            } else if *kind == GraphElementMetadata::Properties && value.as_map().is_some() {
+                copy_value(&value, control).map_err(ProjectionFailure::Control)?
+            } else if *kind == GraphElementMetadata::Keys && let Some((keys, _)) = value.as_map() {
+                GraphValue::List(map_keys(keys, control).map_err(|error| match error {
+                    Some(error) => ProjectionFailure::Control(error),
+                    None => failure(GraphIntegerErrorKind::TextConstruction),
+                })?)
+            } else {
+                let element = match (kind, value.as_ref()) {
+                    (GraphElementMetadata::Labels | GraphElementMetadata::Properties | GraphElementMetadata::Keys, GraphValue::Vertex(id)) => ElementId::Vertex(*id),
+                    (GraphElementMetadata::Type | GraphElementMetadata::Properties | GraphElementMetadata::Keys, GraphValue::Edge(id)) => ElementId::Edge(*id),
+                    _ => return Err(failure(GraphIntegerErrorKind::IncompatibleOperands)),
+                };
+                let catalog = catalog.as_deref().ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?;
+                control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
+                let result = projection_await!(
+                    $mode,
+                    nodes.read.element_metadata_with_control(element, *kind, catalog, control)
+                ).ok_or_else(|| failure(GraphIntegerErrorKind::IncompatibleOperands))?
+                    .map_err(ProjectionFailure::Control)?;
+                match result {
+                    Some(value) => {
+                        if !metadata_value_valid(*kind, &value) {
+                            return Err(failure(GraphIntegerErrorKind::StoredValueBounds));
+                        }
+                        value
+                    }
+                    None => {
+                        control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
                         GraphValue::Scalar(CanonicalScalar::Null)
                     }
                 }

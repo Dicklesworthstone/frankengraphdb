@@ -1220,7 +1220,10 @@ pub(in crate::graph_text) fn remap_output_columns(
             remap_output_columns(right, columns);
         }
         ReadValueTemplate::Temporal { argument, .. }
-        | ReadValueTemplate::Function { argument, .. } => remap_output_columns(argument, columns),
+        | ReadValueTemplate::Function { argument, .. }
+        | ReadValueTemplate::ElementMetadata {
+            value: argument, ..
+        } => remap_output_columns(argument, columns),
         ReadValueTemplate::Integer { program, .. } => {
             for op in program {
                 if let crate::mutation_text::MutationIntegerTemplateOp::Bound(

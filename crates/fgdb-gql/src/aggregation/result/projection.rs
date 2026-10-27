@@ -645,7 +645,7 @@ fn expression<'g, E, C>(
                         crate::GraphElementKey::Missing => Some(Ok(None)),
                         crate::GraphElementKey::Property(key) => {
                             control(GlaExecutionEvent::Work)?;
-                            (input.read)(element, *key)
+                            input.read.property(element, *key)
                         }
                     }
                     .ok_or_else(|| failure(column, GraphIntegerErrorKind::IncompatibleOperands))?
@@ -693,6 +693,68 @@ fn expression<'g, E, C>(
                     OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(field)))
                 }
                 _ => return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands)),
+            }
+        }
+        GraphSetValue::ElementMetadata {
+            kind,
+            value,
+            catalog,
+        } => {
+            let value = expression(value, input, column, control)?;
+            if value.cell().is_null() {
+                OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(&NULL)))
+            } else if *kind == crate::GraphElementMetadata::Properties
+                && matches!(value.cell(), Cell::Value(ValueRef::Map { .. }))
+            {
+                OutputValue::Owned(value.into_owned(control)?)
+            } else if *kind == crate::GraphElementMetadata::Keys
+                && let Cell::Value(ValueRef::Map { keys, .. }) = value.cell()
+            {
+                let texts = crate::set_ops::map_keys(keys, control).map_err(|error| {
+                    error
+                        .unwrap_or_else(|| failure(column, GraphIntegerErrorKind::TextConstruction))
+                })?;
+                OutputValue::Owned(GraphAggregateValue::Value(GraphValue::List(texts)))
+            } else {
+                let element = match (kind, value.cell()) {
+                    (
+                        crate::GraphElementMetadata::Labels
+                        | crate::GraphElementMetadata::Properties
+                        | crate::GraphElementMetadata::Keys,
+                        Cell::Value(ValueRef::Vertex(id)),
+                    ) => ElementId::Vertex(id),
+                    (
+                        crate::GraphElementMetadata::Type
+                        | crate::GraphElementMetadata::Properties
+                        | crate::GraphElementMetadata::Keys,
+                        Cell::Value(ValueRef::Edge(id)),
+                    ) => ElementId::Edge(id),
+                    _ => return Err(failure(column, GraphIntegerErrorKind::IncompatibleOperands)),
+                };
+                let catalog = catalog
+                    .as_deref()
+                    .ok_or_else(|| failure(column, GraphIntegerErrorKind::IncompatibleOperands))?;
+                control(GlaExecutionEvent::Work)?;
+                let result = crate::set_ops::projection::read_metadata(
+                    &mut crate::set_ops::projection::MappedElements {
+                        read: &mut *input.read,
+                        error: |error| GqlQueryError::Source(GraphAggregateError::Source(error)),
+                    },
+                    element,
+                    *kind,
+                    catalog,
+                    control,
+                )
+                .ok_or_else(|| failure(column, GraphIntegerErrorKind::IncompatibleOperands))??;
+                match result {
+                    Some(value) => {
+                        if !crate::set_ops::projection::metadata_value_valid(*kind, &value) {
+                            return Err(failure(column, GraphIntegerErrorKind::StoredValueBounds));
+                        }
+                        OutputValue::Owned(GraphAggregateValue::Value(value))
+                    }
+                    None => OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(&NULL))),
+                }
             }
         }
         GraphSetValue::Keys(map) => {

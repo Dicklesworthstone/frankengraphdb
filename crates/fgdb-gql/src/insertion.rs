@@ -916,6 +916,7 @@ impl Properties {
                 | GraphSetValue::MapOverlay { .. }
                 | GraphSetValue::MapGet { .. }
                 | GraphSetValue::Keys(_)
+                | GraphSetValue::ElementMetadata { .. }
                 | GraphSetValue::Let { .. }
                 | GraphSetValue::Value(_) => {
                     bytes.push(3);

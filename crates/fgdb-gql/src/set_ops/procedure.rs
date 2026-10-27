@@ -18,6 +18,21 @@ use crate::{
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_types::VId;
 
+macro_rules! forward_metadata_to_source {
+    () => {
+        fn element_metadata(
+            &mut self,
+            element: ElementId,
+            kind: super::projection::GraphElementMetadata,
+            catalog: &crate::ReverseSymbolCatalog,
+            control: &mut dyn FnMut(crate::GlaExecutionEvent) -> Result<(), ()>,
+        ) -> Option<Result<Option<GraphValue>, super::projection::GraphElementMetadataError<E>>> {
+            self.source
+                .element_metadata(element, kind, catalog, control)
+        }
+    };
+}
+
 /// A procedure's induced graph, resolved during preparation. The selection
 /// narrows the host's already authorized snapshot; it grants no authority and
 /// never chooses another branch, generation, or database. The current native
@@ -372,6 +387,21 @@ pub trait GraphSetSource<E, C> {
     ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
         None
     }
+
+    /// Read visible metadata with the same cut and authority as `pattern`.
+    /// Reserve work and scratch BEFORE retaining metadata or copying payloads.
+    /// A control error is a stop signal: return `Interrupted` immediately.
+    /// Outer `None` declines this capability; inner `None` is an absent or
+    /// masked element. The evaluator restores the original control failure.
+    fn element_metadata(
+        &mut self,
+        _element: ElementId,
+        _kind: super::projection::GraphElementMetadata,
+        _catalog: &crate::ReverseSymbolCatalog,
+        _control: &mut dyn FnMut(crate::GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<Result<Option<GraphValue>, super::projection::GraphElementMetadataError<E>>> {
+        None
+    }
 }
 
 /// Borrow a host through a consuming row phase, then reuse that same host for
@@ -447,8 +477,22 @@ impl<E, C> GraphSetSource<E, C> for BorrowedSource<'_, '_, E, C> {
         key: PropertyKeyId,
     ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
         match &mut self.elements {
-            Some(read) => read(element, key),
+            Some(read) => read.property(element, key),
             None => self.source.element_property(element, key),
+        }
+    }
+    fn element_metadata(
+        &mut self,
+        element: ElementId,
+        kind: super::projection::GraphElementMetadata,
+        catalog: &crate::ReverseSymbolCatalog,
+        control: &mut dyn FnMut(crate::GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<Result<Option<GraphValue>, super::projection::GraphElementMetadataError<E>>> {
+        match &mut self.elements {
+            Some(read) => read.metadata(element, kind, catalog, control),
+            None => self
+                .source
+                .element_metadata(element, kind, catalog, control),
         }
     }
 }
@@ -606,6 +650,7 @@ where
         GqlQueryPolicy,
     ) -> Option<Result<GraphProcedureExecution<E, C>, GqlQueryError<E, C>>>,
 {
+    forward_metadata_to_source!();
     fn supports_procedure_rows(&self) -> bool {
         true
     }
@@ -671,11 +716,180 @@ pub struct WithElementReads<S, R> {
     pub elements: R,
 }
 
+/// Pinned element access for the ordinary aggregate binding visitor. A
+/// property callback implements this trait directly; hosts can attach the
+/// same controlled metadata capability used by GraphSetSource through
+/// [`with_element_metadata`]. Every read shares the input's snapshot and
+/// authority, including identities carried in parameters and list values.
+pub trait GraphElementReader<E> {
+    fn element_property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>;
+
+    /// Charge before constructing any owned metadata. `None` means the
+    /// capability is unavailable; `Some(Ok(None))` means the element is absent
+    /// or masked. A control refusal must stop construction and return
+    /// GraphElementMetadataError::Interrupted; the evaluator preserves the
+    /// original refusal and exposes no partial value.
+    fn element_metadata(
+        &mut self,
+        _element: ElementId,
+        _kind: super::projection::GraphElementMetadata,
+        _catalog: &crate::ReverseSymbolCatalog,
+        _control: &mut dyn FnMut(crate::GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<Result<Option<GraphValue>, super::projection::GraphElementMetadataError<E>>> {
+        None
+    }
+}
+
+impl<E, F> GraphElementReader<E> for F
+where
+    F: FnMut(ElementId, PropertyKeyId) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+{
+    fn element_property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E> {
+        self(element, key)
+    }
+}
+
+/// Attach a controlled metadata reader without replacing any other source
+/// capability. This also attaches metadata to an aggregate's property
+/// callback. The callback receives the executing expression's control.
+pub struct WithElementMetadata<S, R> {
+    pub source: S,
+    pub metadata: R,
+}
+
+pub fn with_element_metadata<S, R, E>(source: S, metadata: R) -> WithElementMetadata<S, R>
+where
+    R: FnMut(
+        ElementId,
+        super::projection::GraphElementMetadata,
+        &crate::ReverseSymbolCatalog,
+        &mut dyn FnMut(crate::GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Result<Option<GraphValue>, super::projection::GraphElementMetadataError<E>>,
+{
+    WithElementMetadata { source, metadata }
+}
+
+impl<E, S, R> GraphElementReader<E> for WithElementMetadata<S, R>
+where
+    S: GraphElementReader<E>,
+    R: FnMut(
+        ElementId,
+        super::projection::GraphElementMetadata,
+        &crate::ReverseSymbolCatalog,
+        &mut dyn FnMut(crate::GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Result<Option<GraphValue>, super::projection::GraphElementMetadataError<E>>,
+{
+    fn element_property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E> {
+        self.source.element_property(element, key)
+    }
+
+    fn element_metadata(
+        &mut self,
+        element: ElementId,
+        kind: super::projection::GraphElementMetadata,
+        catalog: &crate::ReverseSymbolCatalog,
+        control: &mut dyn FnMut(crate::GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<Result<Option<GraphValue>, super::projection::GraphElementMetadataError<E>>> {
+        Some((self.metadata)(element, kind, catalog, control))
+    }
+}
+
+impl<E, C, S, R> GraphSetSource<E, C> for WithElementMetadata<S, R>
+where
+    S: GraphSetSource<E, C>,
+    R: FnMut(
+        ElementId,
+        super::projection::GraphElementMetadata,
+        &crate::ReverseSymbolCatalog,
+        &mut dyn FnMut(crate::GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Result<Option<GraphValue>, super::projection::GraphElementMetadataError<E>>,
+{
+    fn supports_procedure_rows(&self) -> bool {
+        self.source.supports_procedure_rows()
+    }
+    fn pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> {
+        self.source.pattern(pattern, policy)
+    }
+    fn supports_pattern_factors(&self) -> bool {
+        self.source.supports_pattern_factors()
+    }
+    fn pattern_factors(
+        &mut self,
+        request: &PreparedGraphPatternFactors<'_>,
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GraphPatternFactorExecution, GqlQueryError<E, C>>> {
+        self.source.pattern_factors(request, policy)
+    }
+    fn supports_seeded_patterns(&self) -> bool {
+        self.source.supports_seeded_patterns()
+    }
+    fn seeded_pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        seeds: &[VId],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>> {
+        self.source.seeded_pattern(pattern, seeds, policy)
+    }
+    fn procedure(
+        &mut self,
+        call: &PreparedProcedureCall,
+        arguments: &[GraphValue],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>> {
+        self.source.procedure(call, arguments, policy)
+    }
+    fn procedure_rows(
+        &mut self,
+        call: &PreparedProcedureCall,
+        arguments: &[GraphValue],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GraphProcedureExecution<E, C>, GqlQueryError<E, C>>> {
+        self.source.procedure_rows(call, arguments, policy)
+    }
+    fn owned(&mut self) -> Option<Vec<GraphValueRow>> {
+        self.source.owned()
+    }
+    fn element_property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
+        self.source.element_property(element, key)
+    }
+    fn element_metadata(
+        &mut self,
+        element: ElementId,
+        kind: super::projection::GraphElementMetadata,
+        catalog: &crate::ReverseSymbolCatalog,
+        control: &mut dyn FnMut(crate::GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<Result<Option<GraphValue>, super::projection::GraphElementMetadataError<E>>> {
+        Some((self.metadata)(element, kind, catalog, control))
+    }
+}
+
 impl<E, C, S, R> GraphSetSource<E, C> for WithElementReads<S, R>
 where
     S: GraphSetSource<E, C>,
     R: FnMut(ElementId, PropertyKeyId) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
 {
+    forward_metadata_to_source!();
     fn supports_procedure_rows(&self) -> bool {
         self.source.supports_procedure_rows()
     }
@@ -751,6 +965,7 @@ where
         GqlQueryPolicy,
     ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>>,
 {
+    forward_metadata_to_source!();
     fn supports_procedure_rows(&self) -> bool {
         self.source.supports_procedure_rows()
     }
@@ -820,6 +1035,7 @@ pub(crate) struct WithOwnedRows<'s, E, C> {
 }
 
 impl<E, C> GraphSetSource<E, C> for WithOwnedRows<'_, E, C> {
+    forward_metadata_to_source!();
     fn supports_procedure_rows(&self) -> bool {
         self.source.supports_procedure_rows()
     }

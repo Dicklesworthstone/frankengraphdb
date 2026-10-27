@@ -285,6 +285,15 @@ impl PreparedGraphAggregateText {
                 function: *function,
                 argument: Box::new(Self::bind_input_value(argument, values)?),
             }),
+            ReadValueTemplate::ElementMetadata {
+                kind,
+                value,
+                catalog,
+            } => Ok(GraphSetValue::ElementMetadata {
+                kind: *kind,
+                value: Box::new(Self::bind_input_value(value, values)?),
+                catalog: catalog.bind(),
+            }),
             ReadValueTemplate::Local(offset) => Ok(GraphSetValue::Local(*offset)),
             ReadValueTemplate::Random { site, scope } => Ok(GraphSetValue::Random {
                 site: *site,

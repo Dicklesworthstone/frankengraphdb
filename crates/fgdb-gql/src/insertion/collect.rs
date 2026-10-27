@@ -266,6 +266,7 @@ fn fields<E, A, C>(
             | GraphSetValue::MapOverlay { .. }
             | GraphSetValue::MapGet { .. }
             | GraphSetValue::Keys(_)
+            | GraphSetValue::ElementMetadata { .. }
             | GraphSetValue::Let { .. }) => {
                 let value = crate::set_ops::evaluate_value(composite, row, property, control)
                     .map_err(|failure| match failure {

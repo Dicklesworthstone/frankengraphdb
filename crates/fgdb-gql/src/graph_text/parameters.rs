@@ -221,6 +221,9 @@ impl UnresolvedGraphText<'_> {
         mut self,
         mut resolve: impl GraphSymbolResolver,
     ) -> Result<BoundSetTextInput, GraphPatternTextError> {
+        self.syntax
+            .element_catalog
+            .resolve(&mut resolve, self.statement);
         for stage in self.leading.iter_mut().chain(self.pipeline.iter_mut()) {
             resolve_call_symbols(stage, &mut |kind, name| resolve.resolve_symbol(kind, name))?;
         }

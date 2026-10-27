@@ -289,6 +289,7 @@ impl PreparedGraphEdgeMergeText {
 
         // This direct MATCH builder does not use the read relation's binding
         // pass. Resolve computed output keys before preparing its projection.
+        syntax.element_catalog.resolve(&mut *resolve, statement);
         for (key, slot) in &syntax.element_keys {
             slot.resolve(
                 match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
@@ -512,6 +513,10 @@ impl PreparedGraphEdgeMergeText {
         } else {
             // A direct owned continuation has no read-source resolver to bind
             // keys introduced by this MERGE's computed RETURN or WITH head.
+            parser
+                .syntax
+                .element_catalog
+                .resolve(&mut *resolve, statement);
             for (key, slot) in &parser.syntax.element_keys {
                 slot.resolve(
                     match resolve.resolve_symbol(GraphSymbolKind::Property, key) {

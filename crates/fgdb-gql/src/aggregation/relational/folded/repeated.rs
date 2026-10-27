@@ -240,7 +240,7 @@ impl PreparedGraphAggregate {
             rows,
             evaluator,
             FoldedGroups::Rows(groups),
-            &mut |element, key| source.element_property(element, key),
+            &mut crate::set_ops::projection::SourceElements::new(&mut source),
         )
     }
 }

@@ -270,7 +270,7 @@ impl PreparedGraphAggregate {
         edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
         vertex_properties: impl FnMut(VId) -> Result<Option<&'a GraphValue>, E>,
         edge_properties: impl FnMut(EId) -> Result<Option<&'a GraphValue>, E>,
-        mut elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalPropertyValue>, E>,
+        mut elements: impl crate::GraphElementReader<E>,
         policy: GqlQueryPolicy,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
@@ -286,7 +286,7 @@ impl PreparedGraphAggregate {
             edge_type,
             vertex_properties,
             edge_properties,
-            &mut |element, key| Some(elements(element, key)),
+            &mut crate::set_ops::projection::HostElements(&mut elements),
             policy,
             checkpoint,
         )
@@ -483,12 +483,9 @@ impl PreparedGraphAggregate {
                     &input,
                     projection,
                     &mut control,
-                    &mut |element, key| {
-                        elements(element, key).map(|value| {
-                            value.map_err(|error| {
-                                GqlQueryError::Source(GraphAggregateError::Source(error))
-                            })
-                        })
+                    &mut crate::set_ops::projection::MappedElements {
+                        read: elements,
+                        error: |error| GqlQueryError::Source(GraphAggregateError::Source(error)),
                     },
                     |column, error| {
                         GqlQueryError::Source(GraphAggregateError::InputExpression {

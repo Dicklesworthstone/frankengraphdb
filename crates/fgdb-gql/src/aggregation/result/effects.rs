@@ -44,6 +44,10 @@ fn effects(
                 true,
             )
         }
+        V::ElementMetadata { value, .. } => {
+            let (read, element) = effects(value, columns, types, locals);
+            (read || element, false)
+        }
         V::List(values) => (
             values
                 .iter()

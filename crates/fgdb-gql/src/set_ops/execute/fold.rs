@@ -434,12 +434,10 @@ where
                     // The same host reader as Project, so an UNWIND list can
                     // read carried elements' properties. It is released before
                     // the window takes the source back.
-                    let mut read = |element, key| {
-                        source.element_property(element, key).map(|read| {
-                            read.map_err(|error| {
-                                GqlQueryError::Source(GraphSetExecutionError::Source(error))
-                            })
-                        })
+                    let mut source_elements = projection::SourceElements::new(source);
+                    let mut read = projection::MappedElements {
+                        read: &mut source_elements,
+                        error: |error| GqlQueryError::Source(GraphSetExecutionError::Source(error)),
                     };
                     let mut rows = projection::UnwindRows::new(
                         row,
@@ -493,12 +491,10 @@ where
                 // Numbered like project_rows, so rand() draws the same here.
                 // Carry the same host through the fold so aliases keep its
                 // saved snapshot, masking and element-read error semantics.
-                let mut read = |element, key| {
-                    source.element_property(element, key).map(|read| {
-                        read.map_err(|error| {
-                            GqlQueryError::Source(GraphSetExecutionError::Source(error))
-                        })
-                    })
+                let mut source_elements = projection::SourceElements::new(source);
+                let mut read = projection::MappedElements {
+                    read: &mut source_elements,
+                    error: |error| GqlQueryError::Source(GraphSetExecutionError::Source(error)),
                 };
                 let result = projection::evaluate(
                     &row,

@@ -200,14 +200,14 @@ impl PreparedGraphCount<'_> {
     pub fn execute_governed_with_element_reads<E, C>(
         &self,
         snapshot_records: u64,
-        mut elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalPropertyValue>, E>,
+        mut elements: impl crate::GraphElementReader<E>,
         policy: GqlQueryPolicy,
         checkpoint: impl crate::GovernedCheckpoint<C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
     {
         self.execute_with_reads(
             snapshot_records,
-            &mut |element, key| Some(elements(element, key)),
+            &mut crate::set_ops::projection::HostElements(&mut elements),
             policy,
             checkpoint,
         )

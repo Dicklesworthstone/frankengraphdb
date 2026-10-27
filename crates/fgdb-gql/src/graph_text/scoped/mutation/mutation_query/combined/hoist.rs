@@ -27,6 +27,7 @@ fn columns_fit(value: &ReadValueTemplate, width: usize) -> bool {
         ReadValueTemplate::Size(value)
         | ReadValueTemplate::Keys(value)
         | ReadValueTemplate::MapGet { map: value, .. }
+        | ReadValueTemplate::ElementMetadata { value, .. }
         | ReadValueTemplate::Temporal {
             argument: value, ..
         }

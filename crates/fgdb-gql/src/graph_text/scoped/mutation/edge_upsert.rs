@@ -428,6 +428,7 @@ impl PreparedGraphEdgeUpsertText {
 
         // Direct relationship-upsert preparation bypasses the read resolver.
         // Its computed output still needs the final catalog-bound field keys.
+        syntax.element_catalog.resolve(&mut *resolve, statement);
         for (key, slot) in &syntax.element_keys {
             slot.resolve(
                 match resolve.resolve_symbol(GraphSymbolKind::Property, key) {

@@ -834,6 +834,7 @@ struct Syntax<'a> {
     /// Every `x.key` read this part's expressions parsed, with the slot its
     /// template binds through (fgdb-xnd7x). Resolution fills each slot once.
     element_keys: Vec<(&'a str, crate::set_text::ElementKeySlot)>,
+    element_catalog: crate::set_text::ElementCatalogSlot,
 }
 
 impl<'a> Syntax<'a> {
@@ -1179,6 +1180,7 @@ impl<'a> Parser<'a> {
                 distinct: false,
                 return_at: 0,
                 element_keys: Vec::new(),
+                element_catalog: crate::set_text::ElementCatalogSlot::default(),
             },
         })
     }
@@ -2235,6 +2237,9 @@ impl PreparedGraphText {
         syntax: Syntax<'a>,
         mut resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphPatternTextError> {
+        // Aggregate output expressions share this syntax but are not part
+        // of the input projection. Freeze their metadata catalog here too.
+        syntax.element_catalog.resolve(&mut resolve, statement);
         let mut cache = BTreeMap::new();
         let mut symbol = |kind, name: Name<'a>| -> Result<GraphSymbol, GraphPatternTextError> {
             let key = (kind, name.text.to_owned());
