@@ -268,6 +268,83 @@ impl<C> FnxRowSink<C> for Vec<Vec<FnxValue>> {
 enum ResultSink<'a, C> {
     Collected(&'a mut Vec<Vec<FnxValue>>),
     Mapped(&'a mut dyn FnxRowSink<C>),
+    Retained {
+        values: &'a mut Option<KernelValues>,
+        max_integer: &'a mut Option<u64>,
+        rows: &'a mut usize,
+    },
+}
+
+/// A completed, certified result retaining the kernel's existing value arrays.
+/// Rows are decoded on demand without an additional table of row allocations.
+/// The projection is clone-shared; algorithm vectors and that projection remain
+/// in memory. This is not an external-memory or asynchronous execution path.
+pub struct FnxRowCursor {
+    graph: SnapshotGraphView,
+    fields: Vec<FnxOutput>,
+    values: KernelValues,
+    next_index: usize,
+    remaining: usize,
+    max_integer: Option<u64>,
+    certificate: FnxCertificate,
+}
+
+impl core::fmt::Debug for FnxRowCursor {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FnxRowCursor")
+            .field("remaining", &self.remaining)
+            .finish_non_exhaustive()
+    }
+}
+
+impl FnxRowCursor {
+    /// The same completed certificate as the collected and mapped paths.
+    pub fn certificate(&self) -> &FnxCertificate {
+        &self.certificate
+    }
+
+    /// Exact number of rows still available, including sparse reachability.
+    pub fn remaining(&self) -> usize {
+        self.remaining
+    }
+
+    /// Maximum selected integer cell, checked during canonical result hashing.
+    /// Hosts with a narrower integer domain can reject the complete result
+    /// before consuming any row. Unselected count/distance fields do not enter it.
+    pub fn max_integer(&self) -> Option<u64> {
+        self.max_integer
+    }
+
+    /// Fill a reusable row buffer. Every examined vertex checks live control,
+    /// including unreachable gaps; a cancellation leaves the current vertex
+    /// unconsumed. The buffer is empty on exhaustion and provisional on error.
+    /// No successful call can fail a value-domain validation: the complete
+    /// immutable result was already validated and hashed before construction.
+    pub fn next_row<C>(
+        &mut self,
+        row: &mut Vec<FnxValue>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<bool, FnxExecutionError<C>> {
+        row.clear();
+        while self.next_index < self.graph.node_count() {
+            checkpoint().map_err(FnxExecutionError::Cancelled)?;
+            let index = self.next_index;
+            if !self.values.contains(index) {
+                self.next_index += 1;
+                continue;
+            }
+            row.try_reserve(self.fields.len())
+                .map_err(|_| FnxExecutionError::AllocationFailed)?;
+            for &field in &self.fields {
+                row.push(self.values.value(index, field, &self.graph)?);
+            }
+            self.next_index += 1;
+            self.remaining -= 1;
+            return Ok(true);
+        }
+        debug_assert_eq!(self.remaining, 0);
+        Ok(false)
+    }
 }
 
 pub(crate) fn admit<C>(
@@ -1042,6 +1119,69 @@ impl FnxCallSpec {
         self.execute_with_sink(graph, limits, checkpoint, ResultSink::Mapped(sink))
     }
 
+    /// Complete the kernel, result hash and certificate before returning an
+    /// owned cursor over its existing value arrays. The same logical meter
+    /// trace and cancellation boundary as [`Self::execute`] is retained.
+    /// Cloning the admitted projection shares its immutable storage.
+    pub fn execute_rows<C>(
+        &self,
+        graph: &SnapshotGraphView,
+        limits: FnxExecutionLimits,
+        checkpoint: impl FnxMeter<C>,
+    ) -> Result<FnxRowCursor, FnxExecutionError<C>> {
+        let mut values = None;
+        let mut max_integer = None;
+        let mut remaining = 0;
+        let certificate = self.execute_with_sink(
+            graph,
+            limits,
+            checkpoint,
+            ResultSink::Retained {
+                values: &mut values,
+                max_integer: &mut max_integer,
+                rows: &mut remaining,
+            },
+        )?;
+        let values = values.ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+        let mut fields = reserve(self.outputs().len())?;
+        fields.extend(self.outputs().iter().map(|column| column.field));
+        Ok(FnxRowCursor {
+            graph: graph.clone(),
+            fields,
+            values,
+            next_index: 0,
+            remaining,
+            max_integer,
+            certificate,
+        })
+    }
+
+    fn hash_retained_rows<C>(
+        &self,
+        graph: &SnapshotGraphView,
+        values: &KernelValues,
+        result_hash: &mut Hasher,
+        checkpoint: &mut impl FnxMeter<C>,
+    ) -> Result<(usize, Option<u64>), FnxExecutionError<C>> {
+        let mut emitted = 0usize;
+        let mut max_integer = None;
+        for index in 0..graph.node_count() {
+            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+            if !values.contains(index) {
+                continue;
+            }
+            for column in self.outputs() {
+                let value = values.value(index, column.field, graph)?;
+                hash_result_value(result_hash, value);
+                if let FnxValue::Integer(value) = value {
+                    max_integer = Some(max_integer.map_or(value, |prior: u64| prior.max(value)));
+                }
+            }
+            emitted += 1;
+        }
+        Ok((emitted, max_integer))
+    }
+
     fn execute_with_sink<C>(
         &self,
         graph: &SnapshotGraphView,
@@ -1247,6 +1387,7 @@ impl FnxCallSpec {
         result_hash.update(b"fgdb:prism:result-rows:v3");
         result_hash.update(&(output.row_count as u128).to_le_bytes());
         result_hash.update(&self.digest().0);
+        let mut retained = None;
         let emitted = match sink {
             ResultSink::Collected(rows) => {
                 *rows = reserve(output.row_count)?;
@@ -1286,6 +1427,22 @@ impl FnxCallSpec {
                     sink.row(&row)?;
                     emitted += 1;
                 }
+                emitted
+            }
+            ResultSink::Retained {
+                values,
+                max_integer,
+                rows,
+            } => {
+                *rows = output.row_count;
+                let (emitted, maximum) = self.hash_retained_rows(
+                    graph,
+                    &output.values,
+                    &mut result_hash,
+                    &mut checkpoint,
+                )?;
+                *max_integer = maximum;
+                retained = Some(values);
                 emitted
             }
         };
@@ -1350,6 +1507,9 @@ impl FnxCallSpec {
             digest: hash.finalize(),
         };
         checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+        if let Some(retained) = retained {
+            *retained = Some(output.values);
+        }
         Ok(certificate)
     }
 }
@@ -2043,6 +2203,31 @@ mod tests {
                 .execute_into(&graph, limits, &mut direct_trace, &mut direct)
                 .unwrap();
             assert_eq!(certificate, collected.certificate);
+            let mut retained_trace = fresh(None);
+            let mut retained = call
+                .execute_rows(&graph, limits, &mut retained_trace)
+                .unwrap();
+            assert_eq!(retained.certificate(), &collected.certificate);
+            assert_eq!(retained_trace.events, collected_trace.events);
+            assert_eq!(retained.remaining(), collected.rows.len());
+            let expected_max = collected
+                .rows
+                .iter()
+                .flatten()
+                .filter_map(|value| match value {
+                    FnxValue::Integer(value) => Some(*value),
+                    _ => None,
+                })
+                .max();
+            assert_eq!(retained.max_integer(), expected_max);
+            let mut row = Vec::new();
+            for (index, expected) in collected.rows.iter().enumerate() {
+                assert!(retained.next_row(&mut row, || Ok::<_, ()>(())).unwrap());
+                assert_eq!(&row, expected);
+                assert_eq!(retained.remaining(), collected.rows.len() - index - 1);
+            }
+            assert!(!retained.next_row(&mut row, || Ok::<_, ()>(())).unwrap());
+            assert!(row.is_empty());
             assert_eq!(
                 direct.shape,
                 Some((collected.rows.len(), call.outputs().len()))
@@ -2064,6 +2249,12 @@ mod tests {
                     Err(FnxExecutionError::Cancelled("stop"))
                 ));
                 assert_eq!(direct_trace.events, collected_trace.events, "stop={stop}");
+                let mut retained_trace = fresh(Some(stop));
+                assert!(matches!(
+                    call.execute_rows(&graph, limits, &mut retained_trace),
+                    Err(FnxExecutionError::Cancelled("stop"))
+                ));
+                assert_eq!(retained_trace.events, collected_trace.events, "stop={stop}");
             }
             for refused in [
                 FnxExecutionLimits {
@@ -2081,6 +2272,10 @@ mod tests {
                     .execute_into(&graph, refused, &mut fresh(None), &mut sink)
                     .unwrap_err();
                 assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+                let retained = call
+                    .execute_rows(&graph, refused, &mut fresh(None))
+                    .unwrap_err();
+                assert_eq!(format!("{retained:?}"), format!("{expected:?}"));
                 assert_eq!(sink.shape, None, "refusal must precede output allocation");
             }
         }
@@ -2115,6 +2310,107 @@ mod tests {
         );
         assert_eq!(sink.shape, Some((0, 2)));
         assert_eq!(sink.buffer, None);
+        let mut retained = call.execute_rows(&graph, limits, &mut fresh(None)).unwrap();
+        assert_eq!(retained.remaining(), 0);
+        assert_eq!(retained.max_integer(), None);
+        assert!(
+            !retained
+                .next_row(&mut Vec::new(), || Ok::<_, ()>(()))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn completed_rows_check_sparse_gaps_and_retry_without_losing_a_vertex() {
+        let graph = projection(2, Directedness::Directed);
+        let call = FnxCallSpec::single_source_shortest_path_length(VId(0), Some(0));
+        let limits = FnxExecutionLimits {
+            max_iterations: 1,
+            max_result_rows: 3,
+            max_estimated_work: 1000,
+        };
+        let expected = call.execute(&graph, limits, || Ok::<_, ()>(())).unwrap();
+        let mut cursor = call
+            .execute_rows(&graph, limits, || Ok::<_, ()>(()))
+            .unwrap();
+        drop(graph);
+        let mut row = Vec::new();
+        assert!(matches!(
+            cursor.next_row(&mut row, || Err("cancelled")),
+            Err(FnxExecutionError::Cancelled("cancelled"))
+        ));
+        assert_eq!(cursor.remaining(), 1);
+        assert!(cursor.next_row(&mut row, || Ok::<_, ()>(())).unwrap());
+        assert_eq!(row, expected.rows[0]);
+        let mut checked = 0;
+        assert!(matches!(
+            cursor.next_row(&mut row, || {
+                checked += 1;
+                if checked == 2 { Err("gap") } else { Ok(()) }
+            }),
+            Err(FnxExecutionError::Cancelled("gap"))
+        ));
+        assert_eq!(cursor.remaining(), 0);
+        assert!(row.is_empty());
+        let mut retry = 0;
+        assert!(
+            !cursor
+                .next_row(&mut row, || {
+                    retry += 1;
+                    Ok::<_, ()>(())
+                })
+                .unwrap()
+        );
+        assert_eq!(retry, 1, "the refused unreachable ordinal is retried");
+        assert!(
+            !cursor
+                .next_row(&mut row, || -> Result<(), ()> {
+                    panic!("exhaustion does not rescan")
+                })
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn retained_hash_validates_selected_full_width_integers_before_any_row_pull() {
+        let graph = projection(238, Directedness::Undirected);
+        let values = KernelValues::Counts(vec![0, i64::MAX as u64, u64::MAX]);
+        for (yields, maximum) in [
+            (vec![("vertex", "v"), ("triangles", "t")], Some(u64::MAX)),
+            (vec![("triangles", "t")], Some(u64::MAX)),
+            (vec![("vertex", "v")], None),
+        ] {
+            let call = FnxCallSpec::from_arguments("fnx", "triangles", &[], &yields).unwrap();
+            let mut actual = Hasher::new();
+            let (rows, observed) = call
+                .hash_retained_rows(&graph, &values, &mut actual, &mut || Ok::<_, ()>(()))
+                .unwrap();
+            assert_eq!(rows, 3);
+            assert_eq!(observed, maximum);
+            let mut bytes = Vec::new();
+            for (vertex, count) in [VId(0), VId(17), VId(u128::MAX)].into_iter().zip([
+                0_u64,
+                i64::MAX as u64,
+                u64::MAX,
+            ]) {
+                for &(field, _) in &yields {
+                    match field {
+                        "vertex" => {
+                            bytes.push(0);
+                            bytes.extend_from_slice(&vertex.0.to_le_bytes());
+                        }
+                        "triangles" => {
+                            bytes.push(2);
+                            bytes.extend_from_slice(&count.to_le_bytes());
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            let mut oracle = Hasher::new();
+            oracle.update(&bytes);
+            assert_eq!(actual.finalize(), oracle.finalize());
+        }
     }
 
     #[test]
