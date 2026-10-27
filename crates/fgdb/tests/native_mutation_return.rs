@@ -1259,6 +1259,141 @@ fn a_write_match_where_over_label_tests_filters_its_rows() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// A driver's record fields key a pattern: `MATCH (n:L {id: $m.id})` and
+/// `MERGE (n:L {id: $m.id})` read the field as the constant it is. A key the
+/// record lacks is NULL and matches nothing.
+#[test]
+fn a_map_field_keys_a_write_pattern() {
+    let ((), report) = run_async_under_lab(0xa071_000c, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let record = |entries: &[(&str, i64)]| {
+            let entries = (entries.iter())
+                .map(|(key, value)| ((*key).into(), int(*value)))
+                .collect();
+            GqlParameters::new().with_map("m", entries).unwrap()
+        };
+        let set = "MATCH (n:L {id: $m.id}) SET n.p = $m.p RETURN n.p AS p, n.id AS id";
+        let merge = "MERGE (n:L {id: $m.id}) ON MATCH SET n.p = $m.p RETURN n.p AS p, n.id AS id";
+        for (text, arguments, expected) in [
+            (
+                set,
+                record(&[("id", 1), ("p", 40)]),
+                vec![vec![int(40), int(1)]],
+            ),
+            (
+                merge,
+                record(&[("id", 2), ("p", 70)]),
+                vec![vec![int(70), int(2)]],
+            ),
+            // `$m.id` reads NULL, which equals nothing.
+            (set, record(&[("p", 0)]), vec![]),
+        ] {
+            let result = db
+                .query_write(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    text,
+                    &arguments,
+                    symbols,
+                    R,
+                    policy(10, 10, 0),
+                    no_allocate,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            assert_eq!(rows(result, &["p", "id"]), expected, "{text}");
+        }
+        assert_eq!(
+            db.vertex(VId(1)).unwrap().unwrap().props,
+            vec![
+                (P, CanonicalScalar::Int(40).into()),
+                (ID, CanonicalScalar::Int(1).into())
+            ]
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// Neo4j's batch ingest, `UNWIND $rows AS row CREATE (n:L) SET n += row`,
+/// creates one vertex per row holding that row's map. A batch whose rows
+/// hold different keys refuses as written, with nothing published.
+#[test]
+fn an_unwind_batch_creates_each_row_as_its_properties() {
+    let ((), report) = run_async_under_lab(0xa071_000d, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let row = |entries: &[(&str, i64)]| {
+            let entries = (entries.iter())
+                .map(|(key, value)| ((*key).into(), int(*value)))
+                .collect();
+            GraphValue::map(entries).unwrap()
+        };
+        let batch = |rows: Vec<GraphValue>| GqlParameters::new().with_list("rows", rows).unwrap();
+        let text = "UNWIND $rows AS row CREATE (n:L) SET n += row RETURN n.id AS id, n.p AS p";
+        let result = db
+            .query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &batch(vec![
+                    row(&[("id", 1), ("p", 10)]),
+                    row(&[("id", 2), ("p", 20)]),
+                ]),
+                symbols,
+                R,
+                policy(10, 10, 10),
+                |request| {
+                    let GraphInsertRequest::Vertex { row, .. } = request.request else {
+                        panic!("the batch creates only vertices");
+                    };
+                    let row = u128::try_from(row).unwrap();
+                    Ok::<_, Infallible>(ElementId::Vertex(VId(100 + row)))
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows(result, &["id", "p"]),
+            vec![vec![int(1), int(10)], vec![int(2), int(20)]]
+        );
+        assert_eq!(
+            db.vertex(VId(101)).unwrap().unwrap().props,
+            vec![
+                (P, CanonicalScalar::Int(20).into()),
+                (ID, CanonicalScalar::Int(2).into())
+            ]
+        );
+        let before = (db.frontier().unwrap(), db.vertices().unwrap());
+        db.query_write(
+            &txcx,
+            &cx,
+            &commit,
+            text,
+            &batch(vec![row(&[("id", 3)]), row(&[("p", 30)])]),
+            symbols,
+            R,
+            policy(10, 10, 10),
+            no_allocate,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// fgdb-0s2pq: through the embedded API a map parameter stands for the
 /// property map it holds. `SET n += $props ... RETURN`, autocommit and inside
 /// a transaction, assigns the map's keys and keeps every other property, and

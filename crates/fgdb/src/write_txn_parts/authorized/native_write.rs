@@ -159,6 +159,7 @@ fn map_argument_fault(argument_set: usize, error: &fgdb_gql::GqlMapArgumentError
             "a map argument with the keys of the first argument set"
         }
         E::UnsupportedValue { .. } => "a map argument whose values are properties",
+        E::RowsDiffer { .. } => "UNWIND rows with the keys of the first argument set",
         E::Parameter(_) => "map argument fields within the parameter limits",
     };
     Fault::BatchBinding(fgdb_gql::GraphWriteScriptBatchError::Arguments {
