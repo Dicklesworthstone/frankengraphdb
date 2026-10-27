@@ -14,6 +14,101 @@ use crate::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp, GraphSetQ
 const MAX_FILTER_NESTING: usize = 64;
 pub(in crate::graph_text) type RowSchema<'a> = Vec<(Name<'a>, GraphSetColumnType)>;
 
+#[derive(Default)]
+struct ReadLocals<'a> {
+    scopes: Vec<ReadLocal<'a>>,
+}
+
+struct ReadLocal<'a> {
+    depth: usize,
+    bindings: Vec<&'a str>,
+    active: bool,
+    reduce: bool,
+}
+
+impl<'a> ReadLocals<'a> {
+    // Inputs use the enclosing scope; only WHERE and the body see the locals.
+    // A binder's declaration is not a read of an enclosing value.
+    fn observe(
+        &mut self,
+        token: Token<'a>,
+        previous: Option<TokenKind<'a>>,
+        lexer: &Lexer<'a>,
+        depth: usize,
+    ) -> Result<bool, GraphPatternTextError> {
+        match token.kind {
+            TokenKind::Punct(open @ (b'(' | b'[')) => {
+                let reduce = open == b'('
+                    && matches!(previous, Some(TokenKind::Word(word))
+                        if word.eq_ignore_ascii_case("REDUCE"));
+                let quantifier = open == b'('
+                    && matches!(previous, Some(TokenKind::Word(word))
+                        if ["ANY", "ALL", "NONE", "SINGLE"]
+                            .iter().any(|name| word.eq_ignore_ascii_case(name)));
+                if open == b'[' || reduce || quantifier {
+                    let mut ahead = lexer.clone();
+                    if let TokenKind::Word(name) = ahead.next()?.kind {
+                        let next = ahead.next()?.kind;
+                        if matches!(next, TokenKind::Word(word) if word.eq_ignore_ascii_case("IN"))
+                            || (reduce && next == TokenKind::Punct(b'='))
+                        {
+                            self.scopes.push(ReadLocal {
+                                depth: depth + 1,
+                                bindings: vec![name],
+                                active: false,
+                                reduce,
+                            });
+                        }
+                    }
+                }
+            }
+            TokenKind::Punct(b')' | b']' | b'}') => {
+                if self.scopes.last().is_some_and(|scope| scope.depth == depth) {
+                    self.scopes.pop();
+                }
+            }
+            TokenKind::Punct(b'|') => {
+                if let Some(scope) = self.scopes.last_mut()
+                    && scope.depth == depth
+                {
+                    scope.active = true;
+                }
+            }
+            TokenKind::Word(word) if !matches!(previous, Some(TokenKind::Punct(b'.'))) => {
+                if let Some(scope) = self.scopes.last_mut()
+                    && scope.depth == depth
+                {
+                    if !scope.active
+                        && matches!(previous, Some(TokenKind::Punct(b'[' | b'(')))
+                        && scope.bindings.first() == Some(&word)
+                    {
+                        return Ok(true);
+                    }
+                    if !scope.reduce && word.eq_ignore_ascii_case("WHERE") {
+                        scope.active = true;
+                    } else if scope.reduce
+                        && !scope.active
+                        && matches!(previous, Some(TokenKind::Punct(b',')))
+                        && matches!(lexer.clone().next()?.kind, TokenKind::Word(next)
+                            if next.eq_ignore_ascii_case("IN"))
+                    {
+                        scope.bindings.push(word);
+                        return Ok(true);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn shadows(&self, name: &str) -> bool {
+        self.scopes
+            .iter()
+            .any(|scope| scope.active && scope.bindings.contains(&name))
+    }
+}
+
 /// Private output names for hidden boundary reads. A fixed set lets each name
 /// borrow for the statement's lifetime; a user alias that matches one is
 /// skipped, never shadowed.
@@ -601,7 +696,7 @@ impl<'a> Parser<'a> {
         // may also read the MATCH bindings it drops, as openCypher allows.
         // Those reads are hidden columns too, but scoped to that part.
         let mut scoped: Vec<(&'a str, Option<&'a str>, usize)> = Vec::new();
-        let mut binders: Vec<&'a str> = Vec::new();
+        let mut read_locals = ReadLocals::default();
         let mut before_return = head.plain && !unwind && pending.is_none();
         let mut functions = Vec::new();
         // Pattern comprehensions in the head's own scope, before any later
@@ -631,6 +726,7 @@ impl<'a> Parser<'a> {
             if token.at < skip_until {
                 continue;
             }
+            let declaration = read_locals.observe(token, window[2], &lexer, depth)?;
             let after_dot = matches!(window[2], Some(TokenKind::Punct(b'.')));
             if let TokenKind::Word(word) = token.kind
                 && depth == 0
@@ -782,29 +878,21 @@ impl<'a> Parser<'a> {
                 {
                     before_return = false;
                 }
-                TokenKind::Word(word) if !after_dot => {
+                TokenKind::Word(word) if !after_dot && !declaration => {
                     let next = lexer.clone().next()?.kind;
                     if before_return
+                        && !read_locals.shadows(word)
                         && !matches!(next, TokenKind::Punct(b'.' | b'(' | b'{' | b':'))
                         && head.outputs.iter().all(|(output, _)| output.text != word)
-                    {
-                        // `[x IN list ...]` and quantifiers bind a local that
-                        // shadows any MATCH binding of the same name.
-                        if matches!(window[2], Some(TokenKind::Punct(b'[' | b'(')))
-                            && matches!(next, TokenKind::Word(next) if next.eq_ignore_ascii_case("IN"))
-                        {
-                            binders.push(word);
-                        } else if !scoped
+                        && !scoped
                             .iter()
                             .any(|&(name, key, _)| name == word && key.is_none())
-                            && let Some(variable) =
-                                self.visible_graph_bindings().find(|name| name.text == word)
-                        {
-                            let input =
-                                self.mutation_projection(&mut head.inputs, variable, None)?;
-                            let column = hidden_boundary_column(head, token.at, offset + input)?;
-                            scoped.push((word, None, column));
-                        }
+                        && let Some(variable) =
+                            self.visible_graph_bindings().find(|name| name.text == word)
+                    {
+                        let input = self.mutation_projection(&mut head.inputs, variable, None)?;
+                        let column = hidden_boundary_column(head, token.at, offset + input)?;
+                        scoped.push((word, None, column));
                     }
                     let kept =
                         |alias: &str| carried.as_ref().is_none_or(|kept| kept.contains(&alias));
@@ -835,6 +923,7 @@ impl<'a> Parser<'a> {
                         None => metadata_source(word, token.at, &lexer)?,
                     };
                     if let Some((source, function)) = metadata
+                        && !read_locals.shadows(source.text)
                         && kept(source.text)
                         && let Some(variable) =
                             boundary_metadata_binding(head, offset, source.text, function)
@@ -870,6 +959,7 @@ impl<'a> Parser<'a> {
                         functions.push((source.text, function, head.outputs.len() - 1));
                     }
                     if let Some(source) = property_map_source(word, token.at, &lexer)?
+                        && !read_locals.shadows(source.text)
                         && kept(source.text)
                         && let Some(variable) = boundary_binding(head, offset, source.text)
                         && !reads.iter().any(|&(alias, key, _): &(_, Name<'_>, _)| {
@@ -909,6 +999,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Word(property) | TokenKind::DelimitedKeyword(property) if after_dot => {
                     let chained = matches!(window[0], Some(TokenKind::Punct(b'.')));
                     if let (Some(TokenKind::Word(alias)), false) = (window[1], chained)
+                        && !read_locals.shadows(alias)
                         && carried.as_ref().is_none_or(|kept| kept.contains(&alias))
                         && let Some(source) = boundary_property_source(head, offset, imports, alias)
                         && !reads.iter().any(|&(read, key, _): &(_, Name<'_>, _)| {
@@ -951,6 +1042,7 @@ impl<'a> Parser<'a> {
                     } else if before_return
                         && !chained
                         && let Some(TokenKind::Word(alias)) = window[1]
+                        && !read_locals.shadows(alias)
                         && head.outputs.iter().all(|(output, _)| output.text != alias)
                         && !scoped
                             .iter()
@@ -973,7 +1065,6 @@ impl<'a> Parser<'a> {
             }
             window = [window[1], window[2], Some(token.kind)];
         }
-        scoped.retain(|&(name, _, _)| !binders.contains(&name));
         if head.outputs.len() != visible {
             self.boundary_reads = Some(BoundaryReads {
                 visible,
@@ -1209,9 +1300,12 @@ impl<'a> Parser<'a> {
         else {
             return Ok(None);
         };
-        // A comprehension, quantifier or reduce local shadows every hidden
-        // read of the same name, whichever scan found the name.
-        if boundary.width != width || self.elements.contains(&alias) {
+        // A local shadows value reads. A word before `(` is a function call;
+        // metadata_source below checks that call's actual source alias.
+        if boundary.width != width
+            || (self.elements.contains(&alias)
+                && !matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
+        {
             return Ok(None);
         }
         if self.label_test.is_some() {
@@ -2304,7 +2398,9 @@ impl<'a> Parser<'a> {
             token = lexer.next()?;
         }
         let mut depth = 0_usize;
+        let mut locals = ReadLocals::default();
         loop {
+            locals.observe(token, previous, &lexer, depth)?;
             match token.kind {
                 TokenKind::End => break,
                 TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
@@ -2329,6 +2425,7 @@ impl<'a> Parser<'a> {
                             .map(|(source, _)| source)
                     };
                     if let Some(source) = source
+                        && !locals.shadows(source.text)
                         && yielded.iter().any(|(name, _)| name.text == source.text)
                         && !implied.iter().any(|seen| seen.text == source.text)
                     {

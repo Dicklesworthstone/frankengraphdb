@@ -1082,6 +1082,42 @@ fn yielded_labels_and_complete_maps_use_the_native_graph_boundary() {
 }
 
 #[test]
+fn local_names_do_not_shadow_calls_to_graph_metadata_functions() {
+    let graph = MetadataGraph::new((0..5).map(VId).collect());
+    let prefix = "CALL t.scores() YIELD vertex AS n, score ";
+    let baseline = graph
+        .query(
+            &format!(
+                "{prefix}RETURN labels(n) AS tags, properties(n) AS props, \
+                 keys(n) AS keys, score ORDER BY score"
+            ),
+            wide(),
+        )
+        .unwrap();
+    let actual = graph
+        .query(
+            &format!(
+                "{prefix}RETURN [labels IN [1] | labels(n)] AS tags, \
+                 [properties IN [1] | properties(n)] AS props, \
+                 [keys IN [1] | keys(n)] AS keys, score ORDER BY score"
+            ),
+            wide(),
+        )
+        .unwrap();
+    assert_eq!(actual.rows, baseline.rows);
+    assert_eq!(actual.value.len(), 4);
+    for (actual, baseline) in actual.value.iter().zip(&baseline.value) {
+        for column in 0..3 {
+            assert_eq!(
+                actual.values()[column].as_list(),
+                Some(core::slice::from_ref(&baseline.values()[column]))
+            );
+        }
+        assert_eq!(actual.values()[3], baseline.values()[3]);
+    }
+}
+
+#[test]
 fn procedure_metadata_preserves_source_masks_budgets_and_scalar_refusals() {
     let statement = "CALL t.scores() YIELD vertex AS n,score RETURN labels(n),properties(n),score";
     let graph = MetadataGraph::new((0..5).map(VId).collect());

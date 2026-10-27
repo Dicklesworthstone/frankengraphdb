@@ -60,6 +60,30 @@ fn no_pattern(
     panic!("an expression-produced element must use the admitted reader, not a graph scan")
 }
 
+fn graph_source(
+    pattern: &PreparedGraphPattern<GraphValueRow>,
+    remaining: GqlQueryPolicy,
+) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<&'static str, usize>> {
+    let vertices = [VId(1), VId(9), HIGH];
+    let properties = [2, 99, 7].map(|n| CanonicalPropertyValue::from(CanonicalScalar::Int(n)));
+    pattern.plan().execute_governed_with_properties(
+        3,
+        vertices,
+        [],
+        |_, predicates| {
+            assert!(predicates.is_empty());
+            Ok::<_, &'static str>(true)
+        },
+        |vid, key| {
+            assert_eq!(key, VALUE);
+            let at = vertices.iter().position(|id| *id == vid).unwrap();
+            Ok(Some(&properties[at]))
+        },
+        remaining,
+        || Ok::<_, usize>(()),
+    )
+}
+
 fn procedure(
     call: &PreparedProcedureCall,
     _: &[GraphValue],
@@ -232,6 +256,133 @@ fn source_expression_and_reducer_work_share_exact_and_short_allowances() {
             assert!(run(&query, short).is_err());
         }
     }
+}
+
+#[test]
+fn post_group_local_shadowing_keeps_the_original_call_element_source() {
+    for local in ["item", "node"] {
+        let query = prepare_output(&format!(
+            "RETURN [{local} IN COLLECT(node) | {local}.value] AS values"
+        ));
+        // Renaming a local cannot admit another graph source. The no_pattern
+        // host refuses an accidental graph demand instead of hiding its cost.
+        let actual = run(&query, policy()).unwrap();
+        assert_eq!(actual.rows.snapshot_records, 3, "{local}");
+        assert_eq!(actual.rows.result_rows, 1, "{local}");
+        assert_eq!(
+            actual.value[0].values(),
+            &[scalar_list(&[Some(2), Some(2), Some(7)])],
+            "{local}"
+        );
+    }
+}
+
+#[test]
+fn local_predicates_quantifiers_and_reduce_keep_the_call_element_reader() {
+    let query = prepare_output(
+        "RETURN [node IN COLLECT(node) WHERE node.value > 2 | node.value] AS filtered, \
+         all(node IN COLLECT(node) WHERE node.value > 0) AS every, \
+         any(node IN COLLECT(node) WHERE node.value > 6) AS some, \
+         none(node IN COLLECT(node) WHERE node.value < 0) AS absent, \
+         single(node IN COLLECT(node) WHERE node.value = 7) AS unique, \
+         reduce(total = 0, node IN COLLECT(node) | total + node.value) AS total, \
+         [state IN [reduce(node = {value: 0}, item IN COLLECT(node) | \
+             {value: node.value + item.value})] | state.value] AS accumulated",
+    );
+    let actual = run(&query, policy()).unwrap();
+    assert_eq!(actual.rows.snapshot_records, 3);
+    assert_eq!(actual.rows.result_rows, 1);
+    let values = actual.value[0].values();
+    assert_eq!(values[0], scalar_list(&[Some(7)]));
+    for value in &values[1..5] {
+        assert_eq!(
+            value.as_value(),
+            Some(&GraphValue::Scalar(CanonicalScalar::Bool(true)))
+        );
+    }
+    assert_eq!(
+        values[5].as_value(),
+        Some(&GraphValue::Scalar(CanonicalScalar::Int(11)))
+    );
+    assert_eq!(values[6], scalar_list(&[Some(11)]));
+}
+
+#[test]
+fn shadowed_bodies_do_not_hide_outer_or_iterator_graph_demands() {
+    for tail in [
+        "RETURN SUM(node.value) AS total, [item IN COLLECT(node) | item.value] AS values",
+        "RETURN SUM(node.value) AS total, [node IN COLLECT(node) | node.value] AS values",
+        "RETURN SUM(node.value) AS total, [node IN COLLECT(node) | node.missing] AS values",
+        "RETURN SUM(node.value) AS total, [node IN COLLECT(node.value) | node] AS values",
+        "RETURN [node IN COLLECT(node.value) | node] AS values",
+        "RETURN [state IN [reduce(node = {value: SUM(node.value)}, \
+             item IN COLLECT(node) | {value: node.value + item.value})] | state.value] AS values",
+    ] {
+        let query = prepare_output(tail);
+        let execute = |records| {
+            query.execute_governed_with_elements(
+                GqlQueryPolicy::new(records, 1, 1_000_000, 100_000),
+                graph_source,
+                procedure,
+                property,
+                || Ok(()),
+            )
+        };
+        let actual = execute(6).unwrap_or_else(|error| panic!("{tail}: {error:?}"));
+        assert_eq!(actual.rows.snapshot_records, 6, "{tail}");
+        assert_eq!(actual.rows.result_rows, 1, "{tail}");
+        let values = actual.value[0].values();
+        if values.len() == 2 {
+            assert_eq!(values[0].as_integer(), Some(11), "{tail}");
+        }
+        let expected = if tail.contains(".missing") {
+            scalar_list(&[None, None, None])
+        } else if tail.contains("reduce(") {
+            scalar_list(&[Some(22)])
+        } else {
+            scalar_list(&[Some(2), Some(2), Some(7)])
+        };
+        assert_eq!(values.last(), Some(&expected), "{tail}");
+        assert!(matches!(execute(5), Err(GqlQueryError::Rows(error))
+            if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords
+                && error.observed == error.limit + 1));
+    }
+}
+
+#[test]
+fn nested_shadowing_ends_before_a_following_outer_graph_demand() {
+    let nested =
+        prepare_output("RETURN [node IN COLLECT(node) | [node IN [node] | node.value]] AS values");
+    let actual = run(&nested, policy()).unwrap();
+    assert_eq!(actual.rows.snapshot_records, 3);
+    assert_eq!(actual.rows.result_rows, 1);
+    assert_eq!(
+        actual.value[0].values()[0].as_value(),
+        Some(&GraphValue::List(
+            [2, 2, 7]
+                .map(|n| GraphValue::List(vec![GraphValue::Scalar(CanonicalScalar::Int(n))].into()))
+                .into()
+        ))
+    );
+    let following = prepare_output(
+        "RETURN [node IN COLLECT(node) | node.value] AS values, SUM(node.value) AS total",
+    );
+    let actual = following
+        .execute_governed_with_elements(
+            GqlQueryPolicy::new(6, 1, 1_000_000, 100_000),
+            graph_source,
+            procedure,
+            property,
+            || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(actual.rows.snapshot_records, 6);
+    assert_eq!(actual.rows.result_rows, 1);
+    assert_eq!(
+        actual.value[0].values()[0],
+        scalar_list(&[Some(2), Some(2), Some(7)])
+    );
+    assert_eq!(actual.value[0].values()[1].as_integer(), Some(11));
 }
 
 #[test]
