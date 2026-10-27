@@ -6211,20 +6211,17 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     } = store.reopen_sealed(cx, root_id).await?;
     let published_at = root.published_at;
 
-    // The walk above already validated and collapsed the whole published edge
-    // history; build the writer from that admission rather than validating
-    // every block a second time (fgdb-e8gr4).
-    let mut writer = BlockWriter::from_admitted_partition(
-        GRAPH,
-        BRANCH,
-        PARTITION,
+    // The walk above already validated the whole published edge history and
+    // retained each EId's latest row coordinate. Reconstruct directly from
+    // that admission without sorting the complete history or its property
+    // locations again (fgdb-e8gr4).
+    let mut writer = BlockWriter::from_root_admission(
         sealed_blocks,
         sealed_patches,
-        &admission.edge_statements(),
+        &admission,
         &blocks,
         &block_props,
         &patches,
-        published_at,
     )
     .map_err(|error| RebuildError::Store(StoreError::MalformedRoot(error)))?;
     // Admission already established permanent identity membership. Counting

@@ -2227,6 +2227,7 @@ impl<V: Vfs> BlockStore<V> {
         let RootWalk {
             history,
             chain_heads,
+            latest_edges,
             ..
         } = walk;
         let mut reads = OrderedReads::new();
@@ -2300,9 +2301,11 @@ impl<V: Vfs> BlockStore<V> {
                 }
                 chain_heads.insert(family, reference.block_id);
             }
-            history
-                .observe_block(at, entries)
-                .map_err(StoreError::MalformedRoot)?;
+            match latest_edges {
+                Some(latest) => latest.observe_block(history, at, entries),
+                None => history.observe_block(at, entries),
+            }
+            .map_err(StoreError::MalformedRoot)?;
             if let Some(kept) = keep(at, reference, read) {
                 blocks.try_reserve(1).map_err(|_| {
                     StoreError::Io(std::io::Error::new(
@@ -3112,7 +3115,10 @@ impl<V: Vfs> BlockStore<V> {
         let (root, segments) = self
             .get_root_and_segments(cx, id, crate::root::MAX_ROOT_READ_BYTES)
             .await?;
-        let mut walk = RootWalk::default();
+        let mut walk = RootWalk {
+            latest_edges: Some(crate::root::LatestEdgeRows::default()),
+            ..RootWalk::default()
+        };
         let read = self
             .inspect_root_blocks_observed(
                 cx,
@@ -3324,6 +3330,9 @@ pub struct ReopenedPartition {
 #[derive(Debug, Default)]
 struct RootWalk {
     history: crate::root::EdgeHistoryValidator,
+    /// Only writable reopen needs the latest row coordinates. Admission still
+    /// proves every statement, including those no longer visible at the root.
+    latest_edges: Option<crate::root::LatestEdgeRows>,
     chain_heads: BTreeMap<(fgdb_types::VId, fgdb_delta_types::RelationId), ObjectId>,
     vertex_history: crate::root::VertexHistoryValidator,
 }
@@ -3366,6 +3375,38 @@ impl RootAdmission {
         &self,
     ) -> std::collections::BTreeMap<(fgdb_types::EId, CommitSeq), crate::AdjacencyEntry> {
         self.walk.history.statements()
+    }
+
+    /// The immutable coordinates this admission proved. The writer constructor
+    /// takes its frontier here rather than accepting an unrelated caller cut.
+    pub(crate) fn coordinates(&self) -> (GraphId, BranchId, u64, CommitSeq) {
+        (
+            self.binding.graph,
+            self.binding.branch,
+            self.partition,
+            self.binding.published_at,
+        )
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn live_edges(
+        &self,
+        block_props: &[Option<BlockProps>],
+    ) -> Result<
+        Vec<(crate::AdjacencyEntry, crate::edge_props::EdgePropertyRow)>,
+        crate::root::RootError,
+    > {
+        if block_props.len() != self.blocks.len() {
+            return Err(crate::root::RootError::BlockPropsArity {
+                blocks: self.blocks.len(),
+                props: block_props.len(),
+            });
+        }
+        self.walk
+            .latest_edges
+            .as_ref()
+            .expect("a reopened root retains its latest row coordinates")
+            .live_edges(&self.walk.history, block_props, self.binding.published_at)
     }
 }
 
@@ -3545,6 +3586,7 @@ impl PublishReceipts {
             history,
             chain_heads,
             vertex_history,
+            latest_edges: _,
         } = walk;
         let mut spans = BTreeMap::new();
         let mut chain_fields = BTreeMap::new();

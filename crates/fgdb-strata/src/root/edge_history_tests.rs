@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 #[derive(Default)]
 struct GlobalMapValidator {
     statements: BTreeMap<(EId, CommitSeq), AdjacencyEntry>,
+    locations: BTreeMap<(EId, CommitSeq), (usize, usize)>,
     seen: usize,
 }
 
@@ -123,6 +124,7 @@ impl GlobalMapValidator {
                 }
             }
             self.statements.insert(key, *entry);
+            self.locations.insert(key, (block_at, entry_at));
         }
         Ok(())
     }
@@ -437,4 +439,112 @@ fn winning_rows_answer_exactly_as_the_publication_order_map() {
     // The generator restates statements across blocks, so later copies
     // really do override earlier ones.
     assert!(restated > 10_000, "restated copies: {restated}");
+}
+
+/// The reconstruction index observes the same accepted statements as the
+/// independent map, including a refused block's accepted prefix. Its pointer
+/// always names the last copy of the newest content statement, which need not
+/// be the last statement encountered for that EId.
+#[test]
+fn latest_edge_rows_match_independent_history_and_property_locations() {
+    let mut rng = Rng(0x000e_8674_1a7e_57ed);
+    let (mut accepted, mut refused) = (0, 0);
+    for trial in 0..20_000 {
+        let blocks = history(&mut rng);
+        let props = block_props(&mut rng, &blocks);
+        let mut global = GlobalMapValidator::default();
+        let mut chains = EdgeHistoryValidator::default();
+        let mut latest = super::LatestEdgeRows::default();
+        for (at, block) in blocks.iter().enumerate() {
+            let expected = global.observe_block(at, block);
+            let found = latest.observe_block(&mut chains, at, block);
+            assert_eq!(found, expected, "trial {trial}, block {at}");
+            assert_eq!(chains.statements(), global.statements);
+            let frontier = global
+                .statements
+                .values()
+                .map(|row| row.retired_at.unwrap_or(row.created_at))
+                .max()
+                .unwrap_or(CommitSeq::ORIGIN);
+            let expected: Vec<_> = global
+                .statements
+                .iter()
+                .filter(|(_, row)| row.visible_at(frontier))
+                .map(|(key, row)| {
+                    let (block, at) = global.locations[key];
+                    let props = props[block]
+                        .as_ref()
+                        .map(|props| props.props_of(at))
+                        .unwrap_or_default();
+                    (*row, props)
+                })
+                .collect();
+            assert_eq!(
+                latest.live_edges(&chains, &props, frontier).unwrap(),
+                expected,
+                "trial {trial}, block {at}: {blocks:?}"
+            );
+            assert_eq!(latest.positions.len(), chains.chains.len());
+            if found.is_err() {
+                refused += 1;
+                break;
+            }
+            if at + 1 == blocks.len() {
+                accepted += 1;
+            }
+        }
+    }
+    assert!(accepted > 2_000 && refused > 2_000);
+}
+
+#[test]
+fn latest_edge_rows_keep_newest_content_and_last_copy_property_precedence() {
+    use fgdb_delta_types::PropertyKeyId;
+    use fgdb_types::CanonicalScalar;
+    let early = entry(7, 1, 1, 1, Some(2));
+    let current = entry(7, 1, 1, 2, None);
+    // Newest content may precede an older retired statement in publication
+    // order. Repeating that old statement must not point the current row at it.
+    let blocks = [vec![current], vec![early], vec![current], vec![early]];
+    let mut props: Vec<_> = (0..4)
+        .map(|at| {
+            Some(crate::edge_props::BlockProps {
+                locators: vec![1],
+                rows: vec![vec![(PropertyKeyId(1), CanonicalScalar::Int(at).into())]],
+            })
+        })
+        .collect();
+    let mut history = EdgeHistoryValidator::default();
+    let mut latest = super::LatestEdgeRows::default();
+    for (at, block) in blocks.iter().enumerate() {
+        latest.observe_block(&mut history, at, block).unwrap();
+    }
+    assert_eq!(latest.positions, vec![(2, 0)]);
+    assert_eq!(
+        latest.live_edges(&history, &props, CommitSeq(2)).unwrap(),
+        vec![(current, props[2].as_ref().unwrap().props_of(0))]
+    );
+    // A propertyless latest copy clears earlier properties; it is not a
+    // signal to fall back to an older hosted row.
+    props[2] = None;
+    assert_eq!(
+        latest.live_edges(&history, &props, CommitSeq(2)).unwrap(),
+        vec![(current, Vec::new())]
+    );
+    assert!(matches!(
+        latest.live_edges(&history, &props, CommitSeq(1)),
+        Err(RootError::BlockAfterPublication { .. })
+    ));
+    let retired = AdjacencyEntry {
+        retired_at: Some(CommitSeq(3)),
+        ..current
+    };
+    latest.observe_block(&mut history, 4, &[retired]).unwrap();
+    props.push(None);
+    assert!(
+        latest
+            .live_edges(&history, &props, CommitSeq(3))
+            .unwrap()
+            .is_empty()
+    );
 }

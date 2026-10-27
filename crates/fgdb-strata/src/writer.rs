@@ -442,6 +442,35 @@ impl BlockWriter {
         ))
     }
 
+    /// Reconstruct the writer at a reopened root's own admitted frontier.
+    /// Unlike [`Self::from_admitted_partition`], this consumes the root walk's
+    /// latest-statement coordinates directly, without constructing a sorted
+    /// map of every historical statement or sorting its property locations.
+    /// The supplied sealed/decoded collections must be the exact collections
+    /// returned beside `admission` by [`crate::store::BlockStore::reopen_sealed`].
+    pub fn from_root_admission(
+        sealed: Vec<SealedBlock>,
+        sealed_patches: Vec<SealedPatch>,
+        admission: &crate::store::RootAdmission,
+        blocks: &[Vec<AdjacencyEntry>],
+        block_props: &[Option<crate::edge_props::BlockProps>],
+        patches: &[VertexPatchRows],
+    ) -> Result<Self, RootError> {
+        let (graph, branch, partition, frontier) = admission.coordinates();
+        let live_edges = admission.live_edges(block_props)?;
+        Ok(Self::assemble_published(
+            graph,
+            branch,
+            partition,
+            sealed,
+            sealed_patches,
+            live_edges,
+            blocks,
+            patches,
+            frontier,
+        ))
+    }
+
     /// The rest of a published writer, once its live edges are known.
     #[allow(clippy::too_many_arguments)]
     fn assemble_published(

@@ -1252,6 +1252,51 @@ fn a_prefetching_reopen_proves_hosted_patches_as_the_serial_walk_does() {
         assert_eq!(prefetched.2, bounded.2, "the same proven rows");
         assert_eq!(sealed.block_props, bounded.2, "the same proven rows");
 
+        assert!(matches!(
+            BlockWriter::from_root_admission(
+                sealed.sealed_blocks.clone(),
+                sealed.sealed_patches.clone(),
+                &sealed.admission,
+                &sealed.blocks,
+                &sealed.block_props[..sealed.block_props.len() - 1],
+                &sealed.patches,
+            ),
+            Err(fgdb_strata::root::RootError::BlockPropsArity { blocks, props })
+                if blocks == sealed.blocks.len() && props + 1 == blocks
+        ));
+        let mut from_walk = BlockWriter::from_root_admission(
+            sealed.sealed_blocks.clone(),
+            sealed.sealed_patches.clone(),
+            &sealed.admission,
+            &sealed.blocks,
+            &sealed.block_props,
+            &sealed.patches,
+        )
+        .expect("reconstructs from the same admitted walk");
+        let mut revalidated = BlockWriter::from_published_partition(
+            root.graph,
+            root.branch,
+            root.partition,
+            sealed.sealed_blocks.clone(),
+            sealed.sealed_patches.clone(),
+            &sealed.blocks,
+            &sealed.block_props,
+            &sealed.patches,
+            root.published_at,
+        )
+        .expect("independently revalidates the full history");
+        assert_eq!(format!("{from_walk:?}"), format!("{revalidated:?}"));
+        for recovered in [&mut from_walk, &mut revalidated] {
+            recovered
+                .apply(keys, CommitSeq(2), &create_vertex(2_000))
+                .expect("the reconstructed fold continues normally");
+        }
+        assert_eq!(
+            from_walk.publish(keys, CommitSeq(2)).unwrap(),
+            revalidated.publish(keys, CommitSeq(2)).unwrap(),
+            "the next root and every sealed byte are identical"
+        );
+
         std::fs::write(store.path(late_patch.patch_id), b"damaged").expect("plants garbage");
         std::fs::write(store.path(early_patch.patch_id), &late_patch.bytes)
             .expect("plants a lawful foreign patch");

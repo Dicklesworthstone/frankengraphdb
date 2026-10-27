@@ -2130,6 +2130,19 @@ impl EdgeHistoryValidator {
         block_at: usize,
         block: &[crate::AdjacencyEntry],
     ) -> Result<(), RootError> {
+        self.observe_block_positions(block_at, block, |_, _| {})
+    }
+
+    /// The same admission, reporting the location of each accepted chain's
+    /// latest content statement. The empty observer above compiles out of
+    /// ordinary admission; a writable reopen uses it to retain one coordinate
+    /// per EId instead of sorting every historical statement a second time.
+    fn observe_block_positions(
+        &mut self,
+        block_at: usize,
+        block: &[crate::AdjacencyEntry],
+        mut latest: impl FnMut(usize, usize),
+    ) -> Result<(), RootError> {
         let declared = u32::try_from(block.len()).unwrap_or(u32::MAX);
         if declared > crate::MAX_BLOCK_ENTRIES {
             return Err(RootError::Block {
@@ -2172,6 +2185,7 @@ impl EdgeHistoryValidator {
                 self.chains.push(EdgeChain::One(*entry));
                 self.index.insert(entry.eid, position, &self.chains);
                 self.statements += 1;
+                latest(position, entry_at);
                 continue;
             };
             let chain = &mut self.chains[position];
@@ -2199,6 +2213,9 @@ impl EdgeHistoryValidator {
                         });
                     }
                     chain.statements_mut()[at] = *entry;
+                    if at + 1 == chain.statements().len() {
+                        latest(position, entry_at);
+                    }
                 }
                 Err(at) => {
                     // A NEW statement must extend its EId's chain contiguously
@@ -2235,6 +2252,9 @@ impl EdgeHistoryValidator {
                     }
                     chain.insert(at, *entry);
                     self.statements += 1;
+                    if at + 1 == chain.statements().len() {
+                        latest(position, entry_at);
+                    }
                 }
             }
         }
@@ -2272,6 +2292,86 @@ impl EdgeHistoryValidator {
     fn into_canonical(self) -> CollapsedEdgeHistory {
         let superseded = self.seen - self.statements;
         (self.statements(), superseded)
+    }
+}
+
+/// Latest-statement coordinates for one fully admitted root walk. This is
+/// temporary reconstruction state, never a second history validator or a
+/// durable reference. It costs eight bytes per EId, regardless of the number
+/// of statements/restatements, and is dropped when the walk becomes publish
+/// receipts. Read-only walks and ordinary publication do not allocate it.
+#[derive(Debug, Default)]
+pub(crate) struct LatestEdgeRows {
+    positions: Vec<(u32, u32)>,
+}
+
+impl LatestEdgeRows {
+    pub(crate) fn observe_block(
+        &mut self,
+        history: &mut EdgeHistoryValidator,
+        block_at: usize,
+        block: &[crate::AdjacencyEntry],
+    ) -> Result<(), RootError> {
+        history.observe_block_positions(block_at, block, |chain, row| {
+            // A structurally admitted root holds at most MAX_ROOT_BLOCKS
+            // blocks, each with MAX_BLOCK_ENTRIES rows; both fit u32.
+            let position = (
+                u32::try_from(block_at).expect("admitted root block index fits u32"),
+                u32::try_from(row).expect("admitted block row index fits u32"),
+            );
+            if chain == self.positions.len() {
+                self.positions.push(position);
+            } else {
+                self.positions[chain] = position;
+            }
+        })
+    }
+
+    /// Recover the live rows at the root's own publication frontier. All
+    /// history has already been validated, and its greatest statement is the
+    /// only possible live one there. Sorting only live EIds keeps the writer's
+    /// exact canonical insertion order; each winning property row is cloned
+    /// once from the last copy's own hosted column.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn live_edges(
+        &self,
+        history: &EdgeHistoryValidator,
+        block_props: &[Option<impl Borrow<crate::edge_props::BlockProps>>],
+        frontier: CommitSeq,
+    ) -> Result<Vec<(crate::AdjacencyEntry, crate::edge_props::EdgePropertyRow)>, RootError> {
+        assert_eq!(self.positions.len(), history.chains.len());
+        let mut order = Vec::new();
+        for (chain, statements) in history.chains.iter().enumerate() {
+            let latest = statements.statements().last().expect("a chain is nonempty");
+            let (block, _) = self.positions[chain];
+            let last_seq = latest.retired_at.unwrap_or(latest.created_at);
+            if last_seq > frontier {
+                return Err(RootError::BlockAfterPublication {
+                    at: block as usize,
+                    last_seq,
+                    published_at: frontier,
+                });
+            }
+            if latest.visible_at(frontier) {
+                order.push((latest.eid, chain));
+            }
+        }
+        order.sort_unstable();
+        Ok(order
+            .into_iter()
+            .map(|(_, chain)| {
+                let entry = *history.chains[chain]
+                    .statements()
+                    .last()
+                    .expect("a chain is nonempty");
+                let (block, row) = self.positions[chain];
+                let props = block_props[block as usize]
+                    .as_ref()
+                    .map(|props| props.borrow().props_of(row as usize))
+                    .unwrap_or_default();
+                (entry, props)
+            })
+            .collect())
     }
 }
 
