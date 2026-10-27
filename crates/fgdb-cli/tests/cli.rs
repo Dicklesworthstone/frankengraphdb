@@ -9,8 +9,10 @@
 
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, WriteBatch};
-use fgdb_delta_types::{LabelId, RelationId};
-use fgdb_types::{EId, VId, context::PurposeContexts, ids::DatabaseSecurityNamespaceId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_types::{
+    CanonicalScalar, EId, VId, context::PurposeContexts, ids::DatabaseSecurityNamespaceId,
+};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -1091,13 +1093,50 @@ fn sealed_analytics_reads_beside_a_live_writer_without_mutating_database_files()
             .await
             .unwrap();
         let mut first = WriteBatch::new(RelationId(1));
-        first.create_vertex(VId(1), vec![], vec![]);
-        first.create_vertex(VId(2), vec![], vec![]);
+        first.create_vertex(
+            VId(1),
+            vec![LabelId(1)],
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(10))],
+        );
+        first.create_vertex(
+            VId(2),
+            vec![LabelId(1)],
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(20))],
+        );
         first.add_edge(EId(1), VId(1), VId(2), vec![]);
         writer.write(&commit, first).await.unwrap();
         let historical = writer.frontier().unwrap().0.to_string();
+        let composed = [
+            "CALL fnx.weakly_connected_components({relations:['KNOWS'],parallel:'collapse'}) \
+             YIELD vertex, component RETURN vertex, component ORDER BY vertex LIMIT $top",
+            "CALL fnx.weakly_connected_components({relations:['KNOWS'],parallel:'collapse'}) \
+             YIELD vertex, component MATCH (vertex:Person) \
+             RETURN vertex.id AS id, component ORDER BY id LIMIT $top",
+            "CALL fnx.weakly_connected_components({relations:['KNOWS'],parallel:'collapse'}) \
+             YIELD vertex, component RETURN component, COUNT(*) AS total \
+             GROUP BY component ORDER BY component LIMIT $top",
+        ];
+        let historical_decoded: Vec<_> = composed
+            .iter()
+            .map(|text| {
+                let output = fixture.robot(
+                    "query",
+                    &["--relation", "KNOWS=1", "--param", "top=int:10", text],
+                );
+                assert_eq!(
+                    succeeded(&output, "rows"),
+                    historical.parse::<u64>().unwrap()
+                );
+                output
+            })
+            .collect();
         let mut second = WriteBatch::new(RelationId(1));
-        second.create_vertex(VId(3), vec![], vec![]);
+        second.create_vertex(
+            VId(3),
+            vec![LabelId(1)],
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(30))],
+        );
+        second.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(40)));
         second.add_edge(EId(2), VId(2), VId(3), vec![]);
         writer.write(&commit, second).await.unwrap();
         let current = writer.frontier().unwrap().0.to_string();
@@ -1175,6 +1214,126 @@ fn sealed_analytics_reads_beside_a_live_writer_without_mutating_database_files()
                 );
             }
         }
+        for (text, historical_expected) in composed.iter().zip(&historical_decoded) {
+            let current_expected = fixture.robot(
+                "query",
+                &["--relation", "KNOWS=1", "--param", "top=int:10", text],
+            );
+            assert_eq!(
+                succeeded(&current_expected, "rows"),
+                current.parse::<u64>().unwrap()
+            );
+            assert_ne!(rows(historical_expected), rows(&current_expected));
+            for (cut, expected) in [
+                (&historical, historical_expected),
+                (&current, &current_expected),
+            ] {
+                let flags = [
+                    "--sealed",
+                    "--relation",
+                    "KNOWS=1",
+                    "--graph-relation",
+                    "KNOWS",
+                    "--as-of",
+                    cut.as_str(),
+                    "--param",
+                    "top=int:10",
+                    text,
+                ];
+                let actual = fixture.robot("query", &flags);
+                assert_eq!(succeeded(&actual, "rows"), cut.parse::<u64>().unwrap());
+                assert_eq!(
+                    actual.stdout, expected.stdout,
+                    "composed read at cut {cut}: {text}"
+                );
+                let human = fixture.run(false, "query", &flags);
+                assert!(human.status.success(), "{human:?}");
+            }
+        }
+        let map_query = "CALL fnx.weakly_connected_components({relations:['KNOWS'],parallel:'collapse'}) \
+                         YIELD vertex MATCH (vertex:Person {id: $filter.id}) RETURN vertex.id AS id";
+        for (cut, expected_rows) in [(&historical, 1), (&current, 0)] {
+            let actual = fixture.robot(
+                "query",
+                &[
+                    "--sealed",
+                    "--relation",
+                    "KNOWS=1",
+                    "--graph-relation",
+                    "KNOWS",
+                    "--as-of",
+                    cut.as_str(),
+                    "--param",
+                    r#"filter=json:{"id":10}"#,
+                    map_query,
+                ],
+            );
+            assert_eq!(succeeded(&actual, "rows"), cut.parse::<u64>().unwrap());
+            assert_eq!(rows(&actual).len(), expected_rows);
+            if expected_rows == 1 {
+                assert!(rows(&actual)[0].contains(r#"{"type":"int","value":"10"}"#));
+            } else {
+                let decoded = fixture.robot(
+                    "query",
+                    &[
+                        "--relation",
+                        "KNOWS=1",
+                        "--param",
+                        r#"filter=json:{"id":10}"#,
+                        map_query,
+                    ],
+                );
+                succeeded(&decoded, "rows");
+                assert_eq!(actual.stdout, decoded.stdout);
+            }
+        }
+        for (flag, value) in [
+            ("--max-snapshot-records", "0"),
+            ("--max-result-rows", "0"),
+            ("--max-work-units", "0"),
+            ("--max-scratch-entries", "0"),
+            ("--sealed-kernel-bytes", "0"),
+            ("--sealed-result-bytes", "0"),
+        ] {
+            let output = fixture.robot(
+                "query",
+                &[
+                    "--sealed",
+                    "--relation",
+                    "KNOWS=1",
+                    "--graph-relation",
+                    "KNOWS",
+                    "--param",
+                    "top=int:10",
+                    flag,
+                    value,
+                    composed[0],
+                ],
+            );
+            refused(&output, 3, "query");
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("\"event\":\"columns\""));
+        }
+        let mismatch = fixture.robot(
+            "query",
+            &[
+                "--sealed",
+                "--relation",
+                "KNOWS=1",
+                "--relation",
+                "OTHER=2",
+                "--graph-relation",
+                "KNOWS",
+                "CALL fnx.weakly_connected_components({relations:['OTHER']}) \
+                 YIELD vertex RETURN vertex LIMIT 0",
+            ],
+        );
+        refused(&mismatch, 3, "query");
+        assert!(!String::from_utf8_lossy(&mismatch.stdout).contains("\"event\":\"columns\""));
+        assert_eq!(
+            directory_bytes(&fixture.db()),
+            before,
+            "composed reads and refusals must not mutate storage beside the live writer"
+        );
         drop(writer);
     });
 }

@@ -5,7 +5,7 @@
 //! Combining them keeps source payloads in the extent pool. --sealed-quantum
 //! additionally yields between bounded steps of a supported compressed kernel.
 //!
-//! The graph a procedure sees is an EXPLICIT projection chosen by flags, never
+//! A standalone procedure sees an EXPLICIT projection chosen by flags, never
 //! an implicit collapse of the stored multigraph:
 //! - `--graph-label` / `--graph-relation` select the induced vertices and edges
 //!   (default: every vertex, every relation);
@@ -20,9 +20,14 @@
 //! `fnx.connected_components` over a directed projection) is refused by Prism,
 //! never silently converted. Arguments are typed `--param` values:
 //! `int:`, `float:`, `bool:`, `null` and `vertex:<id>` for a source vertex.
+//! Composed native reads use their query-local projections and native parameter
+//! types; --sealed selects a compressed relation without overriding either.
 use super::{Failure, Options, decimal_usize, float_text, render_rows_iter};
 use asupersync::fs::Vfs;
-use fgdb::{BufferedReadView, Database, DatabaseKeys, EmbeddedReadView, SealedProjectionOpenError};
+use fgdb::{
+    BufferedReadView, Database, DatabaseKeys, EmbeddedReadView, PreparedNativeRead, QueryError,
+    SealedProjectionOpenError, SealedQueryError,
+};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_prism::{
     Directedness, FnxArgument, FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadOptions,
@@ -128,6 +133,41 @@ impl ProjectionFlags {
 
     pub(super) fn uses_sealed_quantum(&self) -> bool {
         self.sealed && self.sealed_quantum.is_some()
+    }
+
+    pub(super) fn is_sealed(&self) -> bool {
+        self.sealed
+    }
+
+    /// The selected compressed relation is an admission boundary. Query-local
+    /// projections still determine each CALL's graph laws; flags cannot replace
+    /// those definitions or silently change an ordinary native read.
+    pub(super) fn validate_composed(&self) -> Result<(), Failure> {
+        if !self.sealed {
+            return Err(Failure::usage(
+                "projection flags on a composed CALL require --sealed; otherwise use a query-local projection map",
+            ));
+        }
+        if self.relation.is_none() {
+            return Err(Failure::usage(
+                "composed --sealed queries require --graph-relation and the same relation in each CALL's query-local projection",
+            ));
+        }
+        if self.label.is_some()
+            || self.weight.is_some()
+            || self.missing.is_some()
+            || self.direction.is_some()
+            || self.parallel.is_some()
+            || self.self_loops.is_some()
+            || self.graph_staging_bytes.is_some()
+            || self.graph_workspace_bytes.is_some()
+            || self.sealed_quantum.is_some()
+        {
+            return Err(Failure::usage(
+                "composed --sealed queries use query-local labels, weights and graph laws; --graph-staging-bytes, --graph-workspace-bytes and --sealed-quantum are unsupported",
+            ));
+        }
+        Ok(())
     }
 
     fn has_sealed_limits(&self) -> bool {
@@ -425,6 +465,136 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
     })
 }
 
+/// A native read bound before storage opens. The relation selects the sealed
+/// source; it never supplies an omitted relation in the query itself.
+pub(super) struct PreparedSealedRead {
+    native: PreparedNativeRead,
+    lowered_params: Option<fgdb_gql::GqlParameters>,
+    relation: RelationId,
+    as_of: Option<CommitSeq>,
+    memory: FnxMemoryLimits,
+    sealing: SealedLimits,
+    source_limits: RootReadLimits,
+}
+
+pub(super) fn prepare_sealed_read(options: &Options) -> Result<PreparedSealedRead, Failure> {
+    options.fnx.validate_composed()?;
+    let name = options
+        .fnx
+        .relation
+        .as_ref()
+        .ok_or_else(|| Failure::usage("--sealed requires --graph-relation"))?;
+    let relation = options
+        .relations
+        .get(name)
+        .map(|id| RelationId(u64::from(*id)))
+        .ok_or_else(|| Failure::usage(format!("relation {name:?} has no binding")))?;
+    // Preserve the ordinary one-shot read contract for map fields used as
+    // pattern keys. Keep the derived values with their prepared template.
+    let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(&options.text, &options.params);
+    let (statement, params) = lowered.as_ref().map_or(
+        (options.text.as_str(), &options.params),
+        |(text, params)| (text.text(), params),
+    );
+    let native = PreparedNativeRead::prepare(statement, params, options)
+        .map_err(|error| super::read_failure(options, error))?;
+    // Bind values now, including parameters in a page or kernel argument, so
+    // malformed input cannot reach the filesystem. Execution reuses the same
+    // immutable template and parameter set for the selected historical cut.
+    let calls_procedure = match &native {
+        PreparedNativeRead::Set(prepared) => prepared
+            .bind_parameters(params)
+            .map_err(|error| super::read_failure(options, QueryError::SetText(error)))?
+            .calls_procedure(),
+        PreparedNativeRead::PipelineAggregate(prepared) if prepared.requires_relational_input() => {
+            prepared
+                .bind_relation_parameters(params)
+                .map_err(|error| super::read_failure(options, QueryError::PipelineText(error)))?
+                .input()
+                .calls_procedure()
+        }
+        other => {
+            return Err(Failure::coded(
+                super::refusal::Code::Unsupported,
+                SealedQueryError::Unsupported {
+                    facade: other.facade_class(),
+                },
+            ));
+        }
+    };
+    if !calls_procedure {
+        return Err(Failure::coded(
+            super::refusal::Code::Unsupported,
+            "composed --sealed execution requires a procedure call",
+        ));
+    }
+    let (memory, sealing) = options
+        .fnx
+        .sealed_limits()
+        .ok_or_else(|| Failure::usage("compressed native reads require --sealed"))?;
+    let source_limits = RootReadLimits {
+        max_incidences: options.fnx.sealed_source_incidences.unwrap_or_else(|| {
+            RootReadLimits::default()
+                .max_incidences
+                .max(sealing.max_incidences)
+        }),
+        ..RootReadLimits::default()
+    };
+    Ok(PreparedSealedRead {
+        native,
+        lowered_params: lowered.map(|(_, params)| params),
+        relation,
+        as_of: options.fnx.as_of,
+        memory,
+        sealing,
+        source_limits,
+    })
+}
+
+/// Keep analytics, native MATCH and property reads on one published generation.
+/// The whole native result completes before its first output event is written.
+pub(super) async fn run_sealed_read(
+    open_cx: &CommitCx,
+    cx: &QueryCx,
+    options: &Options,
+    keys: DatabaseKeys,
+    prepared: &PreparedSealedRead,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
+    let view = Database::open_sealed_read(
+        open_cx,
+        cx,
+        &options.db,
+        keys,
+        prepared.as_of,
+        prepared.relation,
+        prepared.sealing,
+        prepared.source_limits,
+    )
+    .await
+    .map_err(|error| match error {
+        SealedProjectionOpenError::Open(error) => super::open_failure(error),
+        SealedProjectionOpenError::Read(error) => super::execution_failure(error),
+        SealedProjectionOpenError::RecoveryRequired => Failure::open(error),
+    })?;
+    let result = view
+        .execute_prepared(
+            cx,
+            &prepared.native,
+            prepared.lowered_params.as_ref().unwrap_or(&options.params),
+            options.budget.policy(),
+            prepared.memory,
+        )
+        .map_err(|error| match error {
+            SealedQueryError::Query(error) => super::read_failure(options, error),
+            error @ SealedQueryError::Unsupported { .. } => {
+                Failure::coded(super::refusal::Code::Unsupported, error)
+            }
+        })?;
+    super::render(result, view.snapshot_seq().0, "rows", robot, out)
+}
+
 pub(super) fn run(
     view: &EmbeddedReadView,
     cx: &QueryCx,
@@ -598,6 +768,146 @@ fn cell(value: FnxValue, robot: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::is_call;
+
+    fn composed_options(text: &str, flags: &[&str]) -> Result<super::Options, super::Failure> {
+        let mut args: Vec<String> = [
+            "--db",
+            "never-opened-database",
+            "--key-file",
+            "never-opened-key",
+            "--relation",
+            "KNOWS=1",
+            text,
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        args.extend(flags.iter().map(|flag| (*flag).to_owned()));
+        super::super::parse(&args, "query")
+    }
+
+    #[test]
+    fn composed_sealed_preflight_binds_native_queries_and_keeps_both_budget_domains() {
+        for text in [
+            "CALL fnx.weakly_connected_components({relations:['KNOWS'],parallel:'collapse'}) \
+             YIELD vertex, component RETURN vertex, component ORDER BY vertex LIMIT $top",
+            "CALL fnx.weakly_connected_components({relations:['KNOWS'],parallel:'collapse'}) \
+             YIELD vertex, component RETURN component, COUNT(*) AS total \
+             GROUP BY component ORDER BY component LIMIT $top",
+        ] {
+            let mut options = composed_options(
+                text,
+                &[
+                    "--sealed",
+                    "--graph-relation",
+                    "KNOWS",
+                    "--as-of",
+                    "7",
+                    "--max-result-rows",
+                    "9",
+                    "--max-work-units",
+                    "10000",
+                    "--sealed-result-bytes",
+                    "2048",
+                    "--sealed-source-incidences",
+                    "123",
+                ],
+            )
+            .unwrap();
+            assert!(!options.fnx_call);
+            options.params = fgdb_gql::GqlParameters::new().with_int64("top", 2).unwrap();
+            let prepared = super::prepare_sealed_read(&options).unwrap();
+            assert_eq!(prepared.relation, fgdb_delta_types::RelationId(1));
+            assert_eq!(prepared.as_of, Some(fgdb_types::CommitSeq(7)));
+            assert_eq!(prepared.memory.max_result_bytes, 2048);
+            assert_eq!(prepared.source_limits.max_incidences, 123);
+            assert_eq!(options.budget.rows, Some(9));
+            assert_eq!(options.budget.work, Some(10000));
+
+            options.params = fgdb_gql::GqlParameters::new();
+            let failure = super::prepare_sealed_read(&options).err().unwrap();
+            assert_eq!(
+                failure.code, 3,
+                "missing page argument must bind before open"
+            );
+        }
+    }
+
+    #[test]
+    fn composed_sealed_preflight_retains_map_fields_used_by_pattern_keys() {
+        let text = "CALL fnx.weakly_connected_components({relations:['KNOWS'],parallel:'collapse'}) \
+                    YIELD vertex MATCH (vertex:Person {id: $filter.id}) \
+                    RETURN vertex.id AS id";
+        let mut options = composed_options(
+            text,
+            &[
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "--label",
+                "Person=1",
+                "--property",
+                "id=1",
+            ],
+        )
+        .unwrap();
+        options
+            .params
+            .insert(
+                "filter",
+                super::super::json_parameter(r#"{"id":10}"#).unwrap(),
+            )
+            .unwrap();
+        let prepared = super::prepare_sealed_read(&options).unwrap();
+        let derived = prepared.lowered_params.as_ref().unwrap();
+        assert_eq!(derived.len(), 1);
+        assert!(derived.get("filter").is_none());
+        let super::PreparedNativeRead::Set(native) = &prepared.native else {
+            panic!("composed query must retain its native set template");
+        };
+        assert_eq!(native.columns(), &["id"]);
+        assert!(native.bind_parameters(derived).unwrap().calls_procedure());
+        assert!(native.bind_parameters(&options.params).is_err());
+    }
+
+    #[test]
+    fn composed_sealed_preflight_refuses_ignored_flags_and_unsupported_native_classes() {
+        let text = "CALL fnx.weakly_connected_components({relations:['KNOWS']}) \
+                    YIELD vertex RETURN vertex";
+        for flags in [vec!["--sealed"], vec!["--graph-relation", "KNOWS"]] {
+            assert_eq!(composed_options(text, &flags).err().unwrap().code, 2);
+        }
+        for extra in [
+            &["--direction", "directed"][..],
+            &["--graph-label", "Person"][..],
+            &["--weight", "weight"][..],
+            &["--missing-weight", "unit"][..],
+            &["--parallel-edges", "collapse"][..],
+            &["--self-loops", "drop"][..],
+            &["--graph-staging-bytes", "1"][..],
+            &["--graph-workspace-bytes", "1"][..],
+            &["--sealed-quantum", "1"][..],
+            &["--buffered"][..],
+            &["--spill-dir", "never-opened-spill"][..],
+            &["--stream"][..],
+            &["--certify-to", "never-created-certificate"][..],
+        ] {
+            let mut flags = vec!["--sealed", "--graph-relation", "KNOWS"];
+            flags.extend_from_slice(extra);
+            let failure = composed_options(text, &flags).err().unwrap();
+            assert_eq!(failure.code, 2, "{extra:?}");
+        }
+        for text in [
+            "MATCH (n) RETURN n",
+            "RETURN 1 AS n UNION ALL RETURN 2 AS n",
+        ] {
+            let options =
+                composed_options(text, &["--sealed", "--graph-relation", "KNOWS"]).unwrap();
+            let failure = super::prepare_sealed_read(&options).err().unwrap();
+            assert_eq!(failure.code, 3);
+            assert_eq!(failure.refusal, super::super::refusal::Code::Unsupported);
+        }
+    }
 
     #[test]
     fn sealed_core_and_eigenvector_preflight_accept_only_undirected_projections() {
