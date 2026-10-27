@@ -14,6 +14,7 @@ enum MatchedWrite {
     Insert,
     Mutation,
     VertexMerge,
+    EdgeMerge,
 }
 
 impl PreparedGraphWriteChainText {
@@ -304,10 +305,10 @@ impl PreparedGraphWriteChainText {
                             TokenKind::Punct(b'(')
                         )
                     {
-                        // A vertex MERGE reads the complete MATCH relation.
-                        // Relationship MERGE remains with its own compiler:
-                        // inspect past the whole node pattern, including
-                        // nested property values, before choosing this owner.
+                        // Both MERGE families read the complete MATCH
+                        // relation. Inspect past the whole node pattern,
+                        // including nested property values, before choosing
+                        // its native owner.
                         let mut pattern = lexer.clone();
                         let mut nested = 0_usize;
                         loop {
@@ -327,7 +328,11 @@ impl PreparedGraphWriteChainText {
                             script::next_script_token(&mut pattern)?.kind,
                             TokenKind::Punct(b'-' | b'<')
                         );
-                        return Ok(vertex.then_some(MatchedWrite::VertexMerge));
+                        return Ok(Some(if vertex {
+                            MatchedWrite::VertexMerge
+                        } else {
+                            MatchedWrite::EdgeMerge
+                        }));
                     }
                     if (word.eq_ignore_ascii_case("SET") || word.eq_ignore_ascii_case("REMOVE"))
                         && Self::mutation_clause_target(lexer.clone())?
@@ -662,15 +667,18 @@ impl PreparedGraphWriteChainText {
                 continue;
             }
             let matched_vertex_merge = matches!(matched, Some(MatchedWrite::VertexMerge));
+            let matched_edge_merge = matches!(matched, Some(MatchedWrite::EdgeMerge));
             let merge = matched_vertex_merge
+                || matched_edge_merge
                 || matches!(lexer.next()?.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("MERGE"));
             // A relationship MERGE names row vertices: `(a)-` or `(a)<-`.
-            let relationship = merge
-                && !matched_vertex_merge
-                && matches!(lexer.next()?.kind, TokenKind::Punct(b'('))
-                && matches!(lexer.next()?.kind, TokenKind::Word(_))
-                && matches!(lexer.next()?.kind, TokenKind::Punct(b')'))
-                && matches!(lexer.next()?.kind, TokenKind::Punct(b'-' | b'<'));
+            let relationship = matched_edge_merge
+                || (merge
+                    && !matched_vertex_merge
+                    && matches!(lexer.next()?.kind, TokenKind::Punct(b'('))
+                    && matches!(lexer.next()?.kind, TokenKind::Word(_))
+                    && matches!(lexer.next()?.kind, TokenKind::Punct(b')'))
+                    && matches!(lexer.next()?.kind, TokenKind::Punct(b'-' | b'<')));
             if merge && !relationship {
                 let (merge, after) = PreparedGraphVertexMergeRowsText::prepare_step(
                     body,

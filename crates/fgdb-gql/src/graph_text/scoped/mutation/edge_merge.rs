@@ -457,7 +457,9 @@ impl PreparedGraphEdgeMergeText {
     /// owned leaf. As after `MATCH ... WITH`, that row is the whole scope.
     /// A RETURN after the pattern makes it a query step. A next write after
     /// it makes it a row step: the continuation carries the row's visible
-    /// columns and the relationship, as `WITH *` would.
+    /// columns and the relationship, as `WITH *` would. A mandatory MATCH
+    /// may first join the owned rows against the post-write graph. Its
+    /// complete relation is selected before this step begins merging edges.
     #[allow(clippy::type_complexity)]
     pub(crate) fn prepare_chained<'a, R>(
         statement: &'a str,
@@ -480,35 +482,60 @@ impl PreparedGraphEdgeMergeText {
             .with_zones(resolve.time_zones())
             .resume_after(from.boundary, &from.parameters, from.at)?;
         parser.chain_write = true;
-        let schema = from.row;
+        let (source, schema) = if parser.is_word("MATCH") {
+            let (source, row) = parser.owned_match_row_prefix(statement, from.row)?;
+            (Some(source), row)
+        } else {
+            (None, from.row)
+        };
         let keep = parser.visible_width(&schema);
         let (merged, continues) = Self::row_merge(&mut parser, &schema, None)?;
         let continuation =
             Self::chain_continuation(&mut parser, &schema, keep, &merged, continues)?;
-        // An owned continuation has no read-source resolver to bind keys
-        // introduced by this MERGE's computed RETURN or WITH head.
-        for (key, slot) in &parser.syntax.element_keys {
-            slot.resolve(
-                match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
-                    Some(GraphSymbol::Property(key)) => Some(key),
-                    _ => None,
-                },
-            );
-        }
-        let input = BoundSetTextInput {
-            selection: None,
-            parameters: parser.syntax.parameters.clone(),
-            parameter_offsets: parser.syntax.parameter_offsets.clone(),
-            return_at: statement.len(),
-            projection: None,
-            quantifier: GraphSetQuantifier::All,
-            pipeline: Vec::new(),
-            singleton: false,
-            leading: Vec::new(),
-            correlations: Vec::new(),
-            row_fields: Vec::new(),
-            owned: Some(Box::new((columns, types))),
+        let mut input = if let Some(mut source) = source {
+            // MERGE, ON/SET actions and output expressions may add parameters
+            // and property reads after MATCH. Resolve the complete shared
+            // table without changing the owned input's names or column order.
+            source
+                .syntax
+                .parameters
+                .clone_from(&parser.syntax.parameters);
+            source
+                .syntax
+                .parameter_offsets
+                .clone_from(&parser.syntax.parameter_offsets);
+            source
+                .syntax
+                .element_keys
+                .extend(parser.syntax.element_keys.iter().cloned());
+            source.resolve(crate::graph_text::LentResolver(&mut *resolve))?
+        } else {
+            // A direct owned continuation has no read-source resolver to bind
+            // keys introduced by this MERGE's computed RETURN or WITH head.
+            for (key, slot) in &parser.syntax.element_keys {
+                slot.resolve(
+                    match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
+                        Some(GraphSymbol::Property(key)) => Some(key),
+                        _ => None,
+                    },
+                );
+            }
+            BoundSetTextInput {
+                selection: None,
+                parameters: parser.syntax.parameters.clone(),
+                parameter_offsets: parser.syntax.parameter_offsets.clone(),
+                return_at: statement.len(),
+                projection: None,
+                quantifier: GraphSetQuantifier::All,
+                pipeline: Vec::new(),
+                singleton: false,
+                leading: Vec::new(),
+                correlations: Vec::new(),
+                row_fields: Vec::new(),
+                owned: None,
+            }
         };
+        input.owned = Some(Box::new((columns, types)));
         let (merge, returning) = Self::resolve_row_merge(statement, resolve, merged, input)?;
         Ok((merge, returning, continuation))
     }
