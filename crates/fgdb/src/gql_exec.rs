@@ -1018,7 +1018,7 @@ mod admission_meter_tests {
                     (key, CanonicalScalar::Int(11)),
                     (
                         PropertyKeyId(2),
-                        CanonicalScalar::Bytes(vec![0x5a; 16_384].into()),
+                        CanonicalScalar::bytes(vec![0x5a; 16_384]).unwrap(),
                     ),
                 ],
             );
