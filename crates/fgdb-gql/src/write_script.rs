@@ -399,7 +399,7 @@ pub struct GraphWriteScriptBatchLocation {
 
 /// All parameter sets have been checked and lowered before this value exists.
 /// Later sets execute after earlier sets in the canonical transaction overlay.
-/// A native UNWIND vertex- or edge-update batch can carry frozen input provenance;
+/// A native UNWIND field-update batch can carry frozen input provenance;
 /// the program's field-update flags preserve that distinction even
 /// when this wrapper is consumed with into_program().
 /// Give program() to the ordinary WriteTxn or autocommit program API: one shared
@@ -432,6 +432,10 @@ impl BoundGraphWriteScriptBatch {
 
     pub(crate) fn freeze_edge_update_input(mut self) -> Option<Self> {
         self.program.freeze_edge_update_input().then_some(self)
+    }
+
+    pub(crate) fn freeze_mixed_update_input(mut self) -> Option<Self> {
+        self.program.freeze_mixed_update_input().then_some(self)
     }
 
     #[must_use]

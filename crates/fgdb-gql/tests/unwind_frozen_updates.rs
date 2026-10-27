@@ -98,6 +98,7 @@ struct Vertex {
 struct Graph {
     vertices: BTreeMap<VId, Vertex>,
     edges: Vec<(VId, RelationId, VId)>,
+    edge_properties: BTreeMap<EId, BTreeMap<PropertyKeyId, CanonicalPropertyValue>>,
 }
 
 impl Graph {
@@ -119,6 +120,7 @@ impl Graph {
                 })
                 .collect(),
             edges: Vec::new(),
+            edge_properties: BTreeMap::new(),
         }
     }
 
@@ -149,7 +151,18 @@ impl Graph {
                         labels.remove(&label);
                     }
                 }
-                _ => panic!("the fixture executes only vertex field updates"),
+                GraphMutationIntent::EdgeProperty { edge, key, value } => {
+                    let properties = self.edge_properties.entry(edge).or_default();
+                    match value {
+                        Some(value) => {
+                            properties.insert(key, value);
+                        }
+                        None => {
+                            properties.remove(&key);
+                        }
+                    }
+                }
+                _ => panic!("the fixture executes only scalar field updates"),
             }
         }
         Ok(())
@@ -173,12 +186,23 @@ impl Graph {
         let property = |vertex, key| Ok(self.vertices[&vertex].properties.get(&key));
         let records = (self.vertices.len() + self.edges.len()) as u64;
         if !selection.plan().projects_property_maps() {
-            return selection.plan().execute_governed_with_properties(
+            return selection.plan().execute_governed_with_element_properties(
                 records,
                 self.vertices.keys().copied(),
-                self.edges.iter().copied(),
+                self.edges
+                    .iter()
+                    .enumerate()
+                    .map(|(at, &(source, relation, target))| {
+                        (EId(at as u128 + 1), source, relation, target)
+                    }),
                 test_vertex,
                 property,
+                |edge, key| {
+                    Ok(self
+                        .edge_properties
+                        .get(&edge)
+                        .and_then(|props| props.get(&key)))
+                },
                 allowance,
                 || control.checkpoint(),
             );
@@ -220,7 +244,12 @@ impl Graph {
                 }),
             test_vertex,
             property,
-            |_, _| Ok(None),
+            |edge, key| {
+                Ok(self
+                    .edge_properties
+                    .get(&edge)
+                    .and_then(|props| props.get(&key)))
+            },
             |_| Ok(None),
             |_| Ok(None),
             |vertex| Ok(maps.get(&vertex)),
@@ -270,7 +299,7 @@ fn execute(
                 )
                 .map_err(GraphWriteStepError::Mutation)?;
             let stats = proposal.stats();
-            if program.freezes_vertex_update_input() {
+            if program.freezes_field_update_input() {
                 pending.push(proposal);
                 if statement + 1 == program.statements().len() {
                     for proposal in pending.drain(..) {
@@ -313,6 +342,184 @@ fn rekeys_swaps_and_repeated_targets_keep_the_entry_selection_and_input_order() 
         assert_eq!(stats.target_vertex_visits, visits);
         assert_eq!(stats.mutation_effects, visits);
     }
+}
+
+#[test]
+fn mixed_vertex_and_edge_rekeys_freeze_membership_and_apply_rows_in_order() {
+    let mut initial = Graph::new(&[(10, 1, 10), (20, 2, 20)]);
+    initial.edges = vec![(VId(10), R, VId(20)), (VId(20), R, VId(10))];
+    initial.edge_properties = BTreeMap::from([
+        (
+            EId(1),
+            BTreeMap::from([
+                (ID, CanonicalScalar::Int(1).into()),
+                (P, CanonicalScalar::Int(10).into()),
+            ]),
+        ),
+        (
+            EId(2),
+            BTreeMap::from([
+                (ID, CanonicalScalar::Int(2).into()),
+                (P, CanonicalScalar::Int(20).into()),
+            ]),
+        ),
+    ]);
+    let text = "UNWIND $rows AS row MATCH (a:Entity {id:row.a})-[e:R {id:row.a}]->(b) \
+                SET a.id=row.b,e.id=row.b,e.p=row.b";
+    for (rows, vertex_keys, edge_values) in [
+        ([(1, 2), (2, 3)], [2, 3], [(2, 2), (3, 3)]),
+        ([(1, 2), (2, 1)], [2, 1], [(2, 2), (1, 1)]),
+        ([(1, 2), (1, 3)], [3, 2], [(3, 3), (2, 20)]),
+    ] {
+        let bound = bind(text, &rows);
+        assert!(bound.program().freezes_mixed_update_input());
+        let mut actual = initial.clone();
+        let stats = execute(&mut actual, bound.program(), policy(), &Control::default()).unwrap();
+        let mut expected = initial.clone();
+        for (at, key) in vertex_keys.into_iter().enumerate() {
+            expected
+                .vertices
+                .get_mut(&VId((at as u128 + 1) * 10))
+                .unwrap()
+                .properties
+                .insert(ID, CanonicalScalar::Int(key).into());
+        }
+        for (at, (id, p)) in edge_values.into_iter().enumerate() {
+            expected.edge_properties.insert(
+                EId(at as u128 + 1),
+                BTreeMap::from([
+                    (ID, CanonicalScalar::Int(id).into()),
+                    (P, CanonicalScalar::Int(p).into()),
+                ]),
+            );
+        }
+        assert_eq!(actual, expected);
+        assert_eq!(stats.completed_statements, 2);
+        assert_eq!(stats.target_vertex_visits, 2);
+        assert_eq!(stats.target_edge_visits, 2);
+        assert_eq!(stats.mutation_effects, 6);
+    }
+
+    let remove = bind(
+        "UNWIND $rows AS row MATCH (a:Entity)-[e:R {id:row.a}]->(b) REMOVE a:Entity,e.id",
+        &[(1, 0), (1, 0)],
+    );
+    let mut actual = initial.clone();
+    let stats = execute(&mut actual, remove.program(), policy(), &Control::default()).unwrap();
+    let mut expected = initial;
+    expected.vertices.get_mut(&VId(10)).unwrap().labels.clear();
+    expected
+        .edge_properties
+        .get_mut(&EId(1))
+        .unwrap()
+        .remove(&ID);
+    assert_eq!(actual, expected);
+    assert_eq!(stats.target_vertex_visits, 2);
+    assert_eq!(stats.target_edge_visits, 2);
+    assert_eq!(stats.mutation_effects, 4);
+
+    let optional = bind(
+        "UNWIND $rows AS row MATCH (a:Entity {id:row.a}) \
+         OPTIONAL MATCH (a)-[e:R]->(b) SET a.id=row.b,e.p=1/0",
+        &[(1, 2), (1, 3)],
+    );
+    let mut actual = Graph::new(&[(10, 1, 10)]);
+    let stats = execute(
+        &mut actual,
+        optional.program(),
+        policy(),
+        &Control::default(),
+    )
+    .unwrap();
+    assert_eq!(actual, Graph::new(&[(10, 3, 10)]));
+    assert_eq!(stats.target_vertex_visits, 2);
+    assert_eq!(stats.target_edge_visits, 0);
+    assert_eq!(stats.mutation_effects, 2);
+}
+
+#[test]
+fn mixed_update_limits_interruptions_and_late_errors_publish_neither_target_kind() {
+    let mut initial = Graph::new(&[(10, 1, 10), (20, 2, 20)]);
+    initial.edges = vec![(VId(10), R, VId(20))];
+    let bound = bind(
+        "UNWIND $rows AS row MATCH (a:Entity {id:row.a})-[e:R]->(b) SET a.id=row.b,e.p=row.b",
+        &[(1, 2), (1, 3)],
+    );
+    let mut actual = initial.clone();
+    let control = Control::default();
+    let stats = execute(&mut actual, bound.program(), policy(), &control).unwrap();
+    let mut exact = policy();
+    exact.mutations.max_effects = stats.mutation_effects;
+    exact.mutations.query.evaluator.max_work_units = stats.evaluator.work_units;
+    exact.mutations.query.evaluator.max_scratch_entries = stats.evaluator.scratch_entries;
+    assert_eq!(
+        execute(
+            &mut initial.clone(),
+            bound.program(),
+            exact,
+            &Control::default()
+        )
+        .unwrap(),
+        stats
+    );
+    for dimension in [
+        GraphMutationProgramDimension::Effects,
+        GraphMutationProgramDimension::WorkUnits,
+        GraphMutationProgramDimension::ScratchEntries,
+    ] {
+        let mut limited = exact;
+        match dimension {
+            GraphMutationProgramDimension::Effects => limited.mutations.max_effects -= 1,
+            GraphMutationProgramDimension::WorkUnits => {
+                limited.mutations.query.evaluator.max_work_units -= 1
+            }
+            GraphMutationProgramDimension::ScratchEntries => {
+                limited.mutations.query.evaluator.max_scratch_entries -= 1
+            }
+            _ => unreachable!(),
+        }
+        let mut actual = initial.clone();
+        assert!(matches!(
+            execute(&mut actual, bound.program(), limited, &Control::default()),
+            Err(GraphWriteProgramError::Program(GraphMutationProgramError::Budget { dimension: actual, .. }))
+                if actual == dimension
+        ));
+        assert_eq!(actual, initial);
+    }
+    for stop in 0..control.calls.get() {
+        let interrupted = Control {
+            calls: Cell::new(0),
+            stop: Some(stop),
+        };
+        let mut actual = initial.clone();
+        let failure = execute(&mut actual, bound.program(), policy(), &interrupted).unwrap_err();
+        assert!(matches!(failure,
+            GraphWriteProgramError::Program(GraphMutationProgramError::Interrupted { source, .. })
+            | GraphWriteProgramError::Program(GraphMutationProgramError::Statement {
+                source: GqlQueryError::Interrupted(source), ..
+            }) if source == stop
+        ));
+        assert_eq!(actual, initial, "checkpoint {stop}");
+    }
+    let failing = bind(
+        "UNWIND $rows AS row MATCH (a:Entity {id:row.a})-[e:R]->(b) SET a.id=row.b,e.p=10/row.b",
+        &[(1, 2), (1, 0)],
+    );
+    let mut actual = initial.clone();
+    let failure = execute(
+        &mut actual,
+        failing.program(),
+        policy(),
+        &Control::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(failure,
+        GraphWriteProgramError::Program(GraphMutationProgramError::Statement {
+            statement: 1,
+            source: GqlQueryError::Source(GraphMutationError::Arithmetic { error, .. }),
+        }) if error.kind == GraphIntegerErrorKind::DivisionByZero
+    ));
+    assert_eq!(actual, initial);
 }
 
 #[test]
@@ -724,11 +931,13 @@ fn cumulative_limits_and_every_checkpoint_refusal_restore_the_entry_graph() {
 fn definition_admission_precedes_mode_selection_and_unsupported_profiles_still_refuse() {
     const EDGE_REKEY: &str =
         "UNWIND $rows AS row MATCH (n:Entity)-[e:R {id:row.a}]->(m) SET e.id=row.b";
+    const MIXED_REKEY: &str =
+        "UNWIND $rows AS row MATCH (n:Entity)-[e:R {id:row.a}]->(m) SET e.id=row.b, n.id=row.b";
     let arguments = arguments(&[(1, 2), (2, 3)]);
     for text in [
         REKEY,
         EDGE_REKEY,
-        "UNWIND $rows AS row MATCH (n:Entity)-[e:R {id:row.a}]->(m) SET e.id=row.b, n.id=row.b",
+        MIXED_REKEY,
         "UNWIND $rows AS row MATCH (n:Entity {id:row.a})-[:R]->(m) DETACH DELETE n",
         "UNWIND $rows AS row MATCH (n:Entity {id:row.a}), (anchor:Entity {id:1}) DELETE n",
     ] {
@@ -753,6 +962,8 @@ fn definition_admission_precedes_mode_selection_and_unsupported_profiles_still_r
             assert!(admitted.unwrap().program().freezes_vertex_update_input());
         } else if text == EDGE_REKEY {
             assert!(admitted.unwrap().program().freezes_edge_update_input());
+        } else if text == MIXED_REKEY {
+            assert!(admitted.unwrap().program().freezes_mixed_update_input());
         } else {
             assert!(matches!(
                 admitted,

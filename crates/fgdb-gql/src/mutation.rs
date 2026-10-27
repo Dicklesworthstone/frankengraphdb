@@ -523,6 +523,25 @@ impl PreparedGraphMutation {
             })
     }
 
+    /// Vertex and relationship field updates in one statement. This profile
+    /// changes no topology, but endpoint fields may change an edge's authority
+    /// image, so its authorized staging must retain every ordered field check.
+    pub(crate) fn is_mixed_update_only(&self) -> bool {
+        let mut vertex = false;
+        let mut edge = false;
+        for action in &self.actions {
+            if action.deletes() {
+                return false;
+            }
+            match action.target().and_then(|target| self.columns.get(target)) {
+                Some(GraphSetColumnType::Vertex) => vertex = true,
+                Some(GraphSetColumnType::Edge) => edge = true,
+                _ => return false,
+            }
+        }
+        vertex && edge
+    }
+
     /// Every assignment writes a bound constant or row-independent scalar
     /// expression, changes a label, or removes a field. The bytecode's own
     /// dependency inventory proves it reads no selection column or element

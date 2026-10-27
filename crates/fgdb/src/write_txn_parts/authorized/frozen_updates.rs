@@ -20,9 +20,9 @@ type Fault = GraphWriteProgramError<WriteTxnError, WriteTxnError, WriteTxnError>
 // a later row overwrites or a label action that leaves the capability's scope.
 // Statements with disjoint element targets can authorize against independent
 // native row workspaces, then compose their checked intents once. Two statements
-// touching the same element retain sequential before/after checks. The compiler
-// admits vertex-only or edge-only programs: independent edge property updates
-// cannot change another edge's endpoints, relation, or authorization images.
+// touching the same element retain sequential before/after checks. Mixed
+// vertex/edge programs also retain those checks: updating an edge's endpoint
+// may change its authorization image even when the direct targets differ.
 #[allow(clippy::too_many_arguments)]
 pub(in super::super) fn apply_frozen_program<V: Vfs + Clone, Clock: FnMut() -> u64>(
     transaction: &mut WriteTxn,
@@ -38,7 +38,7 @@ pub(in super::super) fn apply_frozen_program<V: Vfs + Clone, Clock: FnMut() -> u
     // The public authorized program starts with an empty workspace. Keep any
     // future caller with a retained prefix on the existing staging path; only
     // the empty-prefix, single-relation case has the row-count cost law below.
-    let mut independent = transaction.staged.is_empty();
+    let mut independent = transaction.staged.is_empty() && !program.freezes_mixed_update_input();
     let mut relation = None;
     let mut target_owners = BTreeMap::new();
     let stats = cx.with_restriction(|| {

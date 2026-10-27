@@ -1,4 +1,4 @@
-// Batch binders admit field-update profiles for vertices or edges, vertex
+// Batch binders admit field-update profiles for vertices and edges, vertex
 // upserts with pairwise distinct MERGE keys, and directed relationship MERGEs
 // with pairwise distinct endpoint keys (fgdb-2l3pt). Every selection and RHS
 // uses the real transaction overlay at entry; one ordered preparation then
@@ -25,7 +25,7 @@ impl WriteTxn {
             GraphWriteProgramError, GraphWriteStatement, GraphWriteStepError,
             GraphWriteStepReceipt, GraphWriteStepStats,
         };
-        debug_assert!(program.freezes_vertex_update_input() || program.freezes_edge_update_input());
+        debug_assert!(program.freezes_field_update_input());
         cx.with_restriction(|| {
             let workspace = MutationProgramWorkspace::new(self);
             workspace.txn.program_multi_relation = true;

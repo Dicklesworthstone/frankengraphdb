@@ -352,13 +352,14 @@ impl GraphWriteProgramStats {
 /// Source-ordered mixed graph writes across relation coordinates. Later MATCH
 /// and MERGE steps observe successful earlier creations, updates and deletes in
 /// the canonical transaction overlay. The native UNWIND compiler can instead
-/// mark a closed vertex- or edge-update program whose inputs are evaluated
+/// mark a closed field-update program whose inputs are evaluated
 /// against its entry overlay before any of its updates are staged.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphWriteProgram {
     statements: Box<[GraphWriteStatement]>,
     frozen_vertex_update_input: bool,
     frozen_edge_update_input: bool,
+    frozen_mixed_update_input: bool,
     frozen_vertex_upsert_input: bool,
     frozen_edge_merge_input: bool,
 }
@@ -398,6 +399,7 @@ impl PreparedGraphWriteProgram {
             statements: statements.into_boxed_slice(),
             frozen_vertex_update_input: false,
             frozen_edge_update_input: false,
+            frozen_mixed_update_input: false,
             frozen_vertex_upsert_input: false,
             frozen_edge_merge_input: false,
         })
@@ -422,6 +424,7 @@ impl PreparedGraphWriteProgram {
     pub(crate) fn freeze_vertex_update_input(&mut self) -> bool {
         if self.statements.len() <= 1
             || self.frozen_edge_update_input
+            || self.frozen_mixed_update_input
             || !self.statements.iter().all(|statement| {
                 matches!(statement, GraphWriteStatement::Mutation(input)
                     if input.is_vertex_update_only() && input.writes_only_constants())
@@ -446,6 +449,7 @@ impl PreparedGraphWriteProgram {
     pub(crate) fn freeze_edge_update_input(&mut self) -> bool {
         if self.statements.len() <= 1
             || self.frozen_vertex_update_input
+            || self.frozen_mixed_update_input
             || !self.statements.iter().all(|statement| {
                 matches!(statement, GraphWriteStatement::Mutation(input)
                     if input.is_edge_update_only() && input.writes_only_constants())
@@ -454,6 +458,42 @@ impl PreparedGraphWriteProgram {
             return false;
         }
         self.frozen_edge_update_input = true;
+        true
+    }
+
+    /// Mixed vertex/relationship constant field updates whose selections all
+    /// observe the entry overlay. Updates retain source order, including
+    /// current before/after authority checks on an edge's mutated endpoints.
+    /// This is not permission to authorize disjoint targets independently.
+    #[must_use]
+    pub const fn freezes_mixed_update_input(&self) -> bool {
+        self.frozen_mixed_update_input
+    }
+
+    /// Whether the workspace must finish every selection before staging any
+    /// field update. The individual profiles remain available to hosts that
+    /// can prove a stronger optimization for homogeneous targets.
+    #[must_use]
+    pub const fn freezes_field_update_input(&self) -> bool {
+        self.frozen_vertex_update_input
+            || self.frozen_edge_update_input
+            || self.frozen_mixed_update_input
+    }
+
+    pub(crate) fn freeze_mixed_update_input(&mut self) -> bool {
+        if self.statements.len() <= 1
+            || self.frozen_vertex_update_input
+            || self.frozen_edge_update_input
+            || self.frozen_vertex_upsert_input
+            || self.frozen_edge_merge_input
+            || !self.statements.iter().all(|statement| {
+                matches!(statement, GraphWriteStatement::Mutation(input)
+                    if input.is_mixed_update_only() && input.writes_only_constants())
+            })
+        {
+            return false;
+        }
+        self.frozen_mixed_update_input = true;
         true
     }
 
@@ -499,6 +539,7 @@ impl PreparedGraphWriteProgram {
         if self.statements.len() <= 1
             || self.frozen_vertex_update_input
             || self.frozen_edge_update_input
+            || self.frozen_mixed_update_input
         {
             return false;
         }
@@ -582,6 +623,7 @@ impl PreparedGraphWriteProgram {
         if self.statements.len() <= 1
             || self.frozen_vertex_update_input
             || self.frozen_edge_update_input
+            || self.frozen_mixed_update_input
             || self.frozen_vertex_upsert_input
         {
             return false;
@@ -617,6 +659,7 @@ impl PreparedGraphWriteProgram {
     pub(crate) fn into_statements(self) -> Box<[GraphWriteStatement]> {
         debug_assert!(!self.frozen_vertex_update_input);
         debug_assert!(!self.frozen_edge_update_input);
+        debug_assert!(!self.frozen_mixed_update_input);
         self.statements
     }
 
@@ -628,6 +671,8 @@ impl PreparedGraphWriteProgram {
             b"fgdb:mixed-write-program:frozen-unwind-vertex-updates:v1\0".to_vec()
         } else if self.frozen_edge_update_input {
             b"fgdb:mixed-write-program:frozen-unwind-edge-updates:v1\0".to_vec()
+        } else if self.frozen_mixed_update_input {
+            b"fgdb:mixed-write-program:frozen-unwind-mixed-updates:v1\0".to_vec()
         } else {
             b"fgdb:mixed-write-program:v1\0".to_vec()
         };
@@ -651,7 +696,7 @@ impl PreparedGraphWriteProgram {
 
     /// TRUSTED workspace seam: stage must retain read observations, use the
     /// existing kernels, expose each successful prefix to the next step (or
-    /// freeze all inputs when either field-update provenance is set) and
+    /// freeze all inputs when field-update provenance is set) and
     /// restore the starting workspace on any error or unwind. This callback
     /// cannot make an arbitrary external writer atomic. WriteTxn implements
     /// these obligations using the existing private MutationProgramWorkspace.

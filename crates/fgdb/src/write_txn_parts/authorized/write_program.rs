@@ -456,9 +456,7 @@ impl<V: Vfs + Clone> Database<V> {
                 let mut receipts = Vec::new();
                 let stats = query_cx
                     .with_restriction(|| {
-                        if program.freezes_vertex_update_input()
-                            || program.freezes_edge_update_input()
-                        {
+                        if program.freezes_field_update_input() {
                             let (stats, frozen_receipts) = mutation::apply_frozen_program(
                                 workspace.transaction(),
                                 self,

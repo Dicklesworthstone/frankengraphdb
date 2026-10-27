@@ -80,8 +80,6 @@ fn multirow_vertex_updates_freeze_selection_feedback_across_fields_aliases_and_s
     for tail in [
         "MATCH (n:Entity) WHERE n.id=row.id SET n.id=n.id+row.p",
         "MATCH (n:Entity) WHERE n.id=row.id SET n.id=row.p, n.p=n.p+1",
-        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id SET e.id=row.p, a.id=row.p",
-        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id SET e.id=row.p, a:Other",
         "MATCH (n:Entity {id:row.id})-[:R]->(m) DETACH DELETE n",
         "MATCH (n:Entity {id:row.id}), (anchor:Entity {id:1}) DETACH DELETE n",
         "MATCH (n:Entity {id:row.id}), (anchor:Entity {id:1}) DELETE n",
@@ -119,6 +117,8 @@ fn duplicate_vertex_and_relationship_feedback_cannot_freeze_current_property_rea
     for tail in [
         "MATCH (n:Entity {id:row.id}) SET n.id=row.id, n.p=n.p+row.p",
         "MATCH (a)-[e:R {id:row.id}]->(b) SET e.id=row.id, e.p=e.p+row.p",
+        "MATCH (a)-[e:R {id:row.id}]->(b) SET e.id=row.id, a.p=a.p+row.p",
+        "MATCH (a:Entity {id:row.id})-[e:R]->(b) SET a.id=row.p, e.p=e.p+1",
     ] {
         let definition =
             GraphUnwindWriteText::parse(&format!("UNWIND $rows AS row {tail}")).unwrap();
@@ -128,6 +128,61 @@ fn duplicate_vertex_and_relationship_feedback_cannot_freeze_current_property_rea
                 Err(GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 })
             ),
             "{tail}"
+        );
+    }
+}
+
+#[test]
+fn mixed_field_updates_freeze_feedback_and_preserve_their_own_provenance() {
+    let input = rows(vec![
+        object(vec![("id", int(1)), ("p", int(2))]),
+        object(vec![("id", int(2)), ("p", int(3))]),
+    ]);
+    let single = rows(vec![object(vec![("id", int(1)), ("p", int(2))])]);
+    for tail in [
+        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id SET e.id=row.p, a.id=row.p",
+        "MATCH (a:Entity)-[e:R]->(b) WHERE e.id=row.id SET e.id=row.p, a:Other",
+        "MATCH (a:Entity {id:row.id})-[e:R]->(b) SET a.id=row.p, e.p=row.p+1",
+        "MATCH (a:Entity {id:row.id}) OPTIONAL MATCH (a)-[e:R]->(b) SET a.id=row.p, e.p=1/0",
+        "MATCH (a:Entity)-[e:R {id:row.id}]->(b) REMOVE a:Entity,e.id",
+        "MATCH (a:Entity {id:row.id})-[e:R]->(b) REMOVE a.id,e.p",
+    ] {
+        let definition =
+            GraphUnwindWriteText::parse(&format!("UNWIND $rows AS row {tail}")).unwrap();
+        let bound = definition
+            .bind(&input, RelationId(1), symbols)
+            .unwrap_or_else(|error| panic!("{tail}: {error:?}"));
+        assert!(bound.program().freezes_mixed_update_input(), "{tail}");
+        assert!(bound.program().freezes_field_update_input(), "{tail}");
+        assert!(!bound.program().freezes_vertex_update_input(), "{tail}");
+        assert!(!bound.program().freezes_edge_update_input(), "{tail}");
+        let ordinary =
+            crate::PreparedGraphWriteProgram::prepare(bound.program().statements().to_vec())
+                .unwrap();
+        assert!(!ordinary.freezes_field_update_input());
+        assert_eq!(ordinary.statements(), bound.program().statements());
+        assert_ne!(
+            ordinary.canonical_bytes(),
+            bound.program().canonical_bytes()
+        );
+        assert!(
+            bound
+                .program()
+                .canonical_bytes()
+                .starts_with(b"fgdb:mixed-write-program:frozen-unwind-mixed-updates:v1\0")
+        );
+        assert!(bound.clone().into_program().freezes_mixed_update_input());
+        assert!(
+            bound
+                .location(1)
+                .is_some_and(|location| location.argument_set == 1)
+        );
+        assert!(
+            !definition
+                .bind(&single, RelationId(1), symbols)
+                .unwrap()
+                .program()
+                .freezes_field_update_input()
         );
     }
 }

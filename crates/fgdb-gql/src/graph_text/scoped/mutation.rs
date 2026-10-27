@@ -1261,6 +1261,39 @@ impl PreparedGraphMutationText {
             })
     }
 
+    /// Resolve mixed vertex/relationship updates before issuing frozen input
+    /// provenance. Unknown targets and deletions cannot enter the field-only
+    /// staging contract; executable binding separately proves constant RHSs.
+    pub(crate) fn is_mixed_update_only(&self) -> bool {
+        let mut vertex = false;
+        let mut edge = false;
+        for action in &self.actions {
+            let target = match action {
+                MutationActionTemplate::ParameterProperty { target, .. }
+                | MutationActionTemplate::IntegerProperty { target, .. }
+                | MutationActionTemplate::CompositeProperty { target, .. }
+                | MutationActionTemplate::ValueProperty { target, .. }
+                | MutationActionTemplate::Bound(
+                    GraphMutationAction::SetProperty { target, .. }
+                    | GraphMutationAction::RemoveProperty { target, .. }
+                    | GraphMutationAction::ClearProperties { target, .. }
+                    | GraphMutationAction::SetLabel { target, .. },
+                ) => *target,
+                _ => return false,
+            };
+            match self.selection.columns.get(target) {
+                Some(column) if column.key.is_none() && column.path.is_none() => vertex = true,
+                Some(column)
+                    if column.key.is_none() && column.path == Some(GraphPathFunction::Edge) =>
+                {
+                    edge = true;
+                }
+                _ => return false,
+            }
+        }
+        vertex && edge
+    }
+
     /// Whether sequential input-row execution could change a later row's
     /// MATCH. This is a conservative definition check, independent of current
     /// data and argument values, not a proof that aliases identify different

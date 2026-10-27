@@ -1413,3 +1413,266 @@ mod frozen_edge_updates {
         });
     }
 }
+
+mod frozen_mixed_updates {
+    use super::*;
+    use fgdb_gql::{GraphMutationProgramError, PreparedGraphWriteProgram};
+    use fgdb_types::EId;
+    use fgdb_warden::LimitDimension;
+
+    type ProgramFault =
+        fgdb_gql::GraphWriteProgramError<WriteTxnError, WriteTxnError, WriteTxnError>;
+
+    fn program(text: &str, values: &[(i64, i64)]) -> PreparedGraphWriteProgram {
+        let bound = GraphUnwindWriteText::parse(text)
+            .unwrap()
+            .bind(&arguments(values), R, symbols)
+            .unwrap();
+        assert!(bound.program().freezes_mixed_update_input());
+        bound.into_program()
+    }
+
+    #[allow(clippy::type_complexity)]
+    async fn execute(
+        contexts: &PurposeContexts,
+        program: &PreparedGraphWriteProgram,
+        scope: Grant,
+        hidden: bool,
+    ) -> Result<
+        (
+            GraphWriteProgramReceipt,
+            Vec<fgdb::VertexRow>,
+            Vec<fgdb::EdgeRecord>,
+        ),
+        ProgramFault,
+    > {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = authority();
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut initial = WriteBatch::new(R);
+        for id in 1..=3 {
+            let mut props = vec![(P, CanonicalScalar::Int(id)), (Q, CanonicalScalar::Int(0))];
+            if hidden {
+                props.push((SECRET, CanonicalScalar::Int(777)));
+            }
+            initial.create_vertex(VId(id as u128), vec![L], props);
+        }
+        for id in 1..=3 {
+            let mut props = vec![(P, CanonicalScalar::Int(id)), (Q, CanonicalScalar::Int(0))];
+            if hidden {
+                props.push((SECRET, CanonicalScalar::Int(777)));
+            }
+            initial.add_edge(
+                EId(id as u128),
+                VId(id as u128),
+                VId((id % 3 + 1) as u128),
+                props,
+            );
+        }
+        if hidden {
+            initial.create_vertex(VId(90), vec![HIDDEN], vec![(P, CanonicalScalar::Int(1))]);
+            initial.add_edge(EId(90), VId(1), VId(90), vec![(P, CanonicalScalar::Int(1))]);
+        }
+        db.write(&commit, initial).await.unwrap();
+        if hidden {
+            let mut other = WriteBatch::new(RelationId(2));
+            other.add_edge(EId(91), VId(1), VId(2), vec![(P, CanonicalScalar::Int(1))]);
+            db.write(&commit, other).await.unwrap();
+        }
+        let before_vertices = db.vertices().unwrap();
+        let before_edges = db.edges().unwrap();
+        let frontier = db.frontier().unwrap();
+        let result = db
+            .execute_graph_write_program_returning_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                program,
+                policy(),
+                || NOW,
+            )
+            .await;
+        assert_eq!(txn.outstanding_obligations(), 0);
+        match result {
+            Ok((receipt, completion)) => {
+                assert_eq!(
+                    completion,
+                    EmbeddedTxnCompletion::WriteCommitted {
+                        commit_seq: fgdb_types::CommitSeq(frontier.0 + 1),
+                    }
+                );
+                let vertices = db.vertices().unwrap();
+                let edges = db.edges().unwrap();
+                for original in &before_vertices {
+                    let actual = vertices.iter().find(|row| row.vid == original.vid).unwrap();
+                    assert_eq!(actual.labels, original.labels);
+                    assert_eq!(
+                        actual.props.iter().find(|(key, _)| *key == SECRET),
+                        original.props.iter().find(|(key, _)| *key == SECRET)
+                    );
+                    if original.vid == VId(90) {
+                        assert_eq!(actual, original);
+                    }
+                }
+                for original in &before_edges {
+                    let actual = edges
+                        .iter()
+                        .find(|row| row.entry.eid == original.entry.eid)
+                        .unwrap();
+                    assert_eq!(
+                        (
+                            actual.entry.eid,
+                            actual.entry.src,
+                            actual.entry.dst,
+                            actual.entry.relation
+                        ),
+                        (
+                            original.entry.eid,
+                            original.entry.src,
+                            original.entry.dst,
+                            original.entry.relation
+                        )
+                    );
+                    assert_eq!(
+                        actual.props.iter().find(|(key, _)| *key == SECRET),
+                        original.props.iter().find(|(key, _)| *key == SECRET)
+                    );
+                    if original.entry.eid.0 >= 90 {
+                        assert_eq!(actual, original);
+                    }
+                }
+                Ok((receipt, vertices, edges))
+            }
+            Err(error) => {
+                assert_eq!(db.frontier().unwrap(), frontier);
+                assert_eq!(db.vertices().unwrap(), before_vertices);
+                assert_eq!(db.edges().unwrap(), before_edges);
+                Err(error)
+            }
+        }
+    }
+
+    fn auth_error(error: &ProgramFault) -> Option<Error> {
+        let mut cause: Option<&(dyn core::error::Error + 'static)> = Some(error);
+        while let Some(error) = cause {
+            if let Some(WriteTxnError::Authorization(error)) = error.downcast_ref::<WriteTxnError>()
+            {
+                return Some(*error);
+            }
+            cause = error.source();
+        }
+        None
+    }
+
+    #[test]
+    fn mixed_rekeys_preserve_visible_graphs_receipts_and_hidden_data_independence() {
+        lab(0xa611_0301, |contexts| async move {
+            for values in [[(1, 2), (2, 1)], [(1, 2), (2, 3)], [(1, 2), (1, 3)]] {
+                let program = program(
+                    "UNWIND $rows AS row MATCH (a:Visible {p:row.p})-[e:R {p:row.p}]->(b) \
+                     SET a.p=row.q,e.p=row.q,e.q=row.q",
+                    &values,
+                );
+                let mut visible_receipt = None;
+                for hidden in [false, true] {
+                    let (receipt, vertices, edges) =
+                        execute(&contexts, &program, grant(), hidden).await.unwrap();
+                    assert_eq!(receipt.stats().completed_statements, 2);
+                    assert_eq!(receipt.stats().target_vertex_visits, 2);
+                    assert_eq!(receipt.stats().target_edge_visits, 2);
+                    assert_eq!(receipt.stats().mutation_effects, 6);
+                    for (step, (p, _)) in receipt.steps().iter().zip(values) {
+                        assert_eq!(step.mutation_targets(), Some([VId(p as u128)].as_slice()));
+                        assert_eq!(step.mutation_edges(), Some([EId(p as u128)].as_slice()));
+                    }
+                    for id in 1..=3 {
+                        let mut expected = (id, 0);
+                        for (p, q) in values {
+                            if p == id {
+                                expected = (q, q);
+                            }
+                        }
+                        let vertex = vertices
+                            .iter()
+                            .find(|row| row.vid == VId(id as u128))
+                            .unwrap();
+                        assert_eq!(
+                            vertex.props[0],
+                            (P, CanonicalScalar::Int(expected.0).into())
+                        );
+                        assert_eq!(vertex.props[1], (Q, CanonicalScalar::Int(0).into()));
+                        let edge = edges
+                            .iter()
+                            .find(|row| row.entry.eid == EId(id as u128))
+                            .unwrap();
+                        assert_eq!(edge.props[0], (P, CanonicalScalar::Int(expected.0).into()));
+                        assert_eq!(edge.props[1], (Q, CanonicalScalar::Int(expected.1).into()));
+                    }
+                    if let Some(expected) = &visible_receipt {
+                        assert_eq!(
+                            &receipt, expected,
+                            "hidden state cannot affect native work or receipts"
+                        );
+                    } else {
+                        visible_receipt = Some(receipt);
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn mixed_staging_keeps_original_field_checks_endpoint_scope_and_cumulative_rows() {
+        lab(0xa611_0302, |contexts| async move {
+            let forbidden = program(
+                "UNWIND $rows AS row MATCH (a)-[e:R]->(b) WHERE e.p=row.p \
+                 OPTIONAL MATCH (b)-[f:R]->(c) WHERE f.p=row.q \
+                 SET a.q=row.q,e.p=row.q,f.secret=777",
+                &[(1, 99), (2, 3)],
+            );
+            let exits_scope = program(
+                "UNWIND $rows AS row MATCH (a:Visible)-[e:R]->(b) WHERE e.p=row.p \
+                 SET e.p=row.q REMOVE a:Visible",
+                &[(1, 2), (2, 1)],
+            );
+            let valid = program(
+                "UNWIND $rows AS row MATCH (a)-[e:R]->(b) WHERE e.p=row.p SET a.q=row.q,e.p=row.q",
+                &[(1, 2), (2, 1)],
+            );
+            for hidden in [false, true] {
+                for (program, expected_row) in [(&forbidden, 1), (&exits_scope, 0)] {
+                    let error = execute(&contexts, program, grant(), hidden)
+                        .await
+                        .unwrap_err();
+                    assert_eq!(auth_error(&error), Some(Error::ScopeDenied));
+                    assert!(matches!(error,
+                        ProgramFault::Program(GraphMutationProgramError::Statement { statement, .. })
+                            if statement == expected_row
+                    ));
+                }
+                let mut exact = grant();
+                exact.limits.max_rows = 4; // One vertex and one edge in each of two receipts.
+                execute(&contexts, &valid, exact.clone(), hidden)
+                    .await
+                    .unwrap();
+                exact.limits.max_rows -= 1;
+                let error = execute(&contexts, &valid, exact, hidden).await.unwrap_err();
+                assert_eq!(
+                    auth_error(&error),
+                    Some(Error::LimitExceeded(LimitDimension::Rows))
+                );
+                assert!(matches!(
+                    error,
+                    ProgramFault::Program(GraphMutationProgramError::Statement {
+                        statement: 1,
+                        ..
+                    })
+                ));
+            }
+        });
+    }
+}

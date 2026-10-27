@@ -16,12 +16,12 @@
 //! map keys and signed indexes as later sources, without copying that document.
 //! Alias rebinding, dynamic indexes, multiple statements and empty batches refuse.
 //!
-//! Vertex-only or relationship-only SET/REMOVE batches that write their
+//! Vertex, relationship or mixed SET/REMOVE batches that write their
 //! MATCH's selection fields freeze selections against the entry overlay for
 //! resolved constant assignments, then apply updates in input order.
 //! Graph-reading RHS feedback remains unsupported. MERGE and admitted disjoint row
-//! updates retain sequential visibility. Feedback involving mixed
-//! vertex/relationship updates or multi-element deletion still refuses typed.
+//! updates retain sequential visibility. Feedback involving multi-element
+//! deletion still refuses typed.
 
 mod controlled;
 mod expansion;

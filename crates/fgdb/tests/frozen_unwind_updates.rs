@@ -17,7 +17,7 @@ use fgdb_gql::{
     ReverseSymbolCatalog,
 };
 use fgdb_types::{
-    CanonicalScalar, CanonicalTimestamp, CommitSeq, DatabaseSecurityNamespaceId,
+    CanonicalScalar, CanonicalTimestamp, CommitSeq, DatabaseSecurityNamespaceId, EId,
     EmbeddedTxnCompletion, PurposeContexts, VId,
 };
 use std::convert::Infallible;
@@ -39,6 +39,7 @@ fn keys() -> DatabaseKeys {
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Label, "Entity") => Some(GraphSymbol::Label(ENTITY)),
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Property, "id") => Some(GraphSymbol::Property(ID)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
@@ -245,6 +246,203 @@ fn frozen_input_includes_caller_staging_and_direct_program_execution() {
         txn.finish(&mut db, &commit).await.unwrap();
         assert_key(&db, 1, 2);
         assert_key(&db, 2, 3);
+        assert_eq!(db.frontier().unwrap(), CommitSeq(2));
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn mixed_rekeys_keep_entry_membership_receipts_and_durable_staged_edges() {
+    let ((), report) = run_async_under_lab(0x6672_6f08, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let text = "UNWIND $rows AS row MATCH (a:Entity {id:row.a})-[e:R {id:row.a}]->(b) \
+                    SET a.id=row.b,e.id=row.b,e.p=row.b";
+        for returning in [true, false] {
+            for (rows, expected_keys, expected_edges, expected_targets) in [
+                ([(1, 2), (2, 3)], [2, 3], [(2, 2), (3, 3)], [1_u128, 2]),
+                ([(1, 2), (2, 1)], [2, 1], [(2, 2), (1, 1)], [1, 2]),
+                ([(1, 2), (1, 3)], [3, 2], [(3, 3), (2, 10)], [1, 1]),
+            ] {
+                let vfs = MemVfs::new().unwrap();
+                let path = vfs.database_dir();
+                let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+                    .await
+                    .unwrap();
+                let mut initial = seed(2);
+                initial.add_edge(
+                    EId(1),
+                    VId(1),
+                    VId(2),
+                    vec![(ID, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(10))],
+                );
+                db.write(&commit, initial).await.unwrap();
+                let mut txn = db.begin(&txcx).unwrap();
+                let mut staged = WriteBatch::new(R);
+                staged.add_edge(
+                    EId(2),
+                    VId(2),
+                    VId(1),
+                    vec![(ID, CanonicalScalar::Int(2)), (P, CanonicalScalar::Int(10))],
+                );
+                txn.write(&mut db, staged).unwrap();
+                let stats = if returning {
+                    let receipt = receipt(
+                        txn.query_write(
+                            &mut db,
+                            &query,
+                            text,
+                            &args(&rows),
+                            symbols,
+                            R,
+                            policy(),
+                            no_allocation,
+                        )
+                        .unwrap(),
+                    );
+                    for (step, target) in receipt.steps().iter().zip(expected_targets) {
+                        assert_eq!(step.mutation_targets(), Some([VId(target)].as_slice()));
+                        assert_eq!(step.mutation_edges(), Some([EId(target)].as_slice()));
+                    }
+                    receipt.stats()
+                } else {
+                    let batch = GraphUnwindWriteText::parse(text)
+                        .unwrap()
+                        .bind(&args(&rows), R, symbols)
+                        .unwrap();
+                    assert!(batch.program().freezes_mixed_update_input());
+                    txn.execute_graph_write_program_governed(
+                        &mut db,
+                        &query,
+                        batch.program(),
+                        policy(),
+                        no_allocation,
+                    )
+                    .unwrap()
+                };
+                assert_eq!(stats.completed_statements, 2);
+                assert_eq!(stats.target_vertex_visits, 2);
+                assert_eq!(stats.target_edge_visits, 2);
+                assert_eq!(stats.mutation_effects, 6);
+                assert_key(&db, 1, 1);
+                assert_key(&db, 2, 2);
+                assert!(db.edge(EId(2)).unwrap().is_none());
+                txn.finish(&mut db, &commit).await.unwrap();
+                drop(db);
+                let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+                    .await
+                    .unwrap();
+                assert_eq!(db.frontier().unwrap(), CommitSeq(2));
+                assert_key(&db, 1, expected_keys[0]);
+                assert_key(&db, 2, expected_keys[1]);
+                for (index, (id, p)) in expected_edges.into_iter().enumerate() {
+                    let edge = db.edge(EId(index as u128 + 1)).unwrap().unwrap();
+                    assert_eq!(
+                        edge.props,
+                        vec![
+                            (ID, CanonicalScalar::Int(id).into()),
+                            (P, CanonicalScalar::Int(p).into()),
+                        ]
+                    );
+                    assert_eq!(
+                        (edge.entry.src, edge.entry.dst),
+                        if index == 0 {
+                            (VId(1), VId(2))
+                        } else {
+                            (VId(2), VId(1))
+                        }
+                    );
+                }
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn mixed_update_late_arithmetic_and_final_budget_refusals_restore_the_callers_prefix() {
+    let ((), report) = run_async_under_lab(0x6672_6f09, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut initial = seed(2);
+        initial.add_edge(EId(1), VId(1), VId(2), vec![(P, CanonicalScalar::Int(10))]);
+        db.write(&commit, initial).await.unwrap();
+        let text = "/* café */ UNWIND $rows AS row MATCH (a:Entity {id:row.a})-[e:R]->(b) \
+                    SET a.id=row.b,e.p=100/row.b";
+        let good = GraphUnwindWriteText::parse(text)
+            .unwrap()
+            .bind(&args(&[(1, 10), (1, 20)]), R, symbols)
+            .unwrap();
+        let mut calibration = db.begin(&txcx).unwrap();
+        prefix(&mut db, &mut calibration);
+        let successful = calibration
+            .execute_graph_write_program_governed(
+                &mut db,
+                &query,
+                good.program(),
+                policy(),
+                no_allocation,
+            )
+            .unwrap();
+        calibration.abort();
+        let mut txn = db.begin(&txcx).unwrap();
+        prefix(&mut db, &mut txn);
+        txn.savepoint(&db, "entry").unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        let failure = txn
+            .query_write(
+                &mut db,
+                &query,
+                text,
+                &args(&[(1, 10), (1, 0)]),
+                symbols,
+                R,
+                policy(),
+                no_allocation,
+            )
+            .unwrap_err();
+        assert!(matches!(failure,
+            QueryWriteError::Execute(GraphWriteScriptExecutionError::BatchProgram {
+                location: Some(location),
+                source: GraphWriteProgramError::Program(GraphMutationProgramError::Statement {
+                    statement: 1,
+                    source: GqlQueryError::Source(GraphMutationError::Arithmetic { .. }),
+                }),
+            }) if location.argument_set == 1 && location.statement == 0 && location.span.end == text.len()
+        ));
+        assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        let mut limited = policy();
+        limited.mutations.query.evaluator.max_work_units = successful.evaluator.work_units - 1;
+        let failure = txn
+            .execute_graph_write_program_governed(
+                &mut db,
+                &query,
+                good.program(),
+                limited,
+                no_allocation,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            failure,
+            GraphWriteProgramError::Program(GraphMutationProgramError::Budget {
+                statement: 2,
+                dimension: GraphMutationProgramDimension::WorkUnits,
+                ..
+            })
+        ));
+        assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        txn.rollback_to_savepoint(&db, "entry").unwrap();
+        txn.finish(&mut db, &commit).await.unwrap();
+        assert_key(&db, 1, 1);
+        assert_key(&db, 2, 2);
+        assert_eq!(
+            db.edge(EId(1)).unwrap().unwrap().props,
+            [(P, CanonicalScalar::Int(10).into())]
+        );
+        assert!(db.vertex(VId(99)).unwrap().is_some());
         assert_eq!(db.frontier().unwrap(), CommitSeq(2));
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
