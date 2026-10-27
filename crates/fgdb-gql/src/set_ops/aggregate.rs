@@ -279,10 +279,7 @@ impl PreparedGraphSetAggregate {
             &[crate::algebra::GraphValue],
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        elements: impl FnMut(
-            fgdb_delta_types::ElementId,
-            fgdb_delta_types::PropertyKeyId,
-        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        elements: impl GraphElementReader<E>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
     {
@@ -344,21 +341,13 @@ impl PreparedGraphSetAggregate {
             GqlQueryPolicy,
         )
             -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        mut elements: impl FnMut(
-            fgdb_delta_types::ElementId,
-            fgdb_delta_types::PropertyKeyId,
-        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        elements: impl GraphElementReader<E>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
     {
         let patterns: &mut DynPatterns<'_, E, C> = &mut patterns;
         let seeded: &mut DynSeeded<'_, E, C> = &mut seeded;
         let procedures: &mut DynProcedures<'_, E, C> = &mut procedures;
-        let elements: &mut dyn FnMut(
-            fgdb_delta_types::ElementId,
-            fgdb_delta_types::PropertyKeyId,
-        )
-            -> Result<Option<fgdb_types::CanonicalPropertyValue>, E> = &mut elements;
         let source = WithSeededPatterns {
             source: WithElementReads {
                 source: WithProcedures {

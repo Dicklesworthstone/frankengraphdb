@@ -710,7 +710,8 @@ where
     }
 }
 
-/// A source plus the host's element property reader (fgdb-xnd7x).
+/// A source plus the host's pinned element reader. Ordinary property callbacks
+/// remain supported; a complete reader also retains controlled metadata.
 pub struct WithElementReads<S, R> {
     pub source: S,
     pub elements: R,
@@ -887,9 +888,25 @@ where
 impl<E, C, S, R> GraphSetSource<E, C> for WithElementReads<S, R>
 where
     S: GraphSetSource<E, C>,
-    R: FnMut(ElementId, PropertyKeyId) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+    R: GraphElementReader<E>,
 {
-    forward_metadata_to_source!();
+    fn element_metadata(
+        &mut self,
+        element: ElementId,
+        kind: super::projection::GraphElementMetadata,
+        catalog: &crate::ReverseSymbolCatalog,
+        control: &mut dyn FnMut(crate::GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<Result<Option<GraphValue>, super::projection::GraphElementMetadataError<E>>> {
+        match self
+            .elements
+            .element_metadata(element, kind, catalog, control)
+        {
+            Some(result) => Some(result),
+            None => self
+                .source
+                .element_metadata(element, kind, catalog, control),
+        }
+    }
     fn supports_procedure_rows(&self) -> bool {
         self.source.supports_procedure_rows()
     }
@@ -945,7 +962,7 @@ where
         element: ElementId,
         key: PropertyKeyId,
     ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
-        Some((self.elements)(element, key))
+        Some(self.elements.element_property(element, key))
     }
 }
 

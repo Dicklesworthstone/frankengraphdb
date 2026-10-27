@@ -528,6 +528,120 @@ mod element_metadata_values {
     }
 
     #[test]
+    fn element_entrypoints_preserve_metadata_for_sets_and_aggregate_outputs() {
+        let values = vec![GraphValue::Vertex(A), GraphValue::Vertex(B)];
+        let query = prepare(
+            "UNWIND $xs AS x RETURN labels(x) AS labels, properties(x) AS props, keys(x) AS keys",
+            values.clone(),
+        );
+        let reference = query
+            .execute_governed_from_source(
+                policy(),
+                with_element_metadata(no_pattern, metadata),
+                || Ok::<_, usize>(()),
+            )
+            .unwrap();
+        for seeded in [false, true] {
+            let reader = with_element_metadata(|_, _| Ok(None), metadata);
+            let result = if seeded {
+                query.execute_governed_with_seeded_elements(
+                    policy(),
+                    no_pattern,
+                    |_, _, _| None,
+                    |_, _, _| panic!("metadata needs no procedure"),
+                    reader,
+                    || Ok(()),
+                )
+            } else {
+                query.execute_governed_with_elements(
+                    policy(),
+                    no_pattern,
+                    |_, _, _| panic!("metadata needs no procedure"),
+                    reader,
+                    || Ok(()),
+                )
+            };
+            assert_eq!(result.unwrap(), reference);
+        }
+
+        let query = PreparedGraphPipelineAggregateText::prepare_with_parameter_types_and_resolver(
+            "UNWIND $xs AS x RETURN [n IN collect(x) | labels(n)] AS names",
+            &[("xs", GqlParameterType::List)],
+            names(),
+        )
+        .unwrap()
+        .bind_relation_parameters(&GqlParameters::new().with_list("xs", values).unwrap())
+        .unwrap();
+        let reference = query
+            .execute_governed_from_source(
+                policy(),
+                with_element_metadata(no_pattern, metadata),
+                || Ok::<_, usize>(()),
+            )
+            .unwrap();
+        for seeded in [false, true] {
+            let reader = with_element_metadata(|_, _| Ok(None), metadata);
+            let result = if seeded {
+                query.execute_governed_with_seeded_elements(
+                    policy(),
+                    no_pattern,
+                    |_, _, _| None,
+                    |_, _, _| panic!("metadata needs no procedure"),
+                    reader,
+                    || Ok(()),
+                )
+            } else {
+                query.execute_governed_with_elements(
+                    policy(),
+                    no_pattern,
+                    |_, _, _| panic!("metadata needs no procedure"),
+                    reader,
+                    || Ok(()),
+                )
+            };
+            assert_eq!(result.unwrap(), reference);
+        }
+    }
+
+    #[test]
+    fn explicit_reader_absence_keeps_null_and_property_only_reader_preserves_source_metadata() {
+        let query = prepare(
+            "UNWIND $xs AS x RETURN labels(x) AS names",
+            vec![GraphValue::Vertex(A)],
+        );
+        let source = fgdb_gql::WithElementReads {
+            source: with_element_metadata(no_pattern, metadata),
+            elements: |_, _| Ok(None),
+        };
+        assert_eq!(
+            query
+                .execute_governed_from_source(policy(), source, || Ok::<_, usize>(()))
+                .unwrap()
+                .value[0]
+                .values(),
+            &[list(vec![text("Person")])],
+        );
+        let source = fgdb_gql::WithElementReads {
+            source: with_element_metadata(no_pattern, metadata),
+            elements: with_element_metadata(
+                |_, _| Ok(None),
+                |_,
+                 _,
+                 _: &ReverseSymbolCatalog,
+                 _: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>| Ok(None),
+            ),
+        };
+        assert_eq!(
+            query
+                .execute_governed_from_source(policy(), source, || Ok::<_, usize>(()))
+                .unwrap()
+                .value[0]
+                .values(),
+            &[null()],
+        );
+    }
+
+    #[test]
     fn ordinary_aggregate_visitor_retains_controlled_element_metadata() {
         let query =
             fgdb_gql::PreparedGraphAggregateText::prepare_with_parameter_types_and_resolver(

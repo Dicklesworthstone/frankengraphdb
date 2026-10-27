@@ -1302,10 +1302,10 @@ impl PreparedGraphSet {
     }
 
     /// `execute_governed_with_procedures` plus the host's element property
-    /// reader (fgdb-xnd7x). `x.key` over a vertex or edge that an expression
-    /// produced reads `elements(element, key)` at the same pinned cut and
-    /// under the same authorization as `patterns`. Without this entry such a
-    /// read stays a typed error.
+    /// reader. Properties and metadata of an expression-produced vertex or
+    /// edge use the same pinned cut and authorization as `patterns`. A plain
+    /// property callback remains supported; `with_element_metadata` also
+    /// supplies labels, relationship types, keys and complete property maps.
     pub fn execute_governed_with_elements<E, C>(
         &self,
         policy: GqlQueryPolicy,
@@ -1320,19 +1320,11 @@ impl PreparedGraphSet {
             GqlQueryPolicy,
         )
             -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        mut elements: impl FnMut(
-            fgdb_delta_types::ElementId,
-            fgdb_delta_types::PropertyKeyId,
-        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        elements: impl GraphElementReader<E>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
         let patterns: &mut DynPatterns<'_, E, C> = &mut patterns;
         let procedures: &mut DynProcedures<'_, E, C> = &mut procedures;
-        let elements: &mut dyn FnMut(
-            fgdb_delta_types::ElementId,
-            fgdb_delta_types::PropertyKeyId,
-        )
-            -> Result<Option<fgdb_types::CanonicalPropertyValue>, E> = &mut elements;
         let mut source = WithElementReads {
             source: WithProcedures {
                 patterns,
@@ -1370,19 +1362,11 @@ impl PreparedGraphSet {
             GqlQueryPolicy,
         )
             -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        mut elements: impl FnMut(
-            fgdb_delta_types::ElementId,
-            fgdb_delta_types::PropertyKeyId,
-        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        elements: impl GraphElementReader<E>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
         let patterns: &mut DynPatterns<'_, E, C> = &mut patterns;
         let procedures: &mut DynProcedures<'_, E, C> = &mut procedures;
-        let elements: &mut dyn FnMut(
-            fgdb_delta_types::ElementId,
-            fgdb_delta_types::PropertyKeyId,
-        )
-            -> Result<Option<fgdb_types::CanonicalPropertyValue>, E> = &mut elements;
         let seeded: &mut DynSeeded<'_, E, C> = &mut seeded;
         let mut source = WithSeededPatterns {
             source: WithElementReads {
