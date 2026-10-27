@@ -30,19 +30,19 @@ USAGE:
   fgdbd serve --listen <addr:port> [--http-listen <addr:port> [--http-allow-host <host>]...]
       [--bolt-listen <addr:port>] [--tls-cert-file <path> --tls-key-file <path>] DATABASE...
       DATABASE := --database <name>=<path> --key-file <path> --issuer-key-file <path>
-                  [--policy-epoch <n>] [--write-relation <u32>] [--query-scratch-dir <path>]
+                  [--policy-epoch <n>] [--write-relation <u64>] [--query-scratch-dir <path>]
                   [--max-snapshot-records <n>] [--max-result-rows <n>]
                   [--max-work-units <n>] [--max-scratch-entries <n>] [--bindings-file <path>]
                   [--compact-interval-seconds <n>] [--scrub-interval-seconds <n>]
-                  [--label <name>=<u32>]... [--relation <name>=<u32>]... [--property <name>=<u32>]...
+                  [--label <name>=<u64>]... [--relation <name>=<u64>]... [--property <name>=<u64>]...
       [--max-connections <n>]
   fgdbd token --key-file <path> --issuer-key-file <path> [--policy-epoch <n>]
       [--rights read|write|read-write] [--expires-in <seconds>]
-      [--allow-label <u32>]... [--allow-relation <u32>]... [--allow-property <u32>]...
+      [--allow-label <u64>]... [--allow-relation <u64>]... [--allow-property <u64>]...
       [--max-nodes <n>] [--max-work <n>] [--max-rows <n>]
   fgdbd attenuate [--rights read|write|read-write] [--expires-in <seconds>]
-      [--not-before-in <seconds>] [--allow-label <u32>]... [--allow-relation <u32>]...
-      [--allow-property <u32>]... [--deny-property <u32>]...
+      [--not-before-in <seconds>] [--allow-label <u64>]... [--allow-relation <u64>]...
+      [--allow-property <u64>]... [--deny-property <u64>]...
       [--max-nodes <n>] [--max-work <n>] [--max-rows <n>]   < token.hex
   fgdbd keygen --database <path> | --issuer <path>
   fgdbd help
@@ -197,7 +197,7 @@ struct DatabaseOptions {
     issuer_key_file: Option<PathBuf>,
     query_scratch_dir: Option<PathBuf>,
     policy_epoch: u64,
-    write_relation: u32,
+    write_relation: u64,
     /// `--max-snapshot-records`, `--max-result-rows`, `--max-work-units` and
     /// `--max-scratch-entries`, in [`fgdb_gql::GqlQueryPolicy::new`] order.
     query_limits: [Option<u64>; 4],
@@ -241,10 +241,10 @@ fn number<T: core::str::FromStr>(raw: &str, flag: &str) -> Result<T, Failure> {
         .map_err(|_| Failure::usage(format!("{flag} is out of range")))
 }
 
-fn binding(raw: &str, flag: &str) -> Result<(String, u32), Failure> {
+fn binding(raw: &str, flag: &str) -> Result<(String, u64), Failure> {
     let (name, id) = raw
         .split_once('=')
-        .ok_or_else(|| Failure::usage(format!("{flag} needs <name>=<u32>")))?;
+        .ok_or_else(|| Failure::usage(format!("{flag} needs <name>=<u64>")))?;
     if name.is_empty() {
         return Err(Failure::usage(format!("{flag} needs a name")));
     }
@@ -357,9 +357,7 @@ impl ServeOptions {
                                 _ => GraphSymbolKind::Property,
                             };
                             let (name, id) = binding(value(args, &mut at, flag)?, flag)?;
-                            db.symbols
-                                .bind(kind, &name, u64::from(id))
-                                .map_err(Failure::usage)?;
+                            db.symbols.bind(kind, &name, id).map_err(Failure::usage)?;
                         }
                         _ => {
                             return Err(Failure::usage(format!(
@@ -470,7 +468,7 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
                 .map_err(Failure::open)?;
         let mut config = DatabaseConfig::new(db.name, keys, issuer_key);
         config.policy_epoch = db.policy_epoch;
-        config.write_relation = RelationId(u64::from(db.write_relation));
+        config.write_relation = RelationId(db.write_relation);
         config.symbols = db.symbols;
         config.ordered_reads = db.query_scratch_dir.map(OrderedReadConfig::new);
         config.set_query_limits(core::array::from_fn(|at| {
@@ -666,9 +664,9 @@ struct TokenOptions {
     policy_epoch: u64,
     rights: Rights,
     expires_in_seconds: u64,
-    labels: Option<Vec<u32>>,
-    relations: Option<Vec<u32>>,
-    properties: Option<Vec<u32>>,
+    labels: Option<Vec<u64>>,
+    relations: Option<Vec<u64>>,
+    properties: Option<Vec<u64>>,
     limits: QueryLimits,
 }
 
@@ -748,6 +746,21 @@ impl TokenOptions {
         }
         Ok(options)
     }
+
+    fn into_grant(self, expires_at_ms: u64) -> Grant {
+        fn scope<T: Ord>(ids: Option<Vec<u64>>, wrap: impl Fn(u64) -> T) -> Scope<T> {
+            ids.map_or(Scope::All, |ids| Scope::only(ids.into_iter().map(wrap)))
+        }
+        Grant {
+            branch: fgdb_server::TRUNK.to_owned(),
+            labels: scope(self.labels, LabelId),
+            relations: scope(self.relations, RelationId),
+            properties: scope(self.properties, PropertyKeyId),
+            rights: self.rights,
+            limits: self.limits,
+            expires_at_ms,
+        }
+    }
 }
 
 async fn token(cx: &Cx, options: TokenOptions) -> Result<(), Failure> {
@@ -766,20 +779,7 @@ async fn token(cx: &Cx, options: TokenOptions) -> Result<(), Failure> {
         .map_err(Failure::io)?
         .checked_add(options.expires_in_seconds.saturating_mul(1000))
         .ok_or_else(|| Failure::usage("--expires-in is out of range"))?;
-    fn scope<T: Ord>(ids: Option<Vec<u32>>, wrap: impl Fn(u64) -> T) -> Scope<T> {
-        ids.map_or(Scope::All, |ids| {
-            Scope::only(ids.into_iter().map(|id| wrap(u64::from(id))))
-        })
-    }
-    let grant = Grant {
-        branch: fgdb_server::TRUNK.to_owned(),
-        labels: scope(options.labels, LabelId),
-        relations: scope(options.relations, RelationId),
-        properties: scope(options.properties, PropertyKeyId),
-        rights: options.rights,
-        limits: options.limits,
-        expires_at_ms,
-    };
+    let grant = options.into_grant(expires_at_ms);
     let token = fgdb_server::issue_token(&authority, &grant).map_err(Failure::usage)?;
     let hex: String = token.iter().map(|byte| format!("{byte:02x}")).collect();
     println!("{hex}");
@@ -793,10 +793,10 @@ struct AttenuateOptions {
     rights: Option<Rights>,
     expires_in_seconds: Option<u64>,
     not_before_in_seconds: Option<u64>,
-    labels: Option<Vec<u32>>,
-    relations: Option<Vec<u32>>,
-    properties: Option<Vec<u32>>,
-    deny_properties: Option<Vec<u32>>,
+    labels: Option<Vec<u64>>,
+    relations: Option<Vec<u64>>,
+    properties: Option<Vec<u64>>,
+    deny_properties: Option<Vec<u64>>,
     max_nodes: Option<u64>,
     max_work: Option<u64>,
     max_rows: Option<u64>,
@@ -867,8 +867,8 @@ impl AttenuateOptions {
 
     /// The caveats to append, with validity bounds measured from `now_ms`.
     fn restrictions(&self, now_ms: u64) -> Result<Vec<Restriction>, Failure> {
-        fn ids<T: Ord>(ids: &[u32], wrap: impl Fn(u64) -> T) -> BTreeSet<T> {
-            ids.iter().map(|id| wrap(u64::from(*id))).collect()
+        fn ids<T: Ord>(ids: &[u64], wrap: impl Fn(u64) -> T) -> BTreeSet<T> {
+            ids.iter().copied().map(wrap).collect()
         }
         let from_now = |seconds: u64, flag: &str| {
             seconds
@@ -977,6 +977,194 @@ async fn keygen(cx: &Cx, args: &[String]) -> Result<(), Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serve_symbol_flags_preserve_the_full_native_ordinal_domain() {
+        let base = [
+            "--listen",
+            "127.0.0.1:0",
+            "--database",
+            "social=test-db",
+            "--key-file",
+            "database.key",
+            "--issuer-key-file",
+            "issuer.key",
+        ];
+        let parse = |extra: &[&str]| {
+            let args: Vec<String> = base.iter().chain(extra).map(|s| (*s).to_owned()).collect();
+            ServeOptions::parse(&args)
+        };
+        for ordinal in [0, u64::from(u32::MAX) + 1, u64::MAX] {
+            let raw = ordinal.to_string();
+            let named = format!("native={ordinal}");
+            let options = parse(&[
+                "--write-relation",
+                &raw,
+                "--label",
+                &named,
+                "--relation",
+                &named,
+                "--property",
+                &named,
+            ])
+            .unwrap_or_else(|error| panic!("{}", error.message));
+            let db = &options.databases[0];
+            assert_eq!(db.write_relation, ordinal);
+            assert_eq!(
+                db.symbols.labels().collect::<Vec<_>>(),
+                [("native", ordinal)]
+            );
+            assert_eq!(
+                db.symbols.relations().collect::<Vec<_>>(),
+                [("native", ordinal)]
+            );
+            assert_eq!(
+                db.symbols.properties().collect::<Vec<_>>(),
+                [("native", ordinal)]
+            );
+        }
+        for invalid in ["", "-1", "+1", "1.5", "18446744073709551616"] {
+            assert!(parse(&["--write-relation", invalid]).is_err());
+            let named = format!("native={invalid}");
+            for flag in ["--label", "--relation", "--property"] {
+                assert!(parse(&[flag, &named]).is_err(), "{flag}={invalid}");
+            }
+        }
+        assert!(parse(&["--label", "native=1", "--label", "native=2"]).is_err());
+        assert!(parse(&["--label", "native=1", "--label", "other=1"]).is_err());
+    }
+
+    #[test]
+    fn native_scope_flags_survive_token_encoding_and_attenuation_without_aliases() {
+        let strings = |args: &[&str]| args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let base = [
+            "--key-file",
+            "database.key",
+            "--issuer-key-file",
+            "issuer.key",
+        ];
+        let native = u64::MAX.to_string();
+        let options = TokenOptions::parse(&strings(&[
+            "--key-file",
+            "database.key",
+            "--issuer-key-file",
+            "issuer.key",
+            "--allow-label",
+            &native,
+            "--allow-relation",
+            &native,
+            "--allow-property",
+            &native,
+        ]))
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        let grant = options.into_grant(1_000);
+        let keys = fgdb::DatabaseKeys::new(
+            [1; 32],
+            fgdb_types::DatabaseSecurityNamespaceId([2; 32]),
+            [3; 32],
+        );
+        let authority = fgdb_server::issuer(
+            asupersync::security::key::AuthKey::from_seed(8_501),
+            &keys,
+            1,
+        )
+        .unwrap();
+        let token = fgdb_warden::CapabilityToken::decode(
+            &authority.issue_at(&grant, 100).unwrap().encode(),
+        )
+        .unwrap();
+        let verified = authority
+            .verify_at(&token, fgdb_server::TRUNK, 100)
+            .unwrap();
+        let predicates = verified.predicates();
+        assert!(predicates.allows_label(LabelId(u64::MAX)));
+        assert!(predicates.allows_relation(RelationId(u64::MAX)));
+        assert!(predicates.allows_property(PropertyKeyId(u64::MAX)));
+        let low = u64::from(u32::MAX);
+        assert!(!predicates.allows_label(LabelId(low)));
+        assert!(!predicates.allows_relation(RelationId(low)));
+        assert!(!predicates.allows_property(PropertyKeyId(low)));
+
+        let restrict = |args: &[&str]| {
+            AttenuateOptions::parse(&strings(args))
+                .and_then(|options| options.restrictions(100))
+                .unwrap_or_else(|error| panic!("{}", error.message))
+        };
+        let attenuate = |token: &fgdb_warden::CapabilityToken, args: &[&str]| {
+            let bytes = fgdb_server::attenuate_token(&token.encode(), &restrict(args)).unwrap();
+            fgdb_warden::CapabilityToken::decode(&bytes).unwrap()
+        };
+        let narrowed = attenuate(
+            &token,
+            &[
+                "--allow-label",
+                &native,
+                "--allow-relation",
+                &native,
+                "--allow-property",
+                &native,
+            ],
+        );
+        let verified = authority
+            .verify_at(&narrowed, fgdb_server::TRUNK, 100)
+            .unwrap();
+        assert!(verified.predicates().allows_label(LabelId(u64::MAX)));
+        assert!(verified.predicates().allows_relation(RelationId(u64::MAX)));
+        assert!(
+            verified
+                .predicates()
+                .allows_property(PropertyKeyId(u64::MAX))
+        );
+        let narrowed = attenuate(&narrowed, &["--deny-property", &native]);
+        let verified = authority
+            .verify_at(&narrowed, fgdb_server::TRUNK, 100)
+            .unwrap();
+        assert!(
+            !verified
+                .predicates()
+                .allows_property(PropertyKeyId(u64::MAX))
+        );
+        assert!(verified.predicates().allows_label(LabelId(u64::MAX)));
+
+        let low_text = low.to_string();
+        let wrong = attenuate(
+            &token,
+            &[
+                "--allow-label",
+                &low_text,
+                "--allow-relation",
+                &low_text,
+                "--allow-property",
+                &low_text,
+            ],
+        );
+        let verified = authority
+            .verify_at(&wrong, fgdb_server::TRUNK, 100)
+            .unwrap();
+        assert!(!verified.predicates().allows_label(LabelId(u64::MAX)));
+        assert!(!verified.predicates().allows_relation(RelationId(u64::MAX)));
+        assert!(
+            !verified
+                .predicates()
+                .allows_property(PropertyKeyId(u64::MAX))
+        );
+        assert!(!verified.predicates().allows_label(LabelId(low)));
+        for invalid in ["", "-1", "+1", "18446744073709551616"] {
+            for flag in ["--allow-label", "--allow-relation", "--allow-property"] {
+                let args = base
+                    .iter()
+                    .copied()
+                    .chain([flag, invalid])
+                    .collect::<Vec<_>>();
+                assert!(
+                    TokenOptions::parse(&strings(&args)).is_err(),
+                    "{flag}={invalid}"
+                );
+                assert!(AttenuateOptions::parse(&strings(&[flag, invalid])).is_err());
+            }
+            assert!(AttenuateOptions::parse(&strings(&["--deny-property", invalid])).is_err());
+        }
+    }
 
     #[test]
     fn maintenance_intervals_are_opt_in_and_per_database() {
