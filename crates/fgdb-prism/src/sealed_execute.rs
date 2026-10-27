@@ -147,6 +147,11 @@ trait Rows {
         Self: 'a;
     fn node_count(&self) -> usize;
     fn degree(&self, source: usize) -> Option<usize>;
+    /// A trusted fact from complete projection admission, never a query hint.
+    /// Unknown row providers keep the general weighted implementation.
+    fn has_unit_weights(&self) -> bool {
+        false
+    }
     fn open(&self, source: usize) -> Result<Self::Cursor<'_>>;
 }
 struct SealedRows<'a> {
@@ -172,6 +177,9 @@ impl Rows for SealedRows<'_> {
     }
     fn degree(&self, source: usize) -> Option<usize> {
         self.graph.degree(source)
+    }
+    fn has_unit_weights(&self) -> bool {
+        self.graph.has_unit_weights()
     }
     fn open(&self, source: usize) -> Result<Self::Cursor<'_>> {
         Ok(SealedRow {
@@ -823,10 +831,15 @@ impl FnxCallSpec {
                     .vertex_ordinal(options.source())
                     .ok_or(ExecutionError::UnknownSource(options.source()))?;
                 admission.rows(1)?;
+                let unit = shortest_path::uses_unit_fifo(n, graph.has_unit_weights());
                 (
-                    "fgdb-prism/sealed-dijkstra-indexed-heap-v1",
-                    shortest_path::work(n, graph.adjacency_entry_count(), pass)?,
-                    shortest_path::workspace(n)?,
+                    if unit {
+                        "fgdb-prism/sealed-dijkstra-unit-fifo-v1"
+                    } else {
+                        "fgdb-prism/sealed-dijkstra-indexed-heap-v1"
+                    },
+                    shortest_path::work(n, graph.adjacency_entry_count(), pass, unit)?,
+                    shortest_path::workspace(n, unit)?,
                     Some(ordinal),
                 )
             }

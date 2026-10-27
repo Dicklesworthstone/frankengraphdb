@@ -59,6 +59,301 @@ fn rows(values: &[Option<f64>]) -> Vec<Vec<FnxValue>> {
 }
 
 #[test]
+fn reduced_unit_weights_select_fifo_with_exact_limits_across_schedules_and_snapshots() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        // The certificate follows final projected weights. Sum can turn raw
+        // nonunit (even negative) alternatives into one, or parallel ones
+        // into two. An unreachable nonunit edge must disable the shortcut.
+        for (policy, first, second, remote, unit) in [
+            (ParallelEdgePolicy::Sum, 0.25, 0.75, 1.0, true),
+            (ParallelEdgePolicy::Sum, -1.0, 2.0, 1.0, true),
+            (ParallelEdgePolicy::Minimum, 1.0, 7.0, 1.0, true),
+            (ParallelEdgePolicy::Sum, 1.0, 1.0, 1.0, false),
+            (ParallelEdgePolicy::Minimum, 1.0, 1.0, 2.0, false),
+            (ParallelEdgePolicy::CollapseUnit, -1.0, 0.0, 2.0, true),
+        ] {
+            let db = weighted(
+                &contexts.commit(),
+                6,
+                &[
+                    (0, 1, first),
+                    (0, 1, second),
+                    (1, 2, 1.0),
+                    (2, 2, 1.0),
+                    (3, 4, remote),
+                ],
+            )
+            .await;
+            for direction in [
+                Directedness::Directed,
+                Directedness::Reversed,
+                Directedness::Undirected,
+            ] {
+                let mut opt = options(direction);
+                opt.projection.parallel_edges = policy;
+                let graph = projection(&db, &cx, opt).await;
+                let view = db.read_session().unwrap();
+                let decoded = view
+                    .prism_projection_at(
+                        &cx,
+                        view.frontier(),
+                        opt.selection,
+                        opt.projection,
+                        opt.projection_limits,
+                        opt.source_limits,
+                    )
+                    .unwrap();
+                for source in [VId(0), VId(5)] {
+                    for cutoff in [None, Some(-0.0), Some(0.5), Some(1.0)] {
+                        for strict in [false, true] {
+                            let call = call(source, cutoff, strict);
+                            let expected = call
+                                .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                                .unwrap();
+                            assert_eq!(
+                                expected.certificate.execution_kernel,
+                                if unit {
+                                    "fgdb-prism/sealed-dijkstra-unit-fifo-v1"
+                                } else {
+                                    "fgdb-prism/sealed-dijkstra-indexed-heap-v1"
+                                }
+                            );
+                            let oracle = call
+                                .execute(&decoded, opt.execution_limits, || cx.checkpoint())
+                                .unwrap();
+                            assert_eq!(expected.rows, oracle.rows);
+                            assert_eq!(
+                                expected.certificate.result_digest,
+                                oracle.certificate.result_digest
+                            );
+                            if unit {
+                                assert_eq!(
+                                    expected.certificate.kernel_workspace_bytes,
+                                    6 * (size_of::<Option<f64>>() + size_of::<usize>())
+                                );
+                            }
+                            let exact = FnxExecutionLimits {
+                                max_estimated_work: expected.certificate.estimated_work,
+                                ..opt.execution_limits
+                            };
+                            let mem = FnxMemoryLimits {
+                                max_kernel_workspace_bytes: expected
+                                    .certificate
+                                    .kernel_workspace_bytes,
+                                ..memory()
+                            };
+                            for q in [1, 7] {
+                                let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                                let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                                let (actual, pending) = drive(
+                                    call.execute_sealed_cooperative(
+                                        &controlled,
+                                        &graph,
+                                        exact,
+                                        mem,
+                                        quantum(q),
+                                        yield_now,
+                                    ),
+                                    &probe,
+                                    q,
+                                );
+                                compare_execution(&actual.unwrap(), &expected);
+                                assert!(pending > 0);
+                            }
+                            for (limited, mem, resource) in [
+                                (
+                                    FnxExecutionLimits {
+                                        max_estimated_work: exact.max_estimated_work - 1,
+                                        ..exact
+                                    },
+                                    mem,
+                                    "estimated work",
+                                ),
+                                (
+                                    exact,
+                                    FnxMemoryLimits {
+                                        max_kernel_workspace_bytes: mem.max_kernel_workspace_bytes
+                                            - 1,
+                                        ..mem
+                                    },
+                                    "kernel workspace bytes",
+                                ),
+                            ] {
+                                assert!(matches!(
+                                    call.execute_sealed_cooperative(
+                                        &cx, &graph, limited, mem, quantum(1), yield_now,
+                                    ).await,
+                                    Err(FnxSealedExecutionError::Execution(
+                                        FnxExecutionError::LimitExceeded { resource: actual, .. }
+                                    )) if actual == resource
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut db = weighted(&contexts.commit(), 3, &[(0, 1, 1.0), (1, 2, 1.0)]).await;
+        let opt = options(Directedness::Directed);
+        let old = projection(&db, &cx, opt).await;
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_edge_property(EId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(2)));
+        db.write(&contexts.commit(), change).await.unwrap();
+        let current = projection(&db, &cx, opt).await;
+        let call = call(VId(0), None, true);
+        for (graph, unit, final_distance) in [(&old, true, 2.0), (&current, false, 3.0)] {
+            let result = call
+                .execute_sealed(&cx, graph, opt.execution_limits, memory())
+                .unwrap();
+            assert_eq!(
+                result.rows,
+                rows(&[Some(0.0), Some(1.0), Some(final_distance)])
+            );
+            assert_eq!(
+                result.certificate.execution_kernel.contains("unit-fifo"),
+                unit
+            );
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn unit_fifo_refuses_every_live_checkpoint_and_drops_at_every_suspension() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let opt = options(Directedness::Directed);
+        let db = weighted(
+            &contexts.commit(),
+            5,
+            &[
+                (0, 0, 1.0),
+                (0, 1, 1.0),
+                (0, 2, 1.0),
+                (1, 3, 1.0),
+                (2, 3, 1.0),
+                (3, 4, 1.0),
+            ],
+        )
+        .await;
+        let graph = projection(&db, &cx, opt).await;
+        let original = db.read_session().unwrap().partition_root();
+        let call = call(VId(0), Some(2.0), true);
+        let probe = Arc::new(SimulationCheckpointProbe::new(None));
+        let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+        let (expected, pending) = drive(
+            call.execute_sealed_cooperative(
+                &controlled,
+                &graph,
+                opt.execution_limits,
+                memory(),
+                quantum(3),
+                yield_now,
+            ),
+            &probe,
+            3,
+        );
+        let expected = expected.unwrap();
+        assert!(expected.certificate.execution_kernel.contains("unit-fifo"));
+        for stop in 1..=probe.calls() {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+            let (result, _) = drive(
+                call.execute_sealed_cooperative(
+                    &controlled,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(3),
+                    yield_now,
+                ),
+                &probe,
+                3,
+            );
+            assert!(matches!(result, Err(FnxSealedExecutionError::Cancelled(_))));
+            assert_eq!(probe.calls(), stop);
+        }
+        let mut guards = 0;
+        call.execute_sealed_cooperative_with_checkpoint(
+            &cx,
+            &graph,
+            opt.execution_limits,
+            memory(),
+            quantum(3),
+            yield_now,
+            || {
+                guards += 1;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        for stop in 1..=guards {
+            let mut seen = 0;
+            let result = call
+                .execute_sealed_cooperative_with_checkpoint(
+                    &cx,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(3),
+                    yield_now,
+                    || {
+                        seen += 1;
+                        if seen == stop {
+                            Err(SealedProjectionError::Guard(Box::new(LiveRefusal(stop))))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .await;
+            live_refusal(result.unwrap_err(), stop);
+            assert_eq!(seen, stop);
+        }
+        for stop in 0..=pending {
+            let waker = Waker::from(Arc::new(Wakes::default()));
+            let mut task = Context::from_waker(&waker);
+            let mut future = Box::pin(call.execute_sealed_cooperative(
+                &cx,
+                &graph,
+                opt.execution_limits,
+                memory(),
+                quantum(3),
+                yield_now,
+            ));
+            for _ in 0..stop {
+                assert!(future.as_mut().poll(&mut task).is_pending());
+            }
+            drop(future);
+            assert_eq!(contexts.outstanding_obligations(), 0);
+            assert_eq!(db.read_session().unwrap().partition_root(), original);
+        }
+        assert_eq!(
+            call.execute_sealed_cooperative(
+                &cx,
+                &graph,
+                opt.execution_limits,
+                memory(),
+                quantum(7),
+                yield_now,
+            )
+            .await
+            .unwrap(),
+            expected
+        );
+    });
+}
+
+#[test]
 fn all_small_weighted_topologies_match_dense_oracle_and_both_existing_drivers() {
     let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);

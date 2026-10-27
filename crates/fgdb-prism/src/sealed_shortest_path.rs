@@ -24,18 +24,32 @@ impl From<HeapError<Error>> for Error {
     }
 }
 
-pub(super) fn workspace(n: usize) -> Result<usize> {
-    crate::shortest_path::workspace_bytes::<Infallible>(n).map_err(Into::into)
+/// Exact unit distances and their next candidates are representable through
+/// n == 2^53. Larger populations retain the general weighted queue.
+pub(super) fn uses_unit_fifo(n: usize, unit_weights: bool) -> bool {
+    unit_weights && n as u128 <= 1u128 << 53
+}
+
+pub(super) fn workspace(n: usize, unit: bool) -> Result<usize> {
+    if unit {
+        mul(n, size_of::<Option<f64>>() + size_of::<usize>())
+    } else {
+        crate::shortest_path::workspace_bytes::<Infallible>(n).map_err(Into::into)
+    }
 }
 
 /// Both complete weight validation and the reachable relaxation pass can
 /// traverse retained history. Heap work uses reduced edges separately; a
 /// heavily reduced multigraph must not conceal the cost of its raw incidences.
-pub(super) fn work(n: usize, edges: usize, pass: usize) -> Result<usize> {
-    add(
-        mul(pass, 2)?,
-        crate::shortest_path::estimated_work::<Infallible>(n, edges)?,
-    )
+pub(super) fn work(n: usize, edges: usize, pass: usize, unit: bool) -> Result<usize> {
+    let queue = if unit {
+        // Population/result passes and constant-time discovery/queue work.
+        // Raw history still contributes BOTH complete compressed-row passes.
+        add(mul(n, 5)?, mul(edges, 2)?)?
+    } else {
+        crate::shortest_path::estimated_work::<Infallible>(n, edges)?
+    };
+    add(mul(pass, 2)?, queue)
 }
 
 pub(super) fn run(
@@ -51,6 +65,7 @@ pub(super) fn run(
         return Err(ExecutionError::InvalidUpstreamResult.into());
     }
     admission.rows(1)?;
+    let unit = uses_unit_fifo(n, graph.has_unit_weights());
     // Validate the ENTIRE selected projection even for a zero cutoff or an
     // isolated source. An unreachable negative edge cannot be hidden by an
     // early exit. The admitted sealed graph is immutable across both passes.
@@ -63,7 +78,13 @@ pub(super) fn run(
                 return Err(ExecutionError::InvalidUpstreamResult.into());
             }
             validate_weight(weight)?;
+            if unit && weight != 1.0 {
+                return Err(ExecutionError::InvalidUpstreamResult.into());
+            }
         }
+    }
+    if unit {
+        return run_unit_fifo(graph, source, options.cutoff(), admission, checkpoint);
     }
     let mut distances = reserve(n)?;
     let mut overflowed = reserve(n)?;
@@ -140,6 +161,140 @@ pub(super) fn run(
         row_count: discovered,
         witness,
     })
+}
+
+/// Shared bounded state for synchronous and cooperative unit traversal.
+/// First discovery is final, and canonical rows plus FIFO preserve the
+/// indexed heap's cost/offer-sequence order under both comparison policies.
+/// The drivers checkpoint before each initialization, pop and incidence step.
+pub(super) struct UnitTraversal {
+    population: usize,
+    distances: Vec<Option<f64>>,
+    queue: Vec<usize>,
+    head: usize,
+    witness: ComplexityWitness,
+}
+
+impl UnitTraversal {
+    pub(super) fn new(n: usize) -> Result<Self> {
+        Ok(Self {
+            population: n,
+            distances: reserve(n)?,
+            queue: reserve(n)?,
+            head: 0,
+            witness: ComplexityWitness {
+                algorithm: "single_source_dijkstra_compressed_unit_fifo".to_owned(),
+                complexity_claim: "O(|V| log(1+H) + H log(1+|V|) + |V| + |E|) compressed row visits and unit queue work".to_owned(),
+                nodes_touched: 0,
+                edges_scanned: 0,
+                queue_peak: 1,
+            },
+        })
+    }
+
+    pub(super) fn initialize_step(&mut self) -> bool {
+        if self.distances.len() < self.population {
+            self.distances.push(None);
+        }
+        self.distances.len() == self.population
+    }
+
+    pub(super) fn start(&mut self, source: usize) -> Result<()> {
+        if self.distances.len() != self.population || !self.queue.is_empty() {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        }
+        *self
+            .distances
+            .get_mut(source)
+            .ok_or(ExecutionError::InvalidUpstreamResult)? = Some(0.0);
+        self.queue.push(source);
+        Ok(())
+    }
+
+    pub(super) fn pop(&mut self) -> Result<Option<(usize, f64)>> {
+        let Some(&source) = self.queue.get(self.head) else {
+            return Ok(None);
+        };
+        let cost = self.distances[source].ok_or(ExecutionError::InvalidUpstreamResult)?;
+        self.head += 1;
+        self.witness.nodes_touched = add(self.witness.nodes_touched, 1)?;
+        Ok(Some((source, cost)))
+    }
+
+    pub(super) fn visit(
+        &mut self,
+        target: usize,
+        weight: f64,
+        cost: f64,
+        cutoff: Option<f64>,
+        admission: &ResultAdmission,
+    ) -> Result<()> {
+        self.witness.edges_scanned = add(self.witness.edges_scanned, 1)?;
+        validate_weight(weight)?;
+        if weight != 1.0 {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        }
+        let distance = self
+            .distances
+            .get_mut(target)
+            .ok_or(ExecutionError::InvalidUpstreamResult)?;
+        if distance.is_some() {
+            return Ok(());
+        }
+        let candidate = cost + 1.0;
+        if cutoff.is_some_and(|limit| candidate > limit) {
+            return Ok(());
+        }
+        admission.rows(add(self.queue.len(), 1)?)?;
+        *distance = Some(candidate);
+        self.queue.push(target);
+        self.witness.queue_peak = self.witness.queue_peak.max(self.queue.len() - self.head);
+        Ok(())
+    }
+
+    pub(super) fn finish(self) -> Result<KernelOutput> {
+        if self.head != self.queue.len() || self.witness.nodes_touched != self.queue.len() {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        }
+        Ok(KernelOutput {
+            values: KernelValues::WeightedDistances(self.distances),
+            row_count: self.queue.len(),
+            witness: self.witness,
+        })
+    }
+}
+
+fn run_unit_fifo(
+    graph: &impl Rows,
+    source: usize,
+    cutoff: Option<f64>,
+    admission: &ResultAdmission,
+    checkpoint: &mut impl FnMut() -> Result<()>,
+) -> Result<KernelOutput> {
+    checkpoint()?;
+    let mut traversal = UnitTraversal::new(graph.node_count())?;
+    loop {
+        checkpoint()?;
+        if traversal.initialize_step() {
+            break;
+        }
+    }
+    checkpoint()?;
+    traversal.start(source)?;
+    loop {
+        checkpoint()?;
+        let Some((node, cost)) = traversal.pop()? else {
+            break;
+        };
+        let mut row = graph.open(node)?;
+        while let Some((target, weight)) = row.next()? {
+            checkpoint()?;
+            traversal.visit(target, weight, cost, cutoff, admission)?;
+        }
+        // Scan cutoff rows too, retaining source failures and edge witnesses.
+        // Unit weights simply cannot discover another vertex beyond the bound.
+    }
+    traversal.finish()
 }
 
 fn validate_weight(weight: f64) -> Result<()> {
@@ -242,6 +397,9 @@ mod tests {
         fn degree(&self, node: usize) -> Option<usize> {
             self.view.neighbors_indices(node).map(<[usize]>::len)
         }
+        fn has_unit_weights(&self) -> bool {
+            self.view.has_unit_weights()
+        }
         fn open(&self, node: usize) -> Result<Self::Cursor<'_>> {
             self.step()?;
             let (targets, weights) = self
@@ -299,6 +457,159 @@ mod tests {
         let (call, options) = bound(fixture.view.vertex_id(0).unwrap(), cutoff, strict);
         let admission = ResultAdmission::new(&call, limits(fixture.node_count()), memory())?;
         run(fixture, 0, options, &admission, &mut || Ok(()))
+    }
+
+    struct Uncertified<'a>(&'a Fixture);
+    impl Rows for Uncertified<'_> {
+        type Cursor<'a>
+            = TestCursor<'a>
+        where
+            Self: 'a;
+        fn node_count(&self) -> usize {
+            self.0.node_count()
+        }
+        fn degree(&self, node: usize) -> Option<usize> {
+            self.0.degree(node)
+        }
+        fn open(&self, node: usize) -> Result<Self::Cursor<'_>> {
+            self.0.open(node)
+        }
+    }
+
+    #[test]
+    fn every_small_unit_topology_matches_heap_order_witnesses_and_independent_bfs() {
+        for n in 1..=3 {
+            for mask in 0usize..(1 << (n * n)) {
+                let edges: Vec<_> = (0..n * n)
+                    .filter(|bit| mask & (1 << bit) != 0)
+                    .map(|bit| (bit / n, bit % n, 1.0))
+                    .collect();
+                let fixture = Fixture::new(n, &edges);
+                for source in 0..n {
+                    let mut oracle = vec![None; n];
+                    let mut queue = std::collections::VecDeque::from([source]);
+                    oracle[source] = Some(0usize);
+                    while let Some(node) = queue.pop_front() {
+                        for &target in fixture.view.neighbors_indices(node).unwrap() {
+                            if oracle[target].is_none() {
+                                oracle[target] = Some(oracle[node].unwrap() + 1);
+                                queue.push_back(target);
+                            }
+                        }
+                    }
+                    for cutoff in [None, Some(-0.0), Some(0.5), Some(1.0), Some(2.0)] {
+                        for strict in [false, true] {
+                            let (call, options) =
+                                bound(fixture.view.vertex_id(source).unwrap(), cutoff, strict);
+                            let admission =
+                                ResultAdmission::new(&call, limits(n), memory()).unwrap();
+                            fixture.calls.set(0);
+                            let actual =
+                                run(&fixture, source, options, &admission, &mut || Ok(())).unwrap();
+                            let visits = fixture.calls.get();
+                            fixture.calls.set(0);
+                            let heap = run(
+                                &Uncertified(&fixture),
+                                source,
+                                options,
+                                &admission,
+                                &mut || Ok(()),
+                            )
+                            .unwrap();
+                            assert_eq!(fixture.calls.get(), visits);
+                            assert_eq!(values(&actual), values(&heap));
+                            assert_eq!(actual.row_count, heap.row_count);
+                            assert_eq!(actual.witness.nodes_touched, heap.witness.nodes_touched);
+                            assert_eq!(actual.witness.edges_scanned, heap.witness.edges_scanned);
+                            assert_eq!(actual.witness.queue_peak, heap.witness.queue_peak);
+                            assert_eq!(
+                                actual.witness.algorithm,
+                                "single_source_dijkstra_compressed_unit_fifo"
+                            );
+                            let expected: Vec<_> = oracle
+                                .iter()
+                                .map(|&hops| {
+                                    hops.map(|hops| hops as f64)
+                                        .filter(|&distance| cutoff.is_none_or(|c| distance <= c))
+                                })
+                                .collect();
+                            assert_eq!(values(&actual), expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_unit_checkpoint_and_cursor_failure_discards_the_private_fifo() {
+        let mut fixture = Fixture::new(
+            7,
+            &[
+                (0, 0, 1.0),
+                (0, 1, 1.0),
+                (0, 2, 1.0),
+                (1, 3, 1.0),
+                (2, 3, 1.0),
+                (3, 4, 1.0),
+                (5, 6, 1.0),
+            ],
+        );
+        let (call, options) = bound(fixture.view.vertex_id(0).unwrap(), Some(1.0), true);
+        let admission = ResultAdmission::new(&call, limits(7), memory()).unwrap();
+        let mut count = 0;
+        let expected = run(&fixture, 0, options, &admission, &mut || {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            values(&expected),
+            &[Some(0.0), Some(1.0), Some(1.0), None, None, None, None]
+        );
+        // Includes edges from both cutoff vertices and the unreachable pair
+        // during validation; no cutoff or reachability shortcut hides reads.
+        assert_eq!(expected.witness.edges_scanned, 5);
+        for stop in 1..=count {
+            let mut seen = 0;
+            let result = run(&fixture, 0, options, &admission, &mut || {
+                seen += 1;
+                if seen == stop {
+                    Err(Error::Cancelled(std::io::Error::other("unit stop").into()))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(matches!(result, Err(Error::Cancelled(_))));
+            assert_eq!(seen, stop);
+        }
+        fixture.calls.set(0);
+        run(&fixture, 0, options, &admission, &mut || Ok(())).unwrap();
+        let operations = fixture.calls.get();
+        for fail_at in 1..=operations {
+            fixture.calls.set(0);
+            fixture.fail_at = fail_at;
+            assert!(matches!(
+                run(&fixture, 0, options, &admission, &mut || Ok(())),
+                Err(Error::Source(SealedProjectionError::UnknownOrdinal(
+                    usize::MAX
+                )))
+            ));
+            assert_eq!(fixture.calls.get(), fail_at);
+        }
+        assert!(uses_unit_fifo(0, true));
+        assert!(!uses_unit_fifo(7, false));
+        if let Ok(limit) = usize::try_from(1u128 << 53) {
+            assert!(uses_unit_fifo(limit, true));
+            assert!(!uses_unit_fifo(limit + 1, true));
+        }
+        assert_eq!(
+            workspace(7, true).unwrap(),
+            7 * (size_of::<Option<f64>>() + size_of::<usize>())
+        );
+        assert!(workspace(7, true).unwrap() < workspace(7, false).unwrap());
+        let pass = super::super::pass_work(7, 7).unwrap();
+        assert!(work(7, 7, pass, true).unwrap() < work(7, 7, pass, false).unwrap());
     }
 
     #[test]
@@ -609,13 +920,15 @@ mod tests {
                 .row_count,
             2
         );
-        assert_eq!(workspace(0).unwrap(), 0);
-        assert!(workspace(usize::MAX).is_err());
-        assert!(work(usize::MAX, usize::MAX, usize::MAX).is_err());
-        assert!(
-            work(3, 2, super::super::pass_work(3, 1000).unwrap()).unwrap()
-                > work(3, 2, super::super::pass_work(3, 2).unwrap()).unwrap()
-        );
+        for unit in [false, true] {
+            assert_eq!(workspace(0, unit).unwrap(), 0);
+            assert!(workspace(usize::MAX, unit).is_err());
+            assert!(work(usize::MAX, usize::MAX, usize::MAX, unit).is_err());
+            assert!(
+                work(3, 2, super::super::pass_work(3, 1000).unwrap(), unit).unwrap()
+                    > work(3, 2, super::super::pass_work(3, 2).unwrap(), unit).unwrap()
+            );
+        }
     }
 
     #[test]

@@ -168,6 +168,7 @@ struct Projection {
     input_edges: usize,
     edges: usize,
     adjacency_entries: usize,
+    unit_weights: bool,
     scan_bound: usize,
     workspace_bytes: usize,
     resident_bytes: usize,
@@ -440,6 +441,7 @@ impl SealedGraphView {
         let mut degrees = reserve(n)?;
         let mut edges = 0usize;
         let mut adjacency_entries = 0usize;
+        let mut unit_weights = true;
         let mut input_edges = 0usize;
         for source in 0..n {
             schedule.check(cx).await?;
@@ -485,15 +487,19 @@ impl SealedGraphView {
                     Ok(())
                 };
                 loop {
-                    let target =
+                    let (target, weight) =
                         match cursor.next_budgeted_observed(cx, schedule.fuel(), &mut observe)? {
-                            SealedScanStep::Item((target, _)) => target,
+                            SealedScanStep::Item(neighbor) => neighbor,
                             SealedScanStep::End => break,
                             SealedScanStep::Yield => {
                                 schedule.refill(cx).await?;
                                 continue;
                             }
                         };
+                    // Certify the final projected weight, after visibility,
+                    // loop policy and parallel reduction. A Unit selection
+                    // alone is insufficient: Sum may combine several edges.
+                    unit_weights &= weight == 1.0;
                     degree = add(degree, 1)?;
                     adjacency_entries = add(adjacency_entries, 1)?;
                     admit(
@@ -543,6 +549,7 @@ impl SealedGraphView {
             input_edges,
             edges,
             adjacency_entries,
+            unit_weights,
             scan_bound,
             workspace_bytes,
             resident_bytes,
@@ -571,6 +578,11 @@ impl SealedGraphView {
     /// non-loop has two entries but contributes only one logical edge.
     pub fn adjacency_entry_count(&self) -> usize {
         self.0.adjacency_entries
+    }
+    /// Exact admission-time fact about every reduced neighbor in this immutable
+    /// projection, including self loops and rows unreachable from a later seed.
+    pub(crate) fn has_unit_weights(&self) -> bool {
+        self.0.unit_weights
     }
     /// The exact source index retained by reversed/undirected projections.
     /// Includes construction-peak evidence; not an allocator/RSS guarantee.

@@ -371,10 +371,15 @@ impl FnxCallSpec {
                         .vertex_ordinal(options.source())
                         .ok_or(ExecutionError::UnknownSource(options.source()))?;
                     admission.rows(1)?;
+                    let unit = super::shortest_path::uses_unit_fifo(n, graph.has_unit_weights());
                     (
-                        "fgdb-prism/sealed-dijkstra-indexed-heap-cooperative-v1",
-                        super::shortest_path::work(n, graph.adjacency_entry_count(), pass)?,
-                        super::shortest_path::workspace(n)?,
+                        if unit {
+                            "fgdb-prism/sealed-dijkstra-unit-fifo-cooperative-v1"
+                        } else {
+                            "fgdb-prism/sealed-dijkstra-indexed-heap-cooperative-v1"
+                        },
+                        super::shortest_path::work(n, graph.adjacency_entry_count(), pass, unit)?,
+                        super::shortest_path::workspace(n, unit)?,
                         Some(ordinal),
                     )
                 }
@@ -556,6 +561,7 @@ where
         return Err(ExecutionError::InvalidUpstreamResult.into());
     }
     admission.rows(1)?;
+    let unit = super::shortest_path::uses_unit_fifo(n, graph.has_unit_weights());
     // A cutoff or unreachable component must not hide an incompatible weight.
     // Validate the whole selected graph before allocating the queue. Raw cursor
     // fuel still covers excluded endpoints, invisible versions and reductions.
@@ -573,7 +579,13 @@ where
             if weight < 0.0 {
                 return Err(ExecutionError::NegativeWeight.into());
             }
+            if unit && weight != 1.0 {
+                return Err(ExecutionError::InvalidUpstreamResult.into());
+            }
         }
+    }
+    if unit {
+        return dijkstra_unit_fifo(graph, source, options.cutoff(), admission, control).await;
     }
     control.tick().await?;
     let mut distances = reserve(n)?;
@@ -666,6 +678,43 @@ where
         row_count: discovered,
         witness,
     })
+}
+
+// The same FIFO state owns both scheduling modes. Only the driver controls
+// suspension: every scalar step and raw cursor pull shares the existing fuel.
+async fn dijkstra_unit_fifo<Yield, YieldFuture>(
+    graph: &SealedGraphView,
+    source: usize,
+    cutoff: Option<f64>,
+    admission: &ResultAdmission,
+    control: &mut Cooperate<'_, Yield>,
+) -> Result<KernelOutput>
+where
+    Yield: FnMut() -> YieldFuture,
+    YieldFuture: Future<Output = ()>,
+{
+    control.tick().await?;
+    let mut traversal = super::shortest_path::UnitTraversal::new(graph.node_count())?;
+    loop {
+        control.tick().await?;
+        if traversal.initialize_step() {
+            break;
+        }
+    }
+    control.tick().await?;
+    traversal.start(source)?;
+    loop {
+        control.tick().await?;
+        let Some((node, cost)) = traversal.pop()? else {
+            break;
+        };
+        let mut row = graph.neighbor_cursor_controlled(control.cx, node, None)?;
+        while let Some((target, weight)) = control.next(&mut row).await? {
+            control.tick().await?;
+            traversal.visit(target, weight, cost, cutoff, admission)?;
+        }
+    }
+    traversal.finish()
 }
 
 // Keep union-by-size, ordinal tie breaks, path halving and canonical minimum
