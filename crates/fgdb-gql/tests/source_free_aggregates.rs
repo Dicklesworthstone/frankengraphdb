@@ -62,6 +62,222 @@ fn constant_pagination_preserves_aggregate_completion_and_group_order() {
 }
 
 #[test]
+fn computed_having_keeps_hidden_summaries_and_aliases_in_one_exact_group() {
+    let definition = template(
+        "UNWIND [1,1,2,3,3,3] AS x \
+         RETURN x AS bucket,count(*)+1 AS adjusted,count(*) AS copies \
+         HAVING adjusted > 2 AND sum(x) BETWEEN 2 AND 9 \
+         ORDER BY sum(x) + adjusted DESC",
+    );
+    assert_eq!(definition.columns(), ["bucket", "adjusted", "copies"]);
+    let query = definition
+        .bind_relation_parameters(&GqlParameters::new())
+        .unwrap();
+    // The two written COUNT items retain their existing summary identities;
+    // HAVING and ORDER BY share the one additional hidden SUM.
+    assert_eq!(query.evaluation_aggregate_columns().len(), 3);
+    let rows = run(&query).value;
+    assert_eq!(rows.len(), 2);
+    for (row, (bucket, adjusted, copies)) in rows.iter().zip([(3, 4, 3), (1, 3, 2)]) {
+        assert!(row.keys().is_empty());
+        assert_eq!(row.values().len(), 3, "the hidden SUM is not returned");
+        assert_eq!(
+            row.values()[0].as_value(),
+            Some(&GraphValue::Scalar(CanonicalScalar::Int(bucket)))
+        );
+        assert_eq!(row.values()[1].as_integer(), Some(adjusted));
+        assert_eq!(row.values()[2].as_count(), Some(copies));
+    }
+
+    let empty = run(&prepare(
+        "UNWIND [] AS x RETURN count(*) AS rows \
+         HAVING coalesce(sum(x),0)+1 = 1",
+    ));
+    assert_eq!(empty.value.len(), 1);
+    assert_eq!(empty.value[0].values().len(), 1);
+    assert_eq!(empty.value[0].values()[0].as_count(), Some(0));
+}
+
+#[test]
+fn computed_having_preserves_full_width_parameters_and_exact_averages() {
+    use fgdb_gql::GqlParameterType;
+    let definition = PreparedGraphPipelineAggregateText::prepare_with_parameter_types(
+        "UNWIND [9223372036854775807,9223372036854775807] AS x \
+         RETURN sum(x) AS total,avg(x) AS mean \
+         HAVING total > $threshold AND mean = $half",
+        &[
+            ("threshold", GqlParameterType::UInt64),
+            ("half", GqlParameterType::Int64),
+        ],
+        |_, _| panic!("source-free HAVING cannot access a catalog"),
+    )
+    .unwrap();
+    let identity = definition.canonical_template_bytes();
+    for (threshold, present) in [(u64::MAX - 2, true), (u64::MAX, false)] {
+        let arguments = GqlParameters::new()
+            .with_uint64("threshold", threshold)
+            .unwrap()
+            .with_int64("half", i64::MAX)
+            .unwrap();
+        let result = run(&definition.bind_relation_parameters(&arguments).unwrap());
+        assert_eq!(result.value.len(), usize::from(present));
+        if present {
+            assert_eq!(
+                result.value[0].values()[0].as_integer(),
+                Some(i128::from(i64::MAX) * 2)
+            );
+            assert_eq!(
+                result.value[0].values()[1].as_average(),
+                GraphExactAverage::new(i128::from(i64::MAX), 1)
+            );
+        }
+    }
+    assert_eq!(definition.canonical_template_bytes(), identity);
+}
+
+#[test]
+fn having_scalar_aliases_remain_lazy_but_boolean_leaves_and_input_errors_remain_eager() {
+    for predicate in [
+        "CASE WHEN count(*)=0 THEN 0 ELSE broken END > 0",
+        "coalesce(0,broken) > 0",
+    ] {
+        let statement = format!("UNWIND [] AS x RETURN count(*)/0 AS broken HAVING {predicate}");
+        assert!(run(&prepare(&statement)).value.is_empty(), "{predicate}");
+    }
+    for statement in [
+        "UNWIND [1] AS x RETURN count(*) AS n HAVING n+1 > 0 OR 1/0=0 LIMIT 0",
+        "UNWIND [0] AS x RETURN count(*) AS n HAVING sum(1/x)+1 > 0 LIMIT 0",
+    ] {
+        assert!(
+            matches!(
+                prepare(statement).execute_governed(policy(), no_source, || Ok(())),
+                Err(GqlQueryError::Source(_))
+            ),
+            "{statement}"
+        );
+    }
+}
+
+#[test]
+fn having_computed_parameters_rebind_once_and_keep_preparation_identity() {
+    let definition = template(
+        "UNWIND $values AS x RETURN count(*)+$delta AS adjusted \
+         HAVING adjusted+$delta BETWEEN $minimum AND $maximum",
+    );
+    let identity = definition.canonical_template_bytes();
+    assert_eq!(
+        definition
+            .parameter_schema()
+            .iter()
+            .find(|p| p.name == "delta")
+            .unwrap()
+            .occurrences,
+        2
+    );
+    for (delta, minimum, maximum, present) in [(1, 4, 4, true), (3, 4, 4, false), (3, 8, 8, true)] {
+        let arguments = GqlParameters::new()
+            .with_list(
+                "values",
+                vec![GraphValue::Scalar(CanonicalScalar::Int(1)); 2],
+            )
+            .unwrap()
+            .with_int64("delta", delta)
+            .unwrap()
+            .with_int64("minimum", minimum)
+            .unwrap()
+            .with_int64("maximum", maximum)
+            .unwrap();
+        let rows = run(&definition.bind_relation_parameters(&arguments).unwrap()).value;
+        assert_eq!(rows.len(), usize::from(present));
+        if present {
+            assert_eq!(
+                rows[0].values()[0].as_integer(),
+                Some(i128::from(2 + delta))
+            );
+        }
+    }
+    assert_eq!(definition.canonical_template_bytes(), identity);
+    assert!(
+        definition
+            .bind_relation_parameters(&GqlParameters::new())
+            .is_err()
+    );
+}
+
+#[test]
+fn having_chained_comparisons_keep_row_filter_semantics_and_single_parameter_registration() {
+    let legacy = prepare("UNWIND [1,1,2] AS k RETURN k,count(*) AS n HAVING 0 < n < 3 ORDER BY k");
+    let rows = run(&legacy).value;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].values()[0].as_count(), Some(2));
+    assert_eq!(rows[1].values()[0].as_count(), Some(1));
+
+    let definition =
+        template("UNWIND [1,1,2] AS k RETURN k,count(*) AS n HAVING 0 < $pivot < n+1 ORDER BY k");
+    assert_eq!(definition.parameter_schema()[0].occurrences, 1);
+    let arguments = GqlParameters::new().with_int64("pivot", 2).unwrap();
+    let rows = run(&definition.bind_relation_parameters(&arguments).unwrap()).value;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].keys(),
+        &[GraphValue::Scalar(CanonicalScalar::Int(1))]
+    );
+    assert_eq!(rows[0].values()[0].as_count(), Some(2));
+}
+
+#[test]
+fn computed_having_is_governed_before_final_pagination() {
+    let plan = prepare(
+        "UNWIND [1,1,2,3,3,3] AS x RETURN x AS k,count(*)+1 AS n \
+         HAVING n+sum(x) > 4 ORDER BY k LIMIT 1",
+    );
+    let mut checkpoints = 0;
+    let measured = plan
+        .execute_governed(policy(), no_source, || {
+            checkpoints += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(measured.value.len(), 1);
+    assert_eq!(measured.rows.snapshot_records, 0);
+    let caps = [
+        measured.rows.result_rows,
+        measured.evaluator.work_units,
+        measured.evaluator.scratch_entries,
+    ];
+    assert_eq!(
+        plan.execute_governed(
+            GqlQueryPolicy::new(0, caps[0], caps[1], caps[2]),
+            no_source,
+            || Ok(())
+        )
+        .unwrap(),
+        measured
+    );
+    for dimension in 0..caps.len() {
+        let mut bounds = caps;
+        bounds[dimension] -= 1;
+        assert!(
+            plan.execute_governed(
+                GqlQueryPolicy::new(0, bounds[0], bounds[1], bounds[2]),
+                no_source,
+                || Ok(())
+            )
+            .is_err()
+        );
+    }
+    for stop in 1..=checkpoints {
+        let mut current = 0;
+        let result = plan.execute_governed(policy(), no_source, || {
+            current += 1;
+            if current == stop { Err(stop) } else { Ok(()) }
+        });
+        assert!(matches!(result, Err(GqlQueryError::Interrupted(found)) if found == stop));
+        assert_eq!(current, stop);
+    }
+}
+
+#[test]
 fn heterogeneous_extrema_use_language_order_and_keep_typed_numeric_ties() {
     let scalar = |value| GraphValue::Scalar(value);
     for (values, low, high) in [

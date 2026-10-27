@@ -21,6 +21,7 @@ use crate::algebra::{
     VertexPredicate,
 };
 use crate::{GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters};
+pub(crate) use aggregate::having::HavingTemplate;
 pub use aggregate::{GraphAggregateTextSlot, PreparedGraphAggregateText};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 pub use map_arguments::{GqlMapArgumentError, GqlMapArgumentText, GqlTextOffsets};

@@ -1166,14 +1166,22 @@ fn an_aggregate_return_reads_carried_properties_in_keys_arguments_and_group_by()
     for text in [
         "MATCH (n) WITH n RETURN n.p AS k, COUNT(__fg_boundary_0) AS c",
         "MATCH (n) WITH n RETURN n.p AS k, COUNT(*) AS c GROUP BY __fg_boundary_0",
-        // Two output columns, as the boundary row has (n plus hidden n.p).
-        "MATCH (n) WITH n RETURN n.p AS k, COUNT(*) AS c HAVING n.p > 1",
     ] {
         assert!(
             PreparedGraphPipelineAggregateText::prepare(text, symbols).is_err(),
             "{text}"
         );
     }
+    // The written grouping expression resolves through the output alias; it
+    // never addresses the similarly sized, discarded boundary row.
+    let repeated_having =
+        query("MATCH (n) WITH n RETURN n.p AS k, COUNT(*) AS c HAVING n.p > 1 ORDER BY k");
+    let aliased_having =
+        query("MATCH (n) WITH n RETURN n.p AS k, COUNT(*) AS c HAVING k > 1 ORDER BY k");
+    assert_eq!(
+        run(&repeated_having, &input, wide()),
+        run(&aliased_having, &input, wide())
+    );
 }
 
 #[test]
@@ -1417,7 +1425,7 @@ fn a_leading_unwind_joined_by_match_feeds_an_aggregate_return() {
 /// the plain MATCH ... RETURN facade already does. The rows equal that
 /// facade's answer over the same data. ORDER BY may rank a combined item, as
 /// in that facade. A non-aggregate operand that is not a grouping key refuses,
-/// as in openCypher, and HAVING over a combined item still refuses.
+/// as in openCypher. HAVING shares the graph facade's computed operands.
 #[test]
 fn a_terminal_return_combines_aggregate_results_like_the_graph_facade() {
     let graph = |text: &str| {
@@ -1451,6 +1459,14 @@ fn a_terminal_return_combines_aggregate_results_like_the_graph_facade() {
             "MATCH (n) WITH n.p AS x RETURN x, x + COUNT(*) AS shifted",
             "MATCH (n) RETURN n.p AS x, n.p + COUNT(*) AS shifted",
         ),
+        (
+            "MATCH (n) WITH n.p AS x RETURN x, COUNT(*) * 2 AS doubled HAVING x > 1",
+            "MATCH (n) RETURN n.p AS x, COUNT(*) * 2 AS doubled HAVING x > 1",
+        ),
+        (
+            "MATCH (n) WITH n.p AS x RETURN x, COUNT(*) * 2 AS doubled HAVING doubled + SUM(x) > 10",
+            "MATCH (n) RETURN n.p AS x, COUNT(*) * 2 AS doubled HAVING doubled + SUM(n.p) > 10",
+        ),
     ] {
         let mut combined = run(&pipeline(with), &input, wide()).value;
         let mut reference = run(&graph(plain), &input, wide()).value;
@@ -1482,12 +1498,30 @@ fn a_terminal_return_combines_aggregate_results_like_the_graph_facade() {
     for text in [
         // y is not a grouping key of the RETURN.
         "MATCH (n) WITH n.p AS x, n.p AS y RETURN x, y + COUNT(*) AS z",
-        "MATCH (n) WITH n.p AS x RETURN x, COUNT(*) * 2 AS d HAVING x > 1",
+        "MATCH (n) WITH n.p AS x RETURN COUNT(*) * 2 AS d HAVING x > 1",
     ] {
         assert!(
             PreparedGraphPipelineAggregateText::prepare(text, symbols).is_err(),
             "{text}"
         );
+    }
+}
+
+#[test]
+fn having_rejects_ungrouped_or_dropped_inputs_before_catalog_access() {
+    for text in [
+        "MATCH (n) WITH n.p AS x RETURN count(*) AS c HAVING x+1 > 2",
+        "MATCH (n) WITH n.p AS x RETURN count(*) AS c HAVING sum(missing) > 2",
+        "MATCH (n) WITH n.p AS x RETURN count(*) AS c HAVING n.p > 2",
+        "MATCH (n) WITH n.p AS x RETURN [count(*)] AS counts HAVING CASE WHEN false THEN size(counts) ELSE 1 END > 0",
+    ] {
+        let calls = std::cell::Cell::new(0);
+        let result = PreparedGraphPipelineAggregateText::prepare(text, |kind, name| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        });
+        assert!(result.is_err(), "{text}");
+        assert_eq!(calls.get(), 0, "{text}");
     }
 }
 

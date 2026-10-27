@@ -9,15 +9,25 @@
 use super::super::boolean::comparison_tag;
 use super::*;
 use crate::algebra::ScalarPredicate;
-use crate::{GraphHavingExpression, GraphHavingOp, GraphHavingOperand, MAX_HAVING_INSTRUCTIONS};
+use crate::{
+    GqlScalarParameter, GraphHavingExpression, GraphHavingOp, GraphHavingOperand,
+    MAX_HAVING_INSTRUCTIONS,
+};
 use fgdb_types::CanonicalScalar;
 
 #[derive(Clone)]
-enum Operand {
+pub(in crate::graph_text) enum Operand {
     Column(GraphAggregateColumn),
+    /// Preserve a pipeline's written alias position for the original row
+    /// filter transcript, even when two aliases name the same grouping key.
+    RowColumn {
+        column: GraphAggregateColumn,
+        index: usize,
+    },
     Number {
         value: Number,
         legacy_int64: bool,
+        at: usize,
     },
     Scalar(ScalarPredicate),
     Expression {
@@ -36,7 +46,9 @@ impl Operand {
         values: &[GqlParameterValue],
     ) -> Result<GraphHavingOperand, GraphPatternTextError> {
         Ok(match self {
-            Self::Column(column) => GraphHavingOperand::Column(*column),
+            Self::Column(column) | Self::RowColumn { column, .. } => {
+                GraphHavingOperand::Column(*column)
+            }
             Self::Scalar(value) => GraphHavingOperand::Scalar(value.clone()),
             Self::Expression { value, column } => GraphHavingOperand::Expression {
                 value: std::sync::Arc::new(PreparedGraphAggregateText::bind_input_value(
@@ -93,12 +105,80 @@ enum Op {
 }
 
 #[derive(Clone)]
-pub(super) struct HavingTemplate {
+pub(crate) struct HavingTemplate {
     program: Vec<Op>,
     at: usize,
 }
 impl HavingTemplate {
-    pub(super) fn attach(
+    /// Keep the existing relational HAVING transcript and native program for
+    /// its original column/scalar domain. Newly supported expressions and
+    /// hidden summaries retain this resolved template instead of reparsing.
+    pub(in crate::graph_text) fn row_filter(
+        &self,
+        columns: &[GraphAggregateColumn],
+        parameters: &[GqlParameterSpec],
+    ) -> Option<Vec<crate::set_text::ReadFilterOp>> {
+        use crate::set_text::{ReadFilterOp as Filter, ReadFilterOperand as Value};
+
+        let operand = |operand: &Operand| -> Option<Value> {
+            Some(match operand {
+                Operand::Column(column) => {
+                    Value::Column(columns.iter().position(|candidate| candidate == column)?)
+                }
+                Operand::RowColumn { index, .. } => Value::Column(*index),
+                Operand::Scalar(value) => {
+                    Value::Literal(GqlScalarParameter::new(value.value().clone()).ok()?)
+                }
+                Operand::Number { value, at, .. } => match value {
+                    Number::Literal(GqlParameterValue::Int64(value)) => {
+                        Value::Literal(GqlScalarParameter::new(CanonicalScalar::Int(*value)).ok()?)
+                    }
+                    Number::Literal(GqlParameterValue::Scalar(value)) => {
+                        Value::Literal(value.clone())
+                    }
+                    Number::Parameter(index)
+                        if parameters[*index].parameter_type != GqlParameterType::UInt64 =>
+                    {
+                        Value::Parameter {
+                            index: *index,
+                            at: *at,
+                        }
+                    }
+                    _ => return None,
+                },
+                Operand::Expression { .. } | Operand::ResolvedExpression { .. } => return None,
+            })
+        };
+        self.program
+            .iter()
+            .map(|op| {
+                Some(match op {
+                    Op::Compare {
+                        left,
+                        comparison,
+                        right,
+                    } => Filter::Compare {
+                        left: operand(left)?,
+                        comparison: *comparison,
+                        right: operand(right)?,
+                    },
+                    Op::IsNull {
+                        operand: value,
+                        is_null,
+                    } => Filter::IsNull {
+                        operand: operand(value)?,
+                        is_null: *is_null,
+                    },
+                    Op::Truth(value) => Filter::Truth(*value),
+                    Op::And => Filter::And,
+                    Op::Or => Filter::Or,
+                    Op::Not => Filter::Not,
+                })
+            })
+            .collect()
+    }
+
+    pub(in crate::graph_text) fn attach(
         &self,
         aggregate: PreparedGraphAggregate,
         values: &[GqlParameterValue],
@@ -142,10 +222,10 @@ impl HavingTemplate {
 
     /// Resolved unbound HAVING program: column identities, comparisons,
     /// literal/parameter operands and structure. Values never enter.
-    pub(super) fn append_template_transcript(&self, bytes: &mut Vec<u8>) {
+    pub(crate) fn append_template_transcript(&self, bytes: &mut Vec<u8>) {
         fn operand(bytes: &mut Vec<u8>, operand: &Operand) {
             match operand {
-                Operand::Column(column) => {
+                Operand::Column(column) | Operand::RowColumn { column, .. } => {
                     bytes.push(0);
                     match column {
                         GraphAggregateColumn::GroupKey(at) => {
@@ -232,6 +312,44 @@ pub(super) fn template_program_bytes(template: &HavingTemplate) -> Vec<u8> {
     bytes
 }
 
+/// Each source owner resolves the same post-group operand grammar against its
+/// own grouping and input-expression registry. Boolean syntax and exact native
+/// HAVING evaluation are shared by graph heads and relational pipelines.
+pub(in crate::graph_text) trait OperandResolver<'a> {
+    fn named(&self, name: &str) -> bool;
+    fn operand(&mut self, parser: &mut Parser<'a>) -> Result<Operand, GraphPatternTextError>;
+}
+
+struct GraphOperands<'p, 'a> {
+    returned: &'p [ReturnItem<'a>],
+    groups: &'p [Expression<'a>],
+    output_columns: &'p [usize],
+    hidden: &'p mut Vec<HiddenSummary<'a>>,
+    computed: &'p mut ComputedInputs<'a>,
+}
+
+pub(in crate::graph_text) fn parse_resolved<'a>(
+    parser: &mut Parser<'a>,
+    resolve: &mut impl OperandResolver<'a>,
+) -> Result<Option<HavingTemplate>, GraphPatternTextError> {
+    if !parser.take_word("HAVING")? {
+        return Ok(None);
+    }
+    let at = parser.current.at;
+    let mut input = HavingParser {
+        parser,
+        resolve,
+        program: Vec::new(),
+        leaves: 0,
+        compound: false,
+    };
+    input.disjunction(0)?;
+    Ok(Some(HavingTemplate {
+        program: input.program,
+        at,
+    }))
+}
+
 pub(super) fn parse<'a>(
     parser: &mut Parser<'a>,
     returned: &[ReturnItem<'a>],
@@ -244,13 +362,16 @@ pub(super) fn parse<'a>(
         return Ok((Vec::new(), None));
     }
     let at = parser.current.at;
-    let mut input = HavingParser {
-        parser,
+    let mut resolve = GraphOperands {
         returned,
         groups,
         output_columns,
         hidden,
         computed,
+    };
+    let mut input = HavingParser {
+        parser,
+        resolve: &mut resolve,
         program: Vec::new(),
         leaves: 0,
         compound: false,
@@ -270,6 +391,7 @@ pub(super) fn parse<'a>(
                         Operand::Number {
                             value,
                             legacy_int64: true,
+                            ..
                         },
                 } => flat.push(Having {
                     column: *column,
@@ -311,11 +433,7 @@ pub(super) fn parse<'a>(
 
 struct HavingParser<'p, 'a> {
     parser: &'p mut Parser<'a>,
-    returned: &'p [ReturnItem<'a>],
-    groups: &'p [Expression<'a>],
-    output_columns: &'p [usize],
-    hidden: &'p mut Vec<HiddenSummary<'a>>,
-    computed: &'p mut ComputedInputs<'a>,
+    resolve: &'p mut dyn OperandResolver<'a>,
     program: Vec<Op>,
     leaves: usize,
     compound: bool,
@@ -370,9 +488,7 @@ impl HavingParser<'_, '_> {
             let mut lexer = self.parser.lexer.clone();
             let next = lexer.next()?;
             let named = matches!(self.parser.current.kind, TokenKind::Word(word)
-                if self.returned.iter().any(|item| item.alias.text == word)
-                    || self.groups.iter().any(|group| group.property.is_none()
-                        && group.variable.text == word));
+                if self.resolve.named(word));
             matches!(
                 next.kind,
                 TokenKind::Punct(b'.' | b'=' | b'<' | b'>' | b'!')
@@ -476,213 +592,234 @@ impl HavingParser<'_, '_> {
             )
         {
             return Ok(Operand::Number {
+                at: self.parser.current.at,
                 value: self.parser.number(GqlParameterType::UInt64)?,
                 legacy_int64: false,
             });
         }
         let outer = core::mem::replace(&mut self.parser.having_operand, true);
-        let expression = self.parser.aggregate_result_expression(
+        let operand = self.resolve.operand(self.parser);
+        self.parser.having_operand = outer;
+        operand
+    }
+}
+
+impl<'a> OperandResolver<'a> for GraphOperands<'_, 'a> {
+    fn named(&self, name: &str) -> bool {
+        self.returned.iter().any(|item| item.alias.text == name)
+            || self
+                .groups
+                .iter()
+                .any(|group| group.property.is_none() && group.variable.text == name)
+    }
+
+    fn operand(&mut self, parser: &mut Parser<'a>) -> Result<Operand, GraphPatternTextError> {
+        let (value, columns) = parser.aggregate_result_expression(
             self.returned,
             self.groups,
             self.hidden,
             self.computed,
             false,
-        );
-        self.parser.having_operand = outer;
-        let (mut value, columns) = expression?;
-        let evaluation_column = |column| match column {
-            GraphAggregateColumn::GroupKey(index) => index,
-            GraphAggregateColumn::Aggregate(index) => self.groups.len() + index,
-        };
-        // Preserve existing simple operands, transcripts and flat numeric
-        // lowering. Only an operator or function selects an expression plan.
-        match &value {
-            ReadValueTemplate::Column(index) => match columns[*index] {
-                ResultOrderColumn::Evaluation(column) => return Ok(Operand::Column(column)),
-                ResultOrderColumn::Projected(column) => {
-                    let mut value = self.returned[column]
-                        .output
-                        .clone()
-                        .expect("computed alias");
-                    remap_output_columns(&mut value, self.output_columns);
-                    return Ok(Operand::Expression { value, column });
-                }
-                ResultOrderColumn::Computed(_) => {
-                    unreachable!("resolved leaves are not order ranks")
-                }
-            },
-            ReadValueTemplate::Literal(value) => {
-                return Ok(match value.value() {
-                    CanonicalScalar::Int(value) => Operand::Number {
-                        value: Number::Literal(GqlParameterValue::Int64(*value)),
-                        legacy_int64: true,
-                    },
-                    _ => Operand::Scalar(value.predicate(IntegerComparison::Equal)),
-                });
-            }
-            ReadValueTemplate::Parameter { index, .. }
-                if !matches!(
-                    self.parser.syntax.parameters[*index].parameter_type,
-                    GqlParameterType::List | GqlParameterType::Map
-                ) =>
-            {
-                return Ok(Operand::Number {
-                    value: Number::Parameter(*index),
-                    legacy_int64: self.parser.syntax.parameters[*index].parameter_type
-                        == GqlParameterType::Int64,
-                });
-            }
-            _ => {}
-        }
-        let column = columns.iter().find_map(|column| match column {
-            ResultOrderColumn::Projected(index) => Some(*index),
-            _ => None,
-        });
-        if let Some(column) = column {
-            // Scalar aliases compose before the shared VM compiles its lazy
-            // branches. Inlining postfix programs preserves CASE/COALESCE,
-            // including a skipped alias whose own expression would fail.
-            if self.inline_scalar_aliases(&mut value, &columns)? {
+        )?;
+        resolve_operand(parser, value, columns, self.groups.len(), |column| {
+            let mut value = self.returned[column]
+                .output
+                .clone()
+                .expect("computed alias");
+            remap_output_columns(&mut value, self.output_columns);
+            value
+        })
+    }
+}
+
+/// Convert source-resolved leaves to exact HAVING operands. A computed alias
+/// is supplied over the immutable evaluation row, never the public projection.
+pub(in crate::graph_text) fn resolve_operand(
+    parser: &Parser<'_>,
+    mut value: ReadValueTemplate,
+    columns: Vec<ResultOrderColumn>,
+    key_width: usize,
+    alias: impl Fn(usize) -> ReadValueTemplate,
+) -> Result<Operand, GraphPatternTextError> {
+    let evaluation_column = |column| match column {
+        GraphAggregateColumn::GroupKey(index) => index,
+        GraphAggregateColumn::Aggregate(index) => key_width + index,
+    };
+    // Preserve existing simple operands, transcripts and flat numeric
+    // lowering. Only an operator or function selects an expression plan.
+    match &value {
+        ReadValueTemplate::Column(index) => match columns[*index] {
+            ResultOrderColumn::Evaluation(column) => return Ok(Operand::Column(column)),
+            ResultOrderColumn::Projected(column) => {
+                let value = alias(column);
                 return Ok(Operand::Expression { value, column });
             }
-            // A composite alias needs a private resolved row. Until that row
-            // supports deferred cells, refuse conditional uses explicitly;
-            // never turn an unevaluated branch into an eager alias error.
-            if has_deferred_values(&value) {
-                return Err(error(
-                    self.parser.current.at,
-                    GraphPatternTextErrorKind::Expected(
-                        "scalar computed aliases in conditional HAVING operands",
-                    ),
-                ));
+            ResultOrderColumn::Computed(_) => {
+                unreachable!("resolved leaves are not order ranks")
             }
-            // A private operand row contains only its referenced inputs. Alias
-            // values evaluate once per distinct reference, over the frozen
-            // group; their native numeric domains and element identities stay
-            // intact. No visible output or grouping key is added.
-            let mut distinct = Vec::new();
-            let mut inputs = Vec::new();
-            let mut remap = Vec::new();
-            for source in columns {
-                let index = if let Some(index) = distinct.iter().position(|old| *old == source) {
-                    index
-                } else {
-                    let input = match source {
-                        ResultOrderColumn::Evaluation(column) => {
-                            ReadValueTemplate::Column(evaluation_column(column))
-                        }
-                        ResultOrderColumn::Projected(index) => {
-                            let mut value =
-                                self.returned[index].output.clone().expect("computed alias");
-                            remap_output_columns(&mut value, self.output_columns);
-                            value
-                        }
-                        ResultOrderColumn::Computed(_) => {
-                            unreachable!("resolved leaves are not order ranks")
-                        }
-                    };
-                    distinct.push(source);
-                    inputs.push(input);
-                    inputs.len() - 1
-                };
-                remap.push(index);
-            }
-            remap_output_columns(&mut value, &remap);
-            Ok(Operand::ResolvedExpression {
-                inputs,
-                value,
-                column,
-            })
-        } else {
-            let columns = columns
-                .into_iter()
-                .map(|column| match column {
-                    ResultOrderColumn::Evaluation(column) => evaluation_column(column),
-                    _ => unreachable!("computed aliases are resolved above"),
-                })
-                .collect::<Vec<_>>();
-            remap_output_columns(&mut value, &columns);
-            Ok(Operand::Expression { value, column: 0 })
+        },
+        ReadValueTemplate::Literal(value) => {
+            return Ok(match value.value() {
+                CanonicalScalar::Int(value) => Operand::Number {
+                    value: Number::Literal(GqlParameterValue::Int64(*value)),
+                    legacy_int64: true,
+                    at: parser.current.at,
+                },
+                _ => Operand::Scalar(value.predicate(IntegerComparison::Equal)),
+            });
         }
+        ReadValueTemplate::Parameter { index, at, .. }
+            if !matches!(
+                parser.syntax.parameters[*index].parameter_type,
+                GqlParameterType::List | GqlParameterType::Map
+            ) =>
+        {
+            return Ok(Operand::Number {
+                value: Number::Parameter(*index),
+                legacy_int64: parser.syntax.parameters[*index].parameter_type
+                    == GqlParameterType::Int64,
+                at: *at,
+            });
+        }
+        _ => {}
     }
+    let column = columns.iter().find_map(|column| match column {
+        ResultOrderColumn::Projected(index) => Some(*index),
+        _ => None,
+    });
+    if let Some(column) = column {
+        // Scalar aliases compose before the shared VM compiles its lazy
+        // branches. Inlining postfix programs preserves CASE/COALESCE,
+        // including a skipped alias whose own expression would fail.
+        if inline_scalar_aliases(&mut value, &columns, key_width, &alias)? {
+            return Ok(Operand::Expression { value, column });
+        }
+        // A composite alias needs a private resolved row. Until that row
+        // supports deferred cells, refuse conditional uses explicitly;
+        // never turn an unevaluated branch into an eager alias error.
+        if has_deferred_values(&value) {
+            return Err(error(
+                parser.current.at,
+                GraphPatternTextErrorKind::Expected(
+                    "scalar computed aliases in conditional HAVING operands",
+                ),
+            ));
+        }
+        // A private operand row contains only its referenced inputs. Alias
+        // values evaluate once per distinct reference, over the frozen
+        // group; their native numeric domains and element identities stay
+        // intact. No visible output or grouping key is added.
+        let mut distinct = Vec::new();
+        let mut inputs = Vec::new();
+        let mut remap = Vec::new();
+        for source in columns {
+            let index = if let Some(index) = distinct.iter().position(|old| *old == source) {
+                index
+            } else {
+                let input = match source {
+                    ResultOrderColumn::Evaluation(column) => {
+                        ReadValueTemplate::Column(evaluation_column(column))
+                    }
+                    ResultOrderColumn::Projected(index) => alias(index),
+                    ResultOrderColumn::Computed(_) => {
+                        unreachable!("resolved leaves are not order ranks")
+                    }
+                };
+                distinct.push(source);
+                inputs.push(input);
+                inputs.len() - 1
+            };
+            remap.push(index);
+        }
+        remap_output_columns(&mut value, &remap);
+        Ok(Operand::ResolvedExpression {
+            inputs,
+            value,
+            column,
+        })
+    } else {
+        let columns = columns
+            .into_iter()
+            .map(|column| match column {
+                ResultOrderColumn::Evaluation(column) => evaluation_column(column),
+                _ => unreachable!("computed aliases are resolved above"),
+            })
+            .collect::<Vec<_>>();
+        remap_output_columns(&mut value, &columns);
+        Ok(Operand::Expression { value, column: 0 })
+    }
+}
 
-    fn inline_scalar_aliases(
-        &self,
-        value: &mut ReadValueTemplate,
-        columns: &[ResultOrderColumn],
-    ) -> Result<bool, GraphPatternTextError> {
-        use crate::GraphIntegerOp;
-        use crate::mutation_text::MutationIntegerTemplateOp as Template;
+fn inline_scalar_aliases(
+    value: &mut ReadValueTemplate,
+    columns: &[ResultOrderColumn],
+    key_width: usize,
+    alias: &impl Fn(usize) -> ReadValueTemplate,
+) -> Result<bool, GraphPatternTextError> {
+    use crate::GraphIntegerOp;
+    use crate::mutation_text::MutationIntegerTemplateOp as Template;
 
-        let ReadValueTemplate::Integer { program, at } = value else {
-            return Ok(false);
+    let ReadValueTemplate::Integer { program, at } = value else {
+        return Ok(false);
+    };
+    let mut expanded = Vec::new();
+    for op in program.iter() {
+        let source = match op {
+            Template::Bound(
+                GraphIntegerOp::Column(index)
+                | GraphIntegerOp::ScalarColumn(index)
+                | GraphIntegerOp::IdentityColumn { column: index, .. },
+            ) => Some(*index),
+            _ => None,
         };
-        let mut expanded = Vec::new();
-        for op in program.iter() {
-            let source = match op {
-                Template::Bound(
-                    GraphIntegerOp::Column(index)
-                    | GraphIntegerOp::ScalarColumn(index)
-                    | GraphIntegerOp::IdentityColumn { column: index, .. },
-                ) => Some(*index),
-                _ => None,
-            };
-            let Some(source) = source else {
-                expanded.push(op.clone());
-                continue;
-            };
-            let mapped = match columns[source] {
-                ResultOrderColumn::Evaluation(column) => Some(match column {
-                    GraphAggregateColumn::GroupKey(index) => index,
-                    GraphAggregateColumn::Aggregate(index) => self.groups.len() + index,
-                }),
-                ResultOrderColumn::Projected(index) => {
-                    let mut alias = self.returned[index].output.clone().expect("computed alias");
-                    remap_output_columns(&mut alias, self.output_columns);
-                    if let ReadValueTemplate::Column(index) = alias {
-                        Some(index)
-                    } else {
-                        if matches!(op, Template::Bound(GraphIntegerOp::IdentityColumn { .. })) {
-                            return Ok(false);
+        let Some(source) = source else {
+            expanded.push(op.clone());
+            continue;
+        };
+        let mapped = match columns[source] {
+            ResultOrderColumn::Evaluation(column) => Some(match column {
+                GraphAggregateColumn::GroupKey(index) => index,
+                GraphAggregateColumn::Aggregate(index) => key_width + index,
+            }),
+            ResultOrderColumn::Projected(index) => {
+                let alias = alias(index);
+                if let ReadValueTemplate::Column(index) = alias {
+                    Some(index)
+                } else {
+                    if matches!(op, Template::Bound(GraphIntegerOp::IdentityColumn { .. })) {
+                        return Ok(false);
+                    }
+                    match alias {
+                        ReadValueTemplate::Integer { program, .. } => expanded.extend(program),
+                        ReadValueTemplate::Literal(value) => expanded.push(Template::Bound(
+                            GraphIntegerOp::Scalar(value.predicate(IntegerComparison::Equal)),
+                        )),
+                        ReadValueTemplate::Parameter { index, at, .. } => {
+                            expanded.push(Template::Parameter { index, at });
                         }
-                        match alias {
-                            ReadValueTemplate::Integer { program, .. } => expanded.extend(program),
-                            ReadValueTemplate::Literal(value) => expanded.push(Template::Bound(
-                                GraphIntegerOp::Scalar(value.predicate(IntegerComparison::Equal)),
-                            )),
-                            ReadValueTemplate::Parameter { index, at, .. } => {
-                                expanded.push(Template::Parameter { index, at });
-                            }
-                            _ => return Ok(false),
-                        }
-                        None
+                        _ => return Ok(false),
+                    }
+                    None
+                }
+            }
+            ResultOrderColumn::Computed(_) => {
+                unreachable!("resolved leaves are not order ranks")
+            }
+        };
+        if let Some(column) = mapped {
+            expanded.push(Template::Bound(match op {
+                Template::Bound(GraphIntegerOp::Column(_)) => GraphIntegerOp::Column(column),
+                Template::Bound(GraphIntegerOp::ScalarColumn(_)) => {
+                    GraphIntegerOp::ScalarColumn(column)
+                }
+                Template::Bound(GraphIntegerOp::IdentityColumn { text, .. }) => {
+                    GraphIntegerOp::IdentityColumn {
+                        column,
+                        text: *text,
                     }
                 }
-                ResultOrderColumn::Computed(_) => {
-                    unreachable!("resolved leaves are not order ranks")
-                }
-            };
-            if let Some(column) = mapped {
-                expanded.push(Template::Bound(match op {
-                    Template::Bound(GraphIntegerOp::Column(_)) => GraphIntegerOp::Column(column),
-                    Template::Bound(GraphIntegerOp::ScalarColumn(_)) => {
-                        GraphIntegerOp::ScalarColumn(column)
-                    }
-                    Template::Bound(GraphIntegerOp::IdentityColumn { text, .. }) => {
-                        GraphIntegerOp::IdentityColumn {
-                            column,
-                            text: *text,
-                        }
-                    }
-                    _ => unreachable!("column instruction checked above"),
-                }));
-            }
-            if expanded.len() > crate::MAX_GRAPH_INTEGER_INSTRUCTIONS {
-                return Err(error(
-                    *at,
-                    GraphPatternTextErrorKind::Expected("bounded computed HAVING operand"),
-                ));
-            }
+                _ => unreachable!("column instruction checked above"),
+            }));
         }
         if expanded.len() > crate::MAX_GRAPH_INTEGER_INSTRUCTIONS {
             return Err(error(
@@ -690,9 +827,18 @@ impl HavingParser<'_, '_> {
                 GraphPatternTextErrorKind::Expected("bounded computed HAVING operand"),
             ));
         }
-        *program = expanded;
-        Ok(true)
     }
+    if expanded.len() > crate::MAX_GRAPH_INTEGER_INSTRUCTIONS {
+        return Err(error(
+            *at,
+            GraphPatternTextErrorKind::Expected("bounded computed HAVING operand"),
+        ));
+    }
+    *program = expanded;
+    Ok(true)
+}
+
+impl HavingParser<'_, '_> {
     fn atom(&mut self) -> Result<(), GraphPatternTextError> {
         let at = self.parser.current.at;
         let left = self.operand()?;
@@ -712,13 +858,31 @@ impl HavingParser<'_, '_> {
             self.parser.current.kind,
             TokenKind::Punct(b'=' | b'<' | b'>' | b'!')
         ) {
-            let comparison = self.parser.comparison()?;
-            let right = self.operand()?;
-            return self.leaf(Op::Compare {
-                left,
-                comparison,
-                right,
-            });
+            let mut left = left;
+            let mut chained = false;
+            loop {
+                let comparison = self.parser.comparison()?;
+                let right = self.operand()?;
+                self.leaf(Op::Compare {
+                    left,
+                    comparison,
+                    right: right.clone(),
+                })?;
+                if chained {
+                    self.emit(Op::And)?;
+                }
+                if !matches!(
+                    self.parser.current.kind,
+                    TokenKind::Punct(b'=' | b'<' | b'>' | b'!')
+                ) {
+                    return Ok(());
+                }
+                // Resolve each middle operand once, then reuse its immutable
+                // program in the neighboring comparisons, as row filters do.
+                left = right;
+                chained = true;
+                self.compound = true;
+            }
         }
         if let Operand::Scalar(value) = left {
             let truth = match value.value() {

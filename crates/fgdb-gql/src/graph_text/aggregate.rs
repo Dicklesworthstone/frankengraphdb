@@ -3,7 +3,7 @@
 //! keep streaming; computed input uses the existing bounded projection path.
 //! Group pagination is never pushed into the matching child.
 
-mod having;
+pub(super) mod having;
 mod order;
 
 use super::boolean::{append_number, comparison_tag};
@@ -38,7 +38,7 @@ struct Summary {
 // Parse-time ORDER BY addresses either the original evaluation schema or a
 // computed RETURN slot. Execution receives only one validated ordering owner.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ResultOrderColumn {
+pub(super) enum ResultOrderColumn {
     Evaluation(GraphAggregateColumn),
     Projected(usize),
     Computed(usize),

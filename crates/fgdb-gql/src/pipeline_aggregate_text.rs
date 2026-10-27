@@ -100,9 +100,11 @@ pub(crate) struct PipelineSummary {
 /// hidden keys. It accepts input expressions and unshadowed RETURN key aliases;
 /// existing WITH aliases retain their meaning.
 /// Repeated key expressions share storage while retaining their output slots.
-/// HAVING is three-valued Boolean over returned aliases and
-/// literals/parameters; ORDER BY also uses returned aliases. Keys may be renamed
-/// in RETURN. output_slots() maps written column order to GraphAggregateRow's
+/// HAVING and ORDER BY share typed expressions over returned aliases, grouping
+/// keys and hidden aggregate calls. HAVING preserves exact comparisons and
+/// three-valued Boolean logic; computed scalar aliases retain lazy CASE and
+/// COALESCE evaluation. Keys may be renamed in RETURN.
+/// output_slots() maps written column order to GraphAggregateRow's
 /// separate key/summary arrays. No cast to a narrower scalar domain occurs.
 ///
 /// One frozen parameter/catalog contract spans the complete statement. Binding
@@ -132,6 +134,7 @@ pub struct PreparedGraphPipelineAggregateText {
     pub(crate) names: Vec<String>,
     pub(crate) slots: Vec<GraphAggregateTextSlot>,
     pub(crate) having: Vec<ReadFilterOp>,
+    pub(crate) having_expression: Option<crate::graph_text::HavingTemplate>,
     pub(crate) having_columns: Vec<GraphAggregateColumn>,
     pub(crate) ordering: Vec<GraphAggregateOrder>,
     pub(crate) offset: ReadPageNumber,
@@ -294,6 +297,10 @@ impl PreparedGraphPipelineAggregateText {
                 }
             }
         }
+        if let Some(expression) = &self.having_expression {
+            bytes.extend_from_slice(b"fgdb:pipeline-aggregate-having:v1\0");
+            expression.append_template_transcript(&mut bytes);
+        }
         bytes
     }
 
@@ -412,7 +419,7 @@ impl PreparedGraphPipelineAggregateText {
         let mut operators = Vec::new();
         input_operators(&mut operators, &self.input);
         operators.push("Aggregate");
-        if !self.having.is_empty() {
+        if !self.having.is_empty() || self.having_expression.is_some() {
             operators.push("SelectHaving");
         }
         if !self.ordering.is_empty()

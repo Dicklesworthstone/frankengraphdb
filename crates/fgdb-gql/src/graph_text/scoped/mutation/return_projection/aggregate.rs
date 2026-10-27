@@ -716,8 +716,8 @@ impl PreparedGraphPipelineAggregateText {
                         kind,
                     )
                 }
-                // Addressed only through the output projection; HAVING and
-                // ORDER BY over it refuse below.
+                // A computed alias resolves through its output expression;
+                // this placeholder is never its HAVING evaluation column.
                 ReturnedValue::Computed(_) => (
                     GraphAggregateTextSlot::Aggregate(0),
                     GraphAggregateColumn::Aggregate(0),
@@ -739,22 +739,33 @@ impl PreparedGraphPipelineAggregateText {
         // here could resolve `n.p` to an output of the same width.
         let input_visible = parser.visible_width(&schema);
         parser.boundary_reads = None;
-        if !computed_at.is_empty() && parser.is_word("HAVING") {
-            return Err(expected(
-                parser.current.at,
-                "HAVING beside an aggregate RETURN item without a combined expression",
-            ));
-        }
         let having_at = parser.current.at;
-        let mut having = Vec::new();
-        if parser.take_word("HAVING")? {
-            parser.row_disjunction(&output_schema, 0, &mut having)?;
-            // Only static NULL placeholders are used for argument shape checks.
-            // Actual values are rebound to the exact HAVING program below.
-            let _ = bind_having(&having, &having_columns, None, having_at)?;
-        }
+        let visible_summaries = summaries.len();
         parser.projected_sources =
             (!order_sources.is_empty()).then_some((output_schema.len(), order_sources));
+        let mut having_expression = order::having(
+            &mut parser,
+            &schema,
+            input_visible,
+            &output_schema,
+            &having_columns,
+            &computed_at,
+            output.as_deref(),
+            &keys,
+            &mut inputs,
+            &mut summaries,
+        )?;
+        let having = if let Some(filter) = having_expression.as_ref().and_then(|expression| {
+            expression.row_filter(&having_columns, &parser.syntax.parameters)
+        }) {
+            // Only static NULL placeholders are used for argument shape checks.
+            // Actual values are rebound to the exact HAVING program below.
+            let _ = bind_having(&filter, &having_columns, None, having_at)?;
+            having_expression = None;
+            filter
+        } else {
+            Vec::new()
+        };
         let order = order::parse(
             &mut parser,
             &schema,
@@ -767,7 +778,7 @@ impl PreparedGraphPipelineAggregateText {
             &mut summaries,
         )?;
         parser.projected_sources = None;
-        if !order.computed.is_empty() {
+        if !order.computed.is_empty() || summaries.len() != visible_summaries {
             if output.is_none() {
                 output = Some(
                     returned
@@ -828,6 +839,7 @@ impl PreparedGraphPipelineAggregateText {
             names,
             slots,
             having,
+            having_expression,
             having_columns,
             ordering: order.evaluation,
             offset,
@@ -904,6 +916,9 @@ impl PreparedGraphPipelineAggregateText {
                     offset: self.having_at,
                     kind: Kind::Having(kind),
                 })?;
+        }
+        if let Some(expression) = &self.having_expression {
+            query = expression.attach(query, &values)?;
         }
         Ok(query)
     }
