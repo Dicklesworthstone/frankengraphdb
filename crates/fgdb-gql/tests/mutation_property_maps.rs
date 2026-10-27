@@ -400,3 +400,486 @@ fn deleted_vertex_maps_and_cascaded_edge_maps_never_return_frozen_properties() {
         Err(GraphMutationQueryBuildError::Binding { binding: 0 })
     ));
 }
+
+mod dynamic_metadata {
+    use super::*;
+    use fgdb_delta_types::{ElementId, LabelId};
+    use fgdb_gql::{
+        GlaExecutionEvent, GraphElementMetadata, GraphElementMetadataError, GraphElementReader,
+        GraphMutationIntent, with_element_metadata,
+    };
+
+    #[derive(Clone, Copy)]
+    struct MetadataCatalog;
+    impl GraphSymbolResolver for MetadataCatalog {
+        fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            match (kind, name) {
+                (GraphSymbolKind::Label, "Before") => Some(GraphSymbol::Label(LabelId(1))),
+                (GraphSymbolKind::Label, "After") => Some(GraphSymbol::Label(LabelId(2))),
+                _ => symbols(kind, name),
+            }
+        }
+        fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+            let mut catalog = Catalog(Some("q")).reverse_catalog().unwrap();
+            catalog.insert_label(LabelId(1), "Before");
+            catalog.insert_label(LabelId(2), "After");
+            catalog.insert_relation(R, "R");
+            Some(catalog)
+        }
+    }
+
+    fn reader<'a>(
+        fixture: &'a Fixture,
+        metadata_calls: &'a Cell<usize>,
+        hidden: bool,
+    ) -> impl GraphElementReader<()> + 'a {
+        let labels = list(vec![text("Before")]);
+        let relation = text("R");
+        with_element_metadata(
+            move |element, key| {
+                let map = match element {
+                    ElementId::Vertex(vertex) => fixture.vertices.get(&vertex),
+                    ElementId::Edge(edge) => fixture.edge_maps.get(&edge),
+                };
+                Ok(property(map, key)
+                    .cloned()
+                    .map(CanonicalPropertyValue::from))
+            },
+            move |element, kind, _catalog, control| {
+                metadata_calls.set(metadata_calls.get() + 1);
+                let map = match element {
+                    ElementId::Vertex(vertex) => fixture.vertices.get(&vertex),
+                    ElementId::Edge(edge) => fixture.edge_maps.get(&edge),
+                };
+                if hidden || map.is_none() {
+                    return Ok(None);
+                }
+                let mut charge =
+                    |event| control(event).map_err(|()| GraphElementMetadataError::Interrupted);
+                let map = map.unwrap();
+                if kind == GraphElementMetadata::Keys {
+                    charge(GlaExecutionEvent::ScratchEntry)?;
+                    let mut values = Vec::new();
+                    for key in map.as_map().unwrap().0 {
+                        for _ in 0..=key
+                            .len()
+                            .div_ceil(fgdb_gql::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+                        {
+                            charge(GlaExecutionEvent::ScratchEntry)?;
+                        }
+                        values.push(text(key));
+                    }
+                    return Ok(Some(list(values)));
+                }
+                let value = match kind {
+                    GraphElementMetadata::Labels => &labels,
+                    GraphElementMetadata::Type => &relation,
+                    GraphElementMetadata::Properties => map,
+                    GraphElementMetadata::Keys => unreachable!(),
+                };
+                value.copy_with_control(&mut charge).map(Some)
+            },
+        )
+    }
+
+    fn execute(
+        fixture: &Fixture,
+        query: &PreparedGraphMutationQuery,
+        allowance: GraphMutationPolicy,
+        calls: &Cell<usize>,
+        hidden: bool,
+        checkpoint: impl FnMut() -> Result<(), ()>,
+    ) -> ResultOf {
+        query.execute_governed_reading(
+            allowance,
+            |pattern, budget| fixture.source(pattern, budget),
+            reader(fixture, calls, hidden),
+            checkpoint,
+        )
+    }
+
+    #[test]
+    fn computed_identities_read_final_property_label_and_relationship_metadata() {
+        let fixture = Fixture::new();
+        let query = prepare(
+            "MATCH (a)-[r:R]->(b) SET a.p=b.p,a.q=NULL,r.q=r.p+1,a:After \
+             REMOVE a.old,r.old,r.p,a:Before \
+             RETURN properties([a][0]) AS node,keys([a][0]) AS names,\
+             labels([a][0]) AS labels,properties([r][0]) AS edge,\
+             type([r][0]) AS relation ORDER BY edge",
+            MetadataCatalog,
+        );
+        let calls = Cell::new(0);
+        let batch = execute(&fixture, &query, policy(), &calls, false, || Ok(())).unwrap();
+        assert_eq!(
+            rows(&batch),
+            [12, 13]
+                .into_iter()
+                .map(|q| vec![
+                    map(vec![("keep", int(7)), ("p", int(20)), ("q", null())]),
+                    list(vec![text("keep"), text("p"), text("q")]),
+                    list(vec![text("After")]),
+                    map(vec![("q", int(q))]),
+                    text("R"),
+                ])
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(calls.get(), 10);
+        assert_eq!(
+            fixture.vertices[&VId(1)],
+            map(vec![("p", int(10)), ("old", int(3)), ("keep", int(7)),])
+        );
+    }
+
+    #[test]
+    fn simultaneous_rhs_is_frozen_and_grouped_tail_metadata_sees_all_proposals() {
+        let fixture = Fixture::new();
+        let query = prepare(
+            "MATCH (a)-[r:R]->(b) \
+             SET a.q=properties([a][0]).p,a.p=99,r.q=properties([r][0]).p,a:After \
+             WITH collect(a) AS ns,collect(r) AS rs \
+             RETURN properties(ns[0]).q AS old,properties(ns[0]).p AS final,\
+             [x IN ns | labels(x)] AS labels,[x IN rs | keys(x)] AS keys,\
+             [x IN rs | type(x)] AS types",
+            MetadataCatalog,
+        );
+        let batch = execute(&fixture, &query, policy(), &Cell::new(0), false, || Ok(())).unwrap();
+        assert_eq!(
+            rows(&batch),
+            vec![vec![
+                int(10),
+                int(99),
+                list(vec![list(vec![text("Before"), text("After")]); 2]),
+                list(vec![list(vec![text("old"), text("p"), text("q")]); 2]),
+                list(vec![text("R"), text("R")]),
+            ]]
+        );
+        assert!(batch.mutation().intents().iter().any(|intent| matches!(
+            intent,
+            GraphMutationIntent::StoredProperty { target: ElementId::Vertex(VId(1)), key: Q, value }
+                if value.as_scalar() == Some(&CanonicalScalar::Int(10))
+        ) || matches!(
+            intent,
+            GraphMutationIntent::Property { vertex: VId(1), key: Q, value: Some(value) }
+                if value.as_scalar() == Some(&CanonicalScalar::Int(10))
+        )));
+    }
+
+    #[test]
+    fn input_relations_and_aggregate_arguments_share_the_reader() {
+        let fixture = Fixture::new();
+        for statement in [
+            "MATCH (n) WITH n,properties([n][0]).p AS old \
+             SET n.p=old+1 RETURN properties([n][0]).p AS p ORDER BY p",
+            "MATCH (n) SET n.p=n.p+1 WITH properties([n][0]).p AS p RETURN p ORDER BY p",
+        ] {
+            let query = prepare(statement, MetadataCatalog);
+            let result =
+                execute(&fixture, &query, policy(), &Cell::new(0), false, || Ok(())).unwrap();
+            assert_eq!(
+                rows(&result),
+                vec![vec![int(11)], vec![int(21)]],
+                "{statement}"
+            );
+        }
+        let query = prepare(
+            "MATCH (n) SET n.p=n.p+1 RETURN collect(properties([n][0]).p) AS ps",
+            MetadataCatalog,
+        );
+        let result = execute(&fixture, &query, policy(), &Cell::new(0), false, || Ok(())).unwrap();
+        assert_eq!(rows(&result), vec![vec![list(vec![int(11), int(21)])]]);
+    }
+
+    #[test]
+    fn create_and_insert_output_bind_metadata_of_new_identities() {
+        use fgdb_gql::PreparedGraphInsertQueryText;
+        use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertRequest};
+
+        let fixture = Fixture::new();
+        for keyword in ["CREATE", "INSERT"] {
+            for tail in [
+                "RETURN properties([a][0]) AS node,labels([a][0]) AS labels,\
+                 properties([r][0]) AS edge,keys([r][0]) AS names,type([r][0]) AS relation",
+                "WITH [a] AS ns,[r] AS rs RETURN properties(ns[0]) AS node,labels(ns[0]) AS labels,\
+                 properties(rs[0]) AS edge,keys(rs[0]) AS names,type(rs[0]) AS relation",
+            ] {
+                let statement = format!(
+                    "{keyword} (a:Before {{p:10,old:3,keep:7}})-[r:R {{p:11,old:8}}]->(b:Before {{p:20}}) {tail}"
+                );
+                let query = PreparedGraphInsertQueryText::prepare(&statement, R, MetadataCatalog)
+                    .unwrap()
+                    .bind_parameters(&GqlParameters::new())
+                    .unwrap();
+                let collection = query
+                    .collect_governed_over(
+                        None,
+                        GraphInsertPolicy::new(policy().query, 100, 100),
+                        |_: &PreparedGraphPattern<GraphValueRow>, _: GqlQueryPolicy|
+                         -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<(), ()>> {
+                            panic!("standalone insertion has no graph source")
+                        },
+                        |request| {
+                            Ok::<_, ()>(match request {
+                                GraphInsertRequest::Vertex { row: 0, vertex } => {
+                                    ElementId::Vertex(VId(1 + vertex as u128))
+                                }
+                                GraphInsertRequest::Edge { row: 0, edge } => {
+                                    ElementId::Edge(EId(11 + edge as u128))
+                                }
+                                _ => panic!("one creation occurrence"),
+                            })
+                        },
+                        || Ok(()),
+                    )
+                    .unwrap();
+                let (insertion, output) = collection.into_parts();
+                assert_eq!(insertion.stats().created_vertices, 2);
+                assert_eq!(insertion.stats().created_edges, 1);
+                // The DB stages the returned intents before this boundary.
+                // This fixture supplies those exact final records; the law
+                // exercises the real parser, binder and output evaluator.
+                let calls = Cell::new(0);
+                let result = output
+                    .finish_governed_reading::<(), ()>(reader(&fixture, &calls, false), || Ok(()))
+                    .unwrap();
+                assert_eq!(
+                    result.value[0].values(),
+                    &[
+                        fixture.vertices[&VId(1)].clone(),
+                        list(vec![text("Before")]),
+                        fixture.edge_maps[&EId(11)].clone(),
+                        list(vec![text("old"), text("p")]),
+                        text("R"),
+                    ],
+                    "{statement}"
+                );
+                assert_eq!(calls.get(), 5);
+            }
+        }
+    }
+
+    #[test]
+    fn vertex_merge_and_upsert_outputs_retain_metadata_catalog_and_reader() {
+        use fgdb_gql::{
+            GlaExecutionStats, GqlExecutionStats, GraphVertexMergeRowsBinding,
+            GraphVertexReturnBinding, GraphWriteChainStep, PreparedGraphVertexUpsertQueryText,
+            PreparedGraphWriteChainText,
+        };
+
+        let fixture = Fixture::new();
+        let suffix =
+            "RETURN properties([n][0]) AS node,keys([n][0]) AS names,labels([n][0]) AS labels";
+        let expected = vec![
+            fixture.vertices[&VId(1)].clone(),
+            list(vec![text("keep"), text("old"), text("p")]),
+            list(vec![text("Before")]),
+        ];
+        for actions in ["", "ON CREATE SET n.old=3,n.keep=7"] {
+            let statement = format!("MERGE (n:Before {{p:10}}) {actions} {suffix}");
+            let query = PreparedGraphVertexUpsertQueryText::prepare(&statement, R, MetadataCatalog)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            assert_eq!(query.bindings(), &[GraphVertexReturnBinding::Vertex]);
+            let calls = Cell::new(0);
+            let result = query
+                .project_governed_reading::<(), ()>(
+                    vec![GraphValue::Vertex(VId(1))],
+                    GqlExecutionStats::default(),
+                    GlaExecutionStats::default(),
+                    policy().query,
+                    reader(&fixture, &calls, false),
+                    || Ok(()),
+                )
+                .unwrap();
+            assert_eq!(result.value[0].values(), expected);
+            assert_eq!(calls.get(), 3);
+        }
+        for suffix in [
+            suffix,
+            "WITH collect(n) AS ns WHERE size(ns)>0 RETURN properties(ns[0]) AS node,\
+             keys(ns[0]) AS names,labels(ns[0]) AS labels",
+        ] {
+            let statement = format!("CREATE (audit) WITH audit MERGE (n:Before {{p:10}}) {suffix}");
+            let chain = PreparedGraphWriteChainText::prepare(&statement, R, MetadataCatalog)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            let [_, GraphWriteChainStep::VertexMergeQuery(query)] = chain.steps() else {
+                panic!("owned-row vertex merge query");
+            };
+            assert_eq!(query.bindings(), &[GraphVertexMergeRowsBinding::Vertex]);
+            let calls = Cell::new(0);
+            let result = query
+                .finish_governed_reading::<(), ()>(
+                    vec![vec![GraphValue::Vertex(VId(1))]],
+                    GqlExecutionStats::default(),
+                    GlaExecutionStats::default(),
+                    policy().query,
+                    reader(&fixture, &calls, false),
+                    || Ok(()),
+                )
+                .unwrap();
+            assert_eq!(result.value[0].values(), expected, "{statement}");
+            assert_eq!(calls.get(), 3);
+        }
+    }
+
+    #[test]
+    fn relationship_merge_and_upsert_outputs_retain_metadata_catalog_and_reader() {
+        use fgdb_gql::{
+            GlaExecutionStats, GqlExecutionStats, GraphEdgeMergeBinding, GraphEdgeReturnBinding,
+            PreparedGraphEdgeMergeQueryText, PreparedGraphEdgeUpsertQueryText,
+        };
+
+        let fixture = Fixture::new();
+        let suffix =
+            "RETURN properties([r][0]) AS edge,keys([r][0]) AS names,type([r][0]) AS relation";
+        let expected = vec![
+            fixture.edge_maps[&EId(11)].clone(),
+            list(vec![text("old"), text("p")]),
+            text("R"),
+        ];
+        let query = PreparedGraphEdgeMergeQueryText::prepare(
+            &format!("MATCH (a),(b) MERGE (a)-[r:R]->(b) {suffix}"),
+            R,
+            MetadataCatalog,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        assert_eq!(query.bindings(), &[GraphEdgeMergeBinding::Edge]);
+        let calls = Cell::new(0);
+        let result = query
+            .finish_governed_reading::<(), ()>(
+                vec![vec![GraphValue::Edge(EId(11))]],
+                GqlExecutionStats::default(),
+                GlaExecutionStats::default(),
+                policy().query,
+                reader(&fixture, &calls, false),
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(result.value[0].values(), expected);
+        assert_eq!(calls.get(), 3);
+        let query = PreparedGraphEdgeUpsertQueryText::prepare(
+            &format!("MATCH (a),(b) MERGE (a)-[r:R]->(b) ON CREATE SET r.p=11,r.old=8 {suffix}"),
+            R,
+            MetadataCatalog,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        assert_eq!(query.bindings(), &[GraphEdgeReturnBinding::Edge]);
+        let calls = Cell::new(0);
+        let result = query
+            .project_governed_reading::<(), ()>(
+                Some(vec![GraphValue::Edge(EId(11))]),
+                GqlExecutionStats::default(),
+                GlaExecutionStats::default(),
+                policy().query,
+                reader(&fixture, &calls, false),
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(result.value[0].values(), expected);
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn deletion_and_cascade_refuse_before_reading_old_metadata() {
+        let fixture = Fixture::new();
+        for statement in [
+            "MATCH (n) DETACH DELETE n RETURN labels([n][0]) AS names",
+            "MATCH (a)-[r:R]->(b) DELETE r RETURN type([r][0]) AS relation",
+            "MATCH (a)-[r:R]->(b) DETACH DELETE a RETURN keys([r][0]) AS names",
+        ] {
+            let query = prepare(statement, MetadataCatalog);
+            let calls = Cell::new(0);
+            assert!(
+                execute(&fixture, &query, policy(), &calls, false, || Ok(())).is_err(),
+                "{statement}"
+            );
+            assert_eq!(calls.get(), 0, "{statement}");
+        }
+    }
+
+    #[test]
+    fn lazy_metadata_and_masked_values_do_not_gain_authority_from_assignments() {
+        let fixture = Fixture::new();
+        let query = prepare(
+            "MATCH (n) SET n.p=99 RETURN CASE WHEN false THEN labels([n][0]) ELSE NULL END AS names",
+            MetadataCatalog,
+        );
+        assert_eq!(
+            rows(&fixture.execute(&query, policy()).unwrap()),
+            vec![vec![null()]; 2]
+        );
+        let query = prepare(
+            "MATCH (n) SET n.p=99,n:After RETURN properties([n][0]) AS m,labels([n][0]) AS ls",
+            MetadataCatalog,
+        );
+        assert!(
+            fixture.execute(&query, policy()).is_err(),
+            "missing capability refuses"
+        );
+        assert_eq!(
+            rows(&execute(&fixture, &query, policy(), &Cell::new(0), true, || Ok(())).unwrap()),
+            vec![vec![null(), null()]; 2],
+        );
+    }
+
+    #[test]
+    fn every_metadata_cancellation_and_cumulative_quota_refuses_without_a_batch() {
+        let fixture = Fixture::new();
+        let query = prepare(
+            "MATCH (n) SET n.q=[n.p,42],n:After REMOVE n.old \
+             RETURN properties([n][0]) AS p,keys([n][0]) AS k,labels([n][0]) AS ls LIMIT 0",
+            MetadataCatalog,
+        );
+        let polls = Cell::new(0);
+        let batch = execute(&fixture, &query, policy(), &Cell::new(0), false, || {
+            polls.set(polls.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+        assert!(batch.returning().value.is_empty());
+        assert!(!batch.mutation().intents().is_empty());
+        for stop in 1..=polls.get() {
+            let seen = Cell::new(0);
+            let result = execute(&fixture, &query, policy(), &Cell::new(0), false, || {
+                seen.set(seen.get() + 1);
+                if seen.get() == stop { Err(()) } else { Ok(()) }
+            });
+            assert!(
+                matches!(result, Err(GqlQueryError::Interrupted(()))),
+                "checkpoint {stop}: {result:?}"
+            );
+            assert_eq!(seen.get(), stop, "nothing runs after refusal");
+        }
+        let measured = batch.returning();
+        let exact = GraphMutationPolicy::new(
+            GqlQueryPolicy::new(
+                measured.rows.snapshot_records,
+                0,
+                measured.evaluator.work_units,
+                measured.evaluator.scratch_entries,
+            ),
+            policy().max_effects,
+        );
+        let again = execute(&fixture, &query, exact, &Cell::new(0), false, || Ok(())).unwrap();
+        assert_eq!(again.returning().evaluator, measured.evaluator);
+        for allowance in [
+            GraphMutationPolicy::new(
+                GqlQueryPolicy::new(10_000, 0, measured.evaluator.work_units - 1, 1_000_000),
+                policy().max_effects,
+            ),
+            GraphMutationPolicy::new(
+                GqlQueryPolicy::new(10_000, 0, 1_000_000, measured.evaluator.scratch_entries - 1),
+                policy().max_effects,
+            ),
+        ] {
+            assert!(execute(&fixture, &query, allowance, &Cell::new(0), false, || Ok(())).is_err());
+        }
+    }
+}

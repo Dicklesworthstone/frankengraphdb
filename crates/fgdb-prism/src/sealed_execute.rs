@@ -1143,8 +1143,12 @@ impl EncodedRows {
         checkpoint()?;
         let value = match values {
             KernelValues::HubsAndAuthorities { hubs, authorities } => {
-                let hub = *hubs.get(index).ok_or(ExecutionError::InvalidUpstreamResult)?;
-                let authority = *authorities.get(index).ok_or(ExecutionError::InvalidUpstreamResult)?;
+                let hub = *hubs
+                    .get(index)
+                    .ok_or(ExecutionError::InvalidUpstreamResult)?;
+                let authority = *authorities
+                    .get(index)
+                    .ok_or(ExecutionError::InvalidUpstreamResult)?;
                 if !hub.is_finite() || hub < 0.0 || !authority.is_finite() || authority < 0.0 {
                     return Err(ExecutionError::InvalidNumericResult.into());
                 }

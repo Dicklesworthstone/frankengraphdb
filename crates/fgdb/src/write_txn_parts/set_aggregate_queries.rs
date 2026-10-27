@@ -248,23 +248,37 @@ mod set_aggregate_queries {
                 .map_err(|error| GqlQueryError::Source(GraphAggregateError::Source(error)))?;
             cx.with_restriction(|| {
                 let element_failure = std::cell::RefCell::new(None);
-                let result = query.execute_governed_with_elements(
+                let result = query.execute_governed_from_source(
                     policy,
-                    |pattern, remaining| {
-                        self.execute_graph_pattern_governed(database, cx, pattern, remaining)
-                    },
-                    |call, arguments, remaining| {
-                        self.execute_procedure_governed(database, cx, call, arguments, remaining)
-                    },
                     fgdb_gql::with_element_metadata(
-                        |element, key| {
-                            self.element_property_with_checkpoint(
-                                database,
-                                cx,
-                                &element_failure,
-                                element,
-                                key,
-                            )
+                        fgdb_gql::WithElementReads {
+                            source: fgdb_gql::WithProcedures {
+                                patterns: |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
+                                    fgdb_gql::algebra::GraphValueRow,
+                                >,
+                                           remaining| {
+                                    self.execute_graph_pattern_governed(
+                                        database, cx, pattern, remaining,
+                                    )
+                                },
+                                procedures:
+                                    |call: &fgdb_gql::PreparedProcedureCall,
+                                     arguments: &[fgdb_gql::algebra::GraphValue],
+                                     remaining| {
+                                        self.execute_procedure_governed(
+                                            database, cx, call, arguments, remaining,
+                                        )
+                                    },
+                            },
+                            elements: |element, key| {
+                                self.element_property_with_checkpoint(
+                                    database,
+                                    cx,
+                                    &element_failure,
+                                    element,
+                                    key,
+                                )
+                            },
                         },
                         |element, kind, catalog, control| {
                             self.element_metadata_with_checkpoint(

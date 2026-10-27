@@ -1351,7 +1351,11 @@ impl FnxCallSpec {
                 admit("iterations", max_iter, limits.max_iterations)?;
             }
             FnxAlgorithm::HitsCentrality => {
-                admit("iterations", crate::hits::MAX_ITERATIONS, limits.max_iterations)?;
+                admit(
+                    "iterations",
+                    crate::hits::MAX_ITERATIONS,
+                    limits.max_iterations,
+                )?;
             }
             _ => {}
         }
@@ -1395,9 +1399,12 @@ impl FnxCallSpec {
                 crate::directed_clustering::estimated_work(graph, &mut checkpoint)?,
             ),
             FnxAlgorithm::InDegreeCentrality | FnxAlgorithm::OutDegreeCentrality => Some(n),
-            FnxAlgorithm::HitsCentrality => {
-                Some(crate::hits::estimated_work::<C>(n, arcs, n, self.outputs().len())?)
-            }
+            FnxAlgorithm::HitsCentrality => Some(crate::hits::estimated_work::<C>(
+                n,
+                arcs,
+                n,
+                self.outputs().len(),
+            )?),
             FnxAlgorithm::Foundation(algorithm) => {
                 crate::foundation::estimated_work(algorithm, n, arcs)
             }

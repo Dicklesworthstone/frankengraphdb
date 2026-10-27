@@ -169,18 +169,14 @@ impl<V: Vfs + Clone> Database<V> {
                                 &controls,
                             )
                         },
-                        |element, key| {
-                            scoped_element_property(
-                                transaction,
-                                self,
-                                query_cx,
-                                verified.predicates(),
-                                &element_failure,
-                                element,
-                                key,
-                                &controls,
-                            )
-                        },
+                        scoped_element_reader(
+                            transaction,
+                            self,
+                            query_cx,
+                            verified.predicates(),
+                            &element_failure,
+                            &controls,
+                        ),
                         || {
                             if let Some(error) = element_failure.borrow_mut().take() {
                                 return Err(WriteTxnError::Interrupted(error));
@@ -448,18 +444,14 @@ fn select_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
                     &execution,
                 )
             },
-            |element, key| {
-                scoped_element_property(
-                    transaction,
-                    database,
-                    cx,
-                    scope,
-                    &element_failure,
-                    element,
-                    key,
-                    &execution,
-                )
-            },
+            scoped_element_reader(
+                transaction,
+                database,
+                cx,
+                scope,
+                &element_failure,
+                &execution,
+            ),
             || {
                 if let Some(error) = element_failure.borrow_mut().take() {
                     return Err(WriteTxnError::Interrupted(error));
@@ -506,6 +498,55 @@ fn scoped_element_property<V: Vfs + Clone, Clock: FnMut() -> u64>(
         }
         result => result,
     }
+}
+
+fn scoped_element_reader<'a, V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &'a WriteTxn,
+    database: &'a Database<V>,
+    cx: &'a QueryCx,
+    scope: &'a PlannerPredicates,
+    failure: &'a RefCell<Option<Box<asupersync::error::Error>>>,
+    execution: &'a RefCell<&mut Execution<'_, '_, Clock>>,
+) -> impl fgdb_gql::GraphElementReader<WriteTxnError> + 'a {
+    fgdb_gql::with_element_metadata(
+        move |element, key| {
+            scoped_element_property(
+                transaction,
+                database,
+                cx,
+                scope,
+                failure,
+                element,
+                key,
+                execution,
+            )
+        },
+        move |element, kind, catalog, control| {
+            use fgdb_gql::GraphElementMetadataError;
+            if let Some(error) = failure.borrow().as_ref() {
+                return Err(GraphElementMetadataError::Source(
+                    WriteTxnError::Interrupted(error.clone()),
+                ));
+            }
+            let result = selection::returning_element_metadata(
+                transaction,
+                database,
+                cx,
+                element,
+                kind,
+                catalog,
+                scope,
+                execution,
+                control,
+            );
+            if let Err(GraphElementMetadataError::Source(WriteTxnError::Interrupted(error))) =
+                &result
+            {
+                failure.borrow_mut().get_or_insert_with(|| error.clone());
+            }
+            result
+        },
+    )
 }
 
 // Both mutation surfaces authorize the same original intents. The projected

@@ -23,6 +23,11 @@ struct PointProperties<'a> {
     >,
 }
 
+struct PointEdgeMetadata<'a> {
+    relation: RelationId,
+    properties: PointProperties<'a>,
+}
+
 impl<'a> PointProperties<'a> {
     fn new(base: &'a [(fgdb_delta_types::PropertyKeyId, CanonicalPropertyValue)]) -> Self {
         Self {
@@ -347,6 +352,99 @@ impl WriteTxn {
             }
         }
         Ok(labels)
+    }
+
+    /// Borrow an edge's immutable type and effective fields at the transaction
+    /// cut. Retirement may occur through either endpoint's canonical cascade;
+    /// it never requires cloning the historical edge or interpreting intents.
+    fn edge_metadata_with_control<'a, V: Vfs + Clone, E>(
+        &'a self,
+        database: &'a Database<V>,
+        edge: EId,
+        visible: &mut impl FnMut(fgdb_delta_types::PropertyKeyId) -> bool,
+        poll: &mut impl FnMut() -> Result<(), E>,
+        control: &mut impl FnMut(crate::gql_exec::source::SourceEvent) -> Result<(), E>,
+        source_error: &impl Fn(WriteTxnError) -> E,
+    ) -> Result<Option<PointEdgeMetadata<'a>>, E> {
+        use crate::gql_exec::source::{SourceEvent, edge_properties_at};
+        use fgdb_delta_types::DeltaRow;
+        let snapshot = self.query_snapshot(database).map_err(source_error)?;
+        control(SourceEvent::Work)?;
+        let coordinate = snapshot.adjacency_index().statement_at_controlled(
+            &snapshot.blocks,
+            edge,
+            self.basis,
+            control,
+        )?;
+        let mut endpoints = None;
+        let mut projected = match coordinate {
+            Some((block, row)) => {
+                control(SourceEvent::SnapshotRecord)?;
+                let edge = &snapshot.blocks[block][row];
+                endpoints = Some((edge.src, edge.dst));
+                let properties = edge_properties_at(&snapshot.block_props, block, row);
+                Some(PointEdgeMetadata {
+                    relation: edge.relation,
+                    properties: PointProperties::new(properties),
+                })
+            }
+            None => None,
+        };
+        if let Some(prepared) = &self.prepared {
+            for coordinate in prepared.template.coordinate_entries() {
+                poll()?;
+                for effect in &coordinate.rows {
+                    poll()?;
+                    match effect {
+                        DeltaRow::CreateEdge {
+                            eid,
+                            src,
+                            relation,
+                            dst,
+                            props,
+                            ..
+                        } if *eid == edge => {
+                            control(SourceEvent::Work)?;
+                            endpoints = Some((*src, *dst));
+                            projected = Some(PointEdgeMetadata {
+                                relation: *relation,
+                                properties: PointProperties::new(props),
+                            });
+                        }
+                        DeltaRow::DeleteVertex {
+                            vid,
+                            sorted_retired_incident_edges,
+                            ..
+                        } if endpoints.is_some_and(|(src, dst)| *vid == src || *vid == dst) => {
+                            control(SourceEvent::Work)?;
+                            if point_find(sorted_retired_incident_edges, edge, |id| *id, control)?
+                                .is_some()
+                            {
+                                projected = None;
+                            }
+                        }
+                        DeltaRow::DeleteEdge { eid, .. } if *eid == edge => {
+                            control(SourceEvent::Work)?;
+                            projected = None;
+                        }
+                        DeltaRow::Property {
+                            elem: ElementId::Edge(eid),
+                            property,
+                            after,
+                            ..
+                        } if *eid == edge && visible(*property) => {
+                            if let Some(projected) = &mut projected {
+                                control(SourceEvent::Work)?;
+                                control(SourceEvent::ScratchEntry)?;
+                                projected.properties.edits.insert(*property, after.as_ref());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok(projected)
     }
 
     fn point_projection<'a, V: Vfs + Clone>(

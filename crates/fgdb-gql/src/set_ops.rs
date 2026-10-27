@@ -1255,16 +1255,13 @@ impl PreparedGraphSet {
             GqlQueryPolicy,
         )
             -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        elements: &mut dyn FnMut(
-            fgdb_delta_types::ElementId,
-            fgdb_delta_types::PropertyKeyId,
-        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        elements: &mut ElementRead<'_, E>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
         let patterns: &mut DynPatterns<'_, E, C> = &mut patterns;
-        let mut source = WithElementReads {
-            source: PatternSource { patterns },
-            elements,
+        let mut source = BorrowedSource {
+            source: &mut PatternSource { patterns },
+            elements: Some(elements),
         };
         let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
         execute::execute(self, policy, &mut source, checkpoint)

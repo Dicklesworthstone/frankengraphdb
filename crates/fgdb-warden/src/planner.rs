@@ -220,6 +220,15 @@ impl PlannerPredicates {
         self.properties.contains(&property) && !self.denied_properties.contains(&property)
     }
 
+    /// Borrow the exact field domain needed by a complete-map or key-set
+    /// transactional observation. This is metadata about an already verified
+    /// predicate, not a grant to read a property or an element. A retaining
+    /// host must charge any owned copy and still admit element visibility.
+    #[must_use]
+    pub fn property_visibility(&self) -> (&Scope<PropertyKeyId>, &BTreeSet<PropertyKeyId>) {
+        (&self.properties, &self.denied_properties)
+    }
+
     /// Apply before admitting an edge into scans, adjacency, degree, or paths.
     /// Both endpoint predicates are required, including intermediate vertices
     /// that do not appear in the query's RETURN clause.

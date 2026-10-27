@@ -64,28 +64,7 @@ impl WriteTxn {
                 |eid| names.edge_type(eid),
                 |vid| Ok(maps.vertices.get(&vid)),
                 |eid| Ok(maps.edges.get(&eid)),
-                fgdb_gql::with_element_metadata(
-                    |element, key| {
-                        self.element_property_with_checkpoint(
-                            database,
-                            cx,
-                            &element_failure,
-                            element,
-                            key,
-                        )
-                    },
-                    |element, kind, catalog, control| {
-                        self.element_metadata_with_checkpoint(
-                            database,
-                            cx,
-                            &element_failure,
-                            element,
-                            kind,
-                            catalog,
-                            control,
-                        )
-                    },
-                ),
+                self.element_reader_with_checkpoint(database, cx, &element_failure),
                 usage.remaining(policy),
                 || {
                     let stopped = element_failure.borrow_mut().take();
@@ -110,8 +89,8 @@ impl WriteTxn {
     /// tracking, even for an empty set or LIMIT 0. A later set-stage refusal
     /// never erases observations already retained by an operand.
     /// Properties and metadata of carried vertex/edge values use that same
-    /// basis and staged effects, retaining selected-field or whole-element
-    /// witnesses, including absent identities and new fields.
+    /// basis and staged effects. Complete-field witnesses include absent names
+    /// and preserve the field mask independently of element-lifetime witnesses.
     pub fn execute_graph_set_governed<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
@@ -133,23 +112,36 @@ impl WriteTxn {
                 .query_snapshot(database)
                 .map_err(|error| GqlQueryError::Source(GraphSetExecutionError::Source(error)))?;
             let element_failure = std::cell::RefCell::new(None);
-            let result = query.execute_governed_with_elements(
+            let result = query.execute_governed_from_source(
                 policy,
-                |pattern, allowance| {
-                    self.execute_graph_pattern_governed(database, cx, pattern, allowance)
-                },
-                |call, arguments, allowance| {
-                    self.execute_procedure_governed(database, cx, call, arguments, allowance)
-                },
                 fgdb_gql::with_element_metadata(
-                    |element, key| {
-                        self.element_property_with_checkpoint(
-                            database,
-                            cx,
-                            &element_failure,
-                            element,
-                            key,
-                        )
+                    fgdb_gql::WithElementReads {
+                        source: fgdb_gql::WithProcedures {
+                            patterns: |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
+                                fgdb_gql::algebra::GraphValueRow,
+                            >,
+                                       allowance| {
+                                self.execute_graph_pattern_governed(
+                                    database, cx, pattern, allowance,
+                                )
+                            },
+                            procedures: |call: &fgdb_gql::PreparedProcedureCall,
+                                         arguments: &[fgdb_gql::algebra::GraphValue],
+                                         allowance| {
+                                self.execute_procedure_governed(
+                                    database, cx, call, arguments, allowance,
+                                )
+                            },
+                        },
+                        elements: |element, key| {
+                            self.element_property_with_checkpoint(
+                                database,
+                                cx,
+                                &element_failure,
+                                element,
+                                key,
+                            )
+                        },
                     },
                     |element, kind, catalog, control| {
                         self.element_metadata_with_checkpoint(

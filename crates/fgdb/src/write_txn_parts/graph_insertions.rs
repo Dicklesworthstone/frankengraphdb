@@ -5,6 +5,7 @@ struct InsertGraphSource<'a, V: Vfs> {
     transaction: &'a WriteTxn,
     database: &'a Database<V>,
     cx: &'a fgdb_types::QueryCx,
+    element_failure: &'a std::cell::RefCell<Option<Box<asupersync::error::Error>>>,
 }
 
 impl<V: Vfs + Clone> fgdb_gql::GraphSetSource<WriteTxnError, Box<asupersync::error::Error>>
@@ -36,6 +37,43 @@ impl<V: Vfs + Clone> fgdb_gql::GraphSetSource<WriteTxnError, Box<asupersync::err
             self.cx,
             request,
             policy,
+        ))
+    }
+
+    fn element_property(
+        &mut self,
+        element: ElementId,
+        key: fgdb_delta_types::PropertyKeyId,
+    ) -> Option<Result<Option<CanonicalPropertyValue>, WriteTxnError>> {
+        Some(self.transaction.element_property_with_checkpoint(
+            self.database,
+            self.cx,
+            self.element_failure,
+            element,
+            key,
+        ))
+    }
+
+    fn element_metadata(
+        &mut self,
+        element: ElementId,
+        kind: fgdb_gql::GraphElementMetadata,
+        catalog: &fgdb_gql::ReverseSymbolCatalog,
+        control: &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<
+        Result<
+            Option<fgdb_gql::algebra::GraphValue>,
+            fgdb_gql::GraphElementMetadataError<WriteTxnError>,
+        >,
+    > {
+        Some(self.transaction.element_metadata_with_checkpoint(
+            self.database,
+            self.cx,
+            self.element_failure,
+            element,
+            kind,
+            catalog,
+            control,
         ))
     }
 }
@@ -84,6 +122,7 @@ impl WriteTxn {
         }
         cx.with_restriction(|| {
             let workspace = MutationProgramWorkspace::new(self);
+            let element_failure = std::cell::RefCell::new(None);
             let proposal = query.collect_governed_over(
                 None,
                 policy,
@@ -91,10 +130,18 @@ impl WriteTxn {
                     transaction: workspace.txn,
                     database,
                     cx,
+                    element_failure: &element_failure,
                 },
                 allocate,
-                || cx.checkpoint(),
-            )?;
+                || match element_failure.borrow_mut().take() {
+                    Some(error) => Err(error),
+                    None => cx.checkpoint(),
+                },
+            );
+            let proposal = match element_failure.into_inner() {
+                Some(error) => return Err(GqlQueryError::Interrupted(error)),
+                None => proposal?,
+            };
             let (insertion, output) = proposal.into_parts();
             let (stats, _, _) = workspace
                 .txn
@@ -1018,16 +1065,25 @@ impl WriteTxn {
             }));
         }
         cx.with_restriction(|| {
+            let element_failure = std::cell::RefCell::new(None);
             let proposal = insertion.execute_governed_with_source(
                 policy,
                 InsertGraphSource {
                     transaction: self,
                     database,
                     cx,
+                    element_failure: &element_failure,
                 },
                 allocate,
-                || cx.checkpoint(),
-            )?;
+                || match element_failure.borrow_mut().take() {
+                    Some(error) => Err(error),
+                    None => cx.checkpoint(),
+                },
+            );
+            let proposal = match element_failure.into_inner() {
+                Some(error) => return Err(GqlQueryError::Interrupted(error)),
+                None => proposal?,
+            };
             self.stage_graph_insert_batch_with_independent(
                 database,
                 cx,

@@ -294,17 +294,13 @@ impl<V: Vfs + Clone> Database<V> {
                             )
                             .and_then(selection::scalar)
                         },
-                        |element, key| {
-                            selection::returning_element_property(
-                                transaction,
-                                self,
-                                query_cx,
-                                element,
-                                key,
-                                verified.predicates(),
-                                &controls,
-                            )
-                        },
+                        selection::returning_element_reader(
+                            transaction,
+                            self,
+                            query_cx,
+                            verified.predicates(),
+                            &controls,
+                        ),
                     )
                 })?;
                 let rows =

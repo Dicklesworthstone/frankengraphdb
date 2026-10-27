@@ -60,7 +60,7 @@ impl WriteTxn {
         policy: fgdb_gql::insertion::GraphInsertPolicy,
         allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
     ) -> WriteChainReadResult<A> {
-        use fgdb_gql::{GqlExecutionBudget, GqlQueryError, WithElementReads};
+        use fgdb_gql::{GqlExecutionBudget, GqlQueryError};
         self.ensure_database(database)
             .map_err(write_read_source_error)?;
         admit_write_read(chain, continuation)?;
@@ -81,28 +81,24 @@ impl WriteTxn {
             )?;
             // Pattern, point and metadata reads use this same fully staged
             // overlay. The owned row bag moves through the source once.
-            let failure = std::cell::RefCell::new(None);
-            let source = WithElementReads {
-                source: InsertGraphSource {
-                    transaction: workspace.txn,
-                    database,
-                    cx,
-                },
-                elements: workspace
-                    .txn
-                    .element_reader_with_checkpoint(database, cx, &failure),
+            let element_failure = std::cell::RefCell::new(None);
+            let source = InsertGraphSource {
+                transaction: workspace.txn,
+                database,
+                cx,
+                element_failure: &element_failure,
             };
             let returning =
                 chain.finish_read_continuation(continuation, head, policy.query, source, || {
-                    match failure.borrow_mut().take() {
+                    match element_failure.borrow_mut().take() {
                         Some(error) => Err(error),
                         None => cx.checkpoint(),
                     }
                 });
-            let returning = match failure.into_inner() {
-                Some(error) => Err(GqlQueryError::Interrupted(error)),
-                None => returning,
-            }?;
+            let returning = match element_failure.into_inner() {
+                Some(error) => return Err(GqlQueryError::Interrupted(error)),
+                None => returning?,
+            };
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
             workspace.accept();
             Ok((receipt, returning))

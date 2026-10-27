@@ -91,12 +91,10 @@ impl PreparedGraphMutation {
                 input.execute_governed_reading(policy, patterns, elements, checkpoint)
             }
             (None, None) => input.execute_governed(policy, patterns, checkpoint),
-            (Some(rows), mut elements) => {
-                let mut read =
-                    |element, key| elements.as_mut().map(|reader| (*reader)(element, key));
+            (Some(rows), elements) => {
                 let mut source = crate::set_ops::BorrowedSource {
                     source: &mut patterns,
-                    elements: Some(&mut read),
+                    elements,
                 };
                 input.execute_with_source(
                     policy,

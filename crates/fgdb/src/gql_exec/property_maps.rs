@@ -30,7 +30,7 @@ pub(crate) fn metadata<E>(
     record: MetadataRecord<'_>,
     kind: GraphElementMetadata,
     catalog: &ReverseSymbolCatalog,
-    mut visible_label: impl FnMut(LabelId) -> bool,
+    visible_label: impl FnMut(LabelId) -> bool,
     visible_property: impl FnMut(PropertyKeyId) -> bool,
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
     failure: &impl Fn(ReadError) -> E,
@@ -62,28 +62,15 @@ pub(crate) fn metadata<E>(
                 failure,
             )
         }
-        (GraphElementMetadata::Labels, MetadataRecord::Vertex(row)) => {
-            // Stored vertex rows have canonical sorted, unique label IDs, the
-            // same order used by labels() over a bound pattern variable.
-            collect_labels(
-                row.labels.iter().copied(),
-                catalog,
-                &mut visible_label,
-                control,
-                failure,
-            )
-        }
+        (GraphElementMetadata::Labels, MetadataRecord::Vertex(row)) => collect_labels(
+            row.labels.iter().copied(),
+            catalog,
+            visible_label,
+            control,
+            failure,
+        ),
         (GraphElementMetadata::Type, MetadataRecord::Edge(relation, _)) => {
-            control(SourceEvent::Work)?;
-            let name = catalog
-                .relations
-                .get(&relation)
-                .ok_or_else(|| failure(ReadError::UnmappedRelation(relation)))?;
-            control(SourceEvent::ScratchEntry)?;
-            payload(name.len(), control)?;
-            CanonicalScalar::ucs_basic_text(name)
-                .map(GraphValue::Scalar)
-                .map_err(|_| failure(ReadError::UnmappedRelation(relation)))
+            relation_type(relation, catalog, control, failure)
         }
         // The value evaluator rejects these domains before calling its host.
         // Retain a typed failure if a host invokes this helper independently.
@@ -91,8 +78,8 @@ pub(crate) fn metadata<E>(
     }
 }
 
-/// Property names only, in canonical name order. The iterator exposes keys
-/// without inspecting stored values, including borrowed transaction overlays.
+/// The same bounded key collector also accepts a borrowed canonical overlay.
+/// Values are never inspected: keys() observes membership, not their payloads.
 pub(crate) fn collect_keys<E>(
     properties: impl IntoIterator<Item = PropertyKeyId>,
     catalog: &ReverseSymbolCatalog,
@@ -115,8 +102,6 @@ pub(crate) fn collect_keys<E>(
             .properties
             .get(&key)
             .ok_or_else(|| failure(ReadError::UnmappedProperty(key)))?;
-        // Borrow catalog names until final delivery; never copy a property
-        // value merely to learn its name. Aliases are a typed refusal.
         control(SourceEvent::ScratchEntry)?;
         if names.insert(name.as_str(), key).is_some() {
             return Err(failure(ReadError::InvalidPropertyMap));
@@ -137,8 +122,8 @@ pub(crate) fn collect_keys<E>(
         .ok_or_else(|| failure(ReadError::InvalidPropertyMap))
 }
 
-/// Label names from an already canonical identity-ordered iterator. Borrowed
-/// overlay iterators avoid building an ungoverned intermediate label vector.
+/// Input is canonical sorted, unique label identities, including staged edits.
+/// Mask before naming or retaining a label, just as for committed records.
 pub(crate) fn collect_labels<E>(
     labels: impl IntoIterator<Item = LabelId>,
     catalog: &ReverseSymbolCatalog,
@@ -163,13 +148,32 @@ pub(crate) fn collect_labels<E>(
             .ok_or_else(|| failure(ReadError::UnmappedLabel(label)))?;
         control(SourceEvent::ScratchEntry)?;
         payload(name.len(), control)?;
-        let name = CanonicalScalar::ucs_basic_text(name)
-            .map_err(|_| failure(ReadError::UnmappedLabel(label)))?;
-        names.push(GraphValue::Scalar(name));
+        names.push(GraphValue::Scalar(
+            CanonicalScalar::ucs_basic_text(name)
+                .map_err(|_| failure(ReadError::UnmappedLabel(label)))?,
+        ));
     }
     Some(GraphValue::List(names.into_boxed_slice()))
         .filter(GraphValue::validate_bounds)
         .ok_or_else(|| failure(ReadError::InvalidPropertyMap))
+}
+
+pub(crate) fn relation_type<E>(
+    relation: RelationId,
+    catalog: &ReverseSymbolCatalog,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    failure: &impl Fn(ReadError) -> E,
+) -> Result<GraphValue, E> {
+    control(SourceEvent::Work)?;
+    let name = catalog
+        .relations
+        .get(&relation)
+        .ok_or_else(|| failure(ReadError::UnmappedRelation(relation)))?;
+    control(SourceEvent::ScratchEntry)?;
+    payload(name.len(), control)?;
+    CanonicalScalar::ucs_basic_text(name)
+        .map(GraphValue::Scalar)
+        .map_err(|_| failure(ReadError::UnmappedRelation(relation)))
 }
 
 /// Enumerate effective source properties, never the catalog's known-key set.

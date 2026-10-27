@@ -90,6 +90,174 @@ fn point_scalar_payload_admission<E>(
 }
 
 impl WriteTxn {
+    /// Materialize an already admitted element at this transaction's basis and
+    /// canonical NET effects. The optional scope masks fields and bounds the
+    /// complete-field witness; it does not itself authorize an identity.
+    #[allow(clippy::too_many_arguments)]
+    fn admitted_element_metadata_with_control<V: Vfs + Clone, E>(
+        &self,
+        database: &Database<V>,
+        element: ElementId,
+        kind: fgdb_gql::GraphElementMetadata,
+        catalog: &fgdb_gql::ReverseSymbolCatalog,
+        scope: Option<&fgdb_warden::PlannerPredicates>,
+        poll: &mut impl FnMut() -> Result<(), E>,
+        control: &mut impl FnMut(crate::gql_exec::source::SourceEvent) -> Result<(), E>,
+        source_error: &impl Fn(WriteTxnError) -> E,
+    ) -> Result<Option<fgdb_gql::algebra::GraphValue>, E> {
+        use crate::gql_exec::{property_maps, source::SourceEvent};
+        use fgdb_gql::GraphElementMetadata;
+        let _ = self.query_snapshot(database).map_err(source_error)?;
+        control(SourceEvent::Work)?;
+        let mut attempt = ProjectionReadAttempt {
+            reads: &self.point_reads,
+            element,
+            accepted: false,
+        };
+        for _ in 0..2 {
+            control(SourceEvent::ScratchEntry)?;
+        }
+        self.point_reads.borrow_mut().record(
+            element,
+            match element {
+                ElementId::Vertex(_) => PointReadField::VertexExistence,
+                ElementId::Edge(_) => PointReadField::EdgeTopology,
+            },
+        );
+        if let Some(domain) = PointMetadataRead::admit(kind, scope, control)? {
+            for _ in 0..2 {
+                control(SourceEvent::ScratchEntry)?;
+            }
+            self.point_reads
+                .borrow_mut()
+                .record_metadata(element, domain);
+        }
+        let visible_property = |key| scope.is_none_or(|scope| scope.allows_property(key));
+        let visible_label = |label| scope.is_none_or(|scope| scope.allows_label(label));
+        let read_error = |error| source_error(WriteTxnError::Read(error));
+        // Authorized physical searches and hidden effects only poll. Native
+        // reads preserve their physical work accounting. Visible sparse edits
+        // reserve their borrowed entry before either host retains it.
+        let poll = std::cell::RefCell::new(poll);
+        let value = match (element, kind) {
+            (ElementId::Vertex(vertex), GraphElementMetadata::Labels) => {
+                let labels = self.vertex_labels_with_control(
+                    database,
+                    vertex,
+                    &mut |label| visible_label(label),
+                    &mut || (poll.borrow_mut())(),
+                    &mut |event| match event {
+                        SourceEvent::Work | SourceEvent::SnapshotRecord if scope.is_some() => {
+                            (poll.borrow_mut())()
+                        }
+                        _ => control(event),
+                    },
+                    source_error,
+                )?;
+                labels
+                    .as_ref()
+                    .map(|labels| {
+                        property_maps::collect_labels(
+                            labels.effective_labels_iter(),
+                            catalog,
+                            visible_label,
+                            control,
+                            &read_error,
+                        )
+                    })
+                    .transpose()?
+            }
+            (
+                ElementId::Vertex(vertex),
+                GraphElementMetadata::Properties | GraphElementMetadata::Keys,
+            ) => {
+                let properties = self.vertex_properties_with_control(
+                    database,
+                    vertex,
+                    &mut |key| visible_property(key),
+                    &mut || (poll.borrow_mut())(),
+                    &mut |event| match event {
+                        SourceEvent::Work | SourceEvent::SnapshotRecord if scope.is_some() => {
+                            (poll.borrow_mut())()
+                        }
+                        _ => control(event),
+                    },
+                    source_error,
+                )?;
+                properties
+                    .as_ref()
+                    .map(|properties| match kind {
+                        GraphElementMetadata::Properties => property_maps::collect(
+                            properties.effective_properties(),
+                            Some(catalog),
+                            visible_property,
+                            control,
+                            &read_error,
+                        ),
+                        _ => property_maps::collect_keys(
+                            properties.effective_properties().map(|(key, _)| key),
+                            catalog,
+                            visible_property,
+                            control,
+                            &read_error,
+                        ),
+                    })
+                    .transpose()?
+            }
+            (
+                ElementId::Edge(edge),
+                GraphElementMetadata::Properties
+                | GraphElementMetadata::Keys
+                | GraphElementMetadata::Type,
+            ) => {
+                let projected = self.edge_metadata_with_control(
+                    database,
+                    edge,
+                    &mut |key| kind != GraphElementMetadata::Type && visible_property(key),
+                    &mut || (poll.borrow_mut())(),
+                    &mut |event| match event {
+                        SourceEvent::Work | SourceEvent::SnapshotRecord if scope.is_some() => {
+                            (poll.borrow_mut())()
+                        }
+                        _ => control(event),
+                    },
+                    source_error,
+                )?;
+                projected
+                    .as_ref()
+                    .map(|projected| match kind {
+                        GraphElementMetadata::Properties => property_maps::collect(
+                            projected.properties.effective_properties(),
+                            Some(catalog),
+                            visible_property,
+                            control,
+                            &read_error,
+                        ),
+                        GraphElementMetadata::Keys => property_maps::collect_keys(
+                            projected
+                                .properties
+                                .effective_properties()
+                                .map(|(key, _)| key),
+                            catalog,
+                            visible_property,
+                            control,
+                            &read_error,
+                        ),
+                        _ => property_maps::relation_type(
+                            projected.relation,
+                            catalog,
+                            control,
+                            &read_error,
+                        ),
+                    })
+                    .transpose()?
+            }
+            _ => return Err(read_error(crate::ReadError::InvalidPropertyMap)),
+        };
+        attempt.accepted = true;
+        Ok(value)
+    }
+
     // A carried identity reads the same borrowed historical winner and prepared
     // NET effects as explicit point projections. The relational engine already
     // charges the expression's work and copied payload; physical lookup and

@@ -243,17 +243,13 @@ impl<V: Vfs + Clone> Database<V> {
                                 control,
                             )
                         },
-                        |element, key| {
-                            selection::returning_element_property(
-                                transaction,
-                                self,
-                                query_cx,
-                                element,
-                                key,
-                                verified.predicates(),
-                                &controls,
-                            )
-                        },
+                        selection::returning_element_reader(
+                            transaction,
+                            self,
+                            query_cx,
+                            verified.predicates(),
+                            &controls,
+                        ),
                     )
                 })?;
                 let rows = u64::try_from(result.value.len())
@@ -883,17 +879,7 @@ mod all_targets {
                 stats.merge.match_selection,
                 evaluator,
                 policy.merge.query,
-                |element, key| {
-                    selection::returning_element_property(
-                        transaction,
-                        database,
-                        cx,
-                        element,
-                        key,
-                        scope,
-                        &controls,
-                    )
-                },
+                selection::returning_element_reader(transaction, database, cx, scope, &controls),
                 || {
                     cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                     controls.borrow_mut().checkpoint()

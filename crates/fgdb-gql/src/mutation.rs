@@ -813,14 +813,16 @@ impl PreparedGraphMutation {
             .map(|(batch, _)| batch)
     }
 
-    /// [`Self::execute_governed`] with the host's element property reader
+    /// [`Self::execute_governed`] with the host's element reader
     /// (fgdb-694ga). `x.key` of an element the input relation or a
     /// right-hand side computes (`WITH collect(n) AS ns UNWIND ns AS m SET
-    /// m.q = m.p * 3`) reads `elements(element, key)` at the statement's
+    /// m.q = m.p * 3`) reads `elements.element_property(element, key)` at the statement's
     /// frozen selection cut, under the same authorization as `source`.
     /// `Ok(None)` is an absent property. Without a reader that read stays a
     /// typed error. The reader retains its point witnesses and never observes
     /// this statement's own proposed assignments.
+    /// Dynamic labels/type/keys/properties use the same frozen reader and
+    /// reserve their owned metadata through the expression's cumulative meter.
     pub fn execute_governed_reading<E, C>(
         &self,
         policy: GraphMutationPolicy,
@@ -828,7 +830,7 @@ impl PreparedGraphMutation {
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalPropertyValue>, E>,
+        elements: impl crate::GraphElementReader<E>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
         self.execute_governed_over_reading(None, policy, source, elements, checkpoint)
@@ -845,7 +847,7 @@ impl PreparedGraphMutation {
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        mut elements: impl FnMut(ElementId, PropertyKeyId) -> Result<Option<CanonicalPropertyValue>, E>,
+        mut elements: impl crate::GraphElementReader<E>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
         collect::execute(
@@ -854,7 +856,7 @@ impl PreparedGraphMutation {
             None,
             owned,
             source,
-            Some(&mut elements),
+            Some(&mut crate::set_ops::projection::HostElements(&mut elements)),
             checkpoint,
         )
         .map(|(batch, _)| batch)

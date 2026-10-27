@@ -289,3 +289,179 @@ fn physical_interruption_retains_refusal_witness_and_native_overlay_still_wins()
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+fn metadata_catalog() -> fgdb_gql::ReverseSymbolCatalog {
+    let mut catalog = fgdb_gql::ReverseSymbolCatalog::new();
+    catalog.insert_property(P, "p");
+    catalog.insert_property(PropertyKeyId(2), "second");
+    catalog.insert_label(VISIBLE, "Visible");
+    catalog.insert_relation(R, "R");
+    catalog
+}
+
+fn observe_metadata(
+    txn: &WriteTxn,
+    db: &Database<MemVfs>,
+    element: ElementId,
+    kind: fgdb_gql::GraphElementMetadata,
+    scope: &PlannerPredicates,
+) -> fgdb_gql::algebra::GraphValue {
+    // This is the same original-object admission used by the signed host.
+    // Its field/lifetime witnesses must remain independent of the map domain.
+    match element {
+        ElementId::Vertex(vertex) => {
+            assert!(mutation_vertex_visible(txn, db, vertex, scope, &mut || Ok(())).unwrap());
+        }
+        ElementId::Edge(edge) => {
+            let (source, relation, target) = mutation_edge_topology(txn, db, edge, &mut || Ok(()))
+                .unwrap()
+                .unwrap();
+            assert!(scope.allows_relation(relation));
+            for vertex in [source, target] {
+                assert!(mutation_vertex_visible(txn, db, vertex, scope, &mut || Ok(())).unwrap());
+            }
+        }
+    }
+    txn.admitted_element_metadata_with_control(
+        db,
+        element,
+        kind,
+        &metadata_catalog(),
+        Some(scope),
+        &mut || Ok::<(), WriteTxnError>(()),
+        &mut |_| Ok(()),
+        &core::convert::identity,
+    )
+    .unwrap()
+    .unwrap()
+}
+
+#[test]
+fn complete_metadata_observes_visible_insertion_gaps_without_hidden_or_keys_value_conflicts() {
+    use fgdb_gql::{GraphElementMetadata, algebra::GraphValue};
+    let (_, report) = run_async_under_lab(0xb174, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let scope = predicates();
+        for element in [ElementId::Vertex(VId(1)), ElementId::Edge(EId(1))] {
+            for kind in [GraphElementMetadata::Properties, GraphElementMetadata::Keys] {
+                for key in [PropertyKeyId(2), P, HIDDEN, PropertyKeyId(11)] {
+                    let mut db = database(&contexts.commit(), 1, CanonicalScalar::Int(7)).await;
+                    let txn_cx = contexts.txn();
+                    let mut txn = db.begin(&txn_cx).unwrap();
+                    let observed = observe_metadata(&txn, &db, element, kind, &scope);
+                    let expected = match kind {
+                        GraphElementMetadata::Properties => GraphValue::map(vec![(
+                            "p".into(),
+                            GraphValue::Scalar(CanonicalScalar::Int(7)),
+                        )])
+                        .unwrap(),
+                        _ => GraphValue::List(
+                            vec![GraphValue::Scalar(
+                                CanonicalScalar::ucs_basic_text("p").unwrap(),
+                            )]
+                            .into_boxed_slice(),
+                        ),
+                    };
+                    assert_eq!(
+                        observed, expected,
+                        "hidden unmapped fields are masked before naming"
+                    );
+                    let mut change = WriteBatch::new(R);
+                    match element {
+                        ElementId::Vertex(vertex) => {
+                            change.set_vertex_property(vertex, key, Some(CanonicalScalar::Int(19)))
+                        }
+                        ElementId::Edge(edge) => {
+                            change.set_edge_property(edge, key, Some(CanonicalScalar::Int(19)))
+                        }
+                    };
+                    db.write(&contexts.commit(), change).await.unwrap();
+                    let result = txn.refresh_snapshot(&db, &txn_cx);
+                    let conflict = key == PropertyKeyId(2)
+                        || (key == P && kind == GraphElementMetadata::Properties);
+                    if conflict {
+                        assert!(
+                            matches!(
+                                result,
+                                Err(WriteTxnError::Write(
+                                    crate::WriteError::FirstCommitterWins {
+                                        law: "FG-LAW-FCW-READ-01",
+                                        ..
+                                    }
+                                ))
+                            ),
+                            "{element:?} {kind:?} {key:?}: {result:?}"
+                        );
+                    } else {
+                        assert!(result.is_ok(), "{element:?} {kind:?} {key:?}: {result:?}");
+                    }
+                    txn.abort();
+                    assert_eq!(txn_cx.outstanding_obligations(), 0);
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn metadata_keeps_endpoint_visibility_observations_and_refused_reads_survive_retry() {
+    use fgdb_gql::GraphElementMetadata;
+    let (_, report) = run_async_under_lab(0xb175, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let scope = predicates();
+        let mut db = database(&contexts.commit(), 1, CanonicalScalar::Int(7)).await;
+        let txn_cx = contexts.txn();
+        let mut txn = db.begin(&txn_cx).unwrap();
+        let edge = ElementId::Edge(EId(1));
+        observe_metadata(&txn, &db, edge, GraphElementMetadata::Keys, &scope);
+        let mut change = WriteBatch::new(R);
+        change.set_vertex_label(VId(2), VISIBLE, false);
+        db.write(&contexts.commit(), change).await.unwrap();
+        assert!(matches!(
+            txn.refresh_snapshot(&db, &txn_cx),
+            Err(WriteTxnError::Write(
+                crate::WriteError::FirstCommitterWins {
+                    law: "FG-LAW-FCW-READ-01",
+                    ..
+                }
+            ))
+        ));
+        txn.abort();
+        assert_eq!(txn_cx.outstanding_obligations(), 0);
+
+        let mut db = database(&contexts.commit(), 1, CanonicalScalar::Int(7)).await;
+        let txn_cx = contexts.txn();
+        let mut txn = db.begin(&txn_cx).unwrap();
+        let element = ElementId::Vertex(VId(1));
+        let refused = txn.admitted_element_metadata_with_control(
+            &db,
+            element,
+            GraphElementMetadata::Properties,
+            &metadata_catalog(),
+            Some(&scope),
+            &mut || Err("physical cancellation"),
+            &mut |_| Ok(()),
+            &|_| "source",
+        );
+        assert_eq!(refused, Err("physical cancellation"));
+        assert_eq!(txn.point_reads.borrow().1, Some(element));
+        observe_metadata(&txn, &db, element, GraphElementMetadata::Properties, &scope);
+        assert_eq!(txn.point_reads.borrow().1, Some(element));
+        let mut change = WriteBatch::new(R);
+        change.set_vertex_property(VId(1), HIDDEN, Some(CanonicalScalar::Int(19)));
+        db.write(&contexts.commit(), change).await.unwrap();
+        assert!(matches!(
+            txn.refresh_snapshot(&db, &txn_cx),
+            Err(WriteTxnError::Write(
+                crate::WriteError::FirstCommitterWins {
+                    law: "FG-LAW-FCW-READ-01",
+                    ..
+                }
+            ))
+        ));
+        txn.abort();
+        assert_eq!(txn_cx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

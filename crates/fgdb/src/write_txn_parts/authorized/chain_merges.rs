@@ -447,17 +447,13 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
                     stats.selection,
                     stats.evaluator,
                     policy.query,
-                    |element, key| {
-                        selection::returning_element_property(
-                            transaction,
-                            database,
-                            cx,
-                            element,
-                            key,
-                            scope,
-                            &controls,
-                        )
-                    },
+                    selection::returning_element_reader(
+                        transaction,
+                        database,
+                        cx,
+                        scope,
+                        &controls,
+                    ),
                     || {
                         cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                         controls.borrow_mut().checkpoint()
@@ -769,17 +765,13 @@ pub(super) fn execute_actions<V: Vfs + Clone, Clock: FnMut() -> u64>(
                     stats.selection,
                     stats.evaluator,
                     policy.query,
-                    |element, key| {
-                        selection::returning_element_property(
-                            transaction,
-                            database,
-                            cx,
-                            element,
-                            key,
-                            scope,
-                            &controls,
-                        )
-                    },
+                    selection::returning_element_reader(
+                        transaction,
+                        database,
+                        cx,
+                        scope,
+                        &controls,
+                    ),
                     || {
                         cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                         controls.borrow_mut().checkpoint()

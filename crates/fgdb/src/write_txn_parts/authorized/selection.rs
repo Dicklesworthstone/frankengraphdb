@@ -244,6 +244,36 @@ pub(super) fn mutation_element_property<V: Vfs + Clone, Clock: FnMut() -> u64>(
     if !scope.allows_property(key) {
         return Ok(None);
     }
+    if !mutation_element_visible(transaction, database, cx, element, scope, execution)? {
+        return Ok(None);
+    }
+    property(
+        transaction,
+        database,
+        element,
+        key,
+        scope,
+        || {
+            cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+            execution.borrow_mut().poll()
+        },
+        &mut |_| {
+            cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+            execution.borrow_mut().checkpoint()
+        },
+        core::convert::identity,
+    )
+    .map(Some)
+}
+
+fn mutation_element_visible<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    cx: &QueryCx,
+    element: ElementId,
+    scope: &PlannerPredicates,
+    execution: &RefCell<&mut Execution<'_, '_, Clock>>,
+) -> Result<bool, WriteTxnError> {
     // Reserve the visibility witnesses and temporary label slots before any
     // hidden metadata is examined. This worst-case bound depends only on the
     // signed predicate and caller-supplied value kind, including missing and
@@ -271,42 +301,26 @@ pub(super) fn mutation_element_property<V: Vfs + Clone, Clock: FnMut() -> u64>(
     match element {
         ElementId::Vertex(vertex) => {
             if !mutation_vertex_visible(transaction, database, vertex, scope, &mut poll)? {
-                return Ok(None);
+                return Ok(false);
             }
         }
         ElementId::Edge(edge) => {
             let Some((source, relation, target)) =
                 mutation_edge_topology(transaction, database, edge, &mut poll)?
             else {
-                return Ok(None);
+                return Ok(false);
             };
             if !scope.allows_relation(relation) {
-                return Ok(None);
+                return Ok(false);
             }
             for vertex in [source, target] {
                 if !mutation_vertex_visible(transaction, database, vertex, scope, &mut poll)? {
-                    return Ok(None);
+                    return Ok(false);
                 }
             }
         }
     }
-    property(
-        transaction,
-        database,
-        element,
-        key,
-        scope,
-        || {
-            cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-            execution.borrow_mut().poll()
-        },
-        &mut |_| {
-            cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-            execution.borrow_mut().checkpoint()
-        },
-        core::convert::identity,
-    )
-    .map(Some)
+    Ok(true)
 }
 
 /// A computed MERGE output may name any identity, including a parameter's.
@@ -326,6 +340,94 @@ pub(super) fn returning_element_property<V: Vfs + Clone, Clock: FnMut() -> u64>(
         return Err(WriteTxnError::Authorization(Error::PermissionDenied));
     }
     mutation_element_property(transaction, database, cx, element, key, scope, execution)
+}
+
+/// Complete metadata of a carried identity uses the same original-object
+/// admission as scalar reads, including both endpoints. Only after admission
+/// may the collector name visible fields or retain their insertion-gap mask.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn returning_element_metadata<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    cx: &QueryCx,
+    element: ElementId,
+    kind: fgdb_gql::GraphElementMetadata,
+    catalog: &fgdb_gql::ReverseSymbolCatalog,
+    scope: &PlannerPredicates,
+    execution: &RefCell<&mut Execution<'_, '_, Clock>>,
+    control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>,
+) -> Result<Option<fgdb_gql::algebra::GraphValue>, fgdb_gql::GraphElementMetadataError<WriteTxnError>>
+{
+    use crate::gql_exec::source::SourceEvent;
+    use fgdb_gql::GraphElementMetadataError;
+    if !scope.rights().can_read() {
+        return Err(GraphElementMetadataError::Source(
+            WriteTxnError::Authorization(Error::PermissionDenied),
+        ));
+    }
+    if !mutation_element_visible(transaction, database, cx, element, scope, execution)
+        .map_err(GraphElementMetadataError::Source)?
+    {
+        return Ok(None);
+    }
+    transaction.admitted_element_metadata_with_control(
+        database,
+        element,
+        kind,
+        catalog,
+        Some(scope),
+        &mut || {
+            cx.checkpoint()
+                .map_err(WriteTxnError::Interrupted)
+                .map_err(GraphElementMetadataError::Source)?;
+            execution
+                .borrow_mut()
+                .poll()
+                .map_err(GraphElementMetadataError::Source)
+        },
+        &mut |event| {
+            cx.checkpoint()
+                .map_err(WriteTxnError::Interrupted)
+                .map_err(GraphElementMetadataError::Source)?;
+            execution
+                .borrow_mut()
+                .checkpoint()
+                .map_err(GraphElementMetadataError::Source)?;
+            control(match event {
+                SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                SourceEvent::Work | SourceEvent::SnapshotRecord => GlaExecutionEvent::Work,
+            })
+            .map_err(|()| GraphElementMetadataError::Interrupted)
+        },
+        &GraphElementMetadataError::Source,
+    )
+}
+
+pub(super) fn returning_element_reader<'a, V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &'a WriteTxn,
+    database: &'a Database<V>,
+    cx: &'a QueryCx,
+    scope: &'a PlannerPredicates,
+    execution: &'a RefCell<&mut Execution<'_, '_, Clock>>,
+) -> impl fgdb_gql::GraphElementReader<WriteTxnError> + 'a {
+    fgdb_gql::with_element_metadata(
+        move |element, key| {
+            returning_element_property(transaction, database, cx, element, key, scope, execution)
+        },
+        move |element, kind, catalog, control| {
+            returning_element_metadata(
+                transaction,
+                database,
+                cx,
+                element,
+                kind,
+                catalog,
+                scope,
+                execution,
+                control,
+            )
+        },
+    )
 }
 
 /// A [`property`] value for a consumer that holds only a scalar: a stored

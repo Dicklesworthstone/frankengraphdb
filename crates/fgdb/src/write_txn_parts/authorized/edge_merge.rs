@@ -268,17 +268,13 @@ impl<V: Vfs + Clone> Database<V> {
                             stats.match_selection,
                             stats.evaluator,
                             policy.query,
-                            |element, key| {
-                                selection::returning_element_property(
-                                    transaction,
-                                    self,
-                                    query_cx,
-                                    element,
-                                    key,
-                                    verified.predicates(),
-                                    &controls,
-                                )
-                            },
+                            selection::returning_element_reader(
+                                transaction,
+                                self,
+                                query_cx,
+                                verified.predicates(),
+                                &controls,
+                            ),
                             checkpoint,
                         )
                         .map_err(|error| error.map_source(GraphEdgeMergeQueryError::Returning))

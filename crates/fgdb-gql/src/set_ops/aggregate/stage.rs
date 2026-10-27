@@ -153,6 +153,12 @@ impl WriteReturnGroupSpec {
 }
 
 impl WriteReturnGroup {
+    pub(crate) fn may_read_element_properties(&self) -> bool {
+        self.inputs
+            .iter()
+            .any(|value| value.value().may_read_element_properties())
+    }
+
     pub(crate) fn column_types(&self) -> &[GraphSetColumnType] {
         &self.types
     }

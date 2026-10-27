@@ -87,6 +87,47 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64> GraphSetSource<WriteTxnError, WriteT
             self.execution,
         ))
     }
+
+    fn element_property(
+        &mut self,
+        element: fgdb_delta_types::ElementId,
+        key: fgdb_delta_types::PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, WriteTxnError>> {
+        Some(selection::returning_element_property(
+            self.transaction,
+            &self.database.borrow(),
+            self.cx,
+            element,
+            key,
+            self.scope,
+            self.execution,
+        ))
+    }
+
+    fn element_metadata(
+        &mut self,
+        element: fgdb_delta_types::ElementId,
+        kind: fgdb_gql::GraphElementMetadata,
+        catalog: &fgdb_gql::ReverseSymbolCatalog,
+        control: &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<
+        Result<
+            Option<fgdb_gql::algebra::GraphValue>,
+            fgdb_gql::GraphElementMetadataError<WriteTxnError>,
+        >,
+    > {
+        Some(selection::returning_element_metadata(
+            self.transaction,
+            &self.database.borrow(),
+            self.cx,
+            element,
+            kind,
+            catalog,
+            self.scope,
+            self.execution,
+            control,
+        ))
+    }
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -491,23 +532,38 @@ pub(super) fn finish_output<V: Vfs + Clone, Clock: FnMut() -> u64>(
     query_cx.with_restriction(|| {
         let controls = RefCell::new(execution);
         output.finish_governed_reading(
-            |element, key| {
-                if !scope.rights().can_read() {
-                    return Err(WriteTxnError::Authorization(Error::PermissionDenied));
-                }
-                if !scope.allows_property(key) {
-                    return Err(WriteTxnError::Authorization(Error::ScopeDenied));
-                }
-                selection::mutation_element_property(
-                    transaction,
-                    database,
-                    query_cx,
-                    element,
-                    key,
-                    scope,
-                    &controls,
-                )
-            },
+            fgdb_gql::with_element_metadata(
+                |element, key| {
+                    if !scope.rights().can_read() {
+                        return Err(WriteTxnError::Authorization(Error::PermissionDenied));
+                    }
+                    if !scope.allows_property(key) {
+                        return Err(WriteTxnError::Authorization(Error::ScopeDenied));
+                    }
+                    selection::mutation_element_property(
+                        transaction,
+                        database,
+                        query_cx,
+                        element,
+                        key,
+                        scope,
+                        &controls,
+                    )
+                },
+                |element, kind, catalog, control| {
+                    selection::returning_element_metadata(
+                        transaction,
+                        database,
+                        query_cx,
+                        element,
+                        kind,
+                        catalog,
+                        scope,
+                        &controls,
+                        control,
+                    )
+                },
+            ),
             || {
                 query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                 controls.borrow_mut().checkpoint()

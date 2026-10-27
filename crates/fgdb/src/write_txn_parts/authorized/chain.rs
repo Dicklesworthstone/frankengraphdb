@@ -230,6 +230,50 @@ impl<V: Vfs + Clone, Clock: FnMut() -> u64> GraphSetSource<WriteTxnError, WriteT
             self.execution,
         ))
     }
+
+    fn element_property(
+        &mut self,
+        element: fgdb_delta_types::ElementId,
+        key: fgdb_delta_types::PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, WriteTxnError>> {
+        if !self.scope.allows_property(key) {
+            return Some(Err(WriteTxnError::Authorization(Error::ScopeDenied)));
+        }
+        Some(selection::returning_element_property(
+            self.transaction,
+            &self.database.borrow(),
+            self.cx,
+            element,
+            key,
+            self.scope,
+            self.execution,
+        ))
+    }
+
+    fn element_metadata(
+        &mut self,
+        element: fgdb_delta_types::ElementId,
+        kind: fgdb_gql::GraphElementMetadata,
+        catalog: &fgdb_gql::ReverseSymbolCatalog,
+        control: &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<
+        Result<
+            Option<fgdb_gql::algebra::GraphValue>,
+            fgdb_gql::GraphElementMetadataError<WriteTxnError>,
+        >,
+    > {
+        Some(selection::returning_element_metadata(
+            self.transaction,
+            &self.database.borrow(),
+            self.cx,
+            element,
+            kind,
+            catalog,
+            self.scope,
+            self.execution,
+            control,
+        ))
+    }
 }
 
 fn remaining(
@@ -718,24 +762,41 @@ impl<V: Vfs + Clone> Database<V> {
                                 execution: &controls,
                             };
                             let transaction = graph.transaction;
-                            let elements = |element, key| {
-                                // A named hidden field retains the chain's
-                                // explicit-refusal contract. Allowed keys still
-                                // admit arbitrary carried identities and both
-                                // edge endpoints before reading a property.
-                                if !scope.allows_property(key) {
-                                    return Err(WriteTxnError::Authorization(Error::ScopeDenied));
-                                }
-                                selection::mutation_element_property(
-                                    transaction,
-                                    &database.borrow(),
-                                    query_cx,
-                                    element,
-                                    key,
-                                    scope,
-                                    &controls,
-                                )
-                            };
+                            let elements = fgdb_gql::with_element_metadata(
+                                |element, key| {
+                                    // A named hidden field retains the chain's
+                                    // explicit-refusal contract. Allowed keys still
+                                    // admit arbitrary carried identities and both
+                                    // edge endpoints before reading a property.
+                                    if !scope.allows_property(key) {
+                                        return Err(WriteTxnError::Authorization(
+                                            Error::ScopeDenied,
+                                        ));
+                                    }
+                                    selection::mutation_element_property(
+                                        transaction,
+                                        &database.borrow(),
+                                        query_cx,
+                                        element,
+                                        key,
+                                        scope,
+                                        &controls,
+                                    )
+                                },
+                                |element, kind, catalog, control| {
+                                    selection::returning_element_metadata(
+                                        transaction,
+                                        &database.borrow(),
+                                        query_cx,
+                                        element,
+                                        kind,
+                                        catalog,
+                                        scope,
+                                        &controls,
+                                        control,
+                                    )
+                                },
+                            );
                             let allocate = |request| {
                                 database.borrow_mut().allocate_identity(query_cx, request)
                             };

@@ -979,6 +979,13 @@ impl PreparedGraphMutationText {
         if let Some(returning) = &returning {
             returning.admit(&parser.syntax.parameters)?;
         }
+        // Composite RHS and RETURN expressions share the parsed catalog
+        // request even when this mutation has no read-pipeline prefix.
+        // Resolve that request before binding either expression family.
+        parser
+            .syntax
+            .element_catalog
+            .resolve(&mut resolve, statement);
         if unwound.is_some() || row_prefix.is_some() {
             if !projections.is_empty() {
                 return Err(error(

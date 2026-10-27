@@ -124,7 +124,10 @@ fn hits_binds_two_independent_scores_and_preserves_yield_identity() {
     assert_eq!(signature.name, "fnx.hits_centrality");
     assert_eq!(signature.graph_kind, FnxGraphKind::Any);
     assert!(signature.parameters.is_empty());
-    assert_eq!(signature.outputs, &[FnxOutput::Vertex, FnxOutput::Hub, FnxOutput::Authority]);
+    assert_eq!(
+        signature.outputs,
+        &[FnxOutput::Vertex, FnxOutput::Hub, FnxOutput::Authority]
+    );
     assert_eq!(call.algorithm(), FnxAlgorithm::HitsCentrality);
     assert_eq!(call, bind("CALL fnx.hits_centrality() YIELD *"));
     assert!(call.supports_sealed_execution());
@@ -146,7 +149,10 @@ fn hits_binds_two_independent_scores_and_preserves_yield_identity() {
         "CALL fnx.hits_centrality() YIELD hub,hub",
         "CALL fnx.hits_centrality() YIELD node,vertex",
     ] {
-        assert!(FnxCallSpec::bind(text, &FnxParameters::new()).is_err(), "{text}");
+        assert!(
+            FnxCallSpec::bind(text, &FnxParameters::new()).is_err(),
+            "{text}"
+        );
     }
 }
 

@@ -443,38 +443,53 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
     cx.with_restriction(|| {
         let selected = {
             let controls = RefCell::new(&mut *execution);
-            let mut source = fgdb_gql::WithElementReads {
-                source: |pattern: &PreparedGraphPattern<GraphValueRow>, allowance| {
-                    admit_pattern(pattern, scope).map_err(GqlQueryError::Source)?;
-                    selection::select_overlay(
-                        transaction,
-                        database,
-                        cx,
-                        pattern,
-                        scope,
-                        allowance,
-                        &controls,
-                    )
+            let mut source = fgdb_gql::with_element_metadata(
+                fgdb_gql::WithElementReads {
+                    source: |pattern: &PreparedGraphPattern<GraphValueRow>, allowance| {
+                        admit_pattern(pattern, scope).map_err(GqlQueryError::Source)?;
+                        selection::select_overlay(
+                            transaction,
+                            database,
+                            cx,
+                            pattern,
+                            scope,
+                            allowance,
+                            &controls,
+                        )
+                    },
+                    elements: |element, key| {
+                        // Named fields retain the same explicit-refusal contract
+                        // as a MATCH projection. An imported identity confers no
+                        // authority: require Read, admit its visible domain, and
+                        // charge the same signed permit before the point lookup.
+                        if !scope.allows_property(key) {
+                            return Err(WriteTxnError::Authorization(Error::ScopeDenied));
+                        }
+                        selection::returning_element_property(
+                            transaction,
+                            database,
+                            cx,
+                            element,
+                            key,
+                            scope,
+                            &controls,
+                        )
+                    },
                 },
-                elements: |element, key| {
-                    // Named fields retain the same explicit-refusal contract
-                    // as a MATCH projection. An imported identity confers no
-                    // authority: require Read, admit its visible domain, and
-                    // charge the same signed permit before the point lookup.
-                    if !scope.allows_property(key) {
-                        return Err(WriteTxnError::Authorization(Error::ScopeDenied));
-                    }
-                    selection::returning_element_property(
+                |element, kind, catalog, control| {
+                    selection::returning_element_metadata(
                         transaction,
                         database,
                         cx,
                         element,
-                        key,
+                        kind,
+                        catalog,
                         scope,
                         &controls,
+                        control,
                     )
                 },
-            };
+            );
             merge
                 .select_governed_with_source::<WriteTxnError, WriteTxnError, WriteTxnError>(
                     owned,
@@ -825,17 +840,13 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
                     selection,
                     evaluator,
                     policy.query,
-                    |element, key| {
-                        selection::returning_element_property(
-                            transaction,
-                            database,
-                            cx,
-                            element,
-                            key,
-                            scope,
-                            &controls,
-                        )
-                    },
+                    selection::returning_element_reader(
+                        transaction,
+                        database,
+                        cx,
+                        scope,
+                        &controls,
+                    ),
                     || {
                         cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                         controls.borrow_mut().checkpoint()

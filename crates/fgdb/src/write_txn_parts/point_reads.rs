@@ -24,6 +24,93 @@ enum PointReadField {
     EdgeTopology,
 }
 
+/// The complete visible field domain includes names that are absent now.
+/// Keeping only fields present in the result would miss concurrent insertion.
+/// Authorized reads retain this small mask, never the entire capability.
+#[derive(PartialEq, Eq)]
+enum PointFieldDomain<T: Ord> {
+    AllExcept(std::collections::BTreeSet<T>),
+    Only(std::collections::BTreeSet<T>),
+}
+
+impl<T: Ord> PointFieldDomain<T> {
+    fn contains(&self, field: &T) -> bool {
+        match self {
+            Self::AllExcept(excluded) => !excluded.contains(field),
+            Self::Only(included) => included.contains(field),
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum PointMetadataRead {
+    Properties {
+        visible: PointFieldDomain<fgdb_delta_types::PropertyKeyId>,
+        keys_only: bool,
+    },
+    Labels(PointFieldDomain<LabelId>),
+}
+
+impl PointMetadataRead {
+    fn admit<E>(
+        kind: fgdb_gql::GraphElementMetadata,
+        scope: Option<&fgdb_warden::PlannerPredicates>,
+        control: &mut impl FnMut(crate::gql_exec::source::SourceEvent) -> Result<(), E>,
+    ) -> Result<Option<Self>, E> {
+        use crate::gql_exec::source::SourceEvent::ScratchEntry;
+        use fgdb_gql::GraphElementMetadata;
+        use std::collections::BTreeSet;
+        match kind {
+            GraphElementMetadata::Properties | GraphElementMetadata::Keys => {
+                let visible = match scope.map(fgdb_warden::PlannerPredicates::property_visibility) {
+                    None => PointFieldDomain::AllExcept(BTreeSet::new()),
+                    Some((fgdb_warden::Scope::All, denied)) => {
+                        let mut excluded = BTreeSet::new();
+                        for key in denied {
+                            control(ScratchEntry)?;
+                            excluded.insert(*key);
+                        }
+                        PointFieldDomain::AllExcept(excluded)
+                    }
+                    Some((fgdb_warden::Scope::Only(allowed), denied)) => {
+                        let mut included = BTreeSet::new();
+                        for key in allowed {
+                            if !denied.contains(key) {
+                                control(ScratchEntry)?;
+                                included.insert(*key);
+                            }
+                        }
+                        PointFieldDomain::Only(included)
+                    }
+                };
+                Ok(Some(Self::Properties {
+                    visible,
+                    keys_only: kind == GraphElementMetadata::Keys,
+                }))
+            }
+            GraphElementMetadata::Labels => {
+                let visible = match scope {
+                    Some(scope) if scope.vertex_label_dependencies().next().is_some() => {
+                        let mut included = BTreeSet::new();
+                        for label in scope.vertex_label_dependencies() {
+                            if scope.allows_label(label) && !included.contains(&label) {
+                                control(ScratchEntry)?;
+                                included.insert(label);
+                            }
+                        }
+                        PointFieldDomain::Only(included)
+                    }
+                    // An explicit empty clause admits no vertex, so this is
+                    // reachable only for an unrestricted admitted label domain.
+                    _ => PointFieldDomain::AllExcept(BTreeSet::new()),
+                };
+                Ok(Some(Self::Labels(visible)))
+            }
+            GraphElementMetadata::Type => Ok(None),
+        }
+    }
+}
+
 #[derive(Default)]
 struct PointReads(
     std::collections::BTreeMap<ElementId, std::collections::BTreeSet<PointReadField>>,
@@ -32,11 +119,20 @@ struct PointReads(
     Option<ElementId>,
     // Each accepted scan retains its predicate, including an empty result.
     Vec<VertexScanRead>,
+    // Complete-field insertion gaps, scoped independently of element admission.
+    std::collections::BTreeMap<ElementId, Vec<PointMetadataRead>>,
 );
 
 impl PointReads {
     fn record(&mut self, element: ElementId, field: PointReadField) {
         self.0.entry(element).or_default().insert(field);
+    }
+
+    fn record_metadata(&mut self, element: ElementId, domain: PointMetadataRead) {
+        let domains = self.3.entry(element).or_default();
+        if !domains.contains(&domain) {
+            domains.push(domain);
+        }
     }
 
     #[cfg(test)]
@@ -86,13 +182,14 @@ impl PointReads {
     }
 
     fn is_empty(&self) -> bool {
-        self.0.is_empty() && self.1.is_none() && self.2.is_empty()
+        self.0.is_empty() && self.1.is_none() && self.2.is_empty() && self.3.is_empty()
     }
 
     fn clear(&mut self) {
         self.0.clear();
         self.1 = None;
         self.2.clear();
+        self.3.clear();
     }
 
     fn contains(&self, element: ElementId, field: PointReadField) -> bool {
@@ -119,16 +216,41 @@ impl PointReads {
             return Ok(Some(element));
         }
         let target = match row {
-            DeltaRow::Property { elem, property, .. } => {
-                return Ok(self
-                    .contains(*elem, PointReadField::Property(*property))
-                    .then_some(*elem));
+            DeltaRow::Property {
+                elem,
+                property,
+                before,
+                after,
+                ..
+            } => {
+                if self.contains(*elem, PointReadField::Property(*property)) {
+                    return Ok(Some(*elem));
+                }
+                for domain in self.3.get(elem).into_iter().flatten() {
+                    checkpoint()?;
+                    if let PointMetadataRead::Properties { visible, keys_only } = domain
+                        && visible.contains(property)
+                        && (!keys_only || before.is_some() != after.is_some())
+                    {
+                        return Ok(Some(*elem));
+                    }
+                }
+                return Ok(None);
             }
             DeltaRow::LabelMembership { vid, label, .. } => {
                 let element = ElementId::Vertex(*vid);
-                return Ok(self
-                    .contains(element, PointReadField::Label(*label))
-                    .then_some(element));
+                if self.contains(element, PointReadField::Label(*label)) {
+                    return Ok(Some(element));
+                }
+                for domain in self.3.get(&element).into_iter().flatten() {
+                    checkpoint()?;
+                    if let PointMetadataRead::Labels(visible) = domain
+                        && visible.contains(label)
+                    {
+                        return Ok(Some(element));
+                    }
+                }
+                return Ok(None);
             }
             DeltaRow::CreateVertex { vid, .. } => ElementId::Vertex(*vid),
             DeltaRow::CreateEdge {

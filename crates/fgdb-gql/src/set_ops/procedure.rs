@@ -717,7 +717,7 @@ pub struct WithElementReads<S, R> {
     pub elements: R,
 }
 
-/// Pinned element access for the ordinary aggregate binding visitor. A
+/// Pinned element access for aggregate and mutation expression evaluators. A
 /// property callback implements this trait directly; hosts can attach the
 /// same controlled metadata capability used by GraphSetSource through
 /// [`with_element_metadata`]. Every read shares the input's snapshot and
