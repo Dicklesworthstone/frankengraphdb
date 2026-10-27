@@ -43,6 +43,8 @@ mod directional_bfs;
 mod distance;
 #[path = "sealed_eigenvector.rs"]
 mod eigenvector;
+#[path = "sealed_hits.rs"]
+mod hits;
 #[path = "sealed_load.rs"]
 mod load;
 #[path = "sealed_shortest_path.rs"]
@@ -702,6 +704,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::DirectedClusteringCoefficient
                 | FnxAlgorithm::InDegreeCentrality
                 | FnxAlgorithm::OutDegreeCentrality
+                | FnxAlgorithm::HitsCentrality
                 | FnxAlgorithm::Foundation(
                     FoundationAlgorithm::DegreeCentrality
                         | FoundationAlgorithm::ClosenessCentrality
@@ -830,6 +833,9 @@ impl FnxCallSpec {
         }
         if matches!(self.algorithm(), FnxAlgorithm::Cdlp { .. }) {
             return cdlp::execute(self, cx, graph, limits, memory, &admission);
+        }
+        if matches!(self.algorithm(), FnxAlgorithm::HitsCentrality) {
+            return hits::execute(self, cx, graph, limits, memory, &admission);
         }
         if matches!(
             self.algorithm(),
@@ -1136,6 +1142,14 @@ impl EncodedRows {
     ) -> Result<()> {
         checkpoint()?;
         let value = match values {
+            KernelValues::HubsAndAuthorities { hubs, authorities } => {
+                let hub = *hubs.get(index).ok_or(ExecutionError::InvalidUpstreamResult)?;
+                let authority = *authorities.get(index).ok_or(ExecutionError::InvalidUpstreamResult)?;
+                if !hub.is_finite() || hub < 0.0 || !authority.is_finite() || authority < 0.0 {
+                    return Err(ExecutionError::InvalidNumericResult.into());
+                }
+                FnxValue::Score(hub)
+            }
             KernelValues::Scores(values) => {
                 let value = *values
                     .get(index)
@@ -1203,6 +1217,9 @@ impl EncodedRows {
             checkpoint()?;
             let value = match (column.field, value) {
                 (FnxOutput::Vertex, _) => FnxValue::Vertex(vertex),
+                (FnxOutput::Hub | FnxOutput::Authority, _) => {
+                    values.value::<Infallible>(index, column.field, vertices)?
+                }
                 (FnxOutput::Score, FnxValue::Score(value)) => FnxValue::Score(value),
                 (FnxOutput::Distance, FnxValue::Integer(value)) => FnxValue::Integer(value),
                 (FnxOutput::Distance, FnxValue::Float(value)) => FnxValue::Float(value),

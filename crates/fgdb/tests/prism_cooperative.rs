@@ -49,8 +49,10 @@ mod dijkstra;
 mod distance;
 #[path = "prism_cooperative/eigenvector.rs"]
 mod eigenvector;
+#[path = "prism_cooperative/hits.rs"]
+mod hits;
 
-fn retained_calls() -> [FnxCallSpec; 19] {
+fn retained_calls() -> [FnxCallSpec; 20] {
     let bind = |text| FnxCallSpec::bind(text, &FnxParameters::new()).unwrap();
     [
         FnxCallSpec::pagerank(PageRankOptions::fixed_iterations(0.85, 2, true).unwrap()),
@@ -74,6 +76,7 @@ fn retained_calls() -> [FnxCallSpec; 19] {
         bind("CALL fnx.core_number() YIELD core AS value, vertex AS id"),
         bind("CALL fnx.eigenvector_centrality()"),
         bind("CALL fnx.load_centrality()"),
+        bind("CALL fnx.hits_centrality() YIELD authority AS rank,node AS id,hub"),
     ]
 }
 

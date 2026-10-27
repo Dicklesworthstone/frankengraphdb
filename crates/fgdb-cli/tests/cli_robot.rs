@@ -3320,12 +3320,16 @@ fn sealed_prism_cli_matches_decoded_algorithms_and_historical_weights() {
             "undirected",
             "CALL fnx.load_centrality() YIELD score AS centrality,node AS id",
         ),
+        (
+            "directed",
+            "CALL fnx.hits_centrality() YIELD authority AS authority_score,node AS id,hub AS hub_score",
+        ),
     ] {
         let mut args = projection.to_vec();
         args.extend_from_slice(&["--direction", direction, call]);
         let output = sealed_analytics_matches_decoded(&db, &args);
         assert_eq!(output.sequence("rows"), basis);
-        if call.contains("load_centrality") {
+        if call.contains("load_centrality") || call.contains("hits_centrality") {
             let mut cooperative = vec!["--sealed", "--sealed-quantum", "1"];
             cooperative.extend_from_slice(&args);
             let actual = db.command("query", &cooperative);
@@ -3677,6 +3681,10 @@ fn sealed_prism_cli_preflights_before_writable_open() {
         (
             "undirected",
             "CALL fnx.load_centrality() YIELD vertex,score",
+        ),
+        (
+            "reversed",
+            "CALL fnx.hits_centrality() YIELD vertex,hub,authority",
         ),
     ] {
         db.command(

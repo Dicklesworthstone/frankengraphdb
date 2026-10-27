@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 19;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 20;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -53,6 +53,8 @@ pub enum FnxOutput {
     Triangles = 4,
     /// A vertex's k-core number: an exact count.
     Core = 5,
+    Hub = 6,
+    Authority = 7,
 }
 impl FnxOutput {
     pub const fn name(self) -> &'static str {
@@ -63,6 +65,8 @@ impl FnxOutput {
             Self::Component => "component",
             Self::Triangles => "triangles",
             Self::Core => "core",
+            Self::Hub => "hub",
+            Self::Authority => "authority",
         }
     }
     /// Whether `YIELD <name>` selects this field: its registered name, or
@@ -370,6 +374,19 @@ const SIGNATURES: &[FnxSignature] = &[
         "O(|V| * (|V| + |E|)); O(|V|) kernel workspace",
         "fgdb-prism/newman-load-csr-v1",
     ),
+    FnxSignature {
+        name: "fnx.hits_centrality",
+        graph_input_arity: 1,
+        parameters: &[],
+        outputs: &[FnxOutput::Vertex, FnxOutput::Hub, FnxOutput::Authority],
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Any,
+        numeric_profile: "fnx-hits-f64-canonical-node-order-v1",
+        rng_policy: "none",
+        graph_laws: "explicit simple projection; weights ignored; retained self-loops count once per row; uniform initial hubs; at most 100 updates, stopping at absolute hub L1 < 1e-8; last iterate returned at the cap; hubs and authorities each sum-normalized with uniform zero-sum fallback; isolates retained",
+        complexity: "O(k * (|V| + |E|)); O(|V|) kernel workspace",
+        execution_kernel: "fgdb-prism/hits-csr-source-order-v1",
+    },
 ];
 
 const fn directed_degree(name: &'static str, execution_kernel: &'static str) -> FnxSignature {
@@ -698,6 +715,7 @@ pub enum FnxAlgorithm {
     DirectedClusteringCoefficient,
     InDegreeCentrality,
     OutDegreeCentrality,
+    HitsCentrality,
 }
 impl FnxAlgorithm {
     pub fn signature(self) -> &'static FnxSignature {
@@ -716,6 +734,7 @@ impl FnxAlgorithm {
             Self::DirectedClusteringCoefficient => 15,
             Self::InDegreeCentrality => 16,
             Self::OutDegreeCentrality => 17,
+            Self::HitsCentrality => 19,
         }]
     }
 }
@@ -785,6 +804,12 @@ impl FnxCallSpec {
     /// Directed neighbor-union coefficient; requires a directed projection.
     pub fn directed_clustering_coefficient() -> Self {
         Self::new(FnxAlgorithm::DirectedClusteringCoefficient)
+    }
+    /// Pinned HITS hub/authority iteration over the explicit projection.
+    /// The two score columns are separately sum-normalized. At the fixed
+    /// 100-update cap the last iterate is returned, as in the fnx oracle.
+    pub fn hits_centrality() -> Self {
+        Self::new(FnxAlgorithm::HitsCentrality)
     }
     fn new(algorithm: FnxAlgorithm) -> Self {
         Self::compiled(algorithm, default_outputs(algorithm.signature()))
@@ -1087,6 +1112,7 @@ impl FnxCallSpec {
             "fnx.load_centrality" => FnxAlgorithm::Foundation(FoundationAlgorithm::LoadCentrality),
             "fnx.in_degree_centrality" => FnxAlgorithm::InDegreeCentrality,
             "fnx.out_degree_centrality" => FnxAlgorithm::OutDegreeCentrality,
+            "fnx.hits_centrality" => FnxAlgorithm::HitsCentrality,
             "fnx.cdlp" => {
                 let max_iter = match arguments[0] {
                     FnxArgument::Integer(value) if value >= 0 => usize::try_from(value).ok(),

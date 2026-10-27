@@ -136,6 +136,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::DirectedClusteringCoefficient
                 | FnxAlgorithm::InDegreeCentrality
                 | FnxAlgorithm::OutDegreeCentrality
+                | FnxAlgorithm::HitsCentrality
                 | FnxAlgorithm::Foundation(
                     FoundationAlgorithm::DegreeCentrality
                         | FoundationAlgorithm::ClosenessCentrality
@@ -312,6 +313,23 @@ impl FnxCallSpec {
                 return Err(Error::UnsupportedCooperativeAlgorithm(self.algorithm()));
             }
             self.validate_sealed_projection(graph.spec().directedness)?;
+            if matches!(self.algorithm(), FnxAlgorithm::HitsCentrality) {
+                let mut control = Cooperate {
+                    cx,
+                    fuel: SealedScanBudget::new(quantum.get()),
+                    quantum,
+                    yield_now,
+                };
+                return super::hits::execute_cooperative(
+                    self,
+                    graph,
+                    limits,
+                    memory,
+                    delivery,
+                    &mut control,
+                )
+                .await;
+            }
             if matches!(self.algorithm(), FnxAlgorithm::Cdlp { .. }) {
                 let mut control = Cooperate {
                     cx,

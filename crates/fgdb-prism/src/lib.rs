@@ -30,6 +30,7 @@ mod clustering;
 mod directed_clustering;
 mod execute;
 mod foundation;
+mod hits;
 mod input;
 mod projection;
 mod sealed;

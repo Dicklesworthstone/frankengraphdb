@@ -1149,6 +1149,43 @@ mod tests {
     }
 
     #[test]
+    fn sealed_hits_preflight_accepts_all_explicit_graph_kinds_and_both_scores() {
+        for direction in ["directed", "reversed", "undirected"] {
+            let args: Vec<String> = [
+                "--db",
+                "never-opened-database",
+                "--key-file",
+                "never-opened-key",
+                "--sealed",
+                "--relation",
+                "KNOWS=1",
+                "--graph-relation",
+                "KNOWS",
+                "--direction",
+                direction,
+                "CALL fnx.hits_centrality() YIELD authority AS a,node AS id,hub AS h",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+            let options = super::super::parse(&args, "query").unwrap();
+            assert!(options.fnx_call);
+            let prepared = super::prepare(&options).unwrap();
+            assert!(prepared.is_sealed());
+            assert!(prepared.call.supports_sealed_execution());
+            assert_eq!(
+                prepared
+                    .call
+                    .outputs()
+                    .iter()
+                    .map(|column| column.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["a", "id", "h"],
+            );
+        }
+    }
+
+    #[test]
     fn projection_envelopes_use_the_native_host_and_positional_calls_keep_their_route() {
         assert!(is_call(
             "CALL fnx.connected_components() YIELD vertex, component",

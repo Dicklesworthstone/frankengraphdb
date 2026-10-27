@@ -28,6 +28,8 @@ pub struct FnxExecutionLimits {
     /// forward intersection by the smaller endpoint's incidence degree.
     /// Directed degree admits n reads from the incoming or outgoing degree
     /// directory; projection admission is separate.
+    /// HITS includes both row passes and all scalar normalization passes for
+    /// its fixed 100-update cap, plus initialization and output.
     /// Not an observed CPU counter, hard memory quota, or deadline guarantee.
     pub max_estimated_work: usize,
 }
@@ -429,6 +431,10 @@ pub(crate) fn reserve<T, C>(length: usize) -> Result<Vec<T>, FnxExecutionError<C
 
 pub(crate) enum KernelValues {
     Scores(Vec<f64>),
+    HubsAndAuthorities {
+        hubs: Vec<f64>,
+        authorities: Vec<f64>,
+    },
     Distances(Vec<Option<usize>>),
     Components(Vec<usize>),
     WeightedDistances(Vec<Option<f64>>),
@@ -443,13 +449,16 @@ impl KernelValues {
     fn contains(&self, index: usize) -> bool {
         match self {
             Self::Scores(values) => index < values.len(),
+            Self::HubsAndAuthorities { hubs, authorities } => {
+                index < hubs.len() && index < authorities.len()
+            }
             Self::Distances(values) => values.get(index).is_some_and(Option::is_some),
             Self::Components(values) => index < values.len(),
             Self::WeightedDistances(values) => values.get(index).is_some_and(Option::is_some),
             Self::Counts(values) => index < values.len(),
         }
     }
-    fn value<C>(
+    pub(crate) fn value<C>(
         &self,
         index: usize,
         field: FnxOutput,
@@ -462,6 +471,16 @@ impl KernelValues {
                 .map(FnxValue::Vertex)
                 .ok_or(FnxExecutionError::InvalidUpstreamResult),
             (FnxOutput::Score, Self::Scores(values)) => values
+                .get(index)
+                .copied()
+                .map(FnxValue::Score)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult),
+            (FnxOutput::Hub, Self::HubsAndAuthorities { hubs, .. }) => hubs
+                .get(index)
+                .copied()
+                .map(FnxValue::Score)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult),
+            (FnxOutput::Authority, Self::HubsAndAuthorities { authorities, .. }) => authorities
                 .get(index)
                 .copied()
                 .map(FnxValue::Score)
@@ -1331,6 +1350,9 @@ impl FnxCallSpec {
             FnxAlgorithm::Cdlp { max_iter } => {
                 admit("iterations", max_iter, limits.max_iterations)?;
             }
+            FnxAlgorithm::HitsCentrality => {
+                admit("iterations", crate::hits::MAX_ITERATIONS, limits.max_iterations)?;
+            }
             _ => {}
         }
         if !matches!(
@@ -1373,6 +1395,9 @@ impl FnxCallSpec {
                 crate::directed_clustering::estimated_work(graph, &mut checkpoint)?,
             ),
             FnxAlgorithm::InDegreeCentrality | FnxAlgorithm::OutDegreeCentrality => Some(n),
+            FnxAlgorithm::HitsCentrality => {
+                Some(crate::hits::estimated_work::<C>(n, arcs, n, self.outputs().len())?)
+            }
             FnxAlgorithm::Foundation(algorithm) => {
                 crate::foundation::estimated_work(algorithm, n, arcs)
             }
@@ -1396,7 +1421,8 @@ impl FnxCallSpec {
             FnxAlgorithm::Foundation(_)
             | FnxAlgorithm::DirectedClusteringCoefficient
             | FnxAlgorithm::InDegreeCentrality
-            | FnxAlgorithm::OutDegreeCentrality => 0,
+            | FnxAlgorithm::OutDegreeCentrality
+            | FnxAlgorithm::HitsCentrality => 0,
             _ => {
                 let bytes_per_vertex = match algorithm {
                     FnxAlgorithm::SingleSourceShortestPathLength { .. } => {
@@ -1480,6 +1506,11 @@ impl FnxCallSpec {
             FnxAlgorithm::DirectedClusteringCoefficient => {
                 let (output, workspace_bytes) =
                     crate::directed_clustering::run(graph, &mut checkpoint)?;
+                kernel_workspace_bytes = workspace_bytes;
+                output
+            }
+            FnxAlgorithm::HitsCentrality => {
+                let (output, workspace_bytes) = crate::hits::run(graph, &mut checkpoint)?;
                 kernel_workspace_bytes = workspace_bytes;
                 output
             }

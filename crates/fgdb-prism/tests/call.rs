@@ -61,8 +61,8 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    assert_eq!(FnxSignatureRegistry::version(), 19);
-    assert_eq!(FnxSignatureRegistry::signatures().len(), 19);
+    assert_eq!(FnxSignatureRegistry::version(), 20);
+    assert_eq!(FnxSignatureRegistry::signatures().len(), 20);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
     assert_eq!(signature.parameters.len(), 7);
@@ -115,6 +115,39 @@ fn registry_describes_only_the_implemented_in_core_signatures() {
     // and witness on non-convergence, so a refusal would have to invent one.
     assert!(FnxSignatureRegistry::lookup("fnx.katz_centrality").is_none());
     assert!(FnxSignatureRegistry::lookup("pagerank").is_none());
+}
+
+#[test]
+fn hits_binds_two_independent_scores_and_preserves_yield_identity() {
+    let call = FnxCallSpec::hits_centrality();
+    let signature = call.signature();
+    assert_eq!(signature.name, "fnx.hits_centrality");
+    assert_eq!(signature.graph_kind, FnxGraphKind::Any);
+    assert!(signature.parameters.is_empty());
+    assert_eq!(signature.outputs, &[FnxOutput::Vertex, FnxOutput::Hub, FnxOutput::Authority]);
+    assert_eq!(call.algorithm(), FnxAlgorithm::HitsCentrality);
+    assert_eq!(call, bind("CALL fnx.hits_centrality() YIELD *"));
+    assert!(call.supports_sealed_execution());
+    assert!(call.supports_cooperative_sealed_execution());
+    let selected = bind("CALL fnx.hits_centrality() YIELD authority AS rank,node AS id,hub");
+    assert_eq!(selected.outputs()[0].field, FnxOutput::Authority);
+    assert_eq!(selected.outputs()[0].name, "rank");
+    assert_eq!(selected.outputs()[1].field, FnxOutput::Vertex);
+    assert_eq!(selected.outputs()[2].field, FnxOutput::Hub);
+    assert_ne!(selected.digest(), call.digest());
+    assert_ne!(
+        bind("CALL fnx.hits_centrality() YIELD hub AS score").digest(),
+        bind("CALL fnx.hits_centrality() YIELD authority AS score").digest(),
+    );
+    for text in [
+        "CALL fnx.hits_centrality(1)",
+        "CALL fnx.hits_centrality(max_iter => 5)",
+        "CALL fnx.hits_centrality() YIELD score",
+        "CALL fnx.hits_centrality() YIELD hub,hub",
+        "CALL fnx.hits_centrality() YIELD node,vertex",
+    ] {
+        assert!(FnxCallSpec::bind(text, &FnxParameters::new()).is_err(), "{text}");
+    }
 }
 
 #[test]

@@ -311,6 +311,7 @@ pub(crate) fn run<C>(
         | FnxAlgorithm::DirectedClusteringCoefficient
         | FnxAlgorithm::InDegreeCentrality
         | FnxAlgorithm::OutDegreeCentrality
+        | FnxAlgorithm::HitsCentrality
         | FnxAlgorithm::Foundation(_) => Err(FnxExecutionError::InvalidUpstreamResult),
     }
 }
