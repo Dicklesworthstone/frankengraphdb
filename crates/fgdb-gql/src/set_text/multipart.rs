@@ -15,12 +15,14 @@ pub(crate) struct BoundContinuation {
 #[derive(Clone)]
 pub(crate) enum BoundContinuationOperation {
     Match(RowJoinSpec),
-    /// A whole row-scope existence filter. Its graph witnesses remain inside
+    /// A row-scope existence predicate. Its graph witnesses remain inside
     /// an Apply body; the completed outer row keeps its order and multiplicity.
+    /// Some(negated) filters directly; None appends a private Boolean value
+    /// for a compound WHERE expression.
     Exists {
         pattern: Box<BoundSetTextInput>,
         join: RowJoinSpec,
-        negated: bool,
+        negated: Option<bool>,
     },
     Apply {
         body: Box<BoundReadInput>,
@@ -430,8 +432,13 @@ impl BoundReadInput {
                         join,
                         negated,
                     } => {
-                        bytes.push(3);
-                        bytes.push(u8::from(*negated));
+                        if let Some(negated) = negated {
+                            // Preserve the established standalone-filter identity.
+                            bytes.push(3);
+                            bytes.push(u8::from(*negated));
+                        } else {
+                            bytes.push(4);
+                        }
                         join.append_template_transcript(bytes);
                         pattern.append_template_transcript(bytes);
                     }

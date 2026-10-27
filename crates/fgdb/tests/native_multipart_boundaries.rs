@@ -251,6 +251,105 @@ fn multipart_authorized_reads_mask_every_source_and_recheck_reused_templates() {
 }
 
 #[test]
+fn compound_row_existence_uses_native_snapshot_and_capability_boundaries() {
+    let ((), report) = run_async_under_lab(0xa681_0007, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = database(&commit).await;
+        let pinned = db.read_session().unwrap();
+        let text = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x \
+            WHERE (x.n IS NULL AND EXISTS((x)-[:R]->())) \
+               OR CASE WHEN EXISTS((x)-[:S]->()) THEN x.n = 10 ELSE false END \
+            RETURN x ORDER BY x";
+        let params = GqlParameters::new();
+        let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+        let identities = |result: QueryResult| {
+            let QueryResult::Rows { columns, rows } = result else {
+                panic!("expected read rows");
+            };
+            assert_eq!(columns, ["x"]);
+            rows.into_iter()
+                .map(|row| match row[0].as_value() {
+                    Some(fgdb_gql::algebra::GraphValue::Vertex(id)) => *id,
+                    other => panic!("expected a vertex identity: {other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = vec![VId(1), VId(2), VId(5)];
+        assert_eq!(
+            identities(db.query(&cx, text, &params, symbols, policy()).unwrap()),
+            before
+        );
+        assert_eq!(
+            identities(prepared.execute(&db, &cx, &params, policy()).unwrap()),
+            before
+        );
+        let issuer = authority();
+        for (allowed, expected) in [
+            (grant(), before.clone()),
+            (
+                {
+                    let mut restricted = grant();
+                    restricted.relations = Scope::only([R]);
+                    restricted
+                },
+                vec![VId(1), VId(5)],
+            ),
+            (
+                {
+                    let mut restricted = grant();
+                    restricted.properties = Scope::only([]);
+                    restricted
+                },
+                vec![VId(1), VId(5)],
+            ),
+        ] {
+            let token = issuer.issue_at(&allowed, 100).unwrap();
+            assert_eq!(
+                identities(
+                    db.query_authorized(
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        text,
+                        &params,
+                        symbols,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap()
+                ),
+                expected
+            );
+        }
+        let mut change = WriteBatch::new(R);
+        change.delete_edge(EId(10));
+        db.write_atomic(&commit, vec![change]).await.unwrap();
+        assert_eq!(
+            identities(db.query(&cx, text, &params, symbols, policy()).unwrap()),
+            vec![VId(2), VId(5)]
+        );
+        assert_eq!(
+            identities(pinned.query(&cx, text, &params, symbols, policy()).unwrap()),
+            before
+        );
+        assert!(
+            db.query(
+                &cx,
+                text,
+                &params,
+                symbols,
+                GqlQueryPolicy::new(1_000, 1_000, 0, 100_000),
+            )
+            .is_err()
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn computed_optional_conditions_share_native_snapshot_transaction_and_authorization_boundaries() {
     let ((), report) = run_async_under_lab(0xa681_0006, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

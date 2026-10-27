@@ -2121,6 +2121,358 @@ fn row_scope_graph_predicates_match_nullable_graph_head_existence() {
 }
 
 #[test]
+fn compound_row_graph_predicates_preserve_boolean_truth_bags_and_local_pages() {
+    let head = "MATCH (n) WITH n ORDER BY n DESC WITH collect(n) AS nodes \
+                UNWIND nodes AS candidate UNWIND [candidate,candidate] AS x";
+    // Hand answers: outgoing identities are 1,2,3; incoming identities are
+    // 2,3,4; p is 1,2,2,3. Parallel witnesses never multiply an outer row.
+    for (predicate, expected) in [
+        ("x.p = 2 AND EXISTS((x)-[:R]->())", vec![3, 3, 2, 2]),
+        (
+            "EXISTS((x)<-[:R]-()) OR x.p = 1",
+            vec![4, 4, 3, 3, 2, 2, 1, 1],
+        ),
+        (
+            "EXISTS((x)-[:R]->()) XOR EXISTS((x)<-[:R]-())",
+            vec![4, 4, 1, 1],
+        ),
+        (
+            "NOT ((x)-[:R]->() AND EXISTS { MATCH (x)<-[:R]-() })",
+            vec![4, 4, 1, 1],
+        ),
+        (
+            "CASE WHEN EXISTS((x)-[:R]->()) THEN x.p = 2 ELSE x.p = 3 END",
+            vec![4, 4, 3, 3, 2, 2],
+        ),
+        (
+            "x.missing = 1 OR EXISTS((x)-[:R]->())",
+            vec![3, 3, 2, 2, 1, 1],
+        ),
+        ("x.missing = 1 AND EXISTS((x)-[:R]->())", vec![]),
+        ("NULL XOR EXISTS((x)-[:R]->())", vec![]),
+        (
+            "EXISTS((x)-[:R]->()) XOR EXISTS((x)<-[:R]-()) AND x.p = 2",
+            vec![1, 1],
+        ),
+        (
+            "CASE WHEN (x)-[:R]->() THEN x.p = 2 ELSE x.p = 3 END",
+            vec![4, 4, 3, 3, 2, 2],
+        ),
+        (
+            "EXISTS((x)-[:R]->(z)) XOR EXISTS((x)<-[:R]-(z))",
+            vec![4, 4, 1, 1],
+        ),
+        (
+            "EXISTS((x)-[:R]->(__fg_boundary_0)) AND EXISTS((x)-[:R]->(__fg_boundary_0))",
+            vec![3, 3, 2, 2, 1, 1],
+        ),
+    ] {
+        let text = format!("{head} WHERE {predicate} RETURN x ORDER BY x DESC");
+        assert_eq!(
+            execute(&text),
+            expected
+                .into_iter()
+                .map(|id| vertices(&[id]))
+                .collect::<Vec<_>>(),
+            "{text}"
+        );
+    }
+    assert_eq!(
+        execute(&format!(
+            "{head} WHERE EXISTS((x)-[:R]->()) XOR EXISTS((x)<-[:R]-()) \
+             LIMIT 3 RETURN x ORDER BY x DESC"
+        )),
+        [4, 4, 1]
+            .into_iter()
+            .map(|id| vertices(&[id]))
+            .collect::<Vec<_>>()
+    );
+    let query = prepare(
+        "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS __fg_boundary_0 \
+         WHERE __fg_boundary_0.p = 2 AND EXISTS((__fg_boundary_0)-[:R]->()) RETURN *",
+    );
+    assert_eq!(query.columns(), ["nodes", "__fg_boundary_0"]);
+    assert_eq!(run(&query, wide(), &mut || Ok(())).unwrap().value.len(), 2);
+    for boundary in ["WITH DISTINCT x", "WITH x AS y"] {
+        let name = if boundary.ends_with('y') { "y" } else { "x" };
+        assert_eq!(
+            execute(&format!(
+                "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x {boundary} \
+                 WHERE {name}.p = 2 AND EXISTS(({name})-[:R]->()) RETURN {name} ORDER BY {name}"
+            )),
+            vec![vertices(&[2]), vertices(&[3])]
+        );
+    }
+}
+
+#[test]
+fn compound_row_graph_predicates_keep_lazy_scalar_cases_and_private_scopes() {
+    for (property, condition, expected) in [
+        (
+            1,
+            "CASE WHEN EXISTS((x)-[:R]->()) THEN true ELSE 1 / 0 = 0 END",
+            1,
+        ),
+        (
+            3,
+            "CASE WHEN EXISTS((x)-[:R]->()) THEN 1 / 0 = 0 ELSE true END",
+            4,
+        ),
+    ] {
+        let text = format!(
+            "MATCH (n) WHERE n.p = {property} WITH collect(n) AS nodes UNWIND nodes AS x \
+             WHERE {condition} RETURN x"
+        );
+        assert_eq!(execute(&text), vec![vertices(&[expected])], "{text}");
+    }
+    assert_eq!(
+        execute(
+            "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x \
+             WHERE COALESCE(EXISTS((x)-[:R]->()), 1 / 0 = 0) RETURN x ORDER BY x"
+        ),
+        [1, 2, 3]
+            .into_iter()
+            .map(|id| vertices(&[id]))
+            .collect::<Vec<_>>()
+    );
+    for condition in [
+        "EXISTS((x)-[:R]->()) AND __fg_boundary_0",
+        "EXISTS((x)-[:R]->(z)) OR z.p = 2",
+        "true OR EXISTS((fresh)-[:R]->())",
+        "EXISTS((x)-[:R]->()) OR ANY(z IN nodes WHERE EXISTS((z)-[:R]->()))",
+        "EXISTS((x)-[:R]->()) OR 1 = (x)-[:R]->()",
+        "EXISTS((x)-[:R]->()) OR [(x)-[:R]->()] = [true]",
+    ] {
+        let text = format!(
+            "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x WHERE {condition} RETURN x"
+        );
+        let resolutions = std::cell::Cell::new(0);
+        assert!(
+            PreparedGraphSetText::prepare(&text, |kind, name| {
+                resolutions.set(resolutions.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(
+            resolutions.get(),
+            0,
+            "scope refusal precedes catalog access: {text}"
+        );
+    }
+}
+
+#[test]
+fn compound_row_graph_predicates_require_boolean_results() {
+    for result in ["1", "[true]", "{value: true}"] {
+        let text = format!(
+            "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x \
+             WHERE CASE WHEN EXISTS((x)-[:R]->()) THEN {result} ELSE false END RETURN x"
+        );
+        if let Ok(template) = PreparedGraphSetText::prepare(&text, symbols)
+            && let Ok(query) = template.bind_parameters(&GqlParameters::new())
+        {
+            assert!(run(&query, wide(), &mut || Ok(())).is_err(), "{text}");
+        }
+    }
+    assert!(
+        execute(
+            "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x \
+             WHERE CASE WHEN EXISTS((x)-[:R]->()) THEN NULL ELSE false END RETURN x"
+        )
+        .is_empty()
+    );
+    // The same Any-typed row column can carry a valid Boolean, NULL, a
+    // numeric scalar or a composite value without changing the template.
+    let template = PreparedGraphSetText::prepare(
+        "UNWIND $items AS x UNWIND $results AS result \
+         WHERE CASE WHEN EXISTS((x)-[:R]->()) THEN result ELSE false END RETURN x",
+        symbols,
+    )
+    .unwrap();
+    for (result, expected) in [
+        (GraphValue::Scalar(CanonicalScalar::Bool(true)), Some(true)),
+        (GraphValue::Scalar(CanonicalScalar::Null), Some(false)),
+        (GraphValue::Scalar(CanonicalScalar::Int(1)), None),
+        (GraphValue::List(vec![].into()), None),
+    ] {
+        let args = GqlParameters::new()
+            .with_list("items", vec![GraphValue::Vertex(VId(1))])
+            .unwrap()
+            .with_list("results", vec![result])
+            .unwrap();
+        let query = template.bind_parameters(&args).unwrap();
+        let outcome = run(&query, wide(), &mut || Ok(()));
+        match expected {
+            Some(keep) => assert_eq!(
+                outcome.unwrap().value,
+                if keep { vec![vertices(&[1])] } else { vec![] }
+            ),
+            None => assert!(outcome.is_err()),
+        }
+    }
+}
+
+#[test]
+fn compound_row_graph_predicates_rebind_multiple_captures_without_any_coercion() {
+    let items = vec![
+        GraphValue::Vertex(VId(1)),
+        GraphValue::Vertex(VId(1)),
+        GraphValue::Vertex(VId(4)),
+        GraphValue::Vertex(VId(u128::MAX)),
+        GraphValue::Scalar(CanonicalScalar::Null),
+        GraphValue::Scalar(CanonicalScalar::Int(1)),
+        GraphValue::Edge(fgdb_types::EId(1)),
+    ];
+    let targets = vec![
+        GraphValue::Vertex(VId(2)),
+        GraphValue::Vertex(VId(3)),
+        GraphValue::Scalar(CanonicalScalar::Null),
+    ];
+    let text = "UNWIND $items AS x UNWIND $targets AS y \
+                WHERE CASE WHEN $enabled = 1 THEN EXISTS((x)-[:R]->(y {p: $p})) \
+                           ELSE false END \
+                   OR (y IS NULL AND NOT EXISTS((x)-[:R]->())) RETURN x,y";
+    let template = PreparedGraphSetText::prepare(text, symbols).unwrap();
+    let frozen = template.canonical_template_bytes();
+    for (enabled, property, input) in [
+        (1, 2, items.clone()),
+        (0, 2, items.clone()),
+        (1, 3, items),
+        (1, 2, vec![]),
+    ] {
+        let mut expected = Vec::new();
+        for x in &input {
+            for y in &targets {
+                let outgoing = matches!(x, GraphValue::Vertex(id)
+                    if EDGES.iter().any(|&(from, _, _)| from == *id));
+                let pair = match (x, y) {
+                    (GraphValue::Vertex(from), GraphValue::Vertex(to)) => {
+                        enabled == 1
+                            && [1, 2, 2, 3][to.0 as usize - 1] == property
+                            && EDGES.iter().any(|&(a, _, b)| a == *from && b == *to)
+                    }
+                    _ => false,
+                };
+                let null_target = matches!(y, GraphValue::Scalar(CanonicalScalar::Null));
+                if pair || (null_target && !outgoing) {
+                    expected.push(GraphValueRow::from_owned_values(vec![x.clone(), y.clone()]));
+                }
+            }
+        }
+        expected.sort();
+        let arguments = GqlParameters::new()
+            .with_list("items", input)
+            .unwrap()
+            .with_list("targets", targets.clone())
+            .unwrap()
+            .with_int64("enabled", enabled)
+            .unwrap()
+            .with_int64("p", property)
+            .unwrap();
+        let query = template.bind_parameters(&arguments).unwrap();
+        let mut actual = run(&query, wide(), &mut || Ok(())).unwrap().value;
+        actual.sort();
+        assert_eq!(actual, expected, "enabled={enabled}, p={property}");
+    }
+    assert_eq!(template.canonical_template_bytes(), frozen);
+    assert!(template.bind_parameters(&GqlParameters::new()).is_err());
+}
+
+#[test]
+fn compound_row_graph_predicates_keep_governed_failures_before_boolean_filtering() {
+    for predicate in [
+        "true OR EXISTS((x)-[:R]->())",
+        "false AND EXISTS((x)-[:R]->())",
+        "CASE WHEN true THEN true ELSE EXISTS((x)-[:R]->()) END",
+    ] {
+        for tail in ["RETURN x", "LIMIT 0 RETURN x", "RETURN x LIMIT 0"] {
+            let query = prepare(&format!(
+                "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x WHERE {predicate} {tail}"
+            ));
+            let mut calls = 0;
+            let result = query.execute_governed(
+                wide(),
+                |pattern, remaining| {
+                    calls += 1;
+                    if calls == 3 {
+                        return Err(GqlQueryError::Source("second-predicate-source-error"));
+                    }
+                    pattern.plan().execute_governed_with_properties(
+                        (4 + EDGES.len()) as u64,
+                        (1..=4).map(VId),
+                        EDGES,
+                        |_, _| Ok::<_, &'static str>(true),
+                        |_, _| Ok(None),
+                        remaining,
+                        || Ok::<_, usize>(()),
+                    )
+                },
+                || Ok::<_, usize>(()),
+            );
+            assert_eq!(calls, 3, "{predicate}, {tail}");
+            assert!(matches!(
+                result,
+                Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+                    "second-predicate-source-error"
+                )))
+            ));
+        }
+    }
+    let query = prepare(
+        "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x \
+         WHERE EXISTS((x)-[:R]->()) XOR EXISTS((x)<-[:R]-()) RETURN x LIMIT 0",
+    );
+    let mut checkpoints = 0;
+    let measured = run(&query, wide(), &mut || {
+        checkpoints += 1;
+        Ok(())
+    })
+    .unwrap();
+    let caps = [
+        measured.rows.snapshot_records,
+        measured.rows.result_rows,
+        measured.evaluator.work_units,
+        measured.evaluator.scratch_entries,
+    ];
+    assert_eq!(
+        run(
+            &query,
+            GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+            &mut || Ok(()),
+        )
+        .unwrap(),
+        measured
+    );
+    for dimension in [0, 2, 3] {
+        let mut limited = caps;
+        assert!(limited[dimension] > 0);
+        limited[dimension] -= 1;
+        assert!(
+            run(
+                &query,
+                GqlQueryPolicy::new(limited[0], limited[1], limited[2], limited[3]),
+                &mut || Ok(()),
+            )
+            .is_err(),
+            "dimension {dimension}"
+        );
+    }
+    for stop in 1..=checkpoints {
+        let mut seen = 0;
+        assert!(
+            run(&query, wide(), &mut || {
+                seen += 1;
+                if seen == stop { Err(stop) } else { Ok(()) }
+            })
+            .is_err(),
+            "checkpoint {stop}/{checkpoints}"
+        );
+    }
+}
+
+#[test]
 fn row_scope_graph_predicate_arguments_rebind_without_coercing_any_values_to_vertices() {
     let mixed = vec![
         GraphValue::Vertex(VId(1)),

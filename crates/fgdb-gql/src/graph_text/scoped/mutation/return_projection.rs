@@ -2511,7 +2511,7 @@ impl<'a> Parser<'a> {
             // A graph head already gathered this pattern comprehension into
             // a hidden column (hoist_comprehension).
             ReadValueTemplate::Column(column)
-        } else if self.at_hoisted_comprehension()
+        } else if (self.at_hoisted_comprehension() || self.at_hoisted_existence_value())
             && let Some(resolve) = resolve.as_mut()
             && let Some(column) = resolve.leaf(self)?
         {

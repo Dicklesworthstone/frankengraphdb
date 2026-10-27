@@ -1451,6 +1451,15 @@ impl<'a> Parser<'a> {
         self.take_hoisted(span)
     }
 
+    /// Explicit EXISTS is a Boolean-valued expression. A bare pattern retains
+    /// its existing Boolean-position rule, even when a row witness is ready.
+    pub(in crate::graph_text) fn at_hoisted_existence_value(&self) -> bool {
+        (!self.is_punct(b'(') || self.boolean_operand_at == self.current.at)
+            && self.existence_reads.as_ref().is_some_and(|(_, spans)| {
+                spans.iter().any(|&(start, _, _)| start == self.current.at)
+            })
+    }
+
     /// The hidden list column of the pattern comprehension that starts at the
     /// current token (hoist_comprehension) over a row of `width`, consuming
     /// the comprehension. `None` consumes nothing.

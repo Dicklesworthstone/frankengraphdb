@@ -50,6 +50,86 @@ impl<'a> Parser<'a> {
     ) -> Result<(), GraphSetTextError> {
         let mut selection = Selection::default();
         self.selection_or(schema, 0, &mut selection)?;
+        self.selection_stages(schema, selection, stages, depth, at)
+    }
+
+    /// A compound row graph predicate has already replaced its exact graph
+    /// spans with private Boolean columns. Compile the whole condition through
+    /// the ordinary scalar VM, retaining XOR precedence and lazy CASE arms.
+    pub(super) fn row_expression_selection(
+        &mut self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        stages: &mut Vec<ReadStageTemplate>,
+        depth: &mut usize,
+        at: usize,
+    ) -> Result<(), GraphSetTextError> {
+        let visible = self.visible_width(schema);
+        let value =
+            self.read_resolved_item(&mut |parser| parser.selection_leaf(schema, visible), 0)?;
+        // Match the ordinary WHERE Boolean-domain contract. An unchecked
+        // comparison to TRUE would silently discard numeric or list results.
+        let value = match value {
+            ReadValueTemplate::Literal(value) => {
+                if !matches!(
+                    value.value(),
+                    CanonicalScalar::Null | CanonicalScalar::Bool(_)
+                ) {
+                    return Err(expected(at, "Boolean row predicate"));
+                }
+                ReadValueTemplate::Literal(value)
+            }
+            value => {
+                let not = MutationIntegerTemplateOp::Bound(GraphIntegerOp::Not);
+                match value {
+                    value @ (ReadValueTemplate::Column(_)
+                    | ReadValueTemplate::Parameter { .. }
+                    | ReadValueTemplate::Integer { .. }) => {
+                        let mut program = scalar_program(value, at)?;
+                        program.extend([not.clone(), not]);
+                        ReadValueTemplate::Integer { program, at }
+                    }
+                    // A composite Boolean (a quantifier, a list CASE) has
+                    // no scalar program: it is the one let slot of the
+                    // check, in the same private cell (TCK Quantifier11 [3]).
+                    composite => ReadValueTemplate::Let {
+                        values: vec![composite],
+                        body: Box::new(ReadValueTemplate::Integer {
+                            program: vec![
+                                MutationIntegerTemplateOp::Bound(GraphIntegerOp::Local(0)),
+                                not.clone(),
+                                not,
+                            ],
+                            at,
+                        }),
+                    },
+                }
+            }
+        };
+        let mut selection = Selection::default();
+        let left = self.selection_cell(schema, &mut selection, value, at)?;
+        emit(
+            &mut selection.code,
+            ReadFilterOp::Compare {
+                left,
+                comparison: IntegerComparison::Equal,
+                right: ReadFilterOperand::Literal(
+                    GqlScalarParameter::new(CanonicalScalar::Bool(true))
+                        .expect("canonical true is a bounded scalar"),
+                ),
+            },
+            at,
+        )?;
+        self.selection_stages(schema, selection, stages, depth, at)
+    }
+
+    fn selection_stages(
+        &mut self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        selection: Selection,
+        stages: &mut Vec<ReadStageTemplate>,
+        depth: &mut usize,
+        at: usize,
+    ) -> Result<(), GraphSetTextError> {
         let types: Vec<_> = schema.iter().map(|(_, kind)| *kind).collect();
         let mut expanded_types = types.clone();
         let mut projection = Vec::new();
@@ -603,39 +683,39 @@ impl<'a> Parser<'a> {
         &mut self,
         schema: &[(Name<'a>, GraphSetColumnType)],
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
-        // The shared resolved-expression entry point stops before comparisons
-        // and Boolean connectors. Parentheses and CASE retain their own inner
-        // expressions. This callback resolves ONLY the current WITH aliases,
-        // then a DISTINCT WITH's own item expression repeated token for
-        // token (`WITH DISTINCT a.name AS name WHERE a.name = 'B'`, TCK
-        // WithWhere1 [2]), whose value is that item's on every row. A
-        // grouping WITH's WHERE reads its projected names only. Hidden
-        // boundary reads resolve only as `alias.property`, never by their
-        // private names.
         let visible = self.visible_width(schema);
-        self.read_resolved_value(
-            &mut |parser| {
-                if let Some(column) = parser.boundary_read(schema.len())? {
-                    return Ok(Some(column));
-                }
-                if let Some(column) = parser.comprehension_read(schema.len())? {
-                    return Ok(Some(column));
-                }
-                if let TokenKind::Word(word) = parser.current.kind
-                    && let Some(column) = schema[..visible]
-                        .iter()
-                        .position(|(name, _)| name.text == word)
-                {
-                    parser.advance()?;
-                    return Ok(Some(column));
-                }
-                if parser.syntax.distinct {
-                    return parser.projected_source(schema.len());
-                }
-                Ok(None)
-            },
-            0,
-        )
+        self.read_resolved_value(&mut |parser| parser.selection_leaf(schema, visible), 0)
+    }
+
+    /// User names see only the original visible row. Private graph and value
+    /// reads resolve by their lexical spans or carried source, never by their
+    /// generated names. DISTINCT retains its own repeated-item rule.
+    fn selection_leaf(
+        &mut self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        visible: usize,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        if self.at_hoisted_existence_value() {
+            return self.existence_read(schema.len());
+        }
+        if let Some(column) = self.boundary_read(schema.len())? {
+            return Ok(Some(column));
+        }
+        if let Some(column) = self.comprehension_read(schema.len())? {
+            return Ok(Some(column));
+        }
+        if let TokenKind::Word(word) = self.current.kind
+            && let Some(column) = schema[..visible]
+                .iter()
+                .position(|(name, _)| name.text == word)
+        {
+            self.advance()?;
+            return Ok(Some(column));
+        }
+        if self.syntax.distinct {
+            return self.projected_source(schema.len());
+        }
+        Ok(None)
     }
 
     fn selection_cell(
