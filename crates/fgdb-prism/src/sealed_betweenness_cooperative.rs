@@ -8,9 +8,9 @@
 
 use super::betweenness::{prepare, witness, workspace};
 use super::{
-    ComplexityWitness, ExecutionError, FnxCallSpec, FnxExecutionLimits, FnxMemoryLimits, FnxResult,
-    KernelOutput, KernelValues, Result, ResultAdmission, SealedGraphView, add, admit, checkpoint,
-    finish_encoded, mul, reserve,
+    ComplexityWitness, Delivery, ExecutionError, Finished, FnxCallSpec, FnxExecutionLimits,
+    FnxMemoryLimits, KernelOutput, KernelValues, Result, ResultAdmission, SealedGraphView, add,
+    admit, checkpoint, finish_encoded, mul, reserve,
 };
 #[cfg(test)]
 use super::{Cursor, Rows, betweenness::work};
@@ -293,13 +293,14 @@ pub(super) async fn execute_cooperative<Yield, YieldFuture>(
     graph: &SealedGraphView,
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
+    delivery: Delivery,
     control: &mut super::cooperative::Cooperate<'_, Yield>,
-) -> Result<FnxResult>
+) -> Result<Finished>
 where
     Yield: FnMut() -> YieldFuture,
     YieldFuture: Future<Output = ()>,
 {
-    let admission = ResultAdmission::new(call, limits, memory)?;
+    let admission = ResultAdmission::for_delivery(call, limits, memory, delivery)?;
     let estimated = prepare(call, graph, limits, memory, &admission)?;
     control.tick().await?;
     let n = graph.node_count();
@@ -333,6 +334,7 @@ where
         call,
         graph,
         encoded,
+        output.values,
         output.witness,
         "fgdb-prism/sealed-brandes-source-ordered-cooperative-v1",
         estimated,

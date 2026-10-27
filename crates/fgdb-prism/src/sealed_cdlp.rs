@@ -9,8 +9,8 @@
 //! scheduling never changes which previous-round labels a vertex observes.
 
 use super::{
-    ComplexityWitness, Cursor, Directedness, ExecutionError, FnxAlgorithm, FnxCallSpec,
-    FnxExecutionLimits, FnxMemoryLimits, FnxResult, KernelOutput, KernelValues, Result,
+    ComplexityWitness, Cursor, Delivery, Directedness, ExecutionError, Finished, FnxAlgorithm,
+    FnxCallSpec, FnxExecutionLimits, FnxMemoryLimits, KernelOutput, KernelValues, Result,
     ResultAdmission, Rows, SealedGraphView, SealedRows, add, admit, checkpoint,
     directional_pass_work, finish, finish_encoded, mul, reserve,
 };
@@ -288,7 +288,7 @@ pub(super) fn execute(
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
     admission: &ResultAdmission,
-) -> Result<FnxResult> {
+) -> Result<Finished> {
     let (max_iter, estimated) = admit_call(call, graph, limits, admission)?;
     let n = graph.node_count();
     let mut control = || checkpoint(cx);
@@ -332,13 +332,14 @@ pub(super) async fn execute_cooperative<Yield, YieldFuture>(
     graph: &SealedGraphView,
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
+    delivery: Delivery,
     control: &mut super::cooperative::Cooperate<'_, Yield>,
-) -> Result<FnxResult>
+) -> Result<Finished>
 where
     Yield: FnMut() -> YieldFuture,
     YieldFuture: Future<Output = ()>,
 {
-    let admission = ResultAdmission::new(call, limits, memory)?;
+    let admission = ResultAdmission::for_delivery(call, limits, memory, delivery)?;
     let (max_iter, estimated) = admit_call(call, graph, limits, &admission)?;
     let n = graph.node_count();
     control.tick().await?;
@@ -422,6 +423,7 @@ where
         call,
         graph,
         encoded,
+        output.values,
         output.witness,
         "fgdb-prism/sealed-cdlp-cooperative-v1",
         estimated,

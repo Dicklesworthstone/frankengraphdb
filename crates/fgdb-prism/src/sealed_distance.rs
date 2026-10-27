@@ -8,8 +8,8 @@
 //! Neither driver retains adjacency or an all-pairs distance matrix.
 
 use super::{
-    ComplexityWitness, Cursor, ExecutionError, FnxAlgorithm, FnxCallSpec, FnxExecutionLimits,
-    FnxMemoryLimits, FnxResult, FoundationAlgorithm, KernelOutput, KernelValues, Result,
+    ComplexityWitness, Cursor, Delivery, ExecutionError, Finished, FnxAlgorithm, FnxCallSpec,
+    FnxExecutionLimits, FnxMemoryLimits, FoundationAlgorithm, KernelOutput, KernelValues, Result,
     ResultAdmission, Rows, SealedGraphView, SealedRows, add, admit, checkpoint,
     directional_pass_work, finish, finish_encoded, mul, require_loop_free_degree, reserve,
 };
@@ -306,7 +306,7 @@ pub(super) fn execute(
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
     admission: &ResultAdmission,
-) -> Result<FnxResult> {
+) -> Result<Finished> {
     let harmonic = harmonic(call)?;
     let estimated = prepare(call, graph, limits, memory, admission)?;
     let rows = SealedRows { cx, graph };
@@ -338,14 +338,15 @@ pub(super) async fn execute_cooperative<Yield, YieldFuture>(
     graph: &SealedGraphView,
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
+    delivery: Delivery,
     control: &mut super::cooperative::Cooperate<'_, Yield>,
-) -> Result<FnxResult>
+) -> Result<Finished>
 where
     Yield: FnMut() -> YieldFuture,
     YieldFuture: Future<Output = ()>,
 {
     let harmonic = harmonic(call)?;
-    let admission = ResultAdmission::new(call, limits, memory)?;
+    let admission = ResultAdmission::for_delivery(call, limits, memory, delivery)?;
     let estimated = prepare(call, graph, limits, memory, &admission)?;
     control.tick().await?;
     let n = graph.node_count();
@@ -377,6 +378,7 @@ where
         call,
         graph,
         encoded,
+        output.values,
         output.witness,
         if harmonic {
             "fgdb-prism/sealed-harmonic-fifo-cooperative-v1"

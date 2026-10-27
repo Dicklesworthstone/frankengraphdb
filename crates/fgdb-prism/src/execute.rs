@@ -6,7 +6,7 @@
 use crate::{
     AdapterPath, BfsDecisionCard, ComponentDecisionCard, FNX_IMPLEMENTATION_REVISION,
     FNX_SIGNATURE_REGISTRY_VERSION, FnxAlgorithm, FnxCallSpec, FnxGraphKind, FnxOutput, GraphView,
-    SnapshotBinding, SnapshotGraphView,
+    SealedGraphView, SnapshotBinding, SnapshotGraphView,
 };
 use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
@@ -277,16 +277,31 @@ enum ResultSink<'a, C> {
 
 /// A completed, certified result retaining the kernel's existing value arrays.
 /// Rows are decoded on demand without an additional table of row allocations.
-/// The projection is clone-shared; algorithm vectors and that projection remain
-/// in memory. This is not an external-memory or asynchronous execution path.
+/// The decoded or compressed projection is clone-shared; algorithm vectors and
+/// that projection remain in memory. Pulling completed rows is synchronous and
+/// does not make the retained result an external-memory representation.
 pub struct FnxRowCursor {
-    graph: SnapshotGraphView,
+    graph: RowProjection,
     fields: Vec<FnxOutput>,
     values: KernelValues,
     next_index: usize,
     remaining: usize,
     max_integer: Option<u64>,
     certificate: FnxCertificate,
+}
+
+enum RowProjection {
+    Decoded(SnapshotGraphView),
+    Sealed(SealedGraphView),
+}
+
+impl RowProjection {
+    fn vertex_ids(&self) -> &[VId] {
+        match self {
+            Self::Decoded(graph) => graph.vertex_ids(),
+            Self::Sealed(graph) => graph.vertex_ids(),
+        }
+    }
 }
 
 impl core::fmt::Debug for FnxRowCursor {
@@ -298,6 +313,48 @@ impl core::fmt::Debug for FnxRowCursor {
 }
 
 impl FnxRowCursor {
+    fn completed<C>(
+        call: &FnxCallSpec,
+        graph: RowProjection,
+        values: KernelValues,
+        remaining: usize,
+        max_integer: Option<u64>,
+        certificate: FnxCertificate,
+    ) -> Result<Self, FnxExecutionError<C>> {
+        let mut fields = reserve(call.outputs().len())?;
+        fields.extend(call.outputs().iter().map(|column| column.field));
+        Ok(Self {
+            graph,
+            fields,
+            values,
+            next_index: 0,
+            remaining,
+            max_integer,
+            certificate,
+        })
+    }
+
+    /// Called only after the compressed encoder has validated every value and
+    /// completed the certificate and final live check. No guard enters the cursor.
+    pub(crate) fn completed_sealed(
+        fields: Vec<FnxOutput>,
+        graph: &SealedGraphView,
+        values: KernelValues,
+        remaining: usize,
+        max_integer: Option<u64>,
+        certificate: FnxCertificate,
+    ) -> Self {
+        Self {
+            graph: RowProjection::Sealed(graph.clone()),
+            fields,
+            values,
+            next_index: 0,
+            remaining,
+            max_integer,
+            certificate,
+        }
+    }
+
     /// The same completed certificate as the collected and mapped paths.
     pub fn certificate(&self) -> &FnxCertificate {
         &self.certificate
@@ -326,7 +383,7 @@ impl FnxRowCursor {
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<bool, FnxExecutionError<C>> {
         row.clear();
-        while self.next_index < self.graph.node_count() {
+        while self.next_index < self.graph.vertex_ids().len() {
             checkpoint().map_err(FnxExecutionError::Cancelled)?;
             let index = self.next_index;
             if !self.values.contains(index) {
@@ -336,7 +393,7 @@ impl FnxRowCursor {
             row.try_reserve(self.fields.len())
                 .map_err(|_| FnxExecutionError::AllocationFailed)?;
             for &field in &self.fields {
-                row.push(self.values.value(index, field, &self.graph)?);
+                row.push(self.values.value(index, field, self.graph.vertex_ids())?);
             }
             self.next_index += 1;
             self.remaining -= 1;
@@ -396,11 +453,12 @@ impl KernelValues {
         &self,
         index: usize,
         field: FnxOutput,
-        graph: &SnapshotGraphView,
+        vertices: &[VId],
     ) -> Result<FnxValue, FnxExecutionError<C>> {
         match (field, self) {
-            (FnxOutput::Vertex, _) => graph
-                .vertex_id(index)
+            (FnxOutput::Vertex, _) => vertices
+                .get(index)
+                .copied()
                 .map(FnxValue::Vertex)
                 .ok_or(FnxExecutionError::InvalidUpstreamResult),
             (FnxOutput::Score, Self::Scores(values)) => values
@@ -420,7 +478,7 @@ impl KernelValues {
             }
             (FnxOutput::Component, Self::Components(values)) => values
                 .get(index)
-                .and_then(|&label| graph.vertex_id(label))
+                .and_then(|&label| vertices.get(label).copied())
                 .map(FnxValue::Vertex)
                 .ok_or(FnxExecutionError::InvalidUpstreamResult),
             (FnxOutput::Distance, Self::WeightedDistances(values)) => values
@@ -1143,17 +1201,14 @@ impl FnxCallSpec {
             },
         )?;
         let values = values.ok_or(FnxExecutionError::InvalidUpstreamResult)?;
-        let mut fields = reserve(self.outputs().len())?;
-        fields.extend(self.outputs().iter().map(|column| column.field));
-        Ok(FnxRowCursor {
-            graph: graph.clone(),
-            fields,
+        FnxRowCursor::completed(
+            self,
+            RowProjection::Decoded(graph.clone()),
             values,
-            next_index: 0,
             remaining,
             max_integer,
             certificate,
-        })
+        )
     }
 
     fn hash_retained_rows<C>(
@@ -1171,7 +1226,7 @@ impl FnxCallSpec {
                 continue;
             }
             for column in self.outputs() {
-                let value = values.value(index, column.field, graph)?;
+                let value = values.value(index, column.field, graph.vertex_ids())?;
                 hash_result_value(result_hash, value);
                 if let FnxValue::Integer(value) = value {
                     max_integer = Some(max_integer.map_or(value, |prior: u64| prior.max(value)));
@@ -1398,7 +1453,9 @@ impl FnxCallSpec {
                     }
                     let mut row = reserve(self.outputs().len())?;
                     for column in self.outputs() {
-                        let value = output.values.value(index, column.field, graph)?;
+                        let value = output
+                            .values
+                            .value(index, column.field, graph.vertex_ids())?;
                         hash_result_value(&mut result_hash, value);
                         row.push(value);
                     }
@@ -1420,7 +1477,9 @@ impl FnxCallSpec {
                     }
                     row.clear();
                     for column in self.outputs() {
-                        let value = output.values.value(index, column.field, graph)?;
+                        let value = output
+                            .values
+                            .value(index, column.field, graph.vertex_ids())?;
                         hash_result_value(&mut result_hash, value);
                         row.push(value);
                     }

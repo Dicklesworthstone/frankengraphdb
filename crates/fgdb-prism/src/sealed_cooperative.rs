@@ -14,10 +14,11 @@
 //! and initial projection preparation remain the caller's responsibility.
 
 use super::{
-    ComplexityWitness, DegreeCentrality, EncodedRows, Error, ExecutionError, FnxAlgorithm,
-    FnxCallSpec, FnxExecutionLimits, FnxMemoryLimits, FnxResult, KernelOutput, KernelValues,
-    PageRankOptions, QueryCx, Result, ResultAdmission, SealedGraphView, SealedNeighborCursor, add,
-    admit, checkpoint, execution_pass_work, finish_encoded, mul, require_loop_free_degree, reserve,
+    ComplexityWitness, DegreeCentrality, Delivery, EncodedRows, Error, ExecutionError, Finished,
+    FnxAlgorithm, FnxCallSpec, FnxExecutionLimits, FnxMemoryLimits, FnxResult, FnxRowCursor,
+    KernelOutput, KernelValues, PageRankOptions, QueryCx, Result, ResultAdmission, SealedGraphView,
+    SealedNeighborCursor, add, admit, checkpoint, execution_pass_work, finish_encoded, mul,
+    require_loop_free_degree, reserve,
 };
 use crate::sealed_control::Control;
 use crate::shortest_path::{Entry, IndexedHeap};
@@ -200,9 +201,101 @@ impl FnxCallSpec {
         limits: FnxExecutionLimits,
         memory: FnxMemoryLimits,
         quantum: NonZeroUsize,
-        mut yield_now: Yield,
+        yield_now: Yield,
         guard: impl FnMut() -> std::result::Result<(), SealedProjectionError>,
     ) -> Result<FnxResult>
+    where
+        Yield: FnMut() -> YieldFuture,
+        YieldFuture: Future<Output = ()>,
+    {
+        self.execute_sealed_cooperative_delivery(
+            cx,
+            graph,
+            limits,
+            memory,
+            quantum,
+            yield_now,
+            guard,
+            Delivery::Collected,
+        )
+        .await?
+        .collected()
+    }
+
+    /// Complete cooperative compressed execution and canonical certification
+    /// without retaining a table of result rows. Kernel value arrays and the
+    /// original immutable projection stay owned by the returned cursor.
+    /// Logical row/byte limits and every kernel scheduling step are unchanged.
+    pub async fn execute_sealed_cooperative_rows<Yield, YieldFuture>(
+        &self,
+        cx: &QueryCx,
+        graph: &SealedGraphView,
+        limits: FnxExecutionLimits,
+        memory: FnxMemoryLimits,
+        quantum: NonZeroUsize,
+        yield_now: Yield,
+    ) -> Result<FnxRowCursor>
+    where
+        Yield: FnMut() -> YieldFuture,
+        YieldFuture: Future<Output = ()>,
+    {
+        self.execute_sealed_cooperative_rows_with_checkpoint(
+            cx,
+            graph,
+            limits,
+            memory,
+            quantum,
+            yield_now,
+            || Ok(()),
+        )
+        .await
+    }
+
+    /// Retain completed values under an execution-local live guard. Every
+    /// suspension is fenced exactly as in the collected cooperative path.
+    /// The cursor retains no guard or permission; its consumer must check live
+    /// control and budget the additional pass through examined vertex ordinals.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_sealed_cooperative_rows_with_checkpoint<Yield, YieldFuture>(
+        &self,
+        cx: &QueryCx,
+        graph: &SealedGraphView,
+        limits: FnxExecutionLimits,
+        memory: FnxMemoryLimits,
+        quantum: NonZeroUsize,
+        yield_now: Yield,
+        guard: impl FnMut() -> std::result::Result<(), SealedProjectionError>,
+    ) -> Result<FnxRowCursor>
+    where
+        Yield: FnMut() -> YieldFuture,
+        YieldFuture: Future<Output = ()>,
+    {
+        self.execute_sealed_cooperative_delivery(
+            cx,
+            graph,
+            limits,
+            memory,
+            quantum,
+            yield_now,
+            guard,
+            Delivery::Retained,
+        )
+        .await?
+        .retained()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_sealed_cooperative_delivery<Yield, YieldFuture>(
+        &self,
+        cx: &QueryCx,
+        graph: &SealedGraphView,
+        limits: FnxExecutionLimits,
+        memory: FnxMemoryLimits,
+        quantum: NonZeroUsize,
+        mut yield_now: Yield,
+        guard: impl FnMut() -> std::result::Result<(), SealedProjectionError>,
+        delivery: Delivery,
+    ) -> Result<Finished>
     where
         Yield: FnMut() -> YieldFuture,
         YieldFuture: Future<Output = ()>,
@@ -226,8 +319,15 @@ impl FnxCallSpec {
                     quantum,
                     yield_now,
                 };
-                return super::cdlp::execute_cooperative(self, graph, limits, memory, &mut control)
-                    .await;
+                return super::cdlp::execute_cooperative(
+                    self,
+                    graph,
+                    limits,
+                    memory,
+                    delivery,
+                    &mut control,
+                )
+                .await;
             }
             if matches!(
                 self.algorithm(),
@@ -244,6 +344,7 @@ impl FnxCallSpec {
                     graph,
                     limits,
                     memory,
+                    delivery,
                     &mut control,
                 )
                 .await;
@@ -263,6 +364,7 @@ impl FnxCallSpec {
                     graph,
                     limits,
                     memory,
+                    delivery,
                     &mut control,
                 )
                 .await;
@@ -282,6 +384,7 @@ impl FnxCallSpec {
                     graph,
                     limits,
                     memory,
+                    delivery,
                     &mut control,
                 )
                 .await;
@@ -301,6 +404,7 @@ impl FnxCallSpec {
                     graph,
                     limits,
                     memory,
+                    delivery,
                     &mut control,
                 )
                 .await;
@@ -323,6 +427,7 @@ impl FnxCallSpec {
                     graph,
                     limits,
                     memory,
+                    delivery,
                     &mut control,
                 )
                 .await;
@@ -342,6 +447,7 @@ impl FnxCallSpec {
                     graph,
                     limits,
                     memory,
+                    delivery,
                     &mut control,
                 )
                 .await;
@@ -356,11 +462,18 @@ impl FnxCallSpec {
                     quantum,
                     yield_now,
                 };
-                return super::load::execute_cooperative(self, graph, limits, memory, &mut control)
-                    .await;
+                return super::load::execute_cooperative(
+                    self,
+                    graph,
+                    limits,
+                    memory,
+                    delivery,
+                    &mut control,
+                )
+                .await;
             }
             let n = graph.node_count();
-            let admission = ResultAdmission::new(self, limits, memory)?;
+            let admission = ResultAdmission::for_delivery(self, limits, memory, delivery)?;
             if super::directional_bfs::eligible(self, graph, limits, memory, &admission) {
                 // Borrow the host's yield callback until optional scratch is
                 // admitted. A capacity fallback can still use the ordinary
@@ -376,6 +489,7 @@ impl FnxCallSpec {
                     graph,
                     limits,
                     memory,
+                    delivery,
                     &mut control,
                 )
                 .await?
@@ -536,6 +650,7 @@ impl FnxCallSpec {
                 self,
                 graph,
                 encoded,
+                output.values,
                 output.witness,
                 kernel,
                 estimated_work,

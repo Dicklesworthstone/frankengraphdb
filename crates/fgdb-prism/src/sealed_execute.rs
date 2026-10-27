@@ -11,8 +11,8 @@ use crate::{
     AdapterPath, BfsDecisionCard, ComplexityWitness, Directedness, FNX_IMPLEMENTATION_REVISION,
     FNX_SIGNATURE_REGISTRY_VERSION, FnxAlgorithm, FnxBindError, FnxCallSpec, FnxCertificate,
     FnxExecutionError, FnxExecutionLimits, FnxGraphKind, FnxOutput, FnxParameters, FnxResult,
-    FnxValue, FoundationAlgorithm, PageRankOptions, SealedGraphView, SealedNeighborCursor,
-    SealedProjectionError,
+    FnxRowCursor, FnxValue, FoundationAlgorithm, PageRankOptions, SealedGraphView,
+    SealedNeighborCursor, SealedProjectionError,
 };
 use fgdb_crypto::{Digest, Hasher};
 use fgdb_strata::tiered::sealed::SealedError;
@@ -119,6 +119,36 @@ type Error = FnxSealedExecutionError;
 type Result<T> = std::result::Result<T, Error>;
 type ExecutionError = FnxExecutionError<Infallible>;
 
+#[derive(Clone, Copy)]
+enum Delivery {
+    Collected,
+    Retained,
+}
+
+// Delivery is selected before execution, but no completed cursor or collected
+// result is exposed until all values, evidence and the final live check pass.
+#[derive(Debug)]
+enum Finished {
+    Collected(FnxResult),
+    Retained(FnxRowCursor),
+}
+
+impl Finished {
+    fn collected(self) -> Result<FnxResult> {
+        match self {
+            Self::Collected(result) => Ok(result),
+            Self::Retained(_) => Err(ExecutionError::InvalidUpstreamResult.into()),
+        }
+    }
+
+    fn retained(self) -> Result<FnxRowCursor> {
+        match self {
+            Self::Retained(cursor) => Ok(cursor),
+            Self::Collected(_) => Err(ExecutionError::InvalidUpstreamResult.into()),
+        }
+    }
+}
+
 fn checkpoint(cx: &Control<'_>) -> Result<()> {
     cx.checkpoint().map_err(Into::into)
 }
@@ -201,6 +231,7 @@ struct ResultAdmission {
     column_bytes: usize,
     max_rows: usize,
     max_bytes: usize,
+    delivery: Delivery,
 }
 impl ResultAdmission {
     fn new(
@@ -221,8 +252,20 @@ impl ResultAdmission {
             column_bytes,
             max_rows: limits.max_result_rows,
             max_bytes: memory.max_result_bytes,
+            delivery: Delivery::Collected,
         };
         admission.rows(0)?;
+        Ok(admission)
+    }
+
+    fn for_delivery(
+        call: &FnxCallSpec,
+        limits: FnxExecutionLimits,
+        memory: FnxMemoryLimits,
+        delivery: Delivery,
+    ) -> Result<Self> {
+        let mut admission = Self::new(call, limits, memory)?;
+        admission.delivery = delivery;
         Ok(admission)
     }
     fn rows(&self, count: usize) -> Result<()> {
@@ -718,7 +761,42 @@ impl FnxCallSpec {
         let guard = RefCell::new(guard);
         let invoke = || (guard.borrow_mut())();
         let control = Control::new(cx, &invoke);
-        self.execute_controlled(&control, graph, limits, memory)
+        self.execute_controlled(&control, graph, limits, memory, Delivery::Collected)?
+            .collected()
+    }
+
+    /// Complete the compressed kernel, value validation and certificate before
+    /// returning a cursor over its existing value arrays. Logical result rows
+    /// and bytes keep the collected API's admission, even though no row table
+    /// is allocated. The cursor shares the original immutable projection.
+    /// Pulling rows needs a fresh caller checkpoint for every examined vertex;
+    /// hosts must budget that additional pass, including unreachable gaps.
+    pub fn execute_sealed_rows(
+        &self,
+        cx: &QueryCx,
+        graph: &SealedGraphView,
+        limits: FnxExecutionLimits,
+        memory: FnxMemoryLimits,
+    ) -> Result<FnxRowCursor> {
+        self.execute_sealed_rows_with_checkpoint(cx, graph, limits, memory, || Ok(()))
+    }
+
+    /// Retain completed values under the same execution-local live guard as
+    /// `execute_sealed_with_checkpoint`. Neither the guard nor a permit enters
+    /// the returned cursor. Its consumer supplies current control on each pull.
+    pub fn execute_sealed_rows_with_checkpoint(
+        &self,
+        cx: &QueryCx,
+        graph: &SealedGraphView,
+        limits: FnxExecutionLimits,
+        memory: FnxMemoryLimits,
+        guard: impl FnMut() -> std::result::Result<(), SealedProjectionError>,
+    ) -> Result<FnxRowCursor> {
+        let guard = RefCell::new(guard);
+        let invoke = || (guard.borrow_mut())();
+        let control = Control::new(cx, &invoke);
+        self.execute_controlled(&control, graph, limits, memory, Delivery::Retained)?
+            .retained()
     }
 
     fn execute_controlled(
@@ -727,11 +805,12 @@ impl FnxCallSpec {
         graph: &SealedGraphView,
         limits: FnxExecutionLimits,
         memory: FnxMemoryLimits,
-    ) -> Result<FnxResult> {
+        delivery: Delivery,
+    ) -> Result<Finished> {
         checkpoint(cx)?;
         self.validate_sealed_projection(graph.spec().directedness)?;
         let n = graph.node_count();
-        let admission = ResultAdmission::new(self, limits, memory)?;
+        let admission = ResultAdmission::for_delivery(self, limits, memory, delivery)?;
         if directional_bfs::eligible(self, graph, limits, memory, &admission)
             && let Some(result) =
                 directional_bfs::execute(self, cx, graph, limits, memory, &admission)?
@@ -942,7 +1021,7 @@ fn finish(
     workspace: usize,
     admission: &ResultAdmission,
     checkpoint: &mut impl FnMut() -> Result<()>,
-) -> Result<FnxResult> {
+) -> Result<Finished> {
     finish_bfs(
         call,
         graph,
@@ -967,7 +1046,7 @@ fn finish_bfs(
     admission: &ResultAdmission,
     bfs_decision_card: Option<BfsDecisionCard>,
     checkpoint: &mut impl FnMut() -> Result<()>,
-) -> Result<FnxResult> {
+) -> Result<Finished> {
     checkpoint()?;
     let mut encoded = EncodedRows::new(call, output.row_count, admission)?;
     for index in 0..graph.node_count() {
@@ -977,6 +1056,7 @@ fn finish_bfs(
         call,
         graph,
         encoded,
+        output.values,
         output.witness,
         kernel,
         estimated_work,
@@ -990,14 +1070,19 @@ fn finish_bfs(
 // Each push handles one vertex; cooperative callers yield BETWEEN pushes.
 // No rows escape this private builder before the final certificate is complete.
 struct EncodedRows {
-    rows: Vec<Vec<FnxValue>>,
+    rows: Option<Vec<Vec<FnxValue>>>,
     result_hash: Hasher,
     row_count: usize,
+    emitted: usize,
+    max_integer: Option<u64>,
 }
 impl EncodedRows {
     fn new(call: &FnxCallSpec, row_count: usize, admission: &ResultAdmission) -> Result<Self> {
         admission.rows(row_count)?;
-        let rows = reserve(row_count)?;
+        let rows = match admission.delivery {
+            Delivery::Collected => Some(reserve(row_count)?),
+            Delivery::Retained => None,
+        };
         let mut result_hash = Hasher::new();
         result_hash.update(b"fgdb:prism:result-rows:v3");
         result_hash.update(&(row_count as u128).to_le_bytes());
@@ -1006,6 +1091,8 @@ impl EncodedRows {
             rows,
             result_hash,
             row_count,
+            emitted: 0,
+            max_integer: None,
         })
     }
 
@@ -1013,6 +1100,17 @@ impl EncodedRows {
         &mut self,
         call: &FnxCallSpec,
         graph: &SealedGraphView,
+        values: &KernelValues,
+        index: usize,
+        checkpoint: &mut impl FnMut() -> Result<()>,
+    ) -> Result<()> {
+        self.push_vertices(call, graph.vertex_ids(), values, index, checkpoint)
+    }
+
+    fn push_vertices(
+        &mut self,
+        call: &FnxCallSpec,
+        vertices: &[fgdb_types::VId],
         values: &KernelValues,
         index: usize,
         checkpoint: &mut impl FnMut() -> Result<()>,
@@ -1044,8 +1142,9 @@ impl EncodedRows {
                     .get(index)
                     .ok_or(ExecutionError::InvalidUpstreamResult)?;
                 FnxValue::Vertex(
-                    graph
-                        .vertex_id(label)
+                    vertices
+                        .get(label)
+                        .copied()
                         .ok_or(ExecutionError::InvalidUpstreamResult)?,
                 )
             }
@@ -1067,14 +1166,19 @@ impl EncodedRows {
                     .ok_or(ExecutionError::InvalidUpstreamResult)?,
             ),
         };
-        let vertex = graph
-            .vertex_id(index)
+        let vertex = vertices
+            .get(index)
+            .copied()
             .ok_or(ExecutionError::InvalidUpstreamResult)?;
         // Refuse an extra row before allocating even its bounded field vector.
-        if self.rows.len() == self.row_count {
+        if self.emitted == self.row_count {
             return Err(ExecutionError::InvalidUpstreamResult.into());
         }
-        let mut row = reserve(call.outputs().len())?;
+        let mut row = self
+            .rows
+            .as_ref()
+            .map(|_| reserve(call.outputs().len()))
+            .transpose()?;
         let result_hash = &mut self.result_hash;
         for column in call.outputs() {
             checkpoint()?;
@@ -1089,9 +1193,16 @@ impl EncodedRows {
                 _ => return Err(ExecutionError::InvalidUpstreamResult.into()),
             };
             hash_result_value(result_hash, value);
-            row.push(value);
+            if let Some(row) = &mut row {
+                row.push(value);
+            } else if let FnxValue::Integer(value) = value {
+                self.max_integer = Some(self.max_integer.map_or(value, |prior| prior.max(value)));
+            }
         }
-        self.rows.push(row);
+        if let (Some(rows), Some(row)) = (&mut self.rows, row) {
+            rows.push(row);
+        }
+        self.emitted = add(self.emitted, 1)?;
         Ok(())
     }
 }
@@ -1101,16 +1212,18 @@ fn finish_encoded(
     call: &FnxCallSpec,
     graph: &SealedGraphView,
     encoded: EncodedRows,
+    values: KernelValues,
     witness: ComplexityWitness,
     kernel: &'static str,
     estimated_work: usize,
     workspace: usize,
     checkpoint: &mut impl FnMut() -> Result<()>,
-) -> Result<FnxResult> {
+) -> Result<Finished> {
     finish_encoded_bfs(
         call,
         graph,
         encoded,
+        values,
         witness,
         kernel,
         estimated_work,
@@ -1125,29 +1238,45 @@ fn finish_encoded_bfs(
     call: &FnxCallSpec,
     graph: &SealedGraphView,
     encoded: EncodedRows,
+    values: KernelValues,
     mut witness: ComplexityWitness,
     kernel: &'static str,
     estimated_work: usize,
     workspace: usize,
     bfs_decision_card: Option<BfsDecisionCard>,
     checkpoint: &mut impl FnMut() -> Result<()>,
-) -> Result<FnxResult> {
+) -> Result<Finished> {
     let EncodedRows {
         rows,
         result_hash,
         row_count,
+        emitted,
+        max_integer,
     } = encoded;
-    if rows.len() != row_count {
+    if emitted != row_count {
         return Err(ExecutionError::InvalidUpstreamResult.into());
     }
-    let mut columns = reserve(call.outputs().len())?;
+    let mut columns = if rows.is_some() {
+        reserve(call.outputs().len())?
+    } else {
+        Vec::new()
+    };
+    let mut fields = if rows.is_none() {
+        reserve(call.outputs().len())?
+    } else {
+        Vec::new()
+    };
     for column in call.outputs() {
         checkpoint()?;
-        let mut name = String::new();
-        name.try_reserve_exact(column.name.len())
-            .map_err(|_| ExecutionError::AllocationFailed)?;
-        name.push_str(&column.name);
-        columns.push(name);
+        if rows.is_some() {
+            let mut name = String::new();
+            name.try_reserve_exact(column.name.len())
+                .map_err(|_| ExecutionError::AllocationFailed)?;
+            name.push_str(&column.name);
+            columns.push(name);
+        } else {
+            fields.push(column.field);
+        }
     }
     let result_digest = result_hash.finalize();
     let kernel_source_digest = source_digest();
@@ -1194,31 +1323,42 @@ fn finish_encoded_bfs(
     hash_bfs_decision_card(&mut hash, bfs_decision_card.as_ref(), checkpoint)?;
     hash_component_decision_card(&mut hash, None, checkpoint)?;
     checkpoint()?;
-    Ok(FnxResult {
-        columns,
-        rows,
-        certificate: FnxCertificate {
-            registry_version: FNX_SIGNATURE_REGISTRY_VERSION,
-            implementation_revision: FNX_IMPLEMENTATION_REVISION,
-            execution_kernel: kernel,
-            kernel_source_digest,
-            numeric_profile,
-            snapshot: graph.binding(),
-            projection_digest: graph.digest(),
-            call_digest: call.digest(),
-            result_digest,
-            adapter,
-            vertices: graph.node_count(),
-            edges: graph.edge_count(),
-            input_edges: graph.input_edge_count(),
-            estimated_work,
-            kernel_workspace_bytes: workspace,
-            bfs_decision_card,
-            component_decision_card: None,
-            witness,
-            digest: hash.finalize(),
-        },
-    })
+    let certificate = FnxCertificate {
+        registry_version: FNX_SIGNATURE_REGISTRY_VERSION,
+        implementation_revision: FNX_IMPLEMENTATION_REVISION,
+        execution_kernel: kernel,
+        kernel_source_digest,
+        numeric_profile,
+        snapshot: graph.binding(),
+        projection_digest: graph.digest(),
+        call_digest: call.digest(),
+        result_digest,
+        adapter,
+        vertices: graph.node_count(),
+        edges: graph.edge_count(),
+        input_edges: graph.input_edge_count(),
+        estimated_work,
+        kernel_workspace_bytes: workspace,
+        bfs_decision_card,
+        component_decision_card: None,
+        witness,
+        digest: hash.finalize(),
+    };
+    match rows {
+        Some(rows) => Ok(Finished::Collected(FnxResult {
+            columns,
+            rows,
+            certificate,
+        })),
+        None => Ok(Finished::Retained(FnxRowCursor::completed_sealed(
+            fields,
+            graph,
+            values,
+            row_count,
+            max_integer,
+            certificate,
+        ))),
+    }
 }
 fn hash_text(hash: &mut Hasher, text: &str) {
     hash.update(&(text.len() as u128).to_le_bytes());
@@ -1271,6 +1411,226 @@ mod tests {
         ProjectionLimits, ProjectionSpec, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView,
     };
     use fgdb_types::{CommitSeq, EId, VId, ids::ObjectId};
+
+    #[test]
+    fn retained_encoding_has_no_row_table_and_preserves_domains_hashes_and_refusal_order() {
+        let vertices = [VId(0), VId(17), VId(u128::MAX)];
+        let parameters =
+            FnxParameters::from([("source".to_owned(), crate::FnxArgument::Vertex(vertices[0]))]);
+        let bind = |text| FnxCallSpec::bind(text, &parameters).unwrap();
+        let cases = [
+            (
+                bind("CALL fnx.pagerank() YIELD score AS rank, vertex AS id"),
+                KernelValues::Scores(vec![0.0, 0.25, 0.75]),
+                vec![
+                    vec![FnxValue::Score(0.0), FnxValue::Vertex(vertices[0])],
+                    vec![FnxValue::Score(0.25), FnxValue::Vertex(vertices[1])],
+                    vec![FnxValue::Score(0.75), FnxValue::Vertex(vertices[2])],
+                ],
+            ),
+            (
+                bind(
+                    "CALL fnx.single_source_shortest_path_length($source) YIELD distance AS hops, vertex AS id",
+                ),
+                KernelValues::Distances(vec![None, Some(0), Some(9)]),
+                vec![
+                    vec![FnxValue::Integer(0), FnxValue::Vertex(vertices[1])],
+                    vec![FnxValue::Integer(9), FnxValue::Vertex(vertices[2])],
+                ],
+            ),
+            (
+                bind("CALL fnx.connected_components() YIELD component AS label, vertex AS id"),
+                KernelValues::Components(vec![2, 2, 2]),
+                vertices
+                    .iter()
+                    .map(|&vertex| vec![FnxValue::Vertex(vertices[2]), FnxValue::Vertex(vertex)])
+                    .collect(),
+            ),
+            (
+                bind(
+                    "CALL fnx.single_source_dijkstra_path_length($source) YIELD distance AS cost, vertex AS id",
+                ),
+                KernelValues::WeightedDistances(vec![Some(0.0), None, Some(0.5)]),
+                vec![
+                    vec![FnxValue::Float(0.0), FnxValue::Vertex(vertices[0])],
+                    vec![FnxValue::Float(0.5), FnxValue::Vertex(vertices[2])],
+                ],
+            ),
+            (
+                bind("CALL fnx.triangles() YIELD triangles AS count, vertex AS id"),
+                KernelValues::Counts(vec![0, (1_u64 << 53) + 1, u64::MAX]),
+                vec![
+                    vec![FnxValue::Integer(0), FnxValue::Vertex(vertices[0])],
+                    vec![
+                        FnxValue::Integer((1_u64 << 53) + 1),
+                        FnxValue::Vertex(vertices[1]),
+                    ],
+                    vec![FnxValue::Integer(u64::MAX), FnxValue::Vertex(vertices[2])],
+                ],
+            ),
+        ];
+        for (call, values, expected) in cases {
+            let mut expected_hash = Hasher::new();
+            expected_hash.update(b"fgdb:prism:result-rows:v3");
+            expected_hash.update(&(expected.len() as u128).to_le_bytes());
+            expected_hash.update(&call.digest().0);
+            for row in &expected {
+                for value in row {
+                    hash_result_value(&mut expected_hash, *value);
+                }
+            }
+            let expected_hash = expected_hash.finalize();
+            let mut previous_checks = None;
+            for delivery in [Delivery::Collected, Delivery::Retained] {
+                let admission =
+                    ResultAdmission::for_delivery(&call, limits(), memory(), delivery).unwrap();
+                let mut encoded = EncodedRows::new(&call, expected.len(), &admission).unwrap();
+                let mut checks = 0;
+                for index in 0..vertices.len() {
+                    encoded
+                        .push_vertices(&call, &vertices, &values, index, &mut || {
+                            checks += 1;
+                            Ok(())
+                        })
+                        .unwrap();
+                }
+                assert_eq!(encoded.emitted, expected.len());
+                match delivery {
+                    Delivery::Collected => assert_eq!(encoded.rows.as_ref(), Some(&expected)),
+                    Delivery::Retained => {
+                        assert!(
+                            encoded.rows.is_none(),
+                            "no complete output row table is retained"
+                        );
+                        assert_eq!(
+                            encoded.max_integer,
+                            expected
+                                .iter()
+                                .flatten()
+                                .filter_map(|value| match value {
+                                    FnxValue::Integer(value) => Some(*value),
+                                    _ => None,
+                                })
+                                .max()
+                        );
+                    }
+                }
+                assert_eq!(encoded.result_hash.finalize(), expected_hash);
+                if let Some(previous) = previous_checks {
+                    assert_eq!(checks, previous);
+                }
+                previous_checks = Some(checks);
+                for stop in 1..=checks {
+                    let mut encoded = EncodedRows::new(&call, expected.len(), &admission).unwrap();
+                    let mut calls = 0;
+                    let result = (0..vertices.len()).try_for_each(|index| {
+                        encoded.push_vertices(&call, &vertices, &values, index, &mut || {
+                            calls += 1;
+                            if calls == stop {
+                                Err(Error::Source(SealedProjectionError::UnknownOrdinal(stop)))
+                            } else {
+                                Ok(())
+                            }
+                        })
+                    });
+                    assert!(
+                        matches!(result, Err(Error::Source(SealedProjectionError::UnknownOrdinal(at))) if at == stop)
+                    );
+                    assert_eq!(calls, stop);
+                }
+                let exact = admission.column_bytes + expected.len() * admission.row_bytes;
+                let exact_memory = FnxMemoryLimits {
+                    max_result_bytes: exact,
+                    ..memory()
+                };
+                let exact_limits = FnxExecutionLimits {
+                    max_result_rows: expected.len(),
+                    ..limits()
+                };
+                assert!(
+                    EncodedRows::new(
+                        &call,
+                        expected.len(),
+                        &ResultAdmission::for_delivery(&call, exact_limits, exact_memory, delivery)
+                            .unwrap()
+                    )
+                    .is_ok()
+                );
+                for (row_limit, byte_limit, resource) in [
+                    (expected.len() - 1, exact, "result rows"),
+                    (expected.len(), exact - 1, "result bytes"),
+                ] {
+                    let admission = ResultAdmission::for_delivery(
+                        &call,
+                        FnxExecutionLimits {
+                            max_result_rows: row_limit,
+                            ..limits()
+                        },
+                        FnxMemoryLimits {
+                            max_result_bytes: byte_limit,
+                            ..memory()
+                        },
+                        delivery,
+                    )
+                    .unwrap();
+                    assert!(
+                        matches!(EncodedRows::new(&call, expected.len(), &admission),
+                        Err(Error::Execution(ExecutionError::LimitExceeded {resource: actual, ..})) if actual == resource)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn retained_vertex_only_outputs_validate_unselected_values_and_ignore_unselected_integer_maxima()
+     {
+        let call = FnxCallSpec::bind(
+            "CALL fnx.pagerank() YIELD vertex AS id",
+            &FnxParameters::new(),
+        )
+        .unwrap();
+        let vertices = [VId(0), VId(17), VId(u128::MAX)];
+        for delivery in [Delivery::Collected, Delivery::Retained] {
+            let admission =
+                ResultAdmission::for_delivery(&call, limits(), memory(), delivery).unwrap();
+            for values in [
+                KernelValues::Scores(vec![0.0, 1.0, f64::NAN]),
+                KernelValues::Scores(vec![0.0, 1.0, -1.0]),
+                KernelValues::WeightedDistances(vec![Some(0.0), Some(1.0), Some(f64::INFINITY)]),
+                KernelValues::Components(vec![0, 1, 3]),
+            ] {
+                let mut encoded = EncodedRows::new(&call, 3, &admission).unwrap();
+                for index in 0..2 {
+                    encoded
+                        .push_vertices(&call, &vertices, &values, index, &mut || Ok(()))
+                        .unwrap();
+                }
+                assert!(matches!(
+                    encoded.push_vertices(&call, &vertices, &values, 2, &mut || Ok(())),
+                    Err(Error::Execution(
+                        ExecutionError::InvalidNumericResult
+                            | ExecutionError::InvalidUpstreamResult
+                    ))
+                ));
+                assert_eq!(encoded.emitted, 2);
+            }
+            let mut encoded = EncodedRows::new(&call, 3, &admission).unwrap();
+            for index in 0..3 {
+                encoded
+                    .push_vertices(
+                        &call,
+                        &vertices,
+                        &KernelValues::Counts(vec![u64::MAX; 3]),
+                        index,
+                        &mut || Ok(()),
+                    )
+                    .unwrap();
+            }
+            assert_eq!(encoded.max_integer, None);
+            assert_eq!(encoded.emitted, 3);
+        }
+    }
 
     struct DecodedRows<'a>(&'a SnapshotGraphView);
     struct DecodedRow<'a> {
