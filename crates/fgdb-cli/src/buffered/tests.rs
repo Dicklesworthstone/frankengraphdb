@@ -387,6 +387,173 @@ fn no_scratch(parent: &Path) {
 }
 
 #[test]
+fn map_fields_keep_buffered_and_spilled_reads_equal_to_literal_patterns() {
+    let ((), report) = run_async_under_lab(0x636c_7531, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let (vfs, resident) = fixture(&commit).await;
+        let directory = spill_parent();
+        for (text, literal, key, seq, count, streaming) in [
+            (
+                "MATCH (n:L {p:$payload.key.value}) RETURN n.p AS p",
+                "MATCH (n:L {p:11}) RETURN n.p AS p",
+                11,
+                2,
+                1,
+                true,
+            ),
+            (
+                "MATCH (n:L {p:$payload.key.value}) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n.p AS p",
+                "MATCH (n:L {p:1}) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n.p AS p",
+                1,
+                1,
+                1,
+                true,
+            ),
+            (
+                "MATCH (a)-[r:R {p:$payload.key.value}]->(b) RETURN r.p AS p",
+                "MATCH (a)-[r:R {p:17}]->(b) RETURN r.p AS p",
+                17,
+                2,
+                1,
+                true,
+            ),
+            (
+                "MATCH (n:L {p:$payload.absent}) RETURN n.p AS p",
+                "MATCH (n:L {p:null}) RETURN n.p AS p",
+                11,
+                2,
+                0,
+                true,
+            ),
+            (
+                "MATCH (n:L {p:$payload.key.value}) RETURN n.p+$payload.offset AS p ORDER BY p",
+                "MATCH (n:L {p:11}) RETURN n.p+10 AS p ORDER BY p",
+                11,
+                2,
+                1,
+                false,
+            ),
+            (
+                "MATCH (n:L {p:$payload.key.value}) RETURN count(*) AS n,sum(n.p) AS total",
+                "MATCH (n:L {p:11}) RETURN count(*) AS n,sum(n.p) AS total",
+                11,
+                2,
+                1,
+                false,
+            ),
+        ] {
+            for spilling in [false, true] {
+                if !spilling && !streaming {
+                    continue;
+                }
+                let mut options = if spilling {
+                    spill_options(&directory, text)
+                } else {
+                    options(&[text])
+                };
+                options.params = fgdb_gql::GqlParameters::new()
+                    .with_map(
+                        "payload",
+                        vec![
+                            (
+                                "key".into(),
+                                GraphValue::map(vec![(
+                                    "value".into(),
+                                    GraphValue::Scalar(CanonicalScalar::Int(key)),
+                                )])
+                                .unwrap(),
+                            ),
+                            (
+                                "offset".into(),
+                                GraphValue::Scalar(CanonicalScalar::Int(10)),
+                            ),
+                        ],
+                    )
+                    .unwrap();
+                let original = options.params.canonical_bytes();
+                let prepared = okay(prepare_query(&options));
+                let expected = resident
+                    .query(
+                        &cx,
+                        literal,
+                        &fgdb_gql::GqlParameters::new(),
+                        &options,
+                        options.budget.policy(),
+                    )
+                    .unwrap();
+                let mut expected_bytes = Vec::new();
+                okay(crate::render(
+                    expected,
+                    seq,
+                    "rows",
+                    true,
+                    &mut expected_bytes,
+                ));
+                assert_eq!(rows(&expected_bytes).len(), count);
+                let (pool, limits) = okay(options.buffered.admission(options.budget.policy()));
+                let mut view = Database::open_buffered_read_view_with_vfs(
+                    &commit,
+                    vfs.clone(),
+                    vfs.database_dir(),
+                    keys(),
+                    pool.clone(),
+                    limits,
+                )
+                .await
+                .unwrap();
+                let mut output = Vec::new();
+                okay(run_query(&mut view, &cx, &options, &prepared, None, true, &mut output).await);
+                assert_eq!(
+                    rows(&output),
+                    rows(&expected_bytes),
+                    "{text}; spilling={spilling}"
+                );
+                assert!(
+                    std::str::from_utf8(&output)
+                        .unwrap()
+                        .contains(&format!(r#""stream":true,"seq":{seq}"#))
+                );
+                drop(view);
+                assert_eq!(pool.used(), 0);
+                if spilling {
+                    let mut resident_spill = Vec::new();
+                    okay(
+                        crate::spill::run(
+                            &resident,
+                            &cx,
+                            &options,
+                            None,
+                            true,
+                            &mut resident_spill,
+                        )
+                        .await,
+                    );
+                    assert_eq!(
+                        rows(&resident_spill),
+                        rows(&expected_bytes),
+                        "resident spill: {text}"
+                    );
+                }
+                assert_eq!(options.params.canonical_bytes(), original);
+                no_scratch(&directory);
+            }
+        }
+        // MATCH's property-map operand is still syntax, not a map parameter.
+        let mut refused = options(&["MATCH (n $payload) RETURN n"]);
+        refused.params = fgdb_gql::GqlParameters::new()
+            .with_map(
+                "payload",
+                vec![("p".into(), GraphValue::Scalar(CanonicalScalar::Int(11)))],
+            )
+            .unwrap();
+        assert!(prepare_query(&refused).is_err());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn buffered_external_queries_preserve_native_projection_distinct_grouping_and_history() {
     let ((), report) = run_async_under_lab(0x636c_7510, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

@@ -62,6 +62,85 @@ fn native_phase_reservations_share_work_and_keep_rows_at_final_delivery() {
 }
 
 #[test]
+fn subscription_map_fields_bind_the_same_key_for_baseline_and_later_deltas() {
+    let ((), report) = run_async_under_lab(0x79a0_0317, |root| async move {
+        let (mut server, token, _) = served(&root, "subscription-map-fields").await;
+        Arc::get_mut(server.databases.get_mut("test").unwrap())
+            .unwrap()
+            .symbols
+            .bind(fgdb_gql::GraphSymbolKind::Property, "p", 1)
+            .unwrap();
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut seed = vertex(1);
+        seed.set_vertex_property(
+            fgdb_types::VId(1),
+            fgdb_delta_types::PropertyKeyId(1),
+            Some(fgdb_types::CanonicalScalar::Int(7)),
+        );
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), seed)
+            .await
+            .unwrap();
+        let mut statement =
+            request("SUBSCRIBE TO MATCH (n {p:$payload.filter.key}) RETURN n.p AS p");
+        statement.parameters = vec![(
+            "payload".into(),
+            WireValue::Map(vec![(
+                "filter".into(),
+                WireValue::Map(vec![("key".into(), WireValue::Int(7))]),
+            )]),
+        )];
+        let mut selected = success(subscribe(&root, db, &token, &statement).await);
+        let baseline = success(poll(&root, db, &token, &mut selected).await).unwrap();
+        assert_eq!(baseline.entries, vec![(1, vec![WireValue::Int(7)])]);
+        selected
+            .consumer
+            .acknowledge(baseline.batch.receipt())
+            .unwrap();
+        statement.parameters = vec![(
+            "payload".into(),
+            WireValue::Map(vec![("filter".into(), WireValue::Map(vec![]))]),
+        )];
+        let mut missing = success(subscribe(&root, db, &token, &statement).await);
+        let empty = success(poll(&root, db, &token, &mut missing).await).unwrap();
+        assert!(empty.entries.is_empty());
+        missing.consumer.acknowledge(empty.batch.receipt()).unwrap();
+        let mut changed = fgdb::WriteBatch::new(fgdb_delta_types::RelationId(1));
+        changed.set_vertex_property(
+            fgdb_types::VId(1),
+            fgdb_delta_types::PropertyKeyId(1),
+            Some(fgdb_types::CanonicalScalar::Int(8)),
+        );
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), changed)
+            .await
+            .unwrap();
+        let delta = success(poll(&root, db, &token, &mut selected).await).unwrap();
+        assert!(!delta.batch.is_snapshot());
+        assert_eq!(delta.entries, vec![(-1, vec![WireValue::Int(7)])]);
+        selected
+            .consumer
+            .acknowledge(delta.batch.receipt())
+            .unwrap();
+        let unseen = success(poll(&root, db, &token, &mut missing).await).unwrap();
+        assert!(unseen.entries.is_empty());
+        let denied = token.attenuate(Restriction::MaxWork(0)).unwrap();
+        refused(
+            subscribe(&root, db, &denied, &statement).await,
+            ErrorCode::Budget,
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn zero_signed_grants_refuse_before_installation_and_source_free_needs_no_nodes() {
     let ((), report) = run_async_under_lab(0x79a0_0301, |root| async move {
         let (mut server, token, _) = served(&root, "subscription-zero-grants").await;

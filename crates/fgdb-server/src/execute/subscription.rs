@@ -435,15 +435,16 @@ pub(crate) async fn subscribe(
     permit.checkpoint_at(unix_millis()).map_err(authorization)?;
     let parameters = convert::parameters(&statement.parameters, None)
         .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
-    let prepared = PreparedNativeRead::prepare_subscription(
-        &query,
-        &statement.statement,
-        &parameters,
-        db.symbols.clone(),
-    )
-    .map_err(subscribe_refusal)?;
+    let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(&statement.statement, &parameters);
+    let (text, parameters) = lowered.as_ref().map_or(
+        (statement.statement.as_str(), &parameters),
+        |(lowered, derived)| (lowered.text(), derived),
+    );
+    let prepared =
+        PreparedNativeRead::prepare_subscription(&query, text, parameters, db.symbols.clone())
+            .map_err(subscribe_refusal)?;
     let (nodes, source_width) = prepared
-        .subscription_footprint(&query, &parameters)
+        .subscription_footprint(&query, parameters)
         .map_err(native_refusal)?;
     let reservation = reserve(
         db.query_policy,
@@ -475,7 +476,7 @@ pub(crate) async fn subscribe(
     let (consumer, (columns, initial)) = prepared.subscribe_scoped(
         &mut guard,
         &query,
-        &parameters,
+        parameters,
         reservation.setup,
         |names, batch| {
             let rows = check_rows(batch, row_limit(db.query_policy, limits))?;

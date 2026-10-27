@@ -392,6 +392,108 @@ fn map_fields_key_read_patterns() {
     });
 }
 
+#[test]
+fn map_fields_bind_once_for_historical_diff_and_maintained_subscription() {
+    use std::collections::BTreeMap;
+    run(async |commit, cx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, graph()).await.unwrap();
+        let before = db.frontier().unwrap();
+        let params = map_parameters(&[("filter", map(&[("name", text("b"))]))]);
+        let statement = "MATCH (n:Person {name:$payload.filter.name}) RETURN n.p AS p";
+        let mut subscription = db
+            .subscribe_native(
+                cx,
+                &format!("SUBSCRIBE TO {statement}"),
+                &params,
+                symbols,
+                policy(),
+            )
+            .unwrap();
+        let baseline = subscription.poll(&db, cx, policy()).unwrap().unwrap();
+        let entries = |batch: &fgdb::SubscriptionBatch| -> BTreeMap<Vec<QueryValue>, i128> {
+            batch
+                .rows()
+                .iter()
+                .map(|(row, weight)| (row.clone(), weight.to_i128().unwrap()))
+                .collect()
+        };
+        assert_eq!(
+            entries(&baseline),
+            BTreeMap::from([(vec![QueryValue::Value(int(20))], 1),])
+        );
+        subscription.acknowledge(baseline.receipt()).unwrap();
+        let mut changes = WriteBatch::new(R);
+        changes.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(25)));
+        changes.set_vertex_property(
+            VId(3),
+            NAME,
+            Some(CanonicalScalar::ucs_basic_text("b").unwrap()),
+        );
+        db.write(commit, changes).await.unwrap();
+        let after = db.frontier().unwrap();
+        let expected = BTreeMap::from([
+            (vec![QueryValue::Value(int(20))], -1),
+            (vec![QueryValue::Value(int(25))], 1),
+            (vec![QueryValue::Value(int(30))], 1),
+        ]);
+        let delta = subscription.poll(&db, cx, policy()).unwrap().unwrap();
+        assert!(!delta.is_snapshot());
+        assert_eq!(entries(&delta), expected);
+        let view = db.read_session().unwrap();
+        for result in [
+            db.query_diff(cx, statement, &params, symbols, before, after, policy())
+                .unwrap(),
+            view.query_diff(cx, statement, &params, symbols, before, after, policy())
+                .unwrap(),
+        ] {
+            let observed: BTreeMap<_, _> = result
+                .changes()
+                .iter()
+                .map(|(row, weight)| (row.to_vec(), weight.to_i128().unwrap()))
+                .collect();
+            assert_eq!(observed, expected);
+        }
+        let missing = map_parameters(&[("filter", map(&[]))]);
+        assert!(
+            db.query_diff(cx, statement, &missing, symbols, before, after, policy())
+                .unwrap()
+                .changes()
+                .is_empty()
+        );
+        let mut empty = db
+            .subscribe_native(
+                cx,
+                &format!("SUBSCRIBE TO {statement}"),
+                &missing,
+                symbols,
+                policy(),
+            )
+            .unwrap();
+        assert!(
+            empty
+                .poll(&db, cx, policy())
+                .unwrap()
+                .unwrap()
+                .rows()
+                .is_empty()
+        );
+        // A retained circuit owns its bound constant, even if a caller binds
+        // another subscription from the same statement afterward.
+        subscription.acknowledge(delta.receipt()).unwrap();
+        let mut further = WriteBatch::new(R);
+        further.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(26)));
+        db.write(commit, further).await.unwrap();
+        assert_eq!(
+            entries(&subscription.poll(&db, cx, policy()).unwrap().unwrap()),
+            BTreeMap::from([
+                (vec![QueryValue::Value(int(25))], -1),
+                (vec![QueryValue::Value(int(26))], 1),
+            ])
+        );
+    });
+}
+
 /// Person vertices 1..=3: p = 10, 20, 30 and name = "a", "b", "c".
 fn graph() -> WriteBatch {
     let mut batch = WriteBatch::new(R);

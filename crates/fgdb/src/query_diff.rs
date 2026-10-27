@@ -104,6 +104,12 @@ impl EmbeddedReadView {
     ) -> Result<GraphResultDiff, Error> {
         admit(self, cx, before, after)?;
         cx.with_restriction(|| {
+            let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(text, params);
+            let (text, params) = lowered
+                .as_ref()
+                .map_or((text, params), |(lowered, derived)| {
+                    (lowered.text(), derived)
+                });
             let prepared =
                 PreparedNativeRead::prepare(text, params, resolver).map_err(definition)?;
             prepared.diff_admitted(self, cx, params, before, after, policy)

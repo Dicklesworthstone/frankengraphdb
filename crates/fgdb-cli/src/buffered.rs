@@ -119,18 +119,22 @@ pub(super) fn prepare_query(options: &Options) -> Result<PreparedQuery, Failure>
 }
 
 pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
-    let native = PreparedNativeRead::prepare(&options.text, &options.params, options)
-        .map_err(execution_failure)?;
+    let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(&options.text, &options.params);
+    let (text, params) = lowered.as_ref().map_or(
+        (options.text.as_str(), &options.params),
+        |(lowered, derived)| (lowered.text(), derived),
+    );
+    let native = PreparedNativeRead::prepare(text, params, options).map_err(execution_failure)?;
     let (pattern, as_of) = match native {
         PreparedNativeRead::Pattern(template) => (
             template
-                .bind_parameters(&options.params)
+                .bind_parameters(params)
                 .map_err(execution_failure)?,
             None,
         ),
         PreparedNativeRead::TemporalPattern(template) => {
             let bound = template
-                .bind_parameters(&options.params)
+                .bind_parameters(params)
                 .map_err(execution_failure)?;
             (bound.pattern().clone(), Some(bound.as_of()))
         }

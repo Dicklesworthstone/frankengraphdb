@@ -251,6 +251,12 @@ impl<V: Vfs + Clone> Database<V> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         self.ensure_readable().map_err(StandingQueryError::Read)?;
         cx.with_restriction(|| {
+            let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(text, params);
+            let (text, params) = lowered
+                .as_ref()
+                .map_or((text, params), |(lowered, derived)| {
+                    (lowered.text(), derived)
+                });
             PreparedNativeRead::prepare(text, params, resolver)
                 .map_err(prepare_error)?
                 .register_standing(self, cx, params, policy)

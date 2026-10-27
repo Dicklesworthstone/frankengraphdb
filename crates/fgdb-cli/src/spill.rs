@@ -347,8 +347,12 @@ pub(super) async fn run(
     robot: bool,
     out: &mut impl Write,
 ) -> Result<(), Failure> {
-    let prepared = PreparedNativeRead::prepare(&options.text, &options.params, options)
-        .map_err(execution_failure)?;
+    let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(&options.text, &options.params);
+    let (text, params) = lowered.as_ref().map_or(
+        (options.text.as_str(), &options.params),
+        |(lowered, derived)| (lowered.text(), derived),
+    );
+    let prepared = PreparedNativeRead::prepare(text, params, options).map_err(execution_failure)?;
     let aggregate = is_aggregate(&prepared);
     let mut scratch = Scratch::new(cx, options, usize::from(aggregate), 0, false).await?;
     let outcome = async {
@@ -358,6 +362,7 @@ pub(super) async fn run(
                 view,
                 cx,
                 options,
+                params,
                 resolver,
                 &mut scratch.source,
                 partition,
@@ -375,7 +380,7 @@ pub(super) async fn run(
             .spool_ordered_in_view(
                 view,
                 cx,
-                &options.params,
+                params,
                 options.budget.policy(),
                 &mut scratch.source,
                 &mut scratch.destination,
@@ -414,16 +419,20 @@ pub(super) enum PreparedBuffered {
 }
 
 pub(super) fn prepare_buffered(options: &Options) -> Result<PreparedBuffered, Failure> {
-    let prepared = PreparedNativeRead::prepare(&options.text, &options.params, options)
-        .map_err(execution_failure)?;
+    let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(&options.text, &options.params);
+    let (text, params) = lowered.as_ref().map_or(
+        (options.text.as_str(), &options.params),
+        |(lowered, derived)| (lowered.text(), derived),
+    );
+    let prepared = PreparedNativeRead::prepare(text, params, options).map_err(execution_failure)?;
     if is_aggregate(&prepared) {
         prepared
-            .prepare_buffered_aggregate(&options.params)
+            .prepare_buffered_aggregate(params)
             .map(|aggregate| PreparedBuffered::Aggregate(Box::new(aggregate)))
             .map_err(execution_failure)
     } else {
         prepared
-            .prepare_buffered_order(&options.params)
+            .prepare_buffered_order(params)
             .map(|order| PreparedBuffered::Ordered(Box::new(order)))
             .map_err(execution_failure)
     }
@@ -601,6 +610,7 @@ async fn run_aggregate(
     view: &EmbeddedReadView,
     cx: &QueryCx,
     options: &Options,
+    params: &fgdb_gql::GqlParameters,
     resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
     source: &mut SpillFile<File>,
     partition: &mut SpillFile<File>,
@@ -616,7 +626,7 @@ async fn run_aggregate(
         .spool_aggregate_in_view(
             view,
             cx,
-            &options.params,
+            params,
             options.budget.policy(),
             source,
             partition,
