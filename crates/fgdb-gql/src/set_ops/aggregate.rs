@@ -297,6 +297,20 @@ impl PreparedGraphSetAggregate {
             .execute_relational_with_source(policy, source, checkpoint)
     }
 
+    /// Execute through one trusted host, retaining its optional completed
+    /// procedure cursors and element-property reader through exact aggregation.
+    /// Source validation and cumulative admission still precede consumption.
+    pub fn execute_governed_from_source<E, C>(
+        &self,
+        policy: GqlQueryPolicy,
+        source: impl GraphSetSource<E, C>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        self.summary
+            .execute_relational_with_source(policy, source, checkpoint)
+    }
+
     /// Execute a terminal aggregate with identity-seeded pattern admission.
     /// This is the same source capability as
     /// [`PreparedGraphSet::execute_governed_with_seeded_elements`]: a necessary

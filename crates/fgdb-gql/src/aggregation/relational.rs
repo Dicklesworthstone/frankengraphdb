@@ -308,7 +308,8 @@ impl PreparedGraphAggregate {
     {
         // Select before observing a source. A runtime failure never falls
         // back, repeats a graph read, or starts a fresh allowance.
-        if let Some(physical) = self.folded_definition() {
+        if let Some(physical) = self.folded_definition_for_source(source.supports_procedure_rows())
+        {
             return physical.execute_relational_folded(policy, source, checkpoint);
         }
         self.execute_relational_materialized(policy, source, checkpoint)

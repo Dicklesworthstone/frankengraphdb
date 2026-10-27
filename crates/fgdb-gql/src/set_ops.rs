@@ -31,9 +31,10 @@ pub(crate) use procedure::{
     BorrowedSource, DynPatterns, DynProcedures, DynSeeded, PatternSource, WithSeededPatterns,
 };
 pub use procedure::{
-    GraphPatternFactorExecution, GraphSetSource, PreparedProcedureCall, ProcedureGraphDirection,
-    ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
-    ProcedureSelfLoops, WithElementReads, WithProcedures,
+    GraphPatternFactorExecution, GraphProcedureExecution, GraphProcedureRowCursor, GraphSetSource,
+    PreparedProcedureCall, ProcedureGraphDirection, ProcedureGraphProjection, ProcedureGraphWeight,
+    ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops, WithElementReads,
+    WithProcedureRows, WithProcedures, procedure_row_source,
 };
 pub(crate) use projection::{
     ElementRead, ProjectionFailure, construct_temporal, evaluate_equality, evaluate_membership,
@@ -1393,6 +1394,19 @@ impl PreparedGraphSet {
         };
         let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
         execute::execute(self, policy, &mut source, checkpoint)
+    }
+
+    /// Execute over one trusted host supplying the optional source capabilities.
+    /// Each source must retain the same pinned snapshot, authority and cumulative
+    /// policy contract as the closure-based entrypoints. Completed procedure
+    /// cursors may be folded into a bounded page without retaining a row table.
+    pub fn execute_governed_from_source<E, C>(
+        &self,
+        policy: GqlQueryPolicy,
+        mut source: impl GraphSetSource<E, C>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
+        execute::execute(self, policy, &mut source, &mut checkpoint)
     }
 
     /// A write tail over its head's owned rows. The tail holds row stages

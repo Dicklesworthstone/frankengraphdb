@@ -226,6 +226,27 @@ impl core::fmt::Debug for GraphPatternFactorExecution {
     }
 }
 
+/// Pull rows from a procedure that has completed its source validation and
+/// certification. The cursor owns its state and does not borrow its host, so
+/// downstream expressions may use that host's ordinary element reader.
+/// Opening the cursor must validate all value domains, even under LIMIT 0.
+pub trait GraphProcedureRowCursor<E, C> {
+    fn next_row(
+        &mut self,
+        checkpoint: &mut dyn FnMut() -> Result<(), C>,
+    ) -> Result<Option<GraphValueRow>, GqlQueryError<E, C>>;
+}
+
+/// Complete admission statistics precede the first downstream row. Output
+/// rows are in canonical tuple order and lead with strictly ascending unique
+/// vertex identities. `rows.result_rows` is the exact cursor cardinality.
+/// The cursor is private execution state, not externally delivered rows.
+pub struct GraphProcedureExecution<E, C> {
+    pub cursor: Box<dyn GraphProcedureRowCursor<E, C>>,
+    pub rows: GqlExecutionStats,
+    pub evaluator: GlaExecutionStats,
+}
+
 /// The trusted row sources one set execution may read: graph patterns and,
 /// when the host supplies them, procedure calls. Every existing closure over
 /// patterns is a source with no procedures.
@@ -310,6 +331,29 @@ pub trait GraphSetSource<E, C> {
         None
     }
 
+    /// Definition-only capability for every canonical vertex-first FnX call.
+    /// A supporting host returns Some from `procedure_rows`, including typed
+    /// binding/source refusals; it may not silently reopen a materialized call.
+    fn supports_procedure_rows(&self) -> bool {
+        false
+    }
+
+    /// Optional completed cursor for a canonical vertex-first procedure.
+    /// A host without this capability uses the unchanged materialized
+    /// procedure. Its default `None` must do no source work. A host advertising
+    /// support must return `Some`; `None` is a source-contract error, never a
+    /// materialized retry. A returned error is authoritative and never falls back.
+    /// No row may expose a deferred source/domain/certificate failure: all
+    /// such validation must finish before this method returns successfully.
+    fn procedure_rows(
+        &mut self,
+        _call: &PreparedProcedureCall,
+        _arguments: &[GraphValue],
+        _policy: GqlQueryPolicy,
+    ) -> Option<Result<GraphProcedureExecution<E, C>, GqlQueryError<E, C>>> {
+        None
+    }
+
     /// A write tail's owned head rows (`SetNode::Owned`), taken once. `None`
     /// means this host supplies none; only a write executes such a tail.
     fn owned(&mut self) -> Option<Vec<GraphValueRow>> {
@@ -339,6 +383,9 @@ pub(crate) struct BorrowedSource<'s, 'r, E, C> {
 }
 
 impl<E, C> GraphSetSource<E, C> for BorrowedSource<'_, '_, E, C> {
+    fn supports_procedure_rows(&self) -> bool {
+        self.source.supports_procedure_rows()
+    }
     fn pattern(
         &mut self,
         pattern: &PreparedGraphPattern<GraphValueRow>,
@@ -379,6 +426,15 @@ impl<E, C> GraphSetSource<E, C> for BorrowedSource<'_, '_, E, C> {
         policy: GqlQueryPolicy,
     ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>> {
         self.source.procedure(call, arguments, policy)
+    }
+
+    fn procedure_rows(
+        &mut self,
+        call: &PreparedProcedureCall,
+        arguments: &[GraphValue],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GraphProcedureExecution<E, C>, GqlQueryError<E, C>>> {
+        self.source.procedure_rows(call, arguments, policy)
     }
 
     fn owned(&mut self) -> Option<Vec<GraphValueRow>> {
@@ -491,17 +547,68 @@ where
     }
 }
 
-/// A source plus the host's element property reader (fgdb-xnd7x).
-pub struct WithElementReads<S, R> {
+/// A source plus an optional completed procedure cursor. Existing pattern,
+/// property and materialized procedure semantics remain with `source`.
+pub struct WithProcedureRows<S, P> {
     pub source: S,
-    pub elements: R,
+    pub procedures: P,
 }
 
-impl<E, C, S, R> GraphSetSource<E, C> for WithElementReads<S, R>
+/// Compose pinned source callbacks with completed procedure cursors.
+/// Materialized procedures remain available for other output orders and
+/// operators that require their complete input bag.
+pub fn procedure_row_source<E, C>(
+    patterns: impl FnMut(
+        &PreparedGraphPattern<GraphValueRow>,
+        GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+    seeded: impl FnMut(
+        &PreparedGraphPattern<GraphValueRow>,
+        &[VId],
+        GqlQueryPolicy,
+    ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>>,
+    procedures: impl FnMut(
+        &PreparedProcedureCall,
+        &[GraphValue],
+        GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+    rows: impl FnMut(
+        &PreparedProcedureCall,
+        &[GraphValue],
+        GqlQueryPolicy,
+    ) -> Option<Result<GraphProcedureExecution<E, C>, GqlQueryError<E, C>>>,
+    elements: impl FnMut(
+        ElementId,
+        PropertyKeyId,
+    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+) -> impl GraphSetSource<E, C> {
+    WithProcedureRows {
+        source: WithSeededPatterns {
+            source: WithElementReads {
+                source: WithProcedures {
+                    patterns,
+                    procedures,
+                },
+                elements,
+            },
+            seeded,
+        },
+        procedures: rows,
+    }
+}
+
+impl<E, C, S, P> GraphSetSource<E, C> for WithProcedureRows<S, P>
 where
     S: GraphSetSource<E, C>,
-    R: FnMut(ElementId, PropertyKeyId) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+    P: FnMut(
+        &PreparedProcedureCall,
+        &[GraphValue],
+        GqlQueryPolicy,
+    ) -> Option<Result<GraphProcedureExecution<E, C>, GqlQueryError<E, C>>>,
 {
+    fn supports_procedure_rows(&self) -> bool {
+        true
+    }
     fn pattern(
         &mut self,
         pattern: &PreparedGraphPattern<GraphValueRow>,
@@ -538,6 +645,84 @@ where
     ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>> {
         self.source.procedure(call, arguments, policy)
     }
+    fn procedure_rows(
+        &mut self,
+        call: &PreparedProcedureCall,
+        arguments: &[GraphValue],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GraphProcedureExecution<E, C>, GqlQueryError<E, C>>> {
+        (self.procedures)(call, arguments, policy)
+    }
+    fn owned(&mut self) -> Option<Vec<GraphValueRow>> {
+        self.source.owned()
+    }
+    fn element_property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
+        self.source.element_property(element, key)
+    }
+}
+
+/// A source plus the host's element property reader (fgdb-xnd7x).
+pub struct WithElementReads<S, R> {
+    pub source: S,
+    pub elements: R,
+}
+
+impl<E, C, S, R> GraphSetSource<E, C> for WithElementReads<S, R>
+where
+    S: GraphSetSource<E, C>,
+    R: FnMut(ElementId, PropertyKeyId) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+{
+    fn supports_procedure_rows(&self) -> bool {
+        self.source.supports_procedure_rows()
+    }
+    fn pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>> {
+        self.source.pattern(pattern, policy)
+    }
+    fn supports_pattern_factors(&self) -> bool {
+        self.source.supports_pattern_factors()
+    }
+    fn pattern_factors(
+        &mut self,
+        request: &PreparedGraphPatternFactors<'_>,
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GraphPatternFactorExecution, GqlQueryError<E, C>>> {
+        self.source.pattern_factors(request, policy)
+    }
+    fn supports_seeded_patterns(&self) -> bool {
+        self.source.supports_seeded_patterns()
+    }
+    fn seeded_pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        seeds: &[VId],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>> {
+        self.source.seeded_pattern(pattern, seeds, policy)
+    }
+    fn procedure(
+        &mut self,
+        call: &PreparedProcedureCall,
+        arguments: &[GraphValue],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>> {
+        self.source.procedure(call, arguments, policy)
+    }
+    fn procedure_rows(
+        &mut self,
+        call: &PreparedProcedureCall,
+        arguments: &[GraphValue],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GraphProcedureExecution<E, C>, GqlQueryError<E, C>>> {
+        self.source.procedure_rows(call, arguments, policy)
+    }
     fn owned(&mut self) -> Option<Vec<GraphValueRow>> {
         self.source.owned()
     }
@@ -566,6 +751,9 @@ where
         GqlQueryPolicy,
     ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>>,
 {
+    fn supports_procedure_rows(&self) -> bool {
+        self.source.supports_procedure_rows()
+    }
     fn pattern(
         &mut self,
         pattern: &PreparedGraphPattern<GraphValueRow>,
@@ -602,6 +790,14 @@ where
     ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>> {
         self.source.procedure(call, arguments, policy)
     }
+    fn procedure_rows(
+        &mut self,
+        call: &PreparedProcedureCall,
+        arguments: &[GraphValue],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GraphProcedureExecution<E, C>, GqlQueryError<E, C>>> {
+        self.source.procedure_rows(call, arguments, policy)
+    }
     fn owned(&mut self) -> Option<Vec<GraphValueRow>> {
         self.source.owned()
     }
@@ -624,6 +820,9 @@ pub(crate) struct WithOwnedRows<'s, E, C> {
 }
 
 impl<E, C> GraphSetSource<E, C> for WithOwnedRows<'_, E, C> {
+    fn supports_procedure_rows(&self) -> bool {
+        self.source.supports_procedure_rows()
+    }
     fn pattern(
         &mut self,
         pattern: &PreparedGraphPattern<GraphValueRow>,
@@ -649,6 +848,14 @@ impl<E, C> GraphSetSource<E, C> for WithOwnedRows<'_, E, C> {
         policy: GqlQueryPolicy,
     ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>> {
         self.source.procedure(call, arguments, policy)
+    }
+    fn procedure_rows(
+        &mut self,
+        call: &PreparedProcedureCall,
+        arguments: &[GraphValue],
+        policy: GqlQueryPolicy,
+    ) -> Option<Result<GraphProcedureExecution<E, C>, GqlQueryError<E, C>>> {
+        self.source.procedure_rows(call, arguments, policy)
     }
     fn owned(&mut self) -> Option<Vec<GraphValueRow>> {
         self.rows.take()

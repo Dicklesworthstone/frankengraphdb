@@ -51,8 +51,8 @@ use explain::{explain_prefix, explain_result};
 pub(crate) use prism::{
     BufferedSealedCache, CooperativeSealedBuild, ImmediateSealedBuild, ProcedureRowSink,
     ProjectionRequest, SEALED_CACHE_BYTES, SealedBuild, SealedProjectionRequest,
-    SealedProjectionSource, bind_procedure, fnx_procedure, procedure_failure, procedure_options,
-    push_staged as push_prism_staged, source_control as prism_source_control,
+    SealedProjectionSource, bind_procedure, fnx_procedure, fnx_procedure_rows, procedure_failure,
+    procedure_options, push_staged as push_prism_staged, source_control as prism_source_control,
 };
 pub use prism::{ProcedureError, SealedProjectionOpenError};
 pub(crate) use read_cache::ReadCaches;

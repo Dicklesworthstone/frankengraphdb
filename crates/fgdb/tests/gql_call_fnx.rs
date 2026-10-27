@@ -836,6 +836,186 @@ fn aggregate_analytics_run_at_the_read_snapshot() {
     });
 }
 
+#[test]
+fn completed_cursor_pages_and_groups_match_materialized_calls_across_history_and_reopen() {
+    run(async |commit, cx| {
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let old = db.write(commit, graph()).await.unwrap();
+        let pinned = db.read_session().unwrap();
+        let params = GqlParameters::new();
+        let ranked = |yields: &str| {
+            format!(
+                "CALL fnx.single_source_shortest_path_length(1) YIELD {yields} \
+                 RETURN vertex, distance ORDER BY distance DESC, vertex SKIP 1 LIMIT 2"
+            )
+        };
+        let grouped = |yields: &str| {
+            format!(
+                "CALL fnx.single_source_shortest_path_length(1) YIELD {yields} \
+                 WITH vertex, distance, distance % 2 AS parity \
+                 RETURN parity, COUNT(*) AS n, SUM(distance) AS total \
+                 GROUP BY parity ORDER BY parity"
+            )
+        };
+        let prepare_rows = |text: &str| {
+            fgdb_gql::PreparedGraphSetText::prepare(text, symbols)
+                .unwrap()
+                .bind_parameters(&params)
+                .unwrap()
+        };
+        let prepare_groups = |text: &str| {
+            let fgdb::PreparedNativeRead::PipelineAggregate(query) =
+                fgdb::PreparedNativeRead::prepare(text, &params, symbols).unwrap()
+            else {
+                panic!("a CALL aggregate must preserve its relational input");
+            };
+            let slots = query.output_slots().to_vec();
+            (query.bind_relation_parameters(&params).unwrap(), slots)
+        };
+        // Only the first form can use the canonical vertex-first cursor. Both
+        // return the same schema and must see the same complete sparse result.
+        let rank_cursor = prepare_rows(&ranked("vertex, distance"));
+        let rank_table = prepare_rows(&ranked("distance, vertex"));
+        // Compute parity in a WITH that retains the unique leading vertex.
+        // A computed terminal group key would instead introduce a projection
+        // dropping that vertex and force the complete input to materialize.
+        let (group_cursor, group_slots) = prepare_groups(&grouped("vertex, distance"));
+        let (group_table, table_slots) = prepare_groups(&grouped("distance, vertex"));
+        assert_eq!(group_slots, table_slots);
+        let group_cells = |groups: &[fgdb_gql::GraphAggregateRow]| {
+            groups
+                .iter()
+                .map(|row| {
+                    group_slots
+                        .iter()
+                        .map(|slot| match *slot {
+                            fgdb_gql::GraphAggregateTextSlot::GroupKey(index) => {
+                                QueryValue::Value(row.keys()[index].clone())
+                            }
+                            fgdb_gql::GraphAggregateTextSlot::Aggregate(index) => {
+                                row.values()[index].clone()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let expected_rank = |current: bool| {
+            let pairs = if current {
+                [(5, 4), (4, 3)]
+            } else {
+                [(4, 3), (3, 2)]
+            };
+            pairs
+                .into_iter()
+                .map(|(vertex, distance)| {
+                    fgdb_gql::algebra::GraphValueRow::from_owned_values(vec![
+                        GraphValue::Vertex(VId(vertex)),
+                        GraphValue::Scalar(CanonicalScalar::Int(distance)),
+                    ])
+                })
+                .collect::<Vec<_>>()
+        };
+        let expected_groups = |current: bool| {
+            vec![
+                vec![
+                    QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(0))),
+                    QueryValue::Count(3),
+                    QueryValue::Integer(6),
+                ],
+                vec![
+                    QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(1))),
+                    QueryValue::Count(if current { 3 } else { 2 }),
+                    QueryValue::Integer(if current { 9 } else { 4 }),
+                ],
+            ]
+        };
+        let mut changed = WriteBatch::new(R);
+        changed.add_edge(EId(6), VId(5), VId(6), vec![]);
+        let now = db.write(commit, changed).await.unwrap();
+
+        for reopen in [false, true] {
+            if reopen {
+                drop(db);
+                db = Database::open_with_vfs(commit, vfs.clone(), &path, keys())
+                    .await
+                    .unwrap();
+            }
+            for (at, current) in [(old, false), (now, true)] {
+                let selected = db
+                    .execute_graph_set_governed_at(cx, &rank_cursor, at, policy())
+                    .unwrap();
+                let materialized = db
+                    .execute_graph_set_governed_at(cx, &rank_table, at, policy())
+                    .unwrap();
+                assert_eq!(
+                    selected.value,
+                    expected_rank(current),
+                    "{at:?}, reopen={reopen}"
+                );
+                assert_eq!(selected.value, materialized.value);
+                assert_eq!(
+                    selected.rows.snapshot_records,
+                    if current { 12 } else { 11 }
+                );
+                assert_eq!(selected.rows.result_rows, 2);
+
+                // The source's own projection allowance stays generous. The
+                // complete relational work/scratch/result ceilings are exact,
+                // including the extra completed-array pass over unreachable
+                // vertices. A one-unit deficit must refuse, never truncate.
+                let exact = GqlQueryPolicy::new(
+                    policy().rows.max_snapshot_records().unwrap(),
+                    2,
+                    selected.evaluator.work_units,
+                    selected.evaluator.scratch_entries,
+                );
+                assert_eq!(
+                    db.execute_graph_set_governed_at(cx, &rank_cursor, at, exact)
+                        .unwrap(),
+                    selected
+                );
+                for work in [false, true] {
+                    let mut short = exact;
+                    if work {
+                        short.evaluator.max_work_units -= 1;
+                    } else {
+                        short.evaluator.max_scratch_entries -= 1;
+                    }
+                    assert!(
+                        db.execute_graph_set_governed_at(cx, &rank_cursor, at, short)
+                            .is_err()
+                    );
+                }
+
+                let summarized = db
+                    .execute_graph_set_aggregate_governed_at(cx, &group_cursor, at, policy())
+                    .unwrap();
+                let materialized = db
+                    .execute_graph_set_aggregate_governed_at(cx, &group_table, at, policy())
+                    .unwrap();
+                assert_eq!(summarized.value, materialized.value);
+                let actual = group_cells(&summarized.value);
+                assert_eq!(actual, expected_groups(current), "{at:?}, reopen={reopen}");
+                assert_eq!(summarized.rows.result_rows, 2);
+            }
+            let pinned_rows = pinned
+                .execute_graph_set_governed(cx, &rank_cursor, policy())
+                .unwrap();
+            assert_eq!(pinned_rows.value, expected_rank(false));
+            let pinned_groups = pinned
+                .execute_graph_set_aggregate_governed(cx, &group_cursor, policy())
+                .unwrap();
+            let actual = group_cells(&pinned_groups.value);
+            assert_eq!(actual, expected_groups(false));
+        }
+    });
+}
+
 /// fgdb-qnqrj: a Prism score thresholds with a decimal literal. Degree
 /// centrality here is deg / 5, and only vertex 3 (degree 3) exceeds 0.5.
 #[test]
