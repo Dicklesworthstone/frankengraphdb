@@ -36,10 +36,10 @@ fn line_error(line: usize, kind: &str, message: impl std::fmt::Display) -> Failu
 /// An endpoint in the input's terms: its label and property by binding name,
 /// not by internal ID.
 fn spelled(endpoint: &BulkEndpoint, options: &Options) -> String {
-    let named = |bindings: &BTreeMap<String, u32>, id: u64| {
+    let named = |bindings: &BTreeMap<String, u64>, id: u64| {
         bindings
             .iter()
-            .find(|(_, bound)| u64::from(**bound) == id)
+            .find(|(_, bound)| **bound == id)
             .map_or_else(|| format!("#{id}"), |(name, _)| name.clone())
     };
     match endpoint {
@@ -937,7 +937,7 @@ fn endpoint(
                 .labels
                 .get(name)
                 .ok_or_else(|| format!("UnknownBinding: label {name}"))?;
-            Some(LabelId(u64::from(*id)))
+            Some(LabelId(*id))
         }
     };
     let name = string(field(fields, "property")?)?;
@@ -949,11 +949,7 @@ fn endpoint(
     if matches!(value, CanonicalScalar::Null) {
         return Err("InvalidEndpoint: a null value matches no vertex".into());
     }
-    Ok(BulkEndpoint::matching(
-        label,
-        PropertyKeyId(u64::from(*key)),
-        value,
-    ))
+    Ok(BulkEndpoint::matching(label, PropertyKeyId(*key), value))
 }
 
 fn parse_row(
@@ -974,10 +970,7 @@ fn parse_row(
                 .properties
                 .get(name)
                 .ok_or_else(|| format!("UnknownBinding: property {name}"))?;
-            props.push((
-                PropertyKeyId(u64::from(*id)),
-                storable(value, resolver)?.into(),
-            ));
+            props.push((PropertyKeyId(*id), storable(value, resolver)?.into()));
         }
     }
     props.sort_by_key(|(id, _)| *id);
@@ -994,7 +987,7 @@ fn parse_row(
                     .labels
                     .get(name)
                     .ok_or_else(|| format!("UnknownBinding: label {name}"))?;
-                labels.push(LabelId(u64::from(*id)));
+                labels.push(LabelId(*id));
             }
             labels.sort();
             if labels.windows(2).any(|w| w[0] == w[1]) {
@@ -1016,7 +1009,7 @@ fn parse_row(
                 key,
                 source: endpoint(field(fields, "source")?, options, resolver)?,
                 destination: endpoint(field(fields, "destination")?, options, resolver)?,
-                relation: RelationId(u64::from(*relation)),
+                relation: RelationId(*relation),
                 props,
             }))
         }

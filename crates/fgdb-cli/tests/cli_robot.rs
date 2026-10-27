@@ -1243,14 +1243,14 @@ fn certified_query_replays_original_rows_after_later_write_across_processes() {
 }
 
 #[test]
-fn write_relation_accepts_u32_max_and_refuses_overflow_without_committing() {
+fn write_relation_accepts_u64_max_and_refuses_overflow_without_committing() {
     let db = TestDb::new("write-relation-boundary");
     let created = db.create();
     db.command(
         "write",
         &[
             "--write-relation",
-            "4294967296",
+            "18446744073709551616",
             "INSERT (:Person {name:'Overflow'})",
         ],
     )
@@ -1261,13 +1261,77 @@ fn write_relation_accepts_u32_max_and_refuses_overflow_without_committing() {
 
     let written = db.write(&[
         "--write-relation",
-        "4294967295",
+        "18446744073709551615",
         "INSERT (:Person {name:'Maximum'})",
     ]);
     assert_eq!(written, created + 1);
     let reopened = db.command("query", &["MATCH (p:Person) RETURN p.name AS name"]);
     assert_eq!(reopened.sequence("rows"), written);
     assert_rows(&reopened, r#"[[{"type":"text","value":"Maximum"}]]"#);
+}
+
+#[test]
+fn native_symbol_flags_and_files_survive_reopen_without_low_bit_aliases() {
+    for from_file in [false, true] {
+        let db = TestDb::new(if from_file {
+            "native-symbol-file"
+        } else {
+            "native-symbol-flags"
+        });
+        let created = db.create();
+        let file = PathBuf::from(&db.key).with_file_name("native.bindings");
+        let declarations = [
+            ("--label", "Native=18446744073709551615"),
+            ("--label", "Low=4294967295"),
+            ("--relation", "NATIVE=18446744073709551615"),
+            ("--relation", "LOW=4294967295"),
+            ("--property", "wide=18446744073709551615"),
+            ("--property", "low=4294967295"),
+        ];
+        let bindings = if from_file {
+            std::fs::write(
+                &file,
+                "label Native=18446744073709551615\nlabel Low=4294967295\n\
+                 relation NATIVE=18446744073709551615\nrelation LOW=4294967295\n\
+                 property wide=18446744073709551615\nproperty low=4294967295\n",
+            )
+            .unwrap();
+            vec!["--bindings-file", file.to_str().unwrap()]
+        } else {
+            declarations
+                .into_iter()
+                .flat_map(|(flag, binding)| [flag, binding])
+                .collect()
+        };
+        let mut write = bindings.clone();
+        write.extend([
+            "--write-relation",
+            "18446744073709551615",
+            "CREATE (a:Native {wide:7}), (b:Native {wide:9}), (n:Low {low:99}), (a)-[:NATIVE]->(b)",
+        ]);
+        let written = db.write(&write);
+        assert_eq!(written, created + 1);
+        let mut query = bindings.clone();
+        query.push("MATCH (a:Native)-[e:NATIVE]->(b:Native) RETURN a.wide AS source_value,b.wide AS target_value,type(e) AS relation_name,labels(a) AS node_labels,keys(a) AS property_names,a.low AS low_value");
+        let reopened = db.command("query", &query);
+        assert_eq!(reopened.sequence("rows"), written);
+        assert_rows(
+            &reopened,
+            r#"[[{"type":"int","value":"7"},{"type":"int","value":"9"},{"type":"text","value":"NATIVE"},{"type":"list","value":[{"type":"text","value":"Native"}]},{"type":"list","value":[{"type":"text","value":"wide"}]},{"type":"null"}]]"#,
+        );
+        let mut query = bindings.clone();
+        query.push("MATCH (n:Low) RETURN n.low AS low");
+        assert_rows(
+            &db.command("query", &query),
+            r#"[[{"type":"int","value":"99"}]]"#,
+        );
+        let mut query = bindings;
+        query.push("MATCH (a)-[:LOW]->(b) RETURN COUNT(*) AS total");
+        assert_rows(
+            &db.command("query", &query),
+            r#"[[{"type":"count","value":"0"}]]"#,
+        );
+    }
 }
 
 #[test]

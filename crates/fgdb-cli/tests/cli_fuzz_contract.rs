@@ -1026,7 +1026,7 @@ fn generated_case(
                 0 => return (args, Some(true)),
                 1 => args.extend([kind.into(), format!("{name}={}", id + 1)]),
                 2 => args.extend([kind.into(), format!("other={id}")]),
-                3 => args.extend([kind.into(), "bad=4294967296".into()]),
+                3 => args.extend([kind.into(), "bad=18446744073709551616".into()]),
                 _ => args.extend([kind.into(), "bad=-1".into()]),
             }
             (args, Some(false))

@@ -342,10 +342,10 @@ pub(super) struct Prepared {
     eligible: Option<Vec<VId>>,
 }
 
-fn property(name: &str, bindings: &BTreeMap<String, u32>) -> Result<PropertyKeyId, Failure> {
+fn property(name: &str, bindings: &BTreeMap<String, u64>) -> Result<PropertyKeyId, Failure> {
     bindings
         .get(name)
-        .map(|id| PropertyKeyId(u64::from(*id)))
+        .map(|id| PropertyKeyId(*id))
         .ok_or_else(|| Failure::usage(format!("unbound property {name:?}")))
 }
 
@@ -412,7 +412,7 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
                     options
                         .relations
                         .get(name)
-                        .map(|id| RelationId(u64::from(*id)))
+                        .map(|id| RelationId(*id))
                         .ok_or_else(|| Failure::usage(format!("unbound relation {name:?}")))
                 })
                 .transpose()?;
@@ -462,7 +462,7 @@ pub(super) fn prepare(options: &Options) -> Result<Prepared, Failure> {
             options
                 .labels
                 .get(name)
-                .map(|id| LabelId(u64::from(*id)))
+                .map(|id| LabelId(*id))
                 .ok_or_else(|| Failure::usage(format!("unbound label {name:?}")))
         })
         .transpose()?;

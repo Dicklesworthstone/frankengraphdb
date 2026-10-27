@@ -459,7 +459,7 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
                 fgdb_gql::symbol_bindings::parse_symbol_bindings(&bytes).map_err(Failure::usage)?;
             for binding in bindings {
                 db.symbols
-                    .bind(binding.kind, &binding.name, u64::from(binding.id))
+                    .bind(binding.kind, &binding.name, binding.id)
                     .map_err(|error| {
                         Failure::usage(format!("bindings file line {}: {error}", binding.line))
                     })?;

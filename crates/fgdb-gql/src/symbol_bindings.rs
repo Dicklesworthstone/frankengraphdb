@@ -3,8 +3,8 @@
 //! There is no durable catalog yet, so every invocation names its symbols
 //! explicitly. A bindings file is the same explicit mapping as repeated
 //! `--label`/`--relation`/`--property` flags, written once: one binding per
-//! line as `label <name>=<u32>`, `relation <name>=<u32>` or
-//! `property <name>=<u32>`. Blank lines and lines starting with `#` are
+//! line as `label <name>=<u64>`, `relation <name>=<u64>` or
+//! `property <name>=<u64>`. Blank lines and lines starting with `#` are
 //! ignored. The name is everything between the kind and the FIRST `=`, as for
 //! the flags, with surrounding whitespace removed. Uniqueness of names and IDs
 //! per kind is the host's rule, applied exactly as for flags.
@@ -122,7 +122,7 @@ pub const MAX_SYMBOL_BINDINGS_BYTES: usize = 1024 * 1024;
 pub struct SymbolBinding {
     pub kind: GraphSymbolKind,
     pub name: String,
-    pub id: u32,
+    pub id: u64,
     /// One-based source line, for the host's duplicate diagnostics.
     pub line: usize,
 }
@@ -168,7 +168,7 @@ pub fn parse_symbol_bindings(bytes: &[u8]) -> Result<Vec<SymbolBinding>, SymbolB
         }
         let (kind, rest) = trimmed
             .split_once(char::is_whitespace)
-            .ok_or(refuse("expected `<kind> <name>=<u32>`"))?;
+            .ok_or(refuse("expected `<kind> <name>=<u64>`"))?;
         let kind = match kind {
             "label" => GraphSymbolKind::Label,
             "relation" => GraphSymbolKind::Relation,
@@ -177,16 +177,16 @@ pub fn parse_symbol_bindings(bytes: &[u8]) -> Result<Vec<SymbolBinding>, SymbolB
         };
         let (name, id) = rest
             .split_once('=')
-            .ok_or(refuse("expected `<name>=<u32>`"))?;
+            .ok_or(refuse("expected `<name>=<u64>`"))?;
         let name = name.trim();
         if name.is_empty() {
             return Err(refuse("empty name"));
         }
         let id = id.trim();
         if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(refuse("ID must be a decimal u32"));
+            return Err(refuse("ID must be a decimal u64"));
         }
-        let id = id.parse().map_err(|_| refuse("ID must be a decimal u32"))?;
+        let id = id.parse().map_err(|_| refuse("ID must be a decimal u64"))?;
         bindings.push(SymbolBinding {
             kind,
             name: name.to_owned(),
@@ -339,7 +339,7 @@ mod tests {
             parse_symbol_bindings(b"label P=1\nproperty a=b=3\n"),
             Err(SymbolBindingsError {
                 line: 2,
-                reason: "ID must be a decimal u32"
+                reason: "ID must be a decimal u64"
             })
         );
         assert_eq!(parse_symbol_bindings(b"").unwrap(), Vec::new());
@@ -348,14 +348,18 @@ mod tests {
     #[test]
     fn malformed_lines_refuse_with_their_line() {
         for (text, line, reason) in [
-            (&b"label"[..], 1, "expected `<kind> <name>=<u32>`"),
+            (&b"label"[..], 1, "expected `<kind> <name>=<u64>`"),
             (b"\nedge R=1", 2, "kind must be label, relation or property"),
-            (b"label Person", 1, "expected `<name>=<u32>`"),
+            (b"label Person", 1, "expected `<name>=<u64>`"),
             (b"label =1", 1, "empty name"),
-            (b"label P=", 1, "ID must be a decimal u32"),
-            (b"label P=-1", 1, "ID must be a decimal u32"),
-            (b"label P=+1", 1, "ID must be a decimal u32"),
-            (b"label P=4294967296", 1, "ID must be a decimal u32"),
+            (b"label P=", 1, "ID must be a decimal u64"),
+            (b"label P=-1", 1, "ID must be a decimal u64"),
+            (b"label P=+1", 1, "ID must be a decimal u64"),
+            (
+                b"label P=18446744073709551616",
+                1,
+                "ID must be a decimal u64",
+            ),
             (b"\xff", 0, "not UTF-8"),
         ] {
             assert_eq!(
@@ -374,7 +378,32 @@ mod tests {
         );
         assert_eq!(
             parse_symbol_bindings(b"label P=4294967295").unwrap()[0].id,
-            u32::MAX
+            u64::from(u32::MAX)
+        );
+    }
+
+    #[test]
+    fn file_ordinals_keep_native_width_in_each_symbol_domain() {
+        for id in [0, u64::from(u32::MAX) + 1, u64::MAX] {
+            let text = format!("label Native={id}\nrelation NATIVE={id}\nproperty wide={id}\n");
+            let parsed = parse_symbol_bindings(text.as_bytes()).unwrap();
+            assert_eq!(parsed.len(), 3);
+            for (binding, kind, line) in [
+                (&parsed[0], GraphSymbolKind::Label, 1),
+                (&parsed[1], GraphSymbolKind::Relation, 2),
+                (&parsed[2], GraphSymbolKind::Property, 3),
+            ] {
+                assert_eq!(binding.kind, kind);
+                assert_eq!(binding.id, id);
+                assert_eq!(binding.line, line);
+            }
+        }
+        let parsed =
+            parse_symbol_bindings(b"label Low=4294967295\nlabel Native=18446744073709551615\n")
+                .unwrap();
+        assert_ne!(
+            parsed[0].id, parsed[1].id,
+            "high bits are part of the identity"
         );
     }
 }

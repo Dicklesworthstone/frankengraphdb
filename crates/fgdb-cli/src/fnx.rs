@@ -317,10 +317,10 @@ impl ProjectionFlags {
 
     fn options(&self, bindings: &Options) -> Result<FnxReadOptions, Failure> {
         let lookup =
-            |name: &Option<String>, table: &std::collections::BTreeMap<String, u32>, what: &str| {
+            |name: &Option<String>, table: &std::collections::BTreeMap<String, u64>, what: &str| {
                 name.as_ref()
                     .map(|name| {
-                        table.get(name).map(|id| u64::from(*id)).ok_or_else(|| {
+                        table.get(name).copied().ok_or_else(|| {
                             Failure::usage(format!("{what} {name:?} has no binding"))
                         })
                     })
@@ -487,7 +487,7 @@ pub(super) fn prepare_sealed_read(options: &Options) -> Result<PreparedSealedRea
     let relation = options
         .relations
         .get(name)
-        .map(|id| RelationId(u64::from(*id)))
+        .map(|id| RelationId(*id))
         .ok_or_else(|| Failure::usage(format!("relation {name:?} has no binding")))?;
     // Preserve the ordinary one-shot read contract for map fields used as
     // pattern keys. Keep the derived values with their prepared template.
