@@ -191,6 +191,12 @@ trait Rows {
     fn has_unit_weights(&self) -> bool {
         false
     }
+    /// Complete, immutable projection admission proved that EVERY reduced
+    /// weight is finite and nonnegative. Unknown sources must validate their
+    /// rows, including components unreachable from the requested source.
+    fn has_nonnegative_weights(&self) -> bool {
+        false
+    }
     fn open(&self, source: usize) -> Result<Self::Cursor<'_>>;
 }
 struct SealedRows<'a> {
@@ -222,6 +228,9 @@ impl Rows for SealedRows<'_> {
     }
     fn has_unit_weights(&self) -> bool {
         self.graph.has_unit_weights()
+    }
+    fn has_nonnegative_weights(&self) -> bool {
+        self.graph.has_nonnegative_weights()
     }
     fn open(&self, source: usize) -> Result<Self::Cursor<'_>> {
         Ok(SealedRow {
@@ -947,9 +956,9 @@ impl FnxCallSpec {
                 let unit = shortest_path::uses_unit_fifo(n, graph.has_unit_weights());
                 (
                     if unit {
-                        "fgdb-prism/sealed-dijkstra-unit-fifo-v1"
+                        "fgdb-prism/sealed-dijkstra-unit-fifo-v2"
                     } else {
-                        "fgdb-prism/sealed-dijkstra-indexed-heap-v1"
+                        "fgdb-prism/sealed-dijkstra-indexed-heap-v2"
                     },
                     shortest_path::work(n, graph.adjacency_entry_count(), pass, unit)?,
                     shortest_path::workspace(n, unit)?,

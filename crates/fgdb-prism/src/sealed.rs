@@ -169,6 +169,9 @@ struct Projection {
     edges: usize,
     adjacency_entries: usize,
     unit_weights: bool,
+    // Proven over every final reduced weight during complete admission, not
+    // inferred from the selected property or a later source's reachable set.
+    nonnegative_weights: bool,
     scan_bound: usize,
     workspace_bytes: usize,
     resident_bytes: usize,
@@ -442,6 +445,7 @@ impl SealedGraphView {
         let mut edges = 0usize;
         let mut adjacency_entries = 0usize;
         let mut unit_weights = true;
+        let mut nonnegative_weights = true;
         let mut input_edges = 0usize;
         for source in 0..n {
             schedule.check(cx).await?;
@@ -500,6 +504,7 @@ impl SealedGraphView {
                     // loop policy and parallel reduction. A Unit selection
                     // alone is insufficient: Sum may combine several edges.
                     unit_weights &= weight == 1.0;
+                    nonnegative_weights &= weight.is_finite() && weight >= 0.0;
                     degree = add(degree, 1)?;
                     adjacency_entries = add(adjacency_entries, 1)?;
                     admit(
@@ -550,6 +555,7 @@ impl SealedGraphView {
             edges,
             adjacency_entries,
             unit_weights,
+            nonnegative_weights,
             scan_bound,
             workspace_bytes,
             resident_bytes,
@@ -583,6 +589,12 @@ impl SealedGraphView {
     /// projection, including self loops and rows unreachable from a later seed.
     pub(crate) fn has_unit_weights(&self) -> bool {
         self.0.unit_weights
+    }
+    /// Complete admission already inspected every reduced row, including
+    /// disconnected components. The source image, selected cut, masks and
+    /// reductions are immutable for this projection's entire lifetime.
+    pub(crate) fn has_nonnegative_weights(&self) -> bool {
+        self.0.nonnegative_weights
     }
     /// The exact source index retained by reversed/undirected projections.
     /// Includes construction-peak evidence; not an allocator/RSS guarantee.

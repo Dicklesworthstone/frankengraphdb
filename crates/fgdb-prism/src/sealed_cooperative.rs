@@ -581,9 +581,9 @@ impl FnxCallSpec {
                     let unit = super::shortest_path::uses_unit_fifo(n, graph.has_unit_weights());
                     (
                         if unit {
-                            "fgdb-prism/sealed-dijkstra-unit-fifo-cooperative-v1"
+                            "fgdb-prism/sealed-dijkstra-unit-fifo-cooperative-v2"
                         } else {
-                            "fgdb-prism/sealed-dijkstra-indexed-heap-cooperative-v1"
+                            "fgdb-prism/sealed-dijkstra-indexed-heap-cooperative-v2"
                         },
                         super::shortest_path::work(n, graph.adjacency_entry_count(), pass, unit)?,
                         super::shortest_path::workspace(n, unit)?,
@@ -772,25 +772,27 @@ where
     }
     admission.rows(1)?;
     let unit = super::shortest_path::uses_unit_fifo(n, graph.has_unit_weights());
-    // A cutoff or unreachable component must not hide an incompatible weight.
-    // Validate the whole selected graph before allocating the queue. Raw cursor
-    // fuel still covers excluded endpoints, invisible versions and reductions.
-    for vertex in 0..n {
-        control.tick().await?;
-        let mut row = graph.neighbor_cursor_controlled(control.cx, vertex, None)?;
-        while let Some((target, weight)) = control.next(&mut row).await? {
+    // Complete immutable admission can prove every reduced weight compatible.
+    // Otherwise a cutoff or unreachable component must not hide a negative
+    // weight: retain the full validation and its bounded raw cursor fuel.
+    if !graph.has_nonnegative_weights() {
+        for vertex in 0..n {
             control.tick().await?;
-            if target >= n {
-                return Err(ExecutionError::InvalidUpstreamResult.into());
-            }
-            if !weight.is_finite() {
-                return Err(ExecutionError::InvalidNumericResult.into());
-            }
-            if weight < 0.0 {
-                return Err(ExecutionError::NegativeWeight.into());
-            }
-            if unit && weight != 1.0 {
-                return Err(ExecutionError::InvalidUpstreamResult.into());
+            let mut row = graph.neighbor_cursor_controlled(control.cx, vertex, None)?;
+            while let Some((target, weight)) = control.next(&mut row).await? {
+                control.tick().await?;
+                if target >= n {
+                    return Err(ExecutionError::InvalidUpstreamResult.into());
+                }
+                if !weight.is_finite() {
+                    return Err(ExecutionError::InvalidNumericResult.into());
+                }
+                if weight < 0.0 {
+                    return Err(ExecutionError::NegativeWeight.into());
+                }
+                if unit && weight != 1.0 {
+                    return Err(ExecutionError::InvalidUpstreamResult.into());
+                }
             }
         }
     }

@@ -59,6 +59,141 @@ fn rows(values: &[Option<f64>]) -> Vec<Vec<FnxValue>> {
 }
 
 #[test]
+fn admitted_weights_avoid_rescanning_unreachable_parallel_edges() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        for weight in [0.0, 1.0, 2.5] {
+            let mut observations = Vec::new();
+            for remote_edges in [1, 512] {
+                // Same four vertices and selected simple topology; only raw
+                // incidence count grows. The source is isolated in both.
+                let edges = vec![(2, 3, weight); remote_edges];
+                let db = weighted(&contexts.commit(), 4, &edges).await;
+                let mut opt = options(Directedness::Directed);
+                opt.projection.parallel_edges = ParallelEdgePolicy::Minimum;
+                let graph = projection(&db, &cx, opt).await;
+                assert_eq!(graph.input_edge_count(), remote_edges);
+                let call = call(VId(0), Some(0.0), true);
+                let mut guards = 0;
+                let expected = call
+                    .execute_sealed_with_checkpoint(
+                        &cx,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        || {
+                            guards += 1;
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(expected.rows, rows(&[Some(0.0), None, None, None]));
+                assert_eq!(expected.certificate.witness.edges_scanned, 0);
+                let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                let (actual, pending) = drive(
+                    call.execute_sealed_cooperative(
+                        &controlled,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(3),
+                        yield_now,
+                    ),
+                    &probe,
+                    3,
+                );
+                compare_execution(&actual.unwrap(), &expected);
+                observations.push((guards, pending));
+            }
+            // Descriptor searches may grow logarithmically with the retained
+            // image. A complete validation would additionally pull all 511
+            // new raw incidences; neither driver may do that on every CALL.
+            assert!(
+                observations[1].0 <= observations[0].0 + 64,
+                "{observations:?}"
+            );
+            assert!(
+                observations[1].1 <= observations[0].1 + 32,
+                "{observations:?}"
+            );
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn nonnegative_weight_evidence_remains_bound_to_reduction_and_snapshot() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let mut db = weighted(&contexts.commit(), 4, &[(2, 3, -2.0), (2, 3, 3.0)]).await;
+        let at = db.frontier().unwrap();
+        let call = call(VId(0), Some(0.0), true);
+        let opt = options(Directedness::Directed);
+        let old = projection(&db, &cx, opt).await;
+        let mut minimum = opt;
+        minimum.projection.parallel_edges = ParallelEdgePolicy::Minimum;
+        let negative = projection(&db, &cx, minimum).await;
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_edge_property(EId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(1)));
+        db.write(&contexts.commit(), change).await.unwrap();
+        let current = projection(&db, &cx, opt).await;
+        let historical = projection(
+            &db,
+            &cx,
+            FnxReadOptions {
+                as_of: Some(at),
+                ..opt
+            },
+        )
+        .await;
+        // A historical view from the newer root has a different source
+        // binding, while its selected cut and weight evidence remain old.
+        assert_eq!(old.binding().as_of, at);
+        assert_eq!(historical.binding().as_of, at);
+        for (graph, succeeds) in [
+            (&old, true),
+            (&negative, false),
+            (&current, false),
+            (&historical, true),
+        ] {
+            let immediate = call.execute_sealed(&cx, graph, opt.execution_limits, memory());
+            let cooperative = call
+                .execute_sealed_cooperative(
+                    &cx,
+                    graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(1),
+                    yield_now,
+                )
+                .await;
+            if succeeds {
+                let immediate = immediate.unwrap();
+                assert_eq!(immediate.rows, rows(&[Some(0.0), None, None, None]));
+                compare_execution(&cooperative.unwrap(), &immediate);
+            } else {
+                for result in [immediate, cooperative] {
+                    assert!(matches!(
+                        result,
+                        Err(FnxSealedExecutionError::Execution(
+                            FnxExecutionError::NegativeWeight
+                        ))
+                    ));
+                }
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
 fn reduced_unit_weights_select_fifo_with_exact_limits_across_schedules_and_snapshots() {
     let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
@@ -117,9 +252,9 @@ fn reduced_unit_weights_select_fifo_with_exact_limits_across_schedules_and_snaps
                             assert_eq!(
                                 expected.certificate.execution_kernel,
                                 if unit {
-                                    "fgdb-prism/sealed-dijkstra-unit-fifo-v1"
+                                    "fgdb-prism/sealed-dijkstra-unit-fifo-v2"
                                 } else {
-                                    "fgdb-prism/sealed-dijkstra-indexed-heap-v1"
+                                    "fgdb-prism/sealed-dijkstra-indexed-heap-v2"
                                 }
                             );
                             let oracle = call

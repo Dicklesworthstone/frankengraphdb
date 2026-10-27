@@ -1,7 +1,9 @@
 //! Weighted distances from immutable compressed rows, with O(|V|) workspace.
 //! The indexed queue is shared with the decoded primitive; graph traversal is
-//! not. One cursor is live at a time and neither validation nor relaxation
-//! collects adjacency. Source failures and cancellation discard all state.
+//! not. Complete immutable projection admission can discharge the nonnegative
+//! weight check once for every later source query. Uncertified sources retain
+//! full validation. One cursor is live at a time and neither validation nor
+//! relaxation collects adjacency. Failures and cancellation discard all state.
 
 use super::{
     Cursor, Error, ExecutionError, KernelOutput, KernelValues, Result, ResultAdmission, Rows, add,
@@ -38,9 +40,10 @@ pub(super) fn workspace(n: usize, unit: bool) -> Result<usize> {
     }
 }
 
-/// Both complete weight validation and the reachable relaxation pass can
-/// traverse retained history. Heap work uses reduced edges separately; a
-/// heavily reduced multigraph must not conceal the cost of its raw incidences.
+/// Preserve the conservative two-pass admission allowance, even when immutable
+/// weight evidence eliminates the validation pass. Heap work uses reduced
+/// edges separately; a heavily reduced multigraph must not conceal the cost of
+/// its raw incidences. This is a bound, not the observed cursor visit count.
 pub(super) fn work(n: usize, edges: usize, pass: usize, unit: bool) -> Result<usize> {
     let queue = if unit {
         // Population/result passes and constant-time discovery/queue work.
@@ -66,20 +69,24 @@ pub(super) fn run(
     }
     admission.rows(1)?;
     let unit = uses_unit_fifo(n, graph.has_unit_weights());
-    // Validate the ENTIRE selected projection even for a zero cutoff or an
-    // isolated source. An unreachable negative edge cannot be hidden by an
-    // early exit. The admitted sealed graph is immutable across both passes.
-    for node in 0..n {
-        checkpoint()?;
-        let mut row = graph.open(node)?;
-        while let Some((target, weight)) = row.next()? {
+    // The admitted sealed graph has already inspected every final weight.
+    // Reopening ALL compressed rows for each source repeats that work, even
+    // for an isolate or a tiny cutoff. Only immutable admission evidence can
+    // omit it: unknown sources and projections containing a negative weight
+    // still validate the ENTIRE selection before allocating any queue.
+    if !graph.has_nonnegative_weights() {
+        for node in 0..n {
             checkpoint()?;
-            if target >= n {
-                return Err(ExecutionError::InvalidUpstreamResult.into());
-            }
-            validate_weight(weight)?;
-            if unit && weight != 1.0 {
-                return Err(ExecutionError::InvalidUpstreamResult.into());
+            let mut row = graph.open(node)?;
+            while let Some((target, weight)) = row.next()? {
+                checkpoint()?;
+                if target >= n {
+                    return Err(ExecutionError::InvalidUpstreamResult.into());
+                }
+                validate_weight(weight)?;
+                if unit && weight != 1.0 {
+                    return Err(ExecutionError::InvalidUpstreamResult.into());
+                }
             }
         }
     }
@@ -476,6 +483,44 @@ mod tests {
         }
     }
 
+    // Model complete immutable admission independently of the SSSP driver.
+    // The actual compressed constructor is exercised by prism_cooperative.
+    struct Nonnegative<'a>(&'a Fixture);
+    impl<'a> Nonnegative<'a> {
+        fn new(fixture: &'a Fixture) -> Self {
+            for source in 0..fixture.node_count() {
+                let (_, weights) = fixture.view.projected_row(source).unwrap();
+                assert!(
+                    weights
+                        .iter()
+                        .all(|weight| weight.is_finite() && *weight >= 0.0)
+                );
+            }
+            Self(fixture)
+        }
+    }
+    impl Rows for Nonnegative<'_> {
+        type Cursor<'a>
+            = TestCursor<'a>
+        where
+            Self: 'a;
+        fn node_count(&self) -> usize {
+            self.0.node_count()
+        }
+        fn degree(&self, node: usize) -> Option<usize> {
+            self.0.degree(node)
+        }
+        fn has_unit_weights(&self) -> bool {
+            self.0.has_unit_weights()
+        }
+        fn has_nonnegative_weights(&self) -> bool {
+            true
+        }
+        fn open(&self, node: usize) -> Result<Self::Cursor<'_>> {
+            self.0.open(node)
+        }
+    }
+
     #[test]
     fn every_small_unit_topology_matches_heap_order_witnesses_and_independent_bfs() {
         for n in 1..=3 {
@@ -642,8 +687,25 @@ mod tests {
                         let (call, options) =
                             bound(fixture.view.vertex_id(source).unwrap(), cutoff, strict);
                         let admission = ResultAdmission::new(&call, limits(3), memory()).unwrap();
+                        fixture.calls.set(0);
                         let output =
                             run(&fixture, source, options, &admission, &mut || Ok(())).unwrap();
+                        let with_validation = fixture.calls.get();
+                        fixture.calls.set(0);
+                        let admitted = run(
+                            &Nonnegative::new(&fixture),
+                            source,
+                            options,
+                            &admission,
+                            &mut || Ok(()),
+                        )
+                        .unwrap();
+                        assert_eq!(values(&admitted), values(&output));
+                        assert_eq!(admitted.row_count, output.row_count);
+                        assert_eq!(admitted.witness, output.witness);
+                        // One open and EOF per vertex, plus every reduced arc,
+                        // disappear. Reachable relaxation visits are unchanged.
+                        assert_eq!(fixture.calls.get() + 2 * 3 + edges.len(), with_validation);
                         let oracle = call
                             .execute(&fixture.view, limits(3), || Ok::<(), Infallible>(()))
                             .unwrap();
@@ -697,6 +759,77 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn admitted_weights_still_interrupt_each_queue_and_reachable_cursor_step() {
+        for weight in [0.0, 1.0, 2.5] {
+            let mut fixture = Fixture::new(
+                5,
+                &[
+                    (0, 1, weight),
+                    (1, 2, weight),
+                    (2, 0, weight),
+                    (3, 4, weight),
+                ],
+            );
+            let (call, options) = bound(fixture.view.vertex_id(0).unwrap(), None, true);
+            let admission = ResultAdmission::new(&call, limits(5), memory()).unwrap();
+            let mut checkpoints = 0;
+            let expected = run(
+                &Nonnegative::new(&fixture),
+                0,
+                options,
+                &admission,
+                &mut || {
+                    checkpoints += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+            let visits = fixture.calls.get();
+            assert_eq!(expected.row_count, 3);
+            assert_eq!(expected.witness.edges_scanned, 3);
+            assert_eq!(visits, 2 * 3 + 3, "only reached rows are opened");
+            for stop in 1..=checkpoints {
+                let mut seen = 0;
+                let result = run(
+                    &Nonnegative::new(&fixture),
+                    0,
+                    options,
+                    &admission,
+                    &mut || {
+                        seen += 1;
+                        if seen == stop {
+                            Err(Error::Cancelled(
+                                std::io::Error::other("admitted stop").into(),
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                );
+                assert!(matches!(result, Err(Error::Cancelled(_))));
+                assert_eq!(seen, stop);
+            }
+            for stop in 1..=visits {
+                fixture.calls.set(0);
+                fixture.fail_at = stop;
+                assert!(matches!(
+                    run(
+                        &Nonnegative::new(&fixture),
+                        0,
+                        options,
+                        &admission,
+                        &mut || Ok(())
+                    ),
+                    Err(Error::Source(SealedProjectionError::UnknownOrdinal(
+                        usize::MAX
+                    )))
+                ));
+                assert_eq!(fixture.calls.get(), stop);
             }
         }
     }
