@@ -132,6 +132,7 @@ impl<V: Vfs + Clone> AsyncEdgeScanSource for Source<'_, '_, V> {
                     })
                 },
             ))
+            .erase_send()
             .await
             .map_err(|error| match error {
                 BufferedScanError::Read(error) => EdgeScanSourceError::Source(error),

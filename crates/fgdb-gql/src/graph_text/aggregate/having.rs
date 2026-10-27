@@ -14,14 +14,30 @@ use fgdb_types::CanonicalScalar;
 #[derive(Clone)]
 enum Operand {
     Column(GraphAggregateColumn),
-    Number { value: Number, legacy_int64: bool },
+    Number {
+        value: Number,
+        legacy_int64: bool,
+    },
     Scalar(ScalarPredicate),
+    Expression {
+        value: ReadValueTemplate,
+        column: usize,
+    },
 }
 impl Operand {
-    fn bind(&self, values: &[GqlParameterValue]) -> GraphHavingOperand {
-        match self {
+    fn bind(
+        &self,
+        values: &[GqlParameterValue],
+    ) -> Result<GraphHavingOperand, GraphPatternTextError> {
+        Ok(match self {
             Self::Column(column) => GraphHavingOperand::Column(*column),
             Self::Scalar(value) => GraphHavingOperand::Scalar(value.clone()),
+            Self::Expression { value, column } => GraphHavingOperand::Expression {
+                value: std::sync::Arc::new(PreparedGraphAggregateText::bind_input_value(
+                    value, values,
+                )?),
+                column: *column,
+            },
             Self::Number { value, .. } => match value.value(values) {
                 GqlParameterValue::Int64(value) => GraphHavingOperand::Integer(i128::from(value)),
                 GqlParameterValue::UInt64(value) => GraphHavingOperand::Integer(i128::from(value)),
@@ -34,7 +50,7 @@ impl Operand {
                     unreachable!("collection parameters never become HAVING operands")
                 }
             },
-        }
+        })
     }
 }
 
@@ -69,26 +85,28 @@ impl HavingTemplate {
         let program = self
             .program
             .iter()
-            .map(|op| match op {
-                Op::Compare {
-                    left,
-                    comparison,
-                    right,
-                } => GraphHavingOp::Compare {
-                    left: left.bind(values),
-                    comparison: *comparison,
-                    right: right.bind(values),
-                },
-                Op::IsNull { operand, is_null } => GraphHavingOp::IsNull {
-                    operand: operand.bind(values),
-                    is_null: *is_null,
-                },
-                Op::Truth(value) => GraphHavingOp::Truth(*value),
-                Op::And => GraphHavingOp::And,
-                Op::Or => GraphHavingOp::Or,
-                Op::Not => GraphHavingOp::Not,
+            .map(|op| {
+                Ok(match op {
+                    Op::Compare {
+                        left,
+                        comparison,
+                        right,
+                    } => GraphHavingOp::Compare {
+                        left: left.bind(values)?,
+                        comparison: *comparison,
+                        right: right.bind(values)?,
+                    },
+                    Op::IsNull { operand, is_null } => GraphHavingOp::IsNull {
+                        operand: operand.bind(values)?,
+                        is_null: *is_null,
+                    },
+                    Op::Truth(value) => GraphHavingOp::Truth(*value),
+                    Op::And => GraphHavingOp::And,
+                    Op::Or => GraphHavingOp::Or,
+                    Op::Not => GraphHavingOp::Not,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, GraphPatternTextError>>()?;
         let failure = |_| {
             error(
                 self.at,
@@ -128,6 +146,11 @@ impl HavingTemplate {
                     let encoded = value.canonical_value_bytes();
                     bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
                     bytes.extend_from_slice(encoded);
+                }
+                Operand::Expression { value, column } => {
+                    bytes.push(3);
+                    bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+                    value.append_template_transcript(bytes);
                 }
             }
         }
@@ -179,6 +202,7 @@ pub(super) fn parse<'a>(
     parser: &mut Parser<'a>,
     returned: &[ReturnItem<'a>],
     groups: &[Expression<'a>],
+    output_columns: &[usize],
     hidden: &mut Vec<HiddenSummary<'a>>,
     computed: &mut ComputedInputs<'a>,
 ) -> Result<(Vec<Having>, Option<HavingTemplate>), GraphPatternTextError> {
@@ -190,6 +214,7 @@ pub(super) fn parse<'a>(
         parser,
         returned,
         groups,
+        output_columns,
         hidden,
         computed,
         program: Vec::new(),
@@ -254,6 +279,7 @@ struct HavingParser<'p, 'a> {
     parser: &'p mut Parser<'a>,
     returned: &'p [ReturnItem<'a>],
     groups: &'p [Expression<'a>],
+    output_columns: &'p [usize],
     hidden: &'p mut Vec<HiddenSummary<'a>>,
     computed: &'p mut ComputedInputs<'a>,
     program: Vec<Op>,
@@ -354,6 +380,26 @@ impl HavingParser<'_, '_> {
 
     fn operand(&mut self) -> Result<Operand, GraphPatternTextError> {
         let at = self.parser.current.at;
+        // A bare computed alias reads its original post-group expression,
+        // never a new grouping key or an already paged/projected result row.
+        if let TokenKind::Word(word) = self.parser.current.kind
+            && !matches!(
+                self.parser.lexer.clone().next()?.kind,
+                TokenKind::Punct(b'.' | b'(')
+            )
+            && let Some((column, value)) =
+                self.returned.iter().enumerate().find_map(|(column, item)| {
+                    (item.alias.text == word)
+                        .then_some(item.output.as_ref())
+                        .flatten()
+                        .map(|value| (column, value))
+                })
+        {
+            self.parser.advance()?;
+            let mut value = value.clone();
+            remap_output_columns(&mut value, self.output_columns);
+            return Ok(Operand::Expression { value, column });
+        }
         // Reuse the ordinary finite decimal/exponent parser on either side
         // of a comparison and in IN/BETWEEN. A float remains a canonical
         // scalar operand; integer-only predicates keep their legacy lowering.

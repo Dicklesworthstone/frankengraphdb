@@ -8,7 +8,7 @@ use std::borrow::Cow;
 
 type QueryError<E, C> = GqlQueryError<GraphAggregateError<E>, C>;
 
-enum OutputValue<'a> {
+pub(super) enum OutputValue<'a> {
     Borrowed(Cell<'a>),
     Owned(GraphAggregateValue),
 }
@@ -49,7 +49,7 @@ fn value_ref(value: &GraphValue) -> ValueRef<'_> {
 }
 
 impl<'a> OutputValue<'a> {
-    fn cell(&self) -> Cell<'_> {
+    pub(super) fn cell(&self) -> Cell<'_> {
         match self {
             Self::Borrowed(value) => *value,
             Self::Owned(GraphAggregateValue::Count(value)) => Cell::Count(*value),
@@ -861,6 +861,25 @@ fn expression<'g, E, C>(
             }
         }
     })
+}
+
+/// Evaluate a pure HAVING alias through the same governed result-expression
+/// kernel as RETURN. Its cells keep exact aggregate domains; no result tuple
+/// or graph source is materialized. Admission rejects element-property reads.
+pub(super) fn having_value<'g, E, C>(
+    value: &'g GraphSetValue,
+    columns: impl Fn(usize) -> Result<Cell<'g>, GraphIntegerErrorKind>,
+    width: usize,
+    column: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
+) -> Result<OutputValue<'g>, QueryError<E, C>> {
+    let mut input = ExpressionInput {
+        columns,
+        width,
+        locals: Vec::new(),
+        read: &mut crate::set_ops::no_element_reads,
+    };
+    expression(value, &mut input, column, control)
 }
 
 /// An aggregate output as an ordinary graph value. Never truncate an

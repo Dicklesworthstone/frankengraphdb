@@ -500,7 +500,7 @@ impl GraphSetValue {
     // lazy branches, participate; no value is evaluated and no source is read.
     // Typed admission already bounds this tree. The exhaustive match keeps new
     // expression variants from silently selecting a reader-free executor.
-    pub(super) fn may_read_element_properties(&self) -> bool {
+    pub(crate) fn may_read_element_properties(&self) -> bool {
         match self {
             Self::Column(_)
             | Self::Literal(_)
@@ -1956,21 +1956,55 @@ macro_rules! projection_recurse {
 // Keep allocation outside the recursive async function's concrete type. The
 // exact grant precedes Box::pin, and tuple order drops the future before the
 // grant both on normal return and when a suspended evaluation is cancelled.
-fn reserve_future<F, M, G, E>(
+// Erase the already-owned frame so a host's Send proof does not traverse the
+// entire recursive evaluator and its concrete property-read future again.
+type ReservedProjectionFuture<'a, T, G> = (
+    std::pin::Pin<Box<dyn core::future::Future<Output = T> + Send + 'a>>,
+    G,
+);
+
+fn reserve_future<'a, F, M, G, E>(
     future: F,
     reserve: &M,
-) -> Result<(std::pin::Pin<Box<F>>, G), ProjectionFailure<E>>
+) -> Result<ReservedProjectionFuture<'a, F::Output, G>, ProjectionFailure<E>>
 where
+    F: core::future::Future + Send + 'a,
     M: Fn(usize) -> Result<G, E>,
 {
     let grant = reserve(core::mem::size_of::<F>()).map_err(ProjectionFailure::Control)?;
     Ok((Box::pin(future), grant))
 }
 
+// Recursive async calls need the Send promise before their opaque bodies are
+// checked. A direct forwarder states it without another box or async wrapper.
+macro_rules! projection_entry {
+    (synchronous) => {};
+    (asynchronous) => {
+        pub(super) fn evaluate_value_at<R, C, M, G>(
+            value: &GraphSetValue,
+            row: &GraphValueRow,
+            column: usize,
+            control: &mut C,
+            depth: usize,
+            nodes: &mut EvaluationState<'_, R>,
+            reserve: &M,
+        ) -> impl core::future::Future<Output = Result<GraphValue, ProjectionFailure<R::Error>>> + Send
+        where
+            R: AsyncSpillElementSource + ?Sized,
+            C: FnMut(GlaExecutionEvent) -> Result<(), R::Error> + Send,
+            M: Fn(usize) -> Result<G, R::Error> + Sync,
+            G: Send,
+        {
+            evaluate_value_at_inner(value, row, column, control, depth, nodes, reserve)
+        }
+    };
+}
+
 macro_rules! projection_evaluator {
-    ($mode:ident, [$($asyncness:tt)*], $reader:ident, [$($send:tt)*], [$($sync:tt)*]) => {
+    ($mode:ident, [$($asyncness:tt)*], $reader:ident, [$($send:tt)*], [$($sync:tt)*], $entry:ident) => {
 mod $mode {
 use super::*;
+projection_entry!($mode);
 
 $($asyncness)* fn operand<'a, R, C, M, G>(
     value: &'a GraphSetValue,
@@ -2005,7 +2039,7 @@ where
     }
 }
 
-pub(super) $($asyncness)* fn evaluate_value_at<R, C, M, G>(
+pub(super) $($asyncness)* fn $entry<R, C, M, G>(
     value: &GraphSetValue,
     row: &GraphValueRow,
     column: usize,
@@ -2843,8 +2877,15 @@ where
     };
 }
 
-projection_evaluator!(synchronous, [], SynchronousElementSource, [], []);
-projection_evaluator!(asynchronous, [async], AsyncSpillElementSource, [+ Send], [+ Sync]);
+projection_evaluator!(
+    synchronous,
+    [],
+    SynchronousElementSource,
+    [],
+    [],
+    evaluate_value_at
+);
+projection_evaluator!(asynchronous, [async], AsyncSpillElementSource, [+ Send], [+ Sync], evaluate_value_at_inner);
 
 fn evaluate_value_at<E>(
     value: &GraphSetValue,

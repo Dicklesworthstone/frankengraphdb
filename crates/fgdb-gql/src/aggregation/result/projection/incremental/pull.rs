@@ -13,6 +13,9 @@ use distinct::{DistinctIndex, DistinctKey};
 #[derive(Clone, Copy)]
 struct CompleteGroup<'a>(&'a GraphAggregateRow);
 impl<'a> GroupCells<'a> for CompleteGroup<'a> {
+    fn schema(self) -> (usize, usize) {
+        (self.0.keys.len(), self.0.values.len())
+    }
     fn cell(self, column: GraphAggregateColumn) -> Cell<'a> {
         match column {
             GraphAggregateColumn::GroupKey(at) => Cell::Value(value_ref(&self.0.keys[at])),

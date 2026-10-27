@@ -20,6 +20,13 @@ pub enum GraphHavingOperand {
     Integer(i128),
     /// Already checked, immutable literal; its encoded payload is shared.
     Scalar(ScalarPredicate),
+    /// A pure computed RETURN alias over keys followed by summaries.
+    /// The ordinary result evaluator retains its exact numeric domains and
+    /// governed temporaries. `column` is its diagnostic output position.
+    Expression {
+        value: Arc<crate::GraphSetValue>,
+        column: usize,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -53,10 +60,28 @@ impl core::fmt::Debug for GraphHavingOp {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphHavingError {
     Empty,
-    TooManyInstructions { limit: usize, observed: usize },
-    TooManyPredicates { limit: usize, observed: usize },
-    InvalidStack { instruction: usize },
-    UnknownColumn { column: GraphAggregateColumn },
+    TooManyInstructions {
+        limit: usize,
+        observed: usize,
+    },
+    TooManyPredicates {
+        limit: usize,
+        observed: usize,
+    },
+    InvalidStack {
+        instruction: usize,
+    },
+    UnknownColumn {
+        column: GraphAggregateColumn,
+    },
+    InvalidExpression {
+        column: usize,
+        error: crate::GraphSetProjectionError,
+    },
+    ExpressionElementRead {
+        column: usize,
+    },
+    ExpressionInputSchema,
 }
 impl core::fmt::Display for GraphHavingError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -73,6 +98,13 @@ impl core::fmt::Display for GraphHavingError {
                 write!(f, "instruction {instruction} lacks an operand")
             }
             Self::UnknownColumn { column } => write!(f, "it references unknown {column}"),
+            Self::InvalidExpression { column, error } => {
+                write!(f, "computed alias {column}: {error}")
+            }
+            Self::ExpressionElementRead { column } => {
+                write!(f, "computed alias {column} requires element-property reads")
+            }
+            Self::ExpressionInputSchema => f.write_str("its computed input schema is invalid"),
         }
     }
 }
@@ -97,16 +129,23 @@ impl core::fmt::Debug for GraphHavingExpression {
 // summarized maintained cells. Neither adapter owns or recomputes any input.
 pub(super) trait GroupCells<'a>: Copy {
     fn cell(self, column: GraphAggregateColumn) -> Cell<'a>;
+    fn schema(self) -> (usize, usize);
 }
 impl<'g, 'a: 'g> GroupCells<'g> for Group<'g, 'a> {
     fn cell(self, column: GraphAggregateColumn) -> Cell<'g> {
         Group::cell(self, column)
+    }
+    fn schema(self) -> (usize, usize) {
+        (self.key.len(), self.state.len())
     }
 }
 
 #[derive(Clone, Copy)]
 struct MaintainedGroup<'a>(&'a GraphAggregateRow);
 impl<'a> GroupCells<'a> for MaintainedGroup<'a> {
+    fn schema(self) -> (usize, usize) {
+        (self.0.keys.len(), self.0.values.len())
+    }
     fn cell(self, column: GraphAggregateColumn) -> Cell<'a> {
         let value = |value: &'a GraphValue| match value {
             GraphValue::Scalar(value) => Cell::Value(ValueRef::Scalar(value)),
@@ -198,6 +237,7 @@ impl GraphHavingExpression {
         &self,
         keys: usize,
         aggregates: usize,
+        types: Option<&[crate::GraphSetColumnType]>,
     ) -> Result<(), GraphHavingError> {
         let validate = |operand: &GraphHavingOperand| {
             if let GraphHavingOperand::Column(column) = operand {
@@ -207,6 +247,20 @@ impl GraphHavingExpression {
                 };
                 if !valid {
                     return Err(GraphHavingError::UnknownColumn { column: *column });
+                }
+            }
+            if let GraphHavingOperand::Expression { value, column } = operand {
+                crate::GraphSetProjection::admit_output(
+                    value,
+                    types.ok_or(GraphHavingError::ExpressionInputSchema)?,
+                    *column,
+                )
+                .map_err(|error| GraphHavingError::InvalidExpression {
+                    column: *column,
+                    error,
+                })?;
+                if value.may_read_element_properties() {
+                    return Err(GraphHavingError::ExpressionElementRead { column: *column });
                 }
             }
             Ok(())
@@ -231,6 +285,7 @@ impl GraphHavingExpression {
             GlaExecutionEvent,
         ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
     ) -> Result<bool, GqlQueryError<GraphAggregateError<E>, C>> {
+        let (keys, aggregates) = group.schema();
         let mut stack = [None::<bool>; MAX_AGGREGATE_FILTERS];
         let mut depth = 0;
         let mut predicate = 0;
@@ -242,15 +297,21 @@ impl GraphHavingExpression {
                     comparison,
                     right,
                 } => {
-                    let left = resolve(left, group, control)?;
-                    let right = resolve(right, group, control)?;
-                    let result = compare(left, right, *comparison, predicate, control)?;
+                    let left = resolve(left, group, keys, aggregates, control)?;
+                    let right = resolve(right, group, keys, aggregates, control)?;
+                    let result =
+                        compare(left.cell(), right.cell(), *comparison, predicate, control)?;
                     predicate += 1;
                     result
                 }
                 GraphHavingOp::IsNull { operand, is_null } => {
                     predicate += 1;
-                    Some(resolve(operand, group, control)?.is_null() == *is_null)
+                    Some(
+                        resolve(operand, group, keys, aggregates, control)?
+                            .cell()
+                            .is_null()
+                            == *is_null,
+                    )
                 }
                 GraphHavingOp::Truth(value) => {
                     predicate += 1;
@@ -359,20 +420,45 @@ fn append_operand(operand: &GraphHavingOperand, bytes: &mut Vec<u8>) {
             bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
             bytes.extend_from_slice(encoded);
         }
+        GraphHavingOperand::Expression { value, column } => {
+            bytes.push(4);
+            bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+            value.append_canonical_bytes(bytes);
+        }
     }
 }
 
-fn resolve<'a, E>(
+fn resolve<'a, E, C>(
     operand: &'a GraphHavingOperand,
     group: impl GroupCells<'a>,
-    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-) -> Result<Cell<'a>, E> {
+    keys: usize,
+    aggregates: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+) -> Result<projection::OutputValue<'a>, GqlQueryError<GraphAggregateError<E>, C>> {
     control(GlaExecutionEvent::Work)?;
-    Ok(match operand {
+    let cell = match operand {
         GraphHavingOperand::Column(column) => group.cell(*column),
         GraphHavingOperand::Integer(value) => Cell::Integer(*value),
         GraphHavingOperand::Scalar(value) => Cell::Value(ValueRef::Scalar(value.value())),
-    })
+        GraphHavingOperand::Expression { value, column } => {
+            return projection::having_value(
+                value,
+                |at| {
+                    if at < keys {
+                        Ok(group.cell(GraphAggregateColumn::GroupKey(at)))
+                    } else if at - keys < aggregates {
+                        Ok(group.cell(GraphAggregateColumn::Aggregate(at - keys)))
+                    } else {
+                        Err(crate::GraphIntegerErrorKind::MissingColumn)
+                    }
+                },
+                keys + aggregates,
+                *column,
+                control,
+            );
+        }
+    };
+    Ok(projection::OutputValue::Borrowed(cell))
 }
 
 fn compare<E, C>(
@@ -460,7 +546,21 @@ impl PreparedGraphAggregate {
         mut self,
         expression: &GraphHavingExpression,
     ) -> Result<Self, GraphHavingError> {
-        expression.validate_columns(self.keys.len(), self.aggregates.len())?;
+        let computed = expression.program.iter().any(|op| match op {
+            GraphHavingOp::Compare { left, right, .. } => {
+                matches!(left, GraphHavingOperand::Expression { .. })
+                    || matches!(right, GraphHavingOperand::Expression { .. })
+            }
+            GraphHavingOp::IsNull { operand, .. } => {
+                matches!(operand, GraphHavingOperand::Expression { .. })
+            }
+            _ => false,
+        });
+        let types = computed
+            .then(|| self.output_input_types())
+            .transpose()
+            .map_err(|_| GraphHavingError::ExpressionInputSchema)?;
+        expression.validate_columns(self.keys.len(), self.aggregates.len(), types.as_deref())?;
         self.having.clear();
         self.having_expression = Some(expression.clone());
         Ok(self)
@@ -487,8 +587,8 @@ impl PreparedGraphAggregate {
     }
 
     /// Test one complete maintained group using the SAME HAVING interpreter and
-    /// exact comparator as batch execution. This borrows payloads and allocates
-    /// no input bag, accumulator, expression program or owned result.
+    /// exact comparator as batch execution. Direct operands borrow payloads;
+    /// computed aliases use governed temporaries in the result evaluator.
     ///
     /// Some(false) is a valid group rejected by FALSE/UNKNOWN. None means the
     /// definition or row schema is outside the admitted profile. Numeric-domain
