@@ -114,8 +114,9 @@ pub(super) fn degree<C>(
 }
 
 /// Directed degree uses division, unlike the undirected foundation's reciprocal
-/// multiplication. The witness names this native kernel, not an unwitnessed
-/// standalone fnx call. Incoming counts borrow CSR; no second graph is built.
+/// multiplication. Both immutable CSR faces already encode their exact degrees
+/// in adjacent offsets. Reading those directories avoids scanning every edge
+/// and allocating a second incoming-count vector on each call.
 pub(crate) fn directed_degree<C>(
     graph: &SnapshotGraphView,
     incoming: bool,
@@ -123,50 +124,27 @@ pub(crate) fn directed_degree<C>(
 ) -> Result<(KernelOutput, usize), FnxExecutionError<C>> {
     let n = graph.node_count();
     let mut arithmetic = Arithmetic::new(checkpoint);
-    let mut counts = reserve(if incoming { n } else { 0 })?;
-    if incoming {
-        for _ in 0..n {
-            arithmetic.step()?;
-            counts.push(0usize);
-        }
-        for source in 0..n {
-            arithmetic.step()?;
-            for &target in graph
-                .neighbors_indices(source)
-                .ok_or(FnxExecutionError::InvalidUpstreamResult)?
-            {
-                arithmetic.step()?;
-                let count = counts
-                    .get_mut(target)
-                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
-                *count = count
-                    .checked_add(1)
-                    .ok_or(FnxExecutionError::SizeOverflow)?;
-            }
-        }
+    let offsets = if incoming {
+        graph.incoming_face().0
+    } else {
+        graph.outgoing_offsets()
+    };
+    if offsets.len().checked_sub(1) != Some(n) {
+        return Err(FnxExecutionError::InvalidUpstreamResult);
     }
     let mut values = reserve(n)?;
-    for vertex in 0..n {
+    for row in offsets.windows(2) {
         arithmetic.step()?;
-        let degree = if incoming {
-            *counts
-                .get(vertex)
-                .ok_or(FnxExecutionError::InvalidUpstreamResult)?
-        } else {
-            graph
-                .neighbors_indices(vertex)
-                .ok_or(FnxExecutionError::InvalidUpstreamResult)?
-                .len()
-        };
+        let degree = row[1]
+            .checked_sub(row[0])
+            .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
         values.push(if n == 1 {
             1.0
         } else {
             degree as f64 / (n - 1) as f64
         });
     }
-    let workspace = vector_bytes(&counts)?
-        .checked_add(vector_bytes(&values)?)
-        .ok_or(FnxExecutionError::SizeOverflow)?;
+    let workspace = vector_bytes(&values)?;
     arithmetic.finish()?;
     Ok((
         KernelOutput {
@@ -179,9 +157,9 @@ pub(crate) fn directed_degree<C>(
                     "fgdb_out_degree_centrality"
                 }
                 .to_owned(),
-                complexity_claim: "O(|V| + |E|)".to_owned(),
+                complexity_claim: "O(|V|)".to_owned(),
                 nodes_touched: n,
-                edges_scanned: if incoming { graph.edge_count() } else { 0 },
+                edges_scanned: 0,
                 queue_peak: 0,
             },
         },

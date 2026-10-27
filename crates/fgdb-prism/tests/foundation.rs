@@ -148,9 +148,11 @@ fn check_directed_degrees(vertices: &[u128], edges: &[(u128, u128)]) {
             run(name, &graph),
             "deterministic call and certificate"
         );
+        assert_eq!(actual.certificate.witness.edges_scanned, 0);
+        assert_eq!(actual.certificate.estimated_work, vertices.len());
         assert_eq!(
-            actual.certificate.witness.edges_scanned,
-            if incoming { edges.len() } else { 0 }
+            actual.certificate.kernel_workspace_bytes,
+            vertices.len() * std::mem::size_of::<f64>()
         );
         assert!(actual.certificate.witness.algorithm.starts_with("fgdb_"));
     }
@@ -171,31 +173,26 @@ fn directed_degree_graph_laws_limits_and_live_arithmetic_cancellation() {
         max_result_rows: n,
         ..limits(1 << 30)
     };
-    for (name, poll) in [("in_degree_centrality", 3), ("out_degree_centrality", 2)] {
+    for name in ["in_degree_centrality", "out_degree_centrality"] {
         let procedure = call(name);
-        let mut meter = NativeControl {
-            stop: Some(NativeStop::Poll(poll)),
-            ..NativeControl::default()
-        };
-        assert!(
-            matches!(procedure.execute(&graph, allowed, &mut meter), Err(FnxExecutionError::Cancelled(NativeStop::Poll(at))) if at == poll)
-        );
-        // No row delivery has started. For incoming degree, poll three is in
-        // the real hub-row gather, after the count vector was initialized.
-        assert_eq!(meter.units, n + 1);
+        // Every live arithmetic poll, including the final pre-delivery poll,
+        // can stop the call. Poll two interrupts the actual directory walk.
+        for poll in 1..=3 {
+            let mut meter = NativeControl {
+                stop: Some(NativeStop::Poll(poll)),
+                ..NativeControl::default()
+            };
+            assert!(
+                matches!(procedure.execute(&graph, allowed, &mut meter), Err(FnxExecutionError::Cancelled(NativeStop::Poll(at))) if at == poll)
+            );
+            assert_eq!(meter.units, n + 1, "no row delivery before live refusal");
+        }
         let result = procedure
             .execute(&graph, allowed, &mut NativeControl::default())
             .unwrap();
         assert_eq!(result.rows.len(), n);
         let work = result.certificate.estimated_work;
-        assert_eq!(
-            work,
-            if name == "in_degree_centrality" {
-                3 * n + edges.len()
-            } else {
-                n
-            }
-        );
+        assert_eq!(work, n);
         assert!(matches!(
             procedure.execute(
                 &graph,
@@ -231,6 +228,115 @@ fn directed_degree_graph_laws_limits_and_live_arithmetic_cancellation() {
             })
         ));
         assert!(FnxCallSpec::bind(&format!("CALL fnx.{name}(1)"), &FnxParameters::new()).is_err());
+    }
+}
+
+#[test]
+fn directed_degree_directory_keeps_logical_refusals_and_dense_admission() {
+    // A complete directed graph has quadratic incidence but each degree is
+    // already certified by its row boundaries. Admit exactly one scalar read
+    // per vertex, with no hidden edge walk or incoming count allocation.
+    let n = 64usize;
+    let vertices: Vec<_> = (0..n as u128).collect();
+    let edges: Vec<_> = vertices
+        .iter()
+        .flat_map(|&source| {
+            vertices
+                .iter()
+                .copied()
+                .filter(move |&target| source != target)
+                .map(move |target| (source, target))
+        })
+        .collect();
+    let graph = view_direction(
+        &vertices,
+        &edges,
+        SelfLoopPolicy::Keep,
+        Directedness::Reversed,
+    );
+    for name in ["in_degree_centrality", "out_degree_centrality"] {
+        let procedure = call(name);
+        let mut meter = NativeControl::default();
+        let result = procedure.execute(&graph, limits(n), &mut meter).unwrap();
+        assert!(
+            degree_bits(&result)
+                .values()
+                .all(|&bits| bits == 1.0f64.to_bits())
+        );
+        // Initial admission, pre-delivery, row conversion and final check:
+        // the immutable-directory fast path changes none of these charges.
+        assert_eq!(meter.units, 2 * n + 3);
+        assert_eq!(meter.polls, [n + 1, n + 1]);
+        for unit in 1..=meter.units {
+            let mut refused = NativeControl {
+                stop: Some(NativeStop::Work(unit)),
+                ..NativeControl::default()
+            };
+            assert!(
+                matches!(procedure.execute(&graph, limits(n), &mut refused), Err(FnxExecutionError::Cancelled(NativeStop::Work(at))) if at == unit),
+                "{name}: work unit {unit}"
+            );
+            assert_eq!(refused.units, unit);
+        }
+    }
+}
+
+#[test]
+fn directed_degree_directory_counts_reduced_reversed_arcs_and_ignores_weights() {
+    let vertices = [VId(u128::MAX), VId(0), VId(1 << 100), VId(29)];
+    let raw = [
+        (0, 1 << 100, -3.0),
+        (0, 1 << 100, 7.0),
+        (u128::MAX, 0, 0.0),
+        (0, 0, 4.0),
+    ];
+    let edges: Vec<_> = raw
+        .into_iter()
+        .enumerate()
+        .map(|(index, (source, target, weight))| ProjectionEdge {
+            eid: EId(index as u128),
+            source: VId(source),
+            target: VId(target),
+            weight,
+        })
+        .collect();
+    for loops in [SelfLoopPolicy::Keep, SelfLoopPolicy::Drop] {
+        let graph = SnapshotGraphView::build(
+            SnapshotBinding {
+                root: ObjectId([7; 32]),
+                as_of: CommitSeq(3),
+            },
+            &vertices,
+            &edges,
+            ProjectionSpec {
+                directedness: Directedness::Reversed,
+                parallel_edges: ParallelEdgePolicy::Sum,
+                self_loops: loops,
+            },
+            ProjectionLimits {
+                max_vertices: vertices.len(),
+                max_input_edges: edges.len(),
+                max_adjacency_entries: edges.len(),
+                max_workspace_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+        let self_loop = usize::from(loops == SelfLoopPolicy::Keep);
+        for (name, expected) in [
+            ("in_degree_centrality", [1 + self_loop, 0, 1, 0]),
+            ("out_degree_centrality", [1 + self_loop, 0, 0, 1]),
+        ] {
+            let expected: BTreeMap<_, _> = [VId(0), VId(29), VId(u128::MAX), VId(1 << 100)]
+                .into_iter()
+                .zip(expected)
+                .map(|(vertex, degree)| (vertex, (degree as f64 / 3.0).to_bits()))
+                .collect();
+            assert_eq!(
+                degree_bits(&run(name, &graph)),
+                expected,
+                "{name}: {loops:?}"
+            );
+        }
     }
 }
 fn limits(max_estimated_work: usize) -> FnxExecutionLimits {

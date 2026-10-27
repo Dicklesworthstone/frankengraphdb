@@ -26,8 +26,8 @@ pub struct FnxExecutionLimits {
     /// passes and result conversion, including a zero-iteration result.
     /// Directed clustering includes weak-neighbor preparation and bounds each
     /// forward intersection by the smaller endpoint's incidence degree.
-    /// Directed degree admits 3*n+arcs for incoming counts and conversion, or
-    /// n for outgoing degree-directory reads; projection admission is separate.
+    /// Directed degree admits n reads from the incoming or outgoing degree
+    /// directory; projection admission is separate.
     /// Not an observed CPU counter, hard memory quota, or deadline guarantee.
     pub max_estimated_work: usize,
 }
@@ -1116,10 +1116,7 @@ impl FnxCallSpec {
             FnxAlgorithm::DirectedClusteringCoefficient => Some(
                 crate::directed_clustering::estimated_work(graph, &mut checkpoint)?,
             ),
-            FnxAlgorithm::InDegreeCentrality => {
-                n.checked_mul(3).and_then(|nodes| nodes.checked_add(arcs))
-            }
-            FnxAlgorithm::OutDegreeCentrality => Some(n),
+            FnxAlgorithm::InDegreeCentrality | FnxAlgorithm::OutDegreeCentrality => Some(n),
             FnxAlgorithm::Foundation(algorithm) => {
                 crate::foundation::estimated_work(algorithm, n, arcs)
             }

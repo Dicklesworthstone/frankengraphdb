@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 16;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 17;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -352,7 +352,10 @@ const SIGNATURES: &[FnxSignature] = &[
         complexity: crate::directed_clustering::COMPLEXITY,
         execution_kernel: "fgdb-prism/directed-clustering-oriented-multiplicity-v2",
     },
-    directed_degree("fnx.in_degree_centrality", "fgdb-prism/in-degree-csr-v1"),
+    directed_degree(
+        "fnx.in_degree_centrality",
+        "fgdb-prism/in-degree-directory-v2",
+    ),
     directed_degree("fnx.out_degree_centrality", "fgdb-prism/out-degree-csr-v1"),
 ];
 
@@ -367,7 +370,7 @@ const fn directed_degree(name: &'static str, execution_kernel: &'static str) -> 
         numeric_profile: "fnx-directed-degree-f64-division-v1",
         rng_policy: "none",
         graph_laws: "explicit directed simple projection; unweighted; self-loops count once; selected in/out degree divided by (|V|-1); a single vertex scores 1; isolates retained",
-        complexity: "O(|V| + |E|)",
+        complexity: "O(|V|) admitted degree-directory reads; O(|V|) kernel workspace",
         execution_kernel,
     }
 }
