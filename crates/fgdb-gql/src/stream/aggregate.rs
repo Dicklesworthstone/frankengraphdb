@@ -134,6 +134,13 @@ impl VertexAggregatePlan {
         self.input.leading_root_prefix()
     }
 
+    /// The first eligible membership expression from this aggregate's input.
+    /// Its source must retain the same scalar-domain proof as an ordinary scan.
+    #[must_use]
+    pub fn leading_root_membership(&self) -> Option<&crate::algebra::BoundBooleanExpression> {
+        self.input.leading_root_membership()
+    }
+
     /// Names addressing GraphAggregateRow::values(), not grouping keys.
     #[must_use]
     pub fn columns(&self) -> &[String] {

@@ -635,6 +635,16 @@ fn scalar_membership_seeks_preserve_numeric_null_and_duplicate_semantics() {
             assert_eq!(actual.rows.snapshot_records, candidates, "{members:?}");
             assert_eq!(complete.rows.snapshot_records, 1_024);
             let exact = GqlQueryPolicy::new(candidates, 2_000, 10_000_000, 10_000_000);
+            let mut stream = db
+                .stream_graph_values_governed_at(&cx, &indexed, at, exact)
+                .unwrap();
+            assert_eq!(stream.row_stats().snapshot_records, 0, "opening stays lazy");
+            assert_eq!(
+                stream.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                complete.value,
+                "stream members={members:?}"
+            );
+            assert_eq!(stream.row_stats().snapshot_records, candidates);
             assert_eq!(
                 db.execute_graph_pattern_governed_at(&cx, &indexed, at, exact)
                     .unwrap()
@@ -647,6 +657,12 @@ fn scalar_membership_seeks_preserve_numeric_null_and_duplicate_semantics() {
                     .execute_graph_pattern_governed_at(&cx, &indexed, at, short)
                     .unwrap_err();
                 assert!(format!("{error:?}").contains("SnapshotRecords"));
+                let mut stream = db
+                    .stream_graph_values_governed_at(&cx, &indexed, at, short)
+                    .unwrap();
+                let error = stream.by_ref().collect::<Result<Vec<_>, _>>().unwrap_err();
+                assert!(format!("{error:?}").contains("SnapshotRecords"));
+                assert!(stream.next().is_none(), "refused streams fuse");
             }
         }
         for (text, expected, candidates) in [
@@ -666,10 +682,82 @@ fn scalar_membership_seeks_preserve_numeric_null_and_duplicate_semantics() {
                 "{text}"
             );
             assert_eq!(result.rows.snapshot_records, candidates, "{text}");
+            let mut stream = db
+                .stream_graph_values_governed_at(&cx, &query, at, wide)
+                .unwrap();
+            assert_eq!(
+                stream.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                result.value,
+                "literal stream {text}"
+            );
+            assert_eq!(stream.row_stats().snapshot_records, candidates, "{text}");
         }
+        for (suffix, records, expected) in [
+            ("LIMIT 0", 0, vec![]),
+            ("LIMIT 1", 1, vec![VId(0)]),
+            ("SKIP 2 LIMIT 1", 3, vec![VId(2)]),
+        ] {
+            let query = membership_pattern(
+                &format!("MATCH (n) WHERE n.p IN [1, 2] RETURN n {suffix}"),
+                None,
+            );
+            let policy = if records == 0 {
+                GqlQueryPolicy::new(0, 0, 0, 0)
+            } else {
+                GqlQueryPolicy::new(records, 1, 100_000, 100_000)
+            };
+            let mut stream = db
+                .stream_graph_values_governed_at(&cx, &query, at, policy)
+                .unwrap();
+            assert_eq!(stream.row_stats().snapshot_records, 0);
+            let before = stream.evaluator_stats();
+            let rows = stream.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(membership_ids(&rows), expected, "{suffix}");
+            assert_eq!(stream.row_stats().snapshot_records, records, "{suffix}");
+            if records == 0 {
+                assert_eq!(stream.evaluator_stats(), before, "LIMIT 0 drives no source");
+            }
+        }
+        let aggregate = fgdb_gql::PreparedGraphAggregate::prepare(
+            membership_pattern("MATCH (n) WHERE n.p IN [1, 2] RETURN n", None),
+            &[],
+            &[fgdb_gql::GraphAggregate::count_rows("rows")],
+            0,
+            None,
+        )
+        .unwrap();
+        let aggregate_plan =
+            fgdb_gql::stream::aggregate::VertexAggregatePlan::compile(&aggregate).unwrap();
+        let expected = db
+            .execute_graph_aggregate_governed_at(&cx, &aggregate, at, wide)
+            .unwrap()
+            .value;
+        let mut aggregate_stream = db
+            .stream_global_aggregate_governed_at(
+                &cx,
+                &aggregate_plan,
+                at,
+                GqlQueryPolicy::new(4, 10, 10_000_000, 10_000_000),
+            )
+            .unwrap();
+        assert_eq!(aggregate_stream.row_stats().snapshot_records, 0);
+        assert_eq!(
+            aggregate_stream
+                .by_ref()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            expected
+        );
+        assert_eq!(aggregate_stream.row_stats().snapshot_records, 4);
         let fallible = membership_pattern("MATCH (n) WHERE n.p IN [1, 1 / 0] RETURN n", None);
         let error = db
             .execute_graph_pattern_governed_at(&cx, &fallible, at, wide)
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("DivisionByZero"));
+        let error = db
+            .stream_graph_values_governed_at(&cx, &fallible, at, wide)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
             .unwrap_err();
         assert!(format!("{error:?}").contains("DivisionByZero"));
     });
@@ -710,6 +798,22 @@ fn membership_postings_recheck_visibility_across_updates_pins_and_reopen() {
             .unwrap();
         assert_eq!(membership_ids(&old_rows.value), [VId(1), VId(2)]);
         assert_eq!(old_rows.rows.snapshot_records, 2);
+        let mut pinned_stream = pinned
+            .stream_graph_values_governed_at(
+                &cx,
+                &query,
+                old,
+                GqlQueryPolicy::new(2, 10, 100_000, 100_000),
+            )
+            .unwrap();
+        assert_eq!(
+            pinned_stream
+                .by_ref()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            old_rows.value
+        );
+        assert_eq!(pinned_stream.row_stats().snapshot_records, 2);
         for reopen in [false, true] {
             if reopen {
                 drop(db);
@@ -735,6 +839,20 @@ fn membership_postings_recheck_visibility_across_updates_pins_and_reopen() {
                     "{at:?}, reopen={reopen}"
                 );
                 assert_eq!(result.rows.snapshot_records, 4);
+                let mut stream = db
+                    .stream_graph_values_governed_at(
+                        &cx,
+                        &query,
+                        at,
+                        GqlQueryPolicy::new(4, 10, 100_000, 100_000),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    stream.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                    result.value,
+                    "historical stream {at:?}, reopen={reopen}"
+                );
+                assert_eq!(stream.row_stats().snapshot_records, 4);
             }
         }
     });
@@ -799,6 +917,15 @@ fn membership_keeps_collection_and_arithmetic_error_boundaries() {
             assert!(
                 format!("{error:?}").contains("StoredValueBounds"),
                 "{text}: {error:?}"
+            );
+            let error = db
+                .stream_graph_values_governed_at(&cx, &query, at, wide)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap_err();
+            assert!(
+                format!("{error:?}").contains("StoredValueBounds"),
+                "stream {text}: {error:?}"
             );
         }
 
@@ -867,6 +994,51 @@ fn membership_keeps_collection_and_arithmetic_error_boundaries() {
             .execute_graph_pattern_governed_at(&cx, &query, at, wide)
             .unwrap_err();
         assert!(format!("{error:?}").contains("StoredValueBounds"));
+        let error = db
+            .stream_graph_values_governed_at(&cx, &query, at, wide)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("StoredValueBounds"));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn wide_stream_membership_falls_back_before_output_and_still_honors_paging() {
+    let ((), report) = run_async_under_lab(0xb01_0064, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        for id in 0..128_u128 {
+            batch.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(id as i64))]);
+        }
+        let at = db.write(&commit, batch).await.unwrap();
+        for distinct in [64, 65] {
+            let members: Vec<_> = (32..32 + distinct)
+                .flat_map(|value| [CanonicalScalar::Int(value), CanonicalScalar::Int(value)])
+                .collect();
+            let query = membership_pattern(
+                "MATCH (n) WHERE n.p IN $members RETURN n SKIP 2 LIMIT 1",
+                Some(&members),
+            );
+            let records = if distinct == 64 { 3 } else { 35 };
+            let mut stream = db
+                .stream_graph_values_governed_at(
+                    &cx,
+                    &query,
+                    at,
+                    GqlQueryPolicy::new(records, 1, 1_000_000, 1_000_000),
+                )
+                .unwrap();
+            assert_eq!(stream.row_stats().snapshot_records, 0);
+            let result = stream.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(membership_ids(&result), [VId(34)]);
+            assert_eq!(stream.row_stats().snapshot_records, records, "{distinct}");
+            assert!(stream.next().is_none());
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

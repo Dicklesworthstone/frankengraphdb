@@ -116,6 +116,26 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
         None
     }
 
+    /// A necessary literal-membership bound from the first Boolean expression.
+    /// Only infallible root predicates may precede it. Sources must prove the
+    /// expression's property domain has no stored collections before pruning:
+    /// scalar-value conversion may otherwise raise on a nonmatching row.
+    /// The original Boolean program remains the visible-row predicate.
+    #[must_use]
+    pub fn leading_root_membership(&self) -> Option<&crate::algebra::BoundBooleanExpression> {
+        for test in self.tests.iter() {
+            match test {
+                Test::Predicate(_) | Test::Identity(_) => {}
+                Test::Binding(GlaOperator::SelectBoolean { expression }) => {
+                    let _ = expression.literal_membership_conjunct()?;
+                    return Some(expression);
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
     // Private to this operator family. A checked global numeric aggregate may
     // consume an unordered value projection; ordinary row streams still prove
     // the requested canonical order through their sealed output profile.

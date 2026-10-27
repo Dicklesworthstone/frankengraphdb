@@ -1,8 +1,9 @@
 //! Actual pull scans over a pinned, already decoded database generation.
 //!
 //! Persistent property candidates or a bounded history spine supply ordered roots.
-//! Equality keeps at most two roots. Numeric ranges merge at most 64 value-bucket
-//! heads; wider ranges test historical membership one identity at a time. Neither
+//! Equality keeps at most two roots. Literal membership and numeric ranges merge
+//! at most 64 value-bucket heads; wider memberships retain the history scan and
+//! wider ranges test historical membership one identity at a time. Neither
 //! path collects all candidate IDs or resolves unrequested MVCC winners.
 //! The source holds an EmbeddedReadView, not a borrow
 //! of the mutable Database: writes, compaction, reopen and handle drop cannot
@@ -27,6 +28,7 @@ use fgdb_types::{CanonicalScalar, CommitSeq, EId, QueryCx, VId};
 use std::sync::Arc;
 
 mod global_aggregate;
+mod membership;
 mod prefix;
 mod range;
 
@@ -55,6 +57,7 @@ enum RootCandidates {
     // Boxed: a range cursor is several times the size of every other arm.
     Range(Box<range::RangeCandidates>),
     Prefix(prefix::PrefixCandidates),
+    Membership(membership::MembershipCandidates),
 }
 
 /// Public only because it is a parameter of the returned public cursor. The
@@ -80,6 +83,22 @@ impl SnapshotVertexSource<'_> {
     ) -> Self {
         self.with_root_equality_predicates(plan.leading_root_predicates(), &allows_property)
             .with_root_prefix(plan.leading_root_prefix(), allows_property)
+    }
+
+    // Unscoped row and aggregate factories install membership explicitly.
+    // Scoped factories keep their existing admission contract until the
+    // membership path has a separate capability-accounting proof.
+    fn with_root_membership(
+        mut self,
+        expression: Option<&fgdb_gql::algebra::BoundBooleanExpression>,
+    ) -> Self {
+        if matches!(self.candidates, RootCandidates::Histories(_))
+            && let Some(expression) = expression
+            && let Some(membership) = membership::MembershipCandidates::new(expression)
+        {
+            self.candidates = RootCandidates::Membership(membership);
+        }
+        self
     }
 
     pub(crate) fn with_root_prefix(
@@ -253,6 +272,13 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                             control,
                         );
                     }
+                    RootCandidates::Membership(membership) => {
+                        return membership.next(
+                            self.view.snapshot.property_index(),
+                            self.after,
+                            control,
+                        );
+                    }
                     RootCandidates::Pending { .. } => {
                         unreachable!("candidate roots resolved above")
                     }
@@ -272,7 +298,7 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<bool, VertexScanSourceError<ReadError, C>> {
         let key = match &self.candidates {
-            RootCandidates::Histories(_) => return Ok(true),
+            RootCandidates::Histories(_) | RootCandidates::Membership(_) => return Ok(true),
             RootCandidates::Pending { equality, .. } | RootCandidates::Indexed { equality, .. } => {
                 equality.key
             }
@@ -304,8 +330,8 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                         RootCandidates::Prefix(prefix) => {
                             value.is_some_and(|value| prefix.accepts(value))
                         }
-                        RootCandidates::Histories(_) => {
-                            unreachable!("history roots admit every row")
+                        RootCandidates::Histories(_) | RootCandidates::Membership(_) => {
+                            unreachable!("unbounded admission accepts every source row")
                         }
                     });
                 }
@@ -332,6 +358,7 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
             let snapshot = &self.view.snapshot;
             let history = match &self.candidates {
                 RootCandidates::Histories(scan) => scan.history(vid),
+                RootCandidates::Membership(membership) => membership.history(vid),
                 _ => None,
             };
             snapshot
@@ -470,7 +497,8 @@ fn open<'q, Row: VertexScanOutput>(
         after: None,
         candidates: RootCandidates::Histories(VertexHistoryScanCursor::default()),
     }
-    .with_root_equality(&plan, |_| true);
+    .with_root_equality(&plan, |_| true)
+    .with_root_membership(plan.leading_root_membership());
     Ok(VertexScanCursor::new(source, plan, policy, move || {
         cx.with_restriction(|| cx.checkpoint())
     }))
