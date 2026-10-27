@@ -186,7 +186,7 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
     /// The same unmasked index proof used by snapshot admission is valid only
     /// when the permit hides no labels, relations or fields. A scoped permit
     /// or an unsupported native closure keeps the complete masked visitor.
-    /// Imported anchors, nested scopes and quantified paths are not modeled by
+    /// Imported anchors and nested scopes are not modeled by
     /// the native overlay closure and cannot enter this path accidentally.
     pub(crate) fn bound_candidates<E, Row: GlaOutput>(
         &self,
