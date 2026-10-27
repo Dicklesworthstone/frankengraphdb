@@ -115,11 +115,11 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
     false
 }
 
-/// Candidate row WHERE positions. The shared graph lexer must still prove a
-/// graph-predicate introducer before any facade routing changes. Scalar NOT,
-/// parenthesized arithmetic, strings and nested comprehension WHEREs do not
-/// become multipart statements merely because they contain a WHERE token.
-pub(crate) fn row_where_offsets(tokens: &[TextToken<'_>]) -> Vec<usize> {
+/// Candidate row WHERE and RETURN positions. The shared graph lexer must still
+/// prove a graph-predicate introducer before facade routing changes. Scalar
+/// expressions, strings and nested comprehension scopes do not become multipart
+/// statements merely because they contain a clause keyword.
+pub(crate) fn row_existence_offsets(tokens: &[TextToken<'_>]) -> Vec<usize> {
     let mut positions = Vec::new();
     let mut depth = 0_usize;
     let mut row = false;
@@ -139,7 +139,7 @@ pub(crate) fn row_where_offsets(tokens: &[TextToken<'_>]) -> Vec<usize> {
                         .is_some_and(|previous| previous.word("STARTS") || previous.word("ENDS"))
                 {
                     row = true;
-                } else if row && token.word("WHERE") {
+                } else if row && (token.word("WHERE") || token.word("RETURN")) {
                     positions.push(token.at);
                 }
             }

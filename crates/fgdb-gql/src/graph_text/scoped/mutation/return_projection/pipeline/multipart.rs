@@ -220,7 +220,7 @@ impl PreparedGraphText {
         zones: Option<&crate::GqlTimeZones>,
     ) -> Result<UnresolvedReadInput<'a>, GraphSetTextError> {
         let mut row_graph_filter = false;
-        for at in crate::set_text::multipart::row_where_offsets(tokens) {
+        for at in crate::set_text::multipart::row_existence_offsets(tokens) {
             // Compound leaves borrow a slice of the statement but retain the
             // original composition-token offsets.
             let at = at - tokens.first().map_or(0, |token| token.at);
@@ -229,7 +229,7 @@ impl PreparedGraphText {
                 at,
                 tokens: 0,
             };
-            lexer.next()?; // WHERE itself, using the one native lexer.
+            lexer.next()?; // The clause keyword, using the one native lexer.
             if row_pattern_filter_starts(&mut lexer.clone(), |_| false)?
                 || !row_pattern_expressions(&mut lexer, |_| false)?.is_empty()
             {
@@ -471,7 +471,7 @@ fn row_pattern_filter_starts(
     Ok(false)
 }
 
-/// Look ahead through one row WHERE using the native lexer. Predicate bodies
+/// Look ahead through one row WHERE or RETURN using the native lexer. Predicate bodies
 /// are consumed whole, so their local vertices cannot become additional
 /// expressions. Per-element list scopes retain their existing typed owner.
 fn row_pattern_expressions<'a>(
@@ -484,8 +484,10 @@ fn row_pattern_expressions<'a>(
     let mut depth = 0_usize;
     let mut locals = ReadLocals::default();
     loop {
-        let key = matches!(previous, Some(TokenKind::Punct(b'.' | b':')));
+        let key = matches!(previous, Some(TokenKind::Punct(b'.' | b':')))
+            || matches!(previous, Some(TokenKind::Word(word)) if word.eq_ignore_ascii_case("AS"));
         if matches!(token.kind, TokenKind::End)
+            || (depth == 0 && matches!(token.kind, TokenKind::Punct(b'}')))
             || matches!(token.kind, TokenKind::Word(word)
                 if depth == 0 && !key && Parser::ends_where(word, previous))
         {
@@ -653,6 +655,20 @@ impl<'a> Parser<'a> {
             .is_empty())
     }
 
+    /// An unhoisted existence value after UNWIND or a later WITH needs the
+    /// same graph witness owner as a row WHERE. Ordinary aggregate RETURNs
+    /// retain their separately typed owner.
+    fn row_existence_projection(&self, width: usize) -> Result<bool, GraphPatternTextError> {
+        if !self.read_elements || !self.is_word("RETURN") || self.return_has_aggregate()? {
+            return Ok(false);
+        }
+        Ok(!row_pattern_expressions(&mut self.lexer.clone(), |at| {
+            hoisted_span(self.existence_reads.as_ref(), width, at).is_some()
+                || hoisted_span(self.comprehension_reads.as_ref(), width, at).is_some()
+        })?
+        .is_empty())
+    }
+
     fn whole_row_existence_filter(&self, width: usize) -> Result<bool, GraphPatternTextError> {
         row_pattern_filter_starts(&mut self.lexer.clone(), |at| {
             hoisted_span(self.existence_reads.as_ref(), width, at).is_some()
@@ -749,10 +765,10 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    /// Append private Boolean witnesses, evaluate one ordinary scalar WHERE,
-    /// and remove the private suffix before its page or following clause. The
-    /// scalar VM owns Boolean precedence, three-valued logic and lazy CASE;
-    /// graph sources keep the existing eager governed Apply contract.
+    /// Append private Boolean witnesses for a row WHERE or RETURN. The
+    /// ordinary scalar/value evaluator owns Boolean precedence, three-valued
+    /// logic and lazy CASE; graph sources retain the existing eager governed
+    /// Apply contract. A public projection never exports the private suffix.
     #[allow(clippy::type_complexity)]
     fn multipart_existence_expression(
         &mut self,
@@ -761,6 +777,7 @@ impl<'a> Parser<'a> {
         aggregate: bool,
     ) -> Result<(Vec<UnresolvedContinuation<'a>>, RowSchema<'a>, bool), GraphSetTextError> {
         let at = self.current.at;
+        let returning = self.is_word("RETURN");
         let width = incoming.len();
         let visible = self.visible_width(incoming);
         let expressions = row_pattern_expressions(&mut self.lexer.clone(), |at| {
@@ -886,11 +903,25 @@ impl<'a> Parser<'a> {
             }
         }
         (self.lexer, self.current) = saved;
-        self.word("WHERE")?;
         let mut pipeline = Vec::new();
         let mut depth = 0;
-        let selected = self.row_expression_selection(&schema, &mut pipeline, &mut depth, at);
-        if had_boundary {
+        let mut projected = None;
+        let selected = if returning {
+            // The spans address the expanded row until RETURN has consumed
+            // every expression, including its ordinary ORDER BY/page.
+            self.multipart_row_tail(schema, aggregate)
+                .map(|(stages, next, terminal)| {
+                    pipeline = stages;
+                    projected = Some((next, terminal));
+                })
+        } else {
+            self.word("WHERE")?;
+            self.row_expression_selection(&schema, &mut pipeline, &mut depth, at)
+        };
+        if returning {
+            // A terminal projection already ended its row scope.
+            self.boundary_reads = detached_boundary;
+        } else if had_boundary {
             self.boundary_reads
                 .as_mut()
                 .expect("matching boundary")
@@ -903,29 +934,34 @@ impl<'a> Parser<'a> {
         self.grouped_comprehensions = previous_grouped;
         self.projected_sources = previous_projected;
         selected?;
-        append_stage(
-            &mut pipeline,
-            ReadStageTemplate::Project {
-                at,
-                projection: incoming
-                    .iter()
-                    .enumerate()
-                    .map(|(column, (name, _))| ReadProjectionTemplate {
-                        name: name.text.to_owned(),
-                        value: ReadValueTemplate::Column(column),
-                    })
-                    .collect(),
-                quantifier: GraphSetQuantifier::All,
-            },
-            &mut depth,
-        )?;
-        let (tail, next, terminal) = self.multipart_row_tail(incoming.clone(), aggregate)?;
-        pipeline.extend(tail);
+        let (next, terminal) = if let Some(projected) = projected {
+            projected
+        } else {
+            append_stage(
+                &mut pipeline,
+                ReadStageTemplate::Project {
+                    at,
+                    projection: incoming
+                        .iter()
+                        .enumerate()
+                        .map(|(column, (name, _))| ReadProjectionTemplate {
+                            name: name.text.to_owned(),
+                            value: ReadValueTemplate::Column(column),
+                        })
+                        .collect(),
+                    quantifier: GraphSetQuantifier::All,
+                },
+                &mut depth,
+            )?;
+            let (tail, next, terminal) = self.multipart_row_tail(incoming.clone(), aggregate)?;
+            pipeline.extend(tail);
+            (next, terminal)
+        };
         let mut syntax = self.take_part_syntax()?;
         syntax.return_at = at;
         let last = parts
             .last_mut()
-            .expect("compound row existence has a graph test");
+            .expect("row existence expression has a graph test");
         last.input.syntax = syntax;
         last.input.pipeline = pipeline;
         Ok((parts, next, terminal))
@@ -1178,7 +1214,8 @@ impl<'a> Parser<'a> {
                 && !(self.is_word("MATCH")
                     || self.is_word("OPTIONAL")
                     || self.inline_call()?
-                    || self.row_existence_filter(incoming.len())?)
+                    || self.row_existence_filter(incoming.len())?
+                    || self.row_existence_projection(incoming.len())?)
             {
                 return Err(expected(
                     self.current.at,
@@ -1204,8 +1241,12 @@ impl<'a> Parser<'a> {
         };
         while !terminal {
             self.refuse_call_write(call_depth)?;
-            if self.row_existence_filter(incoming.len())? {
-                let (next, done) = if self.whole_row_existence_filter(incoming.len())? {
+            if self.row_existence_filter(incoming.len())?
+                || self.row_existence_projection(incoming.len())?
+            {
+                let (next, done) = if self.is_word("WHERE")
+                    && self.whole_row_existence_filter(incoming.len())?
+                {
                     let (part, next, done) =
                         self.multipart_existence_part(statement, &incoming, aggregate)?;
                     result.continuations.push(part);
@@ -1312,7 +1353,7 @@ impl<'a> Parser<'a> {
         aggregate: bool,
     ) -> Result<(Vec<ReadStageTemplate>, RowSchema<'a>, bool), GraphSetTextError> {
         let (mut stages, mut schema, _) = self.row_pipeline_prefix(schema)?;
-        if !self.is_word("RETURN") {
+        if !self.is_word("RETURN") || self.row_existence_projection(schema.len())? {
             return Ok((stages, schema, false));
         }
         // An inline CALL body's aggregating RETURN, once per outer row.
@@ -2017,7 +2058,11 @@ impl<'a> Parser<'a> {
             self.projected_sources = None;
             next = schema;
             terminal = true;
-        } else if !terminal && self.is_word("RETURN") && !aggregate {
+        } else if !terminal
+            && self.is_word("RETURN")
+            && !aggregate
+            && !self.row_existence_projection(next.len())?
+        {
             let at = self.current.at;
             self.advance()?;
             let distinct = self.take_word("DISTINCT")?;

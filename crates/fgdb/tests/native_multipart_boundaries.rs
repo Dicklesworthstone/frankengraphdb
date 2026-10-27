@@ -611,3 +611,203 @@ fn source_free_and_single_source_native_aggregate_lanes_remain_usable() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn projected_row_existence_keeps_snapshot_transaction_and_capability_boundaries() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{GlaLimitDimension, GqlBudgetDimension, GqlQueryError};
+
+    let ((), report) = run_async_under_lab(0xa681_0008, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = database(&commit).await;
+        // This source has an S edge only to a hidden endpoint. Raw reads
+        // observe it; the signed EXISTS must report false.
+        let mut hidden_only = WriteBatch::new(S);
+        hidden_only.add_edge(EId(22), VId(1), VId(4), vec![]);
+        db.write(&commit, hidden_only).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let text = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x \
+            RETURN x, EXISTS((x)-[:R]->()) AS has_r, \
+            EXISTS((x)-[:S]->()) AS has_s ORDER BY x";
+        let params = GqlParameters::new();
+        let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+        let values = |result: QueryResult| {
+            let QueryResult::Rows { columns, rows } = result else {
+                panic!("expected read rows");
+            };
+            assert_eq!(columns, ["x", "has_r", "has_s"]);
+            rows.into_iter()
+                .map(|row| {
+                    let vertex = match row[0].as_value() {
+                        Some(GraphValue::Vertex(vertex)) => *vertex,
+                        other => panic!("expected a carried vertex: {other:?}"),
+                    };
+                    let boolean = |at: usize| match row[at]
+                        .as_value()
+                        .and_then(|value| value.as_scalar())
+                    {
+                        Some(CanonicalScalar::Bool(value)) => *value,
+                        other => panic!("expected an EXISTS boolean: {other:?}"),
+                    };
+                    (vertex, boolean(1), boolean(2))
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = vec![
+            (VId(1), true, true),
+            (VId(2), false, true),
+            (VId(3), false, false),
+            (VId(4), false, false),
+            (VId(5), true, false),
+        ];
+        assert_eq!(
+            values(db.query(&cx, text, &params, symbols, policy()).unwrap()),
+            before
+        );
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &params, policy()).unwrap()),
+            before
+        );
+        let issuer = authority();
+        for (allowed, expected) in [
+            (
+                grant(),
+                vec![
+                    (VId(1), true, false),
+                    (VId(2), false, true),
+                    (VId(3), false, false),
+                    (VId(5), true, false),
+                ],
+            ),
+            (
+                {
+                    let mut restricted = grant();
+                    restricted.relations = Scope::only([R]);
+                    restricted
+                },
+                vec![
+                    (VId(1), true, false),
+                    (VId(2), false, false),
+                    (VId(3), false, false),
+                    (VId(5), true, false),
+                ],
+            ),
+            (
+                {
+                    let mut restricted = grant();
+                    restricted.relations = Scope::only([S]);
+                    restricted
+                },
+                vec![
+                    (VId(1), false, false),
+                    (VId(2), false, true),
+                    (VId(3), false, false),
+                    (VId(5), false, false),
+                ],
+            ),
+        ] {
+            let token = issuer.issue_at(&allowed, 100).unwrap();
+            assert_eq!(
+                values(
+                    db.query_authorized(
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        text,
+                        &params,
+                        symbols,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap()
+                ),
+                expected
+            );
+            assert_eq!(
+                values(
+                    prepared
+                        .execute_authorized(
+                            &db,
+                            &cx,
+                            &issuer,
+                            &token,
+                            BRANCH,
+                            &params,
+                            policy(),
+                            || 100,
+                        )
+                        .unwrap()
+                ),
+                expected
+            );
+        }
+        // Preparation must reach the governed native owner, including its
+        // source and evaluator refusals, instead of a separate EXISTS engine.
+        assert!(matches!(
+            prepared.execute(
+                &db,
+                &cx,
+                &params,
+                GqlQueryPolicy::new(0, 1_000, 1_000_000, 100_000),
+            ),
+            Err(QueryError::Set(GqlQueryError::Rows(limit)))
+                if limit.dimension == GqlBudgetDimension::SnapshotRecords
+        ));
+        assert!(matches!(
+            prepared.execute(
+                &db,
+                &cx,
+                &params,
+                GqlQueryPolicy::new(1_000, 1_000, 0, 100_000),
+            ),
+            Err(QueryError::Set(GqlQueryError::Evaluator(limit)))
+                if limit.dimension == GlaLimitDimension::WorkUnits
+        ));
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut staged = WriteBatch::new(R);
+        staged.delete_edge(EId(10));
+        staged.add_edge(EId(30), VId(3), VId(5), vec![]);
+        txn.write(&mut db, staged).unwrap();
+        let after = vec![
+            (VId(1), false, true),
+            (VId(2), false, true),
+            (VId(3), true, false),
+            (VId(4), false, false),
+            (VId(5), true, false),
+        ];
+        assert_eq!(
+            values(
+                txn.query(&db, &cx, text, &params, symbols, policy())
+                    .unwrap()
+            ),
+            after
+        );
+        assert_eq!(
+            values(
+                prepared
+                    .execute_in_transaction(&txn, &db, &cx, &params, policy())
+                    .unwrap()
+            ),
+            after
+        );
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &params, policy()).unwrap()),
+            before
+        );
+        assert_eq!(db.frontier().unwrap(), basis);
+        txn.commit(&mut db, &commit).await.unwrap();
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &params, policy()).unwrap()),
+            after
+        );
+        assert_eq!(
+            values(pinned.query(&cx, text, &params, symbols, policy()).unwrap()),
+            before
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

@@ -2474,6 +2474,9 @@ impl<'a> Parser<'a> {
         // (element_compared), where read whole here it would end at `=`.
         let scalar = operators
             && (self.composite_operand_continues()?
+                || (inputs.is_none()
+                    && resolve.is_none()
+                    && self.at_hoisted_existence_value())
                 || (inputs.is_some()
                     && resolve.is_none()
                     && self.element_compared(Route {
@@ -2547,6 +2550,13 @@ impl<'a> Parser<'a> {
         } else if let Some(column) = self.comprehension_read(schema.len())? {
             // A graph head already gathered this pattern comprehension into
             // a hidden column (hoist_comprehension).
+            ReadValueTemplate::Column(column)
+        } else if resolve.is_none()
+            && self.at_hoisted_existence_value()
+            && let Some(column) = self.existence_read(schema.len())?
+        {
+            // A row-scope Apply gathered this Boolean before RETURN. Read
+            // its private slot without re-parsing or re-running the pattern.
             ReadValueTemplate::Column(column)
         } else if (self.at_hoisted_comprehension() || self.at_hoisted_existence_value())
             && let Some(resolve) = resolve.as_mut()

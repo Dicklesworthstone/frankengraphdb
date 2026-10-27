@@ -2604,3 +2604,287 @@ fn row_scope_graph_predicates_keep_late_body_errors_and_cumulative_budgets() {
         }
     }
 }
+
+#[test]
+fn row_scope_existence_values_rebind_dynamic_anchors_without_losing_occurrences() {
+    let template = PreparedGraphSetText::prepare(
+        "UNWIND $items AS x RETURN x,EXISTS((x)-[:R]->()) AS outgoing,\
+         NOT EXISTS((x)-[:R]->()) AS sink,\
+         CASE WHEN EXISTS((x)<-[:R]-()) THEN 7 ELSE 9 END AS score",
+        symbols,
+    )
+    .unwrap();
+    let frozen = template.canonical_template_bytes();
+    for items in [
+        vec![
+            GraphValue::Vertex(VId(1)),
+            GraphValue::Vertex(VId(1)),
+            GraphValue::Vertex(VId(4)),
+            GraphValue::Vertex(VId(u128::MAX)),
+            GraphValue::Scalar(CanonicalScalar::Null),
+            GraphValue::Scalar(CanonicalScalar::Int(1)),
+            GraphValue::Edge(fgdb_types::EId(1)),
+            GraphValue::List(vec![].into()),
+        ],
+        vec![GraphValue::Vertex(VId(2)), GraphValue::Vertex(VId(3))],
+        vec![],
+    ] {
+        let mut expected: Vec<_> = items
+            .iter()
+            .map(|item| {
+                let outgoing = matches!(item, GraphValue::Vertex(id)
+                    if EDGES.iter().any(|&(from, _, _)| from == *id));
+                let incoming = matches!(item, GraphValue::Vertex(id)
+                    if EDGES.iter().any(|&(_, _, to)| to == *id));
+                GraphValueRow::from_owned_values(vec![
+                    item.clone(),
+                    GraphValue::Scalar(CanonicalScalar::Bool(outgoing)),
+                    GraphValue::Scalar(CanonicalScalar::Bool(!outgoing)),
+                    GraphValue::Scalar(CanonicalScalar::Int(if incoming { 7 } else { 9 })),
+                ])
+            })
+            .collect();
+        expected.sort();
+        let arguments = GqlParameters::new().with_list("items", items).unwrap();
+        let query = template.bind_parameters(&arguments).unwrap();
+        assert_eq!(query.columns(), ["x", "outgoing", "sink", "score"]);
+        let mut actual = run(&query, wide(), &mut || Ok(())).unwrap().value;
+        actual.sort();
+        assert_eq!(actual, expected);
+    }
+    assert_eq!(template.canonical_template_bytes(), frozen);
+    assert!(template.bind_parameters(&GqlParameters::new()).is_err());
+}
+
+#[test]
+fn row_scope_existence_projection_composes_booleans_and_keeps_private_names_private() {
+    let prefix = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x";
+    for (expression, expected) in [
+        ("NOT ((x)-[:R]->())", [false, false, false, true]),
+        ("x.p = 2 AND EXISTS((x)-[:R]->())", [false, true, true, false]),
+        (
+            "EXISTS((x)-[:R]->()) XOR EXISTS { MATCH (x)<-[:R]-() }",
+            [true, false, false, true],
+        ),
+        (
+            "EXISTS((x)-[:R]->()) AND NOT ((x)<-[:R]-())",
+            [true, false, false, false],
+        ),
+        (
+            "COALESCE(EXISTS((x)-[:R]->()), 1 / 0 = 0)",
+            [true, true, true, false],
+        ),
+        (
+            "CASE WHEN EXISTS((x)-[:R]->()) THEN true ELSE x.p = 3 END",
+            [true, true, true, true],
+        ),
+    ] {
+        let statement = format!("{prefix} RETURN x,{expression} AS value ORDER BY x");
+        assert_eq!(
+            execute(&statement),
+            expected
+                .into_iter()
+                .enumerate()
+                .map(|(at, value)| GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(at as u128 + 1)),
+                    GraphValue::Scalar(CanonicalScalar::Bool(value)),
+                ]))
+                .collect::<Vec<_>>(),
+            "{statement}"
+        );
+    }
+    let query = prepare(
+        "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS __fg_boundary_0 \
+         RETURN __fg_boundary_0,EXISTS((__fg_boundary_0)-[:R]->()) AS present",
+    );
+    assert_eq!(query.columns(), ["__fg_boundary_0", "present"]);
+    assert_eq!(run(&query, wide(), &mut || Ok(())).unwrap().value.len(), 4);
+
+    for expression in [
+        "EXISTS((fresh)-[:R]->()) AS present",
+        "EXISTS((x)-[:R]->(local)) AS present,local.p AS leaked",
+        "EXISTS((x)-[:R]->()) AS present,__fg_boundary_0 AS leaked",
+        "EXISTS((x)-[:R]->()) AS present,ANY(local IN nodes WHERE EXISTS((local)-[:R]->())) AS nested",
+    ] {
+        let statement = format!("{prefix} RETURN {expression}");
+        let resolutions = std::cell::Cell::new(0);
+        assert!(
+            PreparedGraphSetText::prepare(&statement, |kind, name| {
+                resolutions.set(resolutions.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{statement}"
+        );
+        assert_eq!(resolutions.get(), 0, "scope admission precedes catalog reads");
+    }
+}
+
+#[test]
+fn row_scope_existence_projection_keeps_late_source_failures_before_empty_pages() {
+    for expression in [
+        "true OR EXISTS((x)-[:R]->())",
+        "false AND EXISTS((x)-[:R]->())",
+        "CASE WHEN true THEN false ELSE EXISTS((x)-[:R]->()) END",
+    ] {
+        let query = prepare(&format!(
+            "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x \
+             RETURN {expression} AS value LIMIT 0"
+        ));
+        let mut calls = 0;
+        let result = query.execute_governed(
+            wide(),
+            |pattern, remaining| {
+                calls += 1;
+                if calls == 3 {
+                    return Err(GqlQueryError::Source("later-projection-witness-error"));
+                }
+                pattern.plan().execute_governed_with_properties(
+                    (4 + EDGES.len()) as u64,
+                    (1..=4).map(VId),
+                    EDGES,
+                    |_, _| Ok::<_, &'static str>(true),
+                    |_, _| Ok(None),
+                    remaining,
+                    || Ok::<_, usize>(()),
+                )
+            },
+            || Ok::<_, usize>(()),
+        );
+        assert_eq!(calls, 3, "{expression}");
+        assert!(matches!(
+            result,
+            Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+                "later-projection-witness-error"
+            )))
+        ));
+    }
+}
+
+#[test]
+fn row_scope_existence_projection_shares_exact_budgets_and_original_interruptions() {
+    for suffix in ["", " LIMIT 0"] {
+        let query = prepare(&format!(
+            "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x \
+             RETURN x,EXISTS((x)-[:R]->()) XOR EXISTS((x)<-[:R]-()) AS different{suffix}"
+        ));
+        let mut checkpoints = 0;
+        let measured = run(&query, wide(), &mut || {
+            checkpoints += 1;
+            Ok(())
+        })
+        .unwrap();
+        let caps = [
+            measured.rows.snapshot_records,
+            measured.rows.result_rows,
+            measured.evaluator.work_units,
+            measured.evaluator.scratch_entries,
+        ];
+        assert_eq!(
+            run(
+                &query,
+                GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+                &mut || Ok(()),
+            )
+            .unwrap(),
+            measured
+        );
+        for dimension in 0..4 {
+            if caps[dimension] == 0 {
+                continue;
+            }
+            let mut bounded = caps;
+            bounded[dimension] -= 1;
+            assert!(
+                run(
+                    &query,
+                    GqlQueryPolicy::new(bounded[0], bounded[1], bounded[2], bounded[3]),
+                    &mut || Ok(()),
+                )
+                .is_err(),
+                "{suffix}, dimension {dimension}"
+            );
+        }
+        for stop in [1, checkpoints / 2, checkpoints] {
+            let mut seen = 0;
+            let result = run(&query, wide(), &mut || {
+                seen += 1;
+                if seen == stop { Err(stop) } else { Ok(()) }
+            });
+            assert!(
+                matches!(result, Err(GqlQueryError::Interrupted(found)) if found == stop),
+                "checkpoint {stop}/{checkpoints}"
+            );
+            assert_eq!(seen, stop);
+        }
+    }
+}
+
+#[test]
+fn row_scope_existence_projection_preserves_call_boundaries_aliases_and_distinct_pages() {
+    let prefix = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x";
+    let expected: Vec<_> = (1..=4)
+        .map(|id| {
+            GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(id)),
+                GraphValue::Scalar(CanonicalScalar::Bool(id < 4)),
+            ])
+        })
+        .collect();
+    let aliased = prepare(&format!(
+        "{prefix} RETURN x AS WITH,EXISTS((x)-[:R]->()) AS CALL ORDER BY WITH"
+    ));
+    assert_eq!(aliased.columns(), ["WITH", "CALL"]);
+    assert_eq!(run(&aliased, wide(), &mut || Ok(())).unwrap().value, expected);
+
+    // The CALL's RETURN probe must stop at its closing brace. The following
+    // outer WHERE has an anchor that is deliberately not imported into CALL.
+    assert_eq!(
+        execute(&format!(
+            "{prefix} WITH x,nodes[0] AS other \
+             CALL (x) {{ RETURN EXISTS((x)-[:R]->()) AS outgoing }} \
+             WHERE EXISTS((other)-[:R]->()) RETURN x,outgoing ORDER BY x"
+        )),
+        expected
+    );
+    let star = prepare(&format!(
+        "{prefix} WITH x CALL (x) {{ RETURN EXISTS((x)-[:R]->()) AS outgoing }} \
+         RETURN * ORDER BY x"
+    ));
+    assert_eq!(star.columns(), ["outgoing", "x"]);
+    assert_eq!(
+        run(&star, wide(), &mut || Ok(())).unwrap().value,
+        (1..=4)
+            .map(|id| GraphValueRow::from_owned_values(vec![
+                GraphValue::Scalar(CanonicalScalar::Bool(id < 4)),
+                GraphValue::Vertex(VId(id)),
+            ]))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        execute(&format!(
+            "{prefix} RETURN DISTINCT EXISTS((x)-[:R]->()) AS outgoing \
+             ORDER BY outgoing DESC SKIP 1 LIMIT 1"
+        )),
+        vec![GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+            CanonicalScalar::Bool(false),
+        )])]
+    );
+    for (expression, expected) in [
+        ("EXISTS((x)-[:R]->()) = true", [true, true, true, false]),
+        ("EXISTS((x)-[:R]->()) IS NOT NULL", [true, true, true, true]),
+    ] {
+        let rows = execute(&format!(
+            "{prefix} RETURN x,{expression} AS value ORDER BY x"
+        ));
+        let values: Vec<_> = expected
+            .into_iter()
+            .enumerate()
+            .map(|(at, value)| GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(at as u128 + 1)),
+                GraphValue::Scalar(CanonicalScalar::Bool(value)),
+            ]))
+            .collect();
+        assert_eq!(rows, values, "{expression}");
+    }
+}
