@@ -134,6 +134,26 @@ impl<K: IdKey, V> IdMap<K, V> {
         Some(&mut self.entries[index].1)
     }
 
+    /// The transient dense slot of a held key. Insertion, replacement,
+    /// rehashing and cloning preserve slots. Removal alone moves the last
+    /// entry into the removed slot; callers keeping links must repair that
+    /// one move. A slot is never an engine identity or a durable address.
+    pub(crate) fn dense_slot(&self, key: &K) -> Option<u32> {
+        let place = self.locate(*key)?;
+        Some(self.index_at(*key, &place) as u32)
+    }
+
+    /// Borrow a previously resolved dense slot. The caller preserves the
+    /// removal law documented on dense_slot.
+    pub(crate) fn at_slot(&self, slot: u32) -> (&K, &V) {
+        let (key, value) = &self.entries[slot as usize];
+        (key, value)
+    }
+
+    pub(crate) fn at_slot_mut(&mut self, slot: u32) -> &mut V {
+        &mut self.entries[slot as usize].1
+    }
+
     pub(crate) fn contains_key(&self, key: &K) -> bool {
         self.locate(*key).is_some()
     }

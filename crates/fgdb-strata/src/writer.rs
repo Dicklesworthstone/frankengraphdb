@@ -105,6 +105,41 @@ struct LiveEdge {
     dst: VId,
     created_at: CommitSeq,
     props: EdgePropertyRow,
+    /// Intrusive incidence links, source first. A self-loop uses only the
+    /// source links. Dense slots are local to this live map, never IDs.
+    incident: [IncidentLinks; 2],
+}
+
+/// IdMap admits fewer than u32::MAX - 1 entries, so this sentinel cannot
+/// alias a live slot. Full-width VId/EId values remain the map's keys.
+const NO_INCIDENT_EDGE: u32 = u32::MAX;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IncidentLinks {
+    previous: u32,
+    next: u32,
+}
+
+impl IncidentLinks {
+    const EMPTY: Self = Self {
+        previous: NO_INCIDENT_EDGE,
+        next: NO_INCIDENT_EDGE,
+    };
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LiveVertex {
+    row: VertexRow,
+    incident_head: u32,
+}
+
+impl LiveVertex {
+    fn new(row: VertexRow) -> Self {
+        Self {
+            row,
+            incident_head: NO_INCIDENT_EDGE,
+        }
+    }
 }
 
 /// One vertex content transition the fold applies (fgdb-stb6).
@@ -319,7 +354,11 @@ pub struct BlockWriter {
     /// `DeleteVertex` names only the VId, while the tombstone that retires a
     /// SEALED row must restate the exact birth — ordinal, labels, properties —
     /// and only the creation carried those.
-    live_vertices: IdMap<VId, VertexRow>,
+    live_vertices: IdMap<VId, LiveVertex>,
+    /// Published-constructor inputs historically may omit vertex patches.
+    /// Such incomplete endpoint coverage keeps the exact full-scan path;
+    /// ordinary folds and complete recovered partitions use local links.
+    incident_indexed: bool,
     /// Every VId admitted while replaying this partition-local writer, shared
     /// copy-on-write like `spent`.
     spent_vertices: Arc<IdSet<VId>>,
@@ -425,15 +464,16 @@ impl BlockWriter {
                         dst: entry.dst,
                         created_at: entry.created_at,
                         props,
+                        incident: [IncidentLinks::EMPTY; 2],
                     },
                 )
             })
             .collect();
         let spent: IdSet<EId> = blocks.iter().flatten().map(|entry| entry.eid).collect();
-        let live_vertices: IdMap<VId, VertexRow> =
+        let live_vertices: IdMap<VId, LiveVertex> =
             crate::vertex::merge_all_vertices(patches, frontier)
                 .into_iter()
-                .map(|row| (row.vid, row))
+                .map(|row| (row.vid, LiveVertex::new(row)))
                 .collect();
         let spent_vertices: IdSet<VId> = patches.iter().flatten().map(|row| row.vid).collect();
         // The chain head per family is the LAST published block of that
@@ -452,7 +492,7 @@ impl BlockWriter {
                 })
                 .collect(),
         );
-        Self {
+        let mut writer = Self {
             graph,
             branch,
             partition,
@@ -463,12 +503,30 @@ impl BlockWriter {
             chain_heads,
             pending_vertices: BTreeMap::new(),
             live_vertices,
+            incident_indexed: true,
             spent_vertices: Arc::new(spent_vertices),
             sealed_patches,
             sealed_live_edges: BTreeSet::new(),
             sealed_live_vertices: BTreeSet::new(),
             last_seq: (frontier.0 > 0).then_some(frontier),
+        };
+        for slot in 0..writer.live.len() {
+            let edge = writer.live.at_slot(slot as u32).1;
+            if let Ok(endpoint_slots) = writer.incident_endpoint_slots(edge.src, edge.dst) {
+                writer.link_incident_edge(slot as u32, endpoint_slots);
+            } else {
+                // Coverage and linking share the same endpoint probes. An
+                // incomplete input must leave no partly-built topology for
+                // a later clone or fold to observe: discard the private
+                // links before selecting the existing scan fallback.
+                writer.incident_indexed = false;
+                if slot != 0 {
+                    writer.clear_incident_links();
+                }
+                break;
+            }
         }
+        writer
     }
 
     pub fn new(graph: GraphId, branch: BranchId, partition: u64) -> Self {
@@ -483,6 +541,7 @@ impl BlockWriter {
             chain_heads: BTreeMap::new(),
             pending_vertices: BTreeMap::new(),
             live_vertices: IdMap::new(),
+            incident_indexed: true,
             spent_vertices: Arc::default(),
             sealed_patches: Vec::new(),
             sealed_live_edges: BTreeSet::new(),
@@ -565,7 +624,7 @@ impl BlockWriter {
     /// The full LIVE statement of `vid` — the row the statement-chain
     /// version transcript encodes (fgdb-ge6a v3).
     pub fn live_vertex_row(&self, vid: VId) -> Option<VertexRow> {
-        self.live_vertices.get(&vid).cloned()
+        self.live_vertices.get(&vid).map(|live| live.row.clone())
     }
 
     /// Borrow one live vertex's labels without copying its property payload.
@@ -573,7 +632,7 @@ impl BlockWriter {
     pub fn live_vertex_labels(&self, vid: VId) -> Option<&[LabelId]> {
         self.live_vertices
             .get(&vid)
-            .map(|row| row.labels.as_slice())
+            .map(|live| live.row.labels.as_slice())
     }
 
     /// The full LIVE statement of `eid` — topology, birth of the current
@@ -596,16 +655,144 @@ impl BlockWriter {
     /// Every live edge touching `vid`, in canonical ascending-EId order —
     /// the exact set a vertex deletion's cascade before-image must equal
     /// (both directions, the reference semantics).
+    /// Complete folds visit only this vertex's degree before sorting those
+    /// EIds; unrelated live edges do not contribute lookup work. Published
+    /// inputs with incomplete endpoint coverage retain the full-scan path.
     pub fn live_incident_edges(&self, vid: VId) -> Vec<EId> {
-        // The identity map holds no order: sort the incident identities.
-        let mut incident: Vec<EId> = self
-            .live
-            .iter()
-            .filter(|(_, edge)| edge.src == vid || edge.dst == vid)
-            .map(|(eid, _)| *eid)
-            .collect();
+        let mut incident = Vec::new();
+        if self.incident_indexed {
+            let mut slot = self
+                .live_vertices
+                .get(&vid)
+                .map_or(NO_INCIDENT_EDGE, |live| live.incident_head);
+            while slot != NO_INCIDENT_EDGE {
+                #[cfg(test)]
+                tests::record_incident_visit();
+                let (eid, edge) = self.live.at_slot(slot);
+                incident.push(*eid);
+                slot = edge.incident[usize::from(edge.src != vid)].next;
+            }
+        } else {
+            // Preserve constructor semantics for incomplete vertex patches:
+            // even an absent vertex may have edges in that admitted input.
+            incident.extend(
+                self.live
+                    .iter()
+                    .filter(|(_, edge)| {
+                        #[cfg(test)]
+                        tests::record_incident_visit();
+                        edge.src == vid || edge.dst == vid
+                    })
+                    .map(|(eid, _)| *eid),
+            );
+        }
+        // Incidence order is private; the public cascade remains canonical.
         incident.sort_unstable();
         incident
+    }
+
+    fn incident_links_mut(&mut self, slot: u32, vid: VId) -> &mut IncidentLinks {
+        let edge = self.live.at_slot_mut(slot);
+        debug_assert!(edge.src == vid || edge.dst == vid);
+        &mut edge.incident[usize::from(edge.src != vid)]
+    }
+
+    /// Resolve source before destination, preserving CreateEdge's refusal
+    /// order. Dense vertex slots survive edge staging, which never inserts
+    /// or removes a live vertex, and can be reused when linking succeeds.
+    fn incident_endpoint_slots(&self, src: VId, dst: VId) -> Result<[u32; 2], VId> {
+        Ok([
+            self.live_vertices.dense_slot(&src).ok_or(src)?,
+            self.live_vertices.dense_slot(&dst).ok_or(dst)?,
+        ])
+    }
+
+    fn clear_incident_links(&mut self) {
+        for slot in 0..self.live.len() {
+            self.live.at_slot_mut(slot as u32).incident = [IncidentLinks::EMPTY; 2];
+        }
+        for slot in 0..self.live_vertices.len() {
+            self.live_vertices.at_slot_mut(slot as u32).incident_head = NO_INCIDENT_EDGE;
+        }
+    }
+
+    /// Insert an already-admitted edge at its endpoint heads. This adds no
+    /// allocation: links live in the existing edge/vertex records, bounded
+    /// by their live map capacities, and clone with the same dense order.
+    fn link_incident_edge(&mut self, slot: u32, endpoint_slots: [u32; 2]) {
+        if !self.incident_indexed {
+            return;
+        }
+        let edge = self.live.at_slot(slot).1;
+        let endpoints = [edge.src, edge.dst];
+        for (side, vid) in endpoints.into_iter().enumerate() {
+            if side == 1 && vid == endpoints[0] {
+                continue;
+            }
+            debug_assert_eq!(*self.live_vertices.at_slot(endpoint_slots[side]).0, vid);
+            let vertex = self.live_vertices.at_slot_mut(endpoint_slots[side]);
+            let next = vertex.incident_head;
+            vertex.incident_head = slot;
+            self.live.at_slot_mut(slot).incident[side] = IncidentLinks {
+                previous: NO_INCIDENT_EDGE,
+                next,
+            };
+            if next != NO_INCIDENT_EDGE {
+                self.incident_links_mut(next, vid).previous = slot;
+            }
+        }
+    }
+
+    /// Unlink only after retirement's fallible staging has succeeded, then
+    /// repair IdMap's single swap-removal. No other edge's slot moves.
+    fn remove_live_edge(&mut self, eid: EId) {
+        let slot = self.live.dense_slot(&eid).expect("preflighted live edge");
+        if self.incident_indexed {
+            let edge = self.live.at_slot(slot).1;
+            let endpoints = [edge.src, edge.dst];
+            let incident = edge.incident;
+            for (side, vid) in endpoints.into_iter().enumerate() {
+                if side == 1 && vid == endpoints[0] {
+                    continue;
+                }
+                let links = incident[side];
+                if links.previous == NO_INCIDENT_EDGE {
+                    self.live_vertices
+                        .get_mut(&vid)
+                        .expect("indexed endpoint")
+                        .incident_head = links.next;
+                } else {
+                    self.incident_links_mut(links.previous, vid).next = links.next;
+                }
+                if links.next != NO_INCIDENT_EDGE {
+                    self.incident_links_mut(links.next, vid).previous = links.previous;
+                }
+            }
+        }
+        let removed = self.live.remove(&eid);
+        debug_assert!(removed.is_some(), "preflighted live edge disappeared");
+        if self.incident_indexed && (slot as usize) < self.live.len() {
+            let moved = self.live.at_slot(slot).1;
+            let endpoints = [moved.src, moved.dst];
+            let incident = moved.incident;
+            for (side, vid) in endpoints.into_iter().enumerate() {
+                if side == 1 && vid == endpoints[0] {
+                    continue;
+                }
+                let links = incident[side];
+                if links.previous == NO_INCIDENT_EDGE {
+                    self.live_vertices
+                        .get_mut(&vid)
+                        .expect("indexed endpoint")
+                        .incident_head = slot;
+                } else {
+                    self.incident_links_mut(links.previous, vid).next = slot;
+                }
+                if links.next != NO_INCIDENT_EDGE {
+                    self.incident_links_mut(links.next, vid).previous = slot;
+                }
+            }
+        }
     }
 
     /// How many vertex rows are pending — the vertex half of the seal signal.
@@ -667,14 +854,12 @@ impl BlockWriter {
                 // Format first so a seq-0 row stays CreatedAtZero even when
                 // the endpoints are also missing.
                 validate_entry(0, &entry).map_err(WriteError::Block)?;
-                for endpoint in [*src, *dst] {
-                    if !self.live_vertices.contains_key(&endpoint) {
-                        return Err(WriteError::DanglingEndpoint {
+                let endpoint_slots =
+                    self.incident_endpoint_slots(*src, *dst)
+                        .map_err(|endpoint| WriteError::DanglingEndpoint {
                             eid: *eid,
                             endpoint,
-                        });
-                    }
-                }
+                        })?;
                 self.push(keys, entry, props.clone())?;
                 self.live.insert(
                     *eid,
@@ -684,8 +869,12 @@ impl BlockWriter {
                         dst: *dst,
                         created_at: seq,
                         props: props.clone(),
+                        incident: [IncidentLinks::EMPTY; 2],
                     },
                 );
+                // Fresh IdMap insertion appends, and its own checked cap
+                // proves this slot fits u32 without truncating an identity.
+                self.link_incident_edge((self.live.len() - 1) as u32, endpoint_slots);
                 let was_fresh = Arc::make_mut(&mut self.spent).insert(*eid);
                 debug_assert!(was_fresh, "spent-set admission was checked above");
             }
@@ -706,7 +895,7 @@ impl BlockWriter {
                 let row = self
                     .live_vertices
                     .get(vid)
-                    .cloned()
+                    .map(|live| live.row.clone())
                     .ok_or(WriteError::UnknownVertex { vid: *vid })?;
                 // Verify the declared image against the live incident set,
                 // then retire THE DECLARED LIST. An undercount would leave
@@ -869,7 +1058,7 @@ impl BlockWriter {
                     self.seal_vertices(keys)?;
                 }
                 self.pending_vertices.insert((*vid, seq), row.clone());
-                self.live_vertices.insert(*vid, row);
+                self.live_vertices.insert(*vid, LiveVertex::new(row));
                 let was_fresh = Arc::make_mut(&mut self.spent_vertices).insert(*vid);
                 debug_assert!(was_fresh, "spent-set admission was checked above");
             }
@@ -1007,13 +1196,11 @@ impl BlockWriter {
                 removed_pending.is_some(),
                 "the fold requires the pending creation it was proven on"
             );
-            let removed_live = self.live.remove(&eid);
-            debug_assert!(removed_live.is_some(), "preflighted live edge disappeared");
+            self.remove_live_edge(eid);
             return Ok(());
         };
         self.push(keys, entry, props)?;
-        let removed = self.live.remove(&eid);
-        debug_assert!(removed.is_some(), "preflighted live edge disappeared");
+        self.remove_live_edge(eid);
         Ok(())
     }
 
@@ -1361,6 +1548,7 @@ impl BlockWriter {
                     dst: current.dst,
                     created_at: seq,
                     props: successor_row,
+                    incident: current.incident,
                 },
             );
             return Ok(());
@@ -1412,6 +1600,7 @@ impl BlockWriter {
                 dst: current.dst,
                 created_at: seq,
                 props: successor_row,
+                incident: current.incident,
             },
         );
         Ok(())
@@ -1427,7 +1616,7 @@ impl BlockWriter {
         let current = self
             .live_vertices
             .get(&vid)
-            .cloned()
+            .map(|live| live.row.clone())
             .ok_or(WriteError::UnknownVertex { vid })?;
         let mut successor = current.clone();
         match update {
@@ -1468,7 +1657,7 @@ impl BlockWriter {
                 .is_some_and(|pending| pending.retired_at.is_none())
             {
                 self.pending_vertices.insert((vid, seq), successor.clone());
-                self.live_vertices.insert(vid, successor);
+                self.live_vertices.get_mut(&vid).expect("live vertex").row = successor;
                 return Ok(());
             }
             // Same-commit creation already sealed. Restate the live row
@@ -1484,7 +1673,7 @@ impl BlockWriter {
                 self.seal_vertices(keys)?;
             }
             self.pending_vertices.insert((vid, seq), successor.clone());
-            self.live_vertices.insert(vid, successor);
+            self.live_vertices.get_mut(&vid).expect("live vertex").row = successor;
             return Ok(());
         }
         let mut tombstone = current;
@@ -1506,7 +1695,7 @@ impl BlockWriter {
         self.pending_vertices.insert(tombstone_key, tombstone);
         self.pending_vertices
             .insert(successor_key, successor.clone());
-        self.live_vertices.insert(vid, successor);
+        self.live_vertices.get_mut(&vid).expect("live vertex").row = successor;
         Ok(())
     }
 
@@ -1658,7 +1847,7 @@ mod last_wins_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockWriter, PendingStatement, WriteError};
+    use super::{BlockWriter, NO_INCIDENT_EDGE, PendingStatement, WriteError};
     use crate::vertex::{MAX_PATCH_ROWS, VertexPatchError, VertexRow};
     use crate::{AdjacencyEntry, BlockError, MAX_BLOCK_ENTRIES};
     use fgdb_delta_types::{DeltaRow, ElementId, PropertyKeyId, RelationId};
@@ -1669,6 +1858,494 @@ mod tests {
 
     fn keys() -> (&'static [u8; 32], DatabaseSecurityNamespaceId) {
         (&K_OID, DatabaseSecurityNamespaceId([0x77; 32]))
+    }
+
+    thread_local! {
+        static INCIDENT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    pub(super) fn record_incident_visit() {
+        INCIDENT_VISITS.with(|count| count.set(count.get() + 1));
+    }
+
+    fn incident_vertex(vid: VId, ordinal: u64) -> DeltaRow {
+        DeltaRow::CreateVertex {
+            vid,
+            birth_ordinal: ordinal,
+            labels: vec![],
+            props: vec![],
+            valid_time: None,
+        }
+    }
+
+    fn incident_edge(eid: EId, src: VId, dst: VId) -> DeltaRow {
+        DeltaRow::CreateEdge {
+            eid,
+            birth_ordinal: eid.0 as u64,
+            src,
+            relation: RelationId((eid.0 % 3) as u64),
+            dst,
+            canonical_key: None,
+            props: vec![],
+            valid_time: None,
+        }
+    }
+
+    // The previous production implementation, independent of the links.
+    fn incident_scan(writer: &BlockWriter, vid: VId) -> Vec<EId> {
+        let mut incident: Vec<EId> = writer
+            .live
+            .iter()
+            .filter(|(_, edge)| edge.src == vid || edge.dst == vid)
+            .map(|(eid, _)| *eid)
+            .collect();
+        incident.sort_unstable();
+        incident
+    }
+
+    fn assert_incident_index(writer: &BlockWriter) {
+        assert!(writer.incident_indexed);
+        let mut memberships = 0;
+        for (&vid, vertex) in writer.live_vertices.iter() {
+            let mut slot = vertex.incident_head;
+            let mut previous = NO_INCIDENT_EDGE;
+            let mut held = std::collections::BTreeSet::new();
+            while slot != NO_INCIDENT_EDGE {
+                assert!((slot as usize) < writer.live.len(), "dangling slot");
+                let (eid, edge) = writer.live.at_slot(slot);
+                assert!(edge.src == vid || edge.dst == vid, "wrong endpoint");
+                assert!(held.insert(*eid), "cycle or duplicate self-loop");
+                let links = edge.incident[usize::from(edge.src != vid)];
+                assert_eq!(links.previous, previous);
+                previous = slot;
+                slot = links.next;
+            }
+            memberships += held.len();
+            let expected = incident_scan(writer, vid);
+            assert_eq!(held.into_iter().collect::<Vec<_>>(), expected);
+            assert_eq!(writer.live_incident_edges(vid), expected);
+        }
+        assert_eq!(
+            memberships,
+            writer
+                .live
+                .iter()
+                .map(|(_, edge)| 1 + usize::from(edge.src != edge.dst))
+                .sum::<usize>()
+        );
+    }
+
+    #[test]
+    fn incident_index_matches_scan_through_versions_clones_and_dense_moves() {
+        let mut indexed = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        let mut vertices = vec![VId(0), VId(u128::MAX)];
+        // Equal low halves deliberately cannot identify a vertex.
+        vertices.extend((1..=67u128).map(|n| VId((n << 64) | 7)));
+        for (ordinal, &vid) in vertices.iter().enumerate() {
+            indexed
+                .apply(keys(), CommitSeq(1), &incident_vertex(vid, ordinal as u64))
+                .expect("vertex");
+        }
+        let mut scanned = indexed.clone();
+        scanned.incident_indexed = false;
+        let mut rng = 0x83d4_f137_a62e_19cbu64;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        for step in 0..660u64 {
+            let seq = CommitSeq(2 + step / 11);
+            let vid = vertices[next() as usize % vertices.len()];
+            let choice = next() % 10;
+            let row = if choice < 6 || indexed.live.is_empty() {
+                let dst = if step % 5 == 0 {
+                    vid
+                } else {
+                    vertices[next() as usize % vertices.len()]
+                };
+                // Distinct full-width edges may also share their low half.
+                incident_edge(EId((u128::from(step + 1) << 64) | 9), vid, dst)
+            } else if choice < 8 {
+                let slot = (next() as usize % indexed.live.len()) as u32;
+                DeltaRow::DeleteEdge {
+                    eid: *indexed.live.at_slot(slot).0,
+                    before_version: fgdb_types::ObjectId([0; 32]),
+                }
+            } else {
+                let elem = if choice == 8 {
+                    let slot = (next() as usize % indexed.live.len()) as u32;
+                    ElementId::Edge(*indexed.live.at_slot(slot).0)
+                } else {
+                    ElementId::Vertex(vid)
+                };
+                DeltaRow::Property {
+                    elem,
+                    property: PropertyKeyId(step % 3),
+                    before: None,
+                    after: (step % 4 != 0).then(|| CanonicalScalar::Int(step as i64).into()),
+                }
+            };
+            assert_eq!(
+                indexed.apply(keys(), seq, &row),
+                scanned.apply(keys(), seq, &row)
+            );
+            assert_incident_index(&indexed);
+            for &vertex in &vertices {
+                assert_eq!(
+                    indexed.live_incident_edges(vertex),
+                    scanned.live_incident_edges(vertex)
+                );
+                assert_eq!(
+                    indexed.live_vertex_row(vertex),
+                    scanned.live_vertex_row(vertex)
+                );
+            }
+            for (&eid, _) in indexed.live.iter() {
+                assert_eq!(
+                    indexed.live_edge_statement(eid),
+                    scanned.live_edge_statement(eid)
+                );
+            }
+            if step % 29 == 0 && !indexed.live.is_empty() {
+                let before = format!("{indexed:?}");
+                let mut cloned = indexed.clone();
+                let eid = *cloned.live.at_slot(0).0;
+                cloned
+                    .apply(
+                        keys(),
+                        seq,
+                        &DeltaRow::DeleteEdge {
+                            eid,
+                            before_version: fgdb_types::ObjectId([0; 32]),
+                        },
+                    )
+                    .expect("clone retires independently");
+                assert_incident_index(&cloned);
+                assert_eq!(format!("{indexed:?}"), before);
+            }
+            if step % 31 == 0 && !indexed.live.is_empty() {
+                let edge = indexed.live.at_slot(0).1;
+                let row = DeltaRow::DeleteVertex {
+                    vid: edge.src,
+                    before_version: fgdb_types::ObjectId([0; 32]),
+                    sorted_retired_incident_edges: vec![],
+                };
+                let before = format!("{indexed:?}");
+                let refused = indexed.apply(keys(), seq, &row);
+                assert!(matches!(
+                    refused,
+                    Err(WriteError::CascadeImageMismatch { .. })
+                ));
+                assert_eq!(refused, scanned.apply(keys(), seq, &row));
+                assert_eq!(
+                    format!("{indexed:?}"),
+                    before,
+                    "typed refusal changed links"
+                );
+            }
+            if step % 11 == 10 {
+                indexed.seal(keys()).expect("edge seal");
+                indexed.seal_vertices(keys()).expect("vertex seal");
+                scanned.seal(keys()).expect("scan edge seal");
+                scanned.seal_vertices(keys()).expect("scan vertex seal");
+                assert_eq!(
+                    indexed.clone().publish(keys(), seq),
+                    scanned.clone().publish(keys(), seq),
+                    "canonical bytes at step {step}"
+                );
+            }
+        }
+        // Ascending cascades remove arbitrary dense slots, including moved
+        // heads, parallel incidences and both sides of a self-loop.
+        for vid in vertices {
+            let row = DeltaRow::DeleteVertex {
+                vid,
+                before_version: fgdb_types::ObjectId([0; 32]),
+                sorted_retired_incident_edges: incident_scan(&indexed, vid),
+            };
+            assert_eq!(
+                indexed.apply(keys(), CommitSeq(100), &row),
+                scanned.apply(keys(), CommitSeq(100), &row)
+            );
+            assert_incident_index(&indexed);
+        }
+        assert!(indexed.live.is_empty());
+        assert_eq!(
+            indexed.publish(keys(), CommitSeq(100)),
+            scanned.publish(keys(), CommitSeq(100))
+        );
+    }
+
+    #[test]
+    fn incident_index_rebuilds_from_both_constructors_and_keeps_incomplete_fallback() {
+        let mut original = BlockWriter::new(GraphId(1), BranchId(1), 0);
+        let vertices = [VId(0), VId(1 << 96), VId(u128::MAX)];
+        for (ordinal, vid) in vertices.into_iter().enumerate() {
+            original
+                .apply(keys(), CommitSeq(1), &incident_vertex(vid, ordinal as u64))
+                .expect("vertex");
+        }
+        for (eid, src, dst) in [
+            (EId(0), vertices[0], vertices[1]),
+            (EId(1 << 96), vertices[1], vertices[1]),
+            (EId(u128::MAX), vertices[2], vertices[0]),
+        ] {
+            original
+                .apply(keys(), CommitSeq(1), &incident_edge(eid, src, dst))
+                .expect("edge");
+        }
+        original
+            .publish_in_place(keys(), CommitSeq(1))
+            .expect("publish");
+        let blocks: Vec<_> = original
+            .sealed()
+            .iter()
+            .map(|block| crate::decode_block(&block.bytes).expect("block"))
+            .collect();
+        let patches: Vec<_> = original
+            .sealed_patches()
+            .iter()
+            .map(|patch| crate::vertex::decode_patch(&patch.bytes).expect("patch"))
+            .collect();
+        let props = vec![None; blocks.len()];
+        let mut admission = crate::root::EdgeHistoryValidator::default();
+        for (index, block) in blocks.iter().enumerate() {
+            admission
+                .observe_block(index, block)
+                .expect("admitted block");
+        }
+        let recovered = BlockWriter::from_published_partition(
+            GraphId(1),
+            BranchId(1),
+            0,
+            original.sealed().to_vec(),
+            original.sealed_patches().to_vec(),
+            &blocks,
+            &props,
+            &patches,
+            CommitSeq(1),
+        )
+        .expect("published writer");
+        let admitted = BlockWriter::from_admitted_partition(
+            GraphId(1),
+            BranchId(1),
+            0,
+            original.sealed().to_vec(),
+            original.sealed_patches().to_vec(),
+            &admission.statements(),
+            &blocks,
+            &props,
+            &patches,
+            CommitSeq(1),
+        )
+        .expect("admitted writer");
+        let mut incomplete = BlockWriter::from_published_partition(
+            GraphId(1),
+            BranchId(1),
+            0,
+            original.sealed().to_vec(),
+            original.sealed_patches().to_vec(),
+            &blocks,
+            &props,
+            &[],
+            CommitSeq(1),
+        )
+        .expect("existing incomplete constructor semantics");
+        assert!(!incomplete.incident_indexed);
+        for vid in vertices {
+            assert_eq!(
+                incomplete.live_incident_edges(vid),
+                incident_scan(&original, vid)
+            );
+        }
+        incomplete
+            .apply(
+                keys(),
+                CommitSeq(2),
+                &DeltaRow::DeleteEdge {
+                    eid: EId(0),
+                    before_version: fgdb_types::ObjectId([0; 32]),
+                },
+            )
+            .expect("incomplete fold still retires by EId");
+        for vid in vertices {
+            assert_eq!(
+                incomplete.live_incident_edges(vid),
+                incident_scan(&incomplete, vid)
+            );
+        }
+        // The first two EIds have covered endpoints, but the last edge's
+        // source is absent. Exercise abandoning a nonempty linked prefix,
+        // not only the empty-patch refusal at the first edge above.
+        let partial_rows: Vec<_> = patches
+            .iter()
+            .flatten()
+            .filter(|row| row.vid != vertices[2])
+            .cloned()
+            .collect();
+        let partial_patch = crate::vertex::decode_patch(
+            &crate::vertex::encode_patch(&partial_rows).expect("partial patch"),
+        )
+        .expect("decoded partial patch");
+        let mut partial = BlockWriter::from_published_partition(
+            GraphId(1),
+            BranchId(1),
+            0,
+            original.sealed().to_vec(),
+            original.sealed_patches().to_vec(),
+            &blocks,
+            &props,
+            &[partial_patch],
+            CommitSeq(1),
+        )
+        .expect("partly covered constructor input");
+        assert_eq!(*partial.live.at_slot(0).0, EId(0));
+        assert_eq!(*partial.live.at_slot(2).0, EId(u128::MAX));
+        assert!(
+            partial
+                .incident_endpoint_slots(vertices[0], vertices[1])
+                .is_ok()
+        );
+        assert!(
+            partial
+                .incident_endpoint_slots(vertices[2], vertices[0])
+                .is_err()
+        );
+        assert!(!partial.incident_indexed);
+        assert!(
+            partial
+                .live
+                .iter()
+                .all(|(_, edge)| edge.incident == [super::IncidentLinks::EMPTY; 2])
+        );
+        assert!(
+            partial
+                .live_vertices
+                .iter()
+                .all(|(_, vertex)| vertex.incident_head == NO_INCIDENT_EDGE)
+        );
+        partial
+            .apply(keys(), CommitSeq(2), &incident_vertex(vertices[2], 9))
+            .expect("previously missing vertex can arrive in the fold");
+        assert!(
+            !partial.incident_indexed,
+            "fallback never activates stale links"
+        );
+        for writer in [&partial, &partial.clone()] {
+            for vid in vertices {
+                assert_eq!(
+                    writer.live_incident_edges(vid),
+                    incident_scan(&original, vid)
+                );
+            }
+        }
+        let mut published = Vec::new();
+        for mut writer in [original, recovered, admitted] {
+            assert_incident_index(&writer);
+            writer
+                .apply(
+                    keys(),
+                    CommitSeq(2),
+                    &DeltaRow::Property {
+                        elem: ElementId::Edge(EId(u128::MAX)),
+                        property: PropertyKeyId(7),
+                        before: None,
+                        after: Some(CanonicalScalar::Int(4).into()),
+                    },
+                )
+                .expect("property successor");
+            writer
+                .apply(
+                    keys(),
+                    CommitSeq(2),
+                    &DeltaRow::DeleteEdge {
+                        eid: EId(0),
+                        before_version: fgdb_types::ObjectId([0; 32]),
+                    },
+                )
+                .expect("middle slot retirement");
+            writer
+                .apply(
+                    keys(),
+                    CommitSeq(2),
+                    &DeltaRow::DeleteVertex {
+                        vid: vertices[1],
+                        before_version: fgdb_types::ObjectId([0; 32]),
+                        sorted_retired_incident_edges: vec![EId(1 << 96)],
+                    },
+                )
+                .expect("loop cascade");
+            assert_incident_index(&writer);
+            published.push(
+                writer
+                    .publish(keys(), CommitSeq(2))
+                    .expect("published continuation"),
+            );
+        }
+        assert_eq!(published[0], published[1]);
+        assert_eq!(published[0], published[2]);
+    }
+
+    #[test]
+    fn incident_lookup_visits_only_the_requested_vertex_degree() {
+        for unrelated in [0..0, 2..2050] {
+            let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
+            for vid in [VId(0), VId(1)] {
+                writer
+                    .apply(keys(), CommitSeq(1), &incident_vertex(vid, vid.0 as u64))
+                    .expect("vertex");
+            }
+            for eid in 0..3u128 {
+                writer
+                    .apply(
+                        keys(),
+                        CommitSeq(1),
+                        &incident_edge(EId(eid), VId(0), VId(eid % 2)),
+                    )
+                    .expect("target incidence");
+            }
+            for n in unrelated {
+                writer
+                    .apply(keys(), CommitSeq(1), &incident_vertex(VId(n), n as u64))
+                    .expect("unrelated vertex");
+                writer
+                    .apply(
+                        keys(),
+                        CommitSeq(1),
+                        &incident_edge(EId(n + 10), VId(n), VId(n)),
+                    )
+                    .expect("unrelated loop");
+            }
+            INCIDENT_VISITS.with(|count| count.set(0));
+            assert_eq!(
+                writer.live_incident_edges(VId(0)),
+                vec![EId(0), EId(1), EId(2)]
+            );
+            assert_eq!(INCIDENT_VISITS.with(std::cell::Cell::get), 3);
+            INCIDENT_VISITS.with(|count| count.set(0));
+            assert!(writer.live_incident_edges(VId(u128::MAX)).is_empty());
+            assert_eq!(INCIDENT_VISITS.with(std::cell::Cell::get), 0);
+        }
+        let old_edge = std::mem::size_of::<(
+            VId,
+            RelationId,
+            VId,
+            CommitSeq,
+            crate::edge_props::EdgePropertyRow,
+        )>();
+        let edge_growth = std::mem::size_of::<super::LiveEdge>() - old_edge;
+        let vertex_growth =
+            std::mem::size_of::<super::LiveVertex>() - std::mem::size_of::<VertexRow>();
+        assert_eq!(edge_growth, 16, "two fixed pairs of u32 slots");
+        assert!(vertex_growth <= std::mem::align_of::<VertexRow>());
+        eprintln!(
+            "incident_index_metadata edge_before={old_edge} edge_after={} vertex_before={} vertex_after={} extra_allocated_record_bytes=16*edge_capacity+{vertex_growth}*vertex_capacity no_secondary_allocations=true",
+            std::mem::size_of::<super::LiveEdge>(),
+            std::mem::size_of::<VertexRow>(),
+            std::mem::size_of::<super::LiveVertex>()
+        );
     }
 
     #[test]
