@@ -944,6 +944,46 @@ pub(super) fn having_value<'g, E, C>(
     expression(value, &mut input, column, control)
 }
 
+/// Resolve a HAVING operand's referenced aliases through the ordinary result
+/// evaluator, then read those exact cells with the same evaluator. Each cell
+/// is governed before it is retained. Neither stage narrows a count, sum or
+/// average to an ordinary graph scalar, and neither can read graph storage.
+pub(super) fn having_resolved_value<'g, E, C>(
+    inputs: &'g [GraphSetValue],
+    value: &'g GraphSetValue,
+    columns: impl Fn(usize) -> Result<Cell<'g>, GraphIntegerErrorKind>,
+    width: usize,
+    column: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
+) -> Result<OutputValue<'g>, QueryError<E, C>> {
+    let mut input = ExpressionInput {
+        columns,
+        width,
+        locals: Vec::new(),
+        read: &mut crate::set_ops::no_element_reads,
+    };
+    let mut resolved = Vec::new();
+    for value in inputs {
+        control(GlaExecutionEvent::ScratchEntry)?;
+        resolved.push(expression(value, &mut input, column, control)?);
+    }
+    let mut input = ExpressionInput {
+        columns: |at| {
+            resolved
+                .get(at)
+                .map(OutputValue::cell)
+                .ok_or(GraphIntegerErrorKind::MissingColumn)
+        },
+        width: resolved.len(),
+        locals: Vec::new(),
+        read: &mut crate::set_ops::no_element_reads,
+    };
+    // A result borrowing one resolved alias must outlive this temporary row.
+    Ok(OutputValue::Owned(
+        expression(value, &mut input, column, control)?.into_owned(control)?,
+    ))
+}
+
 /// An aggregate output as an ordinary graph value. Never truncate an
 /// aggregate into an i64. A graph value has no exact rational: an average
 /// is openCypher's Float, rounded once (fgdb-y255t, option C).

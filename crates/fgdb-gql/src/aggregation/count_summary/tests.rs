@@ -554,6 +554,8 @@ fn computed_having_aliases_keep_hidden_summaries_and_full_width_counts() {
     for text in [
         "MATCH (n) RETURN COUNT(*) + 1 AS n HAVING n > COUNT(*)",
         "MATCH (n) RETURN COUNT(*) + 1 AS n, COUNT(*) AS raw HAVING n > raw",
+        "MATCH (n) RETURN COUNT(*) + 1 AS n HAVING n - 1 = COUNT(*) AND (COUNT(*) + 1) > COUNT(*)",
+        "MATCH (n) RETURN COUNT(*) + 1 AS n HAVING n + 1 = COUNT(*) + 2",
     ] {
         let prepared = query(text);
         for count in [0, 1, u64::MAX] {
@@ -602,7 +604,14 @@ fn computed_having_aliases_keep_hidden_summaries_and_full_width_counts() {
 #[test]
 fn computed_having_errors_survive_decisive_booleans_and_empty_pages() {
     let policy = GqlQueryPolicy::new(1, 10, 100_000, 100_000);
-    for condition in ["TRUE OR bad > 0", "FALSE AND bad > 0", "bad IS NULL"] {
+    for condition in [
+        "TRUE OR bad > 0",
+        "FALSE AND bad > 0",
+        "bad IS NULL",
+        "TRUE OR bad + 1 > 0",
+        "FALSE AND COUNT(*) / (COUNT(*) - COUNT(*)) > 0",
+        "COUNT(*) / 0 IN []",
+    ] {
         let text = format!(
             "MATCH (n) RETURN COUNT(*) / (COUNT(*) - COUNT(*)) AS bad HAVING {condition} LIMIT 0"
         );
@@ -663,6 +672,53 @@ fn computed_having_checks_input_columns_and_refuses_unowned_element_reads() {
             .with_having_expression(&expression(value)),
         Err(crate::GraphHavingError::ExpressionElementRead { column: 0 })
     ));
+    let resolved = |inputs: Vec<GraphSetValue>, value| {
+        GraphHavingExpression::prepare(&[GraphHavingOp::IsNull {
+            operand: GraphHavingOperand::ResolvedExpression {
+                inputs: inputs.into(),
+                value: std::sync::Arc::new(value),
+                column: 0,
+            },
+            is_null: false,
+        }])
+        .unwrap()
+    };
+    let count = query("MATCH (n) RETURN COUNT(*) AS c");
+    for (inputs, value) in [
+        (vec![GraphSetValue::Column(99)], GraphSetValue::Column(0)),
+        (vec![GraphSetValue::Column(0)], GraphSetValue::Column(99)),
+    ] {
+        assert!(matches!(
+            count
+                .clone()
+                .with_having_expression(&resolved(inputs, value)),
+            Err(crate::GraphHavingError::InvalidExpression {
+                error: crate::GraphSetProjectionError::UnknownInput { input: 99, .. },
+                ..
+            })
+        ));
+    }
+    assert!(matches!(
+        count.with_having_expression(&resolved(
+            vec![GraphSetValue::Column(0); crate::MAX_GRAPH_INTEGER_INSTRUCTIONS + 1],
+            GraphSetValue::Column(0),
+        )),
+        Err(crate::GraphHavingError::InvalidExpression {
+            error: crate::GraphSetProjectionError::TooManyColumns { .. },
+            ..
+        })
+    ));
+    assert!(matches!(
+        query("MATCH (n) RETURN n, COUNT(*) AS c GROUP BY n").with_having_expression(&resolved(
+            vec![GraphSetValue::MapGet {
+                map: Box::new(GraphSetValue::Column(0)),
+                key: "p".into(),
+                property: GraphElementKey::Property(PropertyKeyId(1)),
+            }],
+            GraphSetValue::Column(0),
+        )),
+        Err(crate::GraphHavingError::ExpressionElementRead { column: 0 })
+    ));
 }
 
 #[test]
@@ -671,6 +727,9 @@ fn exact_metadata_checks_every_budget_and_cancellation_boundary() {
         "MATCH (n) RETURN COUNT(*) AS n",
         "MATCH (n:L) RETURN COUNT(*) AS n",
         "MATCH (n:L) RETURN COUNT(*) + 1 AS n HAVING n > 2 ORDER BY n DESC LIMIT 1",
+        "MATCH (n:L) RETURN COUNT(*) + 1 AS n HAVING n + 1 > COUNT(*) ORDER BY n DESC LIMIT 1",
+        "MATCH (n:L) RETURN [COUNT(*)][0] AS n HAVING n + 1 > COUNT(*) ORDER BY n DESC LIMIT 1",
+        "MATCH (n:L) RETURN COUNT(*) AS n HAVING COUNT(*) + 1 > n ORDER BY n DESC LIMIT 1",
         "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n, COUNT(*) AS m",
         "MATCH (n) RETURN COUNT(*) AS n SKIP 1 LIMIT 0",
     ] {

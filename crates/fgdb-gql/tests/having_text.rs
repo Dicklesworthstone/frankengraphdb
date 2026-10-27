@@ -321,6 +321,219 @@ fn scalar_and_unsigned_arguments_rebind_without_reparsing_or_catalog_reads() {
 }
 
 #[test]
+fn computed_operands_share_aliases_aggregates_and_frozen_parameter_binding() {
+    let text = "MATCH (a) RETURN COUNT(*) + 1 AS adjusted,COUNT(*) AS raw \
+        HAVING (adjusted - 1) * 2 = raw * 2 \
+        AND COUNT(*) + $delta BETWEEN $minimum + 1 AND $maximum - 1 \
+        AND abs(adjusted - COUNT(*)) IN [1 + 0, NULL]";
+    let mut calls = 0;
+    let template = PreparedGraphAggregateText::prepare(text, |kind, name| {
+        calls += 1;
+        symbols(kind, name)
+    })
+    .unwrap();
+    assert_eq!(calls, 0);
+    assert_eq!(template.columns(), &["adjusted", "raw"]);
+    assert!(
+        template
+            .parameter_schema()
+            .iter()
+            .all(|arg| arg.occurrences == 1)
+    );
+    let bind = |delta| {
+        template
+            .bind_parameters(
+                &GqlParameters::new()
+                    .with_int64("delta", delta)
+                    .unwrap()
+                    .with_int64("minimum", 2)
+                    .unwrap()
+                    .with_int64("maximum", 6)
+                    .unwrap(),
+            )
+            .unwrap()
+    };
+    for (delta, expected) in [(1, 1), (9, 0)] {
+        let query = bind(delta);
+        let frozen = query.canonical_bytes();
+        let rows = query
+            .execute_governed(
+                3,
+                [VId(1), VId(2), VId(3)],
+                [],
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value;
+        assert_eq!(rows.len(), expected);
+        if let Some(row) = rows.first() {
+            assert_eq!(row.values()[0].as_integer(), Some(4));
+            assert_eq!(row.values()[1].as_count(), Some(3));
+        }
+        assert_eq!(query.canonical_bytes(), frozen);
+    }
+    assert_ne!(bind(1).canonical_bytes(), bind(9).canonical_bytes());
+    assert_eq!(calls, 0);
+}
+
+#[test]
+fn computed_having_retains_wide_sums_and_exact_fractional_averages() {
+    let values = [i64::MAX, i64::MAX - 1]
+        .map(|value| CanonicalPropertyValue::from(CanonicalScalar::Int(value)));
+    for text in [
+        "MATCH (a) RETURN COUNT(*) AS n HAVING \
+         SUM(a.p) + 1 = COUNT(*) * 9223372036854775807 \
+         AND COALESCE(AVG(a.p), 0) > 9223372036854775807 - 1 \
+         AND COALESCE(AVG(a.p), 0) < 9223372036854775807",
+        "MATCH (a) RETURN SUM(a.p) + 1 AS total,COALESCE(AVG(a.p), 0) AS mean HAVING \
+         total - 1 = SUM(a.p) AND COALESCE(mean, 0) > 9223372036854775807 - 1 \
+         AND COALESCE(mean, 0) < 9223372036854775807",
+    ] {
+        let rows = prepare(text)
+            .execute_governed(
+                2,
+                [VId(0), VId(1)],
+                [],
+                |_, _| Ok::<_, ()>(true),
+                |vid, _| Ok(Some(&values[vid.0 as usize])),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value;
+        assert_eq!(rows.len(), 1, "{text}");
+    }
+}
+
+#[test]
+fn computed_having_null_functions_and_parentheses_keep_three_valued_logic() {
+    for (condition, expected) in [
+        ("SUM(a.p) + 1 IS NULL", 1),
+        ("SUM(a.p) + 1 > 0", 0),
+        ("NOT (SUM(a.p) + 1 > 0)", 0),
+        ("COALESCE(SUM(a.p), COUNT(*) + 1) = 1", 1),
+        ("((COUNT(*) + 1) * 2) BETWEEN 1 + 1 AND 2 + 1", 1),
+        ("((COUNT(*) + 1) > 0 OR SUM(a.p) + 1 = 0)", 1),
+        ("(COUNT(*) + 1) NOT IN [2 + 0, NULL]", 0),
+    ] {
+        let text = format!("MATCH (a) RETURN COUNT(*) AS n HAVING {condition}");
+        let rows = prepare(&text)
+            .execute_governed(
+                0,
+                [],
+                [],
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value;
+        assert_eq!(rows.len(), expected, "{condition}");
+    }
+}
+
+#[test]
+fn scalar_aliases_in_lazy_having_branches_do_not_evaluate_unselected_errors() {
+    for condition in [
+        "CASE WHEN TRUE THEN 0 ELSE bad END = 1",
+        "COALESCE(0, bad) = 1",
+        "CASE COUNT(*) WHEN 0 THEN 0 ELSE bad END = 1",
+    ] {
+        let text = format!("MATCH (a) RETURN COUNT(*) / 0 AS bad HAVING {condition}");
+        let rows = prepare(&text)
+            .execute_governed(
+                0,
+                [],
+                [],
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value;
+        assert!(rows.is_empty(), "{condition}");
+    }
+    for condition in [
+        "CASE WHEN FALSE THEN 0 ELSE bad END = 1",
+        "COALESCE(NULL, bad) = 1",
+    ] {
+        let text = format!("MATCH (a) RETURN COUNT(*) / 0 AS bad HAVING {condition} LIMIT 0");
+        assert!(
+            matches!(
+                prepare(&text).execute_governed(
+                    0,
+                    [],
+                    [],
+                    |_, _| Ok::<_, ()>(true),
+                    |_, _| Ok(None),
+                    wide(),
+                    || Ok::<_, ()>(()),
+                ),
+                Err(GqlQueryError::Source(
+                    GraphAggregateError::OutputExpression {
+                        error: fgdb_gql::GraphIntegerError {
+                            kind: fgdb_gql::GraphIntegerErrorKind::DivisionByZero,
+                            ..
+                        },
+                        ..
+                    }
+                ))
+            ),
+            "{condition}"
+        );
+    }
+}
+
+#[test]
+fn deferred_composite_aliases_refuse_instead_of_eagerly_running_their_branches() {
+    for condition in [
+        "CASE WHEN TRUE THEN 0 ELSE bad END = 1",
+        "COALESCE(0, bad) = 1",
+        "size([x IN [] | bad]) = 0",
+    ] {
+        let mut calls = 0;
+        let text = format!("MATCH (a) RETURN [SUM(a.p) / 0][0] AS bad HAVING {condition}");
+        assert!(
+            PreparedGraphAggregateText::prepare(&text, |kind, name| {
+                calls += 1;
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{condition}"
+        );
+        assert_eq!(calls, 0, "{condition}");
+    }
+}
+
+#[test]
+fn computed_alias_operands_preserve_element_identity_and_collection_values() {
+    for text in [
+        "MATCH (a) RETURN collect(a)[0] AS first HAVING id(first) + 1 = 8",
+        "MATCH (a) RETURN collect(a)[0] AS first HAVING elementId(first) = '7'",
+        "MATCH (a) RETURN tail(collect(a)) AS rest HAVING size(rest) + 1 = 2",
+    ] {
+        let rows = prepare(text)
+            .execute_governed(
+                2,
+                [VId(7), VId(8)],
+                [],
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value;
+        assert_eq!(rows.len(), 1, "{text}");
+    }
+}
+
+#[test]
 fn global_empty_null_negation_aliases_and_optional_groups_preserve_semantics() {
     for (condition, expected) in [
         ("NOT (total=0)", 0),
@@ -405,7 +618,7 @@ fn malformed_hidden_columns_and_structural_limits_refuse_before_catalog_access()
         "n>missing",
         "MIN(*)>0",
         "a.p='x'",
-        "n+$x>0",
+        "n+>0",
         "n>0;",
         "n IS TRUE",
         "1",

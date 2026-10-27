@@ -4,7 +4,8 @@
 //! bounded registry as ORDER BY. Hidden grouping keys keep evaluation indices.
 //! IN/NOT IN list constructors and BETWEEN/NOT BETWEEN inclusive ranges lower
 //! to the existing eager three-valued comparisons. An operand can be a public
-//! alias, grouping expression, hidden aggregate, scalar literal or parameter.
+//! alias, grouping expression, hidden aggregate, scalar literal or parameter,
+//! composed by the ordinary typed scalar and value expression compiler.
 use super::super::boolean::comparison_tag;
 use super::*;
 use crate::algebra::ScalarPredicate;
@@ -23,6 +24,11 @@ enum Operand {
         value: ReadValueTemplate,
         column: usize,
     },
+    ResolvedExpression {
+        inputs: Vec<ReadValueTemplate>,
+        value: ReadValueTemplate,
+        column: usize,
+    },
 }
 impl Operand {
     fn bind(
@@ -33,6 +39,21 @@ impl Operand {
             Self::Column(column) => GraphHavingOperand::Column(*column),
             Self::Scalar(value) => GraphHavingOperand::Scalar(value.clone()),
             Self::Expression { value, column } => GraphHavingOperand::Expression {
+                value: std::sync::Arc::new(PreparedGraphAggregateText::bind_input_value(
+                    value, values,
+                )?),
+                column: *column,
+            },
+            Self::ResolvedExpression {
+                inputs,
+                value,
+                column,
+            } => GraphHavingOperand::ResolvedExpression {
+                inputs: inputs
+                    .iter()
+                    .map(|input| PreparedGraphAggregateText::bind_input_value(input, values))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into(),
                 value: std::sync::Arc::new(PreparedGraphAggregateText::bind_input_value(
                     value, values,
                 )?),
@@ -150,6 +171,19 @@ impl HavingTemplate {
                 Operand::Expression { value, column } => {
                     bytes.push(3);
                     bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+                    value.append_template_transcript(bytes);
+                }
+                Operand::ResolvedExpression {
+                    inputs,
+                    value,
+                    column,
+                } => {
+                    bytes.push(4);
+                    bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+                    bytes.extend_from_slice(&(inputs.len() as u64).to_be_bytes());
+                    for input in inputs {
+                        input.append_template_transcript(bytes);
+                    }
                     value.append_template_transcript(bytes);
                 }
             }
@@ -347,6 +381,11 @@ impl HavingParser<'_, '_> {
                     || word.eq_ignore_ascii_case("IN")
                     || word.eq_ignore_ascii_case("BETWEEN"))
                 || (named
+                    && matches!(
+                        next.kind,
+                        TokenKind::Punct(b'+' | b'-' | b'*' | b'/' | b'%' | b'^' | b'|' | b'[')
+                    ))
+                || (named
                     && matches!(next.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT"))
                     && matches!(lexer.next()?.kind, TokenKind::Word(word)
                         if word.eq_ignore_ascii_case("IN")
@@ -360,99 +399,299 @@ impl HavingParser<'_, '_> {
             self.unary(depth + 1)?;
             return self.emit(Op::Not);
         }
-        if self.parser.take(b'(')? {
+        if self.parser.is_punct(b'(') && !self.parenthesized_operand()? {
+            self.parser.advance()?;
             self.compound = true;
             self.disjunction(depth + 1)?;
             return self.parser.punct(b')', ")");
         }
         self.atom()
     }
-    /// An output alias, group key or aggregate. An `IS [NOT] NULL` after it
-    /// is this HAVING's own test, so the key reader stops before it.
-    fn result_column(&mut self) -> Result<GraphAggregateColumn, GraphPatternTextError> {
-        let outer = core::mem::replace(&mut self.parser.having_operand, true);
-        let column =
-            self.parser
-                .result_column(self.returned, self.groups, self.hidden, self.computed);
-        self.parser.having_operand = outer;
-        column
+    /// `(c + 1) > 2` starts an operand; `(c > 1 OR c IS NULL)` starts a
+    /// condition. One bounded token lookahead selects the grammar without
+    /// reparsing, registering parameters twice or touching the catalog.
+    fn parenthesized_operand(&self) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.parser.lexer.clone();
+        let mut depth = 1;
+        loop {
+            match lexer.next()?.kind {
+                TokenKind::Punct(b'(') => {
+                    depth += 1;
+                    if depth > 64 {
+                        return Err(error(
+                            self.parser.current.at,
+                            GraphPatternTextErrorKind::Expected("HAVING nesting at most 64"),
+                        ));
+                    }
+                }
+                TokenKind::Punct(b')') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(match lexer.next()?.kind {
+                            TokenKind::Punct(
+                                b'+' | b'-' | b'*' | b'/' | b'%' | b'^' | b'|' | b'.' | b'[' | b'='
+                                | b'<' | b'>' | b'!',
+                            ) => true,
+                            TokenKind::Word(word) => ["IS", "IN", "BETWEEN", "NOT"]
+                                .iter()
+                                .any(|keyword| word.eq_ignore_ascii_case(keyword)),
+                            _ => false,
+                        });
+                    }
+                }
+                TokenKind::End => return Ok(false),
+                _ => {}
+            }
+        }
     }
 
     fn operand(&mut self) -> Result<Operand, GraphPatternTextError> {
-        let at = self.parser.current.at;
-        // A bare computed alias reads its original post-group expression,
-        // never a new grouping key or an already paged/projected result row.
-        if let TokenKind::Word(word) = self.parser.current.kind
+        // A standalone finite decimal, including its old signed-literal
+        // spelling, retains the scalar operand and its transcript. A following
+        // arithmetic operator selects the shared expression grammar instead.
+        if let Some((_, consumed)) = self.parser.scan_float_literal()? {
+            let mut lexer = self.parser.lexer.clone();
+            for _ in 1..consumed {
+                lexer.next()?;
+            }
+            if !matches!(
+                lexer.next()?.kind,
+                TokenKind::Punct(b'+' | b'-' | b'*' | b'/' | b'%' | b'^' | b'|' | b'.' | b'[')
+            ) {
+                let at = self.parser.current.at;
+                let value = self.parser.float_literal()?.expect("scanned float literal");
+                return ScalarPredicate::new(value, IntegerComparison::Equal)
+                    .map(Operand::Scalar)
+                    .map_err(|_| error(at, GraphPatternTextErrorKind::ScalarLiteral));
+            }
+        }
+        // The pre-existing bare UInt64 HAVING domain includes values above
+        // i64::MAX. Keep it outside the shared scalar language's Int64-only
+        // parameter domain; arithmetic never silently narrows this argument.
+        if let TokenKind::Parameter(name) = self.parser.current.kind
+            && self.parser.parameter_types.get(name) == Some(&GqlParameterType::UInt64)
             && !matches!(
                 self.parser.lexer.clone().next()?.kind,
-                TokenKind::Punct(b'.' | b'(')
+                TokenKind::Punct(b'+' | b'-' | b'*' | b'/' | b'%' | b'^' | b'|' | b'.' | b'[')
             )
-            && let Some((column, value)) =
-                self.returned.iter().enumerate().find_map(|(column, item)| {
-                    (item.alias.text == word)
-                        .then_some(item.output.as_ref())
-                        .flatten()
-                        .map(|value| (column, value))
-                })
         {
-            self.parser.advance()?;
-            let mut value = value.clone();
-            remap_output_columns(&mut value, self.output_columns);
-            return Ok(Operand::Expression { value, column });
+            return Ok(Operand::Number {
+                value: self.parser.number(GqlParameterType::UInt64)?,
+                legacy_int64: false,
+            });
         }
-        // Reuse the ordinary finite decimal/exponent parser on either side
-        // of a comparison and in IN/BETWEEN. A float remains a canonical
-        // scalar operand; integer-only predicates keep their legacy lowering.
-        if let Some(value) = self.parser.float_literal()? {
-            return ScalarPredicate::new(value, IntegerComparison::Equal)
-                .map(Operand::Scalar)
-                .map_err(|_| error(at, GraphPatternTextErrorKind::ScalarLiteral));
-        }
-        let scalar = match self.parser.current.kind {
-            TokenKind::Quoted(raw) => Some(super::super::literal::text_scalar(raw, at)?),
-            TokenKind::Word(word) => {
-                let next = self.parser.lexer.clone().next()?;
-                if matches!(next.kind, TokenKind::Punct(b'.' | b'('))
-                    || self.returned.iter().any(|item| item.alias.text == word)
-                    || self
-                        .groups
-                        .iter()
-                        .any(|group| group.property.is_none() && group.variable.text == word)
-                {
-                    return self.result_column().map(Operand::Column);
+        let outer = core::mem::replace(&mut self.parser.having_operand, true);
+        let expression = self.parser.aggregate_result_expression(
+            self.returned,
+            self.groups,
+            self.hidden,
+            self.computed,
+            false,
+        );
+        self.parser.having_operand = outer;
+        let (mut value, columns) = expression?;
+        let evaluation_column = |column| match column {
+            GraphAggregateColumn::GroupKey(index) => index,
+            GraphAggregateColumn::Aggregate(index) => self.groups.len() + index,
+        };
+        // Preserve existing simple operands, transcripts and flat numeric
+        // lowering. Only an operator or function selects an expression plan.
+        match &value {
+            ReadValueTemplate::Column(index) => match columns[*index] {
+                ResultOrderColumn::Evaluation(column) => return Ok(Operand::Column(column)),
+                ResultOrderColumn::Projected(column) => {
+                    let mut value = self.returned[column]
+                        .output
+                        .clone()
+                        .expect("computed alias");
+                    remap_output_columns(&mut value, self.output_columns);
+                    return Ok(Operand::Expression { value, column });
                 }
-                if word.eq_ignore_ascii_case("TRUE") {
-                    Some(CanonicalScalar::Bool(true))
-                } else if word.eq_ignore_ascii_case("FALSE") {
-                    Some(CanonicalScalar::Bool(false))
-                } else if word.eq_ignore_ascii_case("NULL") {
-                    Some(CanonicalScalar::Null)
-                } else {
-                    return self.result_column().map(Operand::Column);
+                ResultOrderColumn::Computed(_) => {
+                    unreachable!("resolved leaves are not order ranks")
                 }
+            },
+            ReadValueTemplate::Literal(value) => {
+                return Ok(match value.value() {
+                    CanonicalScalar::Int(value) => Operand::Number {
+                        value: Number::Literal(GqlParameterValue::Int64(*value)),
+                        legacy_int64: true,
+                    },
+                    _ => Operand::Scalar(value.predicate(IntegerComparison::Equal)),
+                });
             }
-            _ => None,
-        };
-        if let Some(value) = scalar {
-            self.parser.advance()?;
-            return ScalarPredicate::new(value, IntegerComparison::Equal)
-                .map(Operand::Scalar)
-                .map_err(|_| error(at, GraphPatternTextErrorKind::ScalarLiteral));
+            ReadValueTemplate::Parameter { index, .. }
+                if !matches!(
+                    self.parser.syntax.parameters[*index].parameter_type,
+                    GqlParameterType::List | GqlParameterType::Map
+                ) =>
+            {
+                return Ok(Operand::Number {
+                    value: Number::Parameter(*index),
+                    legacy_int64: self.parser.syntax.parameters[*index].parameter_type
+                        == GqlParameterType::Int64,
+                });
+            }
+            _ => {}
         }
-        let kind = match self.parser.current.kind {
-            TokenKind::Parameter(name) => self
-                .parser
-                .parameter_types
-                .get(name)
-                .copied()
-                .unwrap_or(GqlParameterType::Int64),
-            _ => GqlParameterType::Int64,
+        let column = columns.iter().find_map(|column| match column {
+            ResultOrderColumn::Projected(index) => Some(*index),
+            _ => None,
+        });
+        if let Some(column) = column {
+            // Scalar aliases compose before the shared VM compiles its lazy
+            // branches. Inlining postfix programs preserves CASE/COALESCE,
+            // including a skipped alias whose own expression would fail.
+            if self.inline_scalar_aliases(&mut value, &columns)? {
+                return Ok(Operand::Expression { value, column });
+            }
+            // A composite alias needs a private resolved row. Until that row
+            // supports deferred cells, refuse conditional uses explicitly;
+            // never turn an unevaluated branch into an eager alias error.
+            if has_deferred_values(&value) {
+                return Err(error(
+                    self.parser.current.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "scalar computed aliases in conditional HAVING operands",
+                    ),
+                ));
+            }
+            // A private operand row contains only its referenced inputs. Alias
+            // values evaluate once per distinct reference, over the frozen
+            // group; their native numeric domains and element identities stay
+            // intact. No visible output or grouping key is added.
+            let mut distinct = Vec::new();
+            let mut inputs = Vec::new();
+            let mut remap = Vec::new();
+            for source in columns {
+                let index = if let Some(index) = distinct.iter().position(|old| *old == source) {
+                    index
+                } else {
+                    let input = match source {
+                        ResultOrderColumn::Evaluation(column) => {
+                            ReadValueTemplate::Column(evaluation_column(column))
+                        }
+                        ResultOrderColumn::Projected(index) => {
+                            let mut value =
+                                self.returned[index].output.clone().expect("computed alias");
+                            remap_output_columns(&mut value, self.output_columns);
+                            value
+                        }
+                        ResultOrderColumn::Computed(_) => {
+                            unreachable!("resolved leaves are not order ranks")
+                        }
+                    };
+                    distinct.push(source);
+                    inputs.push(input);
+                    inputs.len() - 1
+                };
+                remap.push(index);
+            }
+            remap_output_columns(&mut value, &remap);
+            Ok(Operand::ResolvedExpression {
+                inputs,
+                value,
+                column,
+            })
+        } else {
+            let columns = columns
+                .into_iter()
+                .map(|column| match column {
+                    ResultOrderColumn::Evaluation(column) => evaluation_column(column),
+                    _ => unreachable!("computed aliases are resolved above"),
+                })
+                .collect::<Vec<_>>();
+            remap_output_columns(&mut value, &columns);
+            Ok(Operand::Expression { value, column: 0 })
+        }
+    }
+
+    fn inline_scalar_aliases(
+        &self,
+        value: &mut ReadValueTemplate,
+        columns: &[ResultOrderColumn],
+    ) -> Result<bool, GraphPatternTextError> {
+        use crate::GraphIntegerOp;
+        use crate::mutation_text::MutationIntegerTemplateOp as Template;
+
+        let ReadValueTemplate::Integer { program, at } = value else {
+            return Ok(false);
         };
-        let value = self.parser.number(kind)?;
-        Ok(Operand::Number {
-            value,
-            legacy_int64: kind == GqlParameterType::Int64,
-        })
+        let mut expanded = Vec::new();
+        for op in program.iter() {
+            let source = match op {
+                Template::Bound(
+                    GraphIntegerOp::Column(index)
+                    | GraphIntegerOp::ScalarColumn(index)
+                    | GraphIntegerOp::IdentityColumn { column: index, .. },
+                ) => Some(*index),
+                _ => None,
+            };
+            let Some(source) = source else {
+                expanded.push(op.clone());
+                continue;
+            };
+            let mapped = match columns[source] {
+                ResultOrderColumn::Evaluation(column) => Some(match column {
+                    GraphAggregateColumn::GroupKey(index) => index,
+                    GraphAggregateColumn::Aggregate(index) => self.groups.len() + index,
+                }),
+                ResultOrderColumn::Projected(index) => {
+                    let mut alias = self.returned[index].output.clone().expect("computed alias");
+                    remap_output_columns(&mut alias, self.output_columns);
+                    if let ReadValueTemplate::Column(index) = alias {
+                        Some(index)
+                    } else {
+                        if matches!(op, Template::Bound(GraphIntegerOp::IdentityColumn { .. })) {
+                            return Ok(false);
+                        }
+                        match alias {
+                            ReadValueTemplate::Integer { program, .. } => expanded.extend(program),
+                            ReadValueTemplate::Literal(value) => expanded.push(Template::Bound(
+                                GraphIntegerOp::Scalar(value.predicate(IntegerComparison::Equal)),
+                            )),
+                            ReadValueTemplate::Parameter { index, at, .. } => {
+                                expanded.push(Template::Parameter { index, at });
+                            }
+                            _ => return Ok(false),
+                        }
+                        None
+                    }
+                }
+                ResultOrderColumn::Computed(_) => {
+                    unreachable!("resolved leaves are not order ranks")
+                }
+            };
+            if let Some(column) = mapped {
+                expanded.push(Template::Bound(match op {
+                    Template::Bound(GraphIntegerOp::Column(_)) => GraphIntegerOp::Column(column),
+                    Template::Bound(GraphIntegerOp::ScalarColumn(_)) => {
+                        GraphIntegerOp::ScalarColumn(column)
+                    }
+                    Template::Bound(GraphIntegerOp::IdentityColumn { text, .. }) => {
+                        GraphIntegerOp::IdentityColumn {
+                            column,
+                            text: *text,
+                        }
+                    }
+                    _ => unreachable!("column instruction checked above"),
+                }));
+            }
+            if expanded.len() > crate::MAX_GRAPH_INTEGER_INSTRUCTIONS {
+                return Err(error(
+                    *at,
+                    GraphPatternTextErrorKind::Expected("bounded computed HAVING operand"),
+                ));
+            }
+        }
+        if expanded.len() > crate::MAX_GRAPH_INTEGER_INSTRUCTIONS {
+            return Err(error(
+                *at,
+                GraphPatternTextErrorKind::Expected("bounded computed HAVING operand"),
+            ));
+        }
+        *program = expanded;
+        Ok(true)
     }
     fn atom(&mut self) -> Result<(), GraphPatternTextError> {
         let at = self.parser.current.at;
@@ -564,6 +803,76 @@ impl HavingParser<'_, '_> {
             self.emit(Op::Not)?;
         }
         Ok(())
+    }
+}
+
+/// Value programs with a conditional or per-element child cannot eagerly
+/// resolve composite aliases. Scalar postfix aliases inline before this gate.
+fn has_deferred_values(value: &ReadValueTemplate) -> bool {
+    use crate::GraphIntegerOp;
+    use crate::mutation_text::MutationIntegerTemplateOp;
+
+    match value {
+        ReadValueTemplate::Integer { program, .. } => program.iter().any(|op| {
+            matches!(
+                op,
+                MutationIntegerTemplateOp::Bound(
+                    GraphIntegerOp::Case
+                        | GraphIntegerOp::SimpleCase { .. }
+                        | GraphIntegerOp::Coalesce
+                )
+            )
+        }),
+        ReadValueTemplate::Case { .. }
+        | ReadValueTemplate::Comprehension { .. }
+        | ReadValueTemplate::Quantifier { .. }
+        | ReadValueTemplate::Reduce { .. }
+        | ReadValueTemplate::MapOverlay { .. }
+        | ReadValueTemplate::MapLiteral { guard: Some(_), .. }
+        | ReadValueTemplate::Function {
+            function: crate::GraphValueFunction::Coalesce,
+            ..
+        } => true,
+        ReadValueTemplate::List(values)
+        | ReadValueTemplate::MapLiteral {
+            values,
+            guard: None,
+            ..
+        } => values.iter().any(has_deferred_values),
+        ReadValueTemplate::Index { list, index } => {
+            has_deferred_values(list) || has_deferred_values(index)
+        }
+        ReadValueTemplate::In { value, list } => {
+            has_deferred_values(value) || has_deferred_values(list)
+        }
+        ReadValueTemplate::Equal { left, right }
+        | ReadValueTemplate::Ordered { left, right, .. } => {
+            has_deferred_values(left) || has_deferred_values(right)
+        }
+        ReadValueTemplate::Size(value)
+        | ReadValueTemplate::MapGet { map: value, .. }
+        | ReadValueTemplate::Keys(value)
+        | ReadValueTemplate::ElementMetadata { value, .. } => has_deferred_values(value),
+        ReadValueTemplate::Temporal { argument, .. }
+        | ReadValueTemplate::Function { argument, .. } => has_deferred_values(argument),
+        ReadValueTemplate::Slice { list, from, to } => {
+            has_deferred_values(list)
+                || from.as_deref().is_some_and(has_deferred_values)
+                || to.as_deref().is_some_and(has_deferred_values)
+        }
+        ReadValueTemplate::Range { start, end, step } => {
+            has_deferred_values(start)
+                || has_deferred_values(end)
+                || step.as_deref().is_some_and(has_deferred_values)
+        }
+        ReadValueTemplate::Let { values, body } => {
+            values.iter().any(has_deferred_values) || has_deferred_values(body)
+        }
+        ReadValueTemplate::Column(_)
+        | ReadValueTemplate::Literal(_)
+        | ReadValueTemplate::Parameter { .. }
+        | ReadValueTemplate::Local(_)
+        | ReadValueTemplate::Random { .. } => false,
     }
 }
 

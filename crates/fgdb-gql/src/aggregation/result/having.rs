@@ -20,10 +20,18 @@ pub enum GraphHavingOperand {
     Integer(i128),
     /// Already checked, immutable literal; its encoded payload is shared.
     Scalar(ScalarPredicate),
-    /// A pure computed RETURN alias over keys followed by summaries.
+    /// A pure post-group expression over keys followed by summaries.
     /// The ordinary result evaluator retains its exact numeric domains and
     /// governed temporaries. `column` is its diagnostic output position.
     Expression {
+        value: Arc<crate::GraphSetValue>,
+        column: usize,
+    },
+    /// A post-group expression that also reads computed RETURN aliases.
+    /// Each input reads the frozen keys and summaries. The value program reads
+    /// those resolved cells, retaining counts, wide sums and exact averages.
+    ResolvedExpression {
+        inputs: Arc<[crate::GraphSetValue]>,
         value: Arc<crate::GraphSetValue>,
         column: usize,
     },
@@ -249,19 +257,45 @@ impl GraphHavingExpression {
                     return Err(GraphHavingError::UnknownColumn { column: *column });
                 }
             }
-            if let GraphHavingOperand::Expression { value, column } = operand {
-                crate::GraphSetProjection::admit_output(
-                    value,
-                    types.ok_or(GraphHavingError::ExpressionInputSchema)?,
-                    *column,
-                )
-                .map_err(|error| GraphHavingError::InvalidExpression {
-                    column: *column,
-                    error,
-                })?;
-                if value.may_read_element_properties() {
-                    return Err(GraphHavingError::ExpressionElementRead { column: *column });
+            let admit =
+                |value: &crate::GraphSetValue, types: &[crate::GraphSetColumnType], column| {
+                    let kind = crate::GraphSetProjection::admit_output(value, types, column)
+                        .map_err(|error| GraphHavingError::InvalidExpression { column, error })?;
+                    if value.may_read_element_properties() {
+                        return Err(GraphHavingError::ExpressionElementRead { column });
+                    }
+                    Ok(kind)
+                };
+            match operand {
+                GraphHavingOperand::Expression { value, column } => {
+                    admit(
+                        value,
+                        types.ok_or(GraphHavingError::ExpressionInputSchema)?,
+                        *column,
+                    )?;
                 }
+                GraphHavingOperand::ResolvedExpression {
+                    inputs,
+                    value,
+                    column,
+                } => {
+                    if inputs.len() > crate::MAX_GRAPH_INTEGER_INSTRUCTIONS {
+                        return Err(GraphHavingError::InvalidExpression {
+                            column: *column,
+                            error: crate::GraphSetProjectionError::TooManyColumns {
+                                limit: crate::MAX_GRAPH_INTEGER_INSTRUCTIONS,
+                                observed: inputs.len(),
+                            },
+                        });
+                    }
+                    let types = types.ok_or(GraphHavingError::ExpressionInputSchema)?;
+                    let resolved = inputs
+                        .iter()
+                        .map(|input| admit(input, types, *column))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    admit(value, &resolved, *column)?;
+                }
+                _ => {}
             }
             Ok(())
         };
@@ -425,6 +459,19 @@ fn append_operand(operand: &GraphHavingOperand, bytes: &mut Vec<u8>) {
             bytes.extend_from_slice(&(*column as u64).to_be_bytes());
             value.append_canonical_bytes(bytes);
         }
+        GraphHavingOperand::ResolvedExpression {
+            inputs,
+            value,
+            column,
+        } => {
+            bytes.push(5);
+            bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+            bytes.extend_from_slice(&(inputs.len() as u64).to_be_bytes());
+            for input in inputs.iter() {
+                input.append_canonical_bytes(bytes);
+            }
+            value.append_canonical_bytes(bytes);
+        }
     }
 }
 
@@ -442,6 +489,28 @@ fn resolve<'a, E, C>(
         GraphHavingOperand::Scalar(value) => Cell::Value(ValueRef::Scalar(value.value())),
         GraphHavingOperand::Expression { value, column } => {
             return projection::having_value(
+                value,
+                |at| {
+                    if at < keys {
+                        Ok(group.cell(GraphAggregateColumn::GroupKey(at)))
+                    } else if at - keys < aggregates {
+                        Ok(group.cell(GraphAggregateColumn::Aggregate(at - keys)))
+                    } else {
+                        Err(crate::GraphIntegerErrorKind::MissingColumn)
+                    }
+                },
+                keys + aggregates,
+                *column,
+                control,
+            );
+        }
+        GraphHavingOperand::ResolvedExpression {
+            inputs,
+            value,
+            column,
+        } => {
+            return projection::having_resolved_value(
+                inputs,
                 value,
                 |at| {
                     if at < keys {
@@ -548,11 +617,22 @@ impl PreparedGraphAggregate {
     ) -> Result<Self, GraphHavingError> {
         let computed = expression.program.iter().any(|op| match op {
             GraphHavingOp::Compare { left, right, .. } => {
-                matches!(left, GraphHavingOperand::Expression { .. })
-                    || matches!(right, GraphHavingOperand::Expression { .. })
+                matches!(
+                    left,
+                    GraphHavingOperand::Expression { .. }
+                        | GraphHavingOperand::ResolvedExpression { .. }
+                ) || matches!(
+                    right,
+                    GraphHavingOperand::Expression { .. }
+                        | GraphHavingOperand::ResolvedExpression { .. }
+                )
             }
             GraphHavingOp::IsNull { operand, .. } => {
-                matches!(operand, GraphHavingOperand::Expression { .. })
+                matches!(
+                    operand,
+                    GraphHavingOperand::Expression { .. }
+                        | GraphHavingOperand::ResolvedExpression { .. }
+                )
             }
             _ => false,
         });

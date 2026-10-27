@@ -18,112 +18,134 @@ impl<'a> Parser<'a> {
         computed: &mut ComputedInputs<'a>,
         expressions: &mut Vec<(ReadValueTemplate, Vec<ResultOrderColumn>)>,
     ) -> Result<ResultOrderColumn, GraphPatternTextError> {
+        let (value, columns) =
+            self.aggregate_result_expression(returned, groups, hidden, computed, true)?;
+        if let ReadValueTemplate::Column(index) = value {
+            return Ok(columns[index]);
+        }
+        let index = expressions.len();
+        expressions.push((value, columns));
+        Ok(ResultOrderColumn::Computed(index))
+    }
+
+    /// One post-group expression, with the same aggregate, grouping-key and
+    /// visible-alias resolver for ORDER BY and HAVING. HAVING owns comparison
+    /// and Boolean precedence outside each operand; ORDER BY reads a whole
+    /// item, including any Boolean operators it contains.
+    pub(super) fn aggregate_result_expression(
+        &mut self,
+        returned: &[ReturnItem<'a>],
+        groups: &[Expression<'a>],
+        hidden: &mut Vec<HiddenSummary<'a>>,
+        computed: &mut ComputedInputs<'a>,
+        whole: bool,
+    ) -> Result<(ReadValueTemplate, Vec<ResultOrderColumn>), GraphPatternTextError> {
         let at = self.current.at;
         let mut leaves = Vec::new();
-        let value = self
-            .read_resolved_item(
-                &mut |parser| {
-                    if matches!(parser.current.kind, TokenKind::Word(word)
+        let mut resolve = |parser: &mut Parser<'a>| {
+            if matches!(parser.current.kind, TokenKind::Word(word)
                         if parser.elements.contains(&word))
-                        && !matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
-                    {
-                        return Ok(None);
-                    }
-                    let leaf = if core::mem::take(&mut parser.percentile_leaf) {
-                        let at = parser.current.at;
-                        let expression = Some(parser.aggregate_argument_expression(computed)?);
-                        let function = GraphAggregateFunction::Collect;
-                        let visible = returned.iter().filter(|item| item.function.is_some());
-                        let index = if let Some(index) = visible.clone().position(|item| {
-                            item.function == Some(function)
-                                && same_expression(item.expression, expression)
-                        }) {
-                            index
-                        } else {
-                            let prefix = visible.count();
-                            if let Some(index) = hidden.iter().position(|item| {
-                                item.function == function
-                                    && same_expression(item.expression, expression)
-                            }) {
-                                prefix + index
-                            } else {
-                                parser.capacity(
-                                    groups.len() + prefix + hidden.len(),
-                                    MAX_PATTERN_VERTICES,
-                                    crate::algebra::PatternLimitDimension::Columns,
-                                )?;
-                                let index = prefix + hidden.len();
-                                hidden.push(HiddenSummary {
-                                    expression,
-                                    function,
-                                    at,
-                                });
-                                index
-                            }
-                        };
-                        Leaf::Column(ResultOrderColumn::Evaluation(
-                            GraphAggregateColumn::Aggregate(index),
-                        ))
-                    } else if parser.starts_aggregate_call()? {
-                        Leaf::Column(ResultOrderColumn::Evaluation(
-                            parser.result_column(returned, groups, hidden, computed)?,
-                        ))
-                    } else if let TokenKind::Word(word) = parser.current.kind
-                        && !matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
-                        && !parser.aggregate_order_repeats_group_property(groups)?
-                        && let Some(index) =
-                            returned.iter().position(|item| item.alias.text == word)
-                    {
-                        let item = &returned[index];
-                        // Consume only the alias: the shared value reader owns
-                        // its property/subscript postfix. A repeated grouped
-                        // property retains its established input meaning;
-                        // other postfix reads address the visible alias.
-                        parser.advance()?;
-                        let column = if item.output.is_some() {
-                            ResultOrderColumn::Projected(index)
-                        } else if item.function.is_some() {
-                            ResultOrderColumn::Evaluation(GraphAggregateColumn::Aggregate(
-                                returned[..index]
-                                    .iter()
-                                    .filter(|item| item.function.is_some())
-                                    .count(),
-                            ))
-                        } else {
-                            let expression = item.expression.expect("plain RETURN key");
-                            ResultOrderColumn::Evaluation(GraphAggregateColumn::GroupKey(
-                                groups
-                                    .iter()
-                                    .position(|group| group.same(expression))
-                                    .expect("returned grouping key checked above"),
-                            ))
-                        };
-                        Leaf::Column(column)
-                    } else if let Some(source) = parser.aggregate_order_source()? {
-                        Leaf::Source(source)
+                && !matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+            {
+                return Ok(None);
+            }
+            let leaf = if core::mem::take(&mut parser.percentile_leaf) {
+                let at = parser.current.at;
+                let expression = Some(parser.aggregate_argument_expression(computed)?);
+                let function = GraphAggregateFunction::Collect;
+                let visible = returned.iter().filter(|item| item.function.is_some());
+                let index = if let Some(index) = visible.clone().position(|item| {
+                    item.function == Some(function) && same_expression(item.expression, expression)
+                }) {
+                    index
+                } else {
+                    let prefix = visible.count();
+                    if let Some(index) = hidden.iter().position(|item| {
+                        item.function == function && same_expression(item.expression, expression)
+                    }) {
+                        prefix + index
                     } else {
-                        return Ok(None);
-                    };
-                    parser.capacity(
-                        leaves.len(),
-                        crate::MAX_GRAPH_INTEGER_INSTRUCTIONS,
-                        crate::algebra::PatternLimitDimension::Columns,
-                    )?;
-                    let index = leaves.len();
-                    leaves.push(leaf);
-                    Ok(Some(index))
-                },
-                0,
-            )
-            .map_err(|source| {
-                let kind = match source.kind {
-                    crate::GraphSetTextErrorKind::Pattern(kind) => kind,
-                    _ => GraphPatternTextErrorKind::Expected(
-                        "valid bounded aggregate ORDER BY expression",
-                    ),
+                        parser.capacity(
+                            groups.len() + prefix + hidden.len(),
+                            MAX_PATTERN_VERTICES,
+                            crate::algebra::PatternLimitDimension::Columns,
+                        )?;
+                        let index = prefix + hidden.len();
+                        hidden.push(HiddenSummary {
+                            expression,
+                            function,
+                            at,
+                        });
+                        index
+                    }
                 };
-                error(source.offset, kind)
-            })?;
+                Leaf::Column(ResultOrderColumn::Evaluation(
+                    GraphAggregateColumn::Aggregate(index),
+                ))
+            } else if parser.starts_aggregate_call()? {
+                Leaf::Column(ResultOrderColumn::Evaluation(
+                    parser.result_column(returned, groups, hidden, computed)?,
+                ))
+            } else if let TokenKind::Word(word) = parser.current.kind
+                && !matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+                && !parser.aggregate_order_repeats_group_property(groups)?
+                && let Some(index) = returned.iter().position(|item| item.alias.text == word)
+            {
+                let item = &returned[index];
+                // Consume only the alias: the shared value reader owns
+                // its property/subscript postfix. A repeated grouped
+                // property retains its established input meaning;
+                // other postfix reads address the visible alias.
+                parser.advance()?;
+                let column = if item.output.is_some() {
+                    ResultOrderColumn::Projected(index)
+                } else if item.function.is_some() {
+                    ResultOrderColumn::Evaluation(GraphAggregateColumn::Aggregate(
+                        returned[..index]
+                            .iter()
+                            .filter(|item| item.function.is_some())
+                            .count(),
+                    ))
+                } else {
+                    let expression = item.expression.expect("plain RETURN key");
+                    ResultOrderColumn::Evaluation(GraphAggregateColumn::GroupKey(
+                        groups
+                            .iter()
+                            .position(|group| group.same(expression))
+                            .expect("returned grouping key checked above"),
+                    ))
+                };
+                Leaf::Column(column)
+            } else if let Some(source) = parser.aggregate_order_source()? {
+                Leaf::Source(source)
+            } else {
+                return Ok(None);
+            };
+            parser.capacity(
+                leaves.len(),
+                crate::MAX_GRAPH_INTEGER_INSTRUCTIONS,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
+            let index = leaves.len();
+            leaves.push(leaf);
+            Ok(Some(index))
+        };
+        let value = if whole {
+            self.read_resolved_item(&mut resolve, 0)
+        } else {
+            self.read_resolved_value(&mut resolve, 0)
+        }
+        .map_err(|source| {
+            let kind = match source.kind {
+                crate::GraphSetTextErrorKind::Pattern(kind) => kind,
+                _ => GraphPatternTextErrorKind::Expected(if whole {
+                    "valid bounded aggregate ORDER BY expression"
+                } else {
+                    "valid bounded aggregate HAVING operand"
+                }),
+            };
+            error(source.offset, kind)
+        })?;
 
         // Repeating a complete computed grouping key remains the same key,
         // including its exact existing transcript. Compare compiled programs,
@@ -149,7 +171,9 @@ impl<'a> Parser<'a> {
                 Leaf::Column(_) => None,
             })
             .collect();
-        if let Some(columns) = source_columns {
+        if let Some(columns) = source_columns
+            && (whole || !leaves.is_empty())
+        {
             let mut input = value.clone();
             remap_output_columns(&mut input, &columns);
             let mut identity = Vec::new();
@@ -159,8 +183,11 @@ impl<'a> Parser<'a> {
                     let mut previous = Vec::new();
                     computed.operands[index].append_template_transcript(&mut previous);
                     if identity == previous {
-                        return Ok(ResultOrderColumn::Evaluation(
-                            GraphAggregateColumn::GroupKey(key),
+                        return Ok((
+                            ReadValueTemplate::Column(0),
+                            vec![ResultOrderColumn::Evaluation(
+                                GraphAggregateColumn::GroupKey(key),
+                            )],
                         ));
                     }
                 }
@@ -177,19 +204,16 @@ impl<'a> Parser<'a> {
                     .ok_or_else(|| {
                         error(
                             at,
-                            GraphPatternTextErrorKind::Expected(
-                                "grouping key in aggregate ORDER BY expression",
-                            ),
+                            GraphPatternTextErrorKind::Expected(if whole {
+                                "grouping key in aggregate ORDER BY expression"
+                            } else {
+                                "grouping key in aggregate HAVING operand"
+                            }),
                         )
                     }),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        if let ReadValueTemplate::Column(index) = value {
-            return Ok(columns[index]);
-        }
-        let index = expressions.len();
-        expressions.push((value, columns));
-        Ok(ResultOrderColumn::Computed(index))
+        Ok((value, columns))
     }
 
     fn aggregate_order_repeats_group_property(
