@@ -130,6 +130,9 @@ fn build<'q, C: FnMut() -> u64 + Send>(
                     })
                     .with_root_prefix(plan.leading_root_prefix(), |key| {
                         execution.borrow().permit.predicates().allows_property(key)
+                    })
+                    .with_root_membership(plan.leading_root_membership(), |key| {
+                        execution.borrow().permit.predicates().allows_property(key)
                     }),
                 execution: execution.clone(),
             };

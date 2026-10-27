@@ -1763,3 +1763,6 @@ fn denied_range_and_prefix_keys_keep_the_same_native_record_refusal() {
 
 #[path = "streams/prefix_types.rs"]
 mod prefix_types;
+
+#[path = "streams/membership.rs"]
+mod membership;

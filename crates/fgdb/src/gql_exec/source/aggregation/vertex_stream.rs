@@ -74,27 +74,30 @@ pub struct SnapshotVertexSource<'q> {
 
 impl SnapshotVertexSource<'_> {
     /// Prefer an admitted leading equality, then numeric constraints on one
-    /// allowed property, then a safe leading prefix. Later fallible predicates
-    /// retain their ordinary evaluation order.
+    /// allowed property, then a safe leading prefix or membership. Later
+    /// fallible predicates retain their ordinary evaluation order.
     pub(crate) fn with_root_equality<Row: VertexScanOutput>(
         self,
         plan: &VertexScanPlan<Row>,
         allows_property: impl Fn(PropertyKeyId) -> bool,
     ) -> Self {
         self.with_root_equality_predicates(plan.leading_root_predicates(), &allows_property)
-            .with_root_prefix(plan.leading_root_prefix(), allows_property)
+            .with_root_prefix(plan.leading_root_prefix(), &allows_property)
+            .with_root_membership(plan.leading_root_membership(), allows_property)
     }
 
-    // Unscoped row and aggregate factories install membership explicitly.
-    // Scoped factories keep their existing admission contract until the
-    // membership path has a separate capability-accounting proof.
-    fn with_root_membership(
+    /// Membership is a private source bound only when its property is visible.
+    /// Scoped adapters recheck every current winner after vertex admission and
+    /// before charging it, including when hidden history forces a full scan.
+    pub(crate) fn with_root_membership(
         mut self,
         expression: Option<&fgdb_gql::algebra::BoundBooleanExpression>,
+        allows_property: impl Fn(PropertyKeyId) -> bool,
     ) -> Self {
         if matches!(self.candidates, RootCandidates::Histories(_))
             && let Some(expression) = expression
             && let Some(membership) = membership::MembershipCandidates::new(expression)
+            && allows_property(membership.key())
         {
             self.candidates = RootCandidates::Membership(membership);
         }
@@ -298,12 +301,13 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<bool, VertexScanSourceError<ReadError, C>> {
         let key = match &self.candidates {
-            RootCandidates::Histories(_) | RootCandidates::Membership(_) => return Ok(true),
+            RootCandidates::Histories(_) => return Ok(true),
             RootCandidates::Pending { equality, .. } | RootCandidates::Indexed { equality, .. } => {
                 equality.key
             }
             RootCandidates::Range(range) => range.key(),
             RootCandidates::Prefix(prefix) => prefix.key(),
+            RootCandidates::Membership(membership) => membership.key(),
         };
         // This poll-only recheck is for the scoped adapter's private candidate
         // admission. The native cursor later meters its ordinary full predicate
@@ -318,7 +322,9 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                 core::cmp::Ordering::Greater => high = mid,
                 core::cmp::Ordering::Equal => {
                     control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
-                    // A stored List or Map never meets a scalar root bound.
+                    // Equality/range/prefix bounds reject collections. IN
+                    // retains them so the original scalar conversion can
+                    // still raise its ordinary collection-bound error.
                     let value = row.properties[mid].1.as_scalar();
                     return Ok(match &self.candidates {
                         RootCandidates::Pending { equality, .. }
@@ -330,7 +336,10 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                         RootCandidates::Prefix(prefix) => {
                             value.is_some_and(|value| prefix.accepts(value))
                         }
-                        RootCandidates::Histories(_) | RootCandidates::Membership(_) => {
+                        RootCandidates::Membership(membership) => membership
+                            .accepts(value, control)
+                            .map_err(VertexScanSourceError::Control)?,
+                        RootCandidates::Histories(_) => {
                             unreachable!("unbounded admission accepts every source row")
                         }
                     });
@@ -497,8 +506,7 @@ fn open<'q, Row: VertexScanOutput>(
         after: None,
         candidates: RootCandidates::Histories(VertexHistoryScanCursor::default()),
     }
-    .with_root_equality(&plan, |_| true)
-    .with_root_membership(plan.leading_root_membership());
+    .with_root_equality(&plan, |_| true);
     Ok(VertexScanCursor::new(source, plan, policy, move || {
         cx.with_restriction(|| cx.checkpoint())
     }))
