@@ -371,8 +371,8 @@ const SIGNATURES: &[FnxSignature] = &[
         "fnx.load_centrality",
         FnxOutput::Score,
         "explicit undirected simple projection; unweighted; self-loops refused; Newman load splits accumulated flow equally among shortest-path predecessors; normalized by (|V|-1)(|V|-2); isolates retained",
-        "O(|V| * (|V| + |E|)); O(|V|) kernel workspace",
-        "fgdb-prism/newman-load-csr-v1",
+        "O(|V| + sum_components |C| * (|C| + |E_C|)); O(|V|) kernel workspace",
+        "fgdb-prism/newman-load-csr-v2",
     ),
     FnxSignature {
         name: "fnx.hits_centrality",

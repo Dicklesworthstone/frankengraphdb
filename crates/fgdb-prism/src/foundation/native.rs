@@ -308,18 +308,17 @@ pub(super) fn core<C>(
     ))
 }
 
-/// Includes dense resets on disconnected graphs, both incidence passes, scalar
-/// state transitions and delivery. In particular an edgeless graph is O(V^2),
-/// not the O(V*E) label of the upstream implementation.
+/// Includes reached-only resets/reductions, both incidence passes, scalar
+/// transitions and delivery. Each source reaches at most C vertices, where
+/// C <= min(V, arcs + 1): a component with C vertices needs C-1 edges, and
+/// every such edge contributes at least one admitted arc. The looser arc
+/// bound also covers directed input conservatively; the registered Load
+/// procedure itself requires an undirected, loop-free projection.
+/// Connected inputs retain the former bound; edgeless input is now O(V).
 pub(crate) fn load_work(nodes: usize, arcs: usize) -> Option<usize> {
-    nodes
-        .checked_mul(
-            nodes
-                .checked_mul(4)?
-                .checked_add(arcs.checked_mul(2)?)?
-                .checked_add(8)?,
-        )?
-        .checked_add(nodes.checked_mul(3)?)?
+    Load::source_bound(nodes, arcs)
+        .checked_mul(nodes.checked_mul(4)?.checked_add(arcs.checked_mul(2)?)?)?
+        .checked_add(nodes.checked_mul(11)?)?
         .checked_add(16)
 }
 
@@ -344,7 +343,9 @@ pub(crate) enum LoadStep {
 /// One bounded state machine serves decoded and compressed graph readers.
 /// The BFS queue is also the reverse dependency stack. Predecessor counts are
 /// collected during BFS; parents are recovered from the immutable undirected
-/// row, without retaining adjacency or a vector of predecessor lists.
+/// row, without retaining adjacency or a vector of predecessor lists. The
+/// same unique queue identifies precisely the scratch cells to reset and
+/// output cells to reduce: other components need no work for this source.
 pub(crate) struct Load {
     distances: Vec<usize>,
     predecessors: Vec<usize>,
@@ -360,9 +361,18 @@ pub(crate) struct Load {
     nodes: usize,
     peak: usize,
     witness: ComplexityWitness,
+    #[cfg(test)]
+    dense_scans: bool,
 }
 
 impl Load {
+    /// A reachable component needs at least one fewer edge than vertices.
+    /// Saturation avoids overflow for the conservative, arbitrary-arc caller;
+    /// the minimum never exceeds this projection's admitted vertex count.
+    pub(crate) fn source_bound(nodes: usize, arcs: usize) -> usize {
+        nodes.min(arcs.saturating_add(1))
+    }
+
     pub(crate) fn workspace(nodes: usize) -> Option<usize> {
         nodes.checked_mul(3 * size_of::<usize>() + 2 * size_of::<f64>())
     }
@@ -418,12 +428,39 @@ impl Load {
             peak,
             witness: ComplexityWitness {
                 algorithm: "fgdb_newman_load_centrality_cursor".to_owned(),
-                complexity_claim: "O(|V| * (|V| + |E|))".to_owned(),
+                complexity_claim:
+                    "O(|V| + sum_components |C| * (|C| + |E_C|)); O(|V|) kernel workspace"
+                        .to_owned(),
                 nodes_touched: 0,
                 edges_scanned: 0,
                 queue_peak: 0,
             },
+            #[cfg(test)]
+            dense_scans: false,
         })
+    }
+
+    fn pass_len(&self) -> usize {
+        #[cfg(test)]
+        if self.dense_scans {
+            return self.nodes;
+        }
+        self.queue.len()
+    }
+
+    fn pass_vertex(&self, at: usize) -> usize {
+        #[cfg(test)]
+        if self.dense_scans {
+            return at;
+        }
+        // A connected source reaches every cell. Preserve the incumbent's
+        // sequential memory access instead of following an arbitrary BFS
+        // permutation when there is no sparse population to skip.
+        if self.queue.len() == self.nodes {
+            at
+        } else {
+            self.queue[at]
+        }
     }
 
     /// One scalar transition, or one row whose pulls the caller controls.
@@ -443,10 +480,14 @@ impl Load {
                 self.phase = LoadPhase::Complete;
             }
             LoadPhase::Initialize(_) => self.phase = LoadPhase::Reset(0),
-            LoadPhase::Reset(at) if at < self.nodes => {
-                self.distances[at] = usize::MAX;
-                self.predecessors[at] = 0;
-                self.between[at] = 0.0;
+            LoadPhase::Reset(at) if at < self.pass_len() => {
+                // Initialization already cleared every cell. Thereafter only
+                // the preceding BFS's unique reached set can contain state;
+                // resetting it leaves every other component untouched/clear.
+                let vertex = self.pass_vertex(at);
+                self.distances[vertex] = usize::MAX;
+                self.predecessors[vertex] = 0;
+                self.between[vertex] = 0.0;
                 self.phase = LoadPhase::Reset(at + 1);
             }
             LoadPhase::Reset(_) => {
@@ -485,12 +526,17 @@ impl Load {
                 }
             }
             LoadPhase::Reverse(_) => self.phase = LoadPhase::Reduce(0),
-            LoadPhase::Reduce(at) if at < self.nodes => {
-                if self.distances[at] != usize::MAX {
-                    self.between[at] -= 1.0;
+            LoadPhase::Reduce(at) if at < self.pass_len() => {
+                let vertex = self.pass_vertex(at);
+                if self.distances[vertex] != usize::MAX {
+                    self.between[vertex] -= 1.0;
                 }
-                self.scores[at] += self.between[at];
-                if !self.scores[at].is_finite() {
+                // Cells are independent: BFS order changes no floating-point
+                // addition within a score. Sources still reduce in canonical
+                // order. Unreached contributions were positive zero, so
+                // omitting their additions preserves the exact score bits.
+                self.scores[vertex] += self.between[vertex];
+                if !self.scores[vertex].is_finite() {
                     return Err(FnxExecutionError::InvalidNumericResult);
                 }
                 self.phase = LoadPhase::Reduce(at + 1);
@@ -586,7 +632,15 @@ pub(super) fn load<C>(
     checkpoint: &mut impl FnxMeter<C>,
 ) -> Result<(KernelOutput, usize), FnxExecutionError<C>> {
     checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
-    let mut state = Load::new(graph.node_count(), usize::MAX)?;
+    let state = Load::new(graph.node_count(), usize::MAX)?;
+    drive_load(graph, state, checkpoint)
+}
+
+fn drive_load<C>(
+    graph: &SnapshotGraphView,
+    mut state: Load,
+    checkpoint: &mut impl FnxMeter<C>,
+) -> Result<(KernelOutput, usize), FnxExecutionError<C>> {
     loop {
         checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
         match state.step()? {
@@ -607,3 +661,7 @@ pub(super) fn load<C>(
     checkpoint.poll().map_err(FnxExecutionError::Cancelled)?;
     state.finish()
 }
+
+#[cfg(test)]
+#[path = "load_tests.rs"]
+mod load_tests;

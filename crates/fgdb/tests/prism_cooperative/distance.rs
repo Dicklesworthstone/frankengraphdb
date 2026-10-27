@@ -254,7 +254,7 @@ fn compressed_load_preserves_history_flow_bits_quanta_and_every_live_cancellatio
                 assert_eq!(expected.rows, native.rows);
                 assert_eq!(expected.certificate.result_digest, native.certificate.result_digest);
                 assert_eq!(expected.certificate.adapter, AdapterPath::CompressedCursor);
-                assert_eq!(expected.certificate.execution_kernel, "fgdb-prism/sealed-newman-load-v1");
+                assert_eq!(expected.certificate.execution_kernel, "fgdb-prism/sealed-newman-load-v2");
                 assert_eq!(expected.certificate.kernel_workspace_bytes,
                     graph.node_count() * (3 * size_of::<usize>() + 2 * size_of::<f64>()));
                 if at == current {
@@ -268,7 +268,7 @@ fn compressed_load_preserves_history_flow_bits_quanta_and_every_live_cancellatio
                     ), &probe, q);
                     let actual = actual.unwrap();
                     compare_execution(&actual, &expected);
-                    assert_eq!(actual.certificate.execution_kernel, "fgdb-prism/sealed-newman-load-cooperative-v1");
+                    assert_eq!(actual.certificate.execution_kernel, "fgdb-prism/sealed-newman-load-cooperative-v2");
                     if q == 1 { assert!(pending > 700); }
                 }
                 assert_eq!(db.execute_fnx_sealed(&cx, &call, opt, memory(), SealedLimits::default()).await.unwrap().analytics, expected);
@@ -307,6 +307,64 @@ fn compressed_load_preserves_history_flow_bits_quanta_and_every_live_cancellatio
         for direction in [Directedness::Directed, Directedness::Reversed] {
             assert!(matches!(call.validate_sealed_projection(direction), Err(FnxSealedExecutionError::Execution(
                 FnxExecutionError::GraphKind { required: FnxGraphKind::Undirected }))));
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn compressed_load_reached_passes_admit_isolates_with_linear_work() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let mut opt = options(Directedness::Undirected);
+        let call = FnxCallSpec::bind(
+            "CALL fnx.load_centrality() YIELD vertex,score",
+            &FnxParameters::new(),
+        )
+        .unwrap();
+        for n in [0, 1, 512] {
+            let db = small_database(&contexts.commit(), n, false).await;
+            let graph = projection(&db, &cx, opt).await;
+            // An edgeless source opens each row only once. The old V-times
+            // full-population admission refused 512 isolates under this cap.
+            opt.execution_limits.max_estimated_work = 80 * n + 128;
+            let expected = call
+                .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                .unwrap();
+            assert_eq!(
+                expected.certificate.execution_kernel,
+                "fgdb-prism/sealed-newman-load-v2"
+            );
+            assert_eq!(expected.rows.len(), n);
+            assert!(
+                expected
+                    .rows
+                    .iter()
+                    .all(|row| row[1] == FnxValue::Score(0.0))
+            );
+            let native = db.execute_fnx(&cx, &call, opt).unwrap().analytics;
+            assert_eq!(native.rows, expected.rows);
+            assert_eq!(
+                native.certificate.result_digest,
+                expected.certificate.result_digest
+            );
+            compare_execution(
+                &call
+                    .execute_sealed_cooperative(
+                        &cx,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(17),
+                        yield_now,
+                    )
+                    .await
+                    .unwrap(),
+                &expected,
+            );
         }
         assert_eq!(contexts.outstanding_obligations(), 0);
     });

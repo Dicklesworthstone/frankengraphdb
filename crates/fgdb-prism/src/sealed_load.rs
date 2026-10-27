@@ -14,7 +14,7 @@ use std::future::Future;
 
 fn output(state: Load) -> Result<(super::KernelOutput, usize)> {
     let (mut output, peak) = state.finish::<Infallible>()?;
-    output.witness.complexity_claim = "O(V^2 + V*(V*(1+log(1+H)) + H*(1+log(1+H)+log(1+V)))); H is retained incidence count; O(V) kernel workspace".to_owned();
+    output.witness.complexity_claim = "O(V + C*(V*(1+log(1+H)) + H*(1+log(1+H)+log(1+V)))); C is the largest visible component, H retained incidences; O(V) kernel workspace".to_owned();
     Ok((output, peak))
 }
 
@@ -34,12 +34,14 @@ fn prepare(
         graph.adjacency_entry_count(),
     )
     .ok_or(ExecutionError::SizeOverflow)?;
-    // Reopening parents can read every retained incidence twice per source.
-    // Invisible/excluded histories therefore remain priced on every pass.
+    // Each row is opened only by sources in its visible component. Its
+    // retained histories are still fully priced on every such visit, even
+    // when invisible/excluded edges connect it to another component.
+    let sources = Load::source_bound(n, graph.adjacency_entry_count());
     let estimated = add(
         scalar,
         add(
-            mul(add(mul(n, 2)?, 1)?, pass)?,
+            mul(add(mul(sources, 2)?, 1)?, pass)?,
             mul(n, call.outputs().len())?,
         )?,
     )?;
@@ -86,7 +88,7 @@ pub(super) fn execute(
         call,
         graph,
         output,
-        "fgdb-prism/sealed-newman-load-v1",
+        "fgdb-prism/sealed-newman-load-v2",
         estimated,
         peak,
         admission,
@@ -142,7 +144,7 @@ where
         encoded,
         output.values,
         output.witness,
-        "fgdb-prism/sealed-newman-load-cooperative-v1",
+        "fgdb-prism/sealed-newman-load-cooperative-v2",
         estimated,
         peak,
         &mut || checkpoint(control.cx),

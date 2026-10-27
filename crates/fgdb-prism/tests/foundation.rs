@@ -687,7 +687,7 @@ fn load_centrality_matches_pinned_fnx_for_every_small_simple_graph() {
             assert_eq!(degree_bits(&actual), expected, "n={n} mask={mask}");
             assert_eq!(
                 actual.certificate.execution_kernel,
-                "fgdb-prism/newman-load-csr-v1"
+                "fgdb-prism/newman-load-csr-v2"
             );
             assert_eq!(
                 actual.certificate.kernel_workspace_bytes,

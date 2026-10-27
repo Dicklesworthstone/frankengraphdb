@@ -460,8 +460,17 @@ fn a_reused_projection_spends_exactly_what_its_build_spent() {
                 grant.relations = Scope::only([RelationId(1)]);
             }
             let token = issuer().issue_at(&grant, 100).unwrap();
-            for (text, direction) in CALLS {
-                let options = options(direction);
+            for (text, direction, self_loops) in CALLS
+                .into_iter()
+                .map(|(text, direction)| (text, direction, SelfLoopPolicy::Keep))
+                .chain([(
+                    "CALL fnx.load_centrality() YIELD vertex,score",
+                    Directedness::Undirected,
+                    SelfLoopPolicy::Drop,
+                )])
+            {
+                let mut options = options(direction);
+                options.projection.self_loops = self_loops;
                 let before = builds();
                 let cold = footprint(&db, &cx, &token, text, options);
                 assert_eq!(builds(), before + 1, "{text}: the first call builds");
@@ -582,6 +591,11 @@ fn kernel_runs_admit_and_refuse_at_the_per_unit_threshold() {
                 ),
                 (
                     "CALL fnx.core_number() YIELD vertex,core",
+                    Directedness::Undirected,
+                    SelfLoopPolicy::Drop,
+                ),
+                (
+                    "CALL fnx.load_centrality() YIELD vertex,score",
                     Directedness::Undirected,
                     SelfLoopPolicy::Drop,
                 ),
