@@ -1,5 +1,7 @@
 use super::*;
-use crate::gql_exec::source::visible_history_row;
+use crate::gql_exec::source::{
+    PropertyEqualityIndex, visible_history_row, visit_projection_vertices,
+};
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_strata::vertex::{VertexPatchRows, VertexRow, decode_patch, encode_patch};
 use fgdb_types::{CanonicalScalar, CommitSeq};
@@ -257,4 +259,167 @@ fn a_new_index_generation_cannot_replace_the_pinned_spine_or_history() {
         pinned.iter().map(|(vid, _)| *vid).collect::<Vec<_>>()
     );
     assert!(!actual.contains(&VId(1)));
+}
+
+fn projection_rows(
+    patches: &[VertexPatchRows],
+    index: Option<&PropertyEqualityIndex>,
+    at: CommitSeq,
+    refuse: Option<usize>,
+) -> (Vec<VertexRow>, Vec<SourceEvent>, Result<(), usize>) {
+    let mut rows = Vec::new();
+    let mut events = Vec::new();
+    let verdict = visit_projection_vertices(
+        patches,
+        index,
+        at,
+        &mut |event| {
+            events.push(event);
+            if refuse == Some(events.len()) {
+                Err(events.len())
+            } else {
+                Ok(())
+            }
+        },
+        |row, control| {
+            // Projection selection checkpoints before staging a selected row.
+            control(SourceEvent::Work)?;
+            rows.push(row.clone());
+            Ok(())
+        },
+    );
+    (rows, events, verdict)
+}
+
+#[test]
+fn projection_vertex_reuse_keeps_raw_transcript_for_empty_or_single_patch() {
+    let rows = vec![
+        VertexRow {
+            vid: VId(0),
+            birth_ordinal: 0,
+            created_at: CommitSeq(1),
+            retired_at: Some(CommitSeq(2)),
+            labels: vec![],
+            props: vec![],
+        },
+        VertexRow {
+            vid: VId(u128::MAX),
+            birth_ordinal: 1,
+            created_at: CommitSeq(3),
+            retired_at: None,
+            labels: vec![],
+            props: vec![],
+        },
+    ];
+    for patches in [vec![], vec![patch(rows)]] {
+        let index = PropertyEqualityIndex::build(&patches);
+        for at in 0..=4 {
+            let at = CommitSeq(at);
+            assert_eq!(
+                projection_rows(&patches, Some(&index), at, None),
+                projection_rows(&patches, None, at, None),
+                "an already ordered patch needs no AVL traversal"
+            );
+        }
+        assert!(index.flat.rows.get().is_none());
+    }
+}
+
+#[test]
+fn projection_vertex_visitors_match_independent_history_at_every_cut() {
+    for seed in 0..12 {
+        let patches = histories(seed);
+        let index = PropertyEqualityIndex::build(&patches);
+        for at in 0..=25 {
+            let at = CommitSeq(at);
+            let expected: Vec<_> = index
+                .histories
+                .iter()
+                .filter_map(|(&vid, _)| oracle(&patches, vid, at).cloned())
+                .collect();
+            for indexed in [None, Some(&index)] {
+                let (rows, _, verdict) = projection_rows(&patches, indexed, at, None);
+                assert_eq!(verdict, Ok(()));
+                assert_eq!(rows, expected, "seed={seed} at={at:?}");
+            }
+        }
+        assert!(
+            index.flat.rows.get().is_none(),
+            "a scan must not build a row cache"
+        );
+        assert_eq!(
+            index
+                .flat
+                .lookups
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+}
+
+#[test]
+fn projection_vertex_visitors_stop_at_every_refused_event_without_a_partial_success() {
+    let patches = histories(71);
+    let index = PropertyEqualityIndex::build(&patches);
+    for indexed in [None, Some(&index)] {
+        let (expected, events, verdict) = projection_rows(&patches, indexed, CommitSeq(25), None);
+        assert_eq!(verdict, Ok(()));
+        for stop in 1..=events.len() {
+            let (prefix, observed, verdict) =
+                projection_rows(&patches, indexed, CommitSeq(25), Some(stop));
+            assert_eq!(verdict, Err(stop));
+            assert_eq!(observed, events[..stop]);
+            assert_eq!(prefix, expected[..prefix.len()]);
+        }
+        assert_eq!(
+            projection_rows(&patches, indexed, CommitSeq(25), None).0,
+            expected,
+            "refusal must not change the immutable source"
+        );
+    }
+}
+
+#[test]
+fn projection_vertex_history_reuse_bounds_work_by_identities_and_version_searches() {
+    let mut live: Vec<_> = (0..64)
+        .map(|vid| VertexRow {
+            vid: VId(vid),
+            birth_ordinal: vid as u64,
+            created_at: CommitSeq(1),
+            retired_at: None,
+            labels: vec![],
+            props: vec![],
+        })
+        .collect();
+    let mut patches = vec![patch(live.clone())];
+    for seq in 2..=65 {
+        let mut changed = Vec::new();
+        for row in &mut live {
+            row.retired_at = Some(CommitSeq(seq));
+            changed.push(row.clone());
+            row.created_at = CommitSeq(seq);
+            row.retired_at = None;
+            changed.push(row.clone());
+        }
+        patches.push(patch(changed));
+    }
+    let index = PropertyEqualityIndex::build(&patches);
+    let (raw, raw_events, raw_verdict) = projection_rows(&patches, None, CommitSeq(65), None);
+    let (indexed, events, verdict) = projection_rows(&patches, Some(&index), CommitSeq(65), None);
+    assert_eq!(raw_verdict, Ok(()));
+    assert_eq!(verdict, Ok(()));
+    assert_eq!(raw, live);
+    assert_eq!(indexed, raw);
+    let count =
+        |events: &[SourceEvent], wanted| events.iter().filter(|&&event| event == wanted).count();
+    let work = count(&events, SourceEvent::Work);
+    assert!(work < count(&raw_events, SourceEvent::Work) / 8);
+    assert_eq!(
+        count(&events, SourceEvent::ScratchEntry),
+        usize::from(index.histories.height()),
+        "only the cursor spine is retained"
+    );
+    assert_eq!(count(&raw_events, SourceEvent::ScratchEntry), patches.len());
+    assert_eq!(count(&events, SourceEvent::SnapshotRecord), 0);
+    assert!(index.flat.rows.get().is_none());
 }

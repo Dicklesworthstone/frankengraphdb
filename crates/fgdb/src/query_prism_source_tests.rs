@@ -584,3 +584,246 @@ fn explicit_source_profile_cannot_bypass_the_legacy_incidence_ceiling() {
         );
     });
 }
+
+fn without_vertex_index(view: &EmbeddedReadView) -> EmbeddedReadView {
+    // Only discard this test copy's derived index. Its already admitted rows,
+    // source root, historical cut and adjacency index remain exactly the same.
+    let mut snapshot = (*view.snapshot).clone();
+    snapshot.property_index = std::sync::OnceLock::new();
+    let mut raw = view.clone();
+    raw.snapshot = Arc::new(snapshot);
+    raw
+}
+
+fn assert_indexed_vertex_projection(
+    view: &EmbeddedReadView,
+    query: &QueryCx,
+    options: FnxReadOptions,
+) -> SnapshotGraphView {
+    let raw = without_vertex_index(view);
+    let build = |source: &EmbeddedReadView| {
+        source
+            .build_prism_projection_at(
+                query,
+                options.as_of.unwrap_or(source.frontier()),
+                options.selection,
+                options.projection,
+                options.projection_limits,
+                options.source_limits,
+            )
+            .unwrap()
+    };
+    let expected = build(&raw);
+    assert!(raw.snapshot.property_index.get().is_none());
+    let graph = build(view);
+    assert_eq!(graph.binding(), expected.binding());
+    assert_eq!(graph.spec(), expected.spec());
+    assert_eq!(graph.digest(), expected.digest());
+    assert_eq!(graph.vertex_ids(), expected.vertex_ids());
+    assert_eq!(graph.input_edge_count(), expected.input_edge_count());
+    assert_eq!(graph.incoming_face(), expected.incoming_face());
+    for row in 0..graph.vertex_ids().len() {
+        assert_eq!(graph.projected_row(row), expected.projected_row(row));
+    }
+    let statement = if options.projection.directedness == Directedness::Undirected {
+        "CALL fnx.connected_components() YIELD vertex,component"
+    } else {
+        "CALL fnx.weakly_connected_components() YIELD vertex,component"
+    };
+    let call = FnxCallSpec::bind(statement, &FnxParameters::new()).unwrap();
+    assert_eq!(
+        call.execute(&graph, options.execution_limits, || query.checkpoint())
+            .unwrap(),
+        call.execute(&expected, options.execution_limits, || query.checkpoint())
+            .unwrap(),
+        "complete rows, witnesses and result/projection digests must agree"
+    );
+    graph
+}
+
+#[test]
+fn indexed_vertex_projection_preserves_labels_history_and_pinned_generations() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let runtime_root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&runtime_root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        db.write(&commit, fixture()).await.unwrap();
+        let pinned = db.read_session().unwrap();
+        let mut opt = options();
+        opt.selection.weight = FnxWeightSpec::Unit;
+        opt.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
+        let cold = without_vertex_index(&pinned);
+        assert_indexed_vertex_projection(&cold, &query, opt);
+        assert!(
+            cold.snapshot.property_index.get().is_none(),
+            "selection must not build an index"
+        );
+        let old_index = Arc::clone(pinned.snapshot.property_index());
+        let before = assert_indexed_vertex_projection(&pinned, &query, opt);
+
+        let mut changed = WriteBatch::new(RelationId(1));
+        changed.set_vertex_property(VId(1), PropertyKeyId(2), Some(CanonicalScalar::Int(7)));
+        changed.set_vertex_label(VId(3), LabelId(1), false);
+        changed.set_vertex_label(VId(3), LabelId(2), true);
+        changed.delete_vertex(VId(12)); // isolated vertex retirement
+        changed.create_vertex(VId(0), vec![LabelId(2)], vec![]);
+        db.write(&commit, changed).await.unwrap();
+        let updated = db.read_session().unwrap();
+        assert!(updated.snapshot.property_index.get().is_some());
+        assert!(!Arc::ptr_eq(updated.snapshot.property_index(), &old_index));
+        for view in [&pinned, &updated] {
+            for cut in [CommitSeq(0), pinned.frontier(), view.frontier()] {
+                for label in [None, Some(LabelId(1)), Some(LabelId(2)), Some(LabelId(404))] {
+                    for direction in [
+                        Directedness::Directed,
+                        Directedness::Reversed,
+                        Directedness::Undirected,
+                    ] {
+                        let mut selected = opt;
+                        selected.as_of = Some(cut);
+                        selected.selection.vertex_label = label;
+                        selected.projection.directedness = direction;
+                        let graph = assert_indexed_vertex_projection(view, &query, selected);
+                        if cut == CommitSeq(0) || label == Some(LabelId(404)) {
+                            assert!(graph.vertex_ids().is_empty());
+                        }
+                    }
+                }
+            }
+        }
+        let current = assert_indexed_vertex_projection(&updated, &query, opt);
+        assert!(!current.vertex_ids().contains(&VId(3)));
+        assert!(!current.vertex_ids().contains(&VId(12)));
+        assert!(before.vertex_ids().contains(&VId(3)));
+        assert!(before.vertex_ids().contains(&VId(12)));
+        assert!(current.vertex_ids().contains(&VId(u128::MAX)));
+        db.compact(&commit).await.unwrap();
+        let compacted = db.read_session().unwrap();
+        assert!(compacted.snapshot.property_index.get().is_some());
+        assert_indexed_vertex_projection(&compacted, &query, opt);
+        assert_eq!(
+            assert_indexed_vertex_projection(&pinned, &query, opt).digest(),
+            before.digest(),
+            "updates and compaction cannot replace a pinned generation's history"
+        );
+        assert!(Arc::ptr_eq(pinned.snapshot.property_index(), &old_index));
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn indexed_vertex_projection_enforces_source_limits_and_every_cancellation() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let runtime_root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&runtime_root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        db.write(&commit, small_fixture()).await.unwrap();
+        let mut changed = WriteBatch::new(RelationId(1));
+        changed.set_vertex_label(VId(3), LabelId(1), false);
+        changed.set_vertex_property(VId(1), PropertyKeyId(2), Some(CanonicalScalar::Int(7)));
+        db.write(&commit, changed).await.unwrap();
+        let view = db.read_session().unwrap();
+        view.snapshot.property_index();
+        let opt = options();
+        let (mut work, mut scratch) = (0, 0);
+        let expected = view
+            .select_prism_vertices(
+                view.frontier(),
+                opt.selection,
+                opt.projection_limits,
+                opt.source_limits,
+                &mut |event| {
+                    match event {
+                        SourceEvent::Work | SourceEvent::SnapshotRecord => work += 1,
+                        SourceEvent::ScratchEntry => scratch += 1,
+                    }
+                    Ok(())
+                },
+                &mut 0,
+            )
+            .unwrap();
+        assert_eq!(expected, [VId(1), VId(2)]);
+        assert!(work > 0 && scratch > 0);
+        let exact = FnxSourceLimits {
+            max_work_units: work,
+            max_scratch_entries: scratch,
+            ..opt.source_limits
+        };
+        let select = |limits| {
+            view.select_prism_vertices(
+                view.frontier(),
+                opt.selection,
+                opt.projection_limits,
+                limits,
+                &mut source_control(&query, limits),
+                &mut 0,
+            )
+        };
+        assert_eq!(select(exact).unwrap(), expected);
+        for (tight, resource) in [
+            (
+                FnxSourceLimits {
+                    max_work_units: work - 1,
+                    ..exact
+                },
+                "work units",
+            ),
+            (
+                FnxSourceLimits {
+                    max_scratch_entries: scratch - 1,
+                    ..exact
+                },
+                "scratch entries",
+            ),
+            (
+                FnxSourceLimits {
+                    max_staging_bytes: 0,
+                    ..exact
+                },
+                "staging bytes",
+            ),
+        ] {
+            assert!(matches!(select(tight), Err(FnxReadError::SourceLimit {
+                resource: actual, ..
+            }) if actual == resource));
+        }
+
+        let build = |cx: &QueryCx| {
+            view.build_prism_projection_at(
+                cx,
+                view.frontier(),
+                opt.selection,
+                opt.projection,
+                opt.projection_limits,
+                opt.source_limits,
+            )
+        };
+        let probe = Arc::new(SimulationCheckpointProbe::new(None));
+        let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
+        let complete = build(&controlled).unwrap();
+        let checkpoints = probe.calls();
+        assert!(u64::try_from(checkpoints).unwrap() > work);
+        for stop in 1..=checkpoints {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
+            assert!(matches!(
+                build(&controlled),
+                Err(FnxReadError::Cancelled(_))
+            ));
+            assert_eq!(probe.calls(), stop);
+        }
+        assert_eq!(build(&query).unwrap().digest(), complete.digest());
+        assert_eq!(select(exact).unwrap(), expected);
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}

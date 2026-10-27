@@ -779,3 +779,314 @@ fn paired_relation_source_preparation_benchmark() {
         }
     });
 }
+
+fn decoded_projection(
+    view: &EmbeddedReadView,
+    cx: &QueryCx,
+    cut: CommitSeq,
+    options: FnxReadOptions,
+) -> Result<SnapshotGraphView, FnxReadError<crate::ReadError, Box<asupersync::error::Error>>> {
+    view.build_prism_projection_at(
+        cx,
+        cut,
+        options.selection,
+        options.projection,
+        options.projection_limits,
+        options.source_limits,
+    )
+}
+
+#[test]
+fn indexed_decoded_projection_preserves_historical_properties_and_complete_certificates() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        db.write(&commit, fixture()).await.unwrap();
+        let first = db.read_session().unwrap().frontier();
+        db.write(&commit, unrelated(64)).await.unwrap();
+        let mut changes = WriteBatch::new(RelationId(1));
+        changes.set_edge_property(EId(100), PropertyKeyId(1), Some(CanonicalScalar::Int(3)));
+        changes.delete_edge(EId(300));
+        db.write(&commit, changes).await.unwrap();
+        let view = db.read_session().unwrap();
+        assert!(view.snapshot.adjacency.get().is_none());
+        let call = dijkstra_call();
+        let mut expected = Vec::new();
+        for cut in [first, view.frontier()] {
+            for direction in [
+                Directedness::Directed,
+                Directedness::Reversed,
+                Directedness::Undirected,
+            ] {
+                let mut opts = options();
+                opts.projection.directedness = direction;
+                let graph = decoded_projection(&view, &query, cut, opts).unwrap();
+                let result = call
+                    .execute(&graph, opts.execution_limits, || query.checkpoint())
+                    .unwrap();
+                expected.push((cut, opts, graph, result));
+            }
+        }
+        assert!(
+            view.snapshot.adjacency.get().is_none(),
+            "a cold projection must not build adjacency"
+        );
+
+        // A real OLTP traversal creates the index once. Analytics can reuse
+        // it, without making that larger allocation part of a cold CALL.
+        view.neighbours(VId(1), RelationId(1)).unwrap();
+        assert!(view.snapshot.adjacency.get().is_some());
+        for (cut, opts, before, expected) in &expected {
+            let after = decoded_projection(&view, &query, *cut, *opts).unwrap();
+            assert_eq!(after.binding(), before.binding());
+            assert_eq!(after.digest(), before.digest());
+            assert_eq!(after.vertex_ids(), before.vertex_ids());
+            assert_eq!(after.input_edge_count(), before.input_edge_count());
+            assert_eq!(
+                after.charged_workspace_bytes(),
+                before.charged_workspace_bytes()
+            );
+            let actual = call
+                .execute(&after, opts.execution_limits, || query.checkpoint())
+                .unwrap();
+            assert_eq!(
+                actual, *expected,
+                "cut {cut:?}, direction {:?}",
+                opts.projection.directedness
+            );
+        }
+
+        // Extending that index publishes a new overlay without changing the
+        // old view. Re-reading its prior cut through the successor keeps the
+        // same results even though the projection binds a newer root.
+        let mut changes = WriteBatch::new(RelationId(1));
+        changes.set_edge_property(EId(100), PropertyKeyId(1), Some(CanonicalScalar::Int(11)));
+        changes.delete_edge(EId(101));
+        db.write(&commit, changes).await.unwrap();
+        let successor = db.read_session().unwrap();
+        assert!(successor.snapshot.adjacency.get().is_some());
+        for (cut, opts, _, expected) in &expected {
+            let graph = decoded_projection(&successor, &query, *cut, *opts).unwrap();
+            let actual = call
+                .execute(&graph, opts.execution_limits, || query.checkpoint())
+                .unwrap();
+            assert_eq!(actual.rows, expected.rows);
+            assert_eq!(
+                actual.certificate.result_digest,
+                expected.certificate.result_digest
+            );
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn indexed_decoded_projection_limits_charge_cursor_scratch_and_all_selected_edges() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        for vertex in 1..=129 {
+            batch.create_vertex(VId(vertex), vec![LabelId(1)], vec![]);
+            if vertex > 1 {
+                batch.add_edge(EId(vertex), VId(vertex - 1), VId(vertex), vec![]);
+            }
+        }
+        db.write(&commit, batch).await.unwrap();
+        let view = db.read_session().unwrap();
+        let mut opts = FnxReadOptions::whole_graph(Some(view.frontier()));
+        let expected = decoded_projection(&view, &query, view.frontier(), opts).unwrap();
+        opts.source_limits.max_scratch_entries = 32;
+        assert!(matches!(
+            decoded_projection(&view, &query, view.frontier(), opts),
+            Err(FnxReadError::SourceLimit {
+                resource: "scratch entries",
+                limit: 32,
+                requested: 33
+            })
+        ));
+        assert!(view.snapshot.adjacency.get().is_none());
+
+        view.neighbours(VId(1), RelationId(1)).unwrap();
+        let actual = decoded_projection(&view, &query, view.frontier(), opts).unwrap();
+        assert_eq!(actual.digest(), expected.digest());
+        assert_eq!(actual.input_edge_count(), 128);
+
+        // The flat identity directory needs no scratch. Only the single
+        // vertex patch cursor is charged, so exactly one entry suffices.
+        let mut tight = opts;
+        tight.source_limits.max_scratch_entries = 1;
+        assert_eq!(
+            decoded_projection(&view, &query, view.frontier(), tight)
+                .unwrap()
+                .digest(),
+            expected.digest()
+        );
+        tight.source_limits.max_scratch_entries = 0;
+        assert!(matches!(
+            decoded_projection(&view, &query, view.frontier(), tight),
+            Err(FnxReadError::SourceLimit {
+                resource: "scratch entries",
+                limit: 0,
+                requested: 1
+            })
+        ));
+        let mut tight = opts;
+        tight.projection_limits.max_input_edges = 127;
+        assert!(matches!(
+            decoded_projection(&view, &query, view.frontier(), tight),
+            Err(FnxReadError::Projection(ProjectionError::LimitExceeded {
+                resource: "input edges",
+                limit: 127,
+                observed: 128
+            }))
+        ));
+        assert_eq!(
+            decoded_projection(&view, &query, view.frontier(), opts)
+                .unwrap()
+                .digest(),
+            expected.digest()
+        );
+    });
+}
+
+#[test]
+fn indexed_decoded_projection_cancels_during_source_and_assembly_without_a_partial_graph() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        db.write(&commit, small_fixture()).await.unwrap();
+        let view = db.read_session().unwrap();
+        view.neighbours(VId(1), RelationId(1)).unwrap();
+        let probe = Arc::new(SimulationCheckpointProbe::new(None));
+        let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
+        let expected = decoded_projection(&view, &controlled, view.frontier(), options()).unwrap();
+        let checkpoints = probe.calls();
+        assert!(checkpoints > 20);
+        for stop in 1..=checkpoints {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
+            assert!(
+                matches!(
+                    decoded_projection(&view, &controlled, view.frontier(), options()),
+                    Err(FnxReadError::Cancelled(_))
+                ),
+                "checkpoint {stop}"
+            );
+            assert_eq!(probe.calls(), stop);
+        }
+        assert_eq!(
+            decoded_projection(&view, &query, view.frontier(), options())
+                .unwrap()
+                .digest(),
+            expected.digest()
+        );
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+/// The two paths read independently admitted copies of the same committed
+/// generation. The candidate's OLTP index build is reported separately; it
+/// precedes analytics just as a real prior traversal does. Each sample builds
+/// a fresh decoded projection and consumes every certified result cell, so a
+/// retained projection cannot turn later samples into cache-hit measurements.
+#[test]
+#[ignore = "paired complete projection and certified CALL measurement; use optimized --ignored --nocapture"]
+fn indexed_decoded_projection_paired_complete_call_benchmark() {
+    use std::time::Instant;
+
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let call = dijkstra_call();
+        for versions in [1, 8] {
+            let n = 512usize;
+            let fanout = 4;
+            let identity = |source: usize, step: usize| {
+                EId(((source * fanout + step) as u128)
+                    .wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c835))
+            };
+            let mut db = Database::<MemVfs>::open_memory(&commit, keys()).await.unwrap();
+            let mut batch = WriteBatch::new(RelationId(1));
+            for source in 0..n {
+                batch.create_vertex(VId(1 + source as u128), vec![LabelId(1)], vec![]);
+            }
+            for source in 0..n {
+                for step in 1..=fanout {
+                    batch.add_edge(identity(source, step), VId(1 + source as u128),
+                        VId(1 + ((source + step) % n) as u128),
+                        vec![(PropertyKeyId(1), CanonicalScalar::Int(1))]);
+                }
+            }
+            db.write(&commit, batch).await.unwrap();
+            for version in 1..versions {
+                let mut batch = WriteBatch::new(RelationId(1));
+                for source in 0..n {
+                    for step in 1..=fanout {
+                        batch.set_edge_property(identity(source, step), PropertyKeyId(1),
+                            Some(CanonicalScalar::Int(version + 1)));
+                    }
+                }
+                db.write(&commit, batch).await.unwrap();
+            }
+            let raw = Database::<MemVfs>::open_read_view_with_vfs(
+                &commit, db.vfs.clone(), db.path(), keys()).await.unwrap();
+            let indexed = Database::<MemVfs>::open_read_view_with_vfs(
+                &commit, db.vfs.clone(), db.path(), keys()).await.unwrap();
+            assert_eq!(raw.partition_root(), indexed.partition_root());
+            assert!(raw.snapshot.adjacency.get().is_none());
+            assert!(indexed.snapshot.adjacency.get().is_none());
+            let start = Instant::now();
+            indexed.neighbours(VId(1), RelationId(1)).unwrap();
+            let index_build_ns = start.elapsed().as_nanos();
+            let opts = FnxReadOptions::whole_graph(Some(raw.frontier()));
+            let mut samples = [Vec::new(), Vec::new()];
+            for trial in 0..8 {
+                let mut outputs = Vec::new();
+                for use_index in if trial % 2 == 0 { [false, true] } else { [true, false] } {
+                    let view = if use_index { &indexed } else { &raw };
+                    let start = Instant::now();
+                    let graph = decoded_projection(view, &query, view.frontier(), opts).unwrap();
+                    let result = call.execute(&graph, opts.execution_limits, || query.checkpoint()).unwrap();
+                    let checksum = result.rows.iter().flatten().fold(0u128, |sum, value| {
+                        sum.wrapping_add(match value {
+                            FnxValue::Vertex(vertex) => vertex.0,
+                            FnxValue::Score(value) | FnxValue::Float(value) => u128::from(value.to_bits()),
+                            FnxValue::Integer(value) => u128::from(*value),
+                        })
+                    });
+                    std::hint::black_box(checksum);
+                    drop(graph);
+                    samples[usize::from(use_index)].push(start.elapsed().as_nanos());
+                    outputs.push(result);
+                }
+                assert_eq!(outputs[0], outputs[1]);
+                assert!(raw.snapshot.adjacency.get().is_none());
+            }
+            println!("indexed_projection_pair vertices={n} edges={} versions={versions} index_build_ns={index_build_ns} raw_ns={:?} indexed_ns={:?}",
+                n * fanout, samples[0], samples[1]);
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}

@@ -435,7 +435,10 @@ fn retained_analytics_scan_matches_raw_history_and_propagates_every_refusal() {
         let flat = super::AdjacencyIndex::build(&blocks);
         let mut overlay = super::AdjacencyIndex::build(&blocks[..split]);
         overlay.apply_added(&blocks, split);
-        for index in [&flat, &overlay] {
+        // An index inherited from an empty generation has no flat base at
+        // all; it must preserve the same winners and refusal prefixes.
+        let pure_overlay = super::AdjacencyIndex::build(&blocks[..0]).extend(&blocks, 0);
+        for index in [&flat, &overlay, &pure_overlay] {
             for at in [0, 2, 5, 9] {
                 let as_of = CommitSeq(at);
                 let (oracle, verdict) = run(false, &blocks, as_of, 0);

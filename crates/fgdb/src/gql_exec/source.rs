@@ -3393,6 +3393,40 @@ fn scan_edges<'a, E>(
     Ok(rows)
 }
 
+/// Select visible vertices for an unrestricted projection, reusing an existing
+/// history index from the SAME immutable generation as `patches`. No property
+/// candidates or flattened row cache are built: only one governed AVL spine
+/// and each identity's exact-cut history are visited. A checkpoint-only source
+/// or an unindexed generation keeps the ordinary raw-patch merge. One patch
+/// is already ordered and keeps that sequential scan even with a warm index.
+///
+/// Each path meters its actual work and scratch. Capability-authorized hosts
+/// retain `visit_vertices` and its visibility-independent charge transcript.
+pub(crate) fn visit_projection_vertices<'a, E, C>(
+    patches: &'a [VertexPatchRows],
+    index: Option<&PropertyEqualityIndex>,
+    as_of: CommitSeq,
+    control: &mut C,
+    mut visit: impl FnMut(&'a VertexRow, &mut C) -> Result<(), E>,
+) -> Result<(), E>
+where
+    C: FnMut(SourceEvent) -> Result<(), E>,
+{
+    let Some(index) = index.filter(|_| patches.len() > 1) else {
+        return visit_vertices(patches, as_of, control, visit);
+    };
+    let mut cursor = VertexHistoryScanCursor::default();
+    while let Some(vid) = cursor.next(&index.histories, control)? {
+        let history = cursor
+            .history(vid)
+            .expect("the cursor retains its current identity's history");
+        if let Some(row) = visible_history_row(patches, history, as_of, control)? {
+            visit(row, control)?;
+        }
+    }
+    Ok(())
+}
+
 /// One reusable heap cursor per nonempty patch; winning rows remain borrowed.
 pub(crate) fn visit_vertices<'a, E, C>(
     patches: &'a [VertexPatchRows],

@@ -286,6 +286,7 @@ impl<V: Vfs + Clone> Database<V> {
                 }
                 let vertices = select_prism_vertices(
                     &patches,
+                    None,
                     as_of,
                     options.selection,
                     options.projection_limits,
@@ -1351,6 +1352,10 @@ impl EmbeddedReadView {
     ) -> Result<Vec<VId>, Error> {
         select_prism_vertices(
             &self.snapshot.patches,
+            self.snapshot
+                .property_index
+                .get()
+                .map(|index| index.as_ref()),
             as_of,
             selection,
             limits,
@@ -1443,9 +1448,11 @@ impl EmbeddedReadView {
     /// their full capacities enter projection admission. Projection sorting and
     /// assembly checkpoint under this same query context and pinned read view.
     /// The cache owns its decoded data and can outlive this read-view handle.
-    /// An explicit relation prunes edge-history winner scratch before merging;
-    /// every raw block and history row still consumes source work. The complete
-    /// snapshot was authenticated before any projection selection is applied.
+    /// An existing adjacency index supplies exact-cut winners without another
+    /// all-edge scratch table or sort. Otherwise an explicit relation prunes
+    /// winner scratch before the raw-history merge. Each path meters its own
+    /// work and scratch; neither builds an index merely for projection. The
+    /// complete snapshot was authenticated before selection is applied.
     /// The source's work/scratch counters are separate from the cache budget;
     /// neither the source nor fnx is presented as a spill-capable operator.
     ///
@@ -1578,8 +1585,10 @@ impl EmbeddedReadView {
 
 /// One visibility, label selection, ordering and admission law for resident
 /// views and the directly opened compressed projection.
+#[allow(clippy::too_many_arguments)]
 fn select_prism_vertices(
     patches: &[fgdb_strata::vertex::VertexPatchRows],
+    index: Option<&source::PropertyEqualityIndex>,
     as_of: CommitSeq,
     selection: FnxSelection,
     limits: ProjectionLimits,
@@ -1588,7 +1597,7 @@ fn select_prism_vertices(
     staging_bytes: &mut usize,
 ) -> Result<Vec<VId>, Error> {
     let mut vertices = Vec::new();
-    source::visit_vertices(patches, as_of, control, |row, control| {
+    source::visit_projection_vertices(patches, index, as_of, control, |row, control| {
         control(SourceEvent::Work)?;
         if selection
             .vertex_label
