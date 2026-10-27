@@ -641,6 +641,49 @@ impl SealedGraphView {
         cx: &Control<'_>,
         max_workspace_bytes: usize,
     ) -> Result<Self, SealedProjectionError> {
+        let (config, limits) = self.reverse_projection_request(max_workspace_bytes)?;
+        Self::build_controlled(
+            cx,
+            &self.0.partition,
+            &self.0.vertices,
+            config,
+            self.0.mask,
+            limits,
+        )
+    }
+
+    /// The same temporary opposite face, with directory, raw incidence and
+    /// incoming-index construction driven by the ordinary bounded scheduler.
+    /// The kernel keeps its original live control; no permission or mask is
+    /// replaced at this construction boundary.
+    pub(crate) async fn reverse_projection_cooperative_controlled<Y, F>(
+        &self,
+        cx: &Control<'_>,
+        max_workspace_bytes: usize,
+        quantum: NonZeroUsize,
+        yield_now: Y,
+    ) -> Result<Self, SealedProjectionError>
+    where
+        Y: FnMut() -> F,
+        F: Future<Output = ()>,
+    {
+        let (config, limits) = self.reverse_projection_request(max_workspace_bytes)?;
+        Self::construct(
+            cx,
+            &self.0.partition,
+            &self.0.vertices,
+            config,
+            self.0.mask,
+            limits,
+            &mut construction::Cooperative::new(quantum, yield_now),
+        )
+        .await
+    }
+
+    fn reverse_projection_request(
+        &self,
+        max_workspace_bytes: usize,
+    ) -> Result<(SealedProjectionSpec, ProjectionLimits), SealedProjectionError> {
         let mut config = self.0.config;
         config.projection.directedness = match config.projection.directedness {
             Directedness::Directed => Directedness::Reversed,
@@ -651,19 +694,15 @@ impl SealedGraphView {
                 ));
             }
         };
-        Self::build_controlled(
-            cx,
-            &self.0.partition,
-            &self.0.vertices,
+        Ok((
             config,
-            self.0.mask,
             ProjectionLimits {
                 max_vertices: self.node_count(),
                 max_input_edges: self.scan_incidence_bound(),
                 max_adjacency_entries: self.adjacency_entry_count(),
                 max_workspace_bytes,
             },
-        )
+        ))
     }
 
     /// Conservative retained-incidence bound, not the reduced simple-edge count.

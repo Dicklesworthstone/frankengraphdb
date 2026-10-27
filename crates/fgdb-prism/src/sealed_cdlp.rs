@@ -1,18 +1,21 @@
-//! Synchronous Graphalytics label propagation over compressed rows.
+//! Graphalytics synchronous label updates over compressed rows.
 //!
 //! Labels and epoch-tagged vote counters occupy four O(|V|) integer vectors.
 //! Directed graphs visit separately reduced outgoing and incoming rows, so a
 //! reciprocal neighbor contributes twice. The reverse projection retains a
 //! bounded compressed locator index, never a decoded adjacency copy. Its
 //! construction peak participates in the kernel's workspace allowance.
+//! Immediate and cooperative drivers share vote arithmetic and round commits;
+//! scheduling never changes which previous-round labels a vertex observes.
 
 use super::{
     ComplexityWitness, Cursor, Directedness, ExecutionError, FnxAlgorithm, FnxCallSpec,
     FnxExecutionLimits, FnxMemoryLimits, FnxResult, KernelOutput, KernelValues, Result,
     ResultAdmission, Rows, SealedGraphView, SealedRows, add, admit, checkpoint,
-    directional_pass_work, finish, mul, reserve,
+    directional_pass_work, finish, finish_encoded, mul, reserve,
 };
 use crate::sealed_control::Control;
+use std::future::Future;
 use std::mem::size_of;
 
 fn workspace(n: usize, iterations: usize) -> Result<usize> {
@@ -164,23 +167,63 @@ impl Labels {
     ) -> Result<()> {
         while let Some((neighbor, _)) = row.next()? {
             control()?;
-            let label = *self
-                .labels
-                .get(neighbor)
-                .ok_or(ExecutionError::InvalidUpstreamResult)?;
-            if self.generations[label] != self.generation {
-                self.generations[label] = self.generation;
-                self.counts[label] = 0;
-            }
-            let count = add(self.counts[label], 1)?;
-            self.counts[label] = count;
-            if count > *best_count || (count == *best_count && label < *best) {
-                *best = label;
-                *best_count = count;
-            }
-            self.witness.edges_scanned = add(self.witness.edges_scanned, 1)?;
+            self.vote(neighbor, best, best_count)?;
         }
         Ok(())
+    }
+
+    fn begin_row(&mut self, source: usize) -> Result<(usize, usize)> {
+        self.generation = add(self.generation, 1)?;
+        let best = *self
+            .labels
+            .get(source)
+            .ok_or(ExecutionError::InvalidUpstreamResult)?;
+        Ok((best, 0))
+    }
+
+    fn vote(&mut self, neighbor: usize, best: &mut usize, best_count: &mut usize) -> Result<()> {
+        let label = *self
+            .labels
+            .get(neighbor)
+            .ok_or(ExecutionError::InvalidUpstreamResult)?;
+        if self.generations[label] != self.generation {
+            self.generations[label] = self.generation;
+            self.counts[label] = 0;
+        }
+        let count = add(self.counts[label], 1)?;
+        self.counts[label] = count;
+        if count > *best_count || (count == *best_count && label < *best) {
+            *best = label;
+            *best_count = count;
+        }
+        self.witness.edges_scanned = add(self.witness.edges_scanned, 1)?;
+        Ok(())
+    }
+
+    fn finish_row(&mut self, source: usize, best: usize) -> Result<()> {
+        *self
+            .next
+            .get_mut(source)
+            .ok_or(ExecutionError::InvalidUpstreamResult)? = best;
+        self.witness.nodes_touched = add(self.witness.nodes_touched, 1)?;
+        Ok(())
+    }
+
+    fn finish_round(&mut self) {
+        // No vertex in this round can see another vertex's new label.
+        std::mem::swap(&mut self.labels, &mut self.next);
+    }
+
+    fn finish(self) -> (KernelOutput, usize) {
+        let row_count = self.labels.len();
+        (
+            KernelOutput {
+                values: KernelValues::Components(self.labels),
+                row_count,
+                witness: self.witness,
+            },
+            self.peak,
+        )
     }
 
     fn iterate<G: Rows>(
@@ -199,40 +242,27 @@ impl Labels {
                 control()?;
                 for source in 0..n {
                     control()?;
-                    self.generation = add(self.generation, 1)?;
-                    let mut best = self.labels[source];
-                    let mut best_count = 0;
+                    let (mut best, mut best_count) = self.begin_row(source)?;
                     self.votes(graph.open(source)?, &mut best, &mut best_count, control)?;
                     if let Some(reverse) = reverse {
                         self.votes(reverse.open(source)?, &mut best, &mut best_count, control)?;
                     }
-                    self.next[source] = best;
-                    self.witness.nodes_touched = add(self.witness.nodes_touched, 1)?;
+                    self.finish_row(source, best)?;
                 }
-                // No vertex in this round can see another vertex's new label.
-                std::mem::swap(&mut self.labels, &mut self.next);
+                self.finish_round();
             }
         }
         control()?;
-        Ok((
-            KernelOutput {
-                values: KernelValues::Components(self.labels),
-                row_count: n,
-                witness: self.witness,
-            },
-            self.peak,
-        ))
+        Ok(self.finish())
     }
 }
 
-pub(super) fn execute(
+fn admit_call(
     call: &FnxCallSpec,
-    cx: &Control<'_>,
     graph: &SealedGraphView,
     limits: FnxExecutionLimits,
-    memory: FnxMemoryLimits,
     admission: &ResultAdmission,
-) -> Result<FnxResult> {
+) -> Result<(usize, usize)> {
     let FnxAlgorithm::Cdlp { max_iter } = call.algorithm() else {
         return Err(super::Error::UnsupportedAlgorithm(call.algorithm()));
     };
@@ -248,6 +278,19 @@ pub(super) fn execute(
         call.outputs().len(),
     )?;
     admit("estimated work", estimated, limits.max_estimated_work)?;
+    Ok((max_iter, estimated))
+}
+
+pub(super) fn execute(
+    call: &FnxCallSpec,
+    cx: &Control<'_>,
+    graph: &SealedGraphView,
+    limits: FnxExecutionLimits,
+    memory: FnxMemoryLimits,
+    admission: &ResultAdmission,
+) -> Result<FnxResult> {
+    let (max_iter, estimated) = admit_call(call, graph, limits, admission)?;
+    let n = graph.node_count();
     let mut control = || checkpoint(cx);
     let rows = SealedRows { cx, graph };
     let mut state = Labels::new(n, max_iter, memory.max_kernel_workspace_bytes)?;
@@ -281,6 +324,109 @@ pub(super) fn execute(
         peak,
         admission,
         &mut control,
+    )
+}
+
+pub(super) async fn execute_cooperative<Yield, YieldFuture>(
+    call: &FnxCallSpec,
+    graph: &SealedGraphView,
+    limits: FnxExecutionLimits,
+    memory: FnxMemoryLimits,
+    control: &mut super::cooperative::Cooperate<'_, Yield>,
+) -> Result<FnxResult>
+where
+    Yield: FnMut() -> YieldFuture,
+    YieldFuture: Future<Output = ()>,
+{
+    let admission = ResultAdmission::new(call, limits, memory)?;
+    let (max_iter, estimated) = admit_call(call, graph, limits, &admission)?;
+    let n = graph.node_count();
+    control.tick().await?;
+    let mut state = Labels::new(n, max_iter, memory.max_kernel_workspace_bytes)?;
+
+    // Zero updates still enforce the same loop-free graph law. Raw history
+    // and excluded endpoints consume scheduling fuel inside the cursor even
+    // when this scan produces no projected neighbor.
+    for source in 0..n {
+        control.tick().await?;
+        let mut row = graph.neighbor_cursor_controlled(control.cx, source, None)?;
+        while let Some((target, _)) = control.next(&mut row).await? {
+            control.tick().await?;
+            if target >= n {
+                return Err(ExecutionError::InvalidUpstreamResult.into());
+            }
+            if target == source {
+                return Err(ExecutionError::SelfLoopRefused.into());
+            }
+        }
+    }
+    for vertex in 0..n {
+        control.tick().await?;
+        state.labels.push(vertex);
+    }
+    if max_iter != 0 {
+        for values in [&mut state.next, &mut state.counts, &mut state.generations] {
+            for _ in 0..n {
+                control.tick().await?;
+                values.push(0);
+            }
+        }
+    }
+    let reverse =
+        if n != 0 && max_iter != 0 && graph.spec().directedness != Directedness::Undirected {
+            let remaining = memory
+                .max_kernel_workspace_bytes
+                .checked_sub(state.peak)
+                .ok_or(ExecutionError::SizeOverflow)?;
+            let reverse = control.reverse_projection(graph, remaining).await?;
+            state.peak = add(state.peak, reverse.charged_workspace_bytes())?;
+            admit(
+                "kernel workspace bytes",
+                state.peak,
+                memory.max_kernel_workspace_bytes,
+            )?;
+            Some(reverse)
+        } else {
+            None
+        };
+    if n != 0 {
+        for _ in 0..max_iter {
+            control.tick().await?;
+            for source in 0..n {
+                control.tick().await?;
+                let (mut best, mut best_count) = state.begin_row(source)?;
+                for face in std::iter::once(graph).chain(reverse.as_ref()) {
+                    let mut row = face.neighbor_cursor_controlled(control.cx, source, None)?;
+                    while let Some((neighbor, _)) = control.next(&mut row).await? {
+                        control.tick().await?;
+                        state.vote(neighbor, &mut best, &mut best_count)?;
+                    }
+                }
+                state.finish_row(source, best)?;
+            }
+            state.finish_round();
+        }
+    }
+    control.tick().await?;
+    let (output, peak) = state.finish();
+    drop(reverse);
+    let mut encoded = super::EncodedRows::new(call, output.row_count, &admission)?;
+    for vertex in 0..n {
+        control.tick().await?;
+        encoded.push(call, graph, &output.values, vertex, &mut || {
+            checkpoint(control.cx)
+        })?;
+    }
+    control.tick().await?;
+    finish_encoded(
+        call,
+        graph,
+        encoded,
+        output.witness,
+        "fgdb-prism/sealed-cdlp-cooperative-v1",
+        estimated,
+        peak,
+        &mut || checkpoint(control.cx),
     )
 }
 

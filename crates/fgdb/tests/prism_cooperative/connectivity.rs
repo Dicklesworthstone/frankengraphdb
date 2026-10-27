@@ -543,3 +543,451 @@ fn deep_dfs_and_whole_graph_scc_labeling_preserve_frames_across_actual_pending_p
         assert_eq!(contexts.outstanding_obligations(), 0);
     });
 }
+
+// A deliberately dense histogram oracle. It observes only the previous round,
+// counts reciprocal directed arcs twice and resolves ties by the complete VId.
+fn community_reference(
+    n: usize,
+    edges: &[(usize, usize)],
+    directed: bool,
+    iterations: usize,
+) -> Vec<Vec<FnxValue>> {
+    let mut adjacent = vec![vec![false; n]; n];
+    for &(source, target) in edges {
+        adjacent[source][target] = true;
+        if !directed {
+            adjacent[target][source] = true;
+        }
+    }
+    let mut labels: Vec<_> = (0..n).collect();
+    for _ in 0..iterations {
+        labels = (0..n)
+            .map(|source| {
+                let mut counts = vec![0usize; n];
+                for neighbor in 0..n {
+                    counts[labels[neighbor]] += usize::from(adjacent[source][neighbor]);
+                    if directed {
+                        counts[labels[neighbor]] += usize::from(adjacent[neighbor][source]);
+                    }
+                }
+                (0..n)
+                    .filter(|&label| counts[label] != 0)
+                    .min_by_key(|&label| (std::cmp::Reverse(counts[label]), label))
+                    .unwrap_or(labels[source])
+            })
+            .collect();
+    }
+    labels
+        .into_iter()
+        .enumerate()
+        .map(|(vertex, label)| {
+            vec![
+                FnxValue::Vertex(identity(vertex, n)),
+                FnxValue::Vertex(identity(label, n)),
+            ]
+        })
+        .collect()
+}
+
+#[test]
+fn cooperative_cdlp_matches_synchronous_rounds_and_independent_votes_on_small_topologies() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let possible = [(0, 1), (0, 2), (1, 0), (1, 2), (2, 0), (2, 1)];
+        for mask in 0u8..64 {
+            let edges: Vec<_> = possible
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| mask & (1 << bit) != 0)
+                .map(|(_, &edge)| edge)
+                .collect();
+            let db = stored(&contexts.commit(), 4, &edges).await;
+            for direction in [
+                Directedness::Directed,
+                Directedness::Reversed,
+                Directedness::Undirected,
+            ] {
+                let opt = options(direction);
+                let graph = projection(&db, &cx, opt).await;
+                for iterations in [0, 1, 2, 5] {
+                    let call = FnxCallSpec::cdlp(iterations);
+                    assert!(call.supports_cooperative_sealed_execution());
+                    let expected = community_reference(
+                        4,
+                        &edges,
+                        direction != Directedness::Undirected,
+                        iterations,
+                    );
+                    let sync = call
+                        .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                        .unwrap();
+                    assert_eq!(sync.rows, expected);
+                    let mut certificate = None;
+                    for q in [1, 7] {
+                        let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                        let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                        let (actual, pending) = drive(
+                            call.execute_sealed_cooperative(
+                                &controlled,
+                                &graph,
+                                opt.execution_limits,
+                                memory(),
+                                quantum(q),
+                                yield_now,
+                            ),
+                            &probe,
+                            q,
+                        );
+                        let actual = actual.unwrap();
+                        compare_execution(&actual, &sync);
+                        assert_eq!(actual.rows, expected, "mask={mask}, q={q}, {direction:?}");
+                        assert!(pending > 0);
+                        if let Some(previous) = &certificate {
+                            assert_eq!(&actual.certificate, previous);
+                        }
+                        certificate = Some(actual.certificate);
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn cooperative_cdlp_retains_exact_admission_and_zero_iteration_graph_laws() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let db = stored(&contexts.commit(), 4, &[(0, 1), (1, 0), (1, 2)]).await;
+        let call = FnxCallSpec::cdlp(3);
+        for direction in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            let opt = options(direction);
+            let graph = projection(&db, &cx, opt).await;
+            let expected = call
+                .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                .unwrap();
+            let bytes = call.outputs().len() * size_of::<String>()
+                + call
+                    .outputs()
+                    .iter()
+                    .map(|output| output.name.len())
+                    .sum::<usize>()
+                + 4 * (size_of::<Vec<FnxValue>>() + call.outputs().len() * size_of::<FnxValue>());
+            let limits = FnxExecutionLimits {
+                max_iterations: 3,
+                max_result_rows: 4,
+                max_estimated_work: expected.certificate.estimated_work,
+            };
+            let mem = FnxMemoryLimits {
+                max_kernel_workspace_bytes: expected.certificate.kernel_workspace_bytes,
+                max_result_bytes: bytes,
+            };
+            let exact = call
+                .execute_sealed_cooperative(&cx, &graph, limits, mem, quantum(1), yield_now)
+                .await
+                .unwrap();
+            compare_execution(&exact, &expected);
+            for (limits, mem) in [
+                (
+                    FnxExecutionLimits {
+                        max_iterations: 2,
+                        ..limits
+                    },
+                    mem,
+                ),
+                (
+                    FnxExecutionLimits {
+                        max_result_rows: 3,
+                        ..limits
+                    },
+                    mem,
+                ),
+                (
+                    FnxExecutionLimits {
+                        max_estimated_work: limits.max_estimated_work - 1,
+                        ..limits
+                    },
+                    mem,
+                ),
+                (
+                    limits,
+                    FnxMemoryLimits {
+                        max_result_bytes: bytes - 1,
+                        ..mem
+                    },
+                ),
+                (
+                    limits,
+                    FnxMemoryLimits {
+                        max_kernel_workspace_bytes: mem.max_kernel_workspace_bytes - 1,
+                        ..mem
+                    },
+                ),
+            ] {
+                let sync = call.execute_sealed(&cx, &graph, limits, mem).unwrap_err();
+                let cooperative = call
+                    .execute_sealed_cooperative(&cx, &graph, limits, mem, quantum(1), yield_now)
+                    .await
+                    .unwrap_err();
+                assert_eq!(format!("{cooperative:?}"), format!("{sync:?}"));
+            }
+        }
+        let loops = stored(&contexts.commit(), 2, &[(0, 0), (0, 1)]).await;
+        let opt = options(Directedness::Directed);
+        let graph = projection(&loops, &cx, opt).await;
+        assert!(matches!(
+            FnxCallSpec::cdlp(0)
+                .execute_sealed_cooperative(
+                    &cx,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(1),
+                    yield_now
+                )
+                .await,
+            Err(FnxSealedExecutionError::Execution(
+                FnxExecutionError::SelfLoopRefused
+            ))
+        ));
+        for n in [0, 512] {
+            let db = stored(&contexts.commit(), n, &[]).await;
+            let graph = projection(&db, &cx, options(Directedness::Undirected)).await;
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+            let (actual, pending) = drive(
+                call.execute_sealed_cooperative(
+                    &controlled,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(1),
+                    yield_now,
+                ),
+                &probe,
+                1,
+            );
+            assert_eq!(actual.unwrap().rows, community_reference(n, &[], false, 3));
+            assert!(pending >= 4 * n, "scalar-only populations must cooperate");
+        }
+    });
+}
+
+#[test]
+fn cooperative_cdlp_checks_every_live_refusal_and_cleans_up_every_suspended_phase() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let db = stored(&contexts.commit(), 3, &[(0, 1), (1, 0), (1, 2)]).await;
+        let anchor = db.read_session().unwrap().partition_root();
+        let call = FnxCallSpec::cdlp(2);
+        for direction in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            let opt = options(direction);
+            let graph = projection(&db, &cx, opt).await;
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+            let guards = Cell::new(0usize);
+            let (expected, pending) = drive(
+                call.execute_sealed_cooperative_with_checkpoint(
+                    &controlled,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(3),
+                    yield_now,
+                    || {
+                        guards.set(guards.get() + 1);
+                        Ok(())
+                    },
+                ),
+                &probe,
+                3,
+            );
+            let expected = expected.unwrap();
+            for stop in 1..=probe.calls() {
+                let refused = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                let controlled = cx.with_checkpoint_probe(Arc::clone(&refused));
+                let (actual, _) = drive(
+                    call.execute_sealed_cooperative(
+                        &controlled,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(3),
+                        yield_now,
+                    ),
+                    &refused,
+                    3,
+                );
+                assert!(matches!(actual, Err(FnxSealedExecutionError::Cancelled(_))));
+                assert_eq!(refused.calls(), stop);
+            }
+            for stop in 1..=guards.get() {
+                let mut seen = 0;
+                let error = call
+                    .execute_sealed_cooperative_with_checkpoint(
+                        &cx,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(3),
+                        yield_now,
+                        || {
+                            seen += 1;
+                            if seen == stop {
+                                Err(SealedProjectionError::Guard(Box::new(LiveRefusal(stop))))
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await
+                    .unwrap_err();
+                live_refusal(error, stop);
+                assert_eq!(seen, stop);
+            }
+            let waker = Waker::from(Arc::new(Wakes::default()));
+            let mut task = Context::from_waker(&waker);
+            for stop in 0..=pending {
+                let revoked = Cell::new(false);
+                let mut future = Box::pin(call.execute_sealed_cooperative_with_checkpoint(
+                    &cx,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(3),
+                    yield_now,
+                    || {
+                        if revoked.get() {
+                            Err(SealedProjectionError::Guard(Box::new(LiveRefusal(stop))))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                ));
+                for _ in 0..stop {
+                    assert!(future.as_mut().poll(&mut task).is_pending());
+                }
+                revoked.set(true);
+                let Poll::Ready(result) = future.as_mut().poll(&mut task) else {
+                    panic!("revocation must stop before resuming any source or label step");
+                };
+                live_refusal(result.unwrap_err(), stop);
+                drop(future);
+                let mut abandoned = Box::pin(call.execute_sealed_cooperative(
+                    &cx,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(3),
+                    yield_now,
+                ));
+                for _ in 0..stop {
+                    assert!(abandoned.as_mut().poll(&mut task).is_pending());
+                }
+                drop(abandoned);
+                assert_eq!(contexts.outstanding_obligations(), 0);
+                assert_eq!(db.read_session().unwrap().partition_root(), anchor);
+            }
+            assert_eq!(
+                call.execute_sealed_cooperative(
+                    &cx,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(7),
+                    yield_now,
+                )
+                .await
+                .unwrap(),
+                expected
+            );
+        }
+    });
+}
+
+#[test]
+fn historical_cdlp_hosts_yield_through_hidden_history_and_reverse_construction() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let (db, original) = database(&contexts.commit()).await;
+        let text = "CALL fnx.cdlp(max_iter => 4) YIELD component AS community, vertex AS id";
+        let call = FnxCallSpec::bind(text, &FnxParameters::new()).unwrap();
+        for direction in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            for at in [original, db.frontier().unwrap()] {
+                let mut opt = options(direction);
+                opt.as_of = Some(at);
+                opt.projection.self_loops = SelfLoopPolicy::Drop;
+                let graph = projection(&db, &cx, opt).await;
+                let sync = call
+                    .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                    .unwrap();
+                let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                let (actual, pending) = drive(
+                    call.execute_sealed_cooperative(
+                        &controlled,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(1),
+                        yield_now,
+                    ),
+                    &probe,
+                    1,
+                );
+                let actual = actual.unwrap();
+                compare_execution(&actual, &sync);
+                assert!(
+                    pending > 700,
+                    "reverse setup and hidden raw incidences must yield"
+                );
+                assert_eq!(actual.columns, vec!["community", "id"]);
+                assert_eq!(actual.rows.len(), 4);
+                assert!(
+                    actual
+                        .rows
+                        .iter()
+                        .all(|row| !row.contains(&FnxValue::Vertex(VId(99))))
+                );
+                let hosted = db
+                    .call_fnx_sealed_cooperative(
+                        &cx,
+                        text,
+                        &FnxParameters::new(),
+                        opt,
+                        memory(),
+                        SealedLimits::default(),
+                        quantum(7),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(hosted.analytics, actual);
+                assert_eq!(hosted.selection, opt.selection);
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
