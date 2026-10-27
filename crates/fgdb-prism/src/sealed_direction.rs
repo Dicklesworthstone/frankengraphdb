@@ -21,6 +21,20 @@ pub(super) struct Incidences<'a> {
 }
 
 impl<'a> Incidences<'a> {
+    /// An empty face keeps the ordinary first-pull live check and scan-budget
+    /// protocol without opening a descriptor or visiting retained history.
+    pub(super) fn empty(source: VId, undirected: bool) -> Self {
+        Self {
+            outgoing: None,
+            incoming: None,
+            out_head: None,
+            in_head: None,
+            source,
+            undirected,
+            finished: false,
+        }
+    }
+
     pub(super) fn open(
         cx: &Control<'_>,
         partition: &'a SealedPartition,
@@ -40,15 +54,7 @@ impl<'a> Incidences<'a> {
             // A forbidden relation never opens either incidence face. Keep the
             // original authenticated image untouched, rather than inventing
             // an empty source or filtering a computed neighbor/degree result.
-            return Ok(Self {
-                outgoing: None,
-                incoming: None,
-                out_head: None,
-                in_head: None,
-                source,
-                undirected: direction == Directedness::Undirected,
-                finished: false,
-            });
+            return Ok(Self::empty(source, direction == Directedness::Undirected));
         }
         let outgoing = if direction == Directedness::Reversed {
             None

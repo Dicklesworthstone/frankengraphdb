@@ -4,12 +4,283 @@
 
 use super::*;
 use fgdb_prism::{FnxGraphKind, GraphView, SnapshotGraphView};
+use fgdb_strata::tiered::sealed::{SealedScanBudget, SealedScanStep};
 
 const DIRECTIONS: [Directedness; 3] = [
     Directedness::Directed,
     Directedness::Reversed,
     Directedness::Undirected,
 ];
+
+fn assert_admitted_empty_cursor(graph: &SealedGraphView, query: &QueryCx, source: usize) {
+    assert_eq!(graph.degree(source), Some(0));
+    let probe = Arc::new(SimulationCheckpointProbe::new(None));
+    let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
+    let mut row = graph.neighbor_cursor(&controlled, source).unwrap();
+    let mut empty = SealedScanBudget::new(0);
+    assert!(matches!(
+        row.next_budgeted(&controlled, &mut empty).unwrap(),
+        SealedScanStep::Yield
+    ));
+    let mut fuel = SealedScanBudget::new(1);
+    assert!(matches!(
+        row.next_budgeted(&controlled, &mut fuel).unwrap(),
+        SealedScanStep::End
+    ));
+    assert_eq!(
+        fuel.remaining(),
+        1,
+        "a proved empty row visits no retained incidence"
+    );
+    let checks = probe.calls();
+    assert!(
+        checks > 0 && checks <= 4,
+        "empty-row work is independent of retained history"
+    );
+    assert!(row.next(&controlled).unwrap().is_none());
+    assert_eq!(probe.calls(), checks, "successful EOF is fused");
+    for stop in 1..=checks {
+        let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+        let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
+        let result = (|| {
+            let mut row = graph.neighbor_cursor(&controlled, source)?;
+            let mut fuel = SealedScanBudget::new(0);
+            let first = row.next_budgeted(&controlled, &mut fuel);
+            if first.is_err() {
+                assert!(row.next(query).unwrap().is_none());
+                return first;
+            }
+            assert!(matches!(first.unwrap(), SealedScanStep::Yield));
+            let result = row.next_budgeted(&controlled, &mut SealedScanBudget::new(1));
+            assert!(
+                row.next(query).unwrap().is_none(),
+                "a refused cursor cannot resume"
+            );
+            result
+        })();
+        assert!(matches!(
+            result,
+            Err(SealedProjectionError::Read(SealedError::Interrupted(_)))
+        ));
+        assert_eq!(probe.calls(), stop);
+    }
+    for lower in [None, Some(VId(0)), Some(VId(u128::MAX))] {
+        assert!(cursor_row(graph, query, source, lower).is_empty());
+    }
+}
+
+#[test]
+fn admitted_empty_rows_skip_history_and_preserve_complete_kernel_results() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        for id in [0, 1, 2, 3, u128::MAX] {
+            batch.create_vertex(VId(id), vec![LabelId(1)], vec![]);
+        }
+        batch.create_vertex(VId(99), vec![LabelId(2)], vec![]);
+        for id in 0..32 {
+            batch.add_edge(
+                EId(id),
+                VId(0),
+                VId(1),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(2))],
+            );
+            // Both physical faces contain long excluded rows. Selection must
+            // discard their endpoint before inspecting an invalid weight.
+            for (eid, source, target) in [(100 + id, 2, 99), (200 + id, 99, 2)] {
+                batch.add_edge(
+                    EId(eid),
+                    VId(source),
+                    VId(target),
+                    vec![(PropertyKeyId(1), CanonicalScalar::Bool(true))],
+                );
+            }
+        }
+        batch.add_edge(
+            EId(900),
+            VId(3),
+            VId(3),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(4))],
+        );
+        batch.add_edge(
+            EId(901),
+            VId(1),
+            VId(u128::MAX),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(5))],
+        );
+        let first = db.write(&commit, batch).await.unwrap();
+        let mut retire = WriteBatch::new(RelationId(1));
+        for id in 0..32 {
+            retire.delete_edge(EId(id));
+        }
+        db.write(&commit, retire).await.unwrap();
+        let view = db.read_session().unwrap();
+        let image = db
+            .store
+            .seal_partition(
+                &query,
+                view.partition_root(),
+                first,
+                SealedLimits::default(),
+            )
+            .await
+            .unwrap();
+
+        // Negative performance control: this authentic source still retains
+        // history. The unprojected row spends fuel before reaching its EOF.
+        let mut raw = image
+            .row(&query, VId(0), RelationId(1), view.frontier())
+            .unwrap();
+        let mut fuel = SealedScanBudget::new(1);
+        assert!(matches!(
+            raw.next_budgeted(&query, &mut fuel).unwrap(),
+            SealedScanStep::Yield
+        ));
+        assert_eq!(fuel.remaining(), 0);
+
+        for cut in [first, view.frontier()] {
+            for direction in DIRECTIONS {
+                for reduction in [
+                    ParallelEdgePolicy::Minimum,
+                    ParallelEdgePolicy::Maximum,
+                    ParallelEdgePolicy::Sum,
+                    ParallelEdgePolicy::CollapseUnit,
+                ] {
+                    for loops in [SelfLoopPolicy::Drop, SelfLoopPolicy::Keep] {
+                        let mut opt = options();
+                        opt.as_of = Some(cut);
+                        opt.projection = ProjectionSpec {
+                            directedness: direction,
+                            parallel_edges: reduction,
+                            self_loops: loops,
+                        };
+                        let (graph, decoded) = assert_projection(&view, &query, &image, opt);
+                        for source in 0..graph.node_count() {
+                            if graph.degree(source) == Some(0) {
+                                assert_admitted_empty_cursor(&graph, &query, source);
+                            }
+                        }
+                        assert!(matches!(graph.neighbor_cursor(&query, graph.node_count()),
+                            Err(SealedProjectionError::UnknownOrdinal(ordinal))
+                                if ordinal == graph.node_count()));
+                        if cut == view.frontier() {
+                            for empty in [VId(0), VId(2)] {
+                                assert_eq!(
+                                    graph.degree(graph.vertex_ordinal(empty).unwrap()),
+                                    Some(0)
+                                );
+                            }
+                        }
+                        if cut != view.frontier()
+                            || loops != SelfLoopPolicy::Drop
+                            || reduction != ParallelEdgePolicy::Minimum
+                        {
+                            continue;
+                        }
+                        let component = if direction == Directedness::Undirected {
+                            FnxCallSpec::connected_components()
+                        } else {
+                            FnxCallSpec::strongly_connected_components()
+                        };
+                        let calls = [
+                            FnxCallSpec::single_source_shortest_path_length(VId(0), None),
+                            FnxCallSpec::single_source_dijkstra_path_length(
+                                fgdb_prism::DijkstraOptions::new(VId(0), None).unwrap(),
+                            ),
+                            FnxCallSpec::pagerank(
+                                fgdb_prism::PageRankOptions::fixed_iterations(0.85, 4, true)
+                                    .unwrap(),
+                            ),
+                            FnxCallSpec::weakly_connected_components(),
+                            component,
+                        ];
+                        for call in calls {
+                            let expected = call
+                                .execute(&decoded, opt.execution_limits, || query.checkpoint())
+                                .unwrap();
+                            let synchronous = call
+                                .execute_sealed(&query, &graph, opt.execution_limits, memory())
+                                .unwrap();
+                            assert_eq!(synchronous.rows, expected.rows);
+                            assert_eq!(
+                                synchronous.certificate.result_digest,
+                                expected.certificate.result_digest
+                            );
+                            let cooperative = call
+                                .execute_sealed_cooperative(
+                                    &query,
+                                    &graph,
+                                    opt.execution_limits,
+                                    memory(),
+                                    std::num::NonZeroUsize::new(1).unwrap(),
+                                    asupersync::runtime::yield_now::yield_now,
+                                )
+                                .await
+                                .unwrap();
+                            assert_eq!(cooperative.rows, synchronous.rows);
+                            assert_eq!(
+                                cooperative.certificate.result_digest,
+                                synchronous.certificate.result_digest
+                            );
+                            assert_eq!(
+                                cooperative.certificate.witness,
+                                synchronous.certificate.witness
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // These are new projections, before a degree proof exists. They must
+        // still inspect and reject selected bad weights, loops and parallels.
+        let build = |opt: FnxReadOptions| {
+            view.prism_sealed_projection_at(
+                &query,
+                &image,
+                opt.as_of.unwrap_or(view.frontier()),
+                opt.selection,
+                opt.projection,
+                opt.projection_limits,
+                opt.source_limits,
+            )
+        };
+        let mut invalid = options();
+        invalid.selection.vertex_label = None;
+        assert!(matches!(
+            build(invalid),
+            Err(SealedReadError::Projection(SealedProjectionError::Weight {
+                reason: FnxWeightError::NotNumeric,
+                ..
+            }))
+        ));
+        invalid = options();
+        invalid.projection.self_loops = SelfLoopPolicy::Reject;
+        assert!(matches!(
+            build(invalid),
+            Err(SealedReadError::Projection(
+                SealedProjectionError::Projection(ProjectionError::SelfLoop(EId(900)))
+            ))
+        ));
+        invalid = options();
+        invalid.as_of = Some(first);
+        invalid.projection.parallel_edges = ParallelEdgePolicy::Reject;
+        assert!(matches!(
+            build(invalid),
+            Err(SealedReadError::Projection(
+                SealedProjectionError::Projection(ProjectionError::ParallelEdge { .. })
+            ))
+        ));
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
 
 fn projected(
     view: &EmbeddedReadView,

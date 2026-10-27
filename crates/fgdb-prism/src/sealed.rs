@@ -786,6 +786,21 @@ impl SealedGraphView {
         source: usize,
         lower_bound: Option<VId>,
     ) -> Result<SealedNeighborCursor<'_>, SealedProjectionError> {
+        // Complete projection admission already visited every retained row
+        // and proved this exact selected/reduced degree. A zero row can still
+        // hide substantial retired or excluded history; kernels need not
+        // decode it again on every visit. Construction deliberately calls
+        // SealedNeighborCursor::open directly, before this proof exists.
+        if self.degree(source) == Some(0) {
+            return SealedNeighborCursor::empty(
+                cx,
+                &self.0.vertices,
+                self.0.vertex_prefix.first(),
+                &self.0.config,
+                self.0.mask,
+                source,
+            );
+        }
         SealedNeighborCursor::open(
             cx,
             &self.0.partition,
@@ -816,6 +831,37 @@ pub struct SealedNeighborCursor<'a> {
 }
 
 impl<'a> SealedNeighborCursor<'a> {
+    fn empty(
+        cx: &Control<'_>,
+        vertices: &'a [VId],
+        vertex_prefix: Option<&'a OrdinalPrefix>,
+        config: &'a SealedProjectionSpec,
+        mask: SealedProjectionMask,
+        source: usize,
+    ) -> Result<Self, SealedProjectionError> {
+        checkpoint(cx)?;
+        let source = vertices
+            .get(source)
+            .copied()
+            .ok_or(SealedProjectionError::UnknownOrdinal(source))?;
+        Ok(Self {
+            raw: Incidences::empty(
+                source,
+                config.projection.directedness == Directedness::Undirected,
+            ),
+            vertices,
+            vertex_prefix,
+            config,
+            mask,
+            source,
+            pending: None,
+            accumulating: None,
+            // The first pull must still observe live cancellation. Only a
+            // successful EOF or failure makes a cursor terminal.
+            finished: false,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn open(
         cx: &Control<'_>,
