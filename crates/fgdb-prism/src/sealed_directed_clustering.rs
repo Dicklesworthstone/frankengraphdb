@@ -8,8 +8,8 @@
 //! row stays a pair of compressed cursors with constant-sized lookahead.
 
 use super::{
-    ComplexityWitness, Cursor, ExecutionError, FnxCallSpec, FnxExecutionLimits, FnxMemoryLimits,
-    FnxResult, KernelOutput, KernelValues, Result, ResultAdmission, Rows, SealedGraphView,
+    ComplexityWitness, Cursor, Delivery, ExecutionError, Finished, FnxCallSpec, FnxExecutionLimits,
+    FnxMemoryLimits, KernelOutput, KernelValues, Result, ResultAdmission, Rows, SealedGraphView,
     SealedRows, add, admit, checkpoint, directional_pass_work, finish, mul, reserve,
 };
 use crate::Directedness;
@@ -36,7 +36,7 @@ pub(super) fn execute(
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
     admission: &ResultAdmission,
-) -> Result<FnxResult> {
+) -> Result<Finished> {
     let n = graph.node_count();
     admission.rows(n)?;
     let mut control = || checkpoint(cx);
@@ -590,14 +590,15 @@ pub(super) async fn execute_cooperative<Yield, YieldFuture>(
     graph: &SealedGraphView,
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
+    delivery: Delivery,
     control: &mut super::cooperative::Cooperate<'_, Yield>,
-) -> Result<FnxResult>
+) -> Result<Finished>
 where
     Yield: FnMut() -> YieldFuture,
     YieldFuture: Future<Output = ()>,
 {
     let n = graph.node_count();
-    let admission = ResultAdmission::new(call, limits, memory)?;
+    let admission = ResultAdmission::for_delivery(call, limits, memory, delivery)?;
     admission.rows(n)?;
     control.tick().await?;
     let kernel = "fgdb-prism/sealed-directed-clustering-retained-cost-cooperative-v1";
@@ -748,6 +749,7 @@ where
         call,
         graph,
         encoded,
+        values,
         witness,
         kernel,
         work,

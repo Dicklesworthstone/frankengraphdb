@@ -7,8 +7,8 @@
 //! drivers differ only in their source pulls and scheduling checkpoints.
 
 use super::{
-    ComplexityWitness, Cursor, ExecutionError, FnxCallSpec, FnxExecutionLimits, FnxMemoryLimits,
-    FnxResult, KernelOutput, KernelValues, Result, ResultAdmission, Rows, SealedGraphView,
+    ComplexityWitness, Cursor, Delivery, ExecutionError, Finished, FnxCallSpec, FnxExecutionLimits,
+    FnxMemoryLimits, KernelOutput, KernelValues, Result, ResultAdmission, Rows, SealedGraphView,
     SealedRows, add, admit, checkpoint, directional_pass_work, finish, finish_encoded, mul,
     require_loop_free_degree, reserve,
 };
@@ -301,7 +301,7 @@ pub(super) fn execute(
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
     admission: &ResultAdmission,
-) -> Result<FnxResult> {
+) -> Result<Finished> {
     let estimated = prepare(call, graph, limits, memory, admission)?;
     let rows = SealedRows { cx, graph };
     let mut control = || checkpoint(cx);
@@ -323,13 +323,14 @@ pub(super) async fn execute_cooperative<Yield, YieldFuture>(
     graph: &SealedGraphView,
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
+    delivery: Delivery,
     control: &mut super::cooperative::Cooperate<'_, Yield>,
-) -> Result<FnxResult>
+) -> Result<Finished>
 where
     Yield: FnMut() -> YieldFuture,
     YieldFuture: Future<Output = ()>,
 {
-    let admission = ResultAdmission::new(call, limits, memory)?;
+    let admission = ResultAdmission::for_delivery(call, limits, memory, delivery)?;
     let estimated = prepare(call, graph, limits, memory, &admission)?;
     control.tick().await?;
     let n = graph.node_count();
@@ -367,6 +368,7 @@ where
         call,
         graph,
         encoded,
+        output.values,
         output.witness,
         "fgdb-prism/sealed-core-bucket-cooperative-v1",
         estimated,

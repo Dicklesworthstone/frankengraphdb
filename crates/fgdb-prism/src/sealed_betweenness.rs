@@ -10,8 +10,8 @@
 //! when every final score remained finite.
 
 use super::{
-    ComplexityWitness, Cursor, ExecutionError, FnxCallSpec, FnxExecutionLimits, FnxMemoryLimits,
-    FnxResult, KernelOutput, KernelValues, Result, ResultAdmission, Rows, SealedGraphView,
+    ComplexityWitness, Cursor, ExecutionError, Finished, FnxCallSpec, FnxExecutionLimits,
+    FnxMemoryLimits, KernelOutput, KernelValues, Result, ResultAdmission, Rows, SealedGraphView,
     SealedRows, add, admit, checkpoint, directional_pass_work, finish, mul,
     require_loop_free_degree, reserve,
 };
@@ -267,7 +267,7 @@ pub(super) fn execute(
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
     admission: &ResultAdmission,
-) -> Result<FnxResult> {
+) -> Result<Finished> {
     let estimated = prepare(call, graph, limits, memory, admission)?;
     let rows = SealedRows { cx, graph };
     let mut control = || checkpoint(cx);

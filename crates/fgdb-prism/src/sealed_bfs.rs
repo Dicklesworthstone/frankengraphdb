@@ -18,8 +18,8 @@
 //! and keeps the registered deterministic result and resource contracts.
 
 use super::{
-    ComplexityWitness, Cursor, EncodedRows, ExecutionError, FnxAlgorithm, FnxCallSpec,
-    FnxExecutionLimits, FnxMemoryLimits, FnxResult, KernelOutput, KernelValues, Result,
+    ComplexityWitness, Cursor, Delivery, EncodedRows, ExecutionError, Finished, FnxAlgorithm,
+    FnxCallSpec, FnxExecutionLimits, FnxMemoryLimits, KernelOutput, KernelValues, Result,
     ResultAdmission, Rows, SealedGraphView, SealedRows, add, checkpoint, finish_bfs,
     finish_encoded_bfs, mul, reserve,
 };
@@ -564,7 +564,7 @@ pub(super) fn execute(
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
     admission: &ResultAdmission,
-) -> Result<Option<FnxResult>> {
+) -> Result<Option<Finished>> {
     let mut control = || checkpoint(cx);
     let Some(state) = prepare(call, graph, limits, memory, admission, &mut control)? else {
         return Ok(None);
@@ -600,13 +600,14 @@ pub(super) async fn execute_cooperative<Yield, YieldFuture>(
     graph: &SealedGraphView,
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
+    delivery: Delivery,
     control: &mut super::cooperative::Cooperate<'_, Yield>,
-) -> Result<Option<FnxResult>>
+) -> Result<Option<Finished>>
 where
     Yield: FnMut() -> YieldFuture,
     YieldFuture: Future<Output = ()>,
 {
-    let admission = ResultAdmission::new(call, limits, memory)?;
+    let admission = ResultAdmission::for_delivery(call, limits, memory, delivery)?;
     let Some(mut state) = prepare(call, graph, limits, memory, &admission, &mut || {
         checkpoint(control.cx)
     })?
@@ -661,6 +662,7 @@ where
         call,
         graph,
         encoded,
+        output.values,
         output.witness,
         "fgdb-prism/sealed-bfs-retained-pull-cooperative-v2",
         estimated,

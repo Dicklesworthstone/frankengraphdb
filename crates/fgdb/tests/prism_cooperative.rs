@@ -14,10 +14,10 @@ use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_prism::{
     Directedness, FnxAlgorithm, FnxArgument, FnxCallSpec, FnxExecutionError, FnxExecutionLimits,
-    FnxMemoryLimits, FnxParameters, FnxReadOptions, FnxResult, FnxSealedExecutionError,
-    FnxSealedReadError, FnxSelection, FnxSourceLimits, FnxWeightSpec, MissingWeightPolicy,
-    PageRankOptions, ParallelEdgePolicy, ProjectionLimits, ProjectionSpec, SealedGraphView,
-    SealedProjectionError, SelfLoopPolicy,
+    FnxGraphKind, FnxMemoryLimits, FnxParameters, FnxReadOptions, FnxResult, FnxRowCursor,
+    FnxSealedExecutionError, FnxSealedReadError, FnxSelection, FnxSourceLimits, FnxValue,
+    FnxWeightSpec, MissingWeightPolicy, PageRankOptions, ParallelEdgePolicy, ProjectionLimits,
+    ProjectionSpec, SealedGraphView, SealedProjectionError, SelfLoopPolicy,
 };
 use fgdb_strata::tiered::sealed::{SealedLimits, SealedScanBudget, SealedScanStep};
 use fgdb_types::context::SimulationCheckpointProbe;
@@ -49,6 +49,276 @@ mod dijkstra;
 mod distance;
 #[path = "prism_cooperative/eigenvector.rs"]
 mod eigenvector;
+
+fn retained_calls() -> [FnxCallSpec; 19] {
+    let bind = |text| FnxCallSpec::bind(text, &FnxParameters::new()).unwrap();
+    [
+        FnxCallSpec::pagerank(PageRankOptions::fixed_iterations(0.85, 2, true).unwrap()),
+        FnxCallSpec::single_source_shortest_path_length(VId(1), None),
+        FnxCallSpec::connected_components(),
+        FnxCallSpec::weakly_connected_components(),
+        FnxCallSpec::strongly_connected_components(),
+        FnxCallSpec::single_source_dijkstra_path_length(
+            fgdb_prism::DijkstraOptions::new(VId(1), None).unwrap(),
+        ),
+        FnxCallSpec::triangles(),
+        FnxCallSpec::clustering_coefficient(),
+        FnxCallSpec::cdlp(3),
+        FnxCallSpec::directed_clustering_coefficient(),
+        bind("CALL fnx.in_degree_centrality() YIELD score AS value, vertex AS id"),
+        bind("CALL fnx.out_degree_centrality() YIELD vertex AS id"),
+        bind("CALL fnx.degree_centrality() YIELD score AS value, vertex AS id"),
+        bind("CALL fnx.closeness_centrality()"),
+        bind("CALL fnx.harmonic_centrality()"),
+        bind("CALL fnx.betweenness_centrality()"),
+        bind("CALL fnx.core_number() YIELD core AS value, vertex AS id"),
+        bind("CALL fnx.eigenvector_centrality()"),
+        bind("CALL fnx.load_centrality()"),
+    ]
+}
+
+fn compare_retained(mut cursor: FnxRowCursor, expected: &FnxResult, vertices: usize) {
+    assert_eq!(cursor.certificate(), &expected.certificate);
+    assert_eq!(cursor.remaining(), expected.rows.len());
+    let maximum = expected
+        .rows
+        .iter()
+        .flatten()
+        .filter_map(|value| match value {
+            FnxValue::Integer(value) => Some(*value),
+            _ => None,
+        })
+        .max();
+    assert_eq!(cursor.max_integer(), maximum);
+    let mut row = vec![FnxValue::Integer(u64::MAX)];
+    assert!(matches!(
+        cursor.next_row(&mut row, || Err(LiveRefusal(17))),
+        Err(FnxExecutionError::Cancelled(LiveRefusal(17)))
+    ));
+    assert!(row.is_empty());
+    assert_eq!(cursor.remaining(), expected.rows.len());
+    let mut examined = 0;
+    for (index, expected_row) in expected.rows.iter().enumerate() {
+        assert!(
+            cursor
+                .next_row(&mut row, || {
+                    examined += 1;
+                    Ok::<_, LiveRefusal>(())
+                })
+                .unwrap()
+        );
+        assert_eq!(&row, expected_row);
+        assert_eq!(cursor.remaining(), expected.rows.len() - index - 1);
+    }
+    assert!(
+        !cursor
+            .next_row(&mut row, || {
+                examined += 1;
+                Ok::<_, LiveRefusal>(())
+            })
+            .unwrap()
+    );
+    assert_eq!(
+        examined, vertices,
+        "unreachable ordinals still poll live control"
+    );
+    assert!(row.is_empty());
+    assert!(
+        !cursor
+            .next_row(&mut row, || -> Result<(), LiveRefusal> {
+                panic!("an exhausted cursor has no ordinal left to examine")
+            })
+            .unwrap()
+    );
+}
+
+#[test]
+fn all_registered_sealed_families_retain_exact_rows_certificates_and_control_cadence() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let db = small_database(&contexts.commit(), 3, false).await;
+        for direction in [Directedness::Directed, Directedness::Reversed, Directedness::Undirected] {
+            let opt = options(direction);
+            let graph = projection(&db, &cx, opt).await;
+            for call in retained_calls() {
+                let compatible = match call.signature().graph_kind {
+                    FnxGraphKind::Any => true,
+                    FnxGraphKind::Directed => direction != Directedness::Undirected,
+                    FnxGraphKind::Undirected => direction == Directedness::Undirected,
+                };
+                if !compatible { continue; }
+                assert!(call.supports_sealed_execution());
+                assert!(call.supports_cooperative_sealed_execution());
+                let collected_checks = Cell::new(0);
+                let collected = call.execute_sealed_with_checkpoint(&cx, &graph,
+                    opt.execution_limits, memory(), || {
+                        collected_checks.set(collected_checks.get() + 1);
+                        Ok(())
+                    }).unwrap();
+                let retained_checks = Cell::new(0);
+                let retained = call.execute_sealed_rows_with_checkpoint(&cx, &graph,
+                    opt.execution_limits, memory(), || {
+                        retained_checks.set(retained_checks.get() + 1);
+                        Ok(())
+                    }).unwrap();
+                assert_eq!(retained_checks.get(), collected_checks.get());
+                compare_retained(retained, &collected, graph.node_count());
+                // The final source guard cannot publish a cursor or certificate.
+                let stopped = Cell::new(0);
+                live_refusal(call.execute_sealed_rows_with_checkpoint(&cx, &graph,
+                    opt.execution_limits, memory(), || {
+                        stopped.set(stopped.get() + 1);
+                        if stopped.get() == collected_checks.get() {
+                            Err(SealedProjectionError::Guard(Box::new(LiveRefusal(stopped.get()))))
+                        } else { Ok(()) }
+                    }).unwrap_err(), collected_checks.get());
+                for q in [1, 7, 256] {
+                    let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                    let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                    let (expected, pending) = drive(call.execute_sealed_cooperative(
+                        &controlled, &graph, opt.execution_limits, memory(), quantum(q), yield_now),
+                        &probe, q);
+                    let expected = expected.unwrap();
+                    let total = probe.calls();
+                    let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                    let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                    let (actual, retained_pending) = drive(call.execute_sealed_cooperative_rows(
+                        &controlled, &graph, opt.execution_limits, memory(), quantum(q), yield_now),
+                        &probe, q);
+                    assert_eq!(retained_pending, pending);
+                    assert_eq!(probe.calls(), total);
+                    compare_retained(actual.unwrap(), &expected, graph.node_count());
+                }
+                let row_bytes = size_of::<Vec<FnxValue>>() + call.outputs().len() * size_of::<FnxValue>();
+                let columns = call.outputs().len() * size_of::<String>()
+                    + call.outputs().iter().map(|column| column.name.len()).sum::<usize>();
+                let exact_limits = FnxExecutionLimits {
+                    max_result_rows: collected.rows.len(), ..opt.execution_limits
+                };
+                let exact_memory = FnxMemoryLimits {
+                    max_result_bytes: columns + row_bytes * collected.rows.len(), ..memory()
+                };
+                compare_retained(call.execute_sealed_rows(&cx, &graph, exact_limits, exact_memory)
+                    .unwrap(), &collected, graph.node_count());
+                for (limits, memory, resource) in [
+                    (FnxExecutionLimits {max_result_rows: collected.rows.len() - 1, ..exact_limits},
+                        exact_memory, "result rows"),
+                    (exact_limits, FnxMemoryLimits {max_result_bytes: exact_memory.max_result_bytes - 1,
+                        ..exact_memory}, "result bytes"),
+                ] {
+                    for error in [
+                        call.execute_sealed_rows(&cx, &graph, limits, memory).unwrap_err(),
+                        call.execute_sealed_cooperative_rows(&cx, &graph, limits, memory,
+                            quantum(3), yield_now).await.unwrap_err(),
+                    ] {
+                        assert!(matches!(error, FnxSealedExecutionError::Execution(
+                            FnxExecutionError::LimitExceeded {resource: actual, ..}) if actual == resource));
+                    }
+                }
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn retained_cooperative_calls_preserve_every_guard_cut_and_release_dropped_futures() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let db = small_database(&contexts.commit(), 3, false).await;
+        for call in retained_calls() {
+            let direction = if call.signature().graph_kind == FnxGraphKind::Directed {
+                Directedness::Directed
+            } else {
+                Directedness::Undirected
+            };
+            let opt = options(direction);
+            let graph = projection(&db, &cx, opt).await;
+            let checks = Cell::new(0);
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+            let (completed, pending) = drive(
+                call.execute_sealed_cooperative_rows_with_checkpoint(
+                    &controlled,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(7),
+                    yield_now,
+                    || {
+                        checks.set(checks.get() + 1);
+                        Ok(())
+                    },
+                ),
+                &probe,
+                7,
+            );
+            let certificate = completed.unwrap().certificate().clone();
+            for stop in 1..=checks.get() {
+                let calls = Cell::new(0);
+                let error = call
+                    .execute_sealed_cooperative_rows_with_checkpoint(
+                        &cx,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(7),
+                        yield_now,
+                        || {
+                            calls.set(calls.get() + 1);
+                            if calls.get() == stop {
+                                Err(SealedProjectionError::Guard(Box::new(LiveRefusal(stop))))
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await
+                    .unwrap_err();
+                live_refusal(error, stop);
+                assert_eq!(calls.get(), stop);
+            }
+            let wakes = Arc::new(Wakes::default());
+            let waker = Waker::from(wakes);
+            let mut task = Context::from_waker(&waker);
+            for stop in 0..=pending {
+                let mut future = Box::pin(call.execute_sealed_cooperative_rows(
+                    &cx,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(7),
+                    yield_now,
+                ));
+                for _ in 0..stop {
+                    assert!(future.as_mut().poll(&mut task).is_pending());
+                }
+                drop(future);
+                assert_eq!(contexts.outstanding_obligations(), 0);
+            }
+            assert_eq!(
+                call.execute_sealed_cooperative_rows(
+                    &cx,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(3),
+                    yield_now
+                )
+                .await
+                .unwrap()
+                .certificate(),
+                &certificate
+            );
+        }
+    });
+}
 
 fn options(direction: Directedness) -> FnxReadOptions {
     FnxReadOptions {

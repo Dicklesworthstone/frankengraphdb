@@ -12,8 +12,8 @@
 //! does. These are admission-model units, not an instruction/deadline guarantee.
 
 use super::{
-    ComplexityWitness, Cursor, ExecutionError, FnxAlgorithm, FnxCallSpec, FnxExecutionLimits,
-    FnxMemoryLimits, FnxResult, KernelOutput, KernelValues, Result, ResultAdmission, Rows,
+    ComplexityWitness, Cursor, Delivery, ExecutionError, Finished, FnxAlgorithm, FnxCallSpec,
+    FnxExecutionLimits, FnxMemoryLimits, KernelOutput, KernelValues, Result, ResultAdmission, Rows,
     SealedGraphView, SealedRows, add, admit, checkpoint, finish, mul, reserve,
 };
 use crate::sealed_control::Control;
@@ -26,7 +26,7 @@ pub(super) fn execute(
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
     admission: &ResultAdmission,
-) -> Result<FnxResult> {
+) -> Result<Finished> {
     let coefficients = matches!(call.algorithm(), FnxAlgorithm::ClusteringCoefficient);
     let workspace = workspace(graph.node_count(), coefficients)?;
     admission.rows(graph.node_count())?;
@@ -301,8 +301,9 @@ pub(super) async fn execute_cooperative<Yield, YieldFuture>(
     graph: &SealedGraphView,
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,
+    delivery: Delivery,
     control: &mut super::cooperative::Cooperate<'_, Yield>,
-) -> Result<FnxResult>
+) -> Result<Finished>
 where
     Yield: FnMut() -> YieldFuture,
     YieldFuture: std::future::Future<Output = ()>,
@@ -310,7 +311,7 @@ where
     control.tick().await?;
     let coefficients = matches!(call.algorithm(), FnxAlgorithm::ClusteringCoefficient);
     let n = graph.node_count();
-    let admission = ResultAdmission::new(call, limits, memory)?;
+    let admission = ResultAdmission::for_delivery(call, limits, memory, delivery)?;
     admission.rows(n)?;
     let workspace = workspace(n, coefficients)?;
     admit(
@@ -464,6 +465,7 @@ where
         call,
         graph,
         encoded,
+        values,
         witness,
         kernel,
         work,
