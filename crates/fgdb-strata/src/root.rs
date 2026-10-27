@@ -2365,14 +2365,26 @@ impl VertexHistoryValidator {
     ) -> Result<(), RootError> {
         for row in rows {
             let key = (row.vid, row.created_at);
-            if let Some(existing) = self.rows.get(&key) {
-                // A restatement of one exact version: birth must byte-match,
-                // and the only lawful change is live-to-retired.
-                let mut expected_birth = existing.clone();
-                let mut found_birth = row.clone();
-                expected_birth.retired_at = None;
-                found_birth.retired_at = None;
-                if found_birth != expected_birth {
+            if let Some(existing) = self.rows.get_mut(&key) {
+                // A restatement may only add retirement. Compare the complete
+                // birth by reference: cloning both property trees merely to
+                // clear retirement copies large nested values during open.
+                // Exhaustive destructuring makes any new row field require an
+                // explicit decision here instead of silently skipping it.
+                let crate::vertex::VertexRow {
+                    vid,
+                    birth_ordinal,
+                    created_at,
+                    retired_at: _,
+                    labels,
+                    props,
+                } = row;
+                if existing.vid != *vid
+                    || existing.birth_ordinal != *birth_ordinal
+                    || existing.created_at != *created_at
+                    || existing.labels != *labels
+                    || existing.props != *props
+                {
                     return Err(RootError::VertexIdentityMismatch {
                         vid: row.vid,
                         conflict: Box::new((existing.clone(), row.clone())),
@@ -2385,6 +2397,10 @@ impl VertexHistoryValidator {
                         found: row.retired_at,
                     });
                 }
+                // Keep the already admitted birth allocations. Replacing the
+                // entire row would deep-clone the same immutable values again.
+                existing.retired_at = row.retired_at;
+                continue;
             } else {
                 // A NEW statement must extend its vid's chain contiguously:
                 // begin exactly where the predecessor retired (a gap is a
@@ -2447,3 +2463,166 @@ mod edge_history_tests;
 
 #[cfg(test)]
 mod append_tests;
+
+#[cfg(test)]
+mod vertex_history_tests {
+    use super::{RootError, VertexHistoryValidator};
+    use crate::vertex::VertexRow;
+    use fgdb_delta_types::{LabelId, PropertyKeyId};
+    use fgdb_types::{
+        CanonicalList, CanonicalMap, CanonicalMapEntry, CanonicalPropertyValue, CanonicalScalar,
+        CanonicalText, CommitSeq, VId,
+    };
+
+    fn birth() -> VertexRow {
+        let nested = CanonicalPropertyValue::Map(
+            CanonicalMap::try_new(vec![CanonicalMapEntry::new(
+                CanonicalText::new_ucs_basic("nested").unwrap(),
+                CanonicalPropertyValue::List(
+                    CanonicalList::try_new(vec![
+                        CanonicalScalar::ucs_basic_text(&"retained payload ".repeat(8))
+                            .unwrap()
+                            .into(),
+                        CanonicalScalar::bytes(vec![0x5a; 256]).unwrap().into(),
+                    ])
+                    .unwrap(),
+                ),
+            )])
+            .unwrap(),
+        );
+        let row = VertexRow {
+            vid: VId((1_u128 << 96) | 17),
+            birth_ordinal: 31,
+            created_at: CommitSeq(3),
+            retired_at: None,
+            labels: vec![LabelId(5), LabelId(11)],
+            props: vec![(PropertyKeyId(7), nested)],
+        };
+        crate::vertex::admit_row_content(&row.labels, &row.props).unwrap();
+        row
+    }
+
+    #[test]
+    fn retirement_restatements_keep_admitted_birth_allocations() {
+        let mut history = VertexHistoryValidator::default();
+        let mut row = birth();
+        let key = (row.vid, row.created_at);
+        history
+            .observe_patch(0, core::slice::from_ref(&row))
+            .unwrap();
+        let labels = history.rows[&key].labels.as_ptr();
+        let props = history.rows[&key].props.as_ptr();
+        assert_ne!(labels, row.labels.as_ptr());
+        assert_ne!(props, row.props.as_ptr());
+
+        for patch in 1..65 {
+            if patch == 32 {
+                row.retired_at = Some(CommitSeq(9));
+            }
+            history
+                .observe_patch(patch, core::slice::from_ref(&row))
+                .unwrap();
+            let admitted = &history.rows[&key];
+            assert_eq!(admitted, &row);
+            assert_eq!(admitted.labels.as_ptr(), labels);
+            assert_eq!(admitted.props.as_ptr(), props);
+        }
+        let accepted = row.clone();
+        row.labels.clear();
+        row.props.clear();
+        assert_eq!(
+            history.rows[&key], accepted,
+            "input stays independently owned"
+        );
+    }
+
+    #[test]
+    fn restatement_errors_preserve_exact_conflicts_and_accepted_prefix() {
+        let mut retired = birth();
+        retired.retired_at = Some(CommitSeq(9));
+        let mutations: [fn(&mut VertexRow); 4] = [
+            |row| row.birth_ordinal += 1,
+            |row| row.labels.push(LabelId(13)),
+            |row| row.props[0].1 = CanonicalScalar::Int(-1).into(),
+            |row| {
+                row.labels.clear();
+                row.retired_at = None;
+            },
+        ];
+        for mutate in mutations {
+            let mut history = VertexHistoryValidator::default();
+            history
+                .observe_patch(0, core::slice::from_ref(&retired))
+                .unwrap();
+            let mut malformed = retired.clone();
+            mutate(&mut malformed);
+            let mut prefix = birth();
+            prefix.vid = VId(retired.vid.0 + 1);
+            let mut expected = history.rows.clone();
+            expected.insert((prefix.vid, prefix.created_at), prefix.clone());
+            assert_eq!(
+                history.observe_patch(1, &[prefix, malformed.clone()]),
+                Err(RootError::VertexIdentityMismatch {
+                    vid: retired.vid,
+                    conflict: Box::new((retired.clone(), malformed)),
+                }),
+            );
+            assert_eq!(history.rows, expected);
+        }
+
+        for retirement in [None, Some(CommitSeq(10))] {
+            let mut history = VertexHistoryValidator::default();
+            history
+                .observe_patch(0, core::slice::from_ref(&retired))
+                .unwrap();
+            let expected = history.rows.clone();
+            let mut malformed = retired.clone();
+            malformed.retired_at = retirement;
+            assert_eq!(
+                history.observe_patch(1, core::slice::from_ref(&malformed)),
+                Err(RootError::VertexRetirementMismatch {
+                    vid: retired.vid,
+                    expected: retired.retired_at,
+                    found: retirement,
+                }),
+            );
+            assert_eq!(history.rows, expected);
+        }
+    }
+
+    #[test]
+    fn contiguous_vertex_versions_keep_their_distinct_births_in_both_orders() {
+        let mut first = birth();
+        first.retired_at = Some(CommitSeq(5));
+        let mut second = first.clone();
+        second.created_at = CommitSeq(5);
+        second.retired_at = Some(CommitSeq(9));
+        second.props[0].1 = CanonicalScalar::Int(41).into();
+        let mut third = second.clone();
+        third.created_at = CommitSeq(9);
+        third.retired_at = None;
+        third.labels.clear();
+        third.props[0].1 = CanonicalScalar::Bool(true).into();
+        let rows = [first, second, third];
+
+        for order in [[0, 1, 2], [2, 1, 0], [1, 0, 2], [1, 2, 0]] {
+            let mut history = VertexHistoryValidator::default();
+            for (patch, index) in order.into_iter().enumerate() {
+                history
+                    .observe_patch(patch, core::slice::from_ref(&rows[index]))
+                    .unwrap();
+            }
+            for row in &rows {
+                history
+                    .observe_patch(3, core::slice::from_ref(row))
+                    .unwrap();
+            }
+            assert_eq!(
+                history.rows,
+                rows.iter()
+                    .map(|row| ((row.vid, row.created_at), row.clone()))
+                    .collect(),
+            );
+        }
+    }
+}
