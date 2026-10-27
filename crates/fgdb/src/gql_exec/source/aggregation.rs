@@ -57,6 +57,12 @@ impl<V: Vfs + Clone> Database<V> {
             .map_err(|error| {
                 GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
             })?;
+        if let Some(plan) = fgdb_gql::scan_stream::AggregateScanPlan::compile_numeric(aggregate) {
+            let view = self.read_session().map_err(|error| {
+                GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
+            })?;
+            return execute_scan(&view, cx, &plan, as_of, policy);
+        }
         cx.with_restriction(|| execute_at(self, aggregate, as_of, policy, || cx.checkpoint()))
     }
 
@@ -90,6 +96,9 @@ impl EmbeddedReadView {
         self.snapshot.check_frontier(as_of).map_err(|error| {
             GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
         })?;
+        if let Some(plan) = fgdb_gql::scan_stream::AggregateScanPlan::compile_numeric(aggregate) {
+            return execute_scan(self, cx, &plan, as_of, policy);
+        }
         cx.with_restriction(|| execute_at(self, aggregate, as_of, policy, || cx.checkpoint()))
     }
 
@@ -100,6 +109,64 @@ impl EmbeddedReadView {
         policy: GqlQueryPolicy,
     ) -> AggregateResult<GqlError> {
         self.execute_graph_aggregate_governed_at(cx, query.aggregate(), query.as_of(), policy)
+    }
+}
+
+// The ordinary read surface can consume a pull aggregate without materializing
+// its matched input. Only complete final groups are retained here. Source,
+// numeric, HAVING, output and delivery errors all terminate this execution;
+// the old evaluator is selected only when physical compilation was ineligible.
+// The source constructors below pin the same admitted cut and keep their own
+// QueryCx restrictions and one cumulative meter. Authorized and transactional
+// facades continue to use their own mandatory admission paths.
+fn execute_scan(
+    view: &EmbeddedReadView,
+    cx: &QueryCx,
+    plan: &fgdb_gql::scan_stream::AggregateScanPlan,
+    as_of: CommitSeq,
+    policy: GqlQueryPolicy,
+) -> AggregateResult<GqlError> {
+    use fgdb_gql::scan_stream::AggregateScanPlan;
+    match plan {
+        AggregateScanPlan::Vertex(plan) => {
+            let map = |error: fgdb_gql::stream::VertexScanError<ReadError>| match error {
+                fgdb_gql::stream::VertexScanError::Source(error) => GqlError::Read(error),
+                fgdb_gql::stream::VertexScanError::Probe(
+                    fgdb_gql::edge_stream::EdgeScanError::Source(error),
+                ) => GqlError::Read(error),
+                error => GqlError::VertexScan(error),
+            };
+            let mut cursor = view
+                .stream_global_aggregate_governed_at(cx, plan, as_of, policy)
+                .map_err(|error| error.map_source(|error| error.map_source(map)))?;
+            let value = cursor
+                .by_ref()
+                .map(|row| row.map_err(|error| error.map_source(|error| error.map_source(map))))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(GqlQueryExecution {
+                value,
+                rows: cursor.row_stats(),
+                evaluator: cursor.evaluator_stats(),
+            })
+        }
+        AggregateScanPlan::Edge(plan) => {
+            let map = |error: fgdb_gql::edge_stream::EdgeScanError<ReadError>| match error {
+                fgdb_gql::edge_stream::EdgeScanError::Source(error) => GqlError::Read(error),
+                error => GqlError::EdgeScan(error),
+            };
+            let mut cursor = view
+                .stream_global_edge_aggregate_governed_at(cx, plan, as_of, policy)
+                .map_err(|error| error.map_source(|error| error.map_source(map)))?;
+            let value = cursor
+                .by_ref()
+                .map(|row| row.map_err(|error| error.map_source(|error| error.map_source(map))))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(GqlQueryExecution {
+                value,
+                rows: cursor.row_stats(),
+                evaluator: cursor.evaluator_stats(),
+            })
+        }
     }
 }
 

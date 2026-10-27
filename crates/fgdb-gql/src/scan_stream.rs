@@ -10,6 +10,99 @@ use crate::stream::{VertexScanCursor, VertexScanError, VertexScanSource};
 use crate::{GlaExecutionStats, GqlExecutionStats, GqlQueryError};
 use fgdb_types::CommitSeq;
 
+/// A conservative numeric aggregate specialization for an ordinary query.
+///
+/// Unlike the explicit streaming APIs, a native host may keep its current
+/// physical evaluator when this compiler returns `None`. This decision uses
+/// only the complete bound definition and precedes source access. Once a
+/// cursor has opened, its errors are final; execution is never retried.
+/// Metadata counts retain their host's exact-count path. Collections retain
+/// their existing source-order contract. An edge input must be one unbound
+/// fixed-edge scan: keyed endpoint and multi-hop plans can use substantially
+/// cheaper bound-closure or factorized evaluation in the ordinary host.
+#[derive(Clone, Debug)]
+pub enum AggregateScanPlan {
+    Vertex(crate::stream::aggregate::VertexAggregatePlan),
+    Edge(crate::edge_stream::aggregate::EdgeAggregatePlan),
+}
+
+impl AggregateScanPlan {
+    /// Admit only complete, numeric reductions whose existing source cursor
+    /// avoids retaining the matched input relation. Grouping, argument
+    /// DISTINCT, HAVING, output expressions, ordering and pagination remain
+    /// the existing aggregate compiler's responsibility.
+    #[must_use]
+    pub fn compile_numeric(aggregate: &crate::PreparedGraphAggregate) -> Option<Self> {
+        use crate::GraphAggregateFunction::{Collect, CollectDistinct};
+        use crate::GraphSetValue;
+        use crate::algebra::GlaOperator;
+
+        if aggregate.count_metadata_source().is_some()
+            || aggregate.count_summary_source().is_some()
+            || aggregate
+                .aggregates()
+                .iter()
+                .any(|spec| matches!(spec.function(), Collect | CollectDistinct))
+        {
+            return None;
+        }
+        // These cursors retire their source before completed-group output and
+        // evaluate each input in physical scan order. Keep graph-reading,
+        // dynamically typed and ordinal-dependent expressions on the host
+        // with an element reader and the complete canonical input relation.
+        // A dead branch is still part of the prepared expression contract.
+        let row_local = |value: &GraphSetValue| {
+            matches!(
+                value,
+                GraphSetValue::Column(_)
+                    | GraphSetValue::Literal(_)
+                    | GraphSetValue::TypedNull(_)
+                    | GraphSetValue::Value(_)
+                    | GraphSetValue::Integer(_)
+            )
+        };
+        if aggregate
+            .input_projection()
+            .is_some_and(|columns| columns.iter().any(|column| !row_local(column.value())))
+            || aggregate
+                .output_projection()
+                .is_some_and(|columns| columns.iter().any(|column| !row_local(column.value())))
+            || aggregate
+                .computed_ordering()
+                .iter()
+                .any(|value| !row_local(value))
+        {
+            return None;
+        }
+        let operators = aggregate.input_pattern().plan().operators();
+        match operators.first()? {
+            GlaOperator::ScanVertices => {
+                crate::stream::aggregate::VertexAggregatePlan::compile(aggregate)
+                    .ok()
+                    .map(Self::Vertex)
+            }
+            GlaOperator::ScanEdges { .. }
+                if operators.iter().all(|operator| match operator {
+                    GlaOperator::ScanEdges { .. }
+                    | GlaOperator::ProjectValues { .. }
+                    | GlaOperator::OrderByValues
+                    | GlaOperator::Limit {
+                        offset: 0,
+                        count: None,
+                    } => true,
+                    GlaOperator::Select { predicates, .. } => predicates.is_empty(),
+                    _ => false,
+                }) =>
+            {
+                crate::edge_stream::aggregate::EdgeAggregatePlan::compile(aggregate)
+                    .ok()
+                    .map(Self::Edge)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// One resumable source examination. A scoped source can skip a private
 /// identity without charging or exposing it as a matching candidate. The
 /// identity is retained only to advance an independently owned successor.

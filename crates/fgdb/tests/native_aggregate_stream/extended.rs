@@ -294,3 +294,209 @@ fn late_numeric_domain_errors_do_not_publish_prior_distinct_or_extremum_cells() 
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn ordinary_queries_use_the_selected_numeric_cursor_and_its_exact_allowances() {
+    use fgdb_gql::{GraphAggregateTextSlot, PreparedGraphAggregateText};
+
+    let ((), report) = run_async_under_lab(0xa66e_2101, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        for id in 0..32_u128 {
+            batch.create_vertex(
+                VId(id),
+                vec![LABEL],
+                vec![
+                    (SCORE, CanonicalScalar::Int(id as i64 - 12)),
+                    (TAG, CanonicalScalar::Int((id % 4) as i64)),
+                ],
+            );
+        }
+        for id in 0..32_u128 {
+            for offset in 0..8 {
+                batch.add_edge(
+                    EId(1000 + id * 8 + offset),
+                    VId(id),
+                    VId((id + offset) % 32),
+                    vec![(SCORE, CanonicalScalar::Int(offset as i64 - 2))],
+                );
+            }
+        }
+        db.write(&commit, batch).await.unwrap();
+        let view = db.read_session().unwrap();
+        let args = GqlParameters::new();
+        for (text, records) in [
+            (
+                "MATCH (n:L) RETURN n.tag AS tag,count(*) AS n,sum(n.score) AS total ORDER BY tag",
+                32,
+            ),
+            (
+                "MATCH (a)-[r:R]->(b) RETURN a AS owner,count(*) AS degree ORDER BY degree DESC,owner LIMIT 4",
+                256,
+            ),
+        ] {
+            let prepared = PreparedGraphAggregateText::prepare(text, symbols()).unwrap();
+            let definition = prepared.bind_parameters(&args).unwrap();
+            assert!(
+                fgdb_gql::scan_stream::AggregateScanPlan::compile_numeric(&definition).is_some()
+            );
+            let mut cursor = db
+                .query_aggregate_stream(&cx, text, &args, symbols(), wide())
+                .unwrap();
+            let logical = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            let stats = cursor.row_stats();
+            let work = cursor.evaluator_stats();
+            assert_eq!((stats.snapshot_records, stats.result_rows), (records, 4));
+            let exact = GqlQueryPolicy::new(
+                stats.snapshot_records,
+                stats.result_rows,
+                work.work_units,
+                work.scratch_entries,
+            );
+            let typed = db
+                .execute_graph_aggregate_governed(&cx, &definition, exact)
+                .unwrap();
+            assert_eq!(typed.value, logical);
+            assert_eq!(typed.rows, stats);
+            assert_eq!(typed.evaluator, work);
+            let rows: Vec<Vec<_>> = logical
+                .iter()
+                .map(|row| {
+                    prepared
+                        .output_slots()
+                        .iter()
+                        .map(|slot| match *slot {
+                            GraphAggregateTextSlot::GroupKey(at) => {
+                                GraphAggregateValue::Value(row.keys()[at].clone())
+                            }
+                            GraphAggregateTextSlot::Aggregate(at) => row.values()[at].clone(),
+                        })
+                        .collect()
+                })
+                .collect();
+            for (at, row) in rows.iter().enumerate() {
+                if records == 32 {
+                    assert_eq!(
+                        row[0].as_value(),
+                        Some(&GraphValue::Scalar(CanonicalScalar::Int(at as i64)))
+                    );
+                    assert_eq!(row[1].as_count(), Some(8));
+                    assert_eq!(row[2].as_integer(), Some(16 + at as i128 * 8));
+                } else {
+                    assert_eq!(
+                        row[0].as_value(),
+                        Some(&GraphValue::Vertex(VId(at as u128)))
+                    );
+                    assert_eq!(row[1].as_count(), Some(8));
+                }
+            }
+            let expected = QueryResult::Rows {
+                columns: prepared.columns().to_vec(),
+                rows,
+            };
+            assert_eq!(
+                db.query(&cx, text, &args, symbols(), exact).unwrap(),
+                expected
+            );
+            assert_eq!(
+                view.query(&cx, text, &args, symbols(), exact).unwrap(),
+                expected
+            );
+            for short in [
+                GqlQueryPolicy::new(records - 1, 4, u64::MAX, u64::MAX),
+                GqlQueryPolicy::new(u64::MAX, 3, u64::MAX, u64::MAX),
+                GqlQueryPolicy::new(u64::MAX, 4, work.work_units - 1, u64::MAX),
+                GqlQueryPolicy::new(u64::MAX, 4, u64::MAX, work.scratch_entries - 1),
+            ] {
+                assert!(matches!(
+                    db.query(&cx, text, &args, symbols(), short),
+                    Err(QueryError::Aggregate(
+                        GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_)
+                    ))
+                ));
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn ordinary_numeric_queries_keep_pinned_history_and_refuse_late_errors_without_retry() {
+    use fgdb_types::context::SimulationCheckpointProbe;
+    use std::sync::Arc;
+
+    let ((), report) = run_async_under_lab(0xa66e_2102, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let basis = db.write(&commit, seed()).await.unwrap();
+        let view = db.read_session().unwrap();
+        let args = GqlParameters::new();
+        let text = "MATCH (n:L) RETURN n.score AS score,count(*) AS n ORDER BY score";
+        let expected = db.query(&cx, text, &args, symbols(), wide()).unwrap();
+        let probe = Arc::new(SimulationCheckpointProbe::new(None));
+        assert_eq!(
+            db.query(
+                &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                text,
+                &args,
+                symbols(),
+                wide(),
+            )
+            .unwrap(),
+            expected
+        );
+        let calls = probe.calls();
+        assert!(calls > 2);
+        for stop in [1, calls / 2, calls] {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            assert!(matches!(
+                db.query(
+                    &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                    text,
+                    &args,
+                    symbols(),
+                    wide(),
+                ),
+                Err(QueryError::Aggregate(GqlQueryError::Interrupted(_)))
+            ));
+            assert_eq!(probe.calls(), stop);
+        }
+        let mut update = WriteBatch::new(RelationId(1));
+        update.set_vertex_property(
+            VId(u128::MAX),
+            SCORE,
+            Some(CanonicalScalar::ucs_basic_text("late invalid numeric input").unwrap()),
+        );
+        db.write(&commit, update).await.unwrap();
+        for limit in [0, 1] {
+            let text = format!(
+                "MATCH (n:L) RETURN n.tag AS tag,SUM(n.score) AS total ORDER BY total LIMIT {limit}"
+            );
+            assert!(matches!(
+                db.query(&cx, &text, &args, symbols(), wide()),
+                Err(QueryError::Aggregate(GqlQueryError::Source(
+                    GraphAggregateError::NonIntegerSum { aggregate: 0 }
+                )))
+            ));
+        }
+        assert_eq!(
+            view.query(&cx, text, &args, symbols(), wide()).unwrap(),
+            expected
+        );
+        let historical = format!(
+            "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ {} RETURN n.score AS score,count(*) AS n ORDER BY score",
+            basis.0
+        );
+        assert_eq!(
+            db.query(&cx, &historical, &args, symbols(), wide())
+                .unwrap(),
+            expected
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

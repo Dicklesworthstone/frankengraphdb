@@ -1201,6 +1201,11 @@ pub enum GqlError {
     Read(ReadError),
     /// A `CALL` stage's procedure refused its arguments, graph or result.
     Procedure(ProcedureError),
+    /// A selected aggregate cursor violated its typed source/plan contract.
+    /// Actual storage read errors retain the `Read` arm.
+    VertexScan(fgdb_gql::stream::VertexScanError<ReadError>),
+    /// A selected fixed-edge aggregate cursor refused its structural contract.
+    EdgeScan(fgdb_gql::edge_stream::EdgeScanError<ReadError>),
 }
 
 impl core::fmt::Display for GqlError {
@@ -1210,6 +1215,8 @@ impl core::fmt::Display for GqlError {
             Self::Bind(error) => write!(f, "gql bind: {error}"),
             Self::Read(error) => write!(f, "gql read: {error}"),
             Self::Procedure(error) => write!(f, "gql procedure: {error}"),
+            Self::VertexScan(error) => write!(f, "gql vertex scan: {error}"),
+            Self::EdgeScan(error) => write!(f, "gql edge scan: {error}"),
         }
     }
 }
@@ -1221,6 +1228,8 @@ impl core::error::Error for GqlError {
             Self::Bind(error) => Some(error),
             Self::Read(error) => Some(error),
             Self::Procedure(error) => Some(error),
+            Self::VertexScan(error) => Some(error),
+            Self::EdgeScan(error) => Some(error),
         }
     }
 }

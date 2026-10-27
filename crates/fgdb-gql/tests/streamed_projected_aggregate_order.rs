@@ -5,6 +5,7 @@ use fgdb_gql::edge_stream::aggregate::{EdgeAggregateCursor, EdgeAggregatePlan};
 use fgdb_gql::edge_stream::{
     EdgeExpansionSourceError, EdgeScanRow, EdgeScanSource, EdgeScanSourceError, EdgeScanState,
 };
+use fgdb_gql::scan_stream::AggregateScanPlan;
 use fgdb_gql::stream::aggregate::{VertexAggregateCursor, VertexAggregatePlan};
 use fgdb_gql::stream::{
     VertexScanEvent, VertexScanRow, VertexScanSource, VertexScanSourceError, VertexScanState,
@@ -604,4 +605,60 @@ fn edge_projected_order_preserves_late_source_expression_and_result_quota_failur
     assert_eq!(limited.state(), EdgeScanState::Failed);
     assert_eq!(limited.row_stats().result_rows, 0);
     assert!(dropped.get() && limited.next().is_none());
+}
+
+#[test]
+fn ordinary_numeric_selection_preserves_counts_collections_and_bound_graph_plans() {
+    for text in [
+        "MATCH (n) RETURN count(*) AS n",
+        "MATCH (a)-[e:R]->(b) RETURN count(*) AS n",
+        "MATCH (n) RETURN collect(n.p) AS values",
+        "MATCH (a)-[e:R]->(b) RETURN collect(e.p) AS values",
+        "MATCH (a {p:7})-[e:R]->(b) RETURN a,sum(e.p) AS total",
+        "MATCH (a)-[e:R]->(b)-[f:S]->(c) RETURN a,count(*) AS n",
+        "MATCH (a)-[e:R*1..2]->(b) RETURN a,count(*) AS n",
+        "MATCH (n) RETURN sum(n.p) AS total,[x IN [min(n)] | x.p] AS values",
+        "MATCH (n) RETURN sum(n.p) AS total,rand() AS random",
+    ] {
+        assert!(
+            AggregateScanPlan::compile_numeric(&query(text)).is_none(),
+            "{text} must retain its current physical evaluator"
+        );
+    }
+
+    let rows = records(&[(1, Some(7)), (1, None), (2, Some(-3)), (2, Some(7))]);
+    for text in [
+        "MATCH (n) RETURN n.g AS g,count(*) AS n,sum(n.p) AS total ORDER BY total DESC",
+        "MATCH (n) RETURN sum(DISTINCT n.p) AS total,avg(n.p) AS mean,min(n.p) AS low,max(n.p) AS high",
+        "MATCH (n) RETURN n.g AS g,count(*) AS n ORDER BY n DESC SKIP 1 LIMIT 1",
+    ] {
+        let q = query(text);
+        let bytes = q.canonical_bytes();
+        let Some(AggregateScanPlan::Vertex(plan)) = AggregateScanPlan::compile_numeric(&q) else {
+            panic!("numeric vertex shape was not selected: {text}");
+        };
+        let result =
+            VertexAggregateCursor::new(Vertices::new(rows.clone()), plan, policy(10), || {
+                Ok::<_, ()>(())
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(result, batch_vertices(&q, &rows), "{text}");
+        assert_eq!(q.canonical_bytes(), bytes);
+    }
+    for pattern in ["(a)-[e:R]->(b)", "(a)<-[e:R]-(b)", "(a)-[e:R]-(b)"] {
+        let text = format!(
+            "MATCH {pattern} RETURN a AS owner,count(*) AS degree ORDER BY degree DESC,owner LIMIT 2"
+        );
+        let q = query(&text);
+        let bytes = q.canonical_bytes();
+        let Some(AggregateScanPlan::Edge(plan)) = AggregateScanPlan::compile_numeric(&q) else {
+            panic!("numeric fixed-edge shape was not selected: {text}");
+        };
+        let result = EdgeAggregateCursor::new(Edges::new(), plan, policy(2), || Ok::<_, ()>(()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(result, batch_edges(&q, &Edges::new()), "{text}");
+        assert_eq!(q.canonical_bytes(), bytes);
+    }
 }
