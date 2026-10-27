@@ -475,7 +475,7 @@ fn empty_matches_never_allocate_and_untrusted_source_statistics_cannot_wrap() {
 #[test]
 fn independent_standalone_creations_keep_every_endpoint_in_their_own_statement() {
     let prepare = |text| {
-        fgdb_gql::PreparedGraphInsertText::prepare(text, R, |kind, name| {
+        fgdb_gql::PreparedGraphInsertText::prepare(text, R, |kind: GraphSymbolKind, name: &str| {
             if kind == GraphSymbolKind::Relation && name == "S" {
                 Some(GraphSymbol::Relation(RelationId(2)))
             } else {
