@@ -184,15 +184,20 @@ impl Lane {
                 Ok(imported.expect("prepared ordered admission returns its session handle"))
             }
         };
-        let execution =
-            match prepared.and_then(|prepared| session.start(&query, &prepared, &parameters)) {
-                Ok(execution) => execution,
-                Err(error) => {
-                    return self
-                        .refuse(cx, request, stream, binding, error.code, &error.message)
-                        .await;
-                }
+        let execution = match prepared.and_then(|prepared| {
+            let parameters = match definition {
+                Some(definition) => definition.arguments(&query, db, token, &parameters)?,
+                None => std::borrow::Cow::Borrowed(&parameters),
             };
+            session.start(&query, &prepared, &parameters)
+        }) {
+            Ok(execution) => execution,
+            Err(error) => {
+                return self
+                    .refuse(cx, request, stream, binding, error.code, &error.message)
+                    .await;
+            }
+        };
         let framing = binding.header_len() + CHUNK_OVERHEAD;
         let frame_budget = self.send_limits.max_frame_len() - framing;
         let mut chunks = Chunks::new(execution.columns().to_vec());

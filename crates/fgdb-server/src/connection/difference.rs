@@ -336,6 +336,10 @@ impl Lane {
             }
         };
         let execution = match prepared.and_then(|prepared| {
+            let parameters = match definition {
+                Some(definition) => definition.arguments(&query, db, token, &parameters)?,
+                None => std::borrow::Cow::Borrowed(&parameters),
+            };
             session.start_difference(&query, &prepared, &parameters, before, after)
         }) {
             Ok(execution) => execution,

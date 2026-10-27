@@ -396,6 +396,163 @@ fn read_values(
 }
 
 #[test]
+fn prepared_map_fields_rebind_inside_the_original_authority_and_snapshot() {
+    let ((), report) = run_async_under_lab(0x5ec0_6021, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let mut db = database(&contexts.commit()).await;
+        let issuer = issuer(641);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let resolutions = AtomicUsize::new(0);
+        let now = AtomicUsize::new(100);
+        let mut session = db
+            .authorized_read_session(
+                &cx,
+                &issuer,
+                &token,
+                BRANCH,
+                |kind, name: &str| {
+                    resolutions.fetch_add(1, Ordering::Relaxed);
+                    symbols(kind, name)
+                },
+                policy(),
+                || now.load(Ordering::Relaxed) as u64,
+            )
+            .unwrap();
+        let arguments = |value: Option<i64>, route: &str| {
+            GqlParameters::new()
+                .with_map(
+                    "m",
+                    value
+                        .map(|value| {
+                            vec![(
+                                "key".into(),
+                                GraphValue::Scalar(CanonicalScalar::Int(value)),
+                            )]
+                        })
+                        .unwrap_or_default(),
+                )
+                .unwrap()
+                .with_text("route", route)
+                .unwrap()
+        };
+        let text = "AT BRANCH $route MATCH (n:L {p: $m.key}) RETURN n.p AS p";
+        let initial = arguments(Some(10), BRANCH);
+        let prepared = session.prepare(&cx, text, &initial).unwrap();
+        let aggregate = session
+            .prepare(
+                &cx,
+                "AT BRANCH $route MATCH (n:L {p: $m.key}) RETURN count(*) AS count",
+                &initial,
+            )
+            .unwrap();
+        assert_eq!(
+            prepared.parameter_schema(),
+            &[fgdb_gql::GqlParameterSpec {
+                name: "m".into(),
+                parameter_type: fgdb_gql::GqlParameterType::Map,
+                requires_positive: false,
+                occurrences: 1,
+            }]
+        );
+        let frozen = resolutions.load(Ordering::Relaxed);
+        let expected = |value: Option<i64>| QueryResult::Rows {
+            columns: vec!["p".into()],
+            rows: value
+                .map(|value| {
+                    vec![vec![crate::QueryValue::Value(GraphValue::Scalar(
+                        CanonicalScalar::Int(value),
+                    ))]]
+                })
+                .unwrap_or_default(),
+        };
+        for (value, visible) in [(Some(30), Some(30)), (Some(20), None), (None, None)] {
+            let args = arguments(value, BRANCH);
+            assert_eq!(
+                session.execute(&cx, &prepared, &args).unwrap(),
+                expected(visible)
+            );
+            let values = visible
+                .map(|value| vec![vec![GraphValue::Scalar(CanonicalScalar::Int(value))]])
+                .unwrap_or_default();
+            assert_eq!(
+                read_values(session.stream(&cx, &prepared, &args).unwrap()),
+                values
+            );
+            assert_eq!(
+                read_values(session.stream_send(&cx, &prepared, &args).unwrap()),
+                values
+            );
+            let mut cursor = session.stream_aggregate(&cx, &aggregate, &args).unwrap();
+            let row = cursor.next().unwrap().unwrap();
+            assert_eq!(
+                row.values()[0].as_count(),
+                Some(u64::from(visible.is_some()))
+            );
+            assert!(cursor.next().is_none());
+        }
+        let other = arguments(Some(30), BRANCH);
+        assert_eq!(
+            session
+                .execute_batch(&cx, &[(&prepared, &initial), (&prepared, &other)])
+                .unwrap(),
+            vec![expected(Some(10)), expected(Some(30))]
+        );
+        let changes = session
+            .execute_diff(&cx, &prepared, &other, CommitSeq(0), CommitSeq(1))
+            .unwrap();
+        assert_eq!(changes.changes().len(), 1);
+        let (row, weight) = changes.changes().iter().next().unwrap();
+        assert_eq!(
+            row,
+            &[crate::QueryValue::Value(GraphValue::Scalar(
+                CanonicalScalar::Int(30)
+            ))]
+        );
+        assert_eq!(weight.to_i128(), Some(1));
+        let wrong = GqlParameters::new().with_int64("m", 30).unwrap();
+        assert!(session.execute(&cx, &prepared, &wrong).is_err());
+        assert!(!session.is_closed());
+        refusal(
+            session.execute(&cx, &prepared, &arguments(Some(30), "other")),
+            AuthorizationError::ScopeDenied,
+        );
+        refusal(
+            session.execute(
+                &cx,
+                &prepared,
+                &wrong.clone().with_text("route", "other").unwrap(),
+            ),
+            AuthorizationError::ScopeDenied,
+        );
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_vertex_property(VId(3), PropertyKeyId(1), Some(CanonicalScalar::Int(300)));
+        db.write(&contexts.commit(), change).await.unwrap();
+        assert_eq!(
+            session
+                .execute_with_snapshot(&cx, &prepared, &other)
+                .unwrap(),
+            (expected(Some(30)), CommitSeq(1))
+        );
+        assert_eq!(resolutions.load(Ordering::Relaxed), frozen);
+        let mut foreign = db
+            .authorized_read_session(&cx, &issuer, &token, BRANCH, symbols, policy(), || 100)
+            .unwrap();
+        refusal(
+            foreign.execute(&cx, &prepared, &GqlParameters::new()),
+            AuthorizationError::WrongAuthority,
+        );
+        now.store(1000, Ordering::Relaxed);
+        refusal(
+            session.execute(&cx, &prepared, &wrong),
+            AuthorizationError::Expired,
+        );
+        assert!(session.is_closed());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn all_native_host_facades_keep_branch_framing_and_one_trailing_terminator() {
     let ((), report) = run_async_under_lab(0x5ec0_6009, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);

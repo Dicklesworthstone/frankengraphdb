@@ -230,6 +230,75 @@ fn refusal<T>(result: Result<T>, expected: AuthorizationError) {
 }
 
 #[test]
+fn prepared_map_fields_keep_keyed_ordered_sources_with_rebound_values() {
+    let ((), report) = run_async_under_lab(0x8600_0081, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = database(&contexts.commit()).await;
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        let (scratch, _) = file(&cx, &pool).await;
+        let (destination, _) = file(&cx, &pool).await;
+        // Six vertices exist, but the keyed source admits at most two.
+        let mut ordered = db
+            .authorized_ordered_read_session(
+                &cx,
+                &issuer,
+                &token,
+                "main",
+                symbols as Resolver,
+                GqlQueryPolicy::new(2, 2, 1_000_000, 1_000_000),
+                || 100,
+                scratch,
+                destination,
+                AuthorizedSortLimits {
+                    max_input_rows: 2,
+                    ..limits()
+                },
+            )
+            .unwrap();
+        let arguments = |key: Option<i64>| {
+            GqlParameters::new()
+                .with_map(
+                    "m",
+                    key.map(|key| vec![("key".into(), scalar(key))])
+                        .unwrap_or_default(),
+                )
+                .unwrap()
+        };
+        let prepared = ordered
+            .prepare(
+                &cx,
+                "MATCH (n:L {p: $m.key}) RETURN n AS id ORDER BY id DESC",
+                &arguments(Some(3)),
+            )
+            .unwrap();
+        for (key, expected) in [
+            (
+                Some(3),
+                vec![
+                    vec![GraphValue::Vertex(VId(3))],
+                    vec![GraphValue::Vertex(VId(1))],
+                ],
+            ),
+            (Some(1), vec![vec![GraphValue::Vertex(VId(2))]]),
+            (None, vec![]),
+        ] {
+            let mut cursor = ordered
+                .execute_ordered(&cx, &prepared, &arguments(key))
+                .unwrap()
+                .await
+                .unwrap();
+            assert_eq!(values(&mut cursor).await, expected);
+            drop(cursor);
+            assert_eq!(pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn keyed_ordered_streams_bound_input_before_sort_and_preserve_the_eager_window() {
     let ((), report) = run_async_under_lab(0x8600_0011, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

@@ -909,7 +909,8 @@ fn open<'q, C: FnMut() -> u64, Plan, Output>(
             .bind_parameters(params)
             .map_err(selector_error)?;
         check_branch(&selected, branch)?;
-        bind_plan(&prepared.native, selected.parameters(), view.frontier())
+        let params = prepared.parameters(selected.parameters())?;
+        bind_plan(&prepared.native, &params, view.frontier())
     })();
     execution.borrow_mut().checkpoint()?;
     build(selected?, view, cx, execution, policy)

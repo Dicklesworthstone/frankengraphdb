@@ -67,6 +67,8 @@ pub struct AuthorizedPreparedRead {
     owner: Arc<()>,
     selector: Arc<PreparedGraphBranchText>,
     native: Arc<PreparedNativeRead>,
+    lowered: Option<fgdb_gql::GqlMapArgumentText>,
+    parameter_schema: Option<Box<[fgdb_gql::GqlParameterSpec]>>,
 }
 
 impl core::fmt::Debug for AuthorizedPreparedRead {
@@ -86,10 +88,29 @@ impl AuthorizedPreparedRead {
     /// Native parameters only; an exclusively branch-routing argument remains
     /// in the retained selector and must still be supplied on every execution.
     pub fn parameter_schema(&self) -> &[fgdb_gql::GqlParameterSpec] {
-        self.native.parameter_schema()
+        self.parameter_schema
+            .as_deref()
+            .unwrap_or_else(|| self.native.parameter_schema())
     }
     pub fn facade_class(&self) -> crate::NativeReadClass {
         self.native.facade_class()
+    }
+
+    // Bind only after the caller has admitted this exact owner and live permit.
+    // The splice holds names and field paths, never preparation-time values.
+    fn parameters<'p>(
+        &self,
+        params: &'p GqlParameters,
+    ) -> Result<std::borrow::Cow<'p, GqlParameters>, QueryError> {
+        match &self.lowered {
+            Some(lowered) => lowered
+                .arguments(params)
+                .map(std::borrow::Cow::Owned)
+                .map_err(|error| QueryError::Unsupported {
+                    diagnostics: vec![error.to_string()],
+                }),
+            None => Ok(std::borrow::Cow::Borrowed(params)),
+        }
     }
 }
 
@@ -316,6 +337,12 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     ) -> Result<AuthorizedPreparedRead, QueryError> {
         let owner = Arc::clone(&self.owner);
         self.run(cx, |_, branch, _, resolver, _, execution| {
+            let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(text, params);
+            let (text, params) = lowered
+                .as_ref()
+                .map_or((text, params), |(lowered, derived)| {
+                    (lowered.text(), derived)
+                });
             let selector = PreparedGraphBranchText::prepare(text).map_err(selector_error)?;
             let selected = selector.bind_parameters(params).map_err(selector_error)?;
             check_branch(&selected, branch)?;
@@ -327,11 +354,20 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                 BorrowedResolver(resolver),
             );
             execution.borrow_mut().checkpoint()?;
+            let native = native?;
+            let lowered = lowered.map(|(lowered, _)| lowered);
+            let parameter_schema = lowered.as_ref().map(|lowered| {
+                lowered
+                    .field_parameter_schema(native.parameter_schema())
+                    .into_boxed_slice()
+            });
             Ok((
                 AuthorizedPreparedRead {
                     owner,
                     selector: Arc::new(selector),
-                    native: Arc::new(native?),
+                    native: Arc::new(native),
+                    lowered,
+                    parameter_schema,
                 },
                 0,
             ))
@@ -388,6 +424,8 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     owner,
                     selector,
                     native,
+                    lowered: None,
+                    parameter_schema: None,
                 },
                 0,
             ))
@@ -474,13 +512,14 @@ fn prepared_at(
         .bind_parameters(params)
         .map_err(selector_error)?;
     check_branch(&selected, branch)?;
+    let params = prepared.parameters(selected.parameters())?;
     let at = prepared
         .native
-        .bound_snapshot_seq(selected.parameters(), view.frontier())?;
+        .bound_snapshot_seq(&params, view.frontier())?;
     result_rows(
         native_at(
             &prepared.native,
-            selected.parameters(),
+            &params,
             &view.snapshot,
             at,
             scope,

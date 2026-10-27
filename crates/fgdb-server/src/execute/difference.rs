@@ -115,6 +115,7 @@ async fn difference_inner(
                 ordered::in_generation(&generation, read_prepared_session(cx, db, token, prepared))
                     .await?;
             let _operation = generation.enter().map_err(Refusal::from)?;
+            let parameters = prepared.arguments(&query, db, token, &parameters)?;
             let result = session
                 .native
                 .execute_diff(&query, &template, &parameters, before, after);

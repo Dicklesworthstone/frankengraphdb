@@ -184,7 +184,15 @@ impl Lane {
             }
         };
         self.send_generation = Some(session.generation());
-        let mut source = match session.stream_prepared(&query, &prepared, &parameters) {
+        let parameters = match statement {
+            SourceStatement::Text(_) => Ok(std::borrow::Cow::Borrowed(&parameters)),
+            SourceStatement::Prepared(definition) => {
+                definition.arguments(&query, db, token, &parameters)
+            }
+        };
+        let mut source = match parameters
+            .and_then(|parameters| session.stream_prepared(&query, &prepared, &parameters))
+        {
             Ok(source) => source,
             Err(error) => {
                 return self

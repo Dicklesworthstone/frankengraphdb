@@ -12,6 +12,183 @@ fn ok<T>(result: Result<T, Refusal>) -> T {
 }
 
 #[test]
+fn prepared_map_fields_rebind_across_native_delivery_modes_and_recovery() {
+    let ((), report) = run_async_under_lab(0x79a0_0441, |root| async move {
+        let (mut server, token, path) = served(&root, "prepared-map-fields").await;
+        let directory = path.join("map-fields-scratch");
+        asupersync::fs::create_dir(&directory).await.unwrap();
+        let config = crate::OrderedReadConfig::new(&directory);
+        let ordered = crate::ordered::OrderedReads::open(&root, config)
+            .await
+            .unwrap();
+        let db = std::sync::Arc::get_mut(server.databases.get_mut("test").unwrap()).unwrap();
+        db.symbols
+            .bind(fgdb_gql::GraphSymbolKind::Property, "p", 1)
+            .unwrap();
+        db.ordered_reads = Some(ordered);
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let query = contexts.query();
+        let key = fgdb_delta_types::PropertyKeyId(1);
+        let mut batch = fgdb::WriteBatch::new(fgdb_delta_types::RelationId(1));
+        for (id, value) in [(1, 10), (2, 30)] {
+            batch.create_vertex(
+                fgdb_types::VId(id),
+                vec![],
+                vec![(key, fgdb_types::CanonicalScalar::Int(value))],
+            );
+        }
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), batch)
+            .await
+            .unwrap();
+        let arguments = |value: Option<i64>| {
+            vec![(
+                "m".into(),
+                WireValue::Map(
+                    value
+                        .map(|value| vec![("key".into(), WireValue::Int(value))])
+                        .unwrap_or_default(),
+                ),
+            )]
+        };
+        let text = "MATCH (n {p: $m.key}) RETURN n.p AS p";
+        let definition = ok(prepare_read(
+            &root,
+            db,
+            &token,
+            &Prepare {
+                mode: PrepareMode::Read,
+                statement: text.into(),
+                parameters: arguments(Some(10)),
+            },
+        )
+        .await);
+        for value in [Some(30), Some(10), None] {
+            let parameters = arguments(value);
+            let expected = value
+                .map(|value| vec![vec![WireValue::Int(value)]])
+                .unwrap_or_default();
+            assert_eq!(
+                ok(read_prepared(&root, db, &token, &definition, &parameters).await).rows,
+                expected,
+            );
+            let parameters = crate::convert::parameters(&parameters, None).unwrap();
+            let (mut session, template) =
+                ok(crate::execute::read_prepared_session(&root, db, &token, &definition).await);
+            let parameters = ok(definition.arguments(&query, db, &token, &parameters));
+            let mut cursor = ok(session.stream_prepared(&query, &template, &parameters));
+            let mut rows = Vec::new();
+            while let Some(row) = ok(cursor.next().await) {
+                rows.push(row);
+            }
+            assert_eq!(rows, expected);
+        }
+        assert_eq!(
+            read_prepared(&root, db, &token, &definition, &[])
+                .await
+                .err()
+                .unwrap()
+                .code,
+            ErrorCode::Statement,
+        );
+        let diff = ok(crate::execute::read_prepared_difference(
+            &root,
+            db,
+            &token,
+            &definition,
+            &arguments(Some(30)),
+            0,
+            1,
+        )
+        .await);
+        assert_eq!(diff.entries, [(1, vec![WireValue::Int(30)])]);
+
+        let ordered = ok(prepare_read(
+            &root,
+            db,
+            &token,
+            &Prepare {
+                mode: PrepareMode::Read,
+                statement: format!("{text} ORDER BY p"),
+                parameters: arguments(Some(10)),
+            },
+        )
+        .await);
+        let generation = ok(crate::execute::ordered::ordered_generation(db, &token));
+        let (mut session, template) = ok(crate::execute::ordered::read_ordered_session(
+            &root,
+            db,
+            &token,
+            Some(&ordered),
+            generation,
+        )
+        .await);
+        let template = template.unwrap();
+        let rebound = crate::convert::parameters(&arguments(Some(30)), None).unwrap();
+        let rebound = ok(ordered.arguments(&query, db, &token, &rebound));
+        {
+            let execution = ok(session.start(&query, &template, &rebound));
+            let mut cursor = ok(execution.finish().await);
+            assert_eq!(ok(cursor.next().await), Some(vec![WireValue::Int(30)]));
+            assert!(ok(cursor.next().await).is_none());
+        }
+        {
+            let execution = ok(session.start_difference(&query, &template, &rebound, 0, 1));
+            let mut cursor = ok(execution.finish().await);
+            assert_eq!(ok(cursor.next().await), Some((1, vec![WireValue::Int(30)])));
+            assert!(ok(cursor.next().await).is_none());
+        }
+        drop(session);
+
+        let mut update = fgdb::WriteBatch::new(fgdb_delta_types::RelationId(1));
+        update.set_vertex_property(
+            fgdb_types::VId(2),
+            key,
+            Some(fgdb_types::CanonicalScalar::Int(300)),
+        );
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), update)
+            .await
+            .unwrap();
+        let answer = ok(read_prepared(&root, db, &token, &definition, &arguments(Some(300))).await);
+        assert_eq!(answer.outcome, Outcome::Rows { seq: 2 });
+        assert_eq!(answer.rows, [vec![WireValue::Int(300)]]);
+        fail_after_marker(&root, db, 99).await;
+        assert_eq!(
+            settled(db).await,
+            crate::DatabaseStatus::Ready { generation: 2 }
+        );
+        assert_eq!(
+            read_prepared(&root, db, &token, &definition, &arguments(Some(300)))
+                .await
+                .err()
+                .unwrap()
+                .code,
+            ErrorCode::DatabaseRecovering,
+        );
+        assert!(db.authority.retire());
+        assert_eq!(
+            definition
+                .arguments(&query, db, &token, &fgdb_gql::GqlParameters::new())
+                .err()
+                .unwrap()
+                .code,
+            ErrorCode::PermissionDenied,
+            "retired authority wins over map binding and old generation",
+        );
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn a_prepared_read_rebinds_operands_and_observes_commits_after_preparation() {
     let ((), report) = run_async_under_lab(0x79a0_0401, |root| async move {
         let (server, token, _) = served(&root, "prepared-live-frontier").await;

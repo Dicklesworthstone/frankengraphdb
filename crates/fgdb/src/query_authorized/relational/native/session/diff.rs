@@ -81,6 +81,12 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         self.run_scoped(
             cx,
             |view, branch, scope, resolver, policy, execution| {
+                let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(text, params);
+                let (text, params) = lowered
+                    .as_ref()
+                    .map_or((text, params), |(lowered, derived)| {
+                        (lowered.text(), derived)
+                    });
                 let selector = PreparedGraphBranchText::prepare(text)
                     .map_err(|error| definition(selector_error(error)))?;
                 let selected = selector
@@ -131,9 +137,12 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     .bind_parameters(params)
                     .map_err(|error| definition(selector_error(error)))?;
                 check_branch(&selected, branch).map_err(control)?;
+                let params = prepared
+                    .parameters(selected.parameters())
+                    .map_err(definition)?;
                 refuse_element_identity(prepared.native.statement()).map_err(control)?;
                 admit(view, before, after)?;
-                BoundDiff::bind(&prepared.native, selected.parameters())?
+                BoundDiff::bind(&prepared.native, &params)?
                     .execute(view, before, after, scope, policy, execution)
             },
             control,

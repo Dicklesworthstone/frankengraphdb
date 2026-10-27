@@ -324,6 +324,40 @@ impl GqlMapArgumentText {
         &self.text
     }
 
+    /// Restore the caller-facing requirements of a `lower_fields` template.
+    /// Generated scalar names are implementation details: callers supply the
+    /// original map, even when several fields or remaining value expressions
+    /// read it. The native template still checks each derived field's type.
+    #[must_use]
+    pub fn field_parameter_schema(
+        &self,
+        native: &[crate::GqlParameterSpec],
+    ) -> Vec<crate::GqlParameterSpec> {
+        let mut schema: BTreeMap<String, crate::GqlParameterSpec> = BTreeMap::new();
+        for parameter in native {
+            let mut parameter = parameter.clone();
+            if let Some(field) = self
+                .fields
+                .iter()
+                .find(|field| *field.name == parameter.name)
+            {
+                parameter.name = field.parameter.to_string();
+                parameter.parameter_type = crate::GqlParameterType::Map;
+                parameter.requires_positive = false;
+            }
+            match schema.entry(parameter.name.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(parameter);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().occurrences += parameter.occurrences;
+                    entry.get_mut().requires_positive |= parameter.requires_positive;
+                }
+            }
+        }
+        schema.into_values().collect()
+    }
+
     /// The arguments that bind the lowered statement for one binding of the
     /// caller's: each argument a remaining token reads, plus one per spliced
     /// key, read from that binding's map, and one per spliced field. A

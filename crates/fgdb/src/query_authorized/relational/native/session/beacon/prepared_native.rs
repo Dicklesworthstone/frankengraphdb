@@ -287,6 +287,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                 .bind_parameters(params)
                 .map_err(selector_error)?;
             check_branch(&selected, branch)?;
+            let params = prepared.parameters(selected.parameters())?;
             view.snapshot
                 .check_frontier(index.sequence)
                 .map_err(QueryError::Read)?;
@@ -348,7 +349,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             let result = (|| match prepared.native.as_ref() {
                 PreparedNativeRead::Set(template) => {
                     let bound = template
-                        .bind_parameters(selected.parameters())
+                        .bind_parameters(&params)
                         .map_err(QueryError::SetText)?;
                     let result = bound
                         .execute_governed_with_elements(
@@ -374,7 +375,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     // first graph leaf. Both physical aggregate profiles keep
                     // the same source/element owner and the original allowance.
                     let bound = template
-                        .bind_relation_parameters(selected.parameters())
+                        .bind_relation_parameters(&params)
                         .map_err(QueryError::PipelineText)?;
                     let result = bound
                         .execute_governed_with_elements(
