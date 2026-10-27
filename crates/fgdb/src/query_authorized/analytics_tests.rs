@@ -896,6 +896,194 @@ fn kernel_live_polls_preserve_charges_and_observe_cancellation_expiry_and_retire
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+fn completed_cursor_fixture(empty: bool, sparse: bool) -> FnxRowCursor {
+    let vertices = if empty {
+        Vec::new()
+    } else {
+        vec![VId(1), VId(2), VId(3), VId(1 << 96), VId(u128::MAX)]
+    };
+    let edges = if empty {
+        Vec::new()
+    } else {
+        vec![ProjectionEdge {
+            eid: EId(u128::MAX),
+            source: VId(1),
+            target: VId(u128::MAX),
+            weight: 1.0,
+        }]
+    };
+    let options = options(if sparse {
+        Directedness::Directed
+    } else {
+        Directedness::Undirected
+    });
+    let graph = SnapshotGraphView::build(
+        SnapshotBinding {
+            root: fgdb_types::ObjectId([0x4e; 32]),
+            as_of: CommitSeq(1),
+        },
+        &vertices,
+        &edges,
+        options.projection,
+        options.projection_limits,
+    )
+    .unwrap();
+    let text = if sparse {
+        "CALL fnx.single_source_shortest_path_length(1) YIELD vertex,distance"
+    } else {
+        "CALL fnx.connected_components() YIELD vertex,component"
+    };
+    FnxCallSpec::bind(text, &FnxParameters::new())
+        .unwrap()
+        .execute_rows(&graph, options.execution_limits, || Ok::<_, QueryError>(()))
+        .unwrap()
+}
+
+#[test]
+fn completed_sparse_cursor_prepays_both_meters_once_and_restores_consumer_charging() {
+    use fgdb_gql::algebra::GraphValue;
+
+    let ((), report) = run_async_under_lab(0x0b7b_0015, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let authority = issuer();
+        let token = authority.issue_at(&open(), 100).unwrap();
+        let verified = authority.verify_at(&token, BRANCH, 100).unwrap();
+        let permit = verified.begin_read_at(BRANCH, 100).unwrap();
+        let execution = RefCell::new(Execution::new(&cx, permit, || 100));
+        let policy = GqlQueryPolicy::new(100, 100, 1_000, 100);
+        let mut usage = AdmissionUsage::default();
+        let cursor = completed_cursor_fixture(false, true);
+        assert_eq!(cursor.remaining(), 2);
+        assert_eq!(cursor.certificate().vertices, 5);
+        reserve_cursor_pull(
+            cursor.certificate().vertices,
+            &execution,
+            UsageObserver {
+                usage: &mut usage,
+                policy,
+            },
+        )
+        .unwrap();
+        assert_eq!(execution.borrow().permit.usage().work, 5);
+        assert_eq!(usage.remaining(policy).evaluator.max_work_units, 995);
+        assert_eq!(execution.borrow().deferred, 0);
+        let before = execution.borrow().permit.usage();
+        let control = CursorControl::default();
+        let mut cursor =
+            control.wrap(crate::query::prism::ProcedureRows::new::<QueryError>(cursor).unwrap());
+        let mut rows = Vec::new();
+        while let Some(row) = cursor
+            .next_row(&mut || control.checkpoint(&execution))
+            .unwrap()
+        {
+            assert!(!control.0.get());
+            assert_eq!(execution.borrow().permit.usage(), before);
+            rows.push(row.values().to_vec());
+        }
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    GraphValue::Vertex(VId(1)),
+                    GraphValue::Scalar(CanonicalScalar::Int(0)),
+                ],
+                vec![
+                    GraphValue::Vertex(VId(u128::MAX)),
+                    GraphValue::Scalar(CanonicalScalar::Int(1)),
+                ],
+            ]
+        );
+        assert!(!control.0.get());
+        assert_eq!(execution.borrow().permit.usage(), before);
+        assert_eq!(usage.remaining(policy).evaluator.max_work_units, 995);
+        control.checkpoint(&execution).unwrap();
+        assert_eq!(execution.borrow().permit.usage().work, before.work + 1);
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn completed_cursor_checks_fresh_authority_at_rows_and_empty_or_drained_ends() {
+    use fgdb_gql::GqlQueryError;
+
+    let ((), report) = run_async_under_lab(0x0b7b_0016, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c
+            .query()
+            .with_host_clock_interval(std::num::NonZeroU32::new(128).unwrap());
+        for phase in ["row", "empty", "drained"] {
+            for cause in ["cancellation", "expiry", "retirement"] {
+                let authority = issuer();
+                let token = authority.issue_at(&open(), 100).unwrap();
+                let verified = authority.verify_at(&token, BRANCH, 100).unwrap();
+                let permit = verified.begin_read_at(BRANCH, 100).unwrap();
+                let now = Cell::new(100);
+                let probe = Arc::new(SimulationCheckpointProbe::new(
+                    (cause == "cancellation").then_some(1),
+                ));
+                let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                let execution = RefCell::new(Execution::new(&cx, permit, || now.get()));
+                let cursor = completed_cursor_fixture(phase == "empty", false);
+                let count = cursor.remaining();
+                reserve_cursor_pull(cursor.certificate().vertices, &execution, Unmetered).unwrap();
+                let control = CursorControl::default();
+                let mut cursor = control
+                    .wrap(crate::query::prism::ProcedureRows::new::<QueryError>(cursor).unwrap());
+                // Leave the source either before its first row, empty, or
+                // after its last row but before the mandatory drain check.
+                if phase == "drained" {
+                    for _ in 0..count {
+                        assert!(
+                            cursor
+                                .next_row(&mut || control.checkpoint(&execution))
+                                .unwrap()
+                                .is_some()
+                        );
+                    }
+                }
+                let before = execution.borrow().permit.usage();
+                execution.borrow_mut().cx = &controlled;
+                match cause {
+                    "expiry" => now.set(10_001),
+                    "retirement" => assert!(authority.retire()),
+                    _ => {}
+                }
+                let result = cursor.next_row(&mut || control.checkpoint(&execution));
+                assert!(
+                    matches!(
+                        (cause, &result),
+                        (
+                            "cancellation",
+                            Err(GqlQueryError::Interrupted(QueryError::Pattern(
+                                GqlQueryError::Interrupted(_)
+                            )))
+                        ) | (
+                            "expiry",
+                            Err(GqlQueryError::Interrupted(QueryError::Authorization(
+                                fgdb_warden::Error::Expired
+                            )))
+                        ) | (
+                            "retirement",
+                            Err(GqlQueryError::Interrupted(QueryError::Authorization(
+                                fgdb_warden::Error::AuthorityRetired
+                            )))
+                        )
+                    ),
+                    "{phase}/{cause}: {result:?}",
+                );
+                assert_eq!(probe.calls(), 1, "{phase}/{cause}");
+                assert_eq!(execution.borrow().permit.usage(), before);
+                assert!(!control.0.get(), "a refusal must restore ordinary charging");
+                assert_eq!(execution.borrow().deferred, 0);
+            }
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// Keep the remote cancellation-prefix law alongside the expiry/retirement
 /// cases. Polls sample the live clock, but never settle or add prepaid work.
 #[test]

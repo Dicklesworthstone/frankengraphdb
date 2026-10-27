@@ -1366,6 +1366,135 @@ fn an_authorized_read_hosts_call_over_the_masked_projection() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// Completed analytics feed authorized pages and exact groups through the
+/// same induced graph. Hidden shortcuts must change neither answers nor a
+/// signed refusal threshold, including when no result row is requested.
+#[test]
+fn completed_analytics_pages_and_groups_preserve_masked_answers_and_signed_limits() {
+    use fgdb::{QueryResult, QueryValue};
+    use fgdb_gql::algebra::GraphValue;
+
+    let ((), report) = run_async_under_lab(0x5ec0_3073, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let masked = simple_database(&c.commit(), true).await;
+        let visible = simple_database(&c.commit(), false).await;
+        let issuer = authority(313, NS);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let params = fgdb_gql::GqlParameters::new();
+        let policy = fgdb_gql::GqlQueryPolicy::new(100_000, 1_000, 1_000_000, 1_000_000);
+        let symbols = |_: fgdb_gql::GraphSymbolKind, _: &str| None;
+        let read = |db: &Database<MemVfs>, token: &CapabilityToken, text: &str| {
+            db.query_authorized(
+                &cx,
+                &issuer,
+                token,
+                BRANCH,
+                text,
+                &params,
+                symbols,
+                policy,
+                || 100,
+            )
+        };
+        let scalar = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        let vertex = |value| QueryValue::Value(GraphValue::Vertex(VId(value)));
+        let cases = [
+            (
+                "RETURN vertex, distance ORDER BY distance DESC, vertex LIMIT 1",
+                vec!["vertex", "distance"],
+                vec![vec![vertex(3), scalar(2)]],
+                true,
+            ),
+            (
+                "WITH vertex, distance, distance % 2 AS parity \
+                 RETURN parity, COUNT(*) AS n, SUM(distance) AS total \
+                 GROUP BY parity ORDER BY parity",
+                vec!["parity", "n", "total"],
+                vec![
+                    vec![scalar(0), QueryValue::Count(2), QueryValue::Integer(2)],
+                    vec![scalar(1), QueryValue::Count(1), QueryValue::Integer(1)],
+                ],
+                true,
+            ),
+            (
+                "RETURN vertex, distance ORDER BY distance DESC, vertex LIMIT 0",
+                vec!["vertex", "distance"],
+                vec![],
+                false,
+            ),
+        ];
+        for (tail, columns, rows, control_differs) in cases {
+            let statement = |yields| {
+                format!("CALL fnx.single_source_shortest_path_length(1) YIELD {yields} {tail}")
+            };
+            let cursor = statement("vertex, distance");
+            let materialized = statement("distance, vertex");
+            let expected = QueryResult::Rows {
+                columns: columns.into_iter().map(str::to_owned).collect(),
+                rows,
+            };
+            for db in [&masked, &visible] {
+                assert_eq!(read(db, &token, &cursor).unwrap(), expected, "{cursor}");
+                assert_eq!(
+                    read(db, &token, &materialized).unwrap(),
+                    expected,
+                    "{materialized}"
+                );
+            }
+            if control_differs {
+                assert_ne!(
+                    masked
+                        .query(&cx, &cursor, &params, symbols, policy)
+                        .unwrap(),
+                    expected,
+                    "the hidden topology must distinguish the unmasked control"
+                );
+            }
+
+            let dimensions: [(fn(u64) -> Restriction, LimitDimension, u64); 3] = [
+                (Restriction::MaxNodes, LimitDimension::Nodes, 1_000),
+                (Restriction::MaxWork, LimitDimension::Work, 1_000_000),
+                (Restriction::MaxRows, LimitDimension::Rows, 1_000),
+            ];
+            for (restrict, dimension, ceiling) in dimensions {
+                // Determine the actual threshold on the physically visible
+                // graph. No clock count or implementation work constant is
+                // used to manufacture the expected allowance.
+                let (mut low, mut high) = (0, ceiling);
+                while low < high {
+                    let middle = low + (high - low) / 2;
+                    let limited = token.attenuate(restrict(middle)).unwrap();
+                    if read(&visible, &limited, &cursor).is_ok() {
+                        high = middle;
+                    } else {
+                        low = middle + 1;
+                    }
+                }
+                assert!(
+                    low > 0,
+                    "complete source admission still costs {dimension:?}"
+                );
+                for db in [&visible, &masked] {
+                    let exact = token.attenuate(restrict(low)).unwrap();
+                    assert_eq!(read(db, &exact, &cursor).unwrap(), expected);
+                    let short = token.attenuate(restrict(low - 1)).unwrap();
+                    assert!(
+                        matches!(
+                            read(db, &short, &cursor),
+                            Err(QueryError::Authorization(Error::LimitExceeded(actual)))
+                                if actual == dimension
+                        ),
+                        "{cursor}: one-short {dimension:?} must preserve its typed refusal"
+                    );
+                }
+            }
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// fgdb-luq0b: a named selection uses the same capability-protected analytics
 /// source. Selecting a forbidden relation cannot reveal it, and an explicitly
 /// selected hidden weight is absent before its payload is inspected.

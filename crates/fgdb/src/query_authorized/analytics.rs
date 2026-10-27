@@ -18,16 +18,17 @@ use crate::gql_exec::source::{self, SourceEvent};
 use crate::query::prism::{LiveCache, ProjectionRequest, push_staged, source_admit};
 use crate::{Database, QueryError, ReadError, Snapshot};
 use asupersync::fs::Vfs;
-use fgdb_gql::GqlQueryPolicy;
+use fgdb_gql::{GqlQueryPolicy, GraphProcedureRowCursor};
 use fgdb_prism::{
     Directedness, FnxCallSpec, FnxExecutionError, FnxGraphKind, FnxMeter, FnxParameters,
-    FnxReadError, FnxReadOptions, FnxRowSink, FnxValue, ParallelEdgePolicy, ProjectionBuildError,
-    ProjectionEdge, ProjectionError, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView,
-    SortedVertexLookup,
+    FnxReadError, FnxReadOptions, FnxRowCursor, FnxRowSink, FnxValue, ParallelEdgePolicy,
+    ProjectionBuildError, ProjectionEdge, ProjectionError, SelfLoopPolicy, SnapshotBinding,
+    SnapshotGraphView, SortedVertexLookup,
 };
 use fgdb_types::{QueryCx, VId};
 use fgdb_warden::{Authority, CapabilityToken, PlannerPredicates};
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::sync::Arc;
 
 type Error = FnxReadError<ReadError, QueryError>;
@@ -238,7 +239,14 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
     observe: impl Observe,
 ) -> Result<Vec<Vec<FnxValue>>, Error> {
     execute_with_sink(
-        snapshot, binding, call, options, scope, execution, observe, None,
+        snapshot,
+        binding,
+        call,
+        options,
+        scope,
+        execution,
+        observe,
+        ResultSink::Collected,
     )
 }
 
@@ -264,9 +272,128 @@ pub(super) fn execute_into<Clock: FnMut() -> u64>(
         scope,
         execution,
         observe,
-        Some(sink),
+        ResultSink::Mapped(sink),
     )
     .map(|_| ())
+}
+
+/// Complete the same masked source and kernel, retaining its existing value
+/// arrays only inside the current authorized operation. The caller must
+/// reserve the additional pull pass before exposing its first downstream row.
+/// Neither this cursor nor its private certificate is a capability response.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute_rows<Clock: FnMut() -> u64>(
+    snapshot: &Arc<Snapshot>,
+    binding: SnapshotBinding,
+    call: &FnxCallSpec,
+    options: FnxReadOptions,
+    scope: &PlannerPredicates,
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    observe: impl Observe,
+) -> Result<FnxRowCursor, Error> {
+    let mut retained = None;
+    execute_with_sink(
+        snapshot,
+        binding,
+        call,
+        options,
+        scope,
+        execution,
+        observe,
+        ResultSink::Retained(&mut retained),
+    )?;
+    retained.ok_or(Error::Execution(FnxExecutionError::InvalidUpstreamResult))
+}
+
+/// Charge the complete visible-vertex pull pass to both meters, before any
+/// consumer. Sparse distances still inspect unreachable visible vertices.
+/// Real pulls use fresh uncharged permission/cancellation checks; they must
+/// not spend this reservation a second time. Hidden graph size never enters it.
+pub(super) fn reserve_cursor_pull<Clock: FnMut() -> u64>(
+    vertices: usize,
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    mut observe: impl Observe,
+) -> Result<(), Error> {
+    super::work_runs(execution, control_error, || {
+        let mut live = execution.borrow_mut();
+        let mut meter = KernelMeter {
+            execution: &mut live,
+            observe: &mut observe,
+        };
+        for start in (0..vertices).step_by(fgdb_prism::FNX_METER_RUN) {
+            meter
+                .units((vertices - start).min(fgdb_prism::FNX_METER_RUN))
+                .map_err(control_error)?;
+        }
+        meter.poll().map_err(control_error)
+    })
+}
+
+/// One synchronous statement's private checkpoint mode. An owned cursor may
+/// retain this flag, but never its borrowed execution permit. While it pulls
+/// prepaid source values, its host callback checks fresh authority without
+/// charging those values again; every ordinary evaluator callback still pays.
+#[derive(Default)]
+pub(super) struct CursorControl(Rc<Cell<bool>>);
+
+impl CursorControl {
+    pub(super) fn checkpoint<Clock: FnMut() -> u64>(
+        &self,
+        execution: &RefCell<Execution<'_, '_, Clock>>,
+    ) -> Result<(), QueryError> {
+        let mut live = execution.borrow_mut();
+        if self.0.get() {
+            poll_live(&mut live)
+        } else {
+            live.checkpoint()
+        }
+    }
+
+    pub(super) fn wrap(
+        &self,
+        rows: crate::query::prism::ProcedureRows,
+    ) -> Box<dyn fgdb_gql::GraphProcedureRowCursor<crate::GqlError, QueryError>> {
+        Box::new(AuthorizedRows {
+            rows,
+            prepaid: Rc::clone(&self.0),
+        })
+    }
+}
+
+struct AuthorizedRows {
+    rows: crate::query::prism::ProcedureRows,
+    prepaid: Rc<Cell<bool>>,
+}
+
+impl fgdb_gql::GraphProcedureRowCursor<crate::GqlError, QueryError> for AuthorizedRows {
+    fn next_row(
+        &mut self,
+        checkpoint: &mut dyn FnMut() -> Result<(), QueryError>,
+    ) -> Result<
+        Option<fgdb_gql::algebra::GraphValueRow>,
+        fgdb_gql::GqlQueryError<crate::GqlError, QueryError>,
+    > {
+        struct Restore<'a>(&'a Cell<bool>, bool);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.1);
+            }
+        }
+        let _restore = Restore(&self.prepaid, self.prepaid.replace(true));
+        let row = self.rows.next_row(checkpoint)?;
+        if row.is_none() {
+            // Even an empty kernel or an exhausted sparse suffix observes
+            // current cancellation, retirement and expiry at the drain edge.
+            checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?;
+        }
+        Ok(row)
+    }
+}
+
+enum ResultSink<'a> {
+    Collected,
+    Mapped(&'a mut dyn FnxRowSink<QueryError>),
+    Retained(&'a mut Option<FnxRowCursor>),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -278,7 +405,7 @@ fn execute_with_sink<Clock: FnMut() -> u64>(
     scope: &PlannerPredicates,
     execution: &RefCell<Execution<'_, '_, Clock>>,
     observe: impl Observe,
-    sink: Option<&mut dyn FnxRowSink<QueryError>>,
+    sink: ResultSink<'_>,
 ) -> Result<Vec<Vec<FnxValue>>, Error> {
     let observe = RefCell::new(observe);
     let checkpoint = || {
@@ -410,12 +537,18 @@ fn execute_with_sink<Clock: FnMut() -> u64>(
             observe: &mut *observe.borrow_mut(),
         };
         match sink {
-            Some(sink) => call
+            ResultSink::Mapped(sink) => call
                 .execute_into(&graph, limits, meter, sink)
                 .map(|_| Vec::new()),
-            None => call
+            ResultSink::Collected => call
                 .execute(&graph, limits, meter)
                 .map(|result| result.rows),
+            ResultSink::Retained(retained) => {
+                call.execute_rows(&graph, limits, meter).map(|cursor| {
+                    *retained = Some(cursor);
+                    Vec::new()
+                })
+            }
         }
     };
     // Every unit the kernel spent is charged before its result or its own
@@ -758,18 +891,24 @@ struct KernelMeter<'m, 'cx, 'permit, Clock, O> {
     observe: &'m mut O,
 }
 
+fn poll_live<Clock: FnMut() -> u64>(
+    execution: &mut Execution<'_, '_, Clock>,
+) -> Result<(), QueryError> {
+    execution.poll()?;
+    // Arithmetic or cursor traversal has already charged its work. A cached
+    // charge-time sample must not hide expiry throughout this physical phase.
+    let now = execution.sample();
+    let checked = execution.permit.checkpoint_at(now);
+    checked.map_err(|error| execution.refusal(error))
+}
+
 impl<Clock, O> FnxMeter<QueryError> for KernelMeter<'_, '_, '_, Clock, O>
 where
     Clock: FnMut() -> u64,
     O: Observe,
 {
     fn poll(&mut self) -> Result<(), QueryError> {
-        self.execution.poll()?;
-        // Arithmetic has already charged its work. A cached charge-time
-        // sample must not hide expiry throughout this physical phase.
-        let now = self.execution.sample();
-        let checked = self.execution.permit.checkpoint_at(now);
-        checked.map_err(|error| self.execution.refusal(error))
+        poll_live(self.execution)
     }
     fn unit(&mut self) -> Result<(), QueryError> {
         self.execution.work_units(1)?;

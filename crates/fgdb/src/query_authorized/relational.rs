@@ -178,35 +178,50 @@ fn set_execution_in_runs<Clock: FnMut() -> u64>(
     GqlQueryError<GraphSetExecutionError<GqlError>, QueryError>,
 > {
     let element_failure = RefCell::new(None);
-    let result = query.execute_governed_with_seeded_elements(
+    let cursor_control = super::analytics::CursorControl::default();
+    let result = query.execute_governed_from_source(
         policy,
-        |pattern, remaining| {
-            pattern_at(snapshot, at, pattern, scope, execution, remaining)
-                .map_err(|error| error.map_source(GqlError::Read))
-        },
-        |pattern, seeds, remaining| {
-            seeded::pattern_at(snapshot, at, pattern, seeds, scope, execution, remaining)
-                .map(|result| result.map_err(|error| error.map_source(GqlError::Read)))
-        },
-        |call, arguments, remaining| {
-            procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
-        },
-        |element, key| {
-            scoped_element_property(
-                snapshot,
-                at,
-                scope,
-                execution,
-                &element_failure,
-                element,
-                key,
-            )
-        },
+        fgdb_gql::procedure_row_source(
+            |pattern, remaining| {
+                pattern_at(snapshot, at, pattern, scope, execution, remaining)
+                    .map_err(|error| error.map_source(GqlError::Read))
+            },
+            |pattern, seeds, remaining| {
+                seeded::pattern_at(snapshot, at, pattern, seeds, scope, execution, remaining)
+                    .map(|result| result.map_err(|error| error.map_source(GqlError::Read)))
+            },
+            |call, arguments, remaining| {
+                procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
+            },
+            |call, arguments, remaining| {
+                Some(procedure_rows_at(
+                    snapshot,
+                    at,
+                    call,
+                    arguments,
+                    scope,
+                    execution,
+                    remaining,
+                    &cursor_control,
+                ))
+            },
+            |element, key| {
+                scoped_element_property(
+                    snapshot,
+                    at,
+                    scope,
+                    execution,
+                    &element_failure,
+                    element,
+                    key,
+                )
+            },
+        ),
         || {
             if let Some(error) = element_failure.borrow_mut().take() {
                 return Err(error);
             }
-            execution.borrow_mut().checkpoint()
+            cursor_control.checkpoint(execution)
         },
     );
     let failure = element_failure.borrow_mut().take();
@@ -275,6 +290,87 @@ fn procedure_at<Clock: FnMut() -> u64>(
     )
 }
 
+/// The masked analytics path completes validation and settles its signed work
+/// before this owned cursor exists. The extra visible-vertex pass is admitted
+/// to both source meters before a reducer, comparator or property read runs.
+/// Only the ordinary result rows leave the enclosing authorized operation;
+/// the projection and its certificate remain trusted-host execution state.
+#[allow(clippy::too_many_arguments)]
+fn procedure_rows_at<Clock: FnMut() -> u64>(
+    snapshot: &Arc<Snapshot>,
+    at: CommitSeq,
+    call: &fgdb_gql::PreparedProcedureCall,
+    arguments: &[fgdb_gql::algebra::GraphValue],
+    scope: &PlannerPredicates,
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    remaining: GqlQueryPolicy,
+    control: &super::analytics::CursorControl,
+) -> Result<
+    fgdb_gql::GraphProcedureExecution<GqlError, QueryError>,
+    GqlQueryError<GqlError, QueryError>,
+> {
+    let spec = crate::query::bind_procedure(call, arguments)?;
+    if spec
+        .outputs()
+        .first()
+        .is_none_or(|column| column.field != fgdb_prism::FnxOutput::Vertex)
+    {
+        return Err(GqlQueryError::Source(GqlError::Procedure(
+            crate::query::ProcedureError::ResultDomain,
+        )));
+    }
+    let options = crate::query::procedure_options(&spec, at, remaining);
+    super::analytics::preflight(&spec, options.projection.directedness)
+        .map_err(crate::query::procedure_failure)?;
+    let mut usage = AdmissionUsage::default();
+    let cursor = super::analytics::execute_rows(
+        snapshot,
+        fgdb_prism::SnapshotBinding {
+            root: snapshot.root.0,
+            as_of: at,
+        },
+        &spec,
+        options,
+        scope,
+        execution,
+        super::analytics::UsageObserver {
+            usage: &mut usage,
+            policy: remaining,
+        },
+    )
+    .map_err(crate::query::procedure_failure)?;
+    let count = cursor.remaining();
+    let vertices = cursor.certificate().vertices;
+    let cursor = crate::query::prism::ProcedureRows::new(cursor)?;
+    super::analytics::reserve_cursor_pull(
+        vertices,
+        execution,
+        super::analytics::UsageObserver {
+            usage: &mut usage,
+            policy: remaining,
+        },
+    )
+    .map_err(crate::query::procedure_failure)?;
+    // Finish the same usage accumulator as the collected path without
+    // allocating a dummy result table. This empty value is statistics-only.
+    let stats = usage.finish::<GqlError, QueryError, ()>(
+        remaining,
+        Ok(fgdb_gql::GqlQueryExecution::<()> {
+            rows: fgdb_gql::GqlExecutionStats {
+                snapshot_records: usage.snapshot_records(),
+                result_rows: u64::try_from(count).unwrap_or(u64::MAX),
+            },
+            evaluator: fgdb_gql::GlaExecutionStats::default(),
+            value: Vec::new(),
+        }),
+    )?;
+    Ok(fgdb_gql::GraphProcedureExecution {
+        cursor: control.wrap(cursor),
+        rows: stats.rows,
+        evaluator: stats.evaluator,
+    })
+}
+
 fn aggregate_at<Clock: FnMut() -> u64>(
     snapshot: &Arc<Snapshot>,
     at: CommitSeq,
@@ -300,35 +396,50 @@ fn aggregate_execution_at<Clock: FnMut() -> u64>(
     GqlQueryError<GraphAggregateError<GqlError>, QueryError>,
 > {
     let element_failure = RefCell::new(None);
-    let result = query.execute_governed_with_seeded_elements(
+    let cursor_control = super::analytics::CursorControl::default();
+    let result = query.execute_governed_from_source(
         policy,
-        |pattern, remaining| {
-            pattern_at(snapshot, at, pattern, scope, execution, remaining)
-                .map_err(|error| error.map_source(GqlError::Read))
-        },
-        |pattern, seeds, remaining| {
-            seeded::pattern_at(snapshot, at, pattern, seeds, scope, execution, remaining)
-                .map(|result| result.map_err(|error| error.map_source(GqlError::Read)))
-        },
-        |call, arguments, remaining| {
-            procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
-        },
-        |element, key| {
-            scoped_element_property(
-                snapshot,
-                at,
-                scope,
-                execution,
-                &element_failure,
-                element,
-                key,
-            )
-        },
+        fgdb_gql::procedure_row_source(
+            |pattern, remaining| {
+                pattern_at(snapshot, at, pattern, scope, execution, remaining)
+                    .map_err(|error| error.map_source(GqlError::Read))
+            },
+            |pattern, seeds, remaining| {
+                seeded::pattern_at(snapshot, at, pattern, seeds, scope, execution, remaining)
+                    .map(|result| result.map_err(|error| error.map_source(GqlError::Read)))
+            },
+            |call, arguments, remaining| {
+                procedure_at(snapshot, at, call, arguments, scope, execution, remaining)
+            },
+            |call, arguments, remaining| {
+                Some(procedure_rows_at(
+                    snapshot,
+                    at,
+                    call,
+                    arguments,
+                    scope,
+                    execution,
+                    remaining,
+                    &cursor_control,
+                ))
+            },
+            |element, key| {
+                scoped_element_property(
+                    snapshot,
+                    at,
+                    scope,
+                    execution,
+                    &element_failure,
+                    element,
+                    key,
+                )
+            },
+        ),
         || {
             if let Some(error) = element_failure.borrow_mut().take() {
                 return Err(error);
             }
-            execution.borrow_mut().checkpoint()
+            cursor_control.checkpoint(execution)
         },
     );
     let failure = element_failure.borrow_mut().take();

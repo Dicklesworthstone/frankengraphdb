@@ -426,16 +426,11 @@ pub(crate) fn fnx_procedure_rows(
     {
         return Err(refuse(ProcedureError::ResultDomain));
     }
-    let cursor =
-        execute(&spec, procedure_options(&spec, as_of, remaining)).map_err(procedure_failure)?;
-    if cursor
-        .max_integer()
-        .is_some_and(|value| value > i64::MAX as u64)
-    {
-        return Err(refuse(ProcedureError::ResultDomain));
-    }
-    let count = cursor.remaining();
-    let certificate = cursor.certificate();
+    let cursor = ProcedureRows::new(
+        execute(&spec, procedure_options(&spec, as_of, remaining)).map_err(procedure_failure)?,
+    )?;
+    let count = cursor.cursor.remaining();
+    let certificate = cursor.cursor.certificate();
     let records = certificate.vertices.saturating_add(certificate.input_edges);
     // Hashing already examined every vertex. Pulling the completed arrays
     // examines them once more, including unreachable gaps. Reserve that whole
@@ -456,25 +451,39 @@ pub(crate) fn fnx_procedure_rows(
     };
     evidence.push(certificate.clone());
     Ok(GraphProcedureExecution {
-        cursor: Box::new(ProcedureRows {
-            cursor,
-            scratch: Vec::new(),
-        }),
+        cursor: Box::new(cursor),
         rows,
         evaluator,
     })
 }
 
-struct ProcedureRows {
+pub(crate) struct ProcedureRows {
     cursor: FnxRowCursor,
     scratch: Vec<FnxValue>,
 }
 
-impl GraphProcedureRowCursor<GqlError, Cancel> for ProcedureRows {
+impl ProcedureRows {
+    /// The complete selected integer domain is checked before any GQL row can
+    /// be consumed, including zero-row pages. This adapter owns no authority.
+    pub(crate) fn new<C>(cursor: FnxRowCursor) -> Result<Self, GqlQueryError<GqlError, C>> {
+        if cursor
+            .max_integer()
+            .is_some_and(|value| value > i64::MAX as u64)
+        {
+            return Err(refuse(ProcedureError::ResultDomain));
+        }
+        Ok(Self {
+            cursor,
+            scratch: Vec::new(),
+        })
+    }
+}
+
+impl<C> GraphProcedureRowCursor<GqlError, C> for ProcedureRows {
     fn next_row(
         &mut self,
-        checkpoint: &mut dyn FnMut() -> Result<(), Cancel>,
-    ) -> Result<Option<GraphValueRow>, GqlQueryError<GqlError, Cancel>> {
+        checkpoint: &mut dyn FnMut() -> Result<(), C>,
+    ) -> Result<Option<GraphValueRow>, GqlQueryError<GqlError, C>> {
         if !self
             .cursor
             .next_row(&mut self.scratch, checkpoint)
