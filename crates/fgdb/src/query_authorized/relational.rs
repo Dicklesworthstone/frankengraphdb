@@ -243,7 +243,8 @@ fn procedure_at<Clock: FnMut() -> u64>(
     super::analytics::preflight(&spec, options.projection.directedness)
         .map_err(crate::query::procedure_failure)?;
     let mut usage = AdmissionUsage::default();
-    let rows = super::analytics::execute(
+    let mut sink = crate::query::ProcedureRowSink::default();
+    super::analytics::execute_into(
         snapshot,
         fgdb_prism::SnapshotBinding {
             root: snapshot.root.0,
@@ -257,9 +258,10 @@ fn procedure_at<Clock: FnMut() -> u64>(
             usage: &mut usage,
             policy: remaining,
         },
+        &mut sink,
     )
     .map_err(crate::query::procedure_failure)?;
-    let value = crate::query::procedure_rows(rows)?;
+    let value = sink.finish()?;
     usage.finish(
         remaining,
         Ok(fgdb_gql::GqlQueryExecution {

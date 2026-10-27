@@ -48,7 +48,7 @@ pub use call::{
 pub use clustering::{TriangleStatistics, triangle_statistics};
 pub use execute::{
     ComplexityWitness, FNX_METER_RUN, FnxCertificate, FnxExecutionError, FnxExecutionLimits,
-    FnxMeter, FnxResult, FnxValue,
+    FnxMeter, FnxResult, FnxRowSink, FnxValue,
 };
 pub use input::{
     FnxReadError, FnxReadOptions, FnxReadResult, FnxSealedReadError, FnxSelection, FnxSourceLimits,

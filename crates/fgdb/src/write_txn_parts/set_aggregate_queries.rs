@@ -94,7 +94,7 @@ mod set_aggregate_queries {
                             as_of,
                             remaining,
                             evidence,
-                            |spec, options| self.execute_fnx(cx, spec, options),
+                            |spec, options, sink| self.execute_fnx_into(cx, spec, options, sink),
                         )
                     },
                     |element, key| crate::gql_exec::element_property_at(self, element, key, as_of),
@@ -163,7 +163,7 @@ mod set_aggregate_queries {
                             as_of,
                             remaining,
                             &mut Vec::new(),
-                            |spec, options| self.execute_fnx(cx, spec, options),
+                            |spec, options, sink| self.execute_fnx_into(cx, spec, options, sink),
                         )
                     },
                     |element, key| crate::gql_exec::element_property_at(self, element, key, as_of),

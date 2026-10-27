@@ -21,7 +21,7 @@ use asupersync::fs::Vfs;
 use fgdb_gql::GqlQueryPolicy;
 use fgdb_prism::{
     Directedness, FnxCallSpec, FnxExecutionError, FnxGraphKind, FnxMeter, FnxParameters,
-    FnxReadError, FnxReadOptions, FnxValue, ParallelEdgePolicy, ProjectionBuildError,
+    FnxReadError, FnxReadOptions, FnxRowSink, FnxValue, ParallelEdgePolicy, ProjectionBuildError,
     ProjectionEdge, ProjectionError, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView,
     SortedVertexLookup,
 };
@@ -237,6 +237,49 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
     execution: &RefCell<Execution<'_, '_, Clock>>,
     observe: impl Observe,
 ) -> Result<Vec<Vec<FnxValue>>, Error> {
+    execute_with_sink(
+        snapshot, binding, call, options, scope, execution, observe, None,
+    )
+}
+
+/// Keep result conversion inside the trusted host while preserving the
+/// projection's exact live replay and the kernel's signed-work settlement.
+/// The sink is discard-only until this function and the delivery gate succeed.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute_into<Clock: FnMut() -> u64>(
+    snapshot: &Arc<Snapshot>,
+    binding: SnapshotBinding,
+    call: &FnxCallSpec,
+    options: FnxReadOptions,
+    scope: &PlannerPredicates,
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    observe: impl Observe,
+    sink: &mut dyn FnxRowSink<QueryError>,
+) -> Result<(), Error> {
+    execute_with_sink(
+        snapshot,
+        binding,
+        call,
+        options,
+        scope,
+        execution,
+        observe,
+        Some(sink),
+    )
+    .map(|_| ())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_with_sink<Clock: FnMut() -> u64>(
+    snapshot: &Arc<Snapshot>,
+    binding: SnapshotBinding,
+    call: &FnxCallSpec,
+    options: FnxReadOptions,
+    scope: &PlannerPredicates,
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    observe: impl Observe,
+    sink: Option<&mut dyn FnxRowSink<QueryError>>,
+) -> Result<Vec<Vec<FnxValue>>, Error> {
     let observe = RefCell::new(observe);
     let checkpoint = || {
         execution.borrow_mut().checkpoint()?;
@@ -361,14 +404,20 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
     // caller meter still sees each one. Nothing else borrows either while the
     // kernel runs.
     let outer = std::mem::replace(&mut execution.borrow_mut().in_runs, true);
-    let result = call.execute(
-        &graph,
-        limits,
-        KernelMeter {
+    let result = {
+        let meter = KernelMeter {
             execution: &mut execution.borrow_mut(),
             observe: &mut *observe.borrow_mut(),
-        },
-    );
+        };
+        match sink {
+            Some(sink) => call
+                .execute_into(&graph, limits, meter, sink)
+                .map(|_| Vec::new()),
+            None => call
+                .execute(&graph, limits, meter)
+                .map(|result| result.rows),
+        }
+    };
     // Every unit the kernel spent is charged before its result or its own
     // error is judged, as it was when each was charged on the spot. A kernel
     // our control stopped keeps that refusal and charges nothing more.
@@ -396,13 +445,13 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
             .deliver(*requested)
             .map_err(control_error)?;
     }
-    let result = result.map_err(|error| match error {
+    let rows = result.map_err(|error| match error {
         FnxExecutionError::Cancelled(error) => control_error(error),
         other => Error::Execution(other),
     })?;
     // The kernel's certificate is trusted-host provenance, not a capability
     // response. Releasing it could expose the unmasked root/history identity.
-    Ok(result.rows)
+    Ok(rows)
 }
 
 /// Replay `tape` exactly as `Tape::replay` through `poll` and `spend`, but a

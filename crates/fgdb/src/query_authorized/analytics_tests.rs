@@ -1258,6 +1258,151 @@ fn a_composed_call_reuses_across_authorized_native_reads() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+#[test]
+fn direct_gql_rows_match_collected_rows_and_every_authorized_refusal_prefix() {
+    use fgdb_gql::GqlQueryError;
+    use fgdb_gql::algebra::{GraphValue, GraphValueRow};
+    use fgdb_types::CanonicalF64;
+
+    let _serial = serial();
+    let ((), report) = run_async_under_lab(0x0b7b_000a, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = database(&c.commit()).await;
+        let authority = issuer();
+        let spec = FnxCallSpec::bind(
+            "CALL fnx.single_source_shortest_path_length(1) YIELD distance,vertex",
+            &FnxParameters::new(),
+        )
+        .unwrap();
+        let options = options(Directedness::Reversed);
+        for scoped in [false, true] {
+            let mut grant = open();
+            if scoped {
+                grant.relations = Scope::only([RelationId(1)]);
+            }
+            let token = authority.issue_at(&grant, 100).unwrap();
+            let run = |direct: bool, token: &CapabilityToken, stop: Option<usize>| {
+                let probe = Arc::new(SimulationCheckpointProbe::new(stop));
+                let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                let clock_reads = Cell::new(0usize);
+                let result: Result<Vec<GraphValueRow>, GqlQueryError<crate::GqlError, QueryError>> =
+                    authorized_with_errors(
+                        &db,
+                        &controlled,
+                        &authority,
+                        token,
+                        BRANCH,
+                        options.as_of,
+                        || {
+                            clock_reads.set(clock_reads.get() + 1);
+                            100
+                        },
+                        GqlQueryError::Interrupted,
+                        |snapshot, at, scope, execution| {
+                            preflight(&spec, options.projection.directedness)
+                                .map_err(crate::query::procedure_failure)?;
+                            let view = db.read_session().map_err(|error| {
+                                crate::query::procedure_failure(FnxReadError::Read(error))
+                            })?;
+                            let binding = SnapshotBinding {
+                                root: view.partition_root().0,
+                                as_of: at,
+                            };
+                            if direct {
+                                let mut sink = crate::query::ProcedureRowSink::default();
+                                execute_into(
+                                    snapshot, binding, &spec, options, scope, execution, Unmetered,
+                                    &mut sink,
+                                )
+                                .map_err(crate::query::procedure_failure)?;
+                                sink.finish()
+                            } else {
+                                // The predecessor's two-table path is the
+                                // control: collect FnX, then independently
+                                // convert cells into the public GQL domains.
+                                let rows = execute(
+                                    snapshot, binding, &spec, options, scope, execution, Unmetered,
+                                )
+                                .map_err(crate::query::procedure_failure)?;
+                                Ok(rows
+                                    .into_iter()
+                                    .map(|row| {
+                                        GraphValueRow::from_owned_values(
+                                            row.into_iter()
+                                                .map(|value| match value {
+                                                    FnxValue::Vertex(vertex) => {
+                                                        GraphValue::Vertex(vertex)
+                                                    }
+                                                    FnxValue::Integer(value) => {
+                                                        GraphValue::Scalar(CanonicalScalar::Int(
+                                                            i64::try_from(value).unwrap(),
+                                                        ))
+                                                    }
+                                                    FnxValue::Score(value)
+                                                    | FnxValue::Float(value) => {
+                                                        GraphValue::Scalar(CanonicalScalar::Float(
+                                                            CanonicalF64::new(value),
+                                                        ))
+                                                    }
+                                                })
+                                                .collect(),
+                                        )
+                                    })
+                                    .collect())
+                            }
+                        },
+                    );
+                let encoded = result
+                    .map(|rows| {
+                        rows.iter()
+                            .map(|row| row.canonical_bytes().unwrap())
+                            .collect::<Vec<_>>()
+                    })
+                    .map_err(|error| format!("{error:?}"));
+                (encoded, probe.calls(), clock_reads.get())
+            };
+            let expected = run(false, &token, None);
+            assert!(expected.0.is_ok());
+            assert_eq!(run(true, &token, None), expected);
+            // This includes output hashing, signed-run settlement and the
+            // final delivery gate after a complete private row table exists.
+            for stop in 1..=expected.1 {
+                let collected = run(false, &token, Some(stop));
+                assert!(collected.0.is_err(), "stop={stop}");
+                assert_eq!(collected.1, stop);
+                assert_eq!(run(true, &token, Some(stop)), collected, "stop={stop}");
+            }
+            let dimensions: [fn(u64) -> Restriction; 3] = [
+                Restriction::MaxNodes,
+                Restriction::MaxWork,
+                Restriction::MaxRows,
+            ];
+            for dimension in dimensions {
+                let attenuated = |limit| token.attenuate(dimension(limit)).unwrap();
+                let (mut low, mut high) = (0, 10_000_000);
+                while low < high {
+                    let middle = low + (high - low) / 2;
+                    if run(false, &attenuated(middle), None).0.is_ok() {
+                        high = middle;
+                    } else {
+                        low = middle + 1;
+                    }
+                }
+                assert!(low > 0);
+                for limit in [low - 1, low] {
+                    let token = attenuated(limit);
+                    let collected = run(false, &token, None);
+                    assert_eq!(collected.0.is_ok(), limit == low);
+                    assert_eq!(run(true, &token, None), collected, "limit={limit}");
+                }
+            }
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// Under the composed path's caller meter, a hit meets every allowance where
 /// its build did: at each dimension's least admitting allowance and one below
 /// it, a read answers or refuses exactly as a fresh build does. A wide

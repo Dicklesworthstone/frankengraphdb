@@ -267,6 +267,70 @@ fn every_registered_procedure_composes_and_equals_the_standalone_call() {
     });
 }
 
+#[test]
+fn direct_call_rows_preserve_sparse_and_reordered_yields_in_every_native_host() {
+    run_transaction(async |commit, cx, txcx| {
+        let mut db = open(commit).await;
+        let view = db.read_session().unwrap();
+        let txn = db.begin(txcx).unwrap();
+        for (procedure, yields, count) in [
+            (
+                "single_source_shortest_path_length(1)",
+                "distance, vertex",
+                5,
+            ),
+            ("pagerank()", "score", 6),
+            ("weakly_connected_components()", "component, vertex", 6),
+        ] {
+            let call = format!("CALL fnx.{procedure} YIELD {yields}");
+            let standalone = db
+                .call_fnx(cx, &call, &FnxParameters::new(), explicit(false))
+                .unwrap();
+            let mut expected: Vec<Vec<GraphValue>> = standalone
+                .analytics
+                .rows
+                .into_iter()
+                .map(|row| row.into_iter().map(value).collect())
+                .collect();
+            assert_eq!(expected.len(), count, "{procedure}");
+            expected.sort_by(|left, right| {
+                left.iter()
+                    .zip(right)
+                    .map(|(left, right)| compare(left, right).unwrap())
+                    .find(|order| *order != Ordering::Equal)
+                    .unwrap_or(Ordering::Equal)
+            });
+            let text = format!("{call} RETURN {yields} ORDER BY {yields}");
+            let expected_columns: Vec<_> = yields.split(", ").collect();
+            for result in [
+                db.query(cx, &text, &GqlParameters::new(), symbols, policy()),
+                view.query(cx, &text, &GqlParameters::new(), symbols, policy()),
+                txn.query(&db, cx, &text, &GqlParameters::new(), symbols, policy()),
+            ] {
+                let (columns, actual) = rows(result.unwrap());
+                assert_eq!(columns, expected_columns, "{procedure}");
+                assert_eq!(actual, expected, "{procedure}");
+                let encode = |rows: &[Vec<GraphValue>]| {
+                    rows.iter()
+                        .map(|row| {
+                            row.iter()
+                                .map(|cell| cell.canonical_bytes().unwrap())
+                                .collect::<Vec<_>>()
+                        })
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(
+                    encode(&actual),
+                    encode(&expected),
+                    "{procedure}: canonical bytes"
+                );
+            }
+        }
+        txn.abort();
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
 /// fgdb-luq0b: the README's analytics shape, `YIELD node, score RETURN
 /// node.p, score ORDER BY score DESC LIMIT k`, runs as written. `node` names
 /// the vertex output, and `node.p` reads through the implied identity match.

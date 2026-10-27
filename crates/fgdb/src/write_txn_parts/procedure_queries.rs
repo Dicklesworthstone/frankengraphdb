@@ -187,22 +187,24 @@ mod procedures {
                 usize::try_from(remaining.evaluator.max_scratch_entries).unwrap_or(usize::MAX)
                     / (spec.outputs().len() + 1),
             );
-            let analytics = spec
-                .execute(&graph, limits, || cx.checkpoint())
+            let mut sink = crate::query::ProcedureRowSink::default();
+            let certificate = spec
+                .execute_into(&graph, limits, || cx.checkpoint(), &mut sink)
                 .map_err(|error| prism_failure(FnxReadError::Execution(error)))?;
             usage.charge_work(
                 policy,
-                u64::try_from(analytics.certificate.estimated_work).unwrap_or(u64::MAX),
+                u64::try_from(certificate.estimated_work).unwrap_or(u64::MAX),
             )?;
-            for row in &analytics.rows {
+            for _ in 0..sink.row_count() {
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
                 usage.observe(policy, SourceEvent::ScratchEntry)?;
-                for _ in row {
+                for _ in spec.outputs() {
                     cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
                     usage.observe(policy, SourceEvent::ScratchEntry)?;
                 }
             }
-            let rows = crate::query::procedure_rows(analytics.rows)
+            let rows = sink
+                .finish()
                 .map_err(|error| error.map_source(WriteTxnError::Gql))?;
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
             usage.finish(

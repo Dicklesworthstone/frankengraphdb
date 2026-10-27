@@ -13,11 +13,11 @@ use fgdb_gql::{
 };
 use fgdb_prism::{
     Directedness, FnxArgument, FnxBindErrorKind, FnxCallError, FnxCallSite, FnxCallSpec,
-    FnxCertificate, FnxMemoryLimits, FnxOutput, FnxParameters, FnxReadError, FnxReadOptions,
-    FnxReadResult, FnxSealedReadError, FnxSelection, FnxSourceLimits, FnxValue, ParallelEdgePolicy,
-    ProjectionBuildError, ProjectionEdge, ProjectionError, ProjectionLimits, ProjectionSpec,
-    SealedGraphView, SealedProjectionError, SealedProjectionSpec, SelfLoopPolicy, SnapshotBinding,
-    SnapshotGraphView, SortedVertexLookup,
+    FnxCertificate, FnxExecutionError, FnxMemoryLimits, FnxOutput, FnxParameters, FnxReadError,
+    FnxReadOptions, FnxReadResult, FnxRowSink, FnxSealedReadError, FnxSelection, FnxSourceLimits,
+    FnxValue, ParallelEdgePolicy, ProjectionBuildError, ProjectionEdge, ProjectionError,
+    ProjectionLimits, ProjectionSpec, SealedGraphView, SealedProjectionError, SealedProjectionSpec,
+    SelfLoopPolicy, SnapshotBinding, SnapshotGraphView, SortedVertexLookup,
 };
 use fgdb_strata::store::RootReadLimits;
 use fgdb_strata::tiered::sealed::{SealedError, SealedLimits, SealedPartition};
@@ -379,14 +379,17 @@ pub(crate) fn fnx_procedure(
     as_of: CommitSeq,
     remaining: GqlQueryPolicy,
     evidence: &mut Vec<FnxCertificate>,
-    execute: impl FnOnce(&FnxCallSpec, FnxReadOptions) -> Result<FnxReadResult, Error>,
+    execute: impl FnOnce(
+        &FnxCallSpec,
+        FnxReadOptions,
+        &mut dyn FnxRowSink<Cancel>,
+    ) -> Result<FnxCertificate, Error>,
 ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GqlError, Cancel>> {
     let spec = bind_procedure(call, arguments)?;
-    let analytics = execute(&spec, procedure_options(&spec, as_of, remaining))
-        .map_err(procedure_failure)?
-        .analytics;
-    let rows = procedure_rows(analytics.rows)?;
-    let certificate = analytics.certificate;
+    let mut sink = ProcedureRowSink::default();
+    let certificate = execute(&spec, procedure_options(&spec, as_of, remaining), &mut sink)
+        .map_err(procedure_failure)?;
+    let rows = sink.finish()?;
     let records = certificate.vertices.saturating_add(certificate.input_edges);
     let execution = GqlQueryExecution {
         rows: GqlExecutionStats {
@@ -528,28 +531,116 @@ pub(crate) fn procedure_failure<C>(
     }
 }
 
-/// Prism rows as GQL rows: vertex identities, exact counts within the Int64
-/// domain, and floats.
-pub(crate) fn procedure_rows<C>(
-    rows: Vec<Vec<FnxValue>>,
-) -> Result<Vec<GraphValueRow>, GqlQueryError<GqlError, C>> {
-    let mut converted = Vec::with_capacity(rows.len());
-    for row in rows {
-        let mut values = Vec::with_capacity(row.len());
-        for value in row {
+/// Convert Prism's borrowed row buffer directly into the final GQL table.
+/// A domain refusal is deferred until the kernel has completed its original
+/// hashing and cancellation schedule, just as conversion after `execute`
+/// would be. No partial table escapes a failed call.
+#[derive(Default)]
+pub(crate) struct ProcedureRowSink {
+    rows: Vec<GraphValueRow>,
+    row_count: usize,
+    result_domain: bool,
+}
+
+impl ProcedureRowSink {
+    /// The exact shape admitted by the completed kernel, including rows that
+    /// could not be represented in GQL. Overlay hosts charge that full shape
+    /// before judging a deferred conversion refusal.
+    pub(crate) fn row_count(&self) -> usize {
+        self.row_count
+    }
+
+    pub(crate) fn finish<C>(self) -> Result<Vec<GraphValueRow>, GqlQueryError<GqlError, C>> {
+        if self.result_domain {
+            Err(refuse(ProcedureError::ResultDomain))
+        } else {
+            Ok(self.rows)
+        }
+    }
+}
+
+impl<C> FnxRowSink<C> for ProcedureRowSink {
+    fn begin(&mut self, rows: usize, _: usize) -> Result<(), FnxExecutionError<C>> {
+        self.rows = Vec::new();
+        self.rows
+            .try_reserve_exact(rows)
+            .map_err(|_| FnxExecutionError::AllocationFailed)?;
+        self.row_count = rows;
+        self.result_domain = false;
+        Ok(())
+    }
+
+    fn row(&mut self, row: &[FnxValue]) -> Result<(), FnxExecutionError<C>> {
+        if self.result_domain {
+            return Ok(());
+        }
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(row.len())
+            .map_err(|_| FnxExecutionError::AllocationFailed)?;
+        for &value in row {
             values.push(match value {
                 FnxValue::Vertex(vertex) => GraphValue::Vertex(vertex),
-                FnxValue::Integer(count) => GraphValue::Scalar(CanonicalScalar::Int(
-                    i64::try_from(count).map_err(|_| refuse(ProcedureError::ResultDomain))?,
-                )),
+                FnxValue::Integer(count) => {
+                    let Ok(count) = i64::try_from(count) else {
+                        self.result_domain = true;
+                        return Ok(());
+                    };
+                    GraphValue::Scalar(CanonicalScalar::Int(count))
+                }
                 FnxValue::Score(value) | FnxValue::Float(value) => {
                     GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(value)))
                 }
             });
         }
-        converted.push(GraphValueRow::from_owned_values(values));
+        self.rows.push(GraphValueRow::from_owned_values(values));
+        Ok(())
     }
-    Ok(converted)
+}
+
+#[cfg(test)]
+mod row_sink_tests {
+    use super::*;
+
+    #[test]
+    fn direct_rows_preserve_gql_canonical_domains_and_defer_unrepresentable_counts() {
+        let mut sink = ProcedureRowSink::default();
+        FnxRowSink::<()>::begin(&mut sink, 1, 4).unwrap();
+        FnxRowSink::<()>::row(
+            &mut sink,
+            &[
+                FnxValue::Vertex(VId(u128::MAX)),
+                FnxValue::Integer(i64::MAX as u64),
+                FnxValue::Score(-0.0),
+                FnxValue::Float(f64::from_bits(0x7ff0_0000_0000_0001)),
+            ],
+        )
+        .unwrap();
+        let rows = sink.finish::<()>().unwrap();
+        let expected = GraphValueRow::from_owned_values(vec![
+            GraphValue::Vertex(VId(u128::MAX)),
+            GraphValue::Scalar(CanonicalScalar::Int(i64::MAX)),
+            GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(0.0))),
+            GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(f64::NAN))),
+        ]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].canonical_bytes(), expected.canonical_bytes());
+
+        let mut sink = ProcedureRowSink::default();
+        FnxRowSink::<()>::begin(&mut sink, 3, 1).unwrap();
+        for count in [7, u64::MAX, 9] {
+            // Even the nonrepresentable row succeeds locally: a later
+            // kernel, cancellation or signed-work refusal still wins.
+            FnxRowSink::<()>::row(&mut sink, &[FnxValue::Integer(count)]).unwrap();
+        }
+        assert_eq!(sink.row_count(), 3);
+        assert!(matches!(
+            sink.finish::<()>(),
+            Err(GqlQueryError::Source(GqlError::Procedure(
+                ProcedureError::ResultDomain
+            )))
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -928,6 +1019,21 @@ impl<V: Vfs + Clone> Database<V> {
                 .execute_fnx(cx, call, options)
         })
     }
+
+    pub(crate) fn execute_fnx_into(
+        &self,
+        cx: &QueryCx,
+        call: &FnxCallSpec,
+        options: FnxReadOptions,
+        sink: &mut dyn FnxRowSink<Cancel>,
+    ) -> Result<FnxCertificate, FnxReadError<ReadError, Cancel>> {
+        cx.with_restriction(|| {
+            cx.checkpoint().map_err(FnxReadError::Cancelled)?;
+            self.read_session()
+                .map_err(FnxReadError::Read)?
+                .execute_fnx_into(cx, call, options, sink)
+        })
+    }
 }
 
 impl EmbeddedReadView {
@@ -1141,6 +1247,27 @@ impl EmbeddedReadView {
                 .execute(&graph, options.execution_limits, || cx.checkpoint())
                 .map_err(FnxReadError::Execution)?;
             Ok(FnxReadResult::bind_selection(result, options.selection))
+        })
+    }
+
+    pub(crate) fn execute_fnx_into(
+        &self,
+        cx: &QueryCx,
+        call: &FnxCallSpec,
+        options: FnxReadOptions,
+        sink: &mut dyn FnxRowSink<Cancel>,
+    ) -> Result<FnxCertificate, FnxReadError<ReadError, Cancel>> {
+        cx.with_restriction(|| {
+            let graph = self.prism_projection_at(
+                cx,
+                options.as_of.unwrap_or(self.frontier()),
+                options.selection,
+                options.projection,
+                options.projection_limits,
+                options.source_limits,
+            )?;
+            call.execute_into(&graph, options.execution_limits, || cx.checkpoint(), sink)
+                .map_err(FnxReadError::Execution)
         })
     }
 

@@ -232,6 +232,44 @@ pub struct FnxResult {
     pub certificate: FnxCertificate,
 }
 
+/// A private destination for decoded result rows. The executor borrows one
+/// reusable row buffer; a sink may copy or convert its cells directly into
+/// the host's final representation without retaining a second result table.
+///
+/// Rows are provisional until [`FnxCallSpec::execute_into`] returns a
+/// certificate. On any error, the sink's entire partial state must be
+/// discarded. This is not a streaming delivery or publication interface.
+pub trait FnxRowSink<C> {
+    /// Start a new result with its exact admitted shape.
+    fn begin(&mut self, rows: usize, columns: usize) -> Result<(), FnxExecutionError<C>>;
+
+    /// Consume one borrowed row in canonical output order. The slice is
+    /// reused for the next row and must not be retained by the sink.
+    fn row(&mut self, values: &[FnxValue]) -> Result<(), FnxExecutionError<C>>;
+}
+
+impl<C> FnxRowSink<C> for Vec<Vec<FnxValue>> {
+    fn begin(&mut self, rows: usize, _: usize) -> Result<(), FnxExecutionError<C>> {
+        *self = reserve(rows)?;
+        Ok(())
+    }
+
+    fn row(&mut self, values: &[FnxValue]) -> Result<(), FnxExecutionError<C>> {
+        let mut row = reserve(values.len())?;
+        row.extend_from_slice(values);
+        self.push(row);
+        Ok(())
+    }
+}
+
+// Keep the standalone collector's original allocation/move loop. Mapped
+// hosts reuse a row buffer, but raw FnX callers need neither a per-cell copy
+// nor a dynamic sink call for each result row.
+enum ResultSink<'a, C> {
+    Collected(&'a mut Vec<Vec<FnxValue>>),
+    Mapped(&'a mut dyn FnxRowSink<C>),
+}
+
 pub(crate) fn admit<C>(
     resource: &'static str,
     requested: usize,
@@ -973,8 +1011,44 @@ impl FnxCallSpec {
         &self,
         graph: &SnapshotGraphView,
         limits: FnxExecutionLimits,
-        mut checkpoint: impl FnxMeter<C>,
+        checkpoint: impl FnxMeter<C>,
     ) -> Result<FnxResult, FnxExecutionError<C>> {
+        let mut rows = Vec::new();
+        let certificate =
+            self.execute_with_sink(graph, limits, checkpoint, ResultSink::Collected(&mut rows))?;
+        Ok(FnxResult {
+            columns: self
+                .outputs()
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
+            rows,
+            certificate,
+        })
+    }
+
+    /// Execute the same admitted call and canonical certificate as
+    /// [`Self::execute`], converting rows directly into a host-owned sink.
+    /// Result hashing, limits and live meter calls do not depend on the sink's
+    /// representation. Its rows remain private and discard-only until this
+    /// method returns successfully, including the final cancellation check.
+    pub fn execute_into<C>(
+        &self,
+        graph: &SnapshotGraphView,
+        limits: FnxExecutionLimits,
+        checkpoint: impl FnxMeter<C>,
+        sink: &mut dyn FnxRowSink<C>,
+    ) -> Result<FnxCertificate, FnxExecutionError<C>> {
+        self.execute_with_sink(graph, limits, checkpoint, ResultSink::Mapped(sink))
+    }
+
+    fn execute_with_sink<C>(
+        &self,
+        graph: &SnapshotGraphView,
+        limits: FnxExecutionLimits,
+        mut checkpoint: impl FnxMeter<C>,
+        sink: ResultSink<'_, C>,
+    ) -> Result<FnxCertificate, FnxExecutionError<C>> {
         checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
         let algorithm = self.algorithm();
         let signature = self.signature();
@@ -1172,25 +1246,53 @@ impl FnxCallSpec {
             }
         };
         checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
-        let mut rows = reserve(output.row_count)?;
         let mut result_hash = Hasher::new();
         result_hash.update(b"fgdb:prism:result-rows:v3");
         result_hash.update(&(output.row_count as u128).to_le_bytes());
         result_hash.update(&self.digest().0);
-        for index in 0..n {
-            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
-            if !output.values.contains(index) {
-                continue;
+        let emitted = match sink {
+            ResultSink::Collected(rows) => {
+                *rows = reserve(output.row_count)?;
+                for index in 0..n {
+                    checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+                    if !output.values.contains(index) {
+                        continue;
+                    }
+                    let mut row = reserve(self.outputs().len())?;
+                    for column in self.outputs() {
+                        let value = output.values.value(index, column.field, graph)?;
+                        hash_result_value(&mut result_hash, value);
+                        row.push(value);
+                    }
+                    rows.push(row);
+                }
+                rows.len()
             }
-            let mut row = reserve(self.outputs().len())?;
-            for column in self.outputs() {
-                let value = output.values.value(index, column.field, graph)?;
-                hash_result_value(&mut result_hash, value);
-                row.push(value);
+            ResultSink::Mapped(sink) => {
+                sink.begin(output.row_count, self.outputs().len())?;
+                let mut row = Vec::new();
+                let mut emitted = 0usize;
+                for index in 0..n {
+                    checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
+                    if !output.values.contains(index) {
+                        continue;
+                    }
+                    if emitted == 0 {
+                        row = reserve(self.outputs().len())?;
+                    }
+                    row.clear();
+                    for column in self.outputs() {
+                        let value = output.values.value(index, column.field, graph)?;
+                        hash_result_value(&mut result_hash, value);
+                        row.push(value);
+                    }
+                    sink.row(&row)?;
+                    emitted += 1;
+                }
+                emitted
             }
-            rows.push(row);
-        }
-        if rows.len() != output.row_count {
+        };
+        if emitted != output.row_count {
             return Err(FnxExecutionError::InvalidUpstreamResult);
         }
         let witness = output.witness;
@@ -1251,15 +1353,7 @@ impl FnxCallSpec {
             digest: hash.finalize(),
         };
         checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
-        Ok(FnxResult {
-            columns: self
-                .outputs()
-                .iter()
-                .map(|column| column.name.clone())
-                .collect(),
-            rows,
-            certificate,
-        })
+        Ok(certificate)
     }
 }
 fn hash_text(hash: &mut Hasher, text: &str) {
@@ -1849,6 +1943,184 @@ mod tests {
     }
 
     #[test]
+    fn direct_row_sink_preserves_cells_certificate_and_every_meter_refusal() {
+        #[derive(Default)]
+        struct FlatRows {
+            shape: Option<(usize, usize)>,
+            cells: Vec<FnxValue>,
+            buffer: Option<usize>,
+        }
+        impl FnxRowSink<&'static str> for FlatRows {
+            fn begin(
+                &mut self,
+                rows: usize,
+                columns: usize,
+            ) -> Result<(), FnxExecutionError<&'static str>> {
+                self.shape = Some((rows, columns));
+                Ok(())
+            }
+            fn row(&mut self, values: &[FnxValue]) -> Result<(), FnxExecutionError<&'static str>> {
+                assert_eq!(values.len(), self.shape.unwrap().1);
+                let address = values.as_ptr() as usize;
+                if let Some(first) = self.buffer {
+                    assert_eq!(address, first, "one shared FnX row allocation");
+                }
+                self.buffer = Some(address);
+                self.cells.extend_from_slice(values);
+                Ok(())
+            }
+        }
+        struct Trace {
+            events: Vec<Option<usize>>,
+            stop: Option<usize>,
+        }
+        impl Trace {
+            fn event(&mut self, event: Option<usize>) -> Result<(), &'static str> {
+                self.events.push(event);
+                if self.stop == Some(self.events.len()) {
+                    Err("stop")
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        impl FnxMeter<&'static str> for &mut Trace {
+            fn unit(&mut self) -> Result<(), &'static str> {
+                self.units(1)
+            }
+            fn units(&mut self, n: usize) -> Result<(), &'static str> {
+                self.event(Some(n))
+            }
+            fn poll(&mut self) -> Result<(), &'static str> {
+                self.event(None)
+            }
+        }
+        let limits = FnxExecutionLimits {
+            max_iterations: 1000,
+            max_result_rows: 3,
+            max_estimated_work: 1 << 20,
+        };
+        let fresh = |stop| Trace {
+            events: Vec::new(),
+            stop,
+        };
+        let sparse = FnxCallSpec::from_arguments(
+            "fnx",
+            "single_source_shortest_path_length",
+            &[crate::FnxArgument::Vertex(VId(0))],
+            &[("distance", "hops"), ("vertex", "node")],
+        )
+        .unwrap();
+        let rank =
+            FnxCallSpec::from_arguments("fnx", "pagerank", &[], &[("score", "rank")]).unwrap();
+        // All cell domains, a sparse result, selected/reordered yields and
+        // full-width IDs. The loop-free triangle also exercises count/float
+        // kernels without conflating projection-law refusals with output.
+        for (graph, call) in [
+            (projection(2, Directedness::Directed), sparse),
+            (projection(238, Directedness::Directed), rank),
+            (
+                projection(238, Directedness::Directed),
+                FnxCallSpec::weakly_connected_components(),
+            ),
+            (
+                projection(2, Directedness::Directed),
+                FnxCallSpec::single_source_dijkstra_path_length(
+                    crate::DijkstraOptions::new(VId(0), None).unwrap(),
+                ),
+            ),
+            (
+                projection(238, Directedness::Undirected),
+                FnxCallSpec::triangles(),
+            ),
+            (
+                projection(238, Directedness::Undirected),
+                FnxCallSpec::clustering_coefficient(),
+            ),
+        ] {
+            let mut collected_trace = fresh(None);
+            let collected = call.execute(&graph, limits, &mut collected_trace).unwrap();
+            let mut direct_trace = fresh(None);
+            let mut direct = FlatRows::default();
+            let certificate = call
+                .execute_into(&graph, limits, &mut direct_trace, &mut direct)
+                .unwrap();
+            assert_eq!(certificate, collected.certificate);
+            assert_eq!(
+                direct.shape,
+                Some((collected.rows.len(), call.outputs().len()))
+            );
+            assert_eq!(
+                direct.cells,
+                collected.rows.into_iter().flatten().collect::<Vec<_>>()
+            );
+            assert_eq!(direct_trace.events, collected_trace.events);
+            for stop in 1..=collected_trace.events.len() {
+                let (mut collected_trace, mut direct_trace) =
+                    (fresh(Some(stop)), fresh(Some(stop)));
+                assert!(matches!(
+                    call.execute(&graph, limits, &mut collected_trace),
+                    Err(FnxExecutionError::Cancelled("stop"))
+                ));
+                assert!(matches!(
+                    call.execute_into(&graph, limits, &mut direct_trace, &mut FlatRows::default(),),
+                    Err(FnxExecutionError::Cancelled("stop"))
+                ));
+                assert_eq!(direct_trace.events, collected_trace.events, "stop={stop}");
+            }
+            for refused in [
+                FnxExecutionLimits {
+                    max_result_rows: 0,
+                    ..limits
+                },
+                FnxExecutionLimits {
+                    max_estimated_work: 0,
+                    ..limits
+                },
+            ] {
+                let mut sink = FlatRows::default();
+                let expected = call.execute(&graph, refused, &mut fresh(None)).unwrap_err();
+                let actual = call
+                    .execute_into(&graph, refused, &mut fresh(None), &mut sink)
+                    .unwrap_err();
+                assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+                assert_eq!(sink.shape, None, "refusal must precede output allocation");
+            }
+        }
+        let graph = SnapshotGraphView::build(
+            SnapshotBinding {
+                root: ObjectId([2; 32]),
+                as_of: CommitSeq(3),
+            },
+            &[],
+            &[],
+            ProjectionSpec {
+                directedness: Directedness::Directed,
+                parallel_edges: ParallelEdgePolicy::Reject,
+                self_loops: SelfLoopPolicy::Keep,
+            },
+            ProjectionLimits {
+                max_vertices: 0,
+                max_input_edges: 0,
+                max_adjacency_entries: 0,
+                max_workspace_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+        let call = FnxCallSpec::weakly_connected_components();
+        let mut sink = FlatRows::default();
+        assert_eq!(
+            call.execute_into(&graph, limits, &mut fresh(None), &mut sink)
+                .unwrap(),
+            call.execute(&graph, limits, &mut fresh(None))
+                .unwrap()
+                .certificate,
+        );
+        assert_eq!(sink.shape, Some((0, 2)));
+        assert_eq!(sink.buffer, None);
+    }
+
+    #[test]
     fn call_arc_admission_uses_exact_incidence_counts_in_every_projection_direction() {
         let call = FnxCallSpec::single_source_shortest_path_length(VId(0), None);
         let limits = FnxExecutionLimits {
@@ -2037,7 +2309,14 @@ mod tests {
         let m: usize = (0..n)
             .map(|node| graph.neighbors_indices(node).unwrap().len())
             .sum();
-        for weighted in [false, true] {
+        assert!(graph.has_unit_weights());
+        let per_pass = |units: usize| units.div_ceil(FNX_METER_RUN);
+        let unit_initialization_calls = n
+            + (0..n)
+                .map(|node| per_pass(graph.neighbors_indices(node).unwrap().len()))
+                .sum::<usize>();
+        assert!(unit_initialization_calls < n + m);
+        for (weighted, forced_shares) in [(false, false), (true, false), (true, true)] {
             let options = PageRankOptions::new(0.85, 1000, 1e-12, weighted).unwrap();
             let oracle = fnx_algorithms::pagerank_with_weight(
                 &graph,
@@ -2052,7 +2331,9 @@ mod tests {
                 seen: 0,
                 polls: 0,
             };
-            let (scores, witness, _) = pagerank(&graph, options, m, &mut meter).unwrap();
+            let (scores, witness, _) =
+                with_weighted_shares(forced_shares, || pagerank(&graph, options, m, &mut meter))
+                    .unwrap();
             for score in &oracle.scores {
                 let ordinal = graph.get_node_index(&score.node).unwrap();
                 assert_eq!(scores[ordinal].to_bits(), score.score.to_bits());
@@ -2066,13 +2347,30 @@ mod tests {
                 meter.polls > passes,
                 "live polls actually ran between charges"
             );
-            assert!(meter.calls.iter().all(|&run| run <= FNX_METER_RUN));
+            assert!(
+                meter
+                    .calls
+                    .iter()
+                    .all(|&run| (1..=FNX_METER_RUN).contains(&run))
+            );
+            // Proven unit weights still charge every weighted validation unit,
+            // but batch each row's arcs. General weighted shares retain one
+            // callback per arc. Check both paths against the same fnx oracle.
+            let initialization_calls = if weighted && !forced_shares {
+                unit_initialization_calls
+            } else {
+                initialization
+            };
+            assert_eq!(
+                meter.calls[..initialization_calls].iter().sum::<usize>(),
+                initialization,
+                "initialization callbacks retain every logical unit"
+            );
             // Four metered passes per iteration, each about (units / 64) calls.
-            let per_pass = |units: usize| units.div_ceil(FNX_METER_RUN);
             assert_eq!(
                 meter.calls.len(),
-                initialization + passes * (3 * per_pass(n) + per_pass(n + m)),
-                "the arc walk is one stream of runs"
+                initialization_calls + passes * (3 * per_pass(n) + per_pass(n + m)),
+                "the arc walk is one stream of runs: weighted={weighted} forced_shares={forced_shares}"
             );
             for stop in (1..=meter.seen).step_by(97) {
                 let mut refusing = Recording {
@@ -2081,7 +2379,9 @@ mod tests {
                     seen: 0,
                     polls: 0,
                 };
-                let result = pagerank(&graph, options, m, &mut refusing);
+                let result = with_weighted_shares(forced_shares, || {
+                    pagerank(&graph, options, m, &mut refusing)
+                });
                 assert!(matches!(result, Err(FnxExecutionError::Cancelled("stop"))));
                 assert_eq!(refusing.seen, stop);
             }
