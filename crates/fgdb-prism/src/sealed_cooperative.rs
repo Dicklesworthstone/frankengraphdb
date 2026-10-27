@@ -1,4 +1,4 @@
-//! Cooperative ranks, centralities, core, distances and connectivity.
+//! Cooperative ranks, centralities, core, distances, connectivity and communities.
 //!
 //! One fuel counter covers raw incidence decoding (including invisible history,
 //! excluded endpoints and parallel reductions), scalar passes and result rows.
@@ -8,8 +8,10 @@
 //!
 //! The quantum bounds counted steps, not instructions or elapsed time. Individual
 //! allocations, compressed lookups, bounded alias strings and the fixed kernel
-//! source transcript remain indivisible. Sealing/projection preparation is NOT
-//! made cooperative by this module.
+//! source transcript remain indivisible. A kernel's temporary reverse projection
+//! uses the existing cooperative constructor, with yields at both boundaries so
+//! its separate quantum cannot accumulate with a kernel quantum. Host sealing
+//! and initial projection preparation remain the caller's responsibility.
 
 use super::{
     ComplexityWitness, DegreeCentrality, EncodedRows, Error, ExecutionError, FnxAlgorithm,
@@ -72,6 +74,26 @@ where
         }
     }
 
+    pub(super) async fn reverse_projection(
+        &mut self,
+        graph: &SealedGraphView,
+        max_workspace_bytes: usize,
+    ) -> Result<SealedGraphView> {
+        // Construction and its incoming index have their own bounded fuel.
+        // Separate both boundaries with an actual host scheduling opportunity.
+        self.pause().await?;
+        let reverse = graph
+            .reverse_projection_cooperative_controlled(
+                self.cx,
+                max_workspace_bytes,
+                self.quantum,
+                &mut self.yield_now,
+            )
+            .await?;
+        self.pause().await?;
+        Ok(reverse)
+    }
+
     async fn offer(&mut self, heap: &mut IndexedHeap, node: usize, cost: f64) -> Result<()> {
         self.tick().await?;
         let mut repair = heap.offer_steps::<Error>(node, cost)?;
@@ -107,6 +129,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::ConnectedComponents
                 | FnxAlgorithm::WeaklyConnectedComponents
                 | FnxAlgorithm::StronglyConnectedComponents
+                | FnxAlgorithm::Cdlp { .. }
                 | FnxAlgorithm::Triangles
                 | FnxAlgorithm::ClusteringCoefficient
                 | FnxAlgorithm::InDegreeCentrality
@@ -195,6 +218,16 @@ impl FnxCallSpec {
                 return Err(Error::UnsupportedCooperativeAlgorithm(self.algorithm()));
             }
             self.validate_sealed_projection(graph.spec().directedness)?;
+            if matches!(self.algorithm(), FnxAlgorithm::Cdlp { .. }) {
+                let mut control = Cooperate {
+                    cx,
+                    fuel: SealedScanBudget::new(quantum.get()),
+                    quantum,
+                    yield_now,
+                };
+                return super::cdlp::execute_cooperative(self, graph, limits, memory, &mut control)
+                    .await;
+            }
             if matches!(
                 self.algorithm(),
                 FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient
