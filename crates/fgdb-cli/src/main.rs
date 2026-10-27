@@ -1113,10 +1113,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
             "--overwrite only applies to query --certify-to",
         ));
     }
-    let mut fnx_call = command == "query"
-        && text
-            .as_deref()
-            .is_some_and(|text| fnx::is_call(text, &raw_params));
+    let mut fnx_call = command == "query" && text.as_deref().is_some_and(fnx::is_call);
     weighted_path.validate()?;
     // Classify the shared sequence flag after every endpoint has been read;
     // --as-of has identical meaning regardless of its position on the line.

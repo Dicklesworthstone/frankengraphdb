@@ -765,6 +765,22 @@ pub struct FnxCallSpec {
     outputs: Vec<FnxOutputColumn>,
     digest: Digest,
 }
+
+/// Syntax and source positions shared by routing and typed binding. A routing
+/// decision must not change when a supplied kernel value fails validation.
+struct ParsedFnxCall<'a> {
+    namespace: &'a str,
+    procedure: &'a str,
+    signature: &'static FnxSignature,
+    procedure_at: usize,
+    arguments: Vec<FnxArgument>,
+    names: Vec<&'a str>,
+    positions: Vec<usize>,
+    arguments_end: usize,
+    yields: Vec<(&'a str, &'a str)>,
+    yield_at: Vec<(usize, usize)>,
+}
+
 impl FnxCallSpec {
     pub fn pagerank(options: PageRankOptions) -> Self {
         Self::new(FnxAlgorithm::PageRank(options))
@@ -853,6 +869,24 @@ impl FnxCallSpec {
         Self::bind_text(text, Some(parameters))
     }
 
+    /// Whether a complete call uses only the registered kernel's argument
+    /// envelope. This classifies syntax, not executable validity: missing or
+    /// invalid parameter values still require [`Self::bind`] before execution.
+    /// Graph projection fields/maps, expressions and continuing GQL pipelines
+    /// belong to the native query compiler instead.
+    #[must_use]
+    pub fn is_standalone_kernel_call(text: &str) -> bool {
+        Self::parse_text(text, None).is_ok_and(|parsed| {
+            parsed.names.iter().all(|name| {
+                parsed
+                    .signature
+                    .parameters
+                    .iter()
+                    .any(|parameter| parameter.name == *name)
+            })
+        })
+    }
+
     /// Whether `text` is a CALL that continues past its YIELD list (WHERE,
     /// WITH, MATCH, RETURN, ...): a read pipeline for the GQL engine, not a
     /// standalone call for [`Self::bind`]. Only structure is read; a `$name`
@@ -860,7 +894,7 @@ impl FnxCallSpec {
     #[must_use]
     pub fn continues_past_call(text: &str) -> bool {
         matches!(
-            Self::bind_text(text, None),
+            Self::parse_text(text, None),
             Err(FnxBindError {
                 kind: FnxBindErrorKind::TrailingInput,
                 ..
@@ -869,7 +903,10 @@ impl FnxCallSpec {
     }
 
     /// `parameters: None` reads every `$name` as NULL: structure only.
-    fn bind_text(text: &str, parameters: Option<&FnxParameters>) -> Result<Self, FnxBindError> {
+    fn parse_text<'a>(
+        text: &'a str,
+        parameters: Option<&FnxParameters>,
+    ) -> Result<ParsedFnxCall<'a>, FnxBindError> {
         if text.len() > MAX_FNX_CALL_BYTES {
             return Err(FnxBindError {
                 at: MAX_FNX_CALL_BYTES,
@@ -948,6 +985,33 @@ impl FnxCallSpec {
         if parser.pos != text.len() {
             return Err(parser.error(FnxBindErrorKind::TrailingInput));
         }
+        Ok(ParsedFnxCall {
+            namespace,
+            procedure,
+            signature,
+            procedure_at,
+            arguments,
+            names,
+            positions,
+            arguments_end,
+            yields,
+            yield_at,
+        })
+    }
+
+    fn bind_text(text: &str, parameters: Option<&FnxParameters>) -> Result<Self, FnxBindError> {
+        let ParsedFnxCall {
+            namespace,
+            procedure,
+            signature: _,
+            procedure_at,
+            arguments,
+            names,
+            positions,
+            arguments_end,
+            yields,
+            yield_at,
+        } = Self::parse_text(text, parameters)?;
         let binding = if names.is_empty() {
             Self::from_arguments(namespace, procedure, &arguments, &yields)
         } else {

@@ -44,14 +44,14 @@ use std::num::NonZeroUsize;
 /// registry. A call that continues past its YIELD list (WHERE, WITH, MATCH,
 /// RETURN, ...) or supplies a native projection is an ordinary native read.
 /// Kernel-only named arguments use the same standalone route as positional
-/// arguments, bound against the actual typed parameters before opening storage.
-pub(super) fn is_call(text: &str, raw_params: &[(String, String)]) -> bool {
+/// arguments, regardless of whether the subsequent typed binding succeeds.
+pub(super) fn is_call(text: &str) -> bool {
     if fgdb_gql::starts_fnx_graph_projection(text) {
         // The shared lexer also recognizes every named argument envelope.
-        // Only the registry's binder can distinguish a complete kernel call
-        // from native projection fields/maps or a continuing read pipeline.
-        return arguments(raw_params)
-            .is_ok_and(|parameters| FnxCallSpec::bind(text, &parameters).is_ok());
+        // The registry's parser distinguishes kernel names from projection
+        // fields/maps and pipelines without substituting parameter values.
+        // A bad value must reach the same pre-open binder as a good one.
+        return FnxCallSpec::is_standalone_kernel_call(text);
     }
     let text = text.trim_start();
     text.get(..4)
@@ -1189,7 +1189,6 @@ mod tests {
     fn projection_envelopes_use_the_native_host_and_positional_calls_keep_their_route() {
         assert!(is_call(
             "CALL fnx.connected_components() YIELD vertex, component",
-            &[],
         ));
         for text in [
             "CALL fnx.connected_components() YIELD vertex RETURN vertex",
@@ -1203,19 +1202,20 @@ mod tests {
             "/* leading */ CALL fnx.degree ( args /* split */ => [] ) YIELD vertex RETURN vertex",
             "CALL fnx.degree({unknown: 'invalid'}) YIELD vertex RETURN vertex",
         ] {
-            assert!(!is_call(text, &[]), "{text}");
+            assert!(!is_call(text), "{text}");
         }
     }
 
     #[test]
-    fn kernel_named_calls_keep_the_standalone_route_with_actual_rebound_parameters() {
+    fn kernel_named_calls_classify_before_binding_actual_parameter_values() {
         for text in [
             "CALL fnx.pagerank(iterations => 2, weighted => false) YIELD vertex,score",
             "/* leading */ cAlL fnx.pagerank ( weighted => false, iterations /* count */ => 2 ) YIELD score AS rank",
             "CALL fnx.pagerank(alpha => 0.85, max_iter => 100, tol => 1e-6, weighted => false)",
             "CALL fnx.pagerank(l1_tol => 1e-9, max_iter => 1000, weighted => false)",
         ] {
-            assert!(is_call(text, &[]), "{text}");
+            assert!(is_call(text), "{text}");
+            FnxCallSpec::bind(text, &FnxParameters::new()).unwrap();
         }
         let text =
             "CALL fnx.pagerank(iterations => $steps, weighted => $weighted) YIELD vertex,score";
@@ -1224,32 +1224,42 @@ mod tests {
                 ("steps".to_owned(), format!("int:{steps}")),
                 ("weighted".to_owned(), "bool:false".to_owned()),
             ];
-            assert!(is_call(text, &raw), "steps={steps}");
-            assert!(!is_call(&format!("{text} RETURN vertex,score"), &raw));
+            assert!(is_call(text), "steps={steps}");
+            FnxCallSpec::bind(text, &arguments(&raw).unwrap()).unwrap();
+            assert!(!is_call(&format!("{text} RETURN vertex,score")));
         }
-        assert!(!is_call(text, &[]), "routing must not invent parameters");
+        assert!(is_call(text), "missing values do not change the route");
+        assert!(FnxCallSpec::bind(text, &FnxParameters::new()).is_err());
         assert!(is_call(
             "CALL fnx.pagerank(l1_tol => $accuracy) YIELD vertex,score",
-            &[("accuracy".to_owned(), "float:1e-9".to_owned())],
         ));
-        assert!(!is_call(
-            "CALL fnx.pagerank(l1_tol => 1e-9, tol => 1e-6) YIELD vertex,score",
-            &[],
-        ));
+        let ambiguous = "CALL fnx.pagerank(l1_tol => 1e-9, tol => 1e-6) YIELD vertex,score";
+        assert!(is_call(ambiguous));
+        assert!(FnxCallSpec::bind(ambiguous, &FnxParameters::new()).is_err());
         for value in ["int:0", "int:-1", "float:2", "null", "int:overflow"] {
             let raw = [
                 ("steps".to_owned(), value.to_owned()),
                 ("weighted".to_owned(), "bool:false".to_owned()),
             ];
-            assert!(!is_call(text, &raw), "{value}");
+            assert!(is_call(text), "{value}: binding cannot change the route");
+            assert!(
+                arguments(&raw)
+                    .and_then(|parameters| {
+                        FnxCallSpec::bind(text, &parameters).map_err(Failure::statement)
+                    })
+                    .is_err(),
+                "{value}: invalid values still refuse"
+            );
         }
-        assert!(is_call(
-            "CALL fnx.single_source_shortest_path_length(source => $source, cutoff => 2) YIELD vertex,distance",
-            &[("source".to_owned(), format!("vertex:{}", u128::MAX))],
-        ));
+        let source_call = "CALL fnx.single_source_shortest_path_length(source => $source, cutoff => 2) YIELD vertex,distance";
+        assert!(is_call(source_call));
+        FnxCallSpec::bind(
+            source_call,
+            &arguments(&[("source".to_owned(), format!("vertex:{}", u128::MAX))]).unwrap(),
+        )
+        .unwrap();
         assert!(!is_call(
             "CALL fnx.pagerank(label => $label, iterations => 2) YIELD vertex,score",
-            &[("label".to_owned(), "text:Person".to_owned())],
         ));
     }
 
