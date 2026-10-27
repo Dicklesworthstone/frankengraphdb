@@ -16,8 +16,30 @@ pub(crate) struct PreparedRead {
 
 pub(crate) struct PreparedWrite {
     script: PreparedGraphWriteScript,
+    /// The value-free splice of map arguments standing for property maps
+    /// (fgdb-0s2pq); every execution derives its own arguments through it.
+    lowered: Option<fgdb_gql::GqlMapArgumentText>,
     generation: Generation,
     source_bytes: usize,
+}
+
+/// A script fault of a lowered statement, at the caller's bytes.
+fn restored_fault<E, A, C>(
+    lowered: Option<&fgdb_gql::GqlMapArgumentText>,
+    mut fault: fgdb_gql::GraphWriteScriptExecutionError<E, A, C>,
+) -> fgdb_gql::GraphWriteScriptExecutionError<E, A, C> {
+    use fgdb_gql::GraphWriteScriptExecutionError as F;
+    if let Some(lowered) = lowered {
+        match &mut fault {
+            F::Binding(error)
+            | F::BatchBinding(fgdb_gql::GraphWriteScriptBatchError::Arguments {
+                source: error,
+                ..
+            }) => lowered.restore(error),
+            _ => {}
+        }
+    }
+    fault
 }
 
 pub(crate) struct PreparedReturning {
@@ -181,6 +203,13 @@ async fn prepare_write(
     let query = crate::query_cx(&contexts);
     let parameters = convert::parameters(&request.parameters, None)
         .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
+    // Map arguments standing for property maps splice with the representative
+    // arguments' keys; the template keeps the keys, never the values.
+    let lowered = fgdb_gql::GqlMapArgumentText::lower(&request.statement, &parameters);
+    let (statement, parameters) = lowered.as_ref().map_or(
+        (request.statement.as_str(), &parameters),
+        |(lowered, derived)| (lowered.text(), derived),
+    );
     let guard = db.db.read(cx).await.map_err(Refusal::from)?;
     generation.check().map_err(Refusal::from)?;
     let script = guard.prepare_graph_write_script_authorized(
@@ -189,16 +218,18 @@ async fn prepare_write(
         &db.authority,
         token,
         TRUNK,
-        &request.statement,
-        &parameters,
+        statement,
+        parameters,
         |kind, name| db.symbols.resolve(kind, name),
         db.write_relation,
         db.max_statements,
         unix_millis,
     );
     generation.check().map_err(Refusal::from)?;
+    let lowered = lowered.map(|(lowered, _)| lowered);
     Ok(PreparedWrite {
-        script: script.map_err(|error| write_refusal(&error))?,
+        script: script.map_err(|error| write_refusal(&restored_fault(lowered.as_ref(), error)))?,
+        lowered,
         generation,
         source_bytes: request.statement.len(),
     })
@@ -411,10 +442,21 @@ async fn write_prepared_inner(
         .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     let query = crate::query_cx(&contexts);
+    // Each argument set's map arguments must carry the keys the template was
+    // lowered with; it binds through the fresh per-key arguments.
+    let lowered = prepared.lowered.as_ref();
+    let derive = |parameters: fgdb_gql::GqlParameters| match lowered {
+        Some(lowered) => lowered.arguments(&parameters),
+        None => Ok(parameters),
+    };
     let parameters = match parameters {
         PreparedParameters::Single(parameters) => NativeParameters::Single(
             convert::parameters(parameters, None)
-                .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?,
+                .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))
+                .and_then(|parameters| {
+                    derive(parameters)
+                        .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))
+                })?,
         ),
         PreparedParameters::Batch(argument_sets) => {
             let mut converted = Vec::with_capacity(argument_sets.len());
@@ -422,12 +464,15 @@ async fn write_prepared_inner(
                 query
                     .checkpoint()
                     .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
-                converted.push(convert::parameters(parameters, None).map_err(|error| {
+                let refusal = |error: &dyn core::fmt::Display| {
                     Refusal::new(
                         ErrorCode::Statement,
                         format!("argument set {index}: {error}"),
                     )
-                })?);
+                };
+                let parameters =
+                    convert::parameters(parameters, None).map_err(|error| refusal(&error))?;
+                converted.push(derive(parameters).map_err(|error| refusal(&error))?);
             }
             NativeParameters::Batch(converted)
         }
@@ -472,7 +517,7 @@ async fn write_prepared_inner(
                 .await
         }
     }
-    .map_err(|error| write_refusal(&error))?;
+    .map_err(|error| write_refusal(&restored_fault(lowered, error)))?;
     drop(guard);
     let statements = stats.completed_statements as u64;
     let outcome = match completion {

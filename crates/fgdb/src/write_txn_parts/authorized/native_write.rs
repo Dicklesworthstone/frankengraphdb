@@ -11,7 +11,9 @@ use fgdb_delta_types::RelationId;
 use fgdb_gql::unwind_write::{
     GraphUnwindBindError, GraphUnwindBindEvent, GraphUnwindWriteError, GraphUnwindWriteText,
 };
-use fgdb_gql::{GqlParameterType, GraphSymbol, GraphSymbolKind, GraphWriteTemplateStatement};
+use fgdb_gql::{
+    GqlMapArgumentText, GqlParameterType, GraphSymbol, GraphSymbolKind, GraphWriteTemplateStatement,
+};
 use fgdb_warden::PlannerPredicates;
 
 fn checkpoint<Clock: FnMut() -> u64>(
@@ -130,6 +132,47 @@ fn prepare_admitted<Clock: FnMut() -> u64>(
     prepared.map_err(Fault::Binding)
 }
 
+/// A script fault of a lowered statement, at the caller's bytes.
+#[allow(clippy::result_large_err)]
+fn restored(lowered: Option<&GqlMapArgumentText>, mut fault: Fault) -> Fault {
+    let Some(lowered) = lowered else {
+        return fault;
+    };
+    match &mut fault {
+        Fault::Binding(error)
+        | Fault::BatchBinding(fgdb_gql::GraphWriteScriptBatchError::Arguments {
+            source: error,
+            ..
+        }) => lowered.restore(error),
+        _ => {}
+    }
+    fault
+}
+
+/// An argument set whose map arguments do not fit the statement lowered with
+/// the first set's keys (fgdb-0s2pq): a script-wide argument error, so no
+/// statement and byte zero.
+fn map_argument_fault(argument_set: usize, error: &fgdb_gql::GqlMapArgumentError) -> Fault {
+    use fgdb_gql::GqlMapArgumentError as E;
+    let expected = match error {
+        E::ExpectedMap { .. } | E::KeysDiffer { .. } => {
+            "a map argument with the keys of the first argument set"
+        }
+        E::UnsupportedValue { .. } => "a map argument whose values are properties",
+        E::Parameter(_) => "map argument fields within the parameter limits",
+    };
+    Fault::BatchBinding(fgdb_gql::GraphWriteScriptBatchError::Arguments {
+        argument_set,
+        source: fgdb_gql::GraphWriteScriptError {
+            statement: None,
+            offset: 0,
+            kind: fgdb_gql::GraphWriteScriptErrorKind::Syntax(
+                fgdb_gql::GraphPatternTextErrorKind::Expected(expected),
+            ),
+        },
+    })
+}
+
 // The only outputs are the existing OWNED program/batch variants. No borrow of
 // a temporary script, unchecked raw writer or independent permit can escape.
 #[allow(clippy::too_many_arguments, clippy::result_large_err)]
@@ -158,10 +201,23 @@ fn bind_native<Clock: FnMut() -> u64>(
         let Some(parsed) = parsed else {
             // CREATE/INSERT UNWIND and ordinary scripts keep their original
             // compiler, preflight and binding protocol, with no second byte bill.
-            let script = prepare_admitted(cx, execution, text, params, relation, resolver)?;
+            // A map argument standing for a property map (`SET n += $props`)
+            // binds as the literal map of its keys (fgdb-0s2pq), and its
+            // diagnostics keep the caller's bytes. Each spliced key is one more
+            // declaration, charged as every declaration is.
+            let lowered = GqlMapArgumentText::lower(text, params);
+            let (text, params) = lowered
+                .as_ref()
+                .map_or((text, params), |(lowered, derived)| {
+                    (lowered.text(), derived)
+                });
+            let lowered = lowered.as_ref().map(|(lowered, _)| lowered);
+            let script = prepare_admitted(cx, execution, text, params, relation, resolver)
+                .map_err(|fault| restored(lowered, fault))?;
             statement_limit(&script, max_statements)?;
-            let super::Bound::Script(program) =
-                Input::Script(&script, params).bind(cx, scope, execution)?
+            let super::Bound::Script(program) = Input::Script(&script, params)
+                .bind(cx, scope, execution)
+                .map_err(|fault| restored(lowered, fault))?
             else {
                 unreachable!("script input always returns an owned script program")
             };

@@ -23,11 +23,11 @@ use crate::{Served, TRUNK, convert, unix_millis};
 use asupersync::Cx;
 use fgdb::{QueryError, QueryResult};
 use fgdb_gql::{
-    GqlQueryError, PreparedGraphEdgeMergeQuery, PreparedGraphEdgeMergeQueryText,
-    PreparedGraphEdgeUpsertQuery, PreparedGraphEdgeUpsertQueryText, PreparedGraphInsertQuery,
-    PreparedGraphInsertQueryText, PreparedGraphMutationQuery, PreparedGraphMutationQueryText,
-    PreparedGraphVertexUpsertQuery, PreparedGraphVertexUpsertQueryText, PreparedGraphWriteChain,
-    PreparedGraphWriteChainText,
+    GqlMapArgumentText, GqlQueryError, GqlTextOffsets, PreparedGraphEdgeMergeQuery,
+    PreparedGraphEdgeMergeQueryText, PreparedGraphEdgeUpsertQuery,
+    PreparedGraphEdgeUpsertQueryText, PreparedGraphInsertQuery, PreparedGraphInsertQueryText,
+    PreparedGraphMutationQuery, PreparedGraphMutationQueryText, PreparedGraphVertexUpsertQuery,
+    PreparedGraphVertexUpsertQueryText, PreparedGraphWriteChain, PreparedGraphWriteChainText,
 };
 use fgdb_protocol::body::{ErrorCode, Execute, ExecuteBatch, Outcome, WireValue};
 use fgdb_types::{EmbeddedTxnCompletion, PurposeContexts};
@@ -591,7 +591,15 @@ pub(crate) enum Returning {
 
 /// Immutable parser/catalog bindings. Representative values never survive
 /// preparation; each execution constructs one fresh native write definition.
-pub(crate) enum ReturningTemplate {
+/// A map argument standing for a property map (`SET n += $props`) is spliced
+/// as the literal map of its keys (fgdb-0s2pq); the splice keeps no value,
+/// and each execution derives its own arguments with those keys.
+pub(crate) struct ReturningTemplate {
+    kind: ReturningKind,
+    lowered: Option<GqlMapArgumentText>,
+}
+
+enum ReturningKind {
     Chain(Box<PreparedGraphWriteChainText>),
     Insert(Box<PreparedGraphInsertQueryText>),
     Mutation(Box<PreparedGraphMutationQueryText>),
@@ -604,6 +612,17 @@ fn returning_template_refusal(error: &dyn core::fmt::Display) -> Refusal {
     Refusal::new(ErrorCode::Statement, format!("statement: {error}"))
 }
 
+/// A statement error of a lowered statement, at the caller's bytes.
+fn restored_refusal<E>(lowered: Option<&GqlMapArgumentText>, mut error: E) -> Refusal
+where
+    E: GqlTextOffsets + core::fmt::Display,
+{
+    if let Some(lowered) = lowered {
+        lowered.restore(&mut error);
+    }
+    returning_template_refusal(&error)
+}
+
 impl ReturningTemplate {
     pub(crate) fn prepare(
         db: &Served,
@@ -611,107 +630,135 @@ impl ReturningTemplate {
         parameters: &fgdb_gql::GqlParameters,
     ) -> Result<Option<Self>, Refusal> {
         refuse_element_identity(text)?;
+        let lowered = GqlMapArgumentText::lower(text, parameters);
+        let (text, parameters) = lowered
+            .as_ref()
+            .map_or((text, parameters), |(lowered, derived)| {
+                (lowered.text(), derived)
+            });
+        let recipe = lowered.as_ref().map(|(lowered, _)| lowered);
         let declarations: Vec<_> = parameters.parameter_types().collect();
-        let refusal = returning_template_refusal;
         // Whole-chain classification wins over any single-write prefix.
-        if PreparedGraphWriteChainText::is_chain(text).map_err(|e| refusal(&e))? {
-            return PreparedGraphWriteChainText::prepare_with_parameter_types(
+        let kind = if PreparedGraphWriteChainText::is_chain(text)
+            .map_err(|e| restored_refusal(recipe, e))?
+        {
+            PreparedGraphWriteChainText::prepare_with_parameter_types(
                 text,
                 db.write_relation,
                 &declarations,
                 db.symbols.clone(),
             )
-            .map(|template| Some(Self::Chain(Box::new(template))))
-            .map_err(|e| refusal(&e));
-        }
-        if PreparedGraphInsertQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
-            return PreparedGraphInsertQueryText::prepare_with_parameter_types(
+            .map(|template| ReturningKind::Chain(Box::new(template)))
+            .map_err(|e| restored_refusal(recipe, e))?
+        } else if PreparedGraphInsertQueryText::has_return_clause(text)
+            .map_err(|e| restored_refusal(recipe, e))?
+        {
+            PreparedGraphInsertQueryText::prepare_with_parameter_types(
                 text,
                 db.write_relation,
                 &declarations,
                 db.symbols.clone(),
             )
-            .map(|template| Some(Self::Insert(Box::new(template))))
-            .map_err(|e| refusal(&e));
-        }
-        if PreparedGraphMutationQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
-            return PreparedGraphMutationQueryText::prepare_with_parameter_types(
+            .map(|template| ReturningKind::Insert(Box::new(template)))
+            .map_err(|e| restored_refusal(recipe, e))?
+        } else if PreparedGraphMutationQueryText::has_return_clause(text)
+            .map_err(|e| restored_refusal(recipe, e))?
+        {
+            PreparedGraphMutationQueryText::prepare_with_parameter_types(
                 text,
                 db.write_relation,
                 &declarations,
                 db.symbols.clone(),
             )
-            .map(|template| Some(Self::Mutation(Box::new(template))))
-            .map_err(|e| refusal(&e));
-        }
-        if PreparedGraphVertexUpsertQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
-            return PreparedGraphVertexUpsertQueryText::prepare_with_parameter_types(
+            .map(|template| ReturningKind::Mutation(Box::new(template)))
+            .map_err(|e| restored_refusal(recipe, e))?
+        } else if PreparedGraphVertexUpsertQueryText::has_return_clause(text)
+            .map_err(|e| restored_refusal(recipe, e))?
+        {
+            PreparedGraphVertexUpsertQueryText::prepare_with_parameter_types(
                 text,
                 db.write_relation,
                 &declarations,
                 db.symbols.clone(),
             )
-            .map(|template| Some(Self::Merge(Box::new(template))))
-            .map_err(|e| refusal(&e));
-        }
+            .map(|template| ReturningKind::Merge(Box::new(template)))
+            .map_err(|e| restored_refusal(recipe, e))?
         // An ON/SET upsert binding error is terminal, never a plain-MERGE retry.
-        if PreparedGraphEdgeUpsertQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
-            return PreparedGraphEdgeUpsertQueryText::prepare_with_parameter_types(
+        } else if PreparedGraphEdgeUpsertQueryText::has_return_clause(text)
+            .map_err(|e| restored_refusal(recipe, e))?
+        {
+            PreparedGraphEdgeUpsertQueryText::prepare_with_parameter_types(
                 text,
                 db.write_relation,
                 &declarations,
                 db.symbols.clone(),
             )
-            .map(|template| Some(Self::EdgeUpsert(Box::new(template))))
-            .map_err(|e| refusal(&e));
-        }
-        if PreparedGraphEdgeMergeQueryText::has_return_clause(text).map_err(|e| refusal(&e))? {
-            return PreparedGraphEdgeMergeQueryText::prepare_with_parameter_types(
+            .map(|template| ReturningKind::EdgeUpsert(Box::new(template)))
+            .map_err(|e| restored_refusal(recipe, e))?
+        } else if PreparedGraphEdgeMergeQueryText::has_return_clause(text)
+            .map_err(|e| restored_refusal(recipe, e))?
+        {
+            PreparedGraphEdgeMergeQueryText::prepare_with_parameter_types(
                 text,
                 db.write_relation,
                 &declarations,
                 db.symbols.clone(),
             )
-            .map(|template| Some(Self::EdgeMerge(Box::new(template))))
-            .map_err(|e| refusal(&e));
-        }
-        Ok(None)
+            .map(|template| ReturningKind::EdgeMerge(Box::new(template)))
+            .map_err(|e| restored_refusal(recipe, e))?
+        } else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            kind,
+            lowered: lowered.map(|(lowered, _)| lowered),
+        }))
     }
 
     pub(crate) fn returns_rows(&self) -> bool {
-        match self {
-            Self::Chain(template) => template.returns_rows(),
+        match &self.kind {
+            ReturningKind::Chain(template) => template.returns_rows(),
             _ => true,
         }
     }
 
     pub(crate) fn bind(&self, parameters: &fgdb_gql::GqlParameters) -> Result<Returning, Refusal> {
-        let refusal = returning_template_refusal;
-        match self {
-            Self::Chain(template) => template
+        let recipe = self.lowered.as_ref();
+        let derived;
+        let parameters = match recipe {
+            Some(recipe) => {
+                derived = recipe
+                    .arguments(parameters)
+                    .map_err(|e| returning_template_refusal(&e))?;
+                &derived
+            }
+            None => parameters,
+        };
+        match &self.kind {
+            ReturningKind::Chain(template) => template
                 .bind_parameters(parameters)
                 .map(|query| Returning::Chain(Box::new(query)))
-                .map_err(|e| refusal(&e)),
-            Self::Insert(template) => template
+                .map_err(|e| restored_refusal(recipe, e)),
+            ReturningKind::Insert(template) => template
                 .bind_parameters(parameters)
                 .map(|query| Returning::Insert(Box::new(query)))
-                .map_err(|e| refusal(&e)),
-            Self::Mutation(template) => template
+                .map_err(|e| restored_refusal(recipe, e)),
+            ReturningKind::Mutation(template) => template
                 .bind_parameters(parameters)
                 .map(|query| Returning::Mutation(Box::new(query)))
-                .map_err(|e| refusal(&e)),
-            Self::Merge(template) => template
+                .map_err(|e| restored_refusal(recipe, e)),
+            ReturningKind::Merge(template) => template
                 .bind_parameters(parameters)
                 .map(|query| Returning::Merge(Box::new(query)))
-                .map_err(|e| refusal(&e)),
-            Self::EdgeMerge(template) => template
+                .map_err(|e| restored_refusal(recipe, e)),
+            ReturningKind::EdgeMerge(template) => template
                 .bind_parameters(parameters)
                 .map(|query| Returning::EdgeMerge(Box::new(query)))
-                .map_err(|e| refusal(&e)),
-            Self::EdgeUpsert(template) => template
+                .map_err(|e| restored_refusal(recipe, e)),
+            ReturningKind::EdgeUpsert(template) => template
                 .bind_parameters(parameters)
                 .map(|query| Returning::EdgeUpsert(Box::new(query)))
-                .map_err(|e| refusal(&e)),
+                .map_err(|e| restored_refusal(recipe, e)),
         }
     }
 }

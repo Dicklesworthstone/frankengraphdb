@@ -71,10 +71,9 @@ impl BoundNativeGraphWrite {
     /// only. Values, row shapes, downstream types and execution budgets still
     /// require the ordinary binder. Collection contents are never inspected.
     /// Native reads should be admitted by their own compiler before this probe.
-    /// The probe prepares the text as written, without splicing map
-    /// arguments as `bind` does: its caller (the server's autocommit
-    /// classifier) executes the text through a preparation that does not
-    /// splice them either, and must not admit a write its executor refuses.
+    /// Map arguments standing for property maps splice as `bind` splices
+    /// them, so a statement the probe admits is one every native write
+    /// executor binds (fgdb-0s2pq).
     #[allow(clippy::result_large_err)]
     pub fn probe_definition(
         text: &str,
@@ -88,9 +87,16 @@ impl BoundNativeGraphWrite {
         {
             return Ok(());
         }
+        let lowered = GqlMapArgumentText::lower(text, arguments);
+        let (text, arguments) = lowered
+            .as_ref()
+            .map_or((text, arguments), |(lowered, derived)| {
+                (lowered.text(), derived)
+            });
+        let lowered = lowered.as_ref().map(|(lowered, _)| lowered);
         Self::prepare_script(text, arguments, relation, resolve)
             .map(|_| ())
-            .map_err(NativeGraphWriteBindError::ScriptPreparation)
+            .map_err(|error| NativeGraphWriteBindError::ScriptPreparation(restored(lowered, error)))
     }
 
     /// Bind ordinary scripts or one `UNWIND $rows AS row` MERGE/MATCH mutation.

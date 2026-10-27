@@ -606,3 +606,158 @@ fn fgp_prepared_returning_cancellation_only_stops_delivery_and_authority_stays_l
         task.join(cx).await.unwrap();
     });
 }
+
+/// fgdb-ch9re (fgdb-0s2pq): a driver sends a record as one map parameter.
+/// Through the server, a direct write and a direct RETURN write splice it as
+/// the literal map of its keys. A prepared write and a prepared RETURN write
+/// bind each execution's map with the keys they were prepared with; a map
+/// with other keys refuses typed and writes nothing.
+#[test]
+fn fgp_map_parameters_bind_as_property_maps() {
+    run(async |cx| {
+        let (addr, shutdown, mut task) = start(cx, "map-parameter-writes").await;
+        let mut client = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        client.select(cx, "social").await.unwrap();
+        let props = |entries: &[(&str, WireValue)]| {
+            let entries = (entries.iter())
+                .map(|(key, value)| ((*key).to_owned(), value.clone()))
+                .collect();
+            ("props".to_owned(), WireValue::Map(entries))
+        };
+        let direct = client
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (n:Person $props)",
+                vec![props(&[("age", WireValue::Int(30)), ("name", text("Ann"))])],
+            )
+            .await
+            .unwrap();
+        assert!(matches!(direct.outcome, Outcome::WriteCommitted { .. }));
+        let returned = client
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "MATCH (n:Person {name: 'Ann'}) SET n += $props RETURN n.name AS name, n.age AS age",
+                vec![props(&[("age", WireValue::Int(31))])],
+            )
+            .await
+            .unwrap();
+        assert_eq!(returned.rows, [vec![text("Ann"), WireValue::Int(31)]]);
+
+        let set = client
+            .prepare_write(
+                cx,
+                "MATCH (n:Person {name: $name}) SET n += $props",
+                vec![
+                    ("name".into(), text("representative")),
+                    props(&[("age", WireValue::Int(0))]),
+                ],
+            )
+            .await
+            .unwrap();
+        let committed = client
+            .execute_prepared_write(
+                cx,
+                set,
+                vec![
+                    ("name".into(), text("Ann")),
+                    props(&[("age", WireValue::Int(32))]),
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(matches!(committed, Outcome::WriteCommitted { .. }));
+        let create = client
+            .prepare_write_returning(
+                cx,
+                "CREATE (n:Person $props) RETURN n.name AS name, n.age AS age",
+                vec![props(&[
+                    ("age", WireValue::Int(0)),
+                    ("name", text("sample")),
+                ])],
+            )
+            .await
+            .unwrap();
+        let created = client
+            .execute_prepared_write_returning(
+                cx,
+                create,
+                vec![props(&[("age", WireValue::Int(40)), ("name", text("Bob"))])],
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.rows, [vec![text("Bob"), WireValue::Int(40)]]);
+
+        // A batch splices with its first set's keys and binds every set with
+        // them; a set with other keys refuses the whole batch.
+        let batch = "MATCH (n:Person {name: $name}) SET n += $props";
+        let record = |name: &str, entries: &[(&str, WireValue)]| {
+            vec![("name".to_owned(), text(name)), props(entries)]
+        };
+        let batched = client
+            .execute_batch(
+                cx,
+                batch,
+                vec![
+                    record("Ann", &[("age", WireValue::Int(33))]),
+                    record("Bob", &[("age", WireValue::Int(41))]),
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(matches!(batched, Outcome::WriteCommitted { .. }));
+        let mixed = client
+            .execute_batch(
+                cx,
+                batch,
+                vec![
+                    record("Ann", &[("age", WireValue::Int(1))]),
+                    record("Bob", &[("name", text("Zed"))]),
+                ],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(mixed), ErrorCode::Statement);
+
+        // Another key set refuses typed, on both handles, and writes nothing.
+        let other = client
+            .execute_prepared_write(
+                cx,
+                set,
+                vec![
+                    ("name".into(), text("Ann")),
+                    props(&[("name", text("Zed"))]),
+                ],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(other), ErrorCode::Statement);
+        let other = client
+            .execute_prepared_write_returning(cx, create, vec![props(&[("name", text("Cy"))])])
+            .await
+            .unwrap_err();
+        assert_eq!(server_code(other), ErrorCode::Statement);
+        let people = client
+            .execute(
+                cx,
+                ExecuteMode::Read,
+                "MATCH (n:Person) RETURN n.name AS name, n.age AS age ORDER BY name",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            people.rows,
+            [
+                vec![text("Ann"), WireValue::Int(33)],
+                vec![text("Bob"), WireValue::Int(41)],
+            ]
+        );
+        client.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}

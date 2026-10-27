@@ -684,10 +684,44 @@ where
                         let first = arguments.first().ok_or(Fault::BatchBinding(
                             fgdb_gql::GraphWriteScriptBatchError::Empty,
                         ))?;
-                        let script =
-                            super::prepare(cx, &mut execution, text, first, *relation, resolver)?;
-                        let Bound::Batch(batch) = Input::Batch(&script, arguments, *max_statements)
-                            .bind(cx, capability.predicates(), &mut execution)?
+                        // Map arguments standing for property maps splice
+                        // with the first set's keys, and every set must carry
+                        // exactly those keys (fgdb-0s2pq). The original text
+                        // pays the byte bill; each fresh key is a declaration.
+                        let lowered = fgdb_gql::GqlMapArgumentText::lower(text, first);
+                        let derived = match &lowered {
+                            Some((recipe, _)) => Some(
+                                (arguments.iter().enumerate())
+                                    .map(|(set, arguments)| {
+                                        recipe
+                                            .arguments(arguments)
+                                            .map_err(|error| super::map_argument_fault(set, &error))
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()?,
+                            ),
+                            None => None,
+                        };
+                        let recipe = lowered.as_ref().map(|(recipe, _)| recipe);
+                        let (statement, sets) = match (recipe, &derived) {
+                            (Some(recipe), Some(sets)) => (recipe.text(), sets.as_slice()),
+                            _ => (text, arguments),
+                        };
+                        let script = cx
+                            .with_restriction(|| {
+                                super::reserve_text(cx, &mut execution, text)?;
+                                super::prepare_admitted(
+                                    cx,
+                                    &mut execution,
+                                    statement,
+                                    &sets[0],
+                                    *relation,
+                                    resolver,
+                                )
+                            })
+                            .map_err(|fault| super::restored(recipe, fault))?;
+                        let Bound::Batch(batch) = Input::Batch(&script, sets, *max_statements)
+                            .bind(cx, capability.predicates(), &mut execution)
+                            .map_err(|fault| super::restored(recipe, fault))?
                         else {
                             unreachable!("text batch input always returns an owned batch")
                         };
