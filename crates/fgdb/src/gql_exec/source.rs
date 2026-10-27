@@ -13,6 +13,7 @@ use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_strata::AdjacencyEntry;
 use fgdb_strata::vertex::{VertexPatchRows, VertexRow};
 use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, VId};
+use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::sync::Arc;
@@ -1912,6 +1913,47 @@ fn prefix_range(key: PropertyKeyId, prefix: &str) -> Option<PropertyRange> {
 }
 
 impl PropertyEqualityIndex {
+    /// Prove a property's complete historical domain contains only scalars.
+    /// Collection encodings are indexed too. Seek their type boundaries rather
+    /// than walking values or histories; an old collection conservatively keeps
+    /// the scan even when its current winner is scalar. This matters for scalar
+    /// IN programs: loading an oversized stored List/Map raises before comparison.
+    fn scalar_only<E>(
+        &self,
+        key: PropertyKeyId,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        // Ask the canonical codec for its collection tags instead of duplicating
+        // private wire-tag constants. The fixed byte alphabet is not a data scan.
+        for tag in u8::MIN..=u8::MAX {
+            if !CanonicalPropertyValue::is_collection_encoding(&[tag]) {
+                continue;
+            }
+            let mut node = self.candidates.0.as_deref();
+            let mut first = None;
+            while let Some(current) = node {
+                control(SourceEvent::Work)?;
+                let order = current
+                    .key
+                    .0
+                    .cmp(&key)
+                    .then_with(|| current.key.1.as_ref().cmp(&[tag]));
+                if order.is_lt() {
+                    node = current.right.0.as_deref();
+                } else {
+                    first = Some(&current.key);
+                    node = current.left.0.as_deref();
+                }
+            }
+            if first.is_some_and(|(property, encoded)| {
+                *property == key && encoded.first() == Some(&tag)
+            }) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// Refuse pruning if any historical property could raise NonText, or uses
     /// nonbinary ordering. Two ordered seeks inspect type/binding boundaries;
     /// no whole-property scan and no additional maintained index are needed.
@@ -1935,7 +1977,7 @@ impl PropertyEqualityIndex {
 /// Whether property-bound single-domain scans use the maintained index.
 const PROPERTY_INDEX_SERVING: bool = true;
 
-/// Serve equality or range predicates over a single vertex domain.
+/// Serve equality, literal membership, or range predicates over one vertex domain.
 /// The admitted rows also supply every nested scan and property lookup, so a
 /// root predicate cannot prune that shared table when later operators introduce
 /// other bindings. Such plans retain the complete scan source.
@@ -1950,9 +1992,21 @@ pub(crate) fn bound_vertices<'a, E, Row>(
         return Ok(None);
     }
     let prefix = &logical.operators()[1..];
+    let mut membership_predicate = false;
+    let mut prefix_predicate = false;
     if !prefix.iter().all(|op| match op {
         GlaOperator::Select { slot, .. } => slot.ordinal() == 0,
-        GlaOperator::SelectBoolean { expression } => expression.starts_with_conjunct().is_some(),
+        GlaOperator::SelectBoolean { expression } => {
+            if expression.literal_membership_conjunct().is_some() {
+                membership_predicate = true;
+                true
+            } else if expression.starts_with_conjunct().is_some() {
+                prefix_predicate = true;
+                true
+            } else {
+                false
+            }
+        }
         GlaOperator::Project { .. }
         | GlaOperator::Distinct
         | GlaOperator::OrderByVertexId
@@ -1965,6 +2019,91 @@ pub(crate) fn bound_vertices<'a, E, Row>(
         _ => false,
     }) {
         return Ok(None);
+    }
+    // Prefix metadata permits stored-value comparisons beyond the narrower
+    // membership proof. A separate prefix Boolean operator could therefore
+    // raise on a row outside the IN union. Keep mixed operator plans on the
+    // scan until those sibling comparisons have their own totality proof.
+    if membership_predicate && prefix_predicate {
+        return Ok(None);
+    }
+    // Every Boolean expression is eager. A nonselected conjunct must not lose
+    // its stored-collection admission error merely because another conjunct
+    // supplied a narrower posting. Prove each safe expression's source domain
+    // before any access-path choice; all other shapes retain the scan.
+    for operator in prefix {
+        if let GlaOperator::SelectBoolean { expression } = operator {
+            if let Some((key, _)) = expression.literal_membership_conjunct() {
+                if !snapshot.property_index().scalar_only(key, control)? {
+                    return Ok(None);
+                }
+            } else if let Some((key, text)) = expression.starts_with_conjunct() {
+                let Some(range) = prefix_range(key, text) else {
+                    return Ok(None);
+                };
+                if !snapshot.property_index().prefix_types_are_safe(&range) {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+    // IN is a union of exact property postings, not a range spanning its
+    // smallest and largest members. NULL cannot make IN true; numeric values
+    // also seek their exact peer in the other canonical numeric domain.
+    // Only leading predicates participate, so an access bound never moves a
+    // later selection ahead of paging or a value-producing operator.
+    if let Some((key, members)) = prefix
+        .iter()
+        .take_while(|operator| {
+            matches!(
+                operator,
+                GlaOperator::Select { .. } | GlaOperator::SelectBoolean { .. }
+            )
+        })
+        .find_map(|operator| match operator {
+            GlaOperator::SelectBoolean { expression } => expression.literal_membership_conjunct(),
+            _ => None,
+        })
+    {
+        let mut candidates = std::collections::BTreeSet::new();
+        for member in members {
+            control(SourceEvent::Work)?;
+            let peers = match member.as_ref() {
+                CanonicalScalar::Null => continue,
+                value @ (CanonicalScalar::Int(_) | CanonicalScalar::Float(_)) => {
+                    numeric::equality_peers(value).map(|peer| peer.map(Cow::Owned))
+                }
+                value => [Some(Cow::Borrowed(value)), None],
+            };
+            for peer in peers.into_iter().flatten() {
+                control(SourceEvent::Work)?;
+                for vid in snapshot.property_index().lookup(key, peer.as_ref()) {
+                    control(SourceEvent::Work)?;
+                    if !candidates.contains(vid) {
+                        control(SourceEvent::ScratchEntry)?;
+                        candidates.insert(*vid);
+                    }
+                }
+            }
+        }
+        let count = candidates.len() as u64;
+        let mut rows = Vec::new();
+        for vid in candidates {
+            control(SourceEvent::Work)?;
+            control(SourceEvent::SnapshotRecord)?;
+            if let Some(row) =
+                snapshot
+                    .property_index()
+                    .visible_row(&snapshot.patches, vid, as_of, control)?
+            {
+                // Historical postings are only candidates. Visibility picks
+                // the winner; the unchanged GLA predicates recheck every
+                // current property and label before producing a result.
+                control(SourceEvent::ScratchEntry)?;
+                rows.push(row);
+            }
+        }
+        return Ok(Some((rows, count)));
     }
     if let Some((key, text)) = prefix.iter().find_map(|operator| match operator {
         GlaOperator::SelectBoolean { expression } => expression.starts_with_conjunct(),

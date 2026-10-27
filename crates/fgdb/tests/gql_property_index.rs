@@ -490,3 +490,383 @@ async fn graph_of(db: &mut Database<MemVfs>, cx: &fgdb_types::CommitCx, total: u
     }
     seq
 }
+
+fn membership_symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+    match (kind, name) {
+        (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+        (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
+        (GraphSymbolKind::Label, "Tag") => Some(GraphSymbol::Label(L)),
+        _ => None,
+    }
+}
+
+fn membership_pattern(
+    text: &str,
+    members: Option<&[CanonicalScalar]>,
+) -> fgdb_gql::algebra::PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow> {
+    let (template, parameters) = if let Some(members) = members {
+        (
+            PreparedGraphText::prepare_with_parameter_types(
+                text,
+                &[("members", GqlParameterType::List)],
+                membership_symbols,
+            )
+            .unwrap(),
+            GqlParameters::new()
+                .with_list(
+                    "members",
+                    members
+                        .iter()
+                        .cloned()
+                        .map(fgdb_gql::algebra::GraphValue::Scalar)
+                        .collect(),
+                )
+                .unwrap(),
+        )
+    } else {
+        (
+            PreparedGraphText::prepare(text, membership_symbols).unwrap(),
+            GqlParameters::new(),
+        )
+    };
+    template.bind_parameters(&parameters).unwrap()
+}
+
+fn membership_ids(rows: &[fgdb_gql::algebra::GraphValueRow]) -> Vec<VId> {
+    rows.iter()
+        .map(|row| row.get(0).unwrap().as_vertex().unwrap())
+        .collect()
+}
+
+/// Small IN batches use the exact posting union, including both numeric
+/// domains. Doubly negated membership deliberately retains the full scan and
+/// supplies an execution differential; explicit answers pin the mixed-type
+/// and floating boundary semantics independently of the optimized source.
+#[test]
+fn scalar_membership_seeks_preserve_numeric_null_and_duplicate_semantics() {
+    use fgdb_types::{CanonicalDecimal, CanonicalF64};
+    let ((), report) = run_async_under_lab(0xb01_0061, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let float = |value| CanonicalScalar::Float(CanonicalF64::new(value));
+        let decimal = CanonicalScalar::Decimal(CanonicalDecimal::from_integer(1).unwrap());
+        let needle = CanonicalScalar::ucs_basic_text("needle").unwrap();
+        let values = [
+            Some(CanonicalScalar::Int(1)),
+            Some(float(1.0)),
+            Some(CanonicalScalar::Int(2)),
+            Some(float(2.0)),
+            Some(CanonicalScalar::Int(3)),
+            Some(CanonicalScalar::Null),
+            None,
+            Some(CanonicalScalar::Bool(true)),
+            Some(needle.clone()),
+            Some(CanonicalScalar::Int(9_007_199_254_740_993)),
+            Some(float(9_007_199_254_740_992.0)),
+            Some(CanonicalScalar::Int(i64::MAX)),
+            Some(float(i64::MAX as f64)),
+            Some(float(f64::NAN)),
+            Some(decimal.clone()),
+            Some(CanonicalScalar::Int(9_007_199_254_740_992)),
+        ];
+        let mut batch = WriteBatch::new(R);
+        for id in 0..1_024_u128 {
+            let value = values
+                .get(id as usize)
+                .cloned()
+                .unwrap_or(Some(CanonicalScalar::Int(10_000 + id as i64)));
+            let mut props = vec![(Q, CanonicalScalar::Int(id as i64))];
+            if let Some(value) = value {
+                props.push((P, value));
+            }
+            batch.create_vertex(VId(id), vec![L], props);
+        }
+        let at = db.write(&commit, batch).await.unwrap();
+        let wide = GqlQueryPolicy::new(2_000, 2_000, 10_000_000, 10_000_000);
+        let cases: Vec<(Vec<CanonicalScalar>, Vec<u128>, u64)> = vec![
+            (vec![], vec![], 0),
+            (vec![CanonicalScalar::Null], vec![], 0),
+            (
+                vec![
+                    CanonicalScalar::Int(1),
+                    CanonicalScalar::Int(2),
+                    CanonicalScalar::Null,
+                    CanonicalScalar::Int(1),
+                ],
+                vec![0, 1, 2, 3],
+                4,
+            ),
+            (vec![float(9_007_199_254_740_992.0)], vec![10, 15], 2),
+            (
+                vec![CanonicalScalar::Int(9_007_199_254_740_993)],
+                vec![9],
+                1,
+            ),
+            (vec![CanonicalScalar::Int(i64::MAX)], vec![11], 1),
+            (vec![float(i64::MAX as f64)], vec![12], 1),
+            (vec![float(f64::NAN)], vec![13], 1),
+            (vec![CanonicalScalar::Bool(true), needle], vec![7, 8], 2),
+            (vec![decimal.clone()], vec![14], 1),
+            // Scalar IN evaluates all members. The incompatible numeric-domain
+            // member makes the Boolean expression UNKNOWN even after a match.
+            (vec![CanonicalScalar::Int(1), decimal], vec![], 3),
+        ];
+        for (members, expected, candidates) in cases {
+            let indexed =
+                membership_pattern("MATCH (n) WHERE n.p IN $members RETURN n", Some(&members));
+            let scan = membership_pattern(
+                "MATCH (n) WHERE NOT NOT (n.p IN $members) RETURN n",
+                Some(&members),
+            );
+            let actual = db
+                .execute_graph_pattern_governed_at(&cx, &indexed, at, wide)
+                .unwrap();
+            let complete = db
+                .execute_graph_pattern_governed_at(&cx, &scan, at, wide)
+                .unwrap();
+            assert_eq!(actual.value, complete.value, "members={members:?}");
+            assert_eq!(
+                membership_ids(&actual.value),
+                expected.into_iter().map(VId).collect::<Vec<_>>(),
+                "members={members:?}"
+            );
+            assert_eq!(actual.rows.snapshot_records, candidates, "{members:?}");
+            assert_eq!(complete.rows.snapshot_records, 1_024);
+            let exact = GqlQueryPolicy::new(candidates, 2_000, 10_000_000, 10_000_000);
+            assert_eq!(
+                db.execute_graph_pattern_governed_at(&cx, &indexed, at, exact)
+                    .unwrap()
+                    .value,
+                actual.value
+            );
+            if candidates != 0 {
+                let short = GqlQueryPolicy::new(candidates - 1, 2_000, 10_000_000, 10_000_000);
+                let error = db
+                    .execute_graph_pattern_governed_at(&cx, &indexed, at, short)
+                    .unwrap_err();
+                assert!(format!("{error:?}").contains("SnapshotRecords"));
+            }
+        }
+        for (text, expected, candidates) in [
+            ("n.p IN [1, 2, null, 1]", vec![0, 1, 2, 3], 4),
+            ("n.p IN []", vec![], 0),
+            ("n.p IN [null]", vec![], 0),
+            ("n.p IN [1, 2] OR n.q = 20", vec![0, 1, 2, 3, 20], 1_024),
+            ("n.p IN [1, 2] AND n.q >= 2", vec![2, 3], 4),
+        ] {
+            let query = membership_pattern(&format!("MATCH (n) WHERE {text} RETURN n"), None);
+            let result = db
+                .execute_graph_pattern_governed_at(&cx, &query, at, wide)
+                .unwrap();
+            assert_eq!(
+                membership_ids(&result.value),
+                expected.into_iter().map(VId).collect::<Vec<_>>(),
+                "{text}"
+            );
+            assert_eq!(result.rows.snapshot_records, candidates, "{text}");
+        }
+        let fallible = membership_pattern("MATCH (n) WHERE n.p IN [1, 1 / 0] RETURN n", None);
+        let error = db
+            .execute_graph_pattern_governed_at(&cx, &fallible, at, wide)
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("DivisionByZero"));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn membership_postings_recheck_visibility_across_updates_pins_and_reopen() {
+    let ((), report) = run_async_under_lab(0xb01_0062, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(R);
+        for id in 0..128_u128 {
+            batch.create_vertex(VId(id), vec![L], vec![(P, CanonicalScalar::Int(id as i64))]);
+        }
+        let old = db.write(&commit, batch).await.unwrap();
+        let pinned = db.read_session().unwrap();
+        let mut changed = WriteBatch::new(R);
+        changed.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(40)));
+        changed.delete_vertex(VId(2));
+        changed.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(1)));
+        changed.create_vertex(VId(u128::MAX), vec![L], vec![(P, CanonicalScalar::Int(2))]);
+        let now = db.write(&commit, changed).await.unwrap();
+        let query = membership_pattern("MATCH (n) WHERE n.p IN [1, 2, 2] RETURN n", None);
+        let old_rows = pinned
+            .execute_graph_pattern_governed_at(
+                &cx,
+                &query,
+                old,
+                GqlQueryPolicy::new(2, 10, 100_000, 100_000),
+            )
+            .unwrap();
+        assert_eq!(membership_ids(&old_rows.value), [VId(1), VId(2)]);
+        assert_eq!(old_rows.rows.snapshot_records, 2);
+        for reopen in [false, true] {
+            if reopen {
+                drop(db);
+                db = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
+                    .await
+                    .unwrap();
+            }
+            for (at, expected) in [
+                (old, vec![VId(1), VId(2)]),
+                (now, vec![VId(3), VId(u128::MAX)]),
+            ] {
+                let result = db
+                    .execute_graph_pattern_governed_at(
+                        &cx,
+                        &query,
+                        at,
+                        GqlQueryPolicy::new(4, 10, 100_000, 100_000),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    membership_ids(&result.value),
+                    expected,
+                    "{at:?}, reopen={reopen}"
+                );
+                assert_eq!(result.rows.snapshot_records, 4);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// A nonmatching collection still has to enter the scalar expression's
+/// value conversion. The access path may not hide its admission error.
+#[test]
+fn membership_keeps_collection_and_arithmetic_error_boundaries() {
+    use fgdb_gql::algebra::{
+        GlaOperator, GraphBooleanExpression, GraphBooleanOp as BooleanOp,
+        GraphBooleanOperand as Operand, GraphColumn, GraphPatternBuilder, GraphValue,
+        IntegerComparison, ScalarPredicate,
+    };
+    use fgdb_gql::{GraphIntegerExpression, GraphIntegerOp};
+    use fgdb_types::CanonicalList;
+    let ((), report) = run_async_under_lab(0xb01_0063, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let oversized = CanonicalPropertyValue::List(
+            CanonicalList::try_new(vec![
+                CanonicalScalar::Null.into();
+                GraphValue::MAX_LIST_NODES
+            ])
+            .unwrap(),
+        );
+        let membership_key = PropertyKeyId(3);
+        let text = CanonicalScalar::ucs_basic_text("prefix").unwrap();
+        let mut batch = WriteBatch::new(R);
+        batch.create_vertex_values(
+            VId(1),
+            vec![],
+            vec![
+                (P, oversized),
+                (Q, text.clone().into()),
+                (membership_key, CanonicalScalar::Int(0).into()),
+            ],
+        );
+        batch.create_vertex(
+            VId(2),
+            vec![],
+            vec![
+                (P, CanonicalScalar::Int(1)),
+                (Q, text.clone()),
+                (membership_key, CanonicalScalar::Int(1)),
+            ],
+        );
+        let at = db.write(&commit, batch).await.unwrap();
+        let wide = GqlQueryPolicy::new(10, 10, 10_000_000, 10_000_000);
+        for text in [
+            "MATCH (n) WHERE n.p IN $members RETURN n",
+            "MATCH (n) WHERE NOT NOT (n.p IN $members) RETURN n",
+            "MATCH (n) WHERE n.q = 9 AND n.p IN $members RETURN n",
+        ] {
+            let query = membership_pattern(text, Some(&[CanonicalScalar::Int(1)]));
+            let error = db
+                .execute_graph_pattern_governed_at(&cx, &query, at, wide)
+                .unwrap_err();
+            assert!(
+                format!("{error:?}").contains("StoredValueBounds"),
+                "{text}: {error:?}"
+            );
+        }
+
+        // Separate typed Boolean operators can carry a prefix comparison's
+        // eager stored-value sibling before membership on another property.
+        // Pruning by that later membership must not hide the first error.
+        let starts_with = GraphIntegerExpression::prepare_scalar(&[
+            GraphIntegerOp::ScalarColumn(0),
+            GraphIntegerOp::Scalar(ScalarPredicate::new(text, IntegerComparison::Equal).unwrap()),
+            GraphIntegerOp::StartsWith,
+        ])
+        .unwrap();
+        let prefix = GraphBooleanExpression::prepare(&[
+            BooleanOp::Expression {
+                expression: &starts_with,
+                columns: &[Operand::Property {
+                    variable: "n",
+                    key: Q,
+                }],
+            },
+            BooleanOp::Compare {
+                left: Operand::Property {
+                    variable: "n",
+                    key: P,
+                },
+                comparison: IntegerComparison::Equal,
+                right: Operand::Property {
+                    variable: "n",
+                    key: P,
+                },
+            },
+            BooleanOp::And,
+        ])
+        .unwrap();
+        let membership = GraphIntegerExpression::prepare_scalar(&[
+            GraphIntegerOp::ScalarColumn(0),
+            GraphIntegerOp::Literal(Some(1)),
+            GraphIntegerOp::InList { members: 1 },
+        ])
+        .unwrap();
+        let membership = GraphBooleanExpression::prepare(&[BooleanOp::Expression {
+            expression: &membership,
+            columns: &[Operand::Property {
+                variable: "n",
+                key: membership_key,
+            }],
+        }])
+        .unwrap();
+        let mut builder = GraphPatternBuilder::new();
+        builder.vertex("n").unwrap();
+        builder.filter_boolean(&prefix).unwrap();
+        builder.filter_boolean(&membership).unwrap();
+        let query = builder
+            .prepare_values(&[GraphColumn::vertex("n", "n")], 0, None)
+            .unwrap();
+        assert_eq!(
+            query
+                .plan()
+                .operators()
+                .iter()
+                .filter(|operator| matches!(operator, GlaOperator::SelectBoolean { .. }))
+                .count(),
+            2
+        );
+        let error = db
+            .execute_graph_pattern_governed_at(&cx, &query, at, wide)
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("StoredValueBounds"));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

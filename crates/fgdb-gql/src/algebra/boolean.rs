@@ -489,6 +489,146 @@ impl core::fmt::Debug for BoundBooleanExpression {
 }
 
 impl BoundBooleanExpression {
+    /// A necessary scalar IN-list conjunct on the single root vertex.
+    /// Literal IN lists also lower to ORs of equality comparisons. AND keeps
+    /// either necessary bound; OR keeps one only when both sides require the
+    /// same property. NOT discards its bound. Arithmetic, computed members,
+    /// another vertex, and captured relationships decline the access path.
+    /// Scalar-expression membership requires a source proof that this property's
+    /// histories contain no stored collections: loading an oversized collection
+    /// could otherwise raise before membership rejects it. The original Boolean
+    /// program still evaluates every resolved row, with its ordinary three-valued
+    /// NULL and mixed-domain semantics.
+    #[must_use]
+    pub fn literal_membership_conjunct(
+        &self,
+    ) -> Option<(
+        PropertyKeyId,
+        impl Iterator<Item = std::borrow::Cow<'_, CanonicalScalar>>,
+    )> {
+        let local = |operand: &Operand<BindingSlot>| match operand {
+            Operand::Vertex(variable) | Operand::Property { variable, .. } => {
+                variable.ordinal() == 0
+            }
+            Operand::Literal(_) => true,
+            Operand::StoredLiteral(_) | Operand::Edge(_) | Operand::EdgeProperty { .. } => false,
+        };
+        fn member(
+            instruction: &Instruction<BindingSlot>,
+        ) -> Option<(PropertyKeyId, &CanonicalScalar)> {
+            match instruction {
+                Instruction::Compare {
+                    left: Operand::Property { variable, key },
+                    comparison: IntegerComparison::Equal,
+                    right: Operand::Literal(value),
+                }
+                | Instruction::Compare {
+                    left: Operand::Literal(value),
+                    comparison: IntegerComparison::Equal,
+                    right: Operand::Property { variable, key },
+                } if variable.ordinal() == 0 => Some((*key, value.value())),
+                _ => None,
+            }
+        }
+        let mut stack = [None; MAX_PATTERN_PREDICATES];
+        let mut depth = 0;
+        let mut expression_key = None;
+        for instruction in self.program.iter() {
+            let bound = match instruction {
+                Instruction::Expression {
+                    expression,
+                    columns,
+                } => {
+                    if columns.len() != 1 || !columns.iter().all(&local) {
+                        return None;
+                    }
+                    let (column, _) = expression.scalar_membership_literals()?;
+                    let Operand::Property { variable, key } = columns.get(column)? else {
+                        return None;
+                    };
+                    if variable.ordinal() != 0 {
+                        return None;
+                    }
+                    if expression_key.is_some_and(|previous| previous != *key) {
+                        return None;
+                    }
+                    expression_key = Some(*key);
+                    Some(*key)
+                }
+                Instruction::Compare { left, right, .. }
+                    if local(left)
+                        && local(right)
+                        && (matches!(left, Operand::Literal(_))
+                            || matches!(right, Operand::Literal(_))) =>
+                {
+                    member(instruction).map(|(key, _)| key)
+                }
+                Instruction::IsNull { operand, .. } if local(operand) => None,
+                Instruction::Truth(_) => None,
+                Instruction::And | Instruction::Or => {
+                    let right = stack[depth - 1];
+                    depth -= 1;
+                    let left = &mut stack[depth - 1];
+                    *left = if matches!(instruction, Instruction::And) {
+                        (*left).or(right)
+                    } else {
+                        (*left).filter(|key| Some(*key) == right)
+                    };
+                    continue;
+                }
+                Instruction::Not => {
+                    stack[depth - 1] = None;
+                    continue;
+                }
+                _ => return None,
+            };
+            stack[depth] = bound;
+            depth += 1;
+        }
+        debug_assert_eq!(depth, 1);
+        // The native empty literal-list lowering preserves the property read
+        // as `(property IS NULL AND FALSE)`. It has no matching posting.
+        let empty_key = match self.program.as_ref() {
+            [
+                Instruction::IsNull {
+                    operand: Operand::Property { variable, key },
+                    ..
+                },
+                Instruction::Truth(Some(false)),
+                Instruction::And,
+            ] if variable.ordinal() == 0 => Some(*key),
+            _ => None,
+        };
+        let key = stack[0].or(empty_key)?;
+        if expression_key.is_some_and(|property| property != key) {
+            return None;
+        }
+        Some((
+            key,
+            self.program.iter().flat_map(move |instruction| {
+                let scalar = member(instruction)
+                    .filter(|(property, _)| *property == key)
+                    .map(|(_, value)| std::borrow::Cow::Borrowed(value));
+                let literals = match instruction {
+                    Instruction::Expression {
+                        expression,
+                        columns,
+                    } => expression
+                        .scalar_membership_literals()
+                        .and_then(|(column, values)| {
+                            matches!(
+                                columns.get(column),
+                                Some(Operand::Property { key: property, .. }) if *property == key
+                            )
+                            .then_some(values)
+                        }),
+                    _ => None,
+                };
+                scalar.into_iter().chain(literals.into_iter().flatten())
+            }),
+        ))
+    }
+
     /// A direct STARTS WITH conjunct over one vertex slot. The original
     /// expression must still be evaluated on the resolved visible rows.
     /// OR, NOT, nested scalar programs and captured-edge operands are not

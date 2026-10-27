@@ -775,6 +775,50 @@ impl GraphIntegerExpression {
         }
     }
 
+    /// A direct column membership test over already bound scalar literals.
+    /// Computed members, NOT, and arithmetic stay in the ordinary evaluator:
+    /// using them as an access bound could suppress a required exception.
+    /// Borrow payloads from the checked definition; inspecting the bound does
+    /// not allocate a second list or evaluate a database value.
+    pub(crate) fn scalar_membership_literals(
+        &self,
+    ) -> Option<(
+        usize,
+        impl ExactSizeIterator<Item = Cow<'_, CanonicalScalar>>,
+    )> {
+        let [
+            Instruction::ScalarColumn(column),
+            literals @ ..,
+            Instruction::InList { members },
+        ] = self.code.as_ref()
+        else {
+            return None;
+        };
+        if literals.len() != *members
+            || !literals.iter().all(|instruction| {
+                matches!(
+                    instruction,
+                    Instruction::Literal(_) | Instruction::Scalar(_) | Instruction::Truth(_)
+                )
+            })
+        {
+            return None;
+        }
+        Some((
+            *column,
+            literals.iter().map(|instruction| match instruction {
+                Instruction::Literal(value) => {
+                    Cow::Owned(value.map_or(CanonicalScalar::Null, CanonicalScalar::Int))
+                }
+                Instruction::Scalar(value) => Cow::Borrowed(value.value()),
+                Instruction::Truth(value) => {
+                    Cow::Owned(value.map_or(CanonicalScalar::Null, CanonicalScalar::Bool))
+                }
+                _ => unreachable!("membership members were checked above"),
+            }),
+        ))
+    }
+
     /// The element offsets (Local) this program reads; each must lie within
     /// the element scopes enclosing it (fgdb-20foe).
     pub fn referenced_locals(&self) -> impl Iterator<Item = usize> + '_ {
