@@ -1583,10 +1583,22 @@ fn pattern_counts_read_witness_list_sizes() {
         )),
         sorted(grouped)
     );
+    // The later k is the carried source n, not the old target k. Preserve
+    // one count per matched edge occurrence, including the parallel pair.
+    assert_eq!(
+        sorted(execute(
+            "MATCH (n)-->(k) WITH n AS k RETURN COUNT { (k)-->() } AS l"
+        )),
+        sorted(
+            EDGES
+                .iter()
+                .map(|&(from, _, _)| GraphValueRow::from_owned_values(vec![int(out(from.0))]))
+                .collect()
+        )
+    );
     for text in [
-        // An enclosing element local, and a binding the row renames.
+        // An enclosing element local still needs a per-element graph owner.
         "MATCH (n) WITH n RETURN [x IN [n] | COUNT { (x)-->() }] AS l",
-        "MATCH (n)-->(k) WITH n AS k RETURN COUNT { (k)-->() } AS l",
         // A pattern expression inside size() (openCypher TCK List6 [6]).
         "MATCH (n) RETURN n, size((n)-->()) AS d",
         "MATCH (n) WHERE size((n)-->()) > 1 RETURN n",
@@ -2898,5 +2910,274 @@ fn row_scope_existence_projection_preserves_call_boundaries_aliases_and_distinct
             })
             .collect();
         assert_eq!(rows, values, "{expression}");
+    }
+}
+
+#[test]
+fn row_scope_pattern_counts_rebind_anchors_and_count_parallel_witnesses() {
+    let template = PreparedGraphSetText::prepare(
+        "UNWIND $items AS x RETURN x,COUNT { (x)-[:R]->() } AS outgoing,\
+         COUNT { MATCH (x)<-[:R]-(y) WHERE y.p >= $minimum } AS incoming",
+        symbols,
+    )
+    .unwrap();
+    let frozen = template.canonical_template_bytes();
+    for items in [
+        vec![
+            GraphValue::Vertex(VId(1)),
+            GraphValue::Vertex(VId(1)),
+            GraphValue::Vertex(VId(4)),
+            GraphValue::Vertex(VId(u128::MAX)),
+            GraphValue::Scalar(CanonicalScalar::Null),
+            GraphValue::Scalar(CanonicalScalar::Int(1)),
+            GraphValue::Edge(fgdb_types::EId(1)),
+            GraphValue::List(vec![].into()),
+        ],
+        vec![GraphValue::Vertex(VId(2)), GraphValue::Vertex(VId(3))],
+        vec![],
+    ] {
+        for minimum in [1_i64, 2, 3] {
+            let values = [1_i64, 2, 2, 3];
+            let mut expected: Vec<_> = items
+                .iter()
+                .map(|item| {
+                    let outgoing = EDGES
+                        .iter()
+                        .filter(|&&(from, _, _)| *item == GraphValue::Vertex(from))
+                        .count();
+                    let incoming = EDGES
+                        .iter()
+                        .filter(|&&(from, _, to)| {
+                            *item == GraphValue::Vertex(to)
+                                && values[from.0 as usize - 1] >= minimum
+                        })
+                        .count();
+                    GraphValueRow::from_owned_values(vec![
+                        item.clone(),
+                        GraphValue::Scalar(CanonicalScalar::Int(outgoing as i64)),
+                        GraphValue::Scalar(CanonicalScalar::Int(incoming as i64)),
+                    ])
+                })
+                .collect();
+            expected.sort();
+            let arguments = GqlParameters::new()
+                .with_list("items", items.clone())
+                .unwrap()
+                .with_int64("minimum", minimum)
+                .unwrap();
+            let query = template.bind_parameters(&arguments).unwrap();
+            assert_eq!(query.columns(), ["x", "outgoing", "incoming"]);
+            let mut actual = run(&query, wide(), &mut || Ok(())).unwrap().value;
+            actual.sort();
+            assert_eq!(actual, expected, "minimum {minimum}");
+        }
+    }
+    assert_eq!(template.canonical_template_bytes(), frozen);
+    assert!(template.bind_parameters(&GqlParameters::new()).is_err());
+    let presence = PreparedGraphSetText::prepare(
+        "UNWIND $items AS x RETURN x,EXISTS { MATCH (x)-[:R]->() } AS outgoing",
+        symbols,
+    )
+    .unwrap();
+    assert_ne!(frozen, presence.canonical_template_bytes());
+}
+
+#[test]
+fn row_scope_pattern_counts_compose_with_where_values_and_call_boundaries() {
+    let prefix = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x";
+    for (expression, counts) in [
+        ("COUNT { (x)-[:R]->() }", [3, 1, 1, 0]),
+        ("COUNT { MATCH (x)-[:R]->() } + 2", [5, 3, 3, 2]),
+        (
+            "CASE WHEN EXISTS((x)-[:R]->()) THEN COUNT { (x)-[:R]->() } ELSE 9 END",
+            [3, 1, 1, 9],
+        ),
+        ("COALESCE(COUNT { (x)-[:R]->() }, 1 / 0)", [3, 1, 1, 0]),
+    ] {
+        assert_eq!(
+            execute(&format!(
+                "{prefix} RETURN x,{expression} AS degree ORDER BY x"
+            )),
+            counts
+                .into_iter()
+                .enumerate()
+                .map(|(at, count)| GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(at as u128 + 1)),
+                    GraphValue::Scalar(CanonicalScalar::Int(count)),
+                ]))
+                .collect::<Vec<_>>(),
+            "{expression}"
+        );
+    }
+    assert_eq!(
+        execute(&format!(
+            "{prefix} WITH x WHERE COUNT {{ (x)-[:R]->() }} > 1 \
+             OR COUNT {{ (x)<-[:R]-() }} = 1 RETURN x ORDER BY x"
+        )),
+        vec![vertices(&[1]), vertices(&[4])]
+    );
+    assert_eq!(
+        execute(&format!(
+            "{prefix} WITH x,nodes[0] AS other \
+             CALL (x) {{ RETURN COUNT {{ (x)-[:R]->() }} AS degree }} \
+             WHERE EXISTS((other)-[:R]->()) RETURN x,degree ORDER BY x"
+        )),
+        [3, 1, 1, 0]
+            .into_iter()
+            .enumerate()
+            .map(|(at, count)| GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(at as u128 + 1)),
+                GraphValue::Scalar(CanonicalScalar::Int(count)),
+            ]))
+            .collect::<Vec<_>>()
+    );
+    let query = prepare(&format!(
+        "{prefix} RETURN DISTINCT COUNT {{ (x)-[:R]->() }} AS MATCH \
+         ORDER BY MATCH DESC SKIP 1 LIMIT 2"
+    ));
+    assert_eq!(query.columns(), ["MATCH"]);
+    assert_eq!(
+        run(&query, wide(), &mut || Ok(())).unwrap().value,
+        [1, 0]
+            .into_iter()
+            .map(
+                |value| GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+                    CanonicalScalar::Int(value)
+                )])
+            )
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn row_scope_pattern_counts_keep_scopes_private_before_catalog_access() {
+    let prefix = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x";
+    for expression in [
+        "COUNT { (fresh)-[:R]->() } AS total",
+        "COUNT { (x)-[:R]->(local) } AS total,local.p AS leaked",
+        "COUNT { (x)-[:R]->() } AS total,__fg_boundary_0 AS leaked",
+        "COUNT { (x)-[:R]->() } AS total,[local IN nodes | COUNT { (local)-[:R]->() }] AS nested",
+        "COUNT { (x)-[:R]->() } AS total,COUNT { (nodes)-[:R]->() } AS invalid",
+    ] {
+        let statement = format!("{prefix} RETURN {expression}");
+        let resolutions = std::cell::Cell::new(0);
+        assert!(
+            PreparedGraphSetText::prepare(&statement, |kind, name| {
+                resolutions.set(resolutions.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{statement}"
+        );
+        assert_eq!(
+            resolutions.get(),
+            0,
+            "scope admission precedes catalog reads"
+        );
+    }
+    let query = prepare(&format!(
+        "{prefix} WITH x AS __fg_boundary_0 \
+         RETURN __fg_boundary_0,COUNT {{ (__fg_boundary_0)-[:R]->() }} AS total"
+    ));
+    assert_eq!(query.columns(), ["__fg_boundary_0", "total"]);
+    assert_eq!(run(&query, wide(), &mut || Ok(())).unwrap().value.len(), 4);
+}
+
+#[test]
+fn row_scope_pattern_counts_keep_late_source_failures_before_empty_pages() {
+    for expression in [
+        "COUNT { (x)-[:R]->() }",
+        "CASE WHEN true THEN 7 ELSE COUNT { (x)-[:R]->() } END",
+    ] {
+        let query = prepare(&format!(
+            "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x \
+             RETURN {expression} AS value LIMIT 0"
+        ));
+        let mut calls = 0;
+        let result = query.execute_governed(
+            wide(),
+            |pattern, remaining| {
+                calls += 1;
+                if calls == 3 {
+                    return Err(GqlQueryError::Source("later-count-witness-error"));
+                }
+                pattern.plan().execute_governed_with_properties(
+                    (4 + EDGES.len()) as u64,
+                    (1..=4).map(VId),
+                    EDGES,
+                    |_, _| Ok::<_, &'static str>(true),
+                    |_, _| Ok(None),
+                    remaining,
+                    || Ok::<_, usize>(()),
+                )
+            },
+            || Ok::<_, usize>(()),
+        );
+        assert_eq!(calls, 3, "{expression}");
+        assert!(matches!(
+            result,
+            Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+                "later-count-witness-error"
+            )))
+        ));
+    }
+}
+
+#[test]
+fn row_scope_pattern_counts_share_exact_budgets_and_original_interruptions() {
+    for suffix in ["", " LIMIT 0"] {
+        let query = prepare(&format!(
+            "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x \
+             RETURN x,COUNT {{ (x)-[:R]->() }} + COUNT {{ (x)<-[:R]-() }} AS degree{suffix}"
+        ));
+        let mut checkpoints = 0;
+        let measured = run(&query, wide(), &mut || {
+            checkpoints += 1;
+            Ok(())
+        })
+        .unwrap();
+        let caps = [
+            measured.rows.snapshot_records,
+            measured.rows.result_rows,
+            measured.evaluator.work_units,
+            measured.evaluator.scratch_entries,
+        ];
+        assert_eq!(
+            run(
+                &query,
+                GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+                &mut || Ok(()),
+            )
+            .unwrap(),
+            measured
+        );
+        for dimension in 0..4 {
+            if caps[dimension] == 0 {
+                continue;
+            }
+            let mut bounded = caps;
+            bounded[dimension] -= 1;
+            assert!(
+                run(
+                    &query,
+                    GqlQueryPolicy::new(bounded[0], bounded[1], bounded[2], bounded[3]),
+                    &mut || Ok(()),
+                )
+                .is_err(),
+                "{suffix}, dimension {dimension}"
+            );
+        }
+        for stop in [1, checkpoints / 2, checkpoints] {
+            let mut seen = 0;
+            let result = run(&query, wide(), &mut || {
+                seen += 1;
+                if seen == stop { Err(stop) } else { Ok(()) }
+            });
+            assert!(
+                matches!(result, Err(GqlQueryError::Interrupted(found)) if found == stop),
+                "checkpoint {stop}/{checkpoints}"
+            );
+            assert_eq!(seen, stop);
+        }
     }
 }

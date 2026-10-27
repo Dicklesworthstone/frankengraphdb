@@ -1530,6 +1530,12 @@ impl<'a> Parser<'a> {
                             return Ok(None);
                         }
                         if guard.refused.contains(&word) {
+                            // A row COUNT has its own identity-correlated
+                            // Apply owner. Leave a rebound alias with that
+                            // row rather than counting its old graph binding.
+                            if self.read_elements && count && self.is_word("COUNT") {
+                                return Ok(None);
+                            }
                             return Err(expected(
                                 next.at,
                                 "a pattern comprehension over bindings its row carries under their own names",

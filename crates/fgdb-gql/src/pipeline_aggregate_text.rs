@@ -353,15 +353,25 @@ impl PreparedGraphPipelineAggregateText {
                         input_operators(operators, body);
                         operators.push("Apply");
                     }
-                    BoundContinuationOperation::Exists {
-                        pattern, negated, ..
+                    BoundContinuationOperation::Pattern {
+                        pattern, result, ..
                     } => {
+                        use crate::set_text::multipart::RowPatternResult;
                         operators.push("Arguments");
                         let selection = pattern.selection.as_ref().expect("existence graph source");
                         operators.push("ScanGraphText");
                         operators.extend(selection.template_operators());
-                        operators.extend(["InnerJoin", "ProjectValues", "OrderByPage", "Apply"]);
-                        if negated.is_some() {
+                        if matches!(result, RowPatternResult::Count) {
+                            operators.extend(["InnerJoin", "Aggregate", "Apply"]);
+                        } else {
+                            operators.extend([
+                                "InnerJoin",
+                                "ProjectValues",
+                                "OrderByPage",
+                                "Apply",
+                            ]);
+                        }
+                        if matches!(result, RowPatternResult::Filter { .. }) {
                             operators.push("Select");
                         }
                     }

@@ -15,14 +15,12 @@ pub(crate) struct BoundContinuation {
 #[derive(Clone)]
 pub(crate) enum BoundContinuationOperation {
     Match(RowJoinSpec),
-    /// A row-scope existence predicate. Its graph witnesses remain inside
-    /// an Apply body; the completed outer row keeps its order and multiplicity.
-    /// Some(negated) filters directly; None appends a private Boolean value
-    /// for a compound WHERE expression.
-    Exists {
+    /// A graph expression over a completed row. Its witnesses remain inside
+    /// an Apply body; each outer occurrence keeps its order and multiplicity.
+    Pattern {
         pattern: Box<BoundSetTextInput>,
         join: RowJoinSpec,
-        negated: Option<bool>,
+        result: RowPatternResult,
     },
     Apply {
         body: Box<BoundReadInput>,
@@ -31,6 +29,13 @@ pub(crate) enum BoundContinuationOperation {
         /// body leaves empty is null-extended (PreparedGraphSet::optional_apply).
         optional: bool,
     },
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum RowPatternResult {
+    Filter { negated: bool },
+    Exists,
+    Count,
 }
 
 #[derive(Clone)]
@@ -392,7 +397,7 @@ impl BoundReadInput {
                 .iter()
                 .map(|part| match &part.operation {
                     BoundContinuationOperation::Match(_) => 1,
-                    BoundContinuationOperation::Exists { pattern, .. } => {
+                    BoundContinuationOperation::Pattern { pattern, .. } => {
                         usize::from(pattern.selection.is_some())
                     }
                     BoundContinuationOperation::Apply { body, .. } => body.graph_source_count(),
@@ -414,7 +419,7 @@ impl BoundReadInput {
             matches!(
                 part.operation,
                 BoundContinuationOperation::Apply { .. }
-                    | BoundContinuationOperation::Exists { .. }
+                    | BoundContinuationOperation::Pattern { .. }
             )
         }) {
             bytes.push(5);
@@ -427,17 +432,19 @@ impl BoundReadInput {
                         bytes.push(0);
                         join.append_template_transcript(bytes);
                     }
-                    BoundContinuationOperation::Exists {
+                    BoundContinuationOperation::Pattern {
                         pattern,
                         join,
-                        negated,
+                        result,
                     } => {
-                        if let Some(negated) = negated {
-                            // Preserve the established standalone-filter identity.
-                            bytes.push(3);
-                            bytes.push(u8::from(*negated));
-                        } else {
-                            bytes.push(4);
+                        match result {
+                            RowPatternResult::Filter { negated } => {
+                                // Preserve established existence identities.
+                                bytes.push(3);
+                                bytes.push(u8::from(*negated));
+                            }
+                            RowPatternResult::Exists => bytes.push(4),
+                            RowPatternResult::Count => bytes.push(5),
                         }
                         join.append_template_transcript(bytes);
                         pattern.append_template_transcript(bytes);
