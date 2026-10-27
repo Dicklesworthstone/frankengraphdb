@@ -30,9 +30,9 @@ use fgdb::{
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_prism::{
-    Directedness, FnxArgument, FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadOptions,
-    FnxReadResult, FnxSealedExecutionError, FnxSelection, FnxValue, FnxWeightSpec,
-    MissingWeightPolicy, ParallelEdgePolicy, ProjectionSpec, SelfLoopPolicy,
+    Directedness, FnxArgument, FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadError,
+    FnxReadOptions, FnxReadResult, FnxRowCursor, FnxSealedExecutionError, FnxSelection, FnxValue,
+    FnxWeightSpec, MissingWeightPolicy, ParallelEdgePolicy, ProjectionSpec, SelfLoopPolicy,
 };
 use fgdb_strata::{store::RootReadLimits, tiered::sealed::SealedLimits};
 use fgdb_types::{CommitCx, CommitSeq, QueryCx, VId};
@@ -602,6 +602,25 @@ pub(super) fn run(
     robot: bool,
     out: &mut impl Write,
 ) -> Result<(), Failure> {
+    if robot {
+        let mut rows = cx.with_restriction(|| {
+            let graph = view
+                .prism_projection_at(
+                    cx,
+                    prepared.read.as_of.unwrap_or(view.frontier()),
+                    prepared.read.selection,
+                    prepared.read.projection,
+                    prepared.read.projection_limits,
+                    prepared.read.source_limits,
+                )
+                .map_err(Failure::query)?;
+            prepared
+                .call
+                .execute_rows(&graph, prepared.read.execution_limits, || cx.checkpoint())
+                .map_err(Failure::query)
+        })?;
+        return render_robot_rows(&prepared.call, &mut rows, out, || cx.checkpoint());
+    }
     let result = view
         .execute_fnx(cx, &prepared.call, prepared.read)
         .map_err(Failure::query)?;
@@ -618,6 +637,101 @@ pub(super) async fn run_buffered<V: Vfs + Clone>(
     robot: bool,
     out: &mut impl Write,
 ) -> Result<(), Failure> {
+    if robot {
+        let mut rows = cx
+            .with_restriction_async(async {
+                if let Some((memory, sealing)) = prepared.sealed {
+                    cx.checkpoint().map_err(|error| {
+                        super::execution_failure(
+                            FnxReadError::<fgdb::BufferedReadError, _>::Cancelled(error),
+                        )
+                    })?;
+                    if prepared.quantum.is_some()
+                        && !prepared.call.supports_cooperative_sealed_execution()
+                    {
+                        return Err(super::execution_failure(
+                            FnxSealedExecutionError::UnsupportedCooperativeAlgorithm(
+                                prepared.call.algorithm(),
+                            ),
+                        ));
+                    }
+                    prepared
+                        .call
+                        .validate_sealed_projection(prepared.read.projection.directedness)
+                        .map_err(super::execution_failure)?;
+                    let graph = match prepared.quantum {
+                        Some(quantum) => {
+                            view.prism_sealed_projection_cooperative_at(
+                                cx,
+                                prepared.read.as_of.unwrap_or(view.frontier()),
+                                prepared.read.selection,
+                                prepared.read.projection,
+                                prepared.read.projection_limits,
+                                prepared.read.source_limits,
+                                sealing,
+                                prepared.source_incidences,
+                                quantum,
+                            )
+                            .await
+                        }
+                        None => {
+                            view.prism_sealed_projection_at(
+                                cx,
+                                prepared.read.as_of.unwrap_or(view.frontier()),
+                                prepared.read.selection,
+                                prepared.read.projection,
+                                prepared.read.projection_limits,
+                                prepared.read.source_limits,
+                                sealing,
+                                prepared.source_incidences,
+                            )
+                            .await
+                        }
+                    }
+                    .map_err(super::execution_failure)?;
+                    match prepared.quantum {
+                        Some(quantum) => {
+                            prepared
+                                .call
+                                .execute_sealed_cooperative_rows(
+                                    cx,
+                                    &graph,
+                                    prepared.read.execution_limits,
+                                    memory,
+                                    quantum,
+                                    asupersync::runtime::yield_now::yield_now,
+                                )
+                                .await
+                        }
+                        None => prepared.call.execute_sealed_rows(
+                            cx,
+                            &graph,
+                            prepared.read.execution_limits,
+                            memory,
+                        ),
+                    }
+                    .map_err(super::execution_failure)
+                } else {
+                    let graph = view
+                        .prism_projection_at(
+                            cx,
+                            prepared.read.as_of.unwrap_or(view.frontier()),
+                            prepared.read.selection,
+                            prepared.read.projection,
+                            prepared.read.projection_limits,
+                            prepared.read.source_limits,
+                        )
+                        .await
+                        .map_err(super::execution_failure)?;
+                    prepared
+                        .call
+                        .execute_rows(&graph, prepared.read.execution_limits, || cx.checkpoint())
+                        .map_err(super::execution_failure)
+                }
+            })
+            .await?;
+        return render_robot_rows(&prepared.call, &mut rows, out, || cx.checkpoint());
+    }
     let result = if let Some((memory, sealing)) = prepared.sealed {
         match prepared.quantum {
             Some(quantum) => {
@@ -704,6 +818,31 @@ pub(super) async fn run_sealed(
         SealedProjectionOpenError::Read(error) => super::execution_failure(error),
         SealedProjectionOpenError::RecoveryRequired => Failure::open(error),
     })?;
+    if robot {
+        let mut rows = match prepared.quantum {
+            Some(quantum) => {
+                prepared
+                    .call
+                    .execute_sealed_cooperative_rows(
+                        cx,
+                        &graph,
+                        prepared.read.execution_limits,
+                        memory,
+                        quantum,
+                        asupersync::runtime::yield_now::yield_now,
+                    )
+                    .await
+            }
+            None => prepared.call.execute_sealed_rows(
+                cx,
+                &graph,
+                prepared.read.execution_limits,
+                memory,
+            ),
+        }
+        .map_err(super::execution_failure)?;
+        return render_robot_rows(&prepared.call, &mut rows, out, || cx.checkpoint());
+    }
     let analytics = match prepared.quantum {
         Some(quantum) => {
             prepared
@@ -728,6 +867,63 @@ pub(super) async fn run_sealed(
         robot,
         out,
     )
+}
+
+/// Deliver a fully validated, certified answer without building a typed row
+/// table. The projection and completed kernel arrays remain owned by the cursor;
+/// one reusable row buffer holds the current output. Ordinary robot framing and
+/// YIELD order are unchanged. Human tables retain their replayable width pass.
+fn render_robot_rows<C: std::fmt::Display>(
+    call: &FnxCallSpec,
+    rows: &mut FnxRowCursor,
+    out: &mut impl Write,
+    mut checkpoint: impl FnMut() -> Result<(), C>,
+) -> Result<(), Failure> {
+    let count = rows.remaining();
+    let seq = rows.certificate().snapshot.as_of.0;
+    // Empty projections do not enter next_row's per-vertex checkpoint.
+    checkpoint().map_err(Failure::query)?;
+    super::emit(
+        out,
+        &format!(
+            r#"{{"v":1,"event":"columns","columns":[{}]}}"#,
+            call.outputs()
+                .iter()
+                .map(|column| super::quoted(&column.name))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    )?;
+    let mut row = Vec::new();
+    let mut encoded = String::new();
+    // Exhaust the cursor even after its last emitted row: sparse traversals can
+    // still have unreachable ordinals that must observe live cancellation.
+    while rows
+        .next_row(&mut row, &mut checkpoint)
+        .map_err(Failure::query)?
+    {
+        encoded.clear();
+        encoded.push_str(r#"{"v":1,"event":"row","cells":["#);
+        for (index, value) in row.iter().enumerate() {
+            if index != 0 {
+                encoded.push(',');
+            }
+            encoded.push_str(&cell(*value, true));
+        }
+        encoded.push_str("]}");
+        super::emit(out, &encoded)?;
+    }
+    // A buffered output failure must be observed before announcing success.
+    // This is ordinary robot output, so it does not flush once per vertex.
+    out.flush().map_err(Failure::io)?;
+    checkpoint().map_err(Failure::query)?;
+    super::emit(
+        out,
+        &format!(r#"{{"v":1,"event":"result","kind":"rows","seq":{seq},"count":{count}}}"#),
+    )?;
+    // A failure here cannot retract bytes already written, but still makes the
+    // command fail instead of reporting a successful delivery to its caller.
+    out.flush().map_err(Failure::io)
 }
 
 fn render(result: FnxReadResult, robot: bool, out: &mut impl Write) -> Result<(), Failure> {
@@ -1108,5 +1304,693 @@ mod tests {
                 .unwrap()
                 .fnx_call
         );
+    }
+}
+
+#[cfg(test)]
+mod completed_rows_tests {
+    use super::*;
+    use asupersync::{Budget, runtime::RuntimeBuilder};
+    use fgdb::{BufferedReadView, WriteBatch};
+    use fgdb_prism::{ProjectionEdge, SnapshotBinding, SnapshotGraphView};
+    use fgdb_types::{DatabaseSecurityNamespaceId, EId, PurposeContexts, ids::ObjectId};
+    use std::convert::Infallible;
+    use std::io;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn proceed() -> Result<(), Infallible> {
+        Ok(())
+    }
+
+    fn bind(text: &str) -> FnxCallSpec {
+        FnxCallSpec::bind(text, &FnxParameters::new()).unwrap()
+    }
+
+    fn graph(call: &FnxCallSpec, empty: bool) -> SnapshotGraphView {
+        let options = FnxReadOptions::whole_graph_for(call, None);
+        let vertices = [VId(1), VId(7), VId(1 << 100), VId(u128::MAX)];
+        let edges = [(1, 7, 1.25), (7, 1 << 100, 2.5), (1 << 100, 1, 4.0)]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (source, target, weight))| ProjectionEdge {
+                eid: EId(index as u128),
+                source: VId(source),
+                target: VId(target),
+                weight,
+            })
+            .collect::<Vec<_>>();
+        SnapshotGraphView::build(
+            SnapshotBinding {
+                root: ObjectId([0x83; 32]),
+                as_of: CommitSeq(17),
+            },
+            if empty { &[] } else { &vertices },
+            if empty { &[] } else { &edges },
+            options.projection,
+            options.projection_limits,
+        )
+        .unwrap()
+    }
+
+    fn cursor(call: &FnxCallSpec, graph: &SnapshotGraphView) -> FnxRowCursor {
+        call.execute_rows(graph, FnxReadOptions::DEFAULT_EXECUTION_LIMITS, proceed)
+            .unwrap()
+    }
+
+    #[test]
+    fn completed_robot_rows_match_collected_bytes_and_entire_certificate() {
+        for text in [
+            "CALL fnx.pagerank(iterations => 3, weighted => true) YIELD score AS rank,vertex AS id",
+            "CALL fnx.single_source_shortest_path_length(1) YIELD distance AS hops,vertex",
+            "CALL fnx.single_source_dijkstra_path_length(1,NULL,true) YIELD distance,vertex",
+            "CALL fnx.weakly_connected_components() YIELD component AS group_id,vertex",
+            "CALL fnx.strongly_connected_components() YIELD vertex,component",
+            "CALL fnx.connected_components() YIELD vertex,component",
+            "CALL fnx.triangles() YIELD triangles AS total,vertex",
+            "CALL fnx.clustering_coefficient() YIELD score,vertex",
+            "CALL fnx.cdlp(3) YIELD component,vertex",
+        ] {
+            let call = bind(text);
+            let graph = graph(&call, false);
+            let collected = call
+                .execute(&graph, FnxReadOptions::DEFAULT_EXECUTION_LIMITS, proceed)
+                .unwrap();
+            let mut rows = cursor(&call, &graph);
+            // The cursor is completed before any output: the kernel witness,
+            // value digest, projection identity and historical cut all agree.
+            assert_eq!(rows.certificate(), &collected.certificate, "{text}");
+            assert_eq!(rows.remaining(), collected.rows.len(), "{text}");
+            let mut expected = Vec::new();
+            render(
+                FnxReadResult::bind_selection(
+                    collected,
+                    FnxReadOptions::whole_graph(None).selection,
+                ),
+                true,
+                &mut expected,
+            )
+            .unwrap();
+            let mut actual = Vec::new();
+            render_robot_rows(&call, &mut rows, &mut actual, proceed).unwrap();
+            assert_eq!(actual, expected, "{text}");
+            assert_eq!(rows.remaining(), 0);
+            assert!(
+                String::from_utf8(actual)
+                    .unwrap()
+                    .ends_with(if text.contains("source_") {
+                        "\"seq\":17,\"count\":3}\n"
+                    } else {
+                        "\"seq\":17,\"count\":4}\n"
+                    })
+            );
+        }
+
+        let call =
+            bind("CALL fnx.weakly_connected_components() YIELD component AS group_id,vertex");
+        let graph = graph(&call, true);
+        let mut rows = cursor(&call, &graph);
+        let mut actual = Vec::new();
+        render_robot_rows(&call, &mut rows, &mut actual, proceed).unwrap();
+        assert_eq!(
+            actual,
+            b"{\"v\":1,\"event\":\"columns\",\"columns\":[\"group_id\",\"vertex\"]}\n\
+              {\"v\":1,\"event\":\"result\",\"kind\":\"rows\",\"seq\":17,\"count\":0}\n"
+        );
+    }
+
+    #[test]
+    fn cancellation_checks_empty_rows_sparse_suffixes_and_final_completion() {
+        let call = bind("CALL fnx.single_source_shortest_path_length(1) YIELD vertex,distance");
+        let projection = graph(&call, false);
+        // Before columns, each of four vertex ordinals (three reachable), and
+        // after the flushed body. In particular remaining()==0 is not EOF.
+        for stop in 1_usize..=6 {
+            let mut rows = cursor(&call, &projection);
+            let mut actual = Vec::new();
+            let mut checkpoints = 0;
+            let failure = render_robot_rows(&call, &mut rows, &mut actual, || {
+                checkpoints += 1;
+                if checkpoints == stop {
+                    Err("delivery cancelled")
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+            assert_eq!(failure.class, "query");
+            assert_eq!(failure.code, 3);
+            assert!(failure.message.contains("delivery cancelled"));
+            assert_eq!(checkpoints, stop);
+            let actual = String::from_utf8(actual).unwrap();
+            assert!(!actual.contains("\"event\":\"result\""), "stop {stop}");
+            let delivered = actual.matches("\"event\":\"row\"").count();
+            assert_eq!(delivered, (stop - 1).saturating_sub(1).min(3));
+            assert_eq!(rows.remaining(), 3 - delivered);
+            if stop == 1 {
+                assert!(actual.is_empty());
+            }
+        }
+
+        let call = FnxCallSpec::weakly_connected_components();
+        let graph = graph(&call, true);
+        for stop in 1..=2 {
+            let mut rows = cursor(&call, &graph);
+            let mut actual = Vec::new();
+            let mut checkpoints = 0;
+            render_robot_rows(&call, &mut rows, &mut actual, || {
+                checkpoints += 1;
+                if checkpoints == stop {
+                    Err("cancel")
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+            assert_eq!(checkpoints, stop);
+            let actual = String::from_utf8(actual).unwrap();
+            assert!(!actual.contains("\"event\":\"result\""));
+            assert_eq!(actual.is_empty(), stop == 1);
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum OutputFault {
+        None,
+        Columns,
+        SecondRow,
+        PrefixFlush,
+        Completion,
+        CompletionFlush,
+    }
+
+    struct Output {
+        fault: OutputFault,
+        bytes: Vec<u8>,
+        rows: usize,
+        flushes: usize,
+    }
+
+    impl Write for Output {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let contains = |marker: &[u8]| bytes.windows(marker.len()).any(|part| part == marker);
+            if contains(b"\"event\":\"row\"") {
+                self.rows += 1;
+                if matches!(self.fault, OutputFault::SecondRow) && self.rows == 2 {
+                    return Err(io::ErrorKind::BrokenPipe.into());
+                }
+            }
+            if (matches!(self.fault, OutputFault::Columns) && contains(b"\"event\":\"columns\""))
+                || (matches!(self.fault, OutputFault::Completion)
+                    && contains(b"\"event\":\"result\""))
+            {
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            if (matches!(self.fault, OutputFault::PrefixFlush) && self.flushes == 1)
+                || (matches!(self.fault, OutputFault::CompletionFlush) && self.flushes == 2)
+            {
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn output_failures_stop_pulls_and_never_report_success_to_the_caller() {
+        let call = FnxCallSpec::weakly_connected_components();
+        let graph = graph(&call, false);
+        for fault in [
+            OutputFault::Columns,
+            OutputFault::SecondRow,
+            OutputFault::PrefixFlush,
+            OutputFault::Completion,
+            OutputFault::CompletionFlush,
+            OutputFault::None,
+        ] {
+            let mut rows = cursor(&call, &graph);
+            let mut out = Output {
+                fault,
+                bytes: Vec::new(),
+                rows: 0,
+                flushes: 0,
+            };
+            let result = render_robot_rows(&call, &mut rows, &mut out, proceed);
+            if matches!(fault, OutputFault::None) {
+                result.unwrap();
+                assert_eq!(out.flushes, 2);
+            } else {
+                let failure = result.unwrap_err();
+                assert_eq!((failure.code, failure.class), (5, "io"), "{fault:?}");
+            }
+            let actual = String::from_utf8(out.bytes).unwrap();
+            assert_eq!(
+                actual.contains("\"event\":\"result\""),
+                matches!(fault, OutputFault::None | OutputFault::CompletionFlush),
+                "only a failed terminal flush may already have written the result: {fault:?}"
+            );
+            match fault {
+                OutputFault::Columns => {
+                    assert_eq!(rows.remaining(), 4);
+                    assert_eq!(out.rows, 0);
+                    assert_eq!(out.flushes, 0);
+                }
+                OutputFault::SecondRow => {
+                    assert_eq!(rows.remaining(), 2);
+                    assert_eq!(out.rows, 2);
+                    assert_eq!(actual.matches("\"event\":\"row\"").count(), 1);
+                    assert_eq!(out.flushes, 0);
+                }
+                _ => assert_eq!(rows.remaining(), 0),
+            }
+        }
+    }
+
+    fn database_path(name: &str) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "fgdb-cli-completed-{name}-{}-{now}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        directory.join("db")
+    }
+
+    fn keys() -> DatabaseKeys {
+        DatabaseKeys::new(
+            [0x91; 32],
+            DatabaseSecurityNamespaceId([0x92; 32]),
+            [0x93; 32],
+        )
+    }
+
+    async fn seed(
+        commit: &CommitCx,
+        path: &Path,
+        vertices: &[VId],
+        edges: &[(VId, VId)],
+    ) -> Database {
+        let mut db = Database::create(commit, path, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        for vertex in vertices {
+            batch.create_vertex(*vertex, vec![LabelId(1)], vec![]);
+        }
+        for (index, (source, target)) in edges.iter().enumerate() {
+            batch.add_edge(EId(index as u128), *source, *target, vec![]);
+        }
+        db.write(commit, batch).await.unwrap();
+        db
+    }
+
+    fn options(path: &Path, text: &str, flags: &[&str]) -> (Options, Prepared) {
+        let mut arguments = vec![
+            "--db",
+            path.to_str().unwrap(),
+            "--key-file",
+            "unused",
+            "--relation",
+            "KNOWS=1",
+            "--graph-relation",
+            "KNOWS",
+            text,
+        ];
+        arguments.extend_from_slice(flags);
+        let arguments = arguments.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        let options = super::super::parse(&arguments, "query").unwrap();
+        let prepared = prepare(&options).unwrap();
+        (options, prepared)
+    }
+
+    async fn buffered(commit: &CommitCx, path: &Path, options: &Options) -> BufferedReadView {
+        let (pool, limits) = options.buffered.admission(options.budget.policy()).unwrap();
+        Database::open_buffered_read_view(commit, path, keys(), pool, limits)
+            .await
+            .unwrap()
+    }
+
+    #[test]
+    fn resident_buffered_and_sealed_delivery_preserve_collected_historical_answers() {
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        let root = runtime.request_cx_with_budget(Budget::INFINITE);
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        runtime.block_on(async {
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let path = database_path("historical-oracle");
+            let mut db = seed(
+                &commit,
+                &path,
+                &[VId(1), VId(7), VId(1 << 100), VId(u128::MAX)],
+                &[
+                    (VId(1), VId(7)),
+                    (VId(7), VId(1 << 100)),
+                    (VId(1 << 100), VId(1)),
+                ],
+            )
+            .await;
+            let pinned = db.pinned_read_view().unwrap();
+            let mut second = WriteBatch::new(RelationId(1));
+            second.create_vertex(VId(99), vec![LabelId(1)], vec![]);
+            second.add_edge(EId(99), VId(7), VId(99), vec![]);
+            db.write(&commit, second).await.unwrap();
+            let current = db.pinned_read_view().unwrap();
+            for (text, direction) in [
+                (
+                    "CALL fnx.single_source_shortest_path_length(1) YIELD distance AS hops,vertex",
+                    "directed",
+                ),
+                (
+                    "CALL fnx.weakly_connected_components() YIELD component AS group_id,vertex",
+                    "directed",
+                ),
+                (
+                    "CALL fnx.pagerank(iterations => 3) YIELD score AS rank,vertex",
+                    "directed",
+                ),
+                ("CALL fnx.triangles() YIELD triangles,vertex", "undirected"),
+            ] {
+                for cut in ["1", "2"] {
+                    let flags = ["--direction", direction, "--as-of", cut];
+                    let (_, prepared) = options(&path, text, &flags);
+                    let incumbent = current
+                        .execute_fnx(&cx, &prepared.call, prepared.read)
+                        .unwrap();
+                    let mut expected = Vec::new();
+                    render(incumbent.clone(), true, &mut expected).unwrap();
+                    let mut actual = Vec::new();
+                    run(&current, &cx, &prepared, true, &mut actual).unwrap();
+                    assert_eq!(actual, expected, "resident cut {cut}: {text}");
+                    if cut == "1" {
+                        actual.clear();
+                        run(&pinned, &cx, &prepared, true, &mut actual).unwrap();
+                        assert_eq!(
+                            actual, expected,
+                            "writer advancement must not retarget a pinned view"
+                        );
+                    }
+                    let mut human_expected = Vec::new();
+                    render(incumbent, false, &mut human_expected).unwrap();
+                    let mut human_actual = Vec::new();
+                    run(&current, &cx, &prepared, false, &mut human_actual).unwrap();
+                    assert_eq!(human_actual, human_expected);
+
+                    let mut mode = flags.to_vec();
+                    mode.push("--buffered");
+                    let (configuration, prepared) = options(&path, text, &mode);
+                    let mut view = buffered(&commit, &path, &configuration).await;
+                    let incumbent = view
+                        .execute_fnx(&cx, &prepared.call, prepared.read)
+                        .await
+                        .unwrap();
+                    let mut buffered_expected = Vec::new();
+                    render(incumbent, true, &mut buffered_expected).unwrap();
+                    assert_eq!(buffered_expected, expected);
+                    actual.clear();
+                    run_buffered(&mut view, &cx, &prepared, true, &mut actual)
+                        .await
+                        .unwrap();
+                    assert_eq!(actual, buffered_expected, "buffered cut {cut}: {text}");
+
+                    for quantum in [false, true] {
+                        let mut mode = flags.to_vec();
+                        mode.push("--sealed");
+                        if quantum {
+                            mode.extend_from_slice(&["--sealed-quantum", "1"]);
+                        }
+                        let (configuration, prepared) = options(&path, text, &mode);
+                        let mut view = buffered(&commit, &path, &configuration).await;
+                        let (memory, sealing) = prepared.sealed.unwrap();
+                        let incumbent = if let Some(quantum) = prepared.quantum {
+                            view.execute_fnx_sealed_cooperative(
+                                &cx,
+                                &prepared.call,
+                                prepared.read,
+                                memory,
+                                sealing,
+                                prepared.source_incidences,
+                                quantum,
+                            )
+                            .await
+                        } else {
+                            view.execute_fnx_sealed(
+                                &cx,
+                                &prepared.call,
+                                prepared.read,
+                                memory,
+                                sealing,
+                                prepared.source_incidences,
+                            )
+                            .await
+                        }
+                        .unwrap();
+                        let projection = view
+                            .prism_sealed_projection_at(
+                                &cx,
+                                prepared.read.as_of.unwrap(),
+                                prepared.read.selection,
+                                prepared.read.projection,
+                                prepared.read.projection_limits,
+                                prepared.read.source_limits,
+                                sealing,
+                                prepared.source_incidences,
+                            )
+                            .await
+                            .unwrap();
+                        let rows = if let Some(quantum) = prepared.quantum {
+                            prepared
+                                .call
+                                .execute_sealed_cooperative_rows(
+                                    &cx,
+                                    &projection,
+                                    prepared.read.execution_limits,
+                                    memory,
+                                    quantum,
+                                    asupersync::runtime::yield_now::yield_now,
+                                )
+                                .await
+                        } else {
+                            prepared.call.execute_sealed_rows(
+                                &cx,
+                                &projection,
+                                prepared.read.execution_limits,
+                                memory,
+                            )
+                        }
+                        .unwrap();
+                        assert_eq!(rows.certificate(), &incumbent.analytics.certificate);
+                        let mut sealed_expected = Vec::new();
+                        render(incumbent, true, &mut sealed_expected).unwrap();
+                        assert_eq!(sealed_expected, expected);
+                        actual.clear();
+                        run_buffered(&mut view, &cx, &prepared, true, &mut actual)
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            actual, sealed_expected,
+                            "buffered sealed quantum {quantum} cut {cut}: {text}"
+                        );
+                        actual.clear();
+                        run_sealed(
+                            &commit,
+                            &cx,
+                            &configuration,
+                            keys(),
+                            &prepared,
+                            true,
+                            &mut actual,
+                        )
+                        .await
+                        .unwrap();
+                        assert_eq!(
+                            actual, sealed_expected,
+                            "sealed reopen quantum {quantum} cut {cut}: {text}"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn source_and_kernel_refusals_precede_columns_in_every_delivery_mode() {
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        let root = runtime.request_cx_with_budget(Budget::INFINITE);
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        runtime.block_on(async {
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let path = database_path("refusal-oracle");
+            let db = seed(&commit, &path, &[VId(1), VId(2)], &[(VId(1), VId(2))]).await;
+            let resident = db.pinned_read_view().unwrap();
+            let text = "CALL fnx.weakly_connected_components() YIELD vertex,component";
+            for refused in 0..7 {
+                let (configuration, mut prepared) = options(&path, text, &[]);
+                match refused {
+                    0 => prepared.read.source_limits.max_work_units = 0,
+                    1 => prepared.read.source_limits.max_staging_bytes = 0,
+                    2 => prepared.read.projection_limits.max_workspace_bytes = 0,
+                    3 => prepared.read.execution_limits.max_result_rows = 0,
+                    4 => prepared.read.execution_limits.max_estimated_work = 0,
+                    5 => prepared.read.as_of = Some(CommitSeq(99)),
+                    _ => {
+                        prepared.read.selection.weight = FnxWeightSpec::Property {
+                            key: PropertyKeyId(9),
+                            missing: MissingWeightPolicy::Reject,
+                        }
+                    }
+                }
+                let expected = resident
+                    .execute_fnx(&cx, &prepared.call, prepared.read)
+                    .unwrap_err();
+                let mut out = Vec::new();
+                let actual = run(&resident, &cx, &prepared, true, &mut out).unwrap_err();
+                assert!(out.is_empty(), "resident refusal {refused}");
+                assert_eq!((actual.code, actual.class), (3, "query"));
+                assert_eq!(actual.message, expected.to_string());
+
+                let mut view = buffered(&commit, &path, &configuration).await;
+                let expected = view
+                    .execute_fnx(&cx, &prepared.call, prepared.read)
+                    .await
+                    .unwrap_err();
+                let actual = run_buffered(&mut view, &cx, &prepared, true, &mut out)
+                    .await
+                    .unwrap_err();
+                assert!(out.is_empty(), "buffered refusal {refused}");
+                assert_eq!((actual.code, actual.class), (3, "query"));
+                assert_eq!(actual.message, expected.to_string());
+            }
+
+            for quantum in [false, true] {
+                for flag in [
+                    "--sealed-result-bytes",
+                    "--sealed-kernel-bytes",
+                    "--graph-staging-bytes",
+                    "--sealed-source-incidences",
+                ] {
+                    let mut flags = vec!["--sealed", flag, "0"];
+                    if quantum {
+                        flags.extend_from_slice(&["--sealed-quantum", "1"]);
+                    }
+                    let (configuration, prepared) = options(&path, text, &flags);
+                    let mut view = buffered(&commit, &path, &configuration).await;
+                    let mut out = Vec::new();
+                    let actual = run_buffered(&mut view, &cx, &prepared, true, &mut out)
+                        .await
+                        .unwrap_err();
+                    assert!(out.is_empty(), "buffered sealed {flag}, quantum {quantum}");
+                    assert_eq!((actual.code, actual.class), (3, "query"));
+                    let mut incumbent_output = Vec::new();
+                    let expected = run_sealed(
+                        &commit,
+                        &cx,
+                        &configuration,
+                        keys(),
+                        &prepared,
+                        false,
+                        &mut incumbent_output,
+                    )
+                    .await
+                    .unwrap_err();
+                    assert!(incumbent_output.is_empty());
+                    let actual = run_sealed(
+                        &commit,
+                        &cx,
+                        &configuration,
+                        keys(),
+                        &prepared,
+                        true,
+                        &mut out,
+                    )
+                    .await
+                    .unwrap_err();
+                    assert!(out.is_empty(), "sealed reopen {flag}, quantum {quantum}");
+                    assert_eq!(
+                        (actual.code, actual.class, actual.message),
+                        (expected.code, expected.class, expected.message)
+                    );
+                }
+            }
+        });
+    }
+
+    /// Same-invocation incumbent comparison over an already admitted durable
+    /// view. Includes projection lookup, kernel, certification, row delivery and
+    /// result destruction. It excludes database create/open and ingest, and is
+    /// not a comparison against GAPBS's kernel-only runner.
+    #[test]
+    #[ignore = "paired query plus robot-delivery measurement; run with --ignored --nocapture"]
+    fn paired_robot_analytics_query_and_delivery() {
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        let root = runtime.request_cx_with_budget(Budget::INFINITE);
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        runtime.block_on(async {
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            for vertices in [8_usize, 4096, 32768] {
+                let path = database_path(&format!("paired-{vertices}"));
+                let ids = (1..=vertices).map(|id| VId(id as u128)).collect::<Vec<_>>();
+                let mut edges = (1..vertices)
+                    .map(|id| (VId(id as u128), VId(id as u128 + 1)))
+                    .collect::<Vec<_>>();
+                for id in (8..vertices.saturating_sub(1)).step_by(8) {
+                    edges.push((VId(id as u128), VId(id as u128 + 2)));
+                }
+                let db = seed(&commit, &path, &ids, &edges).await;
+                let view = db.pinned_read_view().unwrap();
+                for (name, text) in [
+                    ("bfs", "CALL fnx.single_source_shortest_path_length(1) YIELD vertex,distance"),
+                    ("wcc", "CALL fnx.weakly_connected_components() YIELD component,vertex"),
+                    ("pagerank", "CALL fnx.pagerank(iterations => 5) YIELD score,vertex"),
+                ] {
+                    let (_, prepared) = options(&path, text, &[]);
+                    let incumbent = view.execute_fnx(&cx, &prepared.call, prepared.read).unwrap();
+                    let mut expected = Vec::new();
+                    render(incumbent, true, &mut expected).unwrap();
+                    let mut actual = Vec::new();
+                    run(&view, &cx, &prepared, true, &mut actual).unwrap();
+                    assert_eq!(actual, expected, "paired oracle {name}, {vertices}");
+                    // Both paths now have the identical projection cache hit.
+                    // Alternate their order so one route does not always get
+                    // the earlier allocation/cache/CPU scheduling position.
+                    let mut elapsed = [Vec::new(), Vec::new()];
+                    for round in 0..9 {
+                        for route in if round % 2 == 0 { [0, 1] } else { [1, 0] } {
+                            let start = std::time::Instant::now();
+                            let mut bytes = Vec::new();
+                            if route == 0 {
+                                let collected = view.execute_fnx(&cx, &prepared.call, prepared.read).unwrap();
+                                render(collected, true, &mut bytes).unwrap();
+                            } else {
+                                run(&view, &cx, &prepared, true, &mut bytes).unwrap();
+                            }
+                            bytes.flush().unwrap();
+                            elapsed[route].push(start.elapsed());
+                            // Every measured invocation is checked outside the
+                            // clock against the complete incumbent NDJSON.
+                            assert_eq!(bytes, expected, "{name}, {vertices}, route {route}, round {round}");
+                        }
+                    }
+                    for samples in &mut elapsed { samples.sort_unstable(); }
+                    let incumbent = elapsed[0][4].as_nanos();
+                    let completed = elapsed[1][4].as_nanos();
+                    eprintln!(
+                        "paired_robot_analytics algorithm={name} vertices={vertices} edges={} bytes={} samples=9 collected_median_ns={incumbent} cursor_median_ns={completed} collected_p90_ns={} cursor_p90_ns={} ratio={:.4}",
+                        edges.len(), expected.len(), elapsed[0][8].as_nanos(), elapsed[1][8].as_nanos(),
+                        incumbent as f64 / completed as f64,
+                    );
+                }
+            }
+        });
     }
 }

@@ -3582,18 +3582,20 @@ impl<'a> Parser<'a> {
                 TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
                 TokenKind::Punct(b']') if depth == 0 => break,
                 TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
-                TokenKind::Word(word) if !after_dot && local(word) => {
-                    if !elements.iter().any(|seen| seen.text == word) {
-                        self.capacity(
-                            elements.len(),
-                            MAX_PATTERN_VERTICES,
-                            crate::algebra::PatternLimitDimension::Columns,
-                        )?;
-                        elements.push(Name {
-                            text: word,
-                            at: token.at,
-                        });
-                    }
+                TokenKind::Word(word)
+                    if !after_dot
+                        && local(word)
+                        && !elements.iter().any(|seen| seen.text == word) =>
+                {
+                    self.capacity(
+                        elements.len(),
+                        MAX_PATTERN_VERTICES,
+                        crate::algebra::PatternLimitDimension::Columns,
+                    )?;
+                    elements.push(Name {
+                        text: word,
+                        at: token.at,
+                    });
                 }
                 _ => {}
             }
