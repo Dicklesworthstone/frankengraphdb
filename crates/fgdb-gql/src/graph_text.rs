@@ -915,6 +915,9 @@ struct Parser<'a> {
     /// routed by its type as in a row scope. `None` keeps resolved columns
     /// untyped.
     resolved_row: Option<Vec<(Name<'a>, crate::GraphSetColumnType)>>,
+    /// Created path names only while compiling a write's RETURN/WITH items.
+    /// Scalar routing sees their domain; MATCH never gains source bindings.
+    write_paths: Vec<&'a str>,
     boundary_reads: Option<BoundaryReads<'a>>,
     /// A resolved leaf followed by `.key` reads that entry (an imported
     /// map's `row.key` beside MATCH reads, fgdb-0s2pq). Read scopes enable it
@@ -1123,6 +1126,7 @@ impl<'a> Parser<'a> {
             read_row_fields: Vec::new(),
             read_comparisons: None,
             resolved_row: None,
+            write_paths: Vec::new(),
             boundary_reads: None,
             resolved_entries: false,
             call_element_reads: false,

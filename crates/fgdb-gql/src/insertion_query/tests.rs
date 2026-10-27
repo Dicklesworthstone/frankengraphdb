@@ -1,5 +1,5 @@
 use super::*;
-use crate::algebra::{GraphValue, GraphValueOrder};
+use crate::algebra::{GraphPath, GraphValue, GraphValueOrder};
 use crate::insertion::{
     GraphInsertEdge, GraphInsertEndpoint, GraphInsertIntent, GraphInsertLimitDimension,
     GraphInsertVertex,
@@ -217,6 +217,227 @@ fn standalone_return_maps_each_declaration_and_missing_edge_property_to_null() {
             ..
         }
     ));
+}
+
+#[test]
+fn native_created_paths_preserve_traversal_order_self_loops_and_zero_hops() {
+    let insertion = PreparedGraphInsert::prepare_standalone(
+        R,
+        (0..3)
+            .map(|_| GraphInsertVertex {
+                labels: vec![],
+                properties: vec![],
+            })
+            .collect(),
+        [(1, 0), (1, 2), (2, 2)]
+            .into_iter()
+            .map(|(source, destination)| GraphInsertEdge {
+                source: GraphInsertEndpoint::CreatedVertex(source),
+                destination: GraphInsertEndpoint::CreatedVertex(destination),
+                relation: R,
+                properties: vec![],
+            })
+            .collect(),
+    )
+    .unwrap();
+    let mut bindings: Vec<_> = [
+        GraphPathFunction::Value,
+        GraphPathFunction::Length,
+        GraphPathFunction::Nodes,
+        GraphPathFunction::Edges,
+    ]
+    .into_iter()
+    .map(|function| GraphInsertBinding::Path {
+        start: GraphInsertEndpoint::CreatedVertex(0),
+        first_edge: 0,
+        edge_count: 3,
+        function,
+    })
+    .collect();
+    bindings.push(GraphInsertBinding::Path {
+        start: GraphInsertEndpoint::CreatedVertex(2),
+        first_edge: 3,
+        edge_count: 0,
+        function: GraphPathFunction::Value,
+    });
+    let query = PreparedGraphInsertQuery::prepare(
+        insertion,
+        bindings,
+        projection(5),
+        GraphSetQuantifier::All,
+    )
+    .unwrap();
+    let batch = run(&query, policy()).unwrap();
+    assert_eq!(
+        values(&batch),
+        vec![vec![
+            GraphValue::Path(GraphPath::new(
+                VId(100),
+                vec![
+                    (EId(200), VId(101)),
+                    (EId(201), VId(102)),
+                    (EId(202), VId(102)),
+                ]
+                .into_boxed_slice()
+            )),
+            scalar(3),
+            GraphValue::Vertices(vec![VId(100), VId(101), VId(102), VId(102)].into_boxed_slice()),
+            GraphValue::Edges(vec![EId(200), EId(201), EId(202)].into_boxed_slice()),
+            GraphValue::Path(GraphPath::new(VId(102), Box::new([]))),
+        ]]
+    );
+    assert!(matches!(
+        batch.insertion().intents()[3],
+        GraphInsertIntent::Edge {
+            source: VId(101),
+            destination: VId(100),
+            ..
+        }
+    ));
+
+    let usage = batch.returning().evaluator;
+    let exact = GraphInsertPolicy::new(
+        GqlQueryPolicy::new(0, 1, usage.work_units, usage.scratch_entries),
+        3,
+        3,
+    );
+    assert_eq!(run(&query, exact).unwrap(), batch);
+    for dimension in [
+        GlaLimitDimension::WorkUnits,
+        GlaLimitDimension::ScratchEntries,
+    ] {
+        let mut tight = exact;
+        match dimension {
+            GlaLimitDimension::WorkUnits => tight.query.evaluator.max_work_units -= 1,
+            GlaLimitDimension::ScratchEntries => tight.query.evaluator.max_scratch_entries -= 1,
+        }
+        assert!(
+            matches!(run(&query, tight), Err(GqlQueryError::Evaluator(error))
+            if error.dimension == dimension)
+        );
+    }
+    let calls = Cell::new(0);
+    let baseline: ResultOf = query.execute_governed(policy(), no_source, identity, || {
+        calls.set(calls.get() + 1);
+        Ok(())
+    });
+    assert_eq!(baseline.unwrap(), batch);
+    for stop in 1..=calls.get() {
+        let mut observed = 0;
+        let result: ResultOf = query.execute_governed(policy(), no_source, identity, || {
+            observed += 1;
+            if observed == stop { Err(stop) } else { Ok(()) }
+        });
+        assert!(matches!(result, Err(GqlQueryError::Interrupted(at)) if at == stop));
+    }
+}
+
+#[test]
+fn native_path_descriptors_validate_topology_and_participate_in_template_identity() {
+    let insertion = PreparedGraphInsert::prepare_standalone(
+        R,
+        (0..3)
+            .map(|_| GraphInsertVertex {
+                labels: vec![],
+                properties: vec![],
+            })
+            .collect(),
+        vec![GraphInsertEdge {
+            source: GraphInsertEndpoint::CreatedVertex(0),
+            destination: GraphInsertEndpoint::CreatedVertex(1),
+            relation: R,
+            properties: vec![],
+        }],
+    )
+    .unwrap();
+    let prepare = |start, first_edge, edge_count, function| {
+        PreparedGraphInsertQuery::prepare(
+            insertion.clone(),
+            vec![GraphInsertBinding::Path {
+                start,
+                first_edge,
+                edge_count,
+                function,
+            }],
+            projection(1),
+            GraphSetQuantifier::All,
+        )
+    };
+    for (start, first_edge, edge_count, function) in [
+        (
+            GraphInsertEndpoint::CreatedVertex(3),
+            0,
+            1,
+            GraphPathFunction::Value,
+        ),
+        (
+            GraphInsertEndpoint::Column(0),
+            0,
+            1,
+            GraphPathFunction::Value,
+        ),
+        (
+            GraphInsertEndpoint::CreatedVertex(0),
+            2,
+            0,
+            GraphPathFunction::Value,
+        ),
+        (
+            GraphInsertEndpoint::CreatedVertex(0),
+            usize::MAX,
+            1,
+            GraphPathFunction::Value,
+        ),
+        (
+            GraphInsertEndpoint::CreatedVertex(2),
+            0,
+            1,
+            GraphPathFunction::Value,
+        ),
+        (
+            GraphInsertEndpoint::CreatedVertex(0),
+            0,
+            1,
+            GraphPathFunction::Properties,
+        ),
+    ] {
+        assert!(matches!(
+            prepare(start, first_edge, edge_count, function),
+            Err(GraphInsertQueryBuildError::Binding { binding: 0 })
+        ));
+    }
+    let forward = prepare(
+        GraphInsertEndpoint::CreatedVertex(0),
+        0,
+        1,
+        GraphPathFunction::Value,
+    )
+    .unwrap();
+    for changed in [
+        prepare(
+            GraphInsertEndpoint::CreatedVertex(1),
+            0,
+            1,
+            GraphPathFunction::Value,
+        )
+        .unwrap(),
+        prepare(
+            GraphInsertEndpoint::CreatedVertex(0),
+            0,
+            0,
+            GraphPathFunction::Value,
+        )
+        .unwrap(),
+        prepare(
+            GraphInsertEndpoint::CreatedVertex(0),
+            0,
+            1,
+            GraphPathFunction::Nodes,
+        )
+        .unwrap(),
+    ] {
+        assert_ne!(forward.canonical_bytes(), changed.canonical_bytes());
+    }
 }
 
 #[test]
@@ -449,8 +670,14 @@ fn source_identity_return_and_edge_endpoints_share_the_exact_admitted_match() {
         vec![
             GraphInsertBinding::Input(0),
             GraphInsertBinding::CreatedVertex(0),
+            GraphInsertBinding::Path {
+                start: GraphInsertEndpoint::CreatedVertex(0),
+                first_edge: 0,
+                edge_count: 1,
+                function: GraphPathFunction::Value,
+            },
         ],
-        projection(2),
+        projection(3),
         GraphSetQuantifier::All,
     )
     .unwrap();
@@ -478,8 +705,22 @@ fn source_identity_return_and_edge_endpoints_share_the_exact_admitted_match() {
     assert_eq!(
         values(&result),
         vec![
-            vec![GraphValue::Vertex(VId(2)), GraphValue::Vertex(VId(100))],
-            vec![GraphValue::Vertex(VId(7)), GraphValue::Vertex(VId(356))],
+            vec![
+                GraphValue::Vertex(VId(2)),
+                GraphValue::Vertex(VId(100)),
+                GraphValue::Path(GraphPath::new(
+                    VId(100),
+                    vec![(EId(200), VId(2))].into_boxed_slice()
+                )),
+            ],
+            vec![
+                GraphValue::Vertex(VId(7)),
+                GraphValue::Vertex(VId(356)),
+                GraphValue::Path(GraphPath::new(
+                    VId(356),
+                    vec![(EId(456), VId(7))].into_boxed_slice()
+                )),
+            ],
         ]
     );
     for (row, source) in [VId(2), VId(7)].into_iter().enumerate() {

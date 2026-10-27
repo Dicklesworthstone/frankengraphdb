@@ -19,6 +19,12 @@ enum Binding<'a> {
     VertexProperties(usize),
     EdgeProperties(usize),
     VertexLabels(usize),
+    Path {
+        start: GraphInsertEndpoint,
+        first_edge: usize,
+        edge_count: usize,
+        function: GraphPathFunction,
+    },
 }
 impl Binding<'_> {
     fn same(self, other: Self) -> bool {
@@ -29,6 +35,20 @@ impl Binding<'_> {
             | (Self::VertexProperties(a), Self::VertexProperties(b))
             | (Self::EdgeProperties(a), Self::EdgeProperties(b))
             | (Self::VertexLabels(a), Self::VertexLabels(b)) => a == b,
+            (
+                Self::Path {
+                    start: a,
+                    first_edge: af,
+                    edge_count: ac,
+                    function: av,
+                },
+                Self::Path {
+                    start: b,
+                    first_edge: bf,
+                    edge_count: bc,
+                    function: bv,
+                },
+            ) => (a, af, ac, av) == (b, bf, bc, bv),
             (Self::VertexProperty(a, ak), Self::VertexProperty(b, bk))
             | (Self::EdgeProperty(a, ak), Self::EdgeProperty(b, bk)) => {
                 a == b && ak.text == bk.text
@@ -103,6 +123,38 @@ impl<'a> ReturnLeaves<'a> for InsertLeaves<'_, 'a> {
 }
 
 impl<'a> ParsedReturn<'a> {
+    fn path_column(
+        &mut self,
+        path: NewPath<'a>,
+        function: GraphPathFunction,
+        name: Name<'a>,
+    ) -> Result<usize, GraphPatternTextError> {
+        let kind = match function {
+            GraphPathFunction::Value => GraphSetColumnType::Path,
+            GraphPathFunction::Length => GraphSetColumnType::Scalar,
+            GraphPathFunction::Nodes => GraphSetColumnType::Vertices,
+            GraphPathFunction::Edges => GraphSetColumnType::Edges,
+            _ => {
+                return Err(error(
+                    name.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "path value, length, nodes or relationships",
+                    ),
+                ));
+            }
+        };
+        self.column(
+            Binding::Path {
+                start: path.start,
+                first_edge: path.first_edge,
+                edge_count: path.edge_count,
+                function,
+            },
+            name,
+            kind,
+        )
+    }
+
     fn column(
         &mut self,
         binding: Binding<'a>,
@@ -157,6 +209,14 @@ impl<'a> ParsedReturn<'a> {
             text: word,
             at: parser.current.at,
         };
+        if !matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+            && let Some(path) = syntax.paths.iter().find(|path| path.name.text == word)
+        {
+            parser.advance()?;
+            return self
+                .path_column(*path, GraphPathFunction::Value, name)
+                .map(Some);
+        }
         if (word.eq_ignore_ascii_case("properties") || word.eq_ignore_ascii_case("keys"))
             && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
@@ -193,6 +253,18 @@ impl<'a> ParsedReturn<'a> {
         if let Ok(function) = Parser::path_function(name)
             && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
+            let mut lookahead = parser.lexer.clone();
+            lookahead.next()?;
+            if let TokenKind::Word(variable) = lookahead.next()?.kind
+                && matches!(lookahead.next()?.kind, TokenKind::Punct(b')'))
+                && let Some(path) = syntax.paths.iter().find(|path| path.name.text == variable)
+            {
+                parser.advance()?;
+                parser.punct(b'(', "(")?;
+                parser.name()?;
+                parser.punct(b')', ")")?;
+                return self.path_column(*path, function, name).map(Some);
+            }
             // labels() of a vertex this CREATE makes is its CREATE labels:
             // known without a graph read (openCypher Graph3).
             if function == GraphPathFunction::Labels {
@@ -472,6 +544,17 @@ impl<'a> ParsedReturn<'a> {
                 Binding::VertexProperties(vertex) => GraphInsertBinding::VertexProperties(vertex),
                 Binding::EdgeProperties(edge) => GraphInsertBinding::EdgeProperties(edge),
                 Binding::VertexLabels(vertex) => GraphInsertBinding::VertexLabels(vertex),
+                Binding::Path {
+                    start,
+                    first_edge,
+                    edge_count,
+                    function,
+                } => GraphInsertBinding::Path {
+                    start,
+                    first_edge,
+                    edge_count,
+                    function,
+                },
                 Binding::VertexProperty(vertex, name) => {
                     let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, name)?
                     else {
@@ -610,6 +693,14 @@ impl<'a> Parser<'a> {
                     output.push((name, GraphSetColumnType::Edge));
                 }
             }
+            for path in &syntax.paths {
+                let column = returning.path_column(*path, GraphPathFunction::Value, path.name)?;
+                returning.projection.push(ReadProjectionTemplate {
+                    name: path.name.text.to_owned(),
+                    value: ReadValueTemplate::Column(column),
+                });
+                output.push((path.name, GraphSetColumnType::Path));
+            }
             if output.is_empty() && head && !syntax.vertices.is_empty() {
                 // A WITH head (or a chain's implicit `WITH *`) over anonymous
                 // patterns only (`MATCH () CREATE () WITH * CREATE ()`) still
@@ -645,11 +736,20 @@ impl<'a> Parser<'a> {
             }
         } else {
             let entries = self.resolved_entries;
+            // Length's scalar dispatcher needs to know these are path values,
+            // without adding them to MATCH's source projection registry. The
+            // hint ends with these items; the following WITH tail has its own
+            // typed row and may drop or shadow any of the names.
+            let paths = core::mem::replace(
+                &mut self.write_paths,
+                syntax.paths.iter().map(|path| path.name.text).collect(),
+            );
             let items = self.write_return_items(&mut InsertLeaves {
                 returning: &mut returning,
                 syntax: &mut *syntax,
                 source,
             });
+            self.write_paths = paths;
             self.resolved_entries = entries;
             let items = items?;
             returning.projection = items.projection;

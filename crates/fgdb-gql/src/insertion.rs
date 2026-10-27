@@ -650,6 +650,51 @@ impl PreparedGraphInsert {
         Some(relation)
     }
 
+    /// Check a returned path against declarations, before source access or
+    /// allocation. Equal runtime vertex IDs cannot make disconnected template
+    /// endpoints into an admitted traversal.
+    pub(crate) fn return_path_type(
+        &self,
+        start: GraphInsertEndpoint,
+        first_edge: usize,
+        edge_count: usize,
+        function: crate::algebra::GraphPathFunction,
+    ) -> Option<GraphSetColumnType> {
+        use crate::algebra::GraphPathFunction;
+        match start {
+            GraphInsertEndpoint::Column(column)
+                if !matches!(
+                    self.column_types.get(column),
+                    Some(GraphSetColumnType::Vertex | GraphSetColumnType::Any)
+                ) =>
+            {
+                return None;
+            }
+            GraphInsertEndpoint::CreatedVertex(vertex) if vertex >= self.vertices.len() => {
+                return None;
+            }
+            _ => {}
+        }
+        let end = first_edge.checked_add(edge_count)?;
+        let mut vertex = start;
+        for edge in self.edges.get(first_edge..end)? {
+            vertex = if edge.source == vertex {
+                edge.destination
+            } else if edge.destination == vertex {
+                edge.source
+            } else {
+                return None;
+            };
+        }
+        match function {
+            GraphPathFunction::Value => Some(GraphSetColumnType::Path),
+            GraphPathFunction::Length => Some(GraphSetColumnType::Scalar),
+            GraphPathFunction::Nodes => Some(GraphSetColumnType::Vertices),
+            GraphPathFunction::Edges => Some(GraphSetColumnType::Edges),
+            _ => None,
+        }
+    }
+
     pub(crate) fn return_property_keys(
         &self,
         binding: crate::GraphInsertBinding,

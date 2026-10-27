@@ -1,9 +1,12 @@
 //! Native CREATE RETURN over the collector's exact occurrence bindings.
 //! Rows and intents stay private until creation and the entire output succeed.
 
-use crate::algebra::{GraphOrderError, GraphValueOrder, GraphValueRow, PreparedGraphPattern};
+use crate::algebra::{
+    GraphOrderError, GraphPathFunction, GraphValueOrder, GraphValueRow, PreparedGraphPattern,
+};
 use crate::insertion::{
-    GraphInsertBatch, GraphInsertError, GraphInsertPolicy, GraphInsertRequest, PreparedGraphInsert,
+    GraphInsertBatch, GraphInsertEndpoint, GraphInsertError, GraphInsertPolicy, GraphInsertRequest,
+    PreparedGraphInsert,
 };
 use crate::row_projection::{RowProjectionBuildError, RowProjectionSpec};
 use crate::{
@@ -34,6 +37,16 @@ pub enum GraphInsertBinding {
     /// The created vertex's CREATE labels, named by the query's catalog in
     /// label-identity order, as every labels() read names them (Graph3).
     VertexLabels(usize),
+    /// A traversal of a contiguous range of this occurrence's created edges.
+    /// The start may be an imported vertex or a created declaration. Admission
+    /// checks connectivity in declaration order, including incoming edges.
+    /// Only Value, Length, Nodes and Edges are path projections.
+    Path {
+        start: GraphInsertEndpoint,
+        first_edge: usize,
+        edge_count: usize,
+        function: GraphPathFunction,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -330,6 +343,12 @@ impl PreparedGraphInsertQuery {
                 GraphInsertBinding::VertexLabels(vertex) => {
                     (vertex < insertion.vertices_per_row()).then_some(GraphSetColumnType::List)
                 }
+                GraphInsertBinding::Path {
+                    start,
+                    first_edge,
+                    edge_count,
+                    function,
+                } => insertion.return_path_type(start, first_edge, edge_count, function),
             };
             input_types.push(kind.ok_or(GraphInsertQueryBuildError::Binding { binding: at })?);
         }
@@ -591,6 +610,31 @@ impl PreparedGraphInsertQuery {
         bytes.extend_from_slice(&insertion);
         bytes.extend_from_slice(&(self.bindings.len() as u64).to_be_bytes());
         for binding in &self.bindings {
+            if let GraphInsertBinding::Path {
+                start,
+                first_edge,
+                edge_count,
+                function,
+            } = *binding
+            {
+                bytes.push(8);
+                let (tag, index) = match start {
+                    GraphInsertEndpoint::Column(column) => (0, column),
+                    GraphInsertEndpoint::CreatedVertex(vertex) => (1, vertex),
+                };
+                bytes.push(tag);
+                bytes.extend_from_slice(&(index as u64).to_be_bytes());
+                bytes.extend_from_slice(&(first_edge as u64).to_be_bytes());
+                bytes.extend_from_slice(&(edge_count as u64).to_be_bytes());
+                bytes.push(match function {
+                    GraphPathFunction::Value => 0,
+                    GraphPathFunction::Length => 1,
+                    GraphPathFunction::Nodes => 2,
+                    GraphPathFunction::Edges => 3,
+                    _ => unreachable!("insertion path projection admitted"),
+                });
+                continue;
+            }
             let (tag, index, key) = match *binding {
                 GraphInsertBinding::Input(column) => (0, column, None),
                 GraphInsertBinding::CreatedVertex(vertex) => (1, vertex, None),
@@ -600,6 +644,7 @@ impl PreparedGraphInsertQuery {
                 GraphInsertBinding::VertexProperties(vertex) => (5, vertex, None),
                 GraphInsertBinding::EdgeProperties(edge) => (6, edge, None),
                 GraphInsertBinding::VertexLabels(vertex) => (7, vertex, None),
+                GraphInsertBinding::Path { .. } => unreachable!("path encoded above"),
             };
             bytes.push(tag);
             bytes.extend_from_slice(&(index as u64).to_be_bytes());

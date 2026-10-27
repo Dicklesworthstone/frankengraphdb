@@ -2822,3 +2822,161 @@ fn matched_relationship_merge_late_errors_and_limits_roll_back_the_complete_stat
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn created_named_paths_keep_traversal_overlay_reads_and_committed_graph_state() {
+    let ((), report) = run_async_under_lab(0x1a5e_ca71, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let vfs = MemVfs::new().unwrap();
+        let directory = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &directory, keys())
+            .await
+            .unwrap();
+        let write = async |db: &mut Database<MemVfs>,
+                           text: &str,
+                           mut vertices: VecDeque<ElementId>,
+                           mut edges: VecDeque<ElementId>| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => vertices.pop_front().unwrap(),
+                        GraphInsertRequest::Edge { .. } => edges.pop_front().unwrap(),
+                    })
+                },
+            )
+            .await
+        };
+        let (vertices, edges) = reserve(&mut db, &cx, 3, 2);
+        let nodes: Vec<_> = vertices
+            .iter()
+            .map(|value| match value {
+                ElementId::Vertex(id) => *id,
+                _ => unreachable!("reserved vertex"),
+            })
+            .collect();
+        let relationships: Vec<_> = edges
+            .iter()
+            .map(|value| match value {
+                ElementId::Edge(id) => *id,
+                _ => unreachable!("reserved edge"),
+            })
+            .collect();
+        let result = write(
+            &mut db,
+            "CREATE p=(a:Copy {p:11})<-[incoming:R {q:5}]-(b:Person {p:22}) \
+             -[outgoing:T]->(c:Copy {p:33}) \
+             RETURN p AS path,length(p) AS hops,nodes(p) AS nodes,relationships(p) AS edges",
+            vertices,
+            edges,
+        )
+        .await
+        .unwrap();
+        let QueryResult::Rows { columns, rows } = result else {
+            panic!("named CREATE path returns native values")
+        };
+        let int = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        assert_eq!(columns, ["path", "hops", "nodes", "edges"]);
+        assert_eq!(
+            rows,
+            [vec![
+                QueryValue::Value(GraphValue::Path(fgdb_gql::algebra::GraphPath::new(
+                    nodes[0],
+                    vec![(relationships[0], nodes[1]), (relationships[1], nodes[2])]
+                        .into_boxed_slice(),
+                ))),
+                int(2),
+                QueryValue::Value(GraphValue::Vertices(nodes.clone().into_boxed_slice())),
+                QueryValue::Value(GraphValue::Edges(relationships.clone().into_boxed_slice())),
+            ]]
+        );
+        let stored = db.edges().unwrap();
+        assert!(stored.iter().any(|edge| {
+            (
+                edge.entry.eid,
+                edge.entry.src,
+                edge.entry.relation,
+                edge.entry.dst,
+            ) == (relationships[0], nodes[1], R, nodes[0])
+        }));
+        assert!(stored.iter().any(|edge| {
+            (
+                edge.entry.eid,
+                edge.entry.src,
+                edge.entry.relation,
+                edge.entry.dst,
+            ) == (relationships[1], nodes[1], T, nodes[2])
+        }));
+
+        // The tail reads newly staged vertex properties through the real host,
+        // while a renamed path remains available to each UNWIND occurrence.
+        let (vertices, edges) = reserve(&mut db, &cx, 2, 1);
+        let result = write(
+            &mut db,
+            "CREATE p=(a:Person {p:44})-[:R]->(b:Copy {p:55}) \
+             WITH p AS carried UNWIND nodes(carried) AS n \
+             RETURN n.p AS value,length(carried) AS hops ORDER BY value",
+            vertices,
+            edges,
+        )
+        .await
+        .unwrap();
+        let QueryResult::Rows { columns, rows } = result else {
+            panic!("the path's row tail returns its overlay reads")
+        };
+        assert_eq!(columns, ["value", "hops"]);
+        assert_eq!(rows, [vec![int(44), int(1)], vec![int(55), int(1)]]);
+        assert_eq!(db.vertices().unwrap().len(), 5);
+        assert_eq!(db.edges().unwrap().len(), 3);
+
+        let (vertices, edges) = reserve(&mut db, &cx, 2, 1);
+        let expected = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        let failure = write(
+            &mut db,
+            "CREATE p=(a {p:77})-[:R]->(b {p:88}) \
+             WITH p UNWIND nodes(p) AS n \
+             RETURN 1 / (n.p - 88) AS value LIMIT (1 - 1)",
+            vertices,
+            edges,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{failure:?}").contains("DivisionByZero"));
+        assert_eq!(
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap()
+            ),
+            expected,
+            "a zero result page does not suppress late errors or publish partial writes"
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &directory, keys())
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap()
+            ),
+            expected,
+            "the successful path writes survive reopen"
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

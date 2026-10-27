@@ -1981,7 +1981,62 @@ impl<'a> Parser<'a> {
             }),
             _ => false,
         };
-        Ok(!self.syntax.names_path(name) && !carried && !row_path)
+        Ok(!self.syntax.names_path(name)
+            && !self.write_paths.contains(&name)
+            && !carried
+            && !row_path)
+    }
+
+    /// A carried path is already a value, so its length needs no graph read.
+    /// Compose the existing governed path-relationship and size operators;
+    /// their temporary list and per-edge work retain the caller's allowance.
+    /// Created paths in a write's first head stay with that head's own resolver.
+    #[inline(never)]
+    fn row_path_length_slot(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        program: &mut Vec<ParsedOp>,
+        at: usize,
+    ) -> Result<bool, GraphMutationTextError> {
+        if self.lets.is_none() || !(self.is_word("LENGTH") || self.is_word("PATH_LENGTH")) {
+            return Ok(false);
+        }
+        let Some(Some(name)) = Self::length_argument(self.lexer.clone())? else {
+            return Ok(false);
+        };
+        if self.elements.contains(&name) {
+            return Ok(false);
+        }
+        let Some(column) = self.routing_row(columns).and_then(|schema| {
+            schema[..self.visible_width(schema)]
+                .iter()
+                .position(|(binding, kind)| {
+                    binding.text == name && *kind == crate::GraphSetColumnType::Path
+                })
+        }) else {
+            return Ok(false);
+        };
+        self.advance()?;
+        self.punct(b'(', "(")?;
+        let column = match columns {
+            ExpressionColumns::Resolved(resolve) => resolve(self)?
+                .ok_or_else(|| error(at, GraphPatternTextErrorKind::UnknownVariable))?,
+            ExpressionColumns::Row(_) => {
+                self.name()?;
+                column
+            }
+            ExpressionColumns::Graph(_) => unreachable!("only typed row paths route here"),
+        };
+        self.punct(b')', ")")?;
+        self.let_slot(
+            program,
+            ReadValueTemplate::Size(Box::new(ReadValueTemplate::Function {
+                function: crate::GraphValueFunction::PathRelationships,
+                argument: Box::new(ReadValueTemplate::Column(column)),
+            })),
+            at,
+        )?;
+        Ok(true)
     }
 
     /// openCypher pi() and e(), just after their `(`: the binary64 nearest
@@ -2106,6 +2161,9 @@ impl<'a> Parser<'a> {
             return self.composite_slot(columns, depth, program, at);
         }
         if self.null_graph_function(program, at)? {
+            return Ok(());
+        }
+        if self.row_path_length_slot(columns, program, at)? {
             return Ok(());
         }
         let function = if (crate::graph_text::SCALAR_FUNCTIONS

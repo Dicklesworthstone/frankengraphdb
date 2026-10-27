@@ -6,7 +6,7 @@
 mod stored;
 
 use super::*;
-use crate::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue};
+use crate::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphPath, GraphPathFunction, GraphValue};
 use crate::insertion_query::GraphInsertBinding;
 use crate::{
     GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension,
@@ -427,6 +427,19 @@ fn freeze_bindings<E, A, C>(
             GraphInsertBinding::VertexLabels(vertex) => {
                 labels_binding(&templates[vertex].labels, property_catalog, control)?
             }
+            GraphInsertBinding::Path {
+                start, first_edge, ..
+            } => {
+                // Freeze an imported start before freeing the source row. A
+                // created start is filled alongside the vertex's other slots;
+                // the complete path is built only after all identities exist.
+                let start = endpoint(start, row, row_at, first_edge)?;
+                control(GlaExecutionEvent::ScratchEntry)?;
+                match start {
+                    Endpoint::Existing(vertex) => GraphValue::Vertex(vertex),
+                    Endpoint::Created(_) => GraphValue::Scalar(CanonicalScalar::Null),
+                }
+            }
             GraphInsertBinding::CreatedVertex(_) | GraphInsertBinding::CreatedEdge(_) => {
                 control(GlaExecutionEvent::ScratchEntry)?;
                 GraphValue::Scalar(CanonicalScalar::Null)
@@ -690,6 +703,11 @@ fn execute_erased<E, A, C>(
     // an identity. No write or identity-derived expression can feed matching.
     let mut intents = Vec::new();
     let mut seen = BTreeSet::new();
+    let paths = bindings.is_some_and(|bindings| {
+        bindings
+            .iter()
+            .any(|binding| matches!(binding, GraphInsertBinding::Path { .. }))
+    });
     for (row, draft) in drafts.into_iter().enumerate() {
         let mut created = Vec::new();
         for (vertex, (properties, declaration)) in draft
@@ -712,7 +730,12 @@ fn execute_erased<E, A, C>(
             if let (Some(bindings), Some(returned)) = (bindings, &mut returned) {
                 for (column, binding) in bindings.iter().enumerate() {
                     meter.event(GlaExecutionEvent::Work)?;
-                    if *binding == GraphInsertBinding::CreatedVertex(vertex) {
+                    if matches!(*binding,
+                        GraphInsertBinding::CreatedVertex(index)
+                            | GraphInsertBinding::Path {
+                                start: GraphInsertEndpoint::CreatedVertex(index), ..
+                            } if index == vertex)
+                    {
                         returned[row][column] = GraphValue::Vertex(id);
                     }
                 }
@@ -729,6 +752,9 @@ fn execute_erased<E, A, C>(
                 properties,
             });
         }
+        // Only path-bearing outputs retain edge identities and physical
+        // endpoints. Ordinary insertion keeps its existing allocation costs.
+        let mut path_edges = paths.then(Vec::new);
         for (edge, draft) in draft.edges.into_iter().enumerate() {
             let resolve = |endpoint| match endpoint {
                 Endpoint::Existing(vid) => vid,
@@ -745,6 +771,10 @@ fn execute_erased<E, A, C>(
             else {
                 unreachable!("allocator kind was checked")
             };
+            if let Some(path_edges) = &mut path_edges {
+                meter.event(GlaExecutionEvent::ScratchEntry)?;
+                path_edges.push((id, source, destination));
+            }
             if let (Some(bindings), Some(returned)) = (bindings, &mut returned) {
                 for (column, binding) in bindings.iter().enumerate() {
                     meter.event(GlaExecutionEvent::Work)?;
@@ -761,6 +791,72 @@ fn execute_erased<E, A, C>(
                 destination,
                 properties: draft.properties,
             });
+        }
+        if let (Some(bindings), Some(returned), Some(path_edges)) =
+            (bindings, &mut returned, path_edges)
+        {
+            for (column, binding) in bindings.iter().enumerate() {
+                let GraphInsertBinding::Path {
+                    start,
+                    first_edge,
+                    edge_count,
+                    function,
+                } = *binding
+                else {
+                    continue;
+                };
+                meter.event(GlaExecutionEvent::Work)?;
+                let GraphValue::Vertex(start_id) = &returned[row][column] else {
+                    unreachable!("a path's checked start has been allocated or frozen")
+                };
+                let mut current = start;
+                let mut steps = Vec::new();
+                meter.event(GlaExecutionEvent::ScratchEntry)?;
+                for (index, &(edge, source, destination)) in path_edges
+                    [first_edge..first_edge + edge_count]
+                    .iter()
+                    .enumerate()
+                {
+                    meter.event(GlaExecutionEvent::Work)?;
+                    let template = &insertion.edges[first_edge + index];
+                    let vertex = if template.source == current {
+                        current = template.destination;
+                        destination
+                    } else {
+                        // Connectivity was checked over declaration endpoints,
+                        // so incoming traversal never guesses from equal IDs.
+                        debug_assert_eq!(template.destination, current);
+                        current = template.source;
+                        source
+                    };
+                    meter.event(GlaExecutionEvent::ScratchEntry)?;
+                    steps.push((edge, vertex));
+                }
+                let path = GraphPath::new(*start_id, steps.into_boxed_slice());
+                returned[row][column] = match function {
+                    GraphPathFunction::Value => GraphValue::Path(path),
+                    GraphPathFunction::Length => {
+                        GraphValue::Scalar(CanonicalScalar::Int(path.len() as i64))
+                    }
+                    GraphPathFunction::Nodes => {
+                        let mut nodes = Vec::new();
+                        for vertex in path.nodes() {
+                            meter.event(GlaExecutionEvent::ScratchEntry)?;
+                            nodes.push(vertex);
+                        }
+                        GraphValue::Vertices(nodes.into_boxed_slice())
+                    }
+                    GraphPathFunction::Edges => {
+                        let mut edges = Vec::new();
+                        for edge in path.edges() {
+                            meter.event(GlaExecutionEvent::ScratchEntry)?;
+                            edges.push(edge);
+                        }
+                        GraphValue::Edges(edges.into_boxed_slice())
+                    }
+                    _ => unreachable!("insertion path projection admitted"),
+                };
+            }
         }
     }
     let mut rows = Vec::new();

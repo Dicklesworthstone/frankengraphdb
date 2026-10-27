@@ -9,7 +9,8 @@ use crate::{DatabaseKeys, MemVfs};
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId, SchemaEpoch};
-use fgdb_gql::insertion::{GraphInsertLimitDimension, GraphInsertRequest};
+use fgdb_gql::algebra::GraphPathFunction;
+use fgdb_gql::insertion::{GraphInsertEndpoint, GraphInsertLimitDimension, GraphInsertRequest};
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphInsertBinding, GraphSetProjection, GraphSetQuantifier,
     GraphSetValue, GraphSymbol, GraphSymbolKind, PreparedGraphInsertText,
@@ -1449,7 +1450,7 @@ fn insertion_query_projection_quota_and_creation_scope_failures_publish_nothing(
 #[test]
 fn insertion_query_masks_source_values_and_keeps_parallel_edge_occurrences() {
     lab(0xa954, |contexts| async move {
-        use fgdb_gql::algebra::GraphValue;
+        use fgdb_gql::algebra::{GraphPath, GraphValue};
         use fgdb_gql::insertion::GraphInsertVertex;
         use fgdb_gql::{GraphMutationValue, PreparedGraphSetText};
 
@@ -1459,7 +1460,7 @@ fn insertion_query_masks_source_values_and_keeps_parallel_edge_occurrences() {
         let authority = authority();
         let token = authority.issue_at(&read_write_grant(), NOW).unwrap();
         let source = PreparedGraphSetText::prepare(
-            "MATCH (a:Visible)-[:R]->(b:Visible) RETURN a.p AS p, a.secret AS hidden",
+            "MATCH (a:Visible)-[:R]->(b:Visible) RETURN a.p AS p, a.secret AS hidden, a AS source",
             symbols,
         )
         .unwrap()
@@ -1480,6 +1481,12 @@ fn insertion_query_masks_source_values_and_keeps_parallel_edge_occurrences() {
                 GraphInsertBinding::Input(0),
                 GraphInsertBinding::Input(1),
                 GraphInsertBinding::VertexProperty { vertex: 0, key: P },
+                GraphInsertBinding::Path {
+                    start: GraphInsertEndpoint::Column(2),
+                    first_edge: 0,
+                    edge_count: 0,
+                    function: GraphPathFunction::Value,
+                },
             ],
             GraphSetQuantifier::All,
         );
@@ -1509,6 +1516,7 @@ fn insertion_query_masks_source_values_and_keeps_parallel_edge_occurrences() {
                         GraphValue::Scalar(CanonicalScalar::Int(10)),
                         GraphValue::Scalar(CanonicalScalar::Null),
                         GraphValue::Scalar(CanonicalScalar::Int(10)),
+                        GraphValue::Path(GraphPath::new(VId(1), Box::new([]))),
                     ]);
                     2
                 ]
@@ -1541,6 +1549,12 @@ fn insertion_query_expiry_through_final_admission_aborts_all_effects() {
             vec![
                 GraphInsertBinding::CreatedVertex(0),
                 GraphInsertBinding::CreatedEdge(0),
+                GraphInsertBinding::Path {
+                    start: GraphInsertEndpoint::CreatedVertex(0),
+                    first_edge: 0,
+                    edge_count: 1,
+                    function: GraphPathFunction::Value,
+                },
             ],
             GraphSetQuantifier::All,
         );

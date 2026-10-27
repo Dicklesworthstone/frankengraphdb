@@ -30,10 +30,18 @@ struct NewEdge<'a> {
     relation: Name<'a>,
     properties: ParsedFields<'a>,
 }
+#[derive(Clone, Copy)]
+struct NewPath<'a> {
+    name: Name<'a>,
+    start: GraphInsertEndpoint,
+    first_edge: usize,
+    edge_count: usize,
+}
 struct InsertionSyntax<'a> {
     projections: Vec<Projection<'a>>,
     vertices: Vec<NewVertex<'a>>,
     edges: Vec<NewEdge<'a>>,
+    paths: Vec<NewPath<'a>>,
 }
 
 /// One statement-wide catalog cache across the read and write compilers.
@@ -563,6 +571,7 @@ impl<'a> Parser<'a> {
         fields: &mut usize,
         pending_edges: usize,
         row_schema: Option<&[(Name<'a>, GraphSetColumnType)]>,
+        pending_path: Option<Name<'a>>,
     ) -> Result<GraphInsertEndpoint, GraphInsertTextError> {
         self.punct(b'(', "(")?;
         let at = self.current.at;
@@ -576,6 +585,8 @@ impl<'a> Parser<'a> {
                 .edges
                 .iter()
                 .any(|edge| edge.name.is_some_and(|old| old.text == name.text))
+                || parsed.paths.iter().any(|path| path.name.text == name.text)
+                || pending_path.is_some_and(|path| path.text == name.text)
                 || matches!(
                     self.insertion_match_kind(name.text),
                     Some(GraphSetColumnType::Edge | GraphSetColumnType::Path)
@@ -681,10 +692,38 @@ impl<'a> Parser<'a> {
             projections: Vec::new(),
             vertices: Vec::new(),
             edges: Vec::new(),
+            paths: Vec::new(),
         };
         let mut fields = 0;
         loop {
-            let mut left = self.insertion_node(&mut parsed, &mut fields, 0, row_schema)?;
+            let path = if matches!(self.current.kind, TokenKind::Word(_))
+                && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'='))
+            {
+                let name = self.name()?;
+                if self.insertion_match_kind(name.text).is_some()
+                    || row_schema
+                        .is_some_and(|schema| schema.iter().any(|(old, _)| old.text == name.text))
+                    || parsed.paths.iter().any(|path| path.name.text == name.text)
+                    || parsed
+                        .vertices
+                        .iter()
+                        .any(|vertex| vertex.name.is_some_and(|old| old.text == name.text))
+                    || parsed
+                        .edges
+                        .iter()
+                        .any(|edge| edge.name.is_some_and(|old| old.text == name.text))
+                {
+                    return Err(expected(name.at, "new CREATE path binding"));
+                }
+                self.insertion_declaration_capacity(parsed.paths.len())?;
+                self.punct(b'=', "=")?;
+                Some(name)
+            } else {
+                None
+            };
+            let start = self.insertion_node(&mut parsed, &mut fields, 0, row_schema, path)?;
+            let first_edge = parsed.edges.len();
+            let mut left = start;
             while self.is_punct(b'-') || self.is_punct(b'<') {
                 self.insertion_declaration_capacity(parsed.vertices.len() + parsed.edges.len())?;
                 let incoming = self.take(b'<')?;
@@ -706,6 +745,8 @@ impl<'a> Parser<'a> {
                             .edges
                             .iter()
                             .any(|edge| edge.name.is_some_and(|old| old.text == name.text))
+                        || parsed.paths.iter().any(|path| path.name.text == name.text)
+                        || path.is_some_and(|path| path.text == name.text)
                     {
                         return Err(expected(name.at, "new CREATE edge binding"));
                     }
@@ -729,7 +770,7 @@ impl<'a> Parser<'a> {
                 }
                 // Reserve this not-yet-pushed edge while the right node may
                 // admit another vertex. A chain cannot step past the total cap.
-                let right = self.insertion_node(&mut parsed, &mut fields, 1, row_schema)?;
+                let right = self.insertion_node(&mut parsed, &mut fields, 1, row_schema, path)?;
                 if let Some(name) = name
                     && parsed
                         .vertices
@@ -754,6 +795,14 @@ impl<'a> Parser<'a> {
                     properties,
                 });
                 left = right;
+            }
+            if let Some(name) = path {
+                parsed.paths.push(NewPath {
+                    name,
+                    start,
+                    first_edge,
+                    edge_count: parsed.edges.len() - first_edge,
+                });
             }
             // Consecutive CREATE clauses with no reading clause between them
             // run on the same row, so CREATE p1 CREATE p2 is CREATE p1, p2 and

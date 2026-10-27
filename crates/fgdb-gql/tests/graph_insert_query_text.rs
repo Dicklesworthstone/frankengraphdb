@@ -2,7 +2,7 @@
 //! and shares preparation, scalar expressions and output ordering with reads.
 
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
-use fgdb_gql::algebra::{GraphValue, GraphValueRow};
+use fgdb_gql::algebra::{GraphPath, GraphValue, GraphValueRow};
 use fgdb_gql::insertion::{GraphInsertIntent, GraphInsertPolicy, GraphInsertRequest};
 use fgdb_gql::{
     GqlParameterType, GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
@@ -126,6 +126,187 @@ fn standalone_return_reads_exact_created_vertex_edge_and_frozen_properties() {
     assert_eq!(batch.returning().rows.snapshot_records, 0);
     assert_eq!(batch.returning().rows.result_rows, 1);
     assert_eq!(prepare("CREATE (n {p:1}) RETURN n.p").columns(), &["n.p"]);
+}
+
+#[test]
+fn named_created_paths_return_exact_traversals_and_metadata() {
+    let text = "CREATE p=(a:Copy {p:3})-[r:R]->(b)<-[:R]-(c) \
+        RETURN p,length(p) AS hops,nodes(p) AS ns,relationships(p) AS es";
+    let query = prepare(text);
+    assert_eq!(query.columns(), &["p", "hops", "ns", "es"]);
+    assert_eq!(
+        query.column_types(),
+        &[
+            GraphSetColumnType::Path,
+            GraphSetColumnType::Scalar,
+            GraphSetColumnType::Vertices,
+            GraphSetColumnType::Edges,
+        ]
+    );
+    let batch = run(&query).unwrap();
+    assert_eq!(
+        values(&batch),
+        vec![vec![
+            GraphValue::Path(GraphPath::new(
+                VId(100),
+                vec![(EId(1_000), VId(101)), (EId(1_001), VId(102)),].into_boxed_slice()
+            )),
+            int(2),
+            GraphValue::Vertices(vec![VId(100), VId(101), VId(102)].into_boxed_slice()),
+            GraphValue::Edges(vec![EId(1_000), EId(1_001)].into_boxed_slice()),
+        ]]
+    );
+    assert!(matches!(
+        batch.insertion().intents()[4],
+        GraphInsertIntent::Edge {
+            source: VId(102),
+            destination: VId(101),
+            ..
+        }
+    ));
+    assert_eq!(
+        query.canonical_bytes(),
+        prepare(&text.replacen("CREATE", "INSERT", 1)).canonical_bytes()
+    );
+    assert_eq!(
+        query.canonical_bytes(),
+        prepare(&text.replace("length(p)", "path_length(p)")).canonical_bytes()
+    );
+
+    let zero = run(&prepare(
+        "CREATE p=(a) RETURN p,length(p) AS hops,nodes(p) AS ns,relationships(p) AS es",
+    ))
+    .unwrap();
+    assert_eq!(
+        values(&zero),
+        vec![vec![
+            GraphValue::Path(GraphPath::new(VId(100), Box::new([]))),
+            int(0),
+            GraphValue::Vertices(vec![VId(100)].into_boxed_slice()),
+            GraphValue::Edges(Box::new([])),
+        ]]
+    );
+    assert_eq!(zero.insertion().stats().created_vertices, 1);
+    assert_eq!(zero.insertion().stats().created_edges, 0);
+}
+
+#[test]
+fn named_created_paths_survive_with_aliases_and_star_without_scope_leaks() {
+    let path = GraphValue::Path(GraphPath::new(
+        VId(100),
+        vec![(EId(1_000), VId(101))].into_boxed_slice(),
+    ));
+    let expected = vec![vec![
+        path.clone(),
+        int(1),
+        GraphValue::Vertices(vec![VId(100), VId(101)].into_boxed_slice()),
+        GraphValue::Edges(vec![EId(1_000)].into_boxed_slice()),
+    ]];
+    for tail in [
+        "WITH p RETURN p,length(p) AS hops,nodes(p) AS ns,relationships(p) AS es",
+        "WITH * RETURN p,length(p) AS hops,nodes(p) AS ns,relationships(p) AS es",
+        "WITH p AS q RETURN q,length(q) AS hops,nodes(q) AS ns,relationships(q) AS es",
+    ] {
+        let query = prepare(&format!("CREATE p=(a)<-[r:R]-(b) {tail}"));
+        assert_eq!(values(&run(&query).unwrap()), expected, "{tail}");
+    }
+    let star = prepare("CREATE p=(a)<-[r:R]-(b) RETURN *");
+    assert_eq!(star.columns(), &["a", "b", "p", "r"]);
+    assert_eq!(
+        values(&run(&star).unwrap()),
+        vec![vec![
+            GraphValue::Vertex(VId(100)),
+            GraphValue::Vertex(VId(101)),
+            path,
+            GraphValue::Edge(EId(1_000)),
+        ]]
+    );
+    for text in [
+        "CREATE p=(a)-[:R]->(b) WITH a RETURN p",
+        "CREATE p=(a)-[:R]->(b) WITH p AS q RETURN p",
+        "CREATE p=(a)-[:R]->(b) WITH 7 AS x RETURN length(p)",
+    ] {
+        assert!(
+            PreparedGraphInsertQueryText::prepare(text, R, symbols).is_err(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn duplicate_inputs_create_distinct_paths_and_limits_only_page_results() {
+    let query = prepare("UNWIND [1,1] AS x CREATE p=(a)-[:R]->(b) RETURN p");
+    let batch = run(&query).unwrap();
+    assert_eq!(
+        values(&batch),
+        vec![
+            vec![GraphValue::Path(GraphPath::new(
+                VId(100),
+                vec![(EId(1_000), VId(101))].into_boxed_slice()
+            ))],
+            vec![GraphValue::Path(GraphPath::new(
+                VId(116),
+                vec![(EId(1_016), VId(117))].into_boxed_slice()
+            ))],
+        ]
+    );
+    let empty = run(&query.with_page(0, Some(0))).unwrap();
+    assert!(empty.returning().value.is_empty());
+    assert_eq!(empty.insertion().intents(), batch.insertion().intents());
+}
+
+#[test]
+fn named_path_namespace_conflicts_refuse_before_catalog_resolution() {
+    for text in [
+        "CREATE p=(p:Copy) RETURN p",
+        "CREATE p=(a)-[p:R]->(b) RETURN p",
+        "CREATE p=(a:Copy),p=(b) RETURN p",
+        "CREATE (a:Copy),a=(b) RETURN a",
+        "CREATE p=(a:Copy),(p) RETURN p",
+        "CREATE p=(a)-[:R]->(b),(c)-[p:R]->(d) RETURN p",
+        "MATCH (p:Copy) CREATE p=(a) RETURN p",
+        "UNWIND [1] AS p CREATE p=(a:Copy) RETURN p",
+        "MATCH (a) CREATE p=(a) RETURN p",
+        "CREATE p=(a:Copy) RETURN properties(p)",
+    ] {
+        let calls = Cell::new(0);
+        assert!(
+            PreparedGraphInsertQueryText::prepare(text, R, |kind, name: &str| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(calls.get(), 0, "catalog consulted before refusing {text}");
+    }
+}
+
+#[test]
+fn path_return_limit_zero_keeps_source_and_property_errors_before_allocation() {
+    let query = prepare("UNWIND [1,0] AS x CREATE p=(a {p:10/x})-[:R]->(b) RETURN p LIMIT 0");
+    let result: ResultOf = query.execute_governed(
+        policy(),
+        |_, _| panic!("UNWIND does not scan a graph"),
+        |_| panic!("every property row must validate before allocation"),
+        || Ok(()),
+    );
+    assert!(matches!(
+        result,
+        Err(GqlQueryError::Source(GraphInsertQueryError::Insertion(_)))
+    ));
+
+    let query = prepare("MATCH (a) CREATE p=(a)-[:R]->(b) RETURN p LIMIT 0");
+    let result: ResultOf = query.execute_governed(
+        policy(),
+        |_, _| Err(GqlQueryError::Source(())),
+        |_| panic!("source failure must precede allocation"),
+        || Ok(()),
+    );
+    assert!(matches!(
+        result,
+        Err(GqlQueryError::Source(GraphInsertQueryError::Insertion(_)))
+    ));
 }
 
 #[test]

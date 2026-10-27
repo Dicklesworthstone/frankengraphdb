@@ -3511,12 +3511,34 @@ pub(crate) fn value_function<E>(
         ),
         GraphValueFunction::PathNodes | GraphValueFunction::PathRelationships => match argument {
             GraphValue::Path(path) => {
-                let value = if function == GraphValueFunction::PathNodes {
+                let nodes = function == GraphValueFunction::PathNodes;
+                let count = path
+                    .len()
+                    .checked_add(usize::from(nodes))
+                    .ok_or_else(|| failure(GraphIntegerErrorKind::Overflow))?;
+                let width = if nodes {
+                    core::mem::size_of::<fgdb_types::VId>()
+                } else {
+                    core::mem::size_of::<fgdb_types::EId>()
+                };
+                let bytes = count
+                    .checked_mul(width)
+                    .ok_or_else(|| failure(GraphIntegerErrorKind::Overflow))?;
+                // Preserve the ordinary leaf-copy event sequence, but admit
+                // its entire payload before the first allocation. Building an
+                // uncharged list and only then copying it would bypass both
+                // scratch admission and cancellation for the temporary.
+                control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
+                control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                for _ in 0..bytes.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+                    control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
+                }
+                Ok(if nodes {
                     GraphValue::Vertices(path.nodes().collect())
                 } else {
                     GraphValue::Edges(path.edges().collect())
-                };
-                copy_value(&value, control).map_err(ProjectionFailure::Control)
+                })
             }
             _ if argument.is_null() => {
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
@@ -4026,4 +4048,60 @@ pub(crate) fn range_member_count(
     } else {
         0
     })
+}
+
+#[cfg(test)]
+mod path_function_tests {
+    use super::*;
+    use crate::algebra::GraphPath;
+    use fgdb_types::{EId, VId};
+
+    #[test]
+    fn path_lists_preserve_native_copy_charges_and_every_interruption_boundary() {
+        let high = 1_u128 << 100;
+        for length in [0, 1, 3, 65] {
+            let path = GraphPath::new(
+                VId(high),
+                (0..length)
+                    .map(|at| (EId(high + at + 1), VId(high + at + 2)))
+                    .collect(),
+            );
+            for function in [
+                GraphValueFunction::PathNodes,
+                GraphValueFunction::PathRelationships,
+            ] {
+                let expected = if function == GraphValueFunction::PathNodes {
+                    GraphValue::Vertices(path.nodes().collect())
+                } else {
+                    GraphValue::Edges(path.edges().collect())
+                };
+                let mut expected_events = Vec::new();
+                expected
+                    .copy_with_control(&mut |event| {
+                        expected_events.push(event);
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap();
+                let argument = GraphValue::Path(path.clone());
+                let mut events = Vec::new();
+                let actual = value_function(function, &argument, 0, &mut |event| {
+                    events.push(event);
+                    Ok::<_, ()>(())
+                })
+                .unwrap();
+                assert_eq!(actual, expected);
+                assert_eq!(events, expected_events);
+                for stop in 0..events.len() {
+                    let mut seen = 0;
+                    let result = value_function(function, &argument, 0, &mut |_| {
+                        let current = seen;
+                        seen += 1;
+                        if current == stop { Err(stop) } else { Ok(()) }
+                    });
+                    assert!(matches!(result, Err(ProjectionFailure::Control(at)) if at == stop));
+                    assert_eq!(seen, stop + 1);
+                }
+            }
+        }
+    }
 }
