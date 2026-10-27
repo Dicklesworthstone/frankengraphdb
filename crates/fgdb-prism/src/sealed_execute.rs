@@ -509,6 +509,52 @@ fn directed_degree_centrality(
     output.finish_directed(incoming, edges)
 }
 
+/// Admission and both drivers share one normalization/storage decision. Unit
+/// evidence describes every final reduced weight, not merely a Unit selector:
+/// parallel Sum can still produce nonunit weights. A degree no larger than
+/// 2^53 has exactly the same f64 value as the original ordered sum of ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PageRankNormalization {
+    Degree,
+    WeightedSums,
+}
+
+impl PageRankNormalization {
+    fn select(n: usize, weighted: bool, unit_weights: bool) -> Self {
+        if !weighted || (unit_weights && n as u128 <= 1u128 << 53) {
+            Self::Degree
+        } else {
+            Self::WeightedSums
+        }
+    }
+
+    fn workspace(self, n: usize) -> Result<usize> {
+        let vectors = if self == Self::Degree { 2 } else { 3 };
+        mul(n, vectors * size_of::<f64>())
+    }
+
+    fn reserve_sums(self, n: usize) -> Result<Vec<f64>> {
+        if self == Self::Degree {
+            Ok(Vec::new())
+        } else {
+            reserve(n)
+        }
+    }
+
+    fn sum(
+        self,
+        sums: &[f64],
+        source: usize,
+        degree: impl FnOnce() -> Option<usize>,
+    ) -> Result<f64> {
+        let value = match self {
+            Self::Degree => degree().map(|value| value as f64),
+            Self::WeightedSums => sums.get(source).copied(),
+        };
+        value.ok_or_else(|| ExecutionError::InvalidUpstreamResult.into())
+    }
+}
+
 fn pagerank(
     graph: &impl Rows,
     options: PageRankOptions,
@@ -533,14 +579,16 @@ fn pagerank(
             witness,
         });
     }
-    let mut sums = reserve(n)?;
+    let normalization =
+        PageRankNormalization::select(n, options.weighted(), graph.has_unit_weights());
+    let mut sums = normalization.reserve_sums(n)?;
     let mut ranks = reserve(n)?;
     let mut next = reserve(n)?;
     let population = n as f64;
     for source in 0..n {
         checkpoint()?;
-        let mut sum = 0.0;
-        if options.weighted() {
+        if normalization == PageRankNormalization::WeightedSums {
+            let mut sum = 0.0;
             let mut row = graph.open(source)?;
             while let Some((_, weight)) = row.next()? {
                 checkpoint()?;
@@ -552,12 +600,14 @@ fn pagerank(
                     return Err(ExecutionError::NonFiniteWeightSum.into());
                 }
             }
+            sums.push(sum);
         } else {
-            sum = graph
+            // Retain complete ordinal validation before any iteration. The
+            // immutable directory supplies the same normalizer on each use.
+            graph
                 .degree(source)
-                .ok_or(ExecutionError::InvalidUpstreamResult)? as f64;
+                .ok_or(ExecutionError::InvalidUpstreamResult)?;
         }
-        sums.push(sum);
         ranks.push(1.0 / population);
         next.push(0.0);
     }
@@ -565,7 +615,7 @@ fn pagerank(
         let mut dangling_mass = 0.0;
         for source in 0..n {
             checkpoint()?;
-            if sums[source] == 0.0 {
+            if normalization.sum(&sums, source, || graph.degree(source))? == 0.0 {
                 dangling_mass += ranks[source];
             }
         }
@@ -577,7 +627,7 @@ fn pagerank(
         for source in 0..n {
             checkpoint()?;
             let push = options.alpha() * ranks[source];
-            let sum = sums[source];
+            let sum = normalization.sum(&sums, source, || graph.degree(source))?;
             let mut row = graph.open(source)?;
             while let Some((target, weight)) = row.next()? {
                 checkpoint()?;
@@ -930,9 +980,10 @@ impl FnxCallSpec {
                     })
                     .transpose()?;
                 (
-                    "fgdb-prism/sealed-pagerank-v1",
+                    "fgdb-prism/sealed-pagerank-v2",
                     mul(pass, add(options.max_iter(), 1)?)?,
-                    mul(n, 3 * size_of::<f64>())?,
+                    PageRankNormalization::select(n, options.weighted(), graph.has_unit_weights())
+                        .workspace(n)?,
                     source,
                 )
             }
@@ -1714,7 +1765,89 @@ mod tests {
             })
         }
     }
+    // The trusted adapter independently checks every final projected weight.
+    // DecodedRows deliberately retains the default unknown-evidence behavior.
+    struct CountedRankRows<'a> {
+        graph: &'a SnapshotGraphView,
+        unit_weights: bool,
+        opens: std::cell::Cell<usize>,
+    }
+    impl<'a> CountedRankRows<'a> {
+        fn new(graph: &'a SnapshotGraphView, unit_weights: bool) -> Self {
+            if unit_weights {
+                for source in 0..graph.node_count() {
+                    let (_, weights) = graph.projected_row(source).unwrap();
+                    assert!(weights.iter().all(|&weight| weight == 1.0));
+                }
+            }
+            Self {
+                graph,
+                unit_weights,
+                opens: std::cell::Cell::new(0),
+            }
+        }
+    }
+    impl Rows for CountedRankRows<'_> {
+        type Cursor<'a>
+            = DecodedRow<'a>
+        where
+            Self: 'a;
+        fn node_count(&self) -> usize {
+            self.graph.node_count()
+        }
+        fn degree(&self, source: usize) -> Option<usize> {
+            self.graph.neighbors_indices(source).map(<[usize]>::len)
+        }
+        fn has_unit_weights(&self) -> bool {
+            self.unit_weights
+        }
+        fn open(&self, source: usize) -> Result<Self::Cursor<'_>> {
+            self.opens.set(self.opens.get() + 1);
+            let (targets, weights) = self
+                .graph
+                .projected_row(source)
+                .ok_or(ExecutionError::InvalidUpstreamResult)?;
+            Ok(DecodedRow {
+                row: targets.iter().zip(weights),
+            })
+        }
+    }
+    fn rank_score_bits(output: &KernelOutput) -> Vec<u64> {
+        let KernelValues::Scores(scores) = &output.values else {
+            panic!("PageRank scores");
+        };
+        scores.iter().map(|score| score.to_bits()).collect()
+    }
+    fn assert_rank_matches_decoded(
+        graph: &SnapshotGraphView,
+        options: PageRankOptions,
+        output: &KernelOutput,
+    ) {
+        let decoded = FnxCallSpec::pagerank(options)
+            .execute(graph, limits(), || Ok::<(), Infallible>(()))
+            .unwrap();
+        let expected: Vec<_> = decoded
+            .rows
+            .iter()
+            .map(|row| {
+                let FnxValue::Score(score) = row[1] else {
+                    panic!("decoded PageRank score");
+                };
+                score.to_bits()
+            })
+            .collect();
+        assert_eq!(rank_score_bits(output), expected);
+        assert_eq!(output.row_count, decoded.rows.len());
+        let witness = &decoded.certificate.witness;
+        assert_eq!(output.witness.algorithm, witness.algorithm);
+        assert_eq!(output.witness.nodes_touched, witness.nodes_touched);
+        assert_eq!(output.witness.edges_scanned, witness.edges_scanned);
+        assert_eq!(output.witness.queue_peak, witness.queue_peak);
+    }
     fn projection(mask: u16) -> SnapshotGraphView {
+        projection_with_weights(mask, |bit| [0.0, 0.1, 0.3, 1.0, 7.0][bit % 5])
+    }
+    fn projection_with_weights(mask: u16, weight: impl Fn(usize) -> f64) -> SnapshotGraphView {
         let vertices = [VId(0), VId(17), VId(u128::MAX)];
         let edges: Vec<_> = (0..9)
             .filter(|bit| mask & (1 << bit) != 0)
@@ -1722,7 +1855,7 @@ mod tests {
                 eid: EId(bit as u128),
                 source: vertices[bit / 3],
                 target: vertices[bit % 3],
-                weight: [0.0, 0.1, 0.3, 1.0, 7.0][bit % 5],
+                weight: weight(bit),
             })
             .collect();
         SnapshotGraphView::build(
@@ -1910,6 +2043,218 @@ mod tests {
             });
             assert!(matches!(result, Err(Error::Cancelled(_))));
             assert_eq!(seen, stop);
+        }
+    }
+
+    #[test]
+    fn pagerank_degree_normalization_matches_both_oracles_on_every_unit_topology() {
+        for mask in 0..512 {
+            let graph = projection_with_weights(mask, |_| 1.0);
+            let n = graph.node_count();
+            let arcs = mask.count_ones() as usize;
+            let options = PageRankOptions::new(0.85, 1000, 1e-12, true).unwrap();
+            let trusted = CountedRankRows::new(&graph, true);
+            let unknown = CountedRankRows::new(&graph, false);
+            let mut fast_checks = 0;
+            let fast = pagerank(&trusted, options, None, &mut || {
+                fast_checks += 1;
+                Ok(())
+            })
+            .unwrap();
+            let mut slow_checks = 0;
+            let slow = pagerank(&unknown, options, None, &mut || {
+                slow_checks += 1;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(
+                rank_score_bits(&fast),
+                rank_score_bits(&slow),
+                "mask={mask}"
+            );
+            assert_eq!(fast.row_count, slow.row_count);
+            assert_eq!(fast.witness, slow.witness, "mask={mask}");
+            // Every iteration still opens each row exactly once. Only the
+            // normalization pass (including its edge checks) disappears.
+            assert_eq!(trusted.opens.get(), fast.witness.nodes_touched);
+            assert_eq!(unknown.opens.get(), trusted.opens.get() + n);
+            assert_eq!(slow_checks, fast_checks + arcs);
+            assert_eq!(
+                fast_checks,
+                n + 4 * fast.witness.nodes_touched + fast.witness.edges_scanned
+            );
+            assert_rank_matches_decoded(&graph, options, &fast);
+            let oracle = fnx_algorithms::pagerank_with_weight(
+                &graph,
+                options.alpha(),
+                options.max_iter(),
+                options.tolerance(),
+                Some(PROJECTED_WEIGHT_ATTRIBUTE),
+            );
+            assert!(oracle.converged, "mask={mask}");
+            let bits = rank_score_bits(&fast);
+            for expected in oracle.scores {
+                let ordinal = graph.get_node_index(&expected.node).unwrap();
+                assert_eq!(bits[ordinal], expected.score.to_bits(), "mask={mask}");
+            }
+            assert_eq!(fast.witness.nodes_touched, oracle.witness.nodes_touched);
+            assert_eq!(fast.witness.edges_scanned, oracle.witness.edges_scanned);
+
+            // Restart at every possible vertex, including dangling vertices;
+            // exact iteration stopping must use the same normalizers too.
+            for source in [None, Some(0), Some(1), Some(2)] {
+                for iterations in [1, 3] {
+                    let options =
+                        PageRankOptions::fixed_iterations(0.85, iterations, true).unwrap();
+                    let options = source.map_or(options, |source| {
+                        options.with_source(graph.vertex_id(source).unwrap())
+                    });
+                    let trusted = CountedRankRows::new(&graph, true);
+                    let unknown = CountedRankRows::new(&graph, false);
+                    let fast = pagerank(&trusted, options, source, &mut || Ok(())).unwrap();
+                    let slow = pagerank(&unknown, options, source, &mut || Ok(())).unwrap();
+                    assert_eq!(
+                        rank_score_bits(&fast),
+                        rank_score_bits(&slow),
+                        "mask={mask} source={source:?} iterations={iterations}"
+                    );
+                    assert_eq!(fast.witness, slow.witness);
+                    assert_eq!(trusted.opens.get(), n * iterations);
+                    assert_eq!(unknown.opens.get(), n * (iterations + 1));
+                    assert_rank_matches_decoded(&graph, options, &fast);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pagerank_degree_normalization_refuses_every_remaining_checkpoint() {
+        // Isolates, a one-way edge, a cycle, loops, a hub and the complete
+        // directed graph exercise every distinct normalization/iteration case.
+        for mask in [0, 2, 98, 273, 14, 511] {
+            let graph = projection_with_weights(mask, |_| 1.0);
+            for source in [None, Some(2)] {
+                let options = PageRankOptions::fixed_iterations(0.85, 2, true).unwrap();
+                let options = source.map_or(options, |source| {
+                    options.with_source(graph.vertex_id(source).unwrap())
+                });
+                let rows = CountedRankRows::new(&graph, true);
+                let mut count = 0;
+                let expected = pagerank(&rows, options, source, &mut || {
+                    count += 1;
+                    Ok(())
+                })
+                .unwrap();
+                for stop in 1..=count {
+                    let mut seen = 0;
+                    let result = pagerank(&rows, options, source, &mut || {
+                        seen += 1;
+                        if seen == stop {
+                            Err(Error::Cancelled(
+                                std::io::Error::other("PageRank normalization stop").into(),
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    });
+                    assert!(
+                        matches!(result, Err(Error::Cancelled(_))),
+                        "mask={mask} source={source:?} stop={stop}"
+                    );
+                    assert_eq!(seen, stop);
+                }
+                let resumed = pagerank(&rows, options, source, &mut || Ok(())).unwrap();
+                assert_eq!(rank_score_bits(&resumed), rank_score_bits(&expected));
+                assert_eq!(resumed.witness, expected.witness);
+            }
+        }
+    }
+
+    #[test]
+    fn pagerank_degree_normalization_exact_integer_and_workspace_boundaries() {
+        use PageRankNormalization::{Degree, WeightedSums};
+        for n in [0, 1, 3, usize::MAX] {
+            assert_eq!(PageRankNormalization::select(n, false, false), Degree);
+            assert_eq!(PageRankNormalization::select(n, false, true), Degree);
+            assert_eq!(PageRankNormalization::select(n, true, false), WeightedSums);
+        }
+        assert_eq!(PageRankNormalization::select(0, true, true), Degree);
+        assert_eq!(PageRankNormalization::select(3, true, true), Degree);
+        if let Ok(exact) = usize::try_from(1u128 << 53) {
+            assert_eq!(PageRankNormalization::select(exact, true, true), Degree);
+            assert_eq!(
+                PageRankNormalization::select(exact + 1, true, true),
+                WeightedSums
+            );
+            assert_eq!(
+                Degree.sum(&[], 0, || Some(exact)).unwrap().to_bits(),
+                (exact as f64).to_bits()
+            );
+        }
+        for (normalization, vectors) in [(Degree, 2), (WeightedSums, 3)] {
+            let per_node = vectors * size_of::<f64>();
+            assert_eq!(normalization.workspace(0).unwrap(), 0);
+            assert_eq!(normalization.workspace(7).unwrap(), 7 * per_node);
+            let largest = usize::MAX / per_node;
+            assert_eq!(
+                normalization.workspace(largest).unwrap(),
+                largest * per_node
+            );
+            assert!(matches!(
+                normalization.workspace(largest + 1),
+                Err(Error::Execution(ExecutionError::SizeOverflow))
+            ));
+            assert!(matches!(
+                normalization.workspace(usize::MAX),
+                Err(Error::Execution(ExecutionError::SizeOverflow))
+            ));
+        }
+        let no_sums = Degree.reserve_sums(usize::MAX).unwrap();
+        assert!(no_sums.is_empty());
+        assert_eq!(no_sums.capacity(), 0);
+        assert_eq!(WeightedSums.reserve_sums(0).unwrap().capacity(), 0);
+        let sums = WeightedSums.reserve_sums(3).unwrap();
+        assert!(sums.is_empty());
+        assert!(sums.capacity() >= 3);
+        // Stored sums and degree evidence are separate sources. In
+        // particular a zero-weight row remains dangling despite its degree.
+        assert_eq!(Degree.sum(&[99.0], 0, || Some(2)).unwrap(), 2.0);
+        assert_eq!(
+            WeightedSums
+                .sum(&[0.0], 0, || panic!("weighted sum must not read degree"))
+                .unwrap()
+                .to_bits(),
+            0.0f64.to_bits()
+        );
+        assert!(matches!(
+            Degree.sum(&[1.0], 0, || None),
+            Err(Error::Execution(ExecutionError::InvalidUpstreamResult))
+        ));
+        assert!(matches!(
+            WeightedSums.sum(&[], 0, || Some(1)),
+            Err(Error::Execution(ExecutionError::InvalidUpstreamResult))
+        ));
+    }
+
+    #[test]
+    fn pagerank_degree_normalization_preserves_zero_weight_fallback() {
+        let graph = projection_with_weights(38, |_| 0.0);
+        for source in [None, Some(2)] {
+            for weighted in [false, true] {
+                let options = PageRankOptions::fixed_iterations(0.85, 3, weighted).unwrap();
+                let options = source.map_or(options, |source| {
+                    options.with_source(graph.vertex_id(source).unwrap())
+                });
+                let rows = CountedRankRows::new(&graph, false);
+                let output = pagerank(&rows, options, source, &mut || Ok(())).unwrap();
+                assert_rank_matches_decoded(&graph, options, &output);
+                assert_eq!(
+                    rows.opens.get(),
+                    graph.node_count() * (3 + usize::from(weighted))
+                );
+                assert_eq!(output.witness.nodes_touched, 9);
+                assert_eq!(output.witness.edges_scanned, 9);
+            }
         }
     }
 

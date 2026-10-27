@@ -555,9 +555,14 @@ impl FnxCallSpec {
                         })
                         .transpose()?;
                     (
-                        "fgdb-prism/sealed-pagerank-cooperative-v1",
+                        "fgdb-prism/sealed-pagerank-cooperative-v2",
                         mul(pass, add(options.max_iter(), 1)?)?,
-                        mul(n, 3 * size_of::<f64>())?,
+                        super::PageRankNormalization::select(
+                            n,
+                            options.weighted(),
+                            graph.has_unit_weights(),
+                        )
+                        .workspace(n)?,
                         source,
                     )
                 }
@@ -1262,14 +1267,16 @@ where
             witness,
         });
     }
-    let mut sums = reserve(n)?;
+    let normalization =
+        super::PageRankNormalization::select(n, options.weighted(), graph.has_unit_weights());
+    let mut sums = normalization.reserve_sums(n)?;
     let mut ranks = reserve(n)?;
     let mut next = reserve(n)?;
     let population = n as f64;
     for source in 0..n {
         control.tick().await?;
-        let mut sum = 0.0;
-        if options.weighted() {
+        if normalization == super::PageRankNormalization::WeightedSums {
+            let mut sum = 0.0;
             let mut row = graph.neighbor_cursor_controlled(control.cx, source, None)?;
             while let Some((_, weight)) = control.next(&mut row).await? {
                 control.tick().await?;
@@ -1281,12 +1288,12 @@ where
                     return Err(ExecutionError::NonFiniteWeightSum.into());
                 }
             }
+            sums.push(sum);
         } else {
-            sum = graph
+            graph
                 .degree(source)
-                .ok_or(ExecutionError::InvalidUpstreamResult)? as f64;
+                .ok_or(ExecutionError::InvalidUpstreamResult)?;
         }
-        sums.push(sum);
         ranks.push(1.0 / population);
         next.push(0.0);
     }
@@ -1295,7 +1302,7 @@ where
         let mut dangling_mass = 0.0;
         for source in 0..n {
             control.tick().await?;
-            if sums[source] == 0.0 {
+            if normalization.sum(&sums, source, || graph.degree(source))? == 0.0 {
                 dangling_mass += ranks[source];
             }
         }
@@ -1312,7 +1319,7 @@ where
         for source in 0..n {
             control.tick().await?;
             let push = options.alpha() * ranks[source];
-            let sum = sums[source];
+            let sum = normalization.sum(&sums, source, || graph.degree(source))?;
             let mut row = graph.neighbor_cursor_controlled(control.cx, source, None)?;
             while let Some((target, weight)) = control.next(&mut row).await? {
                 control.tick().await?;

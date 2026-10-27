@@ -51,6 +51,8 @@ mod distance;
 mod eigenvector;
 #[path = "prism_cooperative/hits.rs"]
 mod hits;
+#[path = "prism_cooperative/pagerank.rs"]
+mod pagerank;
 
 fn retained_calls() -> [FnxCallSpec; 20] {
     let bind = |text| FnxCallSpec::bind(text, &FnxParameters::new()).unwrap();

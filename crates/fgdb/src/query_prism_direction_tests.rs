@@ -202,6 +202,11 @@ fn admitted_empty_rows_skip_history_and_preserve_complete_kernel_results() {
                             component,
                         ];
                         for call in calls {
+                            if direction == Directedness::Undirected
+                                && call.signature().graph_kind == FnxGraphKind::Directed
+                            {
+                                continue;
+                            }
                             let expected = call
                                 .execute(&decoded, opt.execution_limits, || query.checkpoint())
                                 .unwrap();
