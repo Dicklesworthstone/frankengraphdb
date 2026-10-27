@@ -68,6 +68,16 @@ impl<'a, L: ReturnLeaves<'a>> AggregateLeaves<'_, 'a, L> {
 }
 
 impl<'a, L: ReturnLeaves<'a>> ReturnLeaves<'a> for AggregateLeaves<'_, 'a, L> {
+    fn metadata_leaf(
+        &mut self,
+        parser: &mut Parser<'a>,
+        source: Name<'a>,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        self.raw
+            .metadata_leaf(parser, source)?
+            .map(|binding| self.binding(parser, binding))
+            .transpose()
+    }
     fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
         if let TokenKind::Word(word) = parser.current.kind
             && let Some(function) = return_projection::with_aggregate::function(word)

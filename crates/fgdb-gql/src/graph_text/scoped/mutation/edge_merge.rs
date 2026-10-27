@@ -1219,6 +1219,22 @@ struct EdgeMergeLeaves<'r, 'a> {
     row: Option<&'r [(Name<'a>, GraphSetColumnType)]>,
 }
 impl<'a> ReturnLeaves<'a> for EdgeMergeLeaves<'_, 'a> {
+    fn metadata_leaf(
+        &mut self,
+        parser: &mut Parser<'a>,
+        source: Name<'a>,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        if self.row.is_none()
+            && matches!(
+                parser.insertion_match_kind(source.text),
+                Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+            )
+        {
+            self.leaf(parser)
+        } else {
+            Ok(None)
+        }
+    }
     fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
         let TokenKind::Word(word) = parser.current.kind else {
             return Ok(None);

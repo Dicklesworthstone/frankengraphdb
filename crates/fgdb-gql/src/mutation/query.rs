@@ -386,6 +386,13 @@ impl PreparedGraphMutationQuery {
                 .grouping
                 .as_ref()
                 .is_some_and(crate::set_ops::WriteReturnGroup::may_read_element_properties);
+        let mut charges = crate::algebra_exec::Charges::new(
+            &mut checkpoint,
+            policy.query,
+            returning.rows.snapshot_records,
+        );
+        charges.rows = returning.rows;
+        charges.evaluator = returning.evaluator;
         let mut post_write = PostWriteReads::new(
             if reads_elements {
                 mutation.intents()
@@ -393,31 +400,18 @@ impl PreparedGraphMutationQuery {
                 &[]
             },
             elements,
-            &mut |event| {
-                checkpoint().map_err(GqlQueryError::Interrupted)?;
-                returning
-                    .evaluator
-                    .charge_event(policy.query.evaluator, event)
-                    .map_err(GqlQueryError::Evaluator)
-            },
+            &mut |event| charges.event::<GraphMutationQueryError<E>, C>(event),
         )?;
+        returning.evaluator = charges.evaluator;
+        drop(charges);
         if let Some(grouping) = &self.grouping {
-            returning = if reads_elements {
-                crate::set_ops::finish_owned_aggregate_reading(
-                    returning,
-                    policy.query,
-                    grouping,
-                    &mut post_write,
-                    &mut checkpoint,
-                )
-            } else {
-                crate::set_ops::finish_owned_aggregate(
-                    returning,
-                    policy.query,
-                    grouping,
-                    &mut checkpoint,
-                )
-            }
+            returning = crate::set_ops::finish_owned_aggregate_reading(
+                returning,
+                policy.query,
+                grouping,
+                &mut post_write,
+                &mut checkpoint,
+            )
             .map_err(|error| error.map_source(GraphMutationQueryError::Returning))?;
         }
         // A WITH head's rows are private input to its tail.
@@ -426,28 +420,16 @@ impl PreparedGraphMutationQuery {
         } else {
             policy.query
         };
-        let returning = if reads_elements {
-            crate::set_ops::finish_owned_projection_reading(
-                returning,
-                head,
-                &self.projection,
-                self.quantifier,
-                &self.order,
-                (self.offset, self.count),
-                &mut post_write,
-                &mut checkpoint,
-            )
-        } else {
-            crate::set_ops::finish_owned_projection(
-                returning,
-                head,
-                &self.projection,
-                self.quantifier,
-                &self.order,
-                (self.offset, self.count),
-                &mut checkpoint,
-            )
-        }
+        let returning = crate::set_ops::finish_owned_projection_reading(
+            returning,
+            head,
+            &self.projection,
+            self.quantifier,
+            &self.order,
+            (self.offset, self.count),
+            &mut post_write,
+            &mut checkpoint,
+        )
         .map_err(|error| error.map_source(GraphMutationQueryError::Returning))?;
         let returning = match &self.tail {
             None => returning,
@@ -465,6 +447,7 @@ impl PreparedGraphMutationQuery {
                 .map_err(|error| error.map_source(GraphMutationQueryError::Returning))?
             }
         };
+        drop(post_write);
         Ok(GraphMutationQueryBatch {
             mutation,
             returning,
@@ -826,6 +809,7 @@ impl<E> PostWriteReads<'_, '_, '_, E> {
                     .zip(values.into_vec())
                     .peekable();
                 control(ScratchEntry)?;
+                control(ScratchEntry)?;
                 let mut keys = Vec::new();
                 let mut values = Vec::new();
                 let mut append = |key, value| {
@@ -843,6 +827,7 @@ impl<E> PostWriteReads<'_, '_, '_, E> {
                             break;
                         }
                         control(ScratchEntry)?;
+                        control(ScratchEntry)?;
                         let (key, value) = old.next().expect("peeked map entry");
                         append(key, value)?;
                     }
@@ -853,19 +838,25 @@ impl<E> PostWriteReads<'_, '_, '_, E> {
                         old.next();
                     }
                     if let Some(value) = value {
-                        for _ in 0..=key
+                        control(ScratchEntry)?;
+                        for _ in 0..key
                             .len()
                             .div_ceil(crate::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
                         {
+                            control(Work)?;
                             control(ScratchEntry)?;
                         }
                         GraphValue::charge_property_value(value, control)?;
                         let value = GraphValue::from_property_value(value)
                             .ok_or(MetadataOverlayError::Invalid)?;
+                        control(ScratchEntry)?;
+                        control(ScratchEntry)?;
                         append(key.into(), value)?;
                     }
                 }
                 for (key, value) in old {
+                    control(Work)?;
+                    control(ScratchEntry)?;
                     control(ScratchEntry)?;
                     append(key, value)?;
                 }
@@ -886,6 +877,7 @@ fn metadata_reverse_names<'a, K: Copy + Ord>(
 ) -> Result<std::collections::BTreeMap<&'a str, K>, MetadataOverlayError> {
     let mut names = std::collections::BTreeMap::new();
     for (key, name) in catalog {
+        control(crate::GlaExecutionEvent::Work)?;
         control(crate::GlaExecutionEvent::ScratchEntry)?;
         if names.insert(name.as_str(), *key).is_some() {
             return Err(MetadataOverlayError::Invalid);
@@ -898,10 +890,12 @@ fn metadata_text(
     name: &str,
     control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), MetadataOverlayError>,
 ) -> Result<crate::algebra::GraphValue, MetadataOverlayError> {
-    for _ in 0..=name
+    control(crate::GlaExecutionEvent::ScratchEntry)?;
+    for _ in 0..name
         .len()
         .div_ceil(crate::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
     {
+        control(crate::GlaExecutionEvent::Work)?;
         control(crate::GlaExecutionEvent::ScratchEntry)?;
     }
     CanonicalScalar::ucs_basic_text(name)

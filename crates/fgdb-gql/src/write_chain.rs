@@ -312,10 +312,7 @@ impl GraphWriteChainStep {
         &self,
         input: &crate::algebra::GraphValueRow,
         vertex: fgdb_types::VId,
-        mut read: impl FnMut(
-            fgdb_delta_types::ElementId,
-            fgdb_delta_types::PropertyKeyId,
-        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>,
+        mut read: impl crate::GraphElementReader<E>,
         control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Vec<crate::algebra::GraphValue>, E> {
         use crate::GlaExecutionEvent::{ScratchEntry, Work};
@@ -358,7 +355,7 @@ impl GraphWriteChainStep {
                     };
                     control(Work)?;
                     let property = element
-                        .map(|element| read(element, key))
+                        .map(|element| read.element_property(element, key))
                         .transpose()?
                         .flatten();
                     match property {

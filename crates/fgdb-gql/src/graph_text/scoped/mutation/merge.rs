@@ -1432,6 +1432,17 @@ pub(super) struct ParsedVertexReturn<'a> {
 }
 
 impl<'a> mutation_query::ReturnLeaves<'a> for ParsedVertexReturn<'a> {
+    fn metadata_leaf(
+        &mut self,
+        parser: &mut Parser<'a>,
+        source: Name<'a>,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        if source.text == self.variable.text {
+            self.leaf(parser)
+        } else {
+            Ok(None)
+        }
+    }
     fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
         let TokenKind::Word(word) = parser.current.kind else {
             return Ok(None);

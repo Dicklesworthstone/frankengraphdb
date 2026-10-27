@@ -1,16 +1,17 @@
 //! Complete element maps share native projection, scope and resource owners.
 
 use fgdb_delta_types::catalog::{CatalogSymbol, SymbolCatalog};
-use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{
     GlaDirection, GraphColumn, GraphPathFunction, GraphPatternBuilder, GraphValue, GraphValueRow,
     PreparedGraphPattern,
 };
 use fgdb_gql::{
     GlaExecutionLimits, GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
-    GraphAggregateValue, GraphIntegerError, GraphIntegerErrorKind, GraphSymbol, GraphSymbolKind,
-    GraphSymbolResolver, PreparedGraphAggregateText, PreparedGraphSetText, PreparedGraphText,
-    ReverseSymbolCatalog,
+    GraphAggregateValue, GraphElementMetadata, GraphElementMetadataError, GraphIntegerError,
+    GraphIntegerErrorKind, GraphMutationPolicy, GraphSymbol, GraphSymbolKind, GraphSymbolResolver,
+    PreparedGraphAggregateText, PreparedGraphMutationQueryText, PreparedGraphSetText,
+    PreparedGraphText, ReverseSymbolCatalog,
 };
 use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::Cell;
@@ -19,6 +20,14 @@ use std::collections::BTreeMap;
 const P: PropertyKeyId = PropertyKeyId(1);
 const R: RelationId = RelationId(1);
 type Edge = (EId, VId, RelationId, VId);
+
+enum FixtureRead<'a> {
+    Property(PropertyKeyId),
+    Metadata {
+        kind: GraphElementMetadata,
+        catalog: &'a ReverseSymbolCatalog,
+    },
+}
 
 #[test]
 fn native_catalog_resolver_drives_relation_names_and_complete_property_maps() {
@@ -77,6 +86,9 @@ impl GraphSymbolResolver for Catalog {
         match (kind, name) {
             (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
             (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+            (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(2))),
+            (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
+            (GraphSymbolKind::Label, "M") => Some(GraphSymbol::Label(LabelId(2))),
             _ => None,
         }
     }
@@ -84,6 +96,9 @@ impl GraphSymbolResolver for Catalog {
         let mut catalog = ReverseSymbolCatalog::new();
         catalog.insert_property(P, self.0);
         catalog.insert_relation(R, "R");
+        catalog.insert_relation(RelationId(2), "S");
+        catalog.insert_label(LabelId(1), "L");
+        catalog.insert_label(LabelId(2), "M");
         Some(catalog)
     }
 }
@@ -132,6 +147,7 @@ struct Fixture {
     vertex_values: BTreeMap<(VId, PropertyKeyId), CanonicalPropertyValue>,
     edge_values: BTreeMap<(EId, PropertyKeyId), CanonicalPropertyValue>,
     edge_types: BTreeMap<EId, CanonicalScalar>,
+    labels: BTreeMap<VId, Vec<LabelId>>,
 }
 impl Fixture {
     fn new() -> Self {
@@ -144,6 +160,7 @@ impl Fixture {
             vertex_values: stored(&vertices),
             edge_values: stored(&edge_maps),
             edge_types: BTreeMap::new(),
+            labels: BTreeMap::new(),
             vertices,
             edges: vec![(EId(11), VId(1), R, VId(2)), (EId(12), VId(1), R, VId(2))],
             edge_maps,
@@ -154,6 +171,28 @@ impl Fixture {
         pattern: &PreparedGraphPattern<GraphValueRow>,
         policy: GqlQueryPolicy,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<(), ()>> {
+        let mut labels = BTreeMap::new();
+        if pattern.plan().projects_labels() {
+            for (&vertex, ids) in &self.labels {
+                let catalog = pattern
+                    .plan()
+                    .reverse_catalog
+                    .as_deref()
+                    .ok_or(GqlQueryError::Source(()))?;
+                let names = ids
+                    .iter()
+                    .map(|id| {
+                        catalog
+                            .labels
+                            .get(id)
+                            .and_then(|name| CanonicalScalar::ucs_basic_text(name).ok())
+                            .map(GraphValue::Scalar)
+                            .ok_or(GqlQueryError::Source(()))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                labels.insert(vertex, names);
+            }
+        }
         pattern.plan().execute_governed_with_element_maps(
             (self.vertices.len() + self.edges.len()) as u64,
             self.vertices.keys().copied(),
@@ -161,7 +200,7 @@ impl Fixture {
             |_, _| Ok(true),
             |vid, key| Ok(self.vertex_values.get(&(vid, key))),
             |eid, key| Ok(self.edge_values.get(&(eid, key))),
-            |_| Ok(None),
+            |vid| Ok(labels.get(&vid).map(Vec::as_slice)),
             |eid| Ok(self.edge_types.get(&eid)),
             |vid| Ok(self.vertices.get(&vid)),
             |eid| Ok(self.edge_maps.get(&eid)),
@@ -189,6 +228,158 @@ impl Fixture {
             .into_iter()
             .map(|row| row.values().to_vec())
             .collect()
+    }
+
+    fn read(
+        &self,
+        element: ElementId,
+        request: FixtureRead<'_>,
+    ) -> Result<Option<CanonicalPropertyValue>, ()> {
+        let (properties, labels, relation) = match element {
+            ElementId::Vertex(id) => {
+                if !self.vertices.contains_key(&id) {
+                    return Ok(None);
+                }
+                (
+                    self.vertex_values
+                        .iter()
+                        .filter_map(|(&(vertex, key), value)| {
+                            (vertex == id).then_some((key, value))
+                        })
+                        .collect::<Vec<_>>(),
+                    self.labels.get(&id).map(Vec::as_slice).unwrap_or(&[]),
+                    None,
+                )
+            }
+            ElementId::Edge(id) => {
+                let Some((_, _, relation, _)) = self.edges.iter().find(|(edge, ..)| *edge == id)
+                else {
+                    return Ok(None);
+                };
+                (
+                    self.edge_values
+                        .iter()
+                        .filter_map(|(&(edge, key), value)| (edge == id).then_some((key, value)))
+                        .collect::<Vec<_>>(),
+                    &[][..],
+                    Some(*relation),
+                )
+            }
+        };
+        let FixtureRead::Metadata { kind, catalog } = request else {
+            let FixtureRead::Property(key) = request else {
+                unreachable!()
+            };
+            return Ok(properties
+                .into_iter()
+                .find(|(candidate, _)| *candidate == key)
+                .map(|(_, value)| value.clone()));
+        };
+        let text = |name: &str| {
+            CanonicalScalar::ucs_basic_text(name)
+                .map(GraphValue::Scalar)
+                .map_err(|_| ())
+        };
+        let value = match kind {
+            GraphElementMetadata::Labels => GraphValue::List(
+                labels
+                    .iter()
+                    .map(|id| text(catalog.labels.get(id).ok_or(())?))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_boxed_slice(),
+            ),
+            GraphElementMetadata::Type => {
+                text(catalog.relations.get(&relation.ok_or(())?).ok_or(())?)?
+            }
+            GraphElementMetadata::Keys => GraphValue::List(
+                properties
+                    .iter()
+                    .map(|(key, _)| text(catalog.properties.get(key).ok_or(())?))
+                    .collect::<Result<Vec<_>, ()>>()?
+                    .into_boxed_slice(),
+            ),
+            GraphElementMetadata::Properties => GraphValue::map(
+                properties
+                    .into_iter()
+                    .map(|(key, value)| {
+                        Ok((
+                            catalog.properties.get(&key).ok_or(())?.as_str().into(),
+                            GraphValue::from_property_value(value).ok_or(())?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, ()>>()?,
+            )
+            .ok_or(())?,
+        };
+        value.to_property_value().map(Some).ok_or(())
+    }
+
+    fn reader<'a>(
+        &'a self,
+        reads: Option<&'a Cell<usize>>,
+    ) -> impl fgdb_gql::GraphElementReader<()> + 'a {
+        fgdb_gql::with_element_metadata(
+            move |element, key| {
+                if let Some(reads) = reads {
+                    reads.set(reads.get() + 1);
+                }
+                self.read(element, FixtureRead::Property(key))
+            },
+            move |element, kind, catalog: &ReverseSymbolCatalog,
+                  control: &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), ()>| {
+                if let Some(reads) = reads {
+                    reads.set(reads.get() + 1);
+                }
+                let Some(raw) = self.read(element, FixtureRead::Metadata { kind, catalog })
+                    .map_err(GraphElementMetadataError::Source)? else {
+                    return Ok(None);
+                };
+                let mut interrupted = false;
+                let value = GraphValue::admit_property_value(&raw, &mut |event| {
+                    control(event).map_err(|()| {
+                        interrupted = true;
+                        GraphIntegerError { instruction: 0, kind: GraphIntegerErrorKind::StoredValueBounds }
+                    })
+                });
+                value.map(Some).map_err(|_| {
+                    if interrupted { GraphElementMetadataError::Interrupted }
+                    else { GraphElementMetadataError::Source(()) }
+                })
+            },
+        )
+    }
+
+    fn dynamic(
+        &self,
+        text: &str,
+        reads: &Cell<usize>,
+    ) -> Result<
+        Vec<Vec<GraphValue>>,
+        fgdb_gql::GqlQueryError<fgdb_gql::GraphSetExecutionError<()>, ()>,
+    > {
+        let query = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+            text,
+            &[],
+            &mut Catalog("p"),
+        )
+        .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        query
+            .execute_governed_with_elements(
+                policy(),
+                |pattern, policy| self.execute(pattern, policy),
+                |_, _, _| unreachable!("fixture has no procedure"),
+                self.reader(Some(reads)),
+                || Ok::<_, ()>(()),
+            )
+            .map(|result| {
+                result
+                    .value
+                    .into_iter()
+                    .map(|row| row.values().to_vec())
+                    .collect()
+            })
     }
 }
 
@@ -642,4 +833,360 @@ fn property_names_bind_both_template_and_plan_identity_only_when_maps_are_read()
             );
         }
     }
+}
+
+fn metadata_fixture() -> Fixture {
+    let mut source = Fixture::new();
+    source.labels = BTreeMap::from([
+        (VId(1), vec![LabelId(1), LabelId(2)]),
+        (VId(2), vec![LabelId(2)]),
+    ]);
+    source.edges[1].2 = RelationId(2);
+    source.edge_types = BTreeMap::from([
+        (EId(11), CanonicalScalar::ucs_basic_text("R").unwrap()),
+        (EId(12), CanonicalScalar::ucs_basic_text("S").unwrap()),
+    ]);
+    source
+}
+
+#[test]
+fn dynamic_metadata_matches_bound_elements_across_lists_rows_and_paths() {
+    let source = metadata_fixture();
+    let reads = Cell::new(0);
+    let bound = source
+        .rows("MATCH (n) RETURN labels(n) AS labels, keys(n) AS keys, properties(n) AS props");
+    assert_eq!(
+        source
+            .dynamic(
+                "MATCH (n) WITH collect(n) AS ns UNWIND ns AS x \
+             RETURN labels(x) AS labels, keys(x) AS keys, properties(x) AS props",
+                &reads,
+            )
+            .unwrap(),
+        bound,
+    );
+    assert_eq!(reads.get(), 6);
+    let text = |name| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(name).unwrap());
+    let list = |values: Vec<_>| GraphValue::List(values.into_boxed_slice());
+    assert_eq!(
+        source
+            .dynamic(
+                "MATCH (n) WITH collect(n) AS ns \
+             RETURN labels(ns[0]) AS ls, properties(ns[0]).p AS p, \
+             [x IN [ns[1], ns[0], ns[1]] | keys(x)] AS ks",
+                &reads,
+            )
+            .unwrap(),
+        vec![vec![
+            list(vec![text("L"), text("M")]),
+            integer(1),
+            list(vec![list(vec![]), list(vec![text("p")]), list(vec![])])
+        ]],
+    );
+    for relation in ["R", "S"] {
+        let dynamic = format!(
+            "MATCH p = (a)-[r:{relation}]->(b) RETURN \
+             [n IN nodes(p) | labels(n)] AS ls, \
+             [e IN relationships(p) | type(e)] AS ts, \
+             [e IN relationships(p) | properties(e)] AS ps"
+        );
+        let bound = format!(
+            "MATCH (a)-[r:{relation}]->(b) RETURN [labels(a), labels(b)] AS ls, \
+             [type(r)] AS ts, [properties(r)] AS ps"
+        );
+        assert_eq!(
+            source.dynamic(&dynamic, &reads).unwrap(),
+            source.rows(&bound),
+            "{relation}"
+        );
+    }
+    assert_eq!(
+        source
+            .dynamic(
+                "MATCH ()-[r]->() WITH collect(r) AS rs UNWIND rs AS x RETURN type(x) AS t",
+                &reads,
+            )
+            .unwrap(),
+        vec![vec![text("R")], vec![text("S")]],
+    );
+    assert_eq!(
+        source
+            .dynamic(
+                "MATCH (n) WITH collect(n) AS ns UNWIND ns AS n \
+             WITH n WHERE 'L' IN labels(n) \
+             RETURN labels(n) + ['Extra'] AS ls, properties(n).p + 2 AS p",
+                &reads,
+            )
+            .unwrap(),
+        vec![vec![
+            list(vec![text("L"), text("M"), text("Extra")]),
+            integer(3)
+        ]],
+    );
+}
+
+#[test]
+fn dynamic_metadata_keeps_null_map_wrong_type_and_lazy_branch_semantics() {
+    let source = metadata_fixture();
+    let reads = Cell::new(0);
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    assert_eq!(
+        source
+            .dynamic(
+                "RETURN labels(NULL) AS l, type(NULL) AS t, properties(NULL) AS p, keys(NULL) AS k",
+                &reads,
+            )
+            .unwrap(),
+        vec![vec![null.clone(); 4]],
+    );
+    assert_eq!(reads.get(), 0);
+    assert_eq!(
+        source
+            .dynamic(
+                "RETURN properties({z: 3, a: 1}) AS p, keys({z: 3, a: 1}) AS k",
+                &reads,
+            )
+            .unwrap(),
+        vec![vec![
+            map(&[("a", integer(1)), ("z", integer(3))]),
+            GraphValue::List(
+                vec![
+                    GraphValue::Scalar(CanonicalScalar::ucs_basic_text("a").unwrap()),
+                    GraphValue::Scalar(CanonicalScalar::ucs_basic_text("z").unwrap()),
+                ]
+                .into_boxed_slice()
+            )
+        ]],
+    );
+    assert_eq!(reads.get(), 0);
+    assert_eq!(
+        source
+            .dynamic(
+                "MATCH (n) WITH collect(n) AS ns RETURN \
+             [x IN [ns[0], NULL, ns[0]] | properties(x)] AS p",
+                &reads,
+            )
+            .unwrap(),
+        vec![vec![GraphValue::List(
+            vec![
+                source.vertices[&VId(1)].clone(),
+                null,
+                source.vertices[&VId(1)].clone()
+            ]
+            .into_boxed_slice()
+        )]],
+    );
+    assert_eq!(reads.get(), 2);
+    for statement in [
+        "RETURN labels(42) AS bad",
+        "RETURN type({}) AS bad",
+        "RETURN properties([1]) AS bad",
+        "MATCH (n) WITH collect(n) AS ns RETURN type(ns[0]) AS bad",
+        "MATCH ()-[r:R]->() WITH collect(r) AS rs RETURN labels(rs[0]) AS bad",
+    ] {
+        reads.set(0);
+        assert!(
+            matches!(
+                source.dynamic(statement, &reads),
+                Err(GqlQueryError::Source(
+                    fgdb_gql::GraphSetExecutionError::Projection { .. }
+                ))
+            ),
+            "{statement}"
+        );
+        assert_eq!(
+            reads.get(),
+            0,
+            "wrong domains must refuse before a metadata lookup: {statement}"
+        );
+    }
+    reads.set(0);
+    assert_eq!(
+        source
+            .dynamic(
+                "MATCH (n) WITH collect(n) AS ns RETURN \
+             CASE WHEN false THEN labels(ns[0]) ELSE [] END AS skipped, \
+             CASE WHEN true THEN properties({a: 1}) ELSE properties(ns[0]) END AS selected, \
+             CASE WHEN true THEN 'ok' ELSE type(ns[0]) END AS skipped_type, \
+             coalesce('ok',type(ns[0])) AS skipped_coalesce",
+                &reads,
+            )
+            .unwrap(),
+        vec![vec![
+            GraphValue::List(Box::new([])),
+            map(&[("a", integer(1))]),
+            GraphValue::Scalar(CanonicalScalar::ucs_basic_text("ok").unwrap()),
+            GraphValue::Scalar(CanonicalScalar::ucs_basic_text("ok").unwrap()),
+        ]],
+    );
+    assert_eq!(reads.get(), 0);
+    for statement in [
+        "RETURN labels(missing) AS bad",
+        "RETURN type(missing) AS bad",
+        "RETURN properties(missing) AS bad",
+        "RETURN keys(missing) AS bad",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+                statement,
+                &[],
+                &mut Catalog("p"),
+            )
+            .is_err(),
+            "{statement}"
+        );
+    }
+}
+
+#[test]
+fn dynamic_metadata_catalog_is_frozen_in_template_and_plan_identity() {
+    let source = metadata_fixture();
+    let statement = "MATCH (n) WITH collect(n) AS ns RETURN properties(ns[0]) AS p";
+    let mut catalog = Catalog("original");
+    let prepared = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+        statement,
+        &[],
+        &mut catalog,
+    )
+    .unwrap();
+    catalog.0 = "changed";
+    let changed = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+        statement,
+        &[],
+        &mut catalog,
+    )
+    .unwrap();
+    assert_ne!(
+        prepared.canonical_template_bytes(),
+        changed.canonical_template_bytes()
+    );
+    let query = prepared.bind_parameters(&GqlParameters::new()).unwrap();
+    let repeated = prepared.bind_parameters(&GqlParameters::new()).unwrap();
+    assert_eq!(query.canonical_bytes(), repeated.canonical_bytes());
+    assert_ne!(
+        query.canonical_bytes(),
+        changed
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .canonical_bytes()
+    );
+    let result = query
+        .execute_governed_with_elements(
+            policy(),
+            |pattern, policy| source.execute(pattern, policy),
+            |_, _, _| unreachable!(),
+            source.reader(None),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    assert_eq!(
+        result.value[0].values(),
+        &[map(&[("original", integer(1))])]
+    );
+}
+
+#[test]
+fn aggregate_output_metadata_reads_collected_identities_at_the_same_source() {
+    let source = metadata_fixture();
+    let statement = "MATCH (n) RETURN [x IN collect(n) | labels(x)] AS ls, \
+        [x IN collect(n) | properties(x)] AS ps";
+    let query = PreparedGraphAggregateText::prepare_with_parameter_types_and_resolver(
+        statement,
+        &[],
+        Catalog("p"),
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    let reads = Cell::new(0);
+    let result = query
+        .execute_governed_with_element_maps_and_reads(
+            2,
+            source.vertices.keys().copied(),
+            [],
+            |_, _| Ok::<_, ()>(true),
+            |vid, key| Ok(source.vertex_values.get(&(vid, key))),
+            |_, _| Ok(None),
+            |_| Ok(None),
+            |_| Ok(None),
+            |vid| Ok(source.vertices.get(&vid)),
+            |_| Ok(None),
+            source.reader(Some(&reads)),
+            policy(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    let expected = source
+        .dynamic(
+            "MATCH (n) WITH collect(n) AS ns RETURN [x IN ns | labels(x)] AS ls, \
+         [x IN ns | properties(x)] AS ps",
+            &Cell::new(0),
+        )
+        .unwrap();
+    assert_eq!(
+        result.value[0].values(),
+        expected[0]
+            .iter()
+            .cloned()
+            .map(GraphAggregateValue::Value)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(reads.get(), 4);
+}
+
+#[test]
+fn mutation_metadata_reads_final_intents_in_return_aggregates_and_continuations() {
+    let source = metadata_fixture();
+    let text = |name| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(name).unwrap());
+    let list = |values: Vec<_>| GraphValue::List(values.into_boxed_slice());
+    let labels = vec![list(vec![text("L")]), list(vec![])];
+    let properties = vec![map(&[("p", integer(7))]); 2];
+    for (tail, expected) in [
+        (
+            "RETURN [x IN [n] | labels(x)] AS ls, [x IN [n] | properties(x)] AS ps",
+            (0..2)
+                .map(|at| {
+                    vec![
+                        list(vec![labels[at].clone()]),
+                        list(vec![properties[at].clone()]),
+                    ]
+                })
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "RETURN [x IN collect(n) | labels(x)] AS ls, [x IN collect(n) | properties(x)] AS ps",
+            vec![vec![list(labels.clone()), list(properties.clone())]],
+        ),
+        (
+            "WITH collect(n) AS ns RETURN [x IN ns | labels(x)] AS ls, [x IN ns | properties(x)] AS ps",
+            vec![vec![list(labels.clone()), list(properties.clone())]],
+        ),
+    ] {
+        let statement = format!("MATCH (n) SET n.p=7 REMOVE n:M {tail}");
+        let query = PreparedGraphMutationQueryText::prepare(&statement, R, Catalog("p"))
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let result = query
+            .execute_governed_reading(
+                GraphMutationPolicy::new(policy(), 100),
+                |pattern, policy| source.execute(pattern, policy),
+                source.reader(None),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+        assert_eq!(
+            result
+                .returning()
+                .value
+                .iter()
+                .map(|row| row.values().to_vec())
+                .collect::<Vec<_>>(),
+            expected,
+            "{statement}"
+        );
+    }
+    // The host was a frozen pre-statement snapshot throughout each execution.
+    assert_eq!(source.vertices[&VId(1)], map(&[("p", integer(1))]));
+    assert_eq!(source.labels[&VId(2)], [LabelId(2)]);
 }

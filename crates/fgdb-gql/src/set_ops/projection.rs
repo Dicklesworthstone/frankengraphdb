@@ -552,7 +552,9 @@ impl GraphSetValue {
                 matches!(property, GraphElementKey::Property(_))
                     || map.may_read_element_properties()
             }
-            Self::ElementMetadata { .. } => true,
+            Self::ElementMetadata { value, .. } => {
+                value.may_read_element_properties() || value.may_be_element_value()
+            }
             Self::List(values) => values.iter().any(Self::may_read_element_properties),
             Self::Size(value)
             | Self::Keys(value)
@@ -622,6 +624,29 @@ impl GraphSetValue {
                     .as_deref()
                     .is_some_and(Self::may_read_element_properties)
             }
+        }
+    }
+
+    /// Conservative result-domain check for metadata effects. Known maps,
+    /// lists and NULLs stay reader-free even though metadata accepts elements.
+    fn may_be_element_value(&self) -> bool {
+        match self {
+            Self::Column(_)
+            | Self::Local(_)
+            | Self::Index { .. }
+            | Self::MapGet { .. }
+            | Self::Reduce { .. }
+            | Self::Let { .. }
+            | Self::Case { .. } => true,
+            Self::Value(value) => matches!(value, GraphValue::Vertex(_) | GraphValue::Edge(_)),
+            Self::Function {
+                function: GraphValueFunction::Coalesce,
+                argument,
+            } => match argument.as_ref() {
+                Self::List(values) => values.iter().any(Self::may_be_element_value),
+                _ => true,
+            },
+            _ => false,
         }
     }
 
@@ -2011,6 +2036,26 @@ impl<E> ElementReader<E> for HostElements<'_, E> {
     }
 
     fn metadata(
+        &mut self,
+        element: ElementId,
+        kind: GraphElementMetadata,
+        catalog: &crate::ReverseSymbolCatalog,
+        control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<Result<Option<GraphValue>, GraphElementMetadataError<E>>> {
+        self.0.element_metadata(element, kind, catalog, control)
+    }
+}
+
+impl<E> super::GraphElementReader<E> for HostElements<'_, E> {
+    fn element_property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E> {
+        self.0.element_property(element, key)
+    }
+
+    fn element_metadata(
         &mut self,
         element: ElementId,
         kind: GraphElementMetadata,

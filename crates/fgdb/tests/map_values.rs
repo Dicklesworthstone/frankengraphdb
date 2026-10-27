@@ -669,7 +669,6 @@ fn malformed_map_forms_refuse_typed() {
         for statement in [
             "UNWIND [3] AS m RETURN m.a AS v",
             "RETURN keys([1, 2]) AS k",
-            "MATCH (n:Person) WHERE n.p = 10 RETURN keys(n) AS k",
         ] {
             let result = db.query(cx, statement, &params, symbols, policy());
             assert!(result.is_err(), "{statement}: {result:?}");

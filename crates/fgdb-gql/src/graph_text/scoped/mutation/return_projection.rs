@@ -2664,6 +2664,8 @@ impl<'a> Parser<'a> {
                 values,
                 guard: None,
             }
+        } else if let Some(column) = self.resolved_write_metadata(resolve)? {
+            ReadValueTemplate::Column(column)
         } else if let Some(kind) = self.value_metadata_call(inputs.is_some(), schema)? {
             self.advance()?;
             self.punct(b'(', "(")?;
@@ -3171,6 +3173,31 @@ impl<'a> Parser<'a> {
             (boundary.functions.iter()).any(|&(read, known, _)| read == name && known == path)
         });
         Ok((!carried && schema.iter().any(|(column, _)| column.text == name)).then_some(function))
+    }
+
+    /// Preserve native final metadata cells owned by CREATE/MERGE/SET. The
+    /// owner explicitly declines carried values that need a dynamic read.
+    fn resolved_write_metadata(
+        &mut self,
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        if !(self.is_word("LABELS") || self.is_word("TYPE")) {
+            return Ok(None);
+        }
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(None);
+        };
+        let Some((source, _)) = pipeline::metadata_source(word, self.current.at, &self.lexer)?
+        else {
+            return Ok(None);
+        };
+        if self.elements.contains(&source.text) {
+            return Ok(None);
+        }
+        match resolve.as_mut() {
+            Some(ValueResolver::Write(leaves)) => leaves.metadata_leaf(self, source),
+            _ => Ok(None),
+        }
     }
 
     /// Keep existing graph-column metadata reads where available. Every

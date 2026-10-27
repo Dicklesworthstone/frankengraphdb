@@ -34,6 +34,39 @@ fn source(error: WriteTxnError) -> Fault {
     GqlQueryError::Source(GraphMutationError::Source(error))
 }
 
+/// Admit declared writes before the generic RETURN overlay combines their
+/// intents with masked base metadata. This runs even for empty selections or
+/// NULL targets, so an ungranted name cannot first produce a metadata or
+/// expression error. Actual targets and original before/after images still
+/// pass the ordinary staging checks, including label-induced scope escapes.
+pub(super) fn admit_declared_mutation_fields<Clock: FnMut() -> u64>(
+    query_cx: &QueryCx,
+    mutation: &PreparedGraphMutation,
+    execution: &mut Execution<'_, '_, Clock>,
+) -> Result<(), WriteTxnError> {
+    use fgdb_gql::GraphMutationAction;
+    for action in mutation.actions() {
+        query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+        execution.checkpoint()?;
+        match action {
+            GraphMutationAction::SetProperty { key, .. }
+            | GraphMutationAction::RemoveProperty { key, .. } => {
+                execution.fields([], [*key])?;
+            }
+            GraphMutationAction::ClearProperties { keep, .. } => {
+                execution.fields([], keep.iter().copied())?;
+            }
+            GraphMutationAction::SetLabel { label, .. } => {
+                execution.fields([*label], [])?;
+            }
+            GraphMutationAction::Delete { .. }
+            | GraphMutationAction::DetachDelete { .. }
+            | GraphMutationAction::DeleteValue { .. } => {}
+        }
+    }
+    Ok(())
+}
+
 impl<V: Vfs + Clone> Database<V> {
     /// Execute a mutation and its RETURN projection under one ReadWrite permit.
     ///
@@ -148,6 +181,8 @@ impl<V: Vfs + Clone> Database<V> {
                     clock,
                 };
                 execution.checkpoint().map_err(query_source)?;
+                admit_declared_mutation_fields(query_cx, query.mutation(), &mut execution)
+                    .map_err(query_source)?;
                 let mut workspace = Workspace(Some(
                     self.begin(txn_cx)
                         .map_err(|error| query_source(WriteTxnError::Write(error)))?,
@@ -350,6 +385,8 @@ impl<V: Vfs + Clone> Database<V> {
                     clock,
                 };
                 execution.checkpoint().map_err(source)?;
+                admit_declared_mutation_fields(query_cx, mutation, &mut execution)
+                    .map_err(source)?;
                 let mut workspace = Workspace(Some(
                     self.begin(txn_cx)
                         .map_err(|error| source(WriteTxnError::Write(error)))?,

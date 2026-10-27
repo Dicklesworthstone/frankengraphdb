@@ -37,6 +37,29 @@ fn catalog(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         _ => None,
     }
 }
+
+#[derive(Clone, Copy)]
+struct MetadataCatalog {
+    omit_name: bool,
+}
+
+impl fgdb_gql::GraphSymbolResolver for MetadataCatalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        catalog(kind, name)
+    }
+
+    fn reverse_catalog(&self) -> Option<fgdb_gql::ReverseSymbolCatalog> {
+        let mut names = fgdb_gql::ReverseSymbolCatalog::new();
+        names.insert_label(L, "Node");
+        names.insert_property(BODY, "body");
+        names.insert_property(X, "x");
+        if !self.omit_name {
+            names.insert_property(NAME, "name");
+        }
+        // LabelId(99) and SECRET are deliberately unnamed and masked.
+        Some(names)
+    }
+}
 fn options() -> Options {
     let mut options = Options::text(BODY);
     options.vertex_label = Some(L);
@@ -122,6 +145,129 @@ async fn database(cx: &CommitCx) -> Database<MemVfs> {
     );
     db.write(cx, batch).await.unwrap();
     db
+}
+
+#[test]
+fn retrieved_dynamic_metadata_masks_before_naming_and_restores_original_errors() {
+    let ((), report) = run_async_under_lab(0xbeac_6210, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let db = database(&c.commit()).await;
+        let authority = authority();
+        let token = authority.issue_at(&grant(), NOW).unwrap();
+        let mut session = db
+            .authorized_read_session(
+                &c.query(),
+                &authority,
+                &token,
+                "main",
+                MetadataCatalog { omit_name: false },
+                host(),
+                || NOW,
+            )
+            .unwrap();
+        let index = session
+            .prepare_beacon_index(&c.query(), &options())
+            .unwrap();
+        let query = format!(
+            "{CALL}WITH node UNWIND [node] AS v RETURN \
+            labels(v) AS labels, keys(v) AS keys, properties(v).name AS name"
+        );
+        let parameters_at_prepare = parameters(0, &[HIGH]);
+        let prepared = session
+            .prepare(&c.query(), &query, &parameters_at_prepare)
+            .unwrap();
+        for (id, name) in [(HIGH, "high"), (VId(1), "one")] {
+            let params = parameters(0, &[id]);
+            let scans = crate::query::authorized::SCANS.with(Cell::get);
+            let actual = rows(
+                session
+                    .execute_beacon_index(&c.query(), &index, &prepared, &params)
+                    .unwrap(),
+            );
+            let values = |names: &[&str]| {
+                QueryValue::Value(GraphValue::List(
+                    names
+                        .iter()
+                        .map(|name| GraphValue::Scalar(text(name)))
+                        .collect(),
+                ))
+            };
+            assert_eq!(
+                actual,
+                vec![vec![
+                    values(&["Node"]),
+                    values(&["body", "name", "x"]),
+                    QueryValue::Value(GraphValue::Scalar(text(name))),
+                ]]
+            );
+            assert_eq!(crate::query::authorized::SCANS.with(Cell::get), scans);
+        }
+        // Metadata cannot widen this prepared index source to another caller-
+        // supplied identity, even when that vertex is otherwise visible.
+        let outside = parameters(0, &[HIGH])
+            .with_list("outside", vec![GraphValue::Vertex(VId(1))])
+            .unwrap();
+        let attack = session
+            .prepare(
+                &c.query(),
+                &format!("{CALL}WITH $outside[0] AS v RETURN labels(v) AS labels"),
+                &outside,
+            )
+            .unwrap();
+        assert!(
+            session
+                .execute_beacon_index(&c.query(), &index, &attack, &outside)
+                .is_err()
+        );
+        assert!(!session.is_closed());
+        session.close();
+
+        let mut missing = db
+            .authorized_read_session(
+                &c.query(),
+                &authority,
+                &token,
+                "main",
+                MetadataCatalog { omit_name: true },
+                host(),
+                || NOW,
+            )
+            .unwrap();
+        let index = missing
+            .prepare_beacon_index(&c.query(), &options())
+            .unwrap();
+        let query = format!("{CALL}WITH node UNWIND [node] AS v RETURN properties(v) AS props");
+        let prepared = missing
+            .prepare(&c.query(), &query, &parameters_at_prepare)
+            .unwrap();
+        assert!(matches!(
+            missing.execute_beacon_index(&c.query(), &index, &prepared, &parameters_at_prepare),
+            Err(QueryError::Read(crate::ReadError::UnmappedProperty(NAME)))
+        ));
+        // The private carrier error never escapes and never poisons later
+        // statements: the missing property name is irrelevant to labels.
+        assert!(!missing.is_closed());
+        let labels = missing
+            .prepare(
+                &c.query(),
+                &format!("{CALL}WITH node UNWIND [node] AS v RETURN labels(v) AS labels"),
+                &parameters_at_prepare,
+            )
+            .unwrap();
+        assert_eq!(
+            rows(
+                missing
+                    .execute_beacon_index(&c.query(), &index, &labels, &parameters_at_prepare,)
+                    .unwrap()
+            ),
+            vec![vec![QueryValue::Value(GraphValue::List(
+                vec![GraphValue::Scalar(text("Node"))].into(),
+            ))]]
+        );
+        missing.close();
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

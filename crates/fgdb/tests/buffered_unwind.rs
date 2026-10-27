@@ -253,6 +253,292 @@ async fn contents(
 }
 
 #[test]
+fn element_metadata_matches_bound_values_through_resident_and_cold_spill() {
+    use fgdb_delta_types::LabelId;
+    use fgdb_gql::{GraphSymbolResolver, ReverseSymbolCatalog};
+
+    struct Catalog;
+    impl GraphSymbolResolver for Catalog {
+        fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            match (kind, name) {
+                (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(2))),
+                _ => resolve(kind, name),
+            }
+        }
+        fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+            let mut catalog = ReverseSymbolCatalog::new();
+            catalog.insert_label(LabelId(1), "Alpha");
+            catalog.insert_label(LabelId(2), "Omega");
+            catalog.insert_relation(RelationId(1), "R");
+            catalog.insert_relation(RelationId(2), "S");
+            catalog.insert_property(PropertyKeyId(1), "p");
+            Some(catalog)
+        }
+    }
+
+    let ((), report) = run_async_under_lab(0xc01d_4510, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        batch.create_vertex(
+            VId(1),
+            vec![LabelId(1), LabelId(2)],
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(1))],
+        );
+        batch.create_vertex(
+            VId(u128::MAX),
+            vec![LabelId(2)],
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(2))],
+        );
+        batch.add_edge(
+            EId(u128::MAX),
+            VId(1),
+            VId(u128::MAX),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+        );
+        db.write(&commit, batch).await.unwrap();
+        let mut batch = WriteBatch::new(RelationId(2));
+        batch.add_edge(
+            EId(2),
+            VId(u128::MAX),
+            VId(1),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(8))],
+        );
+        db.write(&commit, batch).await.unwrap();
+        let resident = db.read_session().unwrap();
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
+        let mut cold = view(&commit, &vfs, &source_pool).await;
+        let retained = source_pool.used();
+        let params = GqlParameters::new();
+        let list = |values: Vec<_>| GraphValue::List(values.into_boxed_slice());
+        let text = |name| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(name).unwrap());
+        let props = |value| GraphValue::map(vec![("p".into(), scalar(value))]).unwrap();
+        let labels = [
+            list(vec![text("Alpha"), text("Omega")]),
+            list(vec![text("Omega")]),
+        ];
+        let vertex_query = "MATCH (n) WITH [n,n,NULL] AS items RETURN \
+            [x IN items | labels(x)] AS ls,[x IN items | properties(x)] AS ps,\
+            [x IN items | keys(x)] AS ks ORDER BY ps";
+        let vertex_expected = (0..2)
+            .map(|at| {
+                vec![
+                    list(vec![labels[at].clone(), labels[at].clone(), null()]),
+                    list(vec![props(at as i64 + 1), props(at as i64 + 1), null()]),
+                    list(vec![list(vec![text("p")]), list(vec![text("p")]), null()]),
+                ]
+            })
+            .collect::<Vec<_>>();
+        for (dynamic, bound, expected) in [
+            (
+                vertex_query,
+                "MATCH (n) RETURN [labels(n),labels(n),NULL] AS ls,\
+                 [properties(n),properties(n),NULL] AS ps,[keys(n),keys(n),NULL] AS ks ORDER BY ps",
+                vertex_expected.clone(),
+            ),
+            (
+                "MATCH ()-[r]->() WITH [r,NULL,r] AS items RETURN \
+                 [x IN items | type(x)] AS ts,[x IN items | keys(x)] AS ks,\
+                 [x IN items | properties(x)] AS ps ORDER BY ps",
+                "MATCH ()-[r]->() RETURN [type(r),NULL,type(r)] AS ts,\
+                 [keys(r),NULL,keys(r)] AS ks,[properties(r),NULL,properties(r)] AS ps ORDER BY ps",
+                [("R", 7), ("S", 8)]
+                    .into_iter()
+                    .map(|(relation, value)| {
+                        vec![
+                            list(vec![text(relation), null(), text(relation)]),
+                            list(vec![list(vec![text("p")]), null(), list(vec![text("p")])]),
+                            list(vec![props(value), null(), props(value)]),
+                        ]
+                    })
+                    .collect(),
+            ),
+            (
+                "MATCH path = (a)-[r:R]->(b) WITH nodes(path) AS ns,relationships(path) AS rs \
+                 RETURN [x IN ns | labels(x)] AS ls,[x IN rs | type(x)] AS ts,\
+                 [x IN rs | properties(x)] AS ps ORDER BY ts",
+                "MATCH (a)-[r:R]->(b) RETURN [labels(a),labels(b)] AS ls,\
+                 [type(r)] AS ts,[properties(r)] AS ps ORDER BY ts",
+                vec![vec![
+                    list(labels.to_vec()),
+                    list(vec![text("R")]),
+                    list(vec![props(7)]),
+                ]],
+            ),
+        ] {
+            let expected_native = expected
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .cloned()
+                        .map(GraphAggregateValue::Value)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            for statement in [bound, dynamic] {
+                let query = PreparedNativeRead::prepare(statement, &params, Catalog).unwrap();
+                let fgdb::QueryResult::Rows { rows, .. } = query
+                    .execute_in_view(&resident, &cx, &params, policy(100))
+                    .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+                else {
+                    panic!("metadata reads return rows")
+                };
+                assert_eq!(rows, expected_native, "{statement}");
+            }
+            let prepared = PreparedNativeRead::prepare(dynamic, &params, Catalog).unwrap();
+            let buffered = prepared.prepare_buffered_order(&params).unwrap();
+            for run_rows in [1, 3] {
+                let (mut scratch, _) = file(&cx, &spill_pool).await;
+                let (mut destination, _) = file(&cx, &spill_pool).await;
+                let (spool, _) = prepared
+                    .spool_ordered_in_view(
+                        &resident,
+                        &cx,
+                        &params,
+                        policy(100),
+                        &mut scratch,
+                        &mut destination,
+                        run_rows,
+                        64,
+                        127,
+                        32 * 1024,
+                        100,
+                        WORK,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("resident {dynamic}: {error:?}"));
+                assert_eq!(contents(&spool, &mut destination, &cx).await, expected);
+                assert_eq!(spool.snapshot_seq(), CommitSeq(2));
+                assert_eq!(spill_pool.used(), 0);
+
+                let (mut scratch, _) = file(&cx, &spill_pool).await;
+                let (mut destination, _) = file(&cx, &spill_pool).await;
+                let (mut auxiliary, _) = file(&cx, &spill_pool).await;
+                let (spool, _) = buffered
+                    .spool_in_view(
+                        &mut cold,
+                        &cx,
+                        policy(100),
+                        &mut scratch,
+                        &mut destination,
+                        &mut auxiliary,
+                        run_rows,
+                        512,
+                        1,
+                        512,
+                        127,
+                        32 * 1024,
+                        100,
+                        WORK,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("buffered {dynamic}: {error:?}"));
+                assert_eq!(contents(&spool, &mut destination, &cx).await, expected);
+                assert_eq!(spool.snapshot_seq(), CommitSeq(2));
+                let admitted = spool.evaluator_stats();
+                // Point reads may retain the configured one authenticated
+                // cache frame; query-owned decoded rows must all be released.
+                assert!(source_pool.used() <= retained + 16 * 1024);
+                assert_eq!(spill_pool.used(), 0);
+                let mut below = policy(100);
+                below.evaluator.max_work_units = admitted.work_units - 1;
+                let error = buffered
+                    .spool_in_view(
+                        &mut cold,
+                        &cx,
+                        below,
+                        &mut scratch,
+                        &mut destination,
+                        &mut auxiliary,
+                        run_rows,
+                        512,
+                        1,
+                        512,
+                        127,
+                        32 * 1024,
+                        100,
+                        WORK,
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(
+                    matches!(error, NativeSpoolError::BufferedExecute(ref error)
+                    if matches!(**error, GqlQueryError::Evaluator(_))),
+                    "{error:?}"
+                );
+                assert!(source_pool.used() <= retained + 16 * 1024);
+                assert_eq!(spill_pool.used(), 0);
+            }
+        }
+
+        // Suspend an actual metadata output frame, then drop the operation.
+        // No borrowed cold record, recursive frame or output row may survive.
+        let prepared = PreparedNativeRead::prepare(vertex_query, &params, Catalog)
+            .unwrap()
+            .prepare_buffered_order(&params)
+            .unwrap();
+        let marker = GraphValueRow::from_owned_values(vertex_expected[0].clone())
+            .canonical_bytes()
+            .unwrap();
+        let (mut scratch, a) = file(&cx, &spill_pool).await;
+        let (mut destination, b) = file(&cx, &spill_pool).await;
+        let (mut auxiliary, c) = file(&cx, &spill_pool).await;
+        for backing in [&a, &b, &c] {
+            backing.0.lock().unwrap().suspend_row = Some(marker.clone());
+        }
+        let mut future = prepared.spool_in_view(
+            &mut cold,
+            &cx,
+            policy(100),
+            &mut scratch,
+            &mut destination,
+            &mut auxiliary,
+            1,
+            512,
+            1,
+            512,
+            8 + marker.len(),
+            32 * 1024,
+            100,
+            WORK,
+        );
+        let blocked = poll_fn(|task| {
+            let result = future.as_mut().poll(task);
+            let suspended = [
+                a.0.lock().unwrap().suspended,
+                b.0.lock().unwrap().suspended,
+                c.0.lock().unwrap().suspended,
+            ];
+            if let Some(index) = suspended.iter().position(|&seen| seen) {
+                assert!(result.is_pending());
+                Poll::Ready(index)
+            } else {
+                assert!(
+                    result.is_pending(),
+                    "metadata output append must be reached: {result:?}"
+                );
+                Poll::Pending
+            }
+        })
+        .await;
+        assert!(spill_pool.used() > 0);
+        drop(future);
+        assert!([&scratch, &destination, &auxiliary][blocked].is_poisoned());
+        assert!(source_pool.used() <= retained + 16 * 1024);
+        assert_eq!(spill_pool.used(), 0);
+        drop(cold);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn cold_unwind_keeps_nested_values_multiplicity_history_and_completed_pages() {
     let ((), report) = run_async_under_lab(0xc01d_4101, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

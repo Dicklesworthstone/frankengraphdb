@@ -561,6 +561,12 @@ impl<V: Vfs + Clone> Database<V> {
                 // Match the standalone mutation contract even when the target
                 // identity comes from a creation earlier in this statement.
                 reads = true;
+                mutation::admit_declared_mutation_fields(query_cx, mutation, &mut execution)
+                    .map_err(|error| {
+                        GqlQueryError::Source(GraphWriteChainError::Mutation(
+                            GraphMutationQueryError::Mutation(GraphMutationError::Source(error)),
+                        ))
+                    })?;
                 if let Some(pattern) = mutation.selection() {
                     admit_pattern(pattern, scope).map_err(source)?;
                 }

@@ -410,6 +410,10 @@ fn created_vertex_labels_are_the_create_labels_in_identity_order() {
         ),
         ("CREATE (node) RETURN labels(node)", vec![vec![names(&[])]]),
         (
+            "CREATE (node:Foo) RETURN CASE WHEN true THEN labels(node) ELSE labels(NULL) END AS l",
+            vec![vec![names(&["Foo"])]],
+        ),
+        (
             "CREATE (n:Foo)-[:R]->(:Dog) RETURN labels(n) AS l",
             vec![vec![names(&["Foo"])]],
         ),

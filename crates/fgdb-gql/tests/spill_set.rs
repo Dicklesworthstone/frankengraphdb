@@ -2154,9 +2154,11 @@ fn cartesian_oversized_rows_and_unsupported_children_refuse_before_empty_pages()
 
 mod async_elements {
     use super::*;
-    use fgdb_delta_types::ElementId;
-    use fgdb_gql::GraphElementKey;
+    use fgdb_delta_types::{ElementId, LabelId};
     use fgdb_gql::spill_set::AsyncSpillElementSource;
+    use fgdb_gql::{
+        GraphElementKey, GraphElementMetadata, GraphSymbolResolver, ReverseSymbolCatalog,
+    };
     use std::borrow::Borrow;
     use std::future::{Future, poll_fn};
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -2281,6 +2283,155 @@ mod async_elements {
             }
             self.source.element_property(element, key).await
         }
+    }
+
+    struct MetadataCatalog;
+    impl GraphSymbolResolver for MetadataCatalog {
+        fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            symbols(kind, name)
+        }
+        fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+            let mut catalog = ReverseSymbolCatalog::new();
+            catalog.insert_label(LabelId(1), "Article");
+            catalog.insert_label(LabelId(2), "Featured");
+            catalog.insert_relation(R, "LINK");
+            catalog.insert_property(P, "p");
+            Some(catalog)
+        }
+    }
+
+    #[derive(Default)]
+    struct MetadataReader {
+        calls: Vec<(ElementId, GraphElementMetadata)>,
+        live: Arc<AtomicUsize>,
+        refuse: bool,
+    }
+    struct MetadataGuard {
+        value: Option<GraphValue>,
+        live: Arc<AtomicUsize>,
+    }
+    impl Drop for MetadataGuard {
+        fn drop(&mut self) {
+            self.live.fetch_sub(1, AtomicOrdering::SeqCst);
+        }
+    }
+
+    fn metadata_text<E>(
+        name: &str,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<GraphValue, E> {
+        control(GlaExecutionEvent::ScratchEntry)?;
+        for _ in 0..name
+            .len()
+            .div_ceil(fgdb_gql::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+        {
+            control(GlaExecutionEvent::Work)?;
+            control(GlaExecutionEvent::ScratchEntry)?;
+        }
+        Ok(GraphValue::Scalar(
+            CanonicalScalar::ucs_basic_text(name).unwrap(),
+        ))
+    }
+
+    impl AsyncSpillElementSource for MetadataReader {
+        type Error = &'static str;
+        type Property = Property;
+
+        async fn element_property(
+            &mut self,
+            _: ElementId,
+            _: PropertyKeyId,
+        ) -> Option<Result<Option<Property>, Self::Error>> {
+            Some(Err("metadata fixture received a per-key read"))
+        }
+
+        async fn element_metadata_with_control(
+            &mut self,
+            element: ElementId,
+            kind: GraphElementMetadata,
+            catalog: &ReverseSymbolCatalog,
+            control: &mut (impl FnMut(GlaExecutionEvent) -> Result<(), Self::Error> + Send),
+        ) -> Option<Result<Option<GraphValue>, Self::Error>> {
+            self.calls.push((element, kind));
+            let (number, labels, relation) = match element {
+                ElementId::Vertex(VId(1)) => (2, &[LabelId(1), LabelId(2)][..], None),
+                ElementId::Vertex(VId(u128::MAX)) => (7, &[LabelId(2)][..], None),
+                ElementId::Edge(EId(u128::MAX)) => (11, &[][..], Some(R)),
+                _ => return Some(Ok(None)),
+            };
+            let value = (|| {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                Ok(match kind {
+                    GraphElementMetadata::Labels => GraphValue::List(
+                        labels
+                            .iter()
+                            .map(|id| metadata_text(&catalog.labels[id], control))
+                            .collect::<Result<Vec<_>, _>>()?
+                            .into_boxed_slice(),
+                    ),
+                    GraphElementMetadata::Type => {
+                        metadata_text(&catalog.relations[&relation.unwrap()], control)?
+                    }
+                    GraphElementMetadata::Keys => GraphValue::List(
+                        vec![metadata_text(&catalog.properties[&P], control)?].into_boxed_slice(),
+                    ),
+                    GraphElementMetadata::Properties => {
+                        let name = &catalog.properties[&P];
+                        for _ in 0..=name
+                            .len()
+                            .div_ceil(fgdb_gql::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+                        {
+                            control(GlaExecutionEvent::ScratchEntry)?;
+                        }
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        GraphValue::map(vec![(name.as_str().into(), scalar(number))]).unwrap()
+                    }
+                })
+            })();
+            let value = match value {
+                Ok(value) => value,
+                Err(error) => return Some(Err(error)),
+            };
+            self.live.fetch_add(1, AtomicOrdering::SeqCst);
+            let mut guard = MetadataGuard {
+                value: Some(value),
+                live: Arc::clone(&self.live),
+            };
+            // The catalog and the source guard both survive a real suspension.
+            let mut suspended = false;
+            poll_fn(|cx| {
+                if suspended {
+                    Poll::Ready(())
+                } else {
+                    suspended = true;
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+            Some(if self.refuse {
+                Err("metadata source refused")
+            } else {
+                Ok(guard.value.take())
+            })
+        }
+    }
+
+    fn metadata_stage(expression: &str) -> SpillSetStage {
+        let query = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+            &format!("MATCH (n) WITH [n] AS items RETURN {expression} AS result"),
+            &[],
+            &mut MetadataCatalog,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        AsyncSpillSetPlan::compile(&query)
+            .unwrap()
+            .stages()
+            .last()
+            .unwrap()
+            .clone()
     }
 
     #[derive(Default)]
@@ -2611,6 +2762,129 @@ mod async_elements {
                 Effect::Event(_) => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn metadata_uses_the_same_async_stage_for_lists_nulls_names_and_failures() {
+        let list = |values: Vec<_>| GraphValue::List(values.into_boxed_slice());
+        let text = |name| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(name).unwrap());
+        let props = |value| GraphValue::map(vec![("p".into(), scalar(value))]).unwrap();
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        let v1 = GraphValue::Vertex(VId(1));
+        let vmax = GraphValue::Vertex(VId(u128::MAX));
+        let edge = GraphValue::Edge(EId(u128::MAX));
+        let mixed = list(vec![
+            v1.clone(),
+            vmax.clone(),
+            v1.clone(),
+            edge.clone(),
+            null.clone(),
+            GraphValue::Vertex(VId(2)),
+        ]);
+        for (expression, input, expected, kind, count) in [
+            (
+                "[x IN items | properties(x)]",
+                mixed.clone(),
+                list(vec![
+                    props(2),
+                    props(7),
+                    props(2),
+                    props(11),
+                    null.clone(),
+                    null.clone(),
+                ]),
+                GraphElementMetadata::Properties,
+                5,
+            ),
+            (
+                "[x IN items | keys(x)]",
+                mixed,
+                list(
+                    vec![list(vec![text("p")]); 4]
+                        .into_iter()
+                        .chain([null.clone(), null.clone()])
+                        .collect(),
+                ),
+                GraphElementMetadata::Keys,
+                5,
+            ),
+            (
+                "[x IN items | labels(x)]",
+                list(vec![v1.clone(), null.clone(), vmax, v1.clone()]),
+                list(vec![
+                    list(vec![text("Article"), text("Featured")]),
+                    null.clone(),
+                    list(vec![text("Featured")]),
+                    list(vec![text("Article"), text("Featured")]),
+                ]),
+                GraphElementMetadata::Labels,
+                3,
+            ),
+            (
+                "[x IN items | type(x)]",
+                list(vec![edge.clone(), null.clone(), edge]),
+                list(vec![text("LINK"), null, text("LINK")]),
+                GraphElementMetadata::Type,
+                2,
+            ),
+            (
+                "CASE WHEN true THEN labels(items[0]) ELSE type(items[0]) END",
+                list(vec![v1]),
+                list(vec![text("Article"), text("Featured")]),
+                GraphElementMetadata::Labels,
+                1,
+            ),
+        ] {
+            let mut reader = MetadataReader::default();
+            let frames = Frames::new(usize::MAX, None);
+            let result = run_source(
+                &metadata_stage(expression),
+                row(vec![input]),
+                &mut reader,
+                &frames,
+                &mut |_| Ok(()),
+            );
+            assert_eq!(result.unwrap(), vec![row(vec![expected])], "{expression}");
+            assert_eq!(reader.calls.len(), count, "{expression}");
+            assert!(reader.calls.iter().all(|(_, requested)| *requested == kind));
+            assert_eq!(reader.live.load(AtomicOrdering::SeqCst), 0);
+            assert_eq!(frames.state.current.load(AtomicOrdering::SeqCst), 0);
+        }
+
+        let stage = metadata_stage("properties(items[0])");
+        let frames = Frames::new(usize::MAX, None);
+        let mut reader = MetadataReader {
+            refuse: true,
+            ..MetadataReader::default()
+        };
+        assert_eq!(
+            run_source(&stage, input(), &mut reader, &frames, &mut |_| Ok(())),
+            Err(SpillSetRowError::Control("metadata source refused"))
+        );
+        assert_eq!(reader.live.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(frames.state.current.load(AtomicOrdering::SeqCst), 0);
+
+        let mut reader = MetadataReader::default();
+        let live = Arc::clone(&reader.live);
+        let reserve = |bytes| frames.reserve(bytes);
+        let mut meter = |_| Ok(());
+        let mut future = Box::pin(stage.start_with_async_elements(
+            input(),
+            17,
+            &mut meter,
+            &mut reader,
+            &reserve,
+        ));
+        assert!(
+            future
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        assert_eq!(live.load(AtomicOrdering::SeqCst), 1);
+        drop(future);
+        assert_eq!(live.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(frames.state.current.load(AtomicOrdering::SeqCst), 0);
     }
 
     #[test]

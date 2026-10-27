@@ -70,6 +70,15 @@ pub(super) trait ReturnLeaves<'a> {
     /// The binding column of the leaf at the current token, consuming it;
     /// `None` consumes nothing and leaves the token to the expression parser.
     fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>;
+    /// An existing native cell for a complete bare labels/type call. Owners
+    /// decline carried values so their metadata reads the final source cut.
+    fn metadata_leaf(
+        &mut self,
+        _parser: &mut Parser<'a>,
+        _source: Name<'a>,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        Ok(None)
+    }
     fn map_input(
         &mut self,
         _parser: &mut Parser<'a>,
@@ -332,6 +341,22 @@ struct MutationLeaves<'r, 'a> {
     row: Option<&'r [(Name<'a>, GraphSetColumnType)]>,
 }
 impl<'a> ReturnLeaves<'a> for MutationLeaves<'_, 'a> {
+    fn metadata_leaf(
+        &mut self,
+        parser: &mut Parser<'a>,
+        source: Name<'a>,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        if self.row.is_none_or(|row| {
+            row.iter().any(|(name, kind)| {
+                name.text == source.text
+                    && matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+            })
+        }) {
+            self.leaf(parser)
+        } else {
+            Ok(None)
+        }
+    }
     fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
         match self.row {
             Some(row) => match self.returning.row_metadata(parser, row, self.scope)? {

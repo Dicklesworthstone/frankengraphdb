@@ -708,16 +708,21 @@ impl WriteTxn {
                         // properties read after the statement: the merged
                         // vertex's, and a carried element's (ON/SET effects
                         // included). A NULL column reads NULL.
+                        let failure = std::cell::RefCell::new(None);
                         let mut read = |element: ElementId,
-                                        key|
+                                        key: fgdb_delta_types::PropertyKeyId|
                          -> Result<
                             Option<fgdb_types::CanonicalPropertyValue>,
                             TxnGqlError<GraphWriteChainError<WriteTxnError, A>>,
                         > {
-                            workspace
-                                .txn
-                                .merge_return_property(database, element, key)
-                                .map_err(chain)
+                            match workspace.txn.element_property_with_checkpoint(
+                                database, cx, &failure, element, key,
+                            ) {
+                                Err(WriteTxnError::Interrupted(error)) => {
+                                    Err(GqlQueryError::Interrupted(error))
+                                }
+                                result => result.map_err(chain),
+                            }
                         };
                         let mut returned = Vec::new();
                         for (at, vertex) in pairs {

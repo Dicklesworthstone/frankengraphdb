@@ -279,7 +279,7 @@ impl PreparedGraphSetAggregate {
             &[crate::algebra::GraphValue],
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        elements: impl GraphElementReader<E>,
+        elements: impl crate::GraphElementReader<E>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
     {
@@ -341,13 +341,14 @@ impl PreparedGraphSetAggregate {
             GqlQueryPolicy,
         )
             -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        elements: impl GraphElementReader<E>,
+        mut elements: impl crate::GraphElementReader<E>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
     {
         let patterns: &mut DynPatterns<'_, E, C> = &mut patterns;
         let seeded: &mut DynSeeded<'_, E, C> = &mut seeded;
         let procedures: &mut DynProcedures<'_, E, C> = &mut procedures;
+        let elements = crate::set_ops::projection::HostElements(&mut elements);
         let source = WithSeededPatterns {
             source: WithElementReads {
                 source: WithProcedures {

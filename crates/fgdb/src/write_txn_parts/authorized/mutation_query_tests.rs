@@ -157,6 +157,103 @@ fn projected_row_limit_and_scope_refusals_never_publish_effects() {
 }
 
 #[test]
+fn declared_hidden_writes_refuse_before_post_write_metadata_or_empty_targets() {
+    lab(0xb95a, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let authority = authority();
+        let token = authority.issue_at(&grant(), NOW).unwrap();
+        for hidden in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            seed(&mut db, &commit, hidden).await;
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            for text in [
+                "MATCH (a:Visible) WHERE a.p=10 SET a.secret=0 RETURN keys(a), 1/0",
+                "MATCH (a:Visible) WHERE a.p=999 SET a.secret=0 RETURN properties(a)",
+                "OPTIONAL MATCH (a:Visible) WHERE a.p=999 REMOVE a.secret RETURN properties(a)",
+                "MATCH (a:Visible) WHERE a.p=10 REMOVE a.secret RETURN keys(a), 1/0",
+                "MATCH (a:Visible) WHERE a.p=10 SET a={secret:0} RETURN properties(a), 1/0",
+                "MATCH (a:Visible) WHERE a.p=999 SET a={secret:0} RETURN properties(a)",
+                "MATCH (a:Visible) WHERE a.p=10 SET a:Hidden RETURN labels(a), 1/0",
+                "MATCH (a:Visible) WHERE a.p=999 SET a:Hidden RETURN labels(a)",
+                "MATCH (a:Visible) WHERE a.p=10 REMOVE a:Hidden RETURN labels(a), 1/0",
+                "MATCH (a:Visible)-[e:R]->(b:Visible) SET e.secret=0 RETURN properties(e), 1/0",
+            ] {
+                let statement = prepared(text);
+                let mut admitted = false;
+                let error = db
+                    .execute_graph_mutation_query_authorized_checked(
+                        &txn,
+                        &query,
+                        &commit,
+                        &authority,
+                        &token,
+                        "main",
+                        &statement,
+                        policy(),
+                        || NOW,
+                        |_, _| {
+                            admitted = true;
+                            Ok(())
+                        },
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(auth(error), Error::ScopeDenied, "hidden={hidden}: {text}");
+                assert!(
+                    !admitted,
+                    "forbidden metadata never reaches result admission"
+                );
+                let updates = mutation(text.split_once(" RETURN ").unwrap().0);
+                let error = db
+                    .execute_graph_mutation_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &authority,
+                        &token,
+                        "main",
+                        &updates,
+                        policy(),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(authorization(error), Error::ScopeDenied, "{text}");
+                let error = db
+                    .execute_graph_mutation_returning_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &authority,
+                        &token,
+                        "main",
+                        &updates,
+                        policy(),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(authorization(error), Error::ScopeDenied, "{text}");
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
+                    before,
+                    "hidden={hidden}: {text}"
+                );
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+    });
+}
+
+#[test]
 fn limit_zero_still_updates_and_remove_returns_null_without_empty_commit() {
     lab(0xb953, |contexts| async move {
         let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());

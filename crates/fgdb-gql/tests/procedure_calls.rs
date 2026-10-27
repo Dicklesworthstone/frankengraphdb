@@ -1164,7 +1164,7 @@ fn procedure_metadata_preserves_source_masks_budgets_and_scalar_refusals() {
 }
 
 #[test]
-fn generic_map_outputs_remain_values_and_metadata_scope_does_not_escape() {
+fn generic_maps_and_carried_metadata_keep_runtime_domains() {
     for expression in ["properties(m)", "keys(m)", "m{.*}"] {
         let text = format!("CALL t.echo({{p:7}}) YIELD m RETURN {expression} AS value");
         let query = prepare(&text, &GqlParameters::new());
@@ -1181,18 +1181,58 @@ fn generic_map_outputs_remain_values_and_metadata_scope_does_not_escape() {
             .unwrap();
         assert_eq!(result.value.len(), 1, "{text}");
     }
-    for statement in [
+    let graph = MetadataGraph::new((0..5).map(VId).collect());
+    let query = PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
         "CALL t.scores() YIELD vertex AS n WITH n WITH n RETURN labels(n)",
+        &[],
+        &mut MetadataCatalog,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    let carried = query
+        .execute_governed_with_elements(
+            wide(),
+            |pattern, policy| graph.source(pattern, policy),
+            |call, arguments, _| host(call, arguments),
+            fgdb_gql::with_element_metadata(
+                |_, _| Err::<Option<CanonicalPropertyValue>, &'static str>("unexpected property read"),
+                |element, kind, catalog: &fgdb_gql::ReverseSymbolCatalog,
+                 control: &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), ()>| {
+                    let fgdb_delta_types::ElementId::Vertex(id) = element else {
+                        panic!("the expression requests only vertex labels")
+                    };
+                    assert_eq!(kind, fgdb_gql::GraphElementMetadata::Labels);
+                    assert_eq!(catalog.labels[&LabelId(1)], "Person");
+                    if !graph.visible.contains(&id) {
+                        return Ok(None);
+                    }
+                    let mut charge = |event| control(event).map_err(|_| fgdb_gql::GraphElementMetadataError::Interrupted);
+                    charge(fgdb_gql::GlaExecutionEvent::ScratchEntry)?;
+                    let labels = graph.labels.iter()
+                        .map(|value| value.copy_with_control(&mut charge))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(Some(GraphValue::List(labels.into_boxed_slice())))
+                },
+            ),
+            || Ok::<_, usize>(()),
+        )
+        .unwrap();
+    assert_eq!(
+        column(&carried.value, 0),
+        vec![GraphValue::List(graph.labels.clone().into_boxed_slice()); 4]
+    );
+    for statement in [
         "MATCH (n) WITH n.p AS n RETURN labels(n)",
         "CALL t.scores() YIELD vertex AS n UNWIND [1] AS x RETURN labels(x)",
     ] {
         assert!(
-            PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
-                statement,
-                &[],
-                &mut MetadataCatalog
-            )
-            .is_err(),
+            matches!(
+                graph.query(statement, wide()),
+                Err(GqlQueryError::Source(
+                    GraphSetExecutionError::Projection { .. }
+                ))
+            ),
             "{statement}",
         );
     }
@@ -1207,7 +1247,7 @@ fn carried_vertex_edge_and_path_metadata_matches_direct_native_projection() {
             "MATCH (n) WITH n AS owner RETURN labels(owner) AS tags",
         ),
         // A matched vertex keeps its metadata through a later plain WITH
-        // (fgdb-iznzx); a procedure's YIELD vertex still refuses above.
+        // (fgdb-iznzx); a procedure's Any value uses the typed reader above.
         (
             "MATCH (n) RETURN labels(n) AS tags",
             "MATCH (n) WITH n WITH n RETURN labels(n) AS tags",

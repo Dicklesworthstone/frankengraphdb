@@ -439,6 +439,15 @@ fn merge_labels_bind_reverse_label_names_and_refuse_malformed_host_cells() {
         prepare(statement, Labels("Item", "q")).canonical_bytes()
     );
     let names = list(vec![text("Item"), text("Other")]);
+    let conditional = prepare(
+        "MERGE (n:Item {p:7}) RETURN CASE WHEN true THEN labels(n) ELSE labels(NULL) END AS names",
+        Labels("Item", "p"),
+    );
+    assert_eq!(conditional.bindings(), [GraphVertexReturnBinding::Labels]);
+    assert_eq!(
+        rows(&project(&conditional, vec![names.clone()])),
+        vec![vec![names.clone()]]
+    );
     assert_eq!(
         rows(&project(&query, vec![names.clone()])),
         vec![vec![names.clone(), names]]

@@ -58,6 +58,27 @@ struct InsertLeaves<'r, 'a> {
 }
 
 impl<'a> ReturnLeaves<'a> for InsertLeaves<'_, 'a> {
+    fn metadata_leaf(
+        &mut self,
+        parser: &mut Parser<'a>,
+        source: Name<'a>,
+    ) -> Result<Option<usize>, GraphPatternTextError> {
+        let created_labels = parser.is_word("LABELS")
+            && self
+                .syntax
+                .vertices
+                .iter()
+                .any(|vertex| vertex.name.is_some_and(|name| name.text == source.text));
+        let matched = matches!(
+            parser.insertion_match_kind(source.text),
+            Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+        );
+        if created_labels || matched {
+            self.leaf(parser)
+        } else {
+            Ok(None)
+        }
+    }
     fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
         self.returning.leaf(parser, self.syntax, self.source)
     }

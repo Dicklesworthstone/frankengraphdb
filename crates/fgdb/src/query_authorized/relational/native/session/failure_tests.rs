@@ -504,7 +504,7 @@ fn prepared_map_fields_rebind_inside_the_original_authority_and_snapshot() {
         assert_eq!(changes.changes().len(), 1);
         let (row, weight) = changes.changes().iter().next().unwrap();
         assert_eq!(
-            row,
+            row.as_ref(),
             &[crate::QueryValue::Value(GraphValue::Scalar(
                 CanonicalScalar::Int(30)
             ))]

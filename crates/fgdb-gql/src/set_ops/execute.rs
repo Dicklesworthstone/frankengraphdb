@@ -724,22 +724,7 @@ where
 /// Group the private occurrence bag of a write under its existing prefix.
 /// Input expressions, exact native accumulation and checked row conversion
 /// all precede final RETURN paging. Intermediate group rows consume work,
-/// never the final result-row allowance; no source is invoked here.
-pub(crate) fn finish_owned_aggregate<E, C>(
-    input: GqlQueryExecution<GraphValueRow>,
-    policy: GqlQueryPolicy,
-    grouping: &super::WriteReturnGroup,
-    checkpoint: impl FnMut() -> Result<(), C>,
-) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
-    finish_owned_aggregate_reading(
-        input,
-        policy,
-        grouping,
-        &mut projection::no_element_reads,
-        checkpoint,
-    )
-}
-
+/// never the final result-row allowance; element reads retain their source cut.
 pub(crate) fn finish_owned_aggregate_reading<E, C>(
     input: GqlQueryExecution<GraphValueRow>,
     policy: GqlQueryPolicy,
@@ -794,27 +779,6 @@ pub(crate) fn finish_owned_aggregate_reading<E, C>(
 /// DISTINCT, ordering and page kernels. The private owner has checked the input
 /// schema and charged every retained input cell; counters include its complete
 /// prefix and are continued, never reset or added for a second time.
-pub(crate) fn finish_owned_projection<E, C>(
-    input: GqlQueryExecution<GraphValueRow>,
-    policy: GqlQueryPolicy,
-    projection: &[GraphSetProjection],
-    quantifier: GraphSetQuantifier,
-    order: &[GraphValueOrder],
-    page: (u64, Option<u64>),
-    checkpoint: impl FnMut() -> Result<(), C>,
-) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
-    finish_owned_projection_reading(
-        input,
-        policy,
-        projection,
-        quantifier,
-        order,
-        page,
-        &mut projection::no_element_reads,
-        checkpoint,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finish_owned_projection_reading<E, C>(
     input: GqlQueryExecution<GraphValueRow>,
