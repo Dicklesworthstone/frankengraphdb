@@ -3748,3 +3748,209 @@ fn authorized_merge_labels_omit_hidden_labels_and_preserve_them_in_storage() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn authorized_write_metadata_spends_node_quota_before_any_result_or_commit() {
+    use fgdb::WriteTxnError;
+    use fgdb_gql::{GraphMutationQueryError, GraphSetExecutionError};
+    use fgdb_warden::{Error as AuthorizationError, LimitDimension};
+
+    let ((), report) = run_async_under_lab(0x6d61_0054, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = Authority::new(
+            AuthKey::from_seed(0x6d61_0054),
+            NS,
+            "graph",
+            SchemaEpoch(0),
+            1,
+        )
+        .unwrap();
+        let mut grant = Grant::read_only(
+            "main",
+            1000,
+            QueryLimits {
+                max_nodes: 32,
+                max_work: 10_000_000,
+                max_rows: 100_000,
+            },
+        );
+        grant.rights = Rights::ReadWrite;
+        grant.labels = Scope::only([THING]);
+        grant.relations = Scope::only([R]);
+        grant.properties = Scope::only([SCORE, NOTE]);
+        let limited = issuer.issue_at(&grant, 100).unwrap();
+        let mut roomy = grant.clone();
+        roomy.limits.max_nodes = 256;
+        let roomy = issuer.issue_at(&roomy, 100).unwrap();
+        let mutation_policy = GraphMutationPolicy::new(policy(), 100_000);
+        let mut hidden_usage = Vec::new();
+
+        for hidden in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            seed(&mut db, &commit, hidden).await;
+            let baseline = PreparedGraphMutationQueryText::prepare(
+                "MATCH (n:Thing {score:10}) SET n.score=11 RETURN 1 AS changed",
+                R,
+                Catalog::Full,
+            )
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+            db.execute_graph_mutation_query_authorized(
+                &txcx,
+                &cx,
+                &commit,
+                &issuer,
+                &limited,
+                "main",
+                &baseline,
+                mutation_policy,
+                || 100,
+            )
+            .await
+            .unwrap();
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+
+            for (function, identity, copies) in [
+                ("labels", GraphValue::Vertex(VId(1)), 64),
+                ("keys", GraphValue::Vertex(VId(1)), 64),
+                ("properties", GraphValue::Vertex(VId(1)), 64),
+                ("type", GraphValue::Edge(EId(1)), 32),
+            ] {
+                let statement = format!(
+                    "MATCH (n:Thing {{score:11}}) SET n.score=12 \
+                     RETURN [x IN $refs | {function}(x)] AS values LIMIT 0"
+                );
+                let params = GqlParameters::new()
+                    .with_list("refs", vec![identity; copies])
+                    .unwrap();
+                let query = PreparedGraphMutationQueryText::prepare(&statement, R, Catalog::Full)
+                    .unwrap()
+                    .bind_parameters(&params)
+                    .unwrap();
+                let error = db
+                    .execute_graph_mutation_query_authorized(
+                        &txcx,
+                        &cx,
+                        &commit,
+                        &issuer,
+                        &limited,
+                        "main",
+                        &query,
+                        mutation_policy,
+                        || 100,
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        GqlQueryError::Source(GraphMutationQueryError::Returning(
+                            GraphSetExecutionError::Source(WriteTxnError::Authorization(
+                                AuthorizationError::LimitExceeded(LimitDimension::Nodes)
+                            ))
+                        ))
+                    ),
+                    "{function}: {error:?}"
+                );
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap(),
+                    ),
+                    before,
+                    "{function}"
+                );
+            }
+
+            let params = GqlParameters::new()
+                .with_list("refs", vec![GraphValue::Vertex(VId(1)); 64])
+                .unwrap();
+            let query = PreparedGraphMutationQueryText::prepare(
+                "MATCH (n:Thing {score:11}) SET n.score=12 \
+                 RETURN [x IN $refs | properties(x)] AS values LIMIT 0",
+                R,
+                Catalog::Full,
+            )
+            .unwrap()
+            .bind_parameters(&params)
+            .unwrap();
+            let (_, rows, _) = db
+                .execute_graph_mutation_query_authorized(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    &issuer,
+                    &roomy,
+                    "main",
+                    &query,
+                    mutation_policy,
+                    || 100,
+                )
+                .await
+                .unwrap();
+            assert!(rows.value.is_empty());
+            assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
+            assert_eq!(
+                db.vertex(VId(1)).unwrap().unwrap().props[0].1,
+                CanonicalScalar::Int(12).into()
+            );
+
+            // These references name hidden records in one database and missing
+            // records in the other. Neither may spend a visible-node allowance.
+            let refs = (0..32)
+                .flat_map(|_| {
+                    [
+                        GraphValue::Vertex(VId(3)),
+                        GraphValue::Edge(EId(2)),
+                        GraphValue::Vertex(VId(999)),
+                        GraphValue::Edge(EId(999)),
+                    ]
+                })
+                .collect();
+            let params = GqlParameters::new().with_list("refs", refs).unwrap();
+            let query = PreparedGraphMutationQueryText::prepare(
+                "MATCH (n:Thing {score:12}) SET n.score=13 \
+                 RETURN [x IN $refs | properties(x)] AS values",
+                R,
+                Catalog::Full,
+            )
+            .unwrap()
+            .bind_parameters(&params)
+            .unwrap();
+            let (stats, rows, _) = db
+                .execute_graph_mutation_query_authorized(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    &issuer,
+                    &limited,
+                    "main",
+                    &query,
+                    mutation_policy,
+                    || 100,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                rows.value[0].values(),
+                &[GraphValue::List(vec![null(); 128].into_boxed_slice())]
+            );
+            assert_eq!(rows.value.len(), 1);
+            hidden_usage.push((stats, rows.rows, rows.evaluator));
+            assert_eq!(
+                db.vertex(VId(1)).unwrap().unwrap().props[0].1,
+                CanonicalScalar::Int(13).into()
+            );
+        }
+        assert_eq!(hidden_usage[0], hidden_usage[1]);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

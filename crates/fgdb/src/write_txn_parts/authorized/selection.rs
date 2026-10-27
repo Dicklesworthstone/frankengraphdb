@@ -244,7 +244,7 @@ pub(super) fn mutation_element_property<V: Vfs + Clone, Clock: FnMut() -> u64>(
     if !scope.allows_property(key) {
         return Ok(None);
     }
-    if !mutation_element_visible(transaction, database, cx, element, scope, execution)? {
+    if mutation_element_visible(transaction, database, cx, element, scope, execution)?.is_none() {
         return Ok(None);
     }
     property(
@@ -273,7 +273,7 @@ fn mutation_element_visible<V: Vfs + Clone, Clock: FnMut() -> u64>(
     element: ElementId,
     scope: &PlannerPredicates,
     execution: &RefCell<&mut Execution<'_, '_, Clock>>,
-) -> Result<bool, WriteTxnError> {
+) -> Result<Option<u64>, WriteTxnError> {
     // Reserve the visibility witnesses and temporary label slots before any
     // hidden metadata is examined. This worst-case bound depends only on the
     // signed predicate and caller-supplied value kind, including missing and
@@ -301,26 +301,27 @@ fn mutation_element_visible<V: Vfs + Clone, Clock: FnMut() -> u64>(
     match element {
         ElementId::Vertex(vertex) => {
             if !mutation_vertex_visible(transaction, database, vertex, scope, &mut poll)? {
-                return Ok(false);
+                return Ok(None);
             }
+            Ok(Some(1))
         }
         ElementId::Edge(edge) => {
             let Some((source, relation, target)) =
                 mutation_edge_topology(transaction, database, edge, &mut poll)?
             else {
-                return Ok(false);
+                return Ok(None);
             };
             if !scope.allows_relation(relation) {
-                return Ok(false);
+                return Ok(None);
             }
             for vertex in [source, target] {
                 if !mutation_vertex_visible(transaction, database, vertex, scope, &mut poll)? {
-                    return Ok(false);
+                    return Ok(None);
                 }
             }
+            Ok(Some(if source == target { 1 } else { 2 }))
         }
     }
-    Ok(true)
 }
 
 /// A computed MERGE output may name any identity, including a parameter's.
@@ -365,10 +366,31 @@ pub(super) fn returning_element_metadata<V: Vfs + Clone, Clock: FnMut() -> u64>(
             WriteTxnError::Authorization(Error::PermissionDenied),
         ));
     }
-    if !mutation_element_visible(transaction, database, cx, element, scope, execution)
-        .map_err(GraphElementMetadataError::Source)?
-    {
+    let Some(nodes) =
+        mutation_element_visible(transaction, database, cx, element, scope, execution)
+            .map_err(GraphElementMetadataError::Source)?
+    else {
         return Ok(None);
+    };
+    // Match read-only metadata admission: every visible vertex or unique
+    // relationship endpoint spends one node, even when its witnesses are warm.
+    // Both endpoint predicates precede all node charges, so a hidden endpoint
+    // remains indistinguishable from an absent relationship.
+    for _ in 0..nodes {
+        cx.checkpoint()
+            .map_err(WriteTxnError::Interrupted)
+            .map_err(GraphElementMetadataError::Source)?;
+        let mut borrowed = execution.borrow_mut();
+        let execution = &mut **borrowed;
+        execution
+            .checkpoint()
+            .map_err(GraphElementMetadataError::Source)?;
+        let now = (execution.clock)();
+        execution
+            .permit
+            .charge_nodes_at(now, 1)
+            .map_err(WriteTxnError::Authorization)
+            .map_err(GraphElementMetadataError::Source)?;
     }
     transaction.admitted_element_metadata_with_control(
         database,

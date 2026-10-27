@@ -465,3 +465,246 @@ fn metadata_keeps_endpoint_visibility_observations_and_refused_reads_survive_ret
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+fn metadata_grant(max_nodes: u64) -> Grant {
+    Grant {
+        branch: "main".into(),
+        labels: Scope::only([VISIBLE]),
+        relations: Scope::only([R]),
+        properties: Scope::only([P, PropertyKeyId(2)]),
+        rights: Rights::ReadWrite,
+        limits: QueryLimits {
+            max_nodes,
+            max_work: 1_000_000,
+            max_rows: 100,
+        },
+        expires_at_ms: 10_000,
+    }
+}
+
+#[test]
+fn carried_metadata_charges_each_visible_node_and_unique_edge_endpoint() {
+    use fgdb_gql::{GraphElementMetadata, GraphElementMetadataError};
+    use fgdb_warden::LimitDimension;
+
+    let (_, report) = run_async_under_lab(0xb176, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txn_cx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = database(&commit, 1, CanonicalScalar::Int(7)).await;
+        let mut loops = WriteBatch::new(R);
+        loops.add_edge(EId(2), VId(1), VId(1), vec![]);
+        db.write(&commit, loops).await.unwrap();
+        let authority =
+            Authority::new(AuthKey::from_seed(7128), NS, "graph", SchemaEpoch(1), 1).unwrap();
+        let catalog = metadata_catalog();
+        for (element, nodes, kinds) in [
+            (
+                ElementId::Vertex(VId(1)),
+                1,
+                [
+                    GraphElementMetadata::Labels,
+                    GraphElementMetadata::Keys,
+                    GraphElementMetadata::Properties,
+                ],
+            ),
+            (
+                ElementId::Edge(EId(1)),
+                2,
+                [
+                    GraphElementMetadata::Type,
+                    GraphElementMetadata::Keys,
+                    GraphElementMetadata::Properties,
+                ],
+            ),
+            (
+                ElementId::Edge(EId(2)),
+                1,
+                [
+                    GraphElementMetadata::Type,
+                    GraphElementMetadata::Keys,
+                    GraphElementMetadata::Properties,
+                ],
+            ),
+        ] {
+            for kind in kinds {
+                for max_nodes in [nodes - 1, nodes] {
+                    let token = authority.issue_at(&metadata_grant(max_nodes), 100).unwrap();
+                    let verified = authority.verify_at(&token, "main", 100).unwrap();
+                    let mut execution = Execution {
+                        cx: &commit,
+                        permit: verified.begin_write_at("main", 100).unwrap(),
+                        clock: || 100,
+                    };
+                    let controls = RefCell::new(&mut execution);
+                    let txn = db.begin(&txn_cx).unwrap();
+                    let mut output_events = 0;
+                    let result = returning_element_metadata(
+                        &txn,
+                        &db,
+                        &query,
+                        element,
+                        kind,
+                        &catalog,
+                        verified.predicates(),
+                        &controls,
+                        &mut |_| {
+                            output_events += 1;
+                            Ok(())
+                        },
+                    );
+                    if max_nodes < nodes {
+                        assert!(
+                            matches!(
+                                result,
+                                Err(GraphElementMetadataError::Source(
+                                    WriteTxnError::Authorization(Error::LimitExceeded(
+                                        LimitDimension::Nodes
+                                    ))
+                                ))
+                            ),
+                            "{element:?} {kind:?}: {result:?}"
+                        );
+                        assert_eq!(output_events, 0, "quota refuses before metadata construction");
+                    } else {
+                        assert!(
+                            matches!(result, Ok(Some(_))),
+                            "{element:?} {kind:?}: {result:?}"
+                        );
+                        assert_eq!(controls.borrow().permit.usage().nodes, nodes);
+                        assert!(output_events > 0);
+                        // Warm observations do not grant a second read for free.
+                        output_events = 0;
+                        let repeated = returning_element_metadata(
+                            &txn,
+                            &db,
+                            &query,
+                            element,
+                            kind,
+                            &catalog,
+                            verified.predicates(),
+                            &controls,
+                            &mut |_| {
+                                output_events += 1;
+                                Ok(())
+                            },
+                        );
+                        assert!(
+                            matches!(
+                                repeated,
+                                Err(GraphElementMetadataError::Source(
+                                    WriteTxnError::Authorization(Error::LimitExceeded(
+                                        LimitDimension::Nodes
+                                    ))
+                                ))
+                            ),
+                            "{element:?} {kind:?}: {repeated:?}"
+                        );
+                        assert_eq!(output_events, 0);
+                    }
+                    txn.abort();
+                    assert_eq!(txn_cx.outstanding_obligations(), 0);
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn hidden_and_absent_metadata_use_no_nodes_and_scalar_properties_keep_their_contract() {
+    use fgdb_gql::GraphElementMetadata;
+
+    let (_, report) = run_async_under_lab(0xb177, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txn_cx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = database(&commit, 1, CanonicalScalar::Int(7)).await;
+        let mut hidden = WriteBatch::new(R);
+        hidden.create_vertex(VId(3), vec![LabelId(99)], vec![]);
+        hidden.add_edge(EId(3), VId(1), VId(3), vec![]);
+        hidden.add_edge(EId(4), VId(3), VId(1), vec![]);
+        db.write(&commit, hidden).await.unwrap();
+        let mut relation = WriteBatch::new(RelationId(2));
+        relation.add_edge(EId(5), VId(1), VId(2), vec![]);
+        db.write(&commit, relation).await.unwrap();
+        let authority =
+            Authority::new(AuthKey::from_seed(7129), NS, "graph", SchemaEpoch(1), 1).unwrap();
+        let catalog = metadata_catalog();
+        let mut usage_by_kind = [None, None];
+        for element in [
+            ElementId::Vertex(VId(99)),
+            ElementId::Vertex(VId(3)),
+            ElementId::Edge(EId(99)),
+            ElementId::Edge(EId(3)),
+            ElementId::Edge(EId(4)),
+            ElementId::Edge(EId(5)),
+        ] {
+            let token = authority.issue_at(&metadata_grant(0), 100).unwrap();
+            let verified = authority.verify_at(&token, "main", 100).unwrap();
+            let mut execution = Execution {
+                cx: &commit,
+                permit: verified.begin_write_at("main", 100).unwrap(),
+                clock: || 100,
+            };
+            let controls = RefCell::new(&mut execution);
+            let txn = db.begin(&txn_cx).unwrap();
+            let mut output_events = 0;
+            let result = returning_element_metadata(
+                &txn,
+                &db,
+                &query,
+                element,
+                GraphElementMetadata::Properties,
+                &catalog,
+                verified.predicates(),
+                &controls,
+                &mut |_| {
+                    output_events += 1;
+                    Ok(())
+                },
+            );
+            assert!(matches!(result, Ok(None)), "{element:?}: {result:?}");
+            assert_eq!(
+                output_events, 0,
+                "hidden fields are never named or constructed"
+            );
+            let usage = controls.borrow().permit.usage();
+            assert_eq!(usage.nodes, 0);
+            let kind = usize::from(matches!(element, ElementId::Edge(_)));
+            if let Some(expected) = usage_by_kind[kind] {
+                assert_eq!(usage, expected, "hidden and absent {element:?}");
+            } else {
+                usage_by_kind[kind] = Some(usage);
+            }
+            txn.abort();
+            assert_eq!(txn_cx.outstanding_obligations(), 0);
+        }
+        // The correction is metadata-specific. Scalar point reads retain
+        // their existing work/payload accounting and do not acquire a node cap.
+        for element in [ElementId::Vertex(VId(1)), ElementId::Edge(EId(1))] {
+            let token = authority.issue_at(&metadata_grant(0), 100).unwrap();
+            let verified = authority.verify_at(&token, "main", 100).unwrap();
+            let mut execution = Execution {
+                cx: &commit,
+                permit: verified.begin_write_at("main", 100).unwrap(),
+                clock: || 100,
+            };
+            let controls = RefCell::new(&mut execution);
+            let txn = db.begin(&txn_cx).unwrap();
+            let value = returning_element_property(
+                &txn,
+                &db,
+                &query,
+                element,
+                P,
+                verified.predicates(),
+                &controls,
+            )
+            .unwrap();
+            assert_eq!(value, Some(CanonicalScalar::Int(7).into()));
+            assert_eq!(controls.borrow().permit.usage().nodes, 0);
+            txn.abort();
+            assert_eq!(txn_cx.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
