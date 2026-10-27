@@ -132,6 +132,7 @@ impl FnxCallSpec {
                 | FnxAlgorithm::Cdlp { .. }
                 | FnxAlgorithm::Triangles
                 | FnxAlgorithm::ClusteringCoefficient
+                | FnxAlgorithm::DirectedClusteringCoefficient
                 | FnxAlgorithm::InDegreeCentrality
                 | FnxAlgorithm::OutDegreeCentrality
                 | FnxAlgorithm::Foundation(
@@ -227,6 +228,25 @@ impl FnxCallSpec {
                 };
                 return super::cdlp::execute_cooperative(self, graph, limits, memory, &mut control)
                     .await;
+            }
+            if matches!(
+                self.algorithm(),
+                FnxAlgorithm::DirectedClusteringCoefficient
+            ) {
+                let mut control = Cooperate {
+                    cx,
+                    fuel: SealedScanBudget::new(quantum.get()),
+                    quantum,
+                    yield_now,
+                };
+                return super::directed_clustering::execute_cooperative(
+                    self,
+                    graph,
+                    limits,
+                    memory,
+                    &mut control,
+                )
+                .await;
             }
             if matches!(
                 self.algorithm(),

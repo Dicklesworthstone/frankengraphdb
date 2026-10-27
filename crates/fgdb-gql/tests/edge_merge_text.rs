@@ -576,3 +576,103 @@ fn stored_merge_keys_refuse_invalid_domains_aliases_and_payloads_before_executio
     .unwrap();
     assert!(alias.bind_parameters(&GqlParameters::new()).is_err());
 }
+
+mod matched_chain {
+    use super::*;
+    use fgdb_gql::{GqlParameterType, PreparedGraphWriteChainText};
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        if (kind, name) == (GraphSymbolKind::Property, "q") {
+            Some(GraphSymbol::Property(PropertyKeyId(2)))
+        } else {
+            super::symbols(kind, name)
+        }
+    }
+
+    #[test]
+    fn matched_relationship_merge_keeps_its_native_owner_and_continuations() {
+        for text in [
+            "CREATE (a) WITH a MATCH (b) MERGE (a)-[:R]->(b)",
+            "CREATE (a) WITH a MATCH (b) MERGE (a)<-[r:R]-(b) RETURN r",
+            "CREATE (a) WITH a MATCH (b) MERGE (a)-[r:R]-(b) RETURN b.p, r.p",
+            "CREATE (a) WITH a UNWIND [1, 1, 2] AS k MATCH (b {p:k}) \
+             MERGE (a)-[r:R]->(b) ON CREATE SET r.p=b.p ON MATCH SET r.p=r.p+1 \
+             RETURN r.p",
+            "CREATE (a) WITH a MATCH (b) WITH a,b ORDER BY b.p LIMIT 2 \
+             MERGE (a)-[r:R]->(b) WITH a,b,r CREATE (a)-[:R {q:r.p}]->(b)",
+            "CREATE (a) WITH a MATCH (b) MERGE (a)-[r:R]->(b) CREATE (b)-[:R]->(a)",
+            "CREATE (a) WITH a MATCH (b) MERGE (a)-[:R]->(b) MATCH (a)-[:R]->(b) \
+             RETURN b",
+            "CREATE (a {p:1}) WITH a,a.p AS merge MATCH (b) WHERE b.p=merge \
+             MERGE (a)-[:R]->(b)",
+        ] {
+            assert!(
+                PreparedGraphWriteChainText::is_chain(text).unwrap(),
+                "{text}"
+            );
+            let template = PreparedGraphWriteChainText::prepare(text, R, symbols).expect(text);
+            let bound = template.bind_parameters(&GqlParameters::new()).expect(text);
+            assert_eq!(template.returns_rows(), bound.returns_rows(), "{text}");
+            assert!(bound.steps().len() >= 2, "{text}");
+        }
+        // Extending mandatory MATCH does not admit a new endpoint, a dropped
+        // binding, or nullable OPTIONAL MATCH through this native profile.
+        for text in [
+            "CREATE (a) WITH a.p AS p MATCH (b) MERGE (a)-[:R]->(b)",
+            "CREATE (a) WITH a MATCH (b) MERGE (a)-[:R]->(unknown)",
+            "CREATE (a) WITH a OPTIONAL MATCH (b) MERGE (a)-[:R]->(b)",
+        ] {
+            assert!(
+                PreparedGraphWriteChainText::prepare(text, R, symbols).is_err(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn matched_relationship_merge_rebinds_all_steps_without_resolving_again() {
+        let text = "CREATE (a {p:$created}) WITH a MATCH (b {p:$lookup}) \
+            MERGE (a)-[r:R {p:$key}]->(b) ON CREATE SET r.q=$assigned \
+            RETURN b.p AS found,r.q AS written";
+        let calls = Cell::new(0);
+        let template = PreparedGraphWriteChainText::prepare_with_parameter_types(
+            text,
+            R,
+            &[
+                ("created", GqlParameterType::Int64),
+                ("lookup", GqlParameterType::Int64),
+                ("key", GqlParameterType::Int64),
+                ("assigned", GqlParameterType::Int64),
+            ],
+            |kind, name: &str| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            },
+        )
+        .unwrap();
+        let prepared_calls = calls.get();
+        assert!(prepared_calls > 0);
+        let parameters = |lookup, assigned| {
+            GqlParameters::new()
+                .with_int64("created", 1)
+                .unwrap()
+                .with_int64("lookup", lookup)
+                .unwrap()
+                .with_int64("key", 3)
+                .unwrap()
+                .with_int64("assigned", assigned)
+                .unwrap()
+        };
+        let first = template.bind_parameters(&parameters(2, 4)).unwrap();
+        assert_ne!(first, template.bind_parameters(&parameters(5, 6)).unwrap());
+        assert_eq!(first, template.bind_parameters(&parameters(2, 4)).unwrap());
+        assert_eq!(first.columns(), &["found", "written"]);
+        assert_eq!(calls.get(), prepared_calls);
+        assert!(template.bind_parameters(&GqlParameters::new()).is_err());
+        assert!(
+            template
+                .bind_parameters(&parameters(2, 4).with_int64("extra", 0).unwrap())
+                .is_err()
+        );
+    }
+}

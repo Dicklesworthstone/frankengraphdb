@@ -14,6 +14,7 @@ use super::{
 };
 use crate::Directedness;
 use crate::sealed_control::Control;
+use std::future::Future;
 use std::mem::size_of;
 
 fn witness() -> ComplexityWitness {
@@ -180,7 +181,7 @@ struct Face<C> {
     ended: bool,
 }
 
-impl<C: Cursor> Face<C> {
+impl<C> Face<C> {
     fn new(cursor: C, expected: usize) -> Self {
         Self {
             cursor,
@@ -192,12 +193,8 @@ impl<C: Cursor> Face<C> {
         }
     }
 
-    fn fill(&mut self, n: usize, control: &mut impl FnMut() -> Result<()>) -> Result<()> {
-        if self.head.is_some() || self.ended {
-            return Ok(());
-        }
-        control()?;
-        match self.cursor.next()? {
+    fn accept(&mut self, n: usize, item: Option<(usize, f64)>) -> Result<()> {
+        match item {
             Some((target, _)) => {
                 if target >= n || self.previous.is_some_and(|last| last >= target) {
                     return Err(ExecutionError::InvalidUpstreamResult.into());
@@ -220,6 +217,36 @@ impl<C: Cursor> Face<C> {
     }
 }
 
+impl<C: Cursor> Face<C> {
+    fn fill(&mut self, n: usize, control: &mut impl FnMut() -> Result<()>) -> Result<()> {
+        if self.head.is_some() || self.ended {
+            return Ok(());
+        }
+        control()?;
+        let item = self.cursor.next()?;
+        self.accept(n, item)
+    }
+}
+
+impl Face<super::SealedNeighborCursor<'_>> {
+    async fn fill_cooperative<Yield, YieldFuture>(
+        &mut self,
+        n: usize,
+        control: &mut super::cooperative::Cooperate<'_, Yield>,
+    ) -> Result<()>
+    where
+        Yield: FnMut() -> YieldFuture,
+        YieldFuture: Future<Output = ()>,
+    {
+        if self.head.is_some() || self.ended {
+            return Ok(());
+        }
+        control.tick().await?;
+        let item = control.next(&mut self.cursor).await?;
+        self.accept(n, item)
+    }
+}
+
 struct WeakNeighbors<Out, In> {
     outgoing: Face<Out>,
     incoming: Face<In>,
@@ -227,33 +254,66 @@ struct WeakNeighbors<Out, In> {
     nodes: usize,
 }
 
+impl<Out, In> WeakNeighbors<Out, In> {
+    // Both heads must be filled before taking one distinct weak neighbor.
+    // Keep loop removal in the drivers so refilling always consumes fuel.
+    fn take_ready(&mut self) -> Option<(usize, u8)> {
+        let neighbor = match (self.outgoing.head, self.incoming.head) {
+            (Some(out), Some(input)) => out.min(input),
+            (Some(out), None) => out,
+            (None, Some(input)) => input,
+            (None, None) => return None,
+        };
+        let out = self.outgoing.head == Some(neighbor);
+        let input = self.incoming.head == Some(neighbor);
+        if out {
+            self.outgoing.head = None;
+        }
+        if input {
+            self.incoming.head = None;
+        }
+        Some((neighbor, u8::from(out) + u8::from(input)))
+    }
+
+    fn scans(&self) -> Result<usize> {
+        add(self.outgoing.seen, self.incoming.seen)
+    }
+}
+
 impl<Out: Cursor, In: Cursor> WeakNeighbors<Out, In> {
     fn next(&mut self, control: &mut impl FnMut() -> Result<()>) -> Result<Option<(usize, u8)>> {
         loop {
             self.outgoing.fill(self.nodes, control)?;
             self.incoming.fill(self.nodes, control)?;
-            let neighbor = match (self.outgoing.head, self.incoming.head) {
-                (Some(out), Some(input)) => out.min(input),
-                (Some(out), None) => out,
-                (None, Some(input)) => input,
-                (None, None) => return Ok(None),
+            let Some(item) = self.take_ready() else {
+                return Ok(None);
             };
-            let out = self.outgoing.head == Some(neighbor);
-            let input = self.incoming.head == Some(neighbor);
-            if out {
-                self.outgoing.head = None;
-            }
-            if input {
-                self.incoming.head = None;
-            }
-            if neighbor != self.source {
-                return Ok(Some((neighbor, u8::from(out) + u8::from(input))));
+            if item.0 != self.source {
+                return Ok(Some(item));
             }
         }
     }
+}
 
-    fn scans(&self) -> Result<usize> {
-        add(self.outgoing.seen, self.incoming.seen)
+impl WeakNeighbors<super::SealedNeighborCursor<'_>, super::SealedNeighborCursor<'_>> {
+    async fn next_cooperative<Yield, YieldFuture>(
+        &mut self,
+        control: &mut super::cooperative::Cooperate<'_, Yield>,
+    ) -> Result<Option<(usize, u8)>>
+    where
+        Yield: FnMut() -> YieldFuture,
+        YieldFuture: Future<Output = ()>,
+    {
+        loop {
+            self.outgoing.fill_cooperative(self.nodes, control).await?;
+            self.incoming.fill_cooperative(self.nodes, control).await?;
+            let Some(item) = self.take_ready() else {
+                return Ok(None);
+            };
+            if item.0 != self.source {
+                return Ok(Some(item));
+            }
+        }
     }
 }
 
@@ -288,6 +348,70 @@ struct Plan {
     live: usize,
 }
 
+impl Plan {
+    fn new(
+        n: usize,
+        history: usize,
+        initial_work: usize,
+        work_limit: usize,
+        base: usize,
+        memory_limit: usize,
+    ) -> Result<Self> {
+        admit(
+            "kernel workspace bytes",
+            add(base, workspace(n)?)?,
+            memory_limit,
+        )?;
+        let mut work = initial_work;
+        charge(
+            &mut work,
+            mul(n, add(64, mul(8, bits(history))?)?)?,
+            work_limit,
+        )?;
+        let mut live = base;
+        let costs = reserved(n, &mut live, memory_limit)?;
+        let degrees = reserved(n, &mut live, memory_limit)?;
+        Ok(Self {
+            costs,
+            degrees,
+            work,
+            base,
+            live,
+        })
+    }
+
+    fn price_row(
+        &mut self,
+        n: usize,
+        history: usize,
+        incidences: usize,
+        work_limit: usize,
+    ) -> Result<()> {
+        let cost = row_work(n, history, incidences)?;
+        // One planning scan, one mark scan, and one outer scan. Each includes
+        // BOTH faces, invisible history and excluded endpoint probes.
+        charge(&mut self.work, mul(cost, 3)?, work_limit)?;
+        self.costs.push(cost);
+        Ok(())
+    }
+
+    fn count_neighbor(
+        &mut self,
+        source: usize,
+        target: usize,
+        degree: &mut usize,
+        work_limit: usize,
+    ) -> Result<()> {
+        *degree = add(*degree, 1)?;
+        if lower(&self.costs, target, source) {
+            // Exactly one later inner scan per weak edge, independent of
+            // whether that edge has one or two directed incidences.
+            charge(&mut self.work, self.costs[target], work_limit)?;
+        }
+        Ok(())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare(
     outgoing: &impl Rows,
@@ -305,50 +429,47 @@ fn prepare(
     if incoming.node_count() != n {
         return Err(ExecutionError::InvalidUpstreamResult.into());
     }
-    admit(
-        "kernel workspace bytes",
-        add(base, workspace(n)?)?,
-        memory_limit,
-    )?;
-    let mut work = initial_work;
-    charge(
-        &mut work,
-        mul(n, add(64, mul(8, bits(history))?)?)?,
-        work_limit,
-    )?;
-    let mut live = base;
-    let mut costs = reserved(n, &mut live, memory_limit)?;
-    let mut degrees = reserved(n, &mut live, memory_limit)?;
+    let mut plan = Plan::new(n, history, initial_work, work_limit, base, memory_limit)?;
     for source in 0..n {
         control()?;
-        let cost = row_work(n, history, retained(source)?)?;
-        // One planning scan, one mark scan, and one outer scan. Each includes
-        // BOTH faces, invisible history and excluded endpoint probes.
-        charge(&mut work, mul(cost, 3)?, work_limit)?;
-        costs.push(cost);
+        plan.price_row(n, history, retained(source)?, work_limit)?;
     }
     for source in 0..n {
         control()?;
         let mut row = neighbors(outgoing, incoming, source)?;
         let mut degree = 0;
         while let Some((target, _)) = row.next(control)? {
-            degree = add(degree, 1)?;
-            if lower(&costs, target, source) {
-                // Exactly one later inner scan per weak edge, independent of
-                // whether that edge has one or two directed incidences.
-                charge(&mut work, costs[target], work_limit)?;
-            }
+            plan.count_neighbor(source, target, &mut degree, work_limit)?;
         }
-        degrees.push(degree);
+        plan.degrees.push(degree);
     }
     control()?;
-    Ok(Plan {
-        costs,
-        degrees,
-        work,
-        base,
-        live,
-    })
+    Ok(plan)
+}
+
+fn triangle(closed: &mut [usize], vertices: [usize; 3], opposite_arcs: [u8; 3]) -> Result<()> {
+    // Distinct vertices follow from total orientation. Add the opposite side's
+    // number of directed arcs to each center, in the same order in both drivers.
+    for (vertex, arcs) in vertices.into_iter().zip(opposite_arcs) {
+        closed[vertex] = add(closed[vertex], usize::from(arcs))?;
+    }
+    Ok(())
+}
+
+fn coefficient(degree: usize, count: usize) -> Result<f64> {
+    if degree < 2 {
+        if count != 0 {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        }
+        Ok(0.0)
+    } else {
+        let pairs = mul(degree, degree - 1)?;
+        if count > pairs {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        }
+        // Identical conversion order to the decoded directed LCC kernel.
+        Ok(count as f64 / pairs as f64)
+    }
 }
 
 fn run(
@@ -404,11 +525,11 @@ fn run(
             let mut other = neighbors(outgoing, incoming, target)?;
             while let Some((third, opposite)) = other.next(control)? {
                 if lower(&costs, third, target) && marks[third] == source {
-                    // Distinct vertices follow from total orientation. Add the
-                    // opposite side's number of directed arcs to each center.
-                    closed[source] = add(closed[source], usize::from(opposite))?;
-                    closed[target] = add(closed[target], usize::from(multiplicities[third]))?;
-                    closed[third] = add(closed[third], usize::from(multiplicity))?;
+                    triangle(
+                        &mut closed,
+                        [source, target, third],
+                        [opposite, multiplicities[third], multiplicity],
+                    )?;
                 }
             }
             witness.edges_scanned = add(witness.edges_scanned, other.scans()?)?;
@@ -424,20 +545,7 @@ fn run(
     for (degree, count) in degrees.into_iter().zip(closed) {
         control()?;
         witness.nodes_touched = add(witness.nodes_touched, 1)?;
-        let score = if degree < 2 {
-            if count != 0 {
-                return Err(ExecutionError::InvalidUpstreamResult.into());
-            }
-            0.0
-        } else {
-            let pairs = mul(degree, degree - 1)?;
-            if count > pairs {
-                return Err(ExecutionError::InvalidUpstreamResult.into());
-            }
-            // Identical conversion order to the decoded directed LCC kernel.
-            count as f64 / pairs as f64
-        };
-        scores.push(score);
+        scores.push(coefficient(degree, count)?);
     }
     control()?;
     Ok((
@@ -448,6 +556,204 @@ fn run(
         },
         peak,
     ))
+}
+
+fn sealed_neighbors<'a>(
+    outgoing: &'a SealedGraphView,
+    incoming: &'a SealedGraphView,
+    source: usize,
+    cx: &Control<'_>,
+) -> Result<WeakNeighbors<super::SealedNeighborCursor<'a>, super::SealedNeighborCursor<'a>>> {
+    Ok(WeakNeighbors {
+        outgoing: Face::new(
+            outgoing.neighbor_cursor_controlled(cx, source, None)?,
+            outgoing
+                .degree(source)
+                .ok_or(ExecutionError::InvalidUpstreamResult)?,
+        ),
+        incoming: Face::new(
+            incoming.neighbor_cursor_controlled(cx, source, None)?,
+            incoming
+                .degree(source)
+                .ok_or(ExecutionError::InvalidUpstreamResult)?,
+        ),
+        source,
+        nodes: outgoing.node_count(),
+    })
+}
+
+/// The same retained-cost orientation and exact counters, with raw pulls,
+/// reverse construction, scalar passes and output encoding sharing bounded
+/// scheduling steps. Each weak-neighbor row keeps only two cursor heads.
+pub(super) async fn execute_cooperative<Yield, YieldFuture>(
+    call: &FnxCallSpec,
+    graph: &SealedGraphView,
+    limits: FnxExecutionLimits,
+    memory: FnxMemoryLimits,
+    control: &mut super::cooperative::Cooperate<'_, Yield>,
+) -> Result<FnxResult>
+where
+    Yield: FnMut() -> YieldFuture,
+    YieldFuture: Future<Output = ()>,
+{
+    let n = graph.node_count();
+    let admission = ResultAdmission::new(call, limits, memory)?;
+    admission.rows(n)?;
+    control.tick().await?;
+    let kernel = "fgdb-prism/sealed-directed-clustering-retained-cost-cooperative-v1";
+    if n == 0 {
+        // Preserve the synchronous empty-selection law: excluded history must
+        // not force an incoming index or a nonzero kernel workspace/work bill.
+        return finish(
+            call,
+            graph,
+            KernelOutput {
+                values: KernelValues::Scores(Vec::new()),
+                row_count: 0,
+                witness: witness(),
+            },
+            kernel,
+            0,
+            0,
+            &admission,
+            &mut || checkpoint(control.cx),
+        );
+    }
+    let arrays = workspace(n)?;
+    let memory_limit = memory.max_kernel_workspace_bytes;
+    admit("kernel workspace bytes", arrays, memory_limit)?;
+    let history = graph.scan_incidence_bound();
+    let initial_work = reverse_work(n, history)?;
+    let work_limit = limits.max_estimated_work;
+    admit("estimated work", initial_work, work_limit)?;
+    let opposite = control
+        .reverse_projection(graph, memory_limit - arrays)
+        .await?;
+    control.tick().await?;
+    if opposite.node_count() != n {
+        return Err(ExecutionError::InvalidUpstreamResult.into());
+    }
+    let mut plan = Plan::new(
+        n,
+        history,
+        initial_work,
+        work_limit,
+        opposite.charged_workspace_bytes(),
+        memory_limit,
+    )?;
+    for source in 0..n {
+        control.tick().await?;
+        plan.price_row(
+            n,
+            history,
+            add(
+                graph.retained_row_incidence_bound(source)?,
+                opposite.retained_row_incidence_bound(source)?,
+            )?,
+            work_limit,
+        )?;
+    }
+    for source in 0..n {
+        control.tick().await?;
+        let mut row = sealed_neighbors(graph, &opposite, source, control.cx)?;
+        let mut degree = 0;
+        while let Some((target, _)) = row.next_cooperative(control).await? {
+            control.tick().await?;
+            plan.count_neighbor(source, target, &mut degree, work_limit)?;
+        }
+        plan.degrees.push(degree);
+    }
+    control.tick().await?;
+    let Plan {
+        costs,
+        degrees,
+        work,
+        base,
+        mut live,
+    } = plan;
+    if costs.len() != n || degrees.len() != n {
+        return Err(ExecutionError::InvalidUpstreamResult.into());
+    }
+    let mut closed = reserved(n, &mut live, memory_limit)?;
+    let mut marks = reserved(n, &mut live, memory_limit)?;
+    let mut multiplicities = reserved(n, &mut live, memory_limit)?;
+    for _ in 0..n {
+        control.tick().await?;
+        closed.push(0usize);
+        marks.push(usize::MAX);
+        multiplicities.push(0u8);
+    }
+    let mut peak = live;
+    let mut witness = witness();
+    for source in 0..n {
+        control.tick().await?;
+        witness.nodes_touched = add(witness.nodes_touched, 1)?;
+        {
+            let mut row = sealed_neighbors(graph, &opposite, source, control.cx)?;
+            let mut marked = 0;
+            while let Some((target, multiplicity)) = row.next_cooperative(control).await? {
+                control.tick().await?;
+                if lower(&costs, target, source) {
+                    marks[target] = source;
+                    multiplicities[target] = multiplicity;
+                    marked = add(marked, 1)?;
+                }
+            }
+            witness.queue_peak = witness.queue_peak.max(marked);
+            witness.edges_scanned = add(witness.edges_scanned, row.scans()?)?;
+        }
+        let mut row = sealed_neighbors(graph, &opposite, source, control.cx)?;
+        while let Some((target, multiplicity)) = row.next_cooperative(control).await? {
+            control.tick().await?;
+            if !lower(&costs, target, source) {
+                continue;
+            }
+            let mut other = sealed_neighbors(graph, &opposite, target, control.cx)?;
+            while let Some((third, arcs)) = other.next_cooperative(control).await? {
+                control.tick().await?;
+                if lower(&costs, third, target) && marks[third] == source {
+                    triangle(
+                        &mut closed,
+                        [source, target, third],
+                        [arcs, multiplicities[third], multiplicity],
+                    )?;
+                }
+            }
+            witness.edges_scanned = add(witness.edges_scanned, other.scans()?)?;
+        }
+        witness.edges_scanned = add(witness.edges_scanned, row.scans()?)?;
+    }
+    drop(costs);
+    drop(marks);
+    drop(multiplicities);
+    control.tick().await?;
+    live = add(base, add(vector_bytes(&degrees)?, vector_bytes(&closed)?)?)?;
+    let mut scores = reserved(n, &mut live, memory_limit)?;
+    peak = peak.max(live);
+    for (degree, count) in degrees.into_iter().zip(closed) {
+        control.tick().await?;
+        witness.nodes_touched = add(witness.nodes_touched, 1)?;
+        scores.push(coefficient(degree, count)?);
+    }
+    drop(opposite);
+    control.tick().await?;
+    let values = KernelValues::Scores(scores);
+    let mut encoded = super::EncodedRows::new(call, n, &admission)?;
+    for index in 0..n {
+        control.tick().await?;
+        encoded.push(call, graph, &values, index, &mut || checkpoint(control.cx))?;
+    }
+    control.tick().await?;
+    super::finish_encoded(
+        call,
+        graph,
+        encoded,
+        witness,
+        kernel,
+        work,
+        peak,
+        &mut || checkpoint(control.cx),
+    )
 }
 
 #[cfg(test)]

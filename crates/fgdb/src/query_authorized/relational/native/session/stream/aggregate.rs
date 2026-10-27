@@ -310,6 +310,9 @@ fn vertex_driver<'q, C: FnMut() -> u64>(
         })
         .with_root_prefix(plan.leading_root_prefix(), |key| {
             execution.borrow().permit.predicates().allows_property(key)
+        })
+        .with_root_membership(plan.leading_root_membership(), |key| {
+            execution.borrow().permit.predicates().allows_property(key)
         });
     let source = ScopedSource {
         inner,

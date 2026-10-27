@@ -1868,3 +1868,114 @@ fn terminal_vertex_merge_rows_stay_private_with_and_without_frozen_execution() {
         }
     });
 }
+
+#[test]
+fn matched_relationship_merge_masks_hidden_inputs_and_refuses_denied_actions_atomically() {
+    lab(0xc4a1_3119, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 2), NOW).unwrap();
+        let program = chain(
+            "CREATE (a:Visible {p:1}) WITH a UNWIND [10,20,30] AS k \
+             MATCH (b {p:k}) MERGE (a)-[r:R]->(b) ON CREATE SET r.p=b.p \
+             RETURN b.p AS target,r.p AS weight ORDER BY target",
+        );
+        let mut absent = None;
+        for hidden in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(S);
+            for id in [10_u128, 20] {
+                seed.create_vertex(VId(id), vec![L], vec![(P, CanonicalScalar::Int(id as i64))]);
+            }
+            if hidden {
+                seed.create_vertex(VId(30), vec![HIDDEN], vec![(P, CanonicalScalar::Int(30))]);
+            }
+            db.write(&commit, seed).await.unwrap();
+            let before = db.frontier().unwrap();
+            let (stats, result, completion) = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    policy(2).with_mutation_limit(10),
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!((stats.created_vertices, stats.created_edges), (1, 2));
+            assert_eq!(result.rows.result_rows, 2);
+            assert_eq!(
+                result
+                    .value
+                    .iter()
+                    .map(GraphValueRow::values)
+                    .collect::<Vec<_>>(),
+                vec![&[int(10), int(10)][..], &[int(20), int(20)][..]]
+            );
+            assert_eq!(db.edges().unwrap().len(), 2);
+            assert!(
+                db.edges()
+                    .unwrap()
+                    .iter()
+                    .all(|edge| edge.entry.dst != VId(30))
+            );
+            let frontier = db.frontier().unwrap();
+            assert_eq!(frontier.0, before.0 + 1);
+            assert_eq!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted {
+                    commit_seq: frontier
+                }
+            );
+            let observed = (stats, result.rows, result.evaluator, result.value);
+            if let Some(expected) = &absent {
+                assert_eq!(
+                    &observed, expected,
+                    "hidden and absent MATCH inputs have identical visible answers and charged work"
+                );
+            } else {
+                absent = Some(observed);
+            }
+
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            for action in ["r.secret=9", "b.secret=9"] {
+                let denied = chain(&format!(
+                    "CREATE (a:Visible {{p:100}}) WITH a MATCH (b:Visible {{p:10}}) \
+                     MERGE (a)-[r:R]->(b) ON CREATE SET {action}"
+                ));
+                let error = db
+                    .execute_graph_write_chain_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        &denied,
+                        policy(2).with_mutation_limit(10),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(authorization(&error), Some(Error::ScopeDenied), "{error:?}");
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
+                    before
+                );
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+    });
+}

@@ -3,7 +3,7 @@
 //! certificate parity are checked at the same seam as the other kernels.
 
 use super::*;
-use fgdb_prism::AdapterPath;
+use fgdb_prism::{AdapterPath, FnxValue};
 
 #[test]
 fn topology_calls_preserve_history_reductions_aliases_and_certificates_across_quanta() {
@@ -249,6 +249,519 @@ fn topology_empty_and_isolated_populations_yield_during_scalar_and_result_walks(
                 assert_eq!(actual.rows.len(), n);
                 if n != 0 {
                     assert!(pending >= n * 4, "edge-free scalar walks must cooperate");
+                }
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+fn directed_identity(vertex: usize, n: usize) -> VId {
+    VId(u128::MAX - (n - 1 - vertex) as u128)
+}
+
+async fn directed_database(cx: &CommitCx, n: usize, edges: &[(usize, usize)]) -> Database<MemVfs> {
+    let mut db = Database::<MemVfs>::open_memory(
+        cx,
+        DatabaseKeys::new(
+            [0xd1; 32],
+            DatabaseSecurityNamespaceId([0xd2; 32]),
+            [0xd3; 32],
+        ),
+    )
+    .await
+    .unwrap();
+    if n == 0 {
+        return db;
+    }
+    let mut batch = WriteBatch::new(RelationId(1));
+    for vertex in 0..n {
+        batch.create_vertex(directed_identity(vertex, n), vec![LabelId(1)], vec![]);
+    }
+    for (id, &(source, target)) in edges.iter().enumerate() {
+        batch.add_edge(
+            EId(id as u128),
+            directed_identity(source, n),
+            directed_identity(target, n),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(-1))],
+        );
+    }
+    db.write(cx, batch).await.unwrap();
+    db
+}
+
+// Enumerate ordered pairs of distinct weak neighbors directly. This deliberately
+// has no cost orientation, stamps, two-face merge or triangle enumeration.
+fn directed_reference(n: usize, edges: &[(usize, usize)]) -> Vec<Vec<FnxValue>> {
+    let mut adjacent = vec![vec![false; n]; n];
+    for &(source, target) in edges {
+        adjacent[source][target] = true;
+    }
+    (0..n)
+        .map(|source| {
+            let neighbors: Vec<_> = (0..n)
+                .filter(|&target| {
+                    source != target && (adjacent[source][target] || adjacent[target][source])
+                })
+                .collect();
+            let mut count = 0usize;
+            for &left in &neighbors {
+                for &right in &neighbors {
+                    count += usize::from(left != right && adjacent[left][right]);
+                }
+            }
+            let score = if neighbors.len() < 2 {
+                0.0
+            } else {
+                count as f64 / (neighbors.len() * (neighbors.len() - 1)) as f64
+            };
+            vec![
+                FnxValue::Vertex(directed_identity(source, n)),
+                FnxValue::Score(score),
+            ]
+        })
+        .collect()
+}
+
+#[test]
+fn directed_clustering_matches_independent_ordered_pairs_across_topologies_and_quanta() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let possible = [(0, 1), (0, 2), (1, 0), (1, 2), (2, 0), (2, 1)];
+        let call = FnxCallSpec::directed_clustering_coefficient();
+        assert!(call.supports_cooperative_sealed_execution());
+        for mask in 0u8..64 {
+            let mut edges = vec![(0, 0), (2, 2)];
+            for (bit, &edge) in possible.iter().enumerate() {
+                if mask & (1 << bit) != 0 {
+                    // Parallel arcs reduce to one directed adjacency. Reciprocal
+                    // arcs remain two different ordered pairs in the oracle.
+                    edges.extend([edge, edge]);
+                }
+            }
+            let expected = directed_reference(4, &edges);
+            let db = directed_database(&contexts.commit(), 4, &edges).await;
+            for direction in [Directedness::Directed, Directedness::Reversed] {
+                let mut opt = options(direction);
+                opt.projection.parallel_edges = ParallelEdgePolicy::CollapseUnit;
+                let graph = projection(&db, &cx, opt).await;
+                let sync = call
+                    .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                    .unwrap();
+                assert_eq!(sync.rows, expected, "mask={mask}, {direction:?}");
+                let mut previous = None;
+                for q in [1, 7, 257] {
+                    let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                    let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                    let (actual, pending) = drive(
+                        call.execute_sealed_cooperative(
+                            &controlled,
+                            &graph,
+                            opt.execution_limits,
+                            memory(),
+                            quantum(q),
+                            yield_now,
+                        ),
+                        &probe,
+                        q,
+                    );
+                    let actual = actual.unwrap();
+                    compare_execution(&actual, &sync);
+                    assert_eq!(actual.rows, expected, "mask={mask}, q={q}, {direction:?}");
+                    assert!(pending > 0, "reverse construction must offer scheduling");
+                    if let Some(previous) = &previous {
+                        assert_eq!(&actual, previous);
+                    }
+                    previous = Some(actual);
+                }
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn directed_clustering_preserves_exact_admission_and_empty_or_isolated_graph_laws() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let edges = [(0, 1), (1, 0), (1, 2), (2, 0), (2, 3)];
+        let db = directed_database(&contexts.commit(), 4, &edges).await;
+        let call = FnxCallSpec::directed_clustering_coefficient();
+        for direction in [Directedness::Directed, Directedness::Reversed] {
+            let opt = options(direction);
+            let graph = projection(&db, &cx, opt).await;
+            let sync = call
+                .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                .unwrap();
+            let bytes = call.outputs().len() * size_of::<String>()
+                + call
+                    .outputs()
+                    .iter()
+                    .map(|column| column.name.len())
+                    .sum::<usize>()
+                + 4 * (size_of::<Vec<FnxValue>>() + call.outputs().len() * size_of::<FnxValue>());
+            let limits = FnxExecutionLimits {
+                max_iterations: 0,
+                max_result_rows: 4,
+                max_estimated_work: sync.certificate.estimated_work,
+            };
+            let mem = FnxMemoryLimits {
+                max_kernel_workspace_bytes: sync.certificate.kernel_workspace_bytes,
+                max_result_bytes: bytes,
+            };
+            let exact = call
+                .execute_sealed_cooperative(&cx, &graph, limits, mem, quantum(1), yield_now)
+                .await
+                .unwrap();
+            compare_execution(&exact, &sync);
+            // Four vertices cannot trigger the optional ordinal prefix, so a
+            // one-byte-short workspace cannot trade that directory for space.
+            for (limits, mem) in [
+                (
+                    FnxExecutionLimits {
+                        max_result_rows: 3,
+                        ..limits
+                    },
+                    mem,
+                ),
+                (
+                    FnxExecutionLimits {
+                        max_estimated_work: limits.max_estimated_work - 1,
+                        ..limits
+                    },
+                    mem,
+                ),
+                (
+                    limits,
+                    FnxMemoryLimits {
+                        max_result_bytes: bytes - 1,
+                        ..mem
+                    },
+                ),
+                (
+                    limits,
+                    FnxMemoryLimits {
+                        max_kernel_workspace_bytes: mem.max_kernel_workspace_bytes - 1,
+                        ..mem
+                    },
+                ),
+            ] {
+                let sync = call.execute_sealed(&cx, &graph, limits, mem).unwrap_err();
+                let cooperative = call
+                    .execute_sealed_cooperative(&cx, &graph, limits, mem, quantum(1), yield_now)
+                    .await
+                    .unwrap_err();
+                assert_eq!(format!("{cooperative:?}"), format!("{sync:?}"));
+            }
+        }
+        for n in [0, 1, 512] {
+            let db = directed_database(&contexts.commit(), n, &[]).await;
+            let opt = options(Directedness::Directed);
+            let graph = projection(&db, &cx, opt).await;
+            let mut limits = opt.execution_limits;
+            let mut mem = memory();
+            if n == 0 {
+                limits.max_result_rows = 0;
+                limits.max_estimated_work = 0;
+                mem.max_kernel_workspace_bytes = 0;
+            }
+            let expected = call.execute_sealed(&cx, &graph, limits, mem).unwrap();
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+            let (actual, pending) = drive(
+                call.execute_sealed_cooperative(
+                    &controlled,
+                    &graph,
+                    limits,
+                    mem,
+                    quantum(1),
+                    yield_now,
+                ),
+                &probe,
+                1,
+            );
+            let actual = actual.unwrap();
+            compare_execution(&actual, &expected);
+            assert_eq!(actual.rows, directed_reference(n, &[]));
+            assert!(
+                pending >= 4 * n,
+                "scalar and reverse-directory work must yield"
+            );
+        }
+        let opt = options(Directedness::Undirected);
+        let graph = projection(&db, &cx, opt).await;
+        assert!(matches!(
+            call.execute_sealed_cooperative(
+                &cx,
+                &graph,
+                opt.execution_limits,
+                memory(),
+                quantum(1),
+                yield_now
+            )
+            .await,
+            Err(FnxSealedExecutionError::Execution(
+                FnxExecutionError::GraphKind { .. }
+            ))
+        ));
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn directed_clustering_observes_every_live_refusal_and_suspended_drop() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let db = directed_database(&contexts.commit(), 3, &[(0, 1), (1, 0), (1, 2), (2, 0)]).await;
+        let anchor = db.read_session().unwrap().partition_root();
+        let call = FnxCallSpec::directed_clustering_coefficient();
+        for direction in [Directedness::Directed, Directedness::Reversed] {
+            let opt = options(direction);
+            let graph = projection(&db, &cx, opt).await;
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+            let guards = Cell::new(0usize);
+            let (expected, pending) = drive(
+                call.execute_sealed_cooperative_with_checkpoint(
+                    &controlled,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(3),
+                    yield_now,
+                    || {
+                        guards.set(guards.get() + 1);
+                        Ok(())
+                    },
+                ),
+                &probe,
+                3,
+            );
+            let expected = expected.unwrap();
+            for stop in 1..=probe.calls() {
+                let refusal = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                let controlled = cx.with_checkpoint_probe(Arc::clone(&refusal));
+                let (actual, _) = drive(
+                    call.execute_sealed_cooperative(
+                        &controlled,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(3),
+                        yield_now,
+                    ),
+                    &refusal,
+                    3,
+                );
+                assert!(matches!(actual, Err(FnxSealedExecutionError::Cancelled(_))));
+                assert_eq!(refusal.calls(), stop);
+            }
+            for stop in 1..=guards.get() {
+                let mut seen = 0;
+                let error = call
+                    .execute_sealed_cooperative_with_checkpoint(
+                        &cx,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(3),
+                        yield_now,
+                        || {
+                            seen += 1;
+                            if seen == stop {
+                                Err(SealedProjectionError::Guard(Box::new(LiveRefusal(stop))))
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await
+                    .unwrap_err();
+                live_refusal(error, stop);
+                assert_eq!(seen, stop);
+            }
+            let waker = Waker::from(Arc::new(Wakes::default()));
+            let mut task = Context::from_waker(&waker);
+            for stop in 0..=pending {
+                let revoked = Cell::new(false);
+                let mut future = Box::pin(call.execute_sealed_cooperative_with_checkpoint(
+                    &cx,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(3),
+                    yield_now,
+                    || {
+                        if revoked.get() {
+                            Err(SealedProjectionError::Guard(Box::new(LiveRefusal(stop))))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                ));
+                for _ in 0..stop {
+                    assert!(future.as_mut().poll(&mut task).is_pending());
+                }
+                revoked.set(true);
+                let Poll::Ready(result) = future.as_mut().poll(&mut task) else {
+                    panic!("revocation must stop before resuming a source or counter step");
+                };
+                live_refusal(result.unwrap_err(), stop);
+                drop(future);
+                let mut abandoned = Box::pin(call.execute_sealed_cooperative(
+                    &cx,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(3),
+                    yield_now,
+                ));
+                for _ in 0..stop {
+                    assert!(abandoned.as_mut().poll(&mut task).is_pending());
+                }
+                drop(abandoned);
+                assert_eq!(contexts.outstanding_obligations(), 0);
+                assert_eq!(db.read_session().unwrap().partition_root(), anchor);
+            }
+            assert_eq!(
+                call.execute_sealed_cooperative(
+                    &cx,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(7),
+                    yield_now,
+                )
+                .await
+                .unwrap(),
+                expected
+            );
+        }
+    });
+}
+
+#[test]
+fn historical_directed_clustering_hosts_preserve_reductions_and_yield_inside_hidden_hubs() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let (mut db, original) = database(&contexts.commit()).await;
+        let mut batch = WriteBatch::new(RelationId(1));
+        batch.add_edge(
+            EId(7),
+            VId(2),
+            VId(0),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(-4))],
+        );
+        db.write(&contexts.commit(), batch).await.unwrap();
+        let current = db.frontier().unwrap();
+        let view = db.read_session().unwrap();
+        let text =
+            "CALL fnx.directed_clustering_coefficient() YIELD score AS coefficient, vertex AS id";
+        let call = FnxCallSpec::bind(text, &FnxParameters::new()).unwrap();
+        for direction in [Directedness::Directed, Directedness::Reversed] {
+            for at in [original, current] {
+                for reduction in [
+                    ParallelEdgePolicy::Sum,
+                    ParallelEdgePolicy::Minimum,
+                    ParallelEdgePolicy::Maximum,
+                    ParallelEdgePolicy::CollapseUnit,
+                ] {
+                    for loops in [SelfLoopPolicy::Keep, SelfLoopPolicy::Drop] {
+                        let mut opt = options(direction);
+                        opt.as_of = Some(at);
+                        opt.projection.parallel_edges = reduction;
+                        opt.projection.self_loops = loops;
+                        let graph = projection(&db, &cx, opt).await;
+                        let decoded = view
+                            .prism_projection_at(
+                                &cx,
+                                at,
+                                opt.selection,
+                                opt.projection,
+                                opt.projection_limits,
+                                opt.source_limits,
+                            )
+                            .unwrap();
+                        let independent = call
+                            .execute(&decoded, opt.execution_limits, || cx.checkpoint())
+                            .unwrap();
+                        let sync = call
+                            .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                            .unwrap();
+                        assert_eq!(sync.rows, independent.rows);
+                        assert_eq!(
+                            sync.certificate.result_digest,
+                            independent.certificate.result_digest
+                        );
+                        assert_eq!(
+                            sync.rows[0][0],
+                            FnxValue::Score(if at == current { 0.5 } else { 0.0 })
+                        );
+                        let mut previous = None;
+                        for q in [1, 7] {
+                            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                            let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                            let (actual, pending) = drive(
+                                call.execute_sealed_cooperative(
+                                    &controlled,
+                                    &graph,
+                                    opt.execution_limits,
+                                    memory(),
+                                    quantum(q),
+                                    yield_now,
+                                ),
+                                &probe,
+                                q,
+                            );
+                            let actual = actual.unwrap();
+                            compare_execution(&actual, &sync);
+                            assert_eq!(actual.certificate.adapter, AdapterPath::CompressedCursor);
+                            assert_eq!(actual.columns, vec!["coefficient", "id"]);
+                            assert_eq!(actual.rows.len(), 4);
+                            assert!(
+                                actual
+                                    .rows
+                                    .iter()
+                                    .all(|row| row[1] != FnxValue::Vertex(VId(99)))
+                            );
+                            if q == 1 {
+                                assert!(
+                                    pending > 700,
+                                    "hidden history and both-face scans must yield"
+                                );
+                            }
+                            if let Some(previous) = &previous {
+                                assert_eq!(&actual, previous);
+                            }
+                            previous = Some(actual);
+                        }
+                        let hosted = db
+                            .call_fnx_sealed_cooperative(
+                                &cx,
+                                text,
+                                &FnxParameters::new(),
+                                opt,
+                                memory(),
+                                SealedLimits::default(),
+                                quantum(7),
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(Some(hosted.analytics), previous);
+                        assert_eq!(hosted.selection, opt.selection);
+                    }
                 }
             }
         }

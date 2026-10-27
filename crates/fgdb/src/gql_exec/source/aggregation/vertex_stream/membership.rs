@@ -40,6 +40,39 @@ impl MembershipCandidates {
         })
     }
 
+    pub(super) fn key(&self) -> PropertyKeyId {
+        self.key
+    }
+
+    /// Recheck only the necessary bound, never the whole Boolean expression.
+    /// Scoped callers have already admitted the current vertex and this key.
+    /// The same check applies to postings and full-history fallbacks, so a
+    /// hidden collection or extra posting cannot change visible accounting.
+    /// A stored collection must reach the ordinary evaluator: scalar conversion
+    /// may fail there before IN returns false, including for an empty list.
+    pub(super) fn accepts<C>(
+        &self,
+        value: Option<&CanonicalScalar>,
+        control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+    ) -> Result<bool, C> {
+        let Some(value) = value else {
+            return Ok(true);
+        };
+        let (_, members) = self
+            .expression
+            .literal_membership_conjunct()
+            .expect("the immutable membership definition was checked at opening");
+        for member in members {
+            control(VertexScanEvent::Work)?;
+            if fgdb_gql::algebra::IntegerComparison::Equal
+                .accepts_scalar_pair(Some(value), Some(member.as_ref()))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// The complete-scan fallback retains the history it just enumerated,
     /// exactly as an ordinary root scan does. Correlated probes still seek.
     pub(super) fn history(&self, vid: VId) -> Option<&History> {

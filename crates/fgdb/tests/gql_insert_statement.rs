@@ -2555,3 +2555,244 @@ fn a_write_right_after_match_unwind_reads_its_rows() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// A read between writes can feed the relationship MERGE family, preserving
+/// the occurrence bag, post-write visibility, final RETURN and one commit.
+#[test]
+fn matched_relationship_merge_runs_actions_and_following_writes_then_reopens() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4ae, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in [10_u128, 20] {
+            seed.create_vertex(
+                VId(id),
+                vec![SOURCE],
+                vec![(P, CanonicalScalar::Int(id as i64))],
+            );
+        }
+        db.write(&commit, seed).await.unwrap();
+        let write = async |db: &mut Database<MemVfs>, text: &str, params: &GqlParameters| {
+            let (mut vertices, mut edges) = reserve(db, &cx, 4, 8);
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                params,
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => vertices.pop_front().unwrap(),
+                        GraphInsertRequest::Edge { .. } => edges.pop_front().unwrap(),
+                    })
+                },
+            )
+            .await
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        let int = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        let parameters = GqlParameters::new()
+            .with_int64("created", 1)
+            .unwrap()
+            .with_list(
+                "keys",
+                [10, 10, 20, 99]
+                    .into_iter()
+                    .map(|value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+                    .collect(),
+            )
+            .unwrap()
+            .with_int64("bump", 1)
+            .unwrap();
+        let original = parameters.canonical_bytes();
+        let text = "MERGE (a:Person {p:$created}) WITH a UNWIND $keys AS k \
+            MATCH (b:Source {p:k}) MERGE (a)-[r:T]->(b) \
+            ON CREATE SET r.q=b.p ON MATCH SET r.q=r.q+$bump \
+            RETURN b.p AS target,r.q AS weight ORDER BY target,weight";
+        for (ten, twenty) in [(11, 20), (13, 21)] {
+            let before = db.frontier().unwrap();
+            let result = write(&mut db, text, &parameters).await.unwrap();
+            let QueryResult::Rows { columns, rows } = result else {
+                panic!("the final MERGE RETURN must return rows")
+            };
+            assert_eq!(columns, ["target", "weight"]);
+            assert_eq!(
+                rows,
+                [
+                    vec![int(10), int(ten)],
+                    vec![int(10), int(ten)],
+                    vec![int(20), int(twenty)]
+                ],
+                "duplicate keys keep both occurrences; RETURN sees all completed actions"
+            );
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            assert_eq!(db.vertices().unwrap().len(), 3);
+            let edges = db.edges().unwrap();
+            assert_eq!(
+                edges.len(),
+                2,
+                "the second occurrence and retry reuse the edges"
+            );
+            for (destination, weight) in [(VId(10), ten), (VId(20), twenty)] {
+                let edge = edges
+                    .iter()
+                    .find(|edge| edge.entry.dst == destination)
+                    .unwrap();
+                assert_eq!(edge.entry.relation, T);
+                assert_eq!(edge.props, [(Q, CanonicalScalar::Int(weight).into())]);
+            }
+        }
+        assert_eq!(parameters.canonical_bytes(), original);
+
+        // Selection reads a vertex created by an earlier step of this same
+        // statement; no external commit is needed before matching it.
+        write(
+            &mut db,
+            "CREATE (a:Copy {p:5}) WITH a MATCH (b:Copy {p:5}) MERGE (a)-[:T]->(b)",
+            &GqlParameters::new(),
+        )
+        .await
+        .unwrap();
+        let copies: Vec<_> = db
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .filter(|v| v.labels == [COPY])
+            .collect();
+        assert_eq!(copies.len(), 1);
+        assert!(db.edges().unwrap().iter().any(|edge| {
+            (edge.entry.src, edge.entry.relation, edge.entry.dst)
+                == (copies[0].vid, T, copies[0].vid)
+        }));
+
+        // Row stages finish before MERGE; its post-action edge property is
+        // then available to another write, including a reversed relationship.
+        let result = write(
+            &mut db,
+            "CREATE (a:Person {p:2}) WITH a MATCH (b:Source) \
+             WITH a,b ORDER BY b.p DESC LIMIT 1 MERGE (a)<-[r:T]-(b) SET r.q=b.p \
+             WITH a,b,r CREATE (a)-[:R {q:r.q}]->(b) \
+             RETURN a.p AS source,b.p AS target,r.q AS weight",
+            &GqlParameters::new(),
+        )
+        .await
+        .unwrap();
+        let QueryResult::Rows { rows, .. } = result else {
+            panic!("the following CREATE must retain MERGE's row")
+        };
+        assert_eq!(rows, [vec![int(2), int(20), int(20)]]);
+        let person = db
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .find(|v| {
+                v.labels == [PERSON] && v.props.contains(&(P, CanonicalScalar::Int(2).into()))
+            })
+            .unwrap()
+            .vid;
+        assert!(db.edges().unwrap().iter().any(|edge| {
+            (edge.entry.src, edge.entry.relation, edge.entry.dst) == (VId(20), T, person)
+        }));
+        assert!(db.edges().unwrap().iter().any(|edge| {
+            (edge.entry.src, edge.entry.relation, edge.entry.dst) == (person, R, VId(20))
+                && edge.props == [(Q, CanonicalScalar::Int(20).into())]
+        }));
+        assert_eq!(txcx.outstanding_obligations(), 0);
+        let expected = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap()
+            ),
+            expected
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn matched_relationship_merge_late_errors_and_limits_roll_back_the_complete_statement() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4af, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = fresh(&commit, true).await;
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        let prefix = "CREATE (a:Person {p:1}) WITH a MATCH (b:Source) MERGE (a)-[r:T]->(b)";
+        let cases = [
+            (
+                format!("{prefix} ON CREATE SET r.q=100/(b.p-20)"),
+                policy(),
+                "DivisionByZero",
+            ),
+            (
+                prefix.to_owned(),
+                GraphWriteProgramPolicy::new(policy().mutations.query, 100, 100, 1),
+                "CreationLimit",
+            ),
+            (
+                format!("{prefix} RETURN b.p AS p"),
+                GraphWriteProgramPolicy::new(
+                    GqlQueryPolicy::new(100_000, 1, 10_000_000, 10_000_000),
+                    100,
+                    100,
+                    100,
+                ),
+                "ResultRows",
+            ),
+        ];
+        for (text, admitted, expected) in cases {
+            let (mut vertices, mut edges) = reserve(&mut db, &cx, 4, 8);
+            let error = db
+                .query_write(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    &text,
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    admitted,
+                    |request| {
+                        Ok::<_, &'static str>(match request.request {
+                            GraphInsertRequest::Vertex { .. } => vertices.pop_front().unwrap(),
+                            GraphInsertRequest::Edge { .. } => edges.pop_front().unwrap(),
+                        })
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(format!("{error:?}").contains(expected), "{text}: {error:?}");
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
