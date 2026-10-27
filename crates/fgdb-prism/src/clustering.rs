@@ -84,14 +84,35 @@ pub(crate) fn estimated_work<C>(
                 .ok_or(FnxExecutionError::SizeOverflow)?,
         )?;
         add(&mut work, bits(row.len()))?;
-        for &target in row {
-            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
-            if source < target {
-                let other = graph
-                    .neighbors_indices(target)
-                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
-                add(&mut work, row.len().min(other.len()))?;
+        let mut start = 0;
+        while start < row.len() {
+            let proposed = (row.len() - start).min(FNX_METER_RUN);
+            // Every contribution is at most this source's degree. Prove
+            // that the whole run cannot overflow before precharging it;
+            // otherwise retain the original unit/error ordering. Targets
+            // are validated immutable projection ordinals.
+            let count = if row
+                .len()
+                .checked_mul(proposed)
+                .and_then(|bound| work.checked_add(bound))
+                .is_some()
+            {
+                proposed
+            } else {
+                1
+            };
+            checkpoint
+                .units(count)
+                .map_err(FnxExecutionError::Cancelled)?;
+            for &target in &row[start..start + count] {
+                if source < target {
+                    let other = graph
+                        .neighbors_indices(target)
+                        .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                    add(&mut work, row.len().min(other.len()))?;
+                }
             }
+            start += count;
         }
     }
     Ok(work)
@@ -163,23 +184,44 @@ fn forward_rows<C>(
             offsets.push(targets.len());
             continue;
         }
-        for &target in row {
-            checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
-            add(&mut witness.edges_scanned, 1)?;
-            let other = graph
-                .neighbors_indices(target)
-                .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
-            // A self-loop has the same key and never enters the forward CSR.
-            // Rows stay sorted by ordinal; degree only chooses their members.
-            if can_participate(other, target) && (other.len(), target) < (row.len(), source) {
-                if targets.len() == capacity {
-                    return Err(FnxExecutionError::InvalidUpstreamResult);
+        let mut start = 0;
+        while start < row.len() {
+            let proposed = (row.len() - start).min(FNX_METER_RUN);
+            // The first retained target may allocate and must fail on its
+            // original unit. After admission, the immutable CSR guarantees
+            // valid targets; bound both counters before batching the scan.
+            let count = if !targets.is_empty()
+                && witness.edges_scanned.checked_add(proposed).is_some()
+                && targets
+                    .len()
+                    .checked_add(proposed)
+                    .is_some_and(|end| end <= capacity)
+            {
+                proposed
+            } else {
+                1
+            };
+            checkpoint
+                .units(count)
+                .map_err(FnxExecutionError::Cancelled)?;
+            for &target in &row[start..start + count] {
+                add(&mut witness.edges_scanned, 1)?;
+                let other = graph
+                    .neighbors_indices(target)
+                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                // A self-loop has the same key and never enters the forward CSR.
+                // Rows stay sorted by ordinal; degree only chooses their members.
+                if can_participate(other, target) && (other.len(), target) < (row.len(), source) {
+                    if targets.len() == capacity {
+                        return Err(FnxExecutionError::InvalidUpstreamResult);
+                    }
+                    if targets.is_empty() {
+                        targets = reserve(capacity)?;
+                    }
+                    targets.push(target);
                 }
-                if targets.is_empty() {
-                    targets = reserve(capacity)?;
-                }
-                targets.push(target);
             }
+            start += count;
         }
         has_wedges |= targets.len() - offsets[source] >= 2;
         offsets.push(targets.len());
@@ -554,6 +596,115 @@ mod tests {
             }
             self.counts.units += count;
             Ok(())
+        }
+    }
+
+    #[test]
+    fn admission_and_forward_scans_batch_without_changing_work_or_refusal_prefixes() {
+        // Cross several run boundaries, include a self-loop and leave one
+        // isolated vertex. Expected work and orientation are derived from
+        // the graph's degree law, independently of either scanning loop.
+        let width = FNX_METER_RUN + 3;
+        let mut edges: Vec<_> = (0..width)
+            .flat_map(|source| (source + 1..width).map(move |target| (source, target)))
+            .collect();
+        edges.push((0, 0));
+        let view = graph(width + 1, &edges);
+        let rows: Vec<_> = (0..view.node_count())
+            .map(|source| view.neighbors_indices(source).unwrap())
+            .collect();
+        let expected_work = 4 * rows.len()
+            + rows
+                .iter()
+                .map(|row| 2 * row.len() + bits(row.len()))
+                .sum::<usize>()
+            + rows
+                .iter()
+                .enumerate()
+                .flat_map(|(source, row)| {
+                    row.iter()
+                        .filter_map(move |&target| (source < target).then_some((row.len(), target)))
+                })
+                .map(|(degree, target)| degree.min(rows[target].len()))
+                .sum::<usize>();
+        let expected_units = rows.len() + rows.iter().map(|row| row.len()).sum::<usize>();
+        let mut admission_meter = MeterCounts::default();
+        assert_eq!(
+            estimated_work(
+                &view,
+                &mut BulkMeter {
+                    counts: &mut admission_meter,
+                    allowance: usize::MAX,
+                },
+            )
+            .unwrap(),
+            expected_work,
+        );
+        assert_eq!(admission_meter.units, expected_units);
+        assert_eq!(admission_meter.largest_run, FNX_METER_RUN);
+        assert!(admission_meter.calls * 8 < admission_meter.units);
+
+        let empty_witness = || ComplexityWitness {
+            algorithm: String::new(),
+            complexity_claim: String::new(),
+            nodes_touched: 0,
+            edges_scanned: 0,
+            queue_peak: 0,
+        };
+        let mut forward_meter = MeterCounts::default();
+        let mut witness = empty_witness();
+        let forward = forward_rows(
+            &view,
+            &mut witness,
+            &mut BulkMeter {
+                counts: &mut forward_meter,
+                allowance: usize::MAX,
+            },
+        )
+        .unwrap();
+        assert_eq!(forward_meter.units, expected_units);
+        assert_eq!(forward_meter.largest_run, FNX_METER_RUN);
+        assert!(forward_meter.calls * 8 < forward_meter.units);
+        assert_eq!(witness.nodes_touched, rows.len());
+        assert_eq!(witness.edges_scanned, expected_units - rows.len());
+        for (source, row) in rows.iter().enumerate() {
+            let expected: Vec<_> = row
+                .iter()
+                .copied()
+                .filter(|&target| (rows[target].len(), target) < (row.len(), source))
+                .collect();
+            assert_eq!(forward.row(source), expected);
+        }
+
+        for allowance in [
+            0,
+            1,
+            2,
+            63,
+            64,
+            65,
+            127,
+            128,
+            expected_units / 2,
+            expected_units - 1,
+        ] {
+            for forward in [false, true] {
+                let mut meter = MeterCounts::default();
+                let mut checkpoint = BulkMeter {
+                    counts: &mut meter,
+                    allowance,
+                };
+                let actual = if forward {
+                    forward_rows(&view, &mut empty_witness(), &mut checkpoint).map(|_| ())
+                } else {
+                    estimated_work(&view, &mut checkpoint).map(|_| ())
+                };
+                assert!(matches!(
+                    actual,
+                    Err(FnxExecutionError::Cancelled(unit)) if unit == allowance + 1
+                ));
+                assert_eq!(meter.units, allowance + 1);
+            }
         }
     }
 
