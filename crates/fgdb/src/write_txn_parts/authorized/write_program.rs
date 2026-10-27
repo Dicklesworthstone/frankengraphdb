@@ -38,14 +38,17 @@ fn preflight(error: WriteTxnError) -> Fault {
 }
 
 /// The compiler proves that these MERGE rows have disjoint keys or endpoint
-/// pairs and cannot observe one another's effects. Authorize each row through
+/// pairs, or that every INSERT reads only vertices and creates edges in one
+/// relation. The latter keeps duplicate inputs and parallel edge creations:
+/// every allocated identity remains distinct. Neither profile can observe
+/// another row's effects. Authorize each row through
 /// its ordinary native workspace, including its intermediate before/after
 /// images, then compose the original authorized intents once in input order.
 /// No growing prefix is rematched or re-prepared for every subsequent row.
 /// The native guard restores effects only: all read and absence witnesses and
 /// the one live permit survive each row, including refusals and unwinding.
 #[allow(clippy::too_many_arguments)]
-fn apply_frozen_merges<V: Vfs + Clone, Clock: FnMut() -> u64>(
+fn apply_independent_rows<V: Vfs + Clone, Clock: FnMut() -> u64>(
     transaction: &mut WriteTxn,
     database: &mut Database<V>,
     cx: &QueryCx,
@@ -55,7 +58,11 @@ fn apply_frozen_merges<V: Vfs + Clone, Clock: FnMut() -> u64>(
     execution: &mut Execution<'_, '_, Clock>,
     returning: bool,
 ) -> Result<(GraphWriteProgramStats, Vec<GraphWriteStepReceipt>), Fault> {
-    debug_assert!(program.freezes_vertex_upsert_input() || program.freezes_edge_merge_input());
+    debug_assert!(
+        program.freezes_vertex_upsert_input()
+            || program.freezes_edge_merge_input()
+            || crate::write_txn::IndependentEdgeWrites::admit(transaction, program).is_some()
+    );
     let mut batches = Vec::new();
     let mut receipts = Vec::new();
     let stats = {
@@ -67,6 +74,23 @@ fn apply_frozen_merges<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 let mut borrowed = controls.borrow_mut();
                 let execution = &mut **borrowed;
                 let (stats, receipt) = match statement {
+                    GraphWriteStatement::Insert(insertion) => {
+                        let (stats, vertices, edges) = insert::apply(
+                            row.txn,
+                            database,
+                            cx,
+                            insertion,
+                            remaining.insertion_policy(),
+                            scope,
+                            execution,
+                            returning,
+                        )
+                        .map_err(GraphWriteStepError::Insert)?;
+                        (
+                            GraphWriteStepStats::Insert(stats),
+                            returning.then_some(GraphWriteStepReceipt::Insert { vertices, edges }),
+                        )
+                    }
                     GraphWriteStatement::VertexMerge(merge) => {
                         let (stats, receipt) = vertex_program::merge(
                             row.txn,
@@ -109,7 +133,7 @@ fn apply_frozen_merges<V: Vfs + Clone, Clock: FnMut() -> u64>(
                             returning.then_some(receipt),
                         )
                     }
-                    _ => unreachable!("native frozen MERGE profiles contain only MERGE rows"),
+                    _ => unreachable!("native independent profiles contain INSERT or MERGE rows"),
                 };
                 // Preserve original intents, not the normalized delta: final
                 // ordered preparation must keep value validation and birth
@@ -166,6 +190,11 @@ impl<V: Vfs + Clone> Database<V> {
     /// Compiler-proven distinct-key vertex MERGEs and distinct-endpoint edge
     /// MERGEs authorize each row against that same entry overlay, then prepare
     /// their original checked intents together once in input order.
+    /// Programs of vertex-only MATCH followed by edge CREATE use that same
+    /// bounded preparation shape: every statement keeps ordinary field/image
+    /// authorization and cumulative allowances, while earlier edge creations
+    /// are not replayed for each following statement. Duplicate inputs still
+    /// create distinct parallel edges in source order.
     /// Each ordinary statement also freezes its own MATCH and expressions.
     /// Every field/image and every plain-DELETE incidence proof uses the same
     /// rules as the corresponding authorized single-statement method.
@@ -439,8 +468,13 @@ impl<V: Vfs + Clone> Database<V> {
                         }
                         if program.freezes_vertex_upsert_input()
                             || program.freezes_edge_merge_input()
+                            || crate::write_txn::IndependentEdgeWrites::admit(
+                                workspace.transaction(),
+                                program,
+                            )
+                            .is_some()
                         {
-                            let (stats, frozen_receipts) = apply_frozen_merges(
+                            let (stats, frozen_receipts) = apply_independent_rows(
                                 workspace.transaction(),
                                 self,
                                 query_cx,

@@ -73,6 +73,7 @@ fn authorization(error: &(dyn core::error::Error + 'static)) -> Option<Error> {
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Label, "Visible") => Some(GraphSymbol::Label(LabelId(1))),
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
         (GraphSymbolKind::Property, "secret") => Some(GraphSymbol::Property(PropertyKeyId(2))),
         _ => None,
@@ -602,6 +603,123 @@ fn host_prepared_batch_rolls_back_a_runtime_tail_and_reauthorizes_reuse() {
         assert_eq!(authorization(&error), Some(Error::AuthorityRetired));
         assert_eq!(db.frontier().unwrap(), frontier);
         assert_eq!(db.vertices().unwrap(), rows);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authorized_edge_batch_prepares_each_input_once_and_reuses_the_session() {
+    let ((), report) = run_async_under_lab(0xaa64, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let vfs = fgdb::MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut seed = fgdb::WriteBatch::new(RelationId(1));
+        for (id, value) in [(1, 10), (2, 20)] {
+            seed.create_vertex(
+                fgdb_types::VId(id),
+                vec![LabelId(1)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(value))],
+            );
+        }
+        // This matching endpoint is outside the token's label scope.
+        seed.create_vertex(
+            fgdb_types::VId(3),
+            vec![LabelId(2)],
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(20))],
+        );
+        db.write(&commit, seed).await.unwrap();
+        let before = db.frontier().unwrap();
+        let issuer = authority();
+        let token = issuer
+            .issue_at(
+                &Grant {
+                    rights: Rights::ReadWrite,
+                    limits: QueryLimits {
+                        max_nodes: 100_000,
+                        // Replaying prefixes 1..=1000 alone costs 500,500.
+                        // This budget admits the real linear preparation plus
+                        // ordinary matching, authorization and finalization.
+                        max_work: 400_000,
+                        max_rows: 0,
+                    },
+                    ..grant()
+                },
+                100,
+            )
+            .unwrap();
+        let program_policy = GraphWriteProgramPolicy::new(
+            GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 1_000_000),
+            64,
+            0,
+            1_000,
+        );
+        let mut session = db
+            .authorized_write_session(
+                &txn,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                symbols,
+                RelationId(1),
+                program_policy,
+                1_000,
+                || 100,
+            )
+            .unwrap();
+        let prepared = session
+            .prepare(
+                &query,
+                "MATCH (a:Visible {p:10}), (b:Visible {p:20}) CREATE (a)-[:R {p:$value}]->(b)",
+                &arguments(99),
+            )
+            .unwrap();
+        let arguments: Vec<_> = (0..1_000).map(|_| arguments(7)).collect();
+        let (stats, completion) = session
+            .execute_batch_stats(&query, &prepared, &arguments)
+            .await
+            .unwrap();
+        assert_eq!(
+            (stats.completed_statements, stats.created_edges),
+            (1_000, 1_000)
+        );
+        assert_eq!(stats.created_vertices, 0);
+        assert_eq!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: fgdb_types::CommitSeq(before.0 + 1),
+            }
+        );
+        assert!(!session.is_closed());
+        let (stats, _) = session
+            .execute_batch_stats(&query, &prepared, &arguments[..2])
+            .await
+            .unwrap();
+        assert_eq!(stats.created_edges, 2);
+        drop(session);
+        let edges = db.edges().unwrap();
+        assert_eq!(edges.len(), 1_002, "duplicate inputs create parallel edges");
+        for edge in &edges {
+            assert_eq!(
+                (edge.entry.src, edge.entry.relation, edge.entry.dst),
+                (fgdb_types::VId(1), RelationId(1), fgdb_types::VId(2))
+            );
+            assert_eq!(
+                edge.props,
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(7).into())]
+            );
+        }
+        assert_eq!(db.frontier().unwrap().0, before.0 + 2);
+        drop(db);
+        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(reopened.edges().unwrap(), edges);
         assert_eq!(txn.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
