@@ -707,6 +707,17 @@ impl<'a> HistoryRef<'a> {
         }
     }
 
+    /// Any statement can identify lifetime-constant fields in an admitted
+    /// history, such as its relation. This is not a visibility decision.
+    fn representative(self) -> Option<(usize, usize)> {
+        match self {
+            Self::Flat(statements) => statements
+                .first()
+                .map(|&(_, block, row)| (block as usize, row as usize)),
+            Self::Tree(history) => history.0.as_ref().map(|node| (node.key.1, node.key.2)),
+        }
+    }
+
     /// The levels a charged resolution of this history may descend.
     #[cfg(test)]
     fn height(self) -> usize {
@@ -3069,15 +3080,19 @@ where
     })
 }
 
-/// Merge only a requested relation from an already admitted snapshot. The
+/// Visit a requested relation from an already admitted snapshot. The
 /// whole-history validator fixes an EId's relation for its entire lifetime,
 /// including property successors and retirement restatements. Filtering that
 /// immutable field before winner selection therefore keeps exactly the same
 /// winners, properties and EId order as filtering the complete merge.
 ///
-/// Every raw block and row still crosses the work/cancellation boundary. Only
-/// identities in the requested relation occupy winner scratch and enter the
-/// final sort. This does not validate or selectively admit raw storage.
+/// An already retained adjacency index supplies those winners in canonical
+/// order without a temporary winner table or sort. Its flat base and persistent
+/// overlay resolve the exact historical cut, charging each cursor/history step
+/// and only the bounded overlay spine as scratch. An absent index keeps the raw
+/// merge: this scan never triggers an unbudgeted, whole-generation index build.
+/// That fallback charges every raw block and row; only selected identities
+/// occupy winner scratch. Neither path validates or selectively admits storage.
 pub(crate) fn visit_edges_in_relation_with_properties<'a, E, C>(
     snapshot: &'a Snapshot,
     as_of: CommitSeq,
@@ -3092,19 +3107,59 @@ pub(crate) fn visit_edges_in_relation_with_properties<'a, E, C>(
 where
     C: FnMut(SourceEvent) -> Result<(), E>,
 {
-    visit_edge_coordinates_in_relation(
-        &snapshot.blocks,
-        as_of,
-        relation,
-        control,
-        |entry, block, row, control| {
-            visit(
-                entry,
-                edge_properties_at(&snapshot.block_props, block, row),
-                control,
-            )
-        },
-    )
+    let visit = |entry, block, row, control: &mut C| {
+        visit(
+            entry,
+            edge_properties_at(&snapshot.block_props, block, row),
+            control,
+        )
+    };
+    if let Some(index) = snapshot.adjacency.get() {
+        visit_indexed_edge_coordinates(index, &snapshot.blocks, as_of, relation, control, visit)
+    } else {
+        visit_edge_coordinates_in_relation(&snapshot.blocks, as_of, relation, control, visit)
+    }
+}
+
+/// Borrow already indexed winners; the index and blocks must belong to the
+/// same admitted immutable generation. The raw merge remains an independent
+/// oracle and the fallback when no index has been retained. This path does
+/// not replay the raw merge's obsolete allocation/work transcript: its source
+/// allowance describes the cursor and history work actually performed.
+fn visit_indexed_edge_coordinates<'a, E, C>(
+    index: &AdjacencyIndex,
+    blocks: &'a [impl AsRef<[AdjacencyEntry]>],
+    as_of: CommitSeq,
+    relation: Option<RelationId>,
+    control: &mut C,
+    mut visit: impl FnMut(&'a AdjacencyEntry, usize, usize, &mut C) -> Result<(), E>,
+) -> Result<(), E>
+where
+    C: FnMut(SourceEvent) -> Result<(), E>,
+{
+    let mut cursor = IdentityScanCursor::default();
+    while let Some(eid) = cursor.next(index, control)? {
+        let history = cursor
+            .history(index, eid)
+            .expect("the cursor retains every delivered identity");
+        if let Some(relation) = relation {
+            let (block, row) = history
+                .representative()
+                .expect("an indexed identity has at least one statement");
+            if blocks[block].as_ref()[row].relation != relation {
+                continue;
+            }
+        }
+        let coordinates = history.latest_charged(as_of, &mut || control(SourceEvent::Work))?;
+        let Some((block, row)) = coordinates else {
+            continue;
+        };
+        let entry = &blocks[block].as_ref()[row];
+        if entry.visible_at(as_of) {
+            visit(entry, block, row, control)?;
+        }
+    }
+    Ok(())
 }
 
 /// As [`visit_edges_with_properties`], also naming each winner's block and

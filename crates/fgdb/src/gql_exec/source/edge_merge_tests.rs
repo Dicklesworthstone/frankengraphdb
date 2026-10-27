@@ -372,3 +372,143 @@ fn relation_selection_retains_only_selected_scratch_and_charges_every_raw_row() 
     assert_eq!(count(&absent, SourceEvent::ScratchEntry), 0);
     assert_eq!(count(&absent, SourceEvent::SnapshotRecord), 0);
 }
+
+fn run_indexed(
+    index: &super::AdjacencyIndex,
+    blocks: &[Vec<AdjacencyEntry>],
+    as_of: CommitSeq,
+    relation: Option<RelationId>,
+    stop: usize,
+) -> (Vec<Step>, Result<(), usize>) {
+    let log = RefCell::new(Vec::new());
+    let calls = Cell::new(0);
+    let result = super::visit_indexed_edge_coordinates(
+        index,
+        blocks,
+        as_of,
+        relation,
+        &mut |event| {
+            calls.set(calls.get() + 1);
+            log.borrow_mut().push(Step::Control(event));
+            if calls.get() == stop {
+                Err(stop)
+            } else {
+                Ok(())
+            }
+        },
+        |entry, block, row, control| {
+            log.borrow_mut()
+                .push(Step::Visit(entry.eid, entry.created_at, block, row));
+            control(SourceEvent::SnapshotRecord)
+        },
+    );
+    (log.into_inner(), result)
+}
+
+#[test]
+fn retained_analytics_scan_matches_raw_history_and_propagates_every_refusal() {
+    let mut state = 0x1ade_61b1_ed6e_0001;
+    for _ in 0..96 {
+        let pool = 1 + next(&mut state) % 24;
+        let blocks: Vec<Vec<AdjacencyEntry>> = (0..1 + next(&mut state) % 5)
+            .map(|_| {
+                (0..next(&mut state) % 18)
+                    .map(|_| {
+                        let raw = next(&mut state) % pool;
+                        let created = next(&mut state) % 8;
+                        let retired = next(&mut state)
+                            .is_multiple_of(3)
+                            .then(|| created + 1 + next(&mut state) % 3);
+                        let identity = match raw {
+                            0 => EId(0),
+                            1 => EId(u128::MAX),
+                            _ => eid(raw, false),
+                        };
+                        let mut entry = statement(identity, created, retired);
+                        entry.relation = RelationId(1 + raw % 3);
+                        entry
+                    })
+                    .collect()
+            })
+            .collect();
+        let split = blocks.len() / 2;
+        let flat = super::AdjacencyIndex::build(&blocks);
+        let mut overlay = super::AdjacencyIndex::build(&blocks[..split]);
+        overlay.apply_added(&blocks, split);
+        for index in [&flat, &overlay] {
+            for at in [0, 2, 5, 9] {
+                let as_of = CommitSeq(at);
+                let (oracle, verdict) = run(false, &blocks, as_of, 0);
+                assert_eq!(verdict, Ok(()));
+                for relation in [None, Some(RelationId(1)), Some(RelationId(4))] {
+                    let expected: Vec<_> = oracle
+                        .iter()
+                        .filter(|step| match **step {
+                            Step::Visit(_, _, block, row) => relation
+                                .is_none_or(|relation| blocks[block][row].relation == relation),
+                            Step::Control(_) => false,
+                        })
+                        .copied()
+                        .collect();
+                    let (actual, verdict) = run_indexed(index, &blocks, as_of, relation, 0);
+                    assert_eq!(verdict, Ok(()));
+                    assert_eq!(
+                        actual
+                            .iter()
+                            .filter(|step| matches!(step, Step::Visit(..)))
+                            .copied()
+                            .collect::<Vec<_>>(),
+                        expected
+                    );
+                    let mut calls = 0;
+                    for (position, step) in actual.iter().enumerate() {
+                        if matches!(step, Step::Control(_)) {
+                            calls += 1;
+                            assert_eq!(
+                                run_indexed(index, &blocks, as_of, relation, calls),
+                                (actual[..=position].to_vec(), Err(calls)),
+                                "at {as_of:?}, relation {relation:?}, stop {calls}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn retained_analytics_scan_avoids_history_merge_scratch_and_repeated_versions() {
+    let count = 4096;
+    let blocks: Vec<Vec<_>> = (1..=16)
+        .map(|round| {
+            (0..count)
+                .map(|id| statement(eid(id, false), round, None))
+                .collect()
+        })
+        .collect();
+    let index = super::AdjacencyIndex::build(&blocks);
+    let (raw, raw_verdict) = run(false, &blocks, CommitSeq(16), 0);
+    let (indexed, indexed_verdict) = run_indexed(&index, &blocks, CommitSeq(16), None, 0);
+    assert_eq!((raw_verdict, indexed_verdict), (Ok(()), Ok(())));
+    let events = |steps: &[Step], event| {
+        steps
+            .iter()
+            .filter(|&&step| step == Step::Control(event))
+            .count()
+    };
+    assert_eq!(
+        events(&indexed, SourceEvent::SnapshotRecord),
+        count as usize
+    );
+    assert_eq!(events(&raw, SourceEvent::ScratchEntry), count as usize);
+    assert_eq!(events(&indexed, SourceEvent::ScratchEntry), 0);
+    assert!(events(&indexed, SourceEvent::Work) * 2 < events(&raw, SourceEvent::Work));
+    let visits = |steps: Vec<Step>| {
+        steps
+            .into_iter()
+            .filter(|step| matches!(step, Step::Visit(..)))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(visits(indexed), visits(raw));
+}

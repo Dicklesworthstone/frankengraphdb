@@ -485,6 +485,13 @@ fn selected_relation_calls_bound_winner_scratch_without_skipping_raw_source_work
             database.write(&commit, changes).await.unwrap();
         }
         let now = [db.frontier().unwrap(), oracle.frontier().unwrap()];
+        for database in [&db, &oracle] {
+            assert_eq!(
+                database.index_maintenance_work().unwrap().0,
+                0,
+                "batch property updates and retirements must leave this raw-source control cold",
+            );
+        }
         let calls = [
             (call(), Directedness::Directed),
             (
@@ -555,6 +562,163 @@ fn selected_relation_calls_bound_winner_scratch_without_skipping_raw_source_work
             oracle.execute_fnx(&query, &call(), limited).unwrap();
         }
         assert_eq!(db.read_cache_status(&query).unwrap().projections.entries, 0);
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn retained_adjacency_projections_equal_cold_reads_across_history_and_reductions() {
+    let _cache = exclusive();
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        db.write(&commit, fixture()).await.unwrap();
+        let mut parallel = WriteBatch::new(RelationId(1));
+        parallel.add_edge(
+            EId(14),
+            VId(2),
+            VId(2),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(4))],
+        );
+        for id in 1000..1512 {
+            parallel.add_edge(
+                EId(id),
+                VId(1),
+                VId(2),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(1))],
+            );
+        }
+        db.write(&commit, parallel).await.unwrap();
+        let mut other = WriteBatch::new(RelationId(2));
+        other.add_edge(
+            EId(2000),
+            VId(2),
+            VId(1),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(8))],
+        );
+        let first = db.write(&commit, other).await.unwrap();
+        assert_eq!(db.index_maintenance_work().unwrap().0, 0);
+        // An ordinary graph read retains the flat adjacency index. Subsequent
+        // updates extend it, exercising the persistent overlay as well.
+        assert_eq!(db.neighbours(VId(1), RelationId(1)).unwrap(), [VId(2)]);
+        assert!(db.index_maintenance_work().unwrap().0 > 0);
+        let mut changes = WriteBatch::new(RelationId(1));
+        changes.set_edge_property(EId(10), PropertyKeyId(1), Some(CanonicalScalar::Int(10)));
+        changes.delete_edge(EId(11));
+        let latest = db.write(&commit, changes).await.unwrap();
+        assert!(db.index_maintenance_work().unwrap().0 > 0);
+        let warm = db.read_session().unwrap();
+        // A separate read-only open reconstructs the same admitted root with
+        // no retained adjacency. Neither projection may reuse decoded output.
+        let cold = Database::open_read_view_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(cold.partition_root(), warm.partition_root());
+        assert_eq!(cold.frontier(), warm.frontier());
+        for view in [&warm, &cold] {
+            view.set_read_cache_limits(
+                &query,
+                ReadCacheLimits {
+                    projection_bytes: 0,
+                    ..ReadCacheLimits::default()
+                },
+            )
+            .unwrap();
+        }
+        let base = options();
+        for at in [first, latest] {
+            for relation in [None, Some(RelationId(1)), Some(RelationId(2))] {
+                let selection = FnxSelection {
+                    relation,
+                    ..base.selection
+                };
+                for directedness in [
+                    Directedness::Directed,
+                    Directedness::Reversed,
+                    Directedness::Undirected,
+                ] {
+                    for parallel_edges in [
+                        ParallelEdgePolicy::Sum,
+                        ParallelEdgePolicy::Minimum,
+                        ParallelEdgePolicy::CollapseUnit,
+                    ] {
+                        for self_loops in [SelfLoopPolicy::Keep, SelfLoopPolicy::Drop] {
+                            let spec = ProjectionSpec {
+                                directedness,
+                                parallel_edges,
+                                self_loops,
+                            };
+                            let project = |view: &fgdb::EmbeddedReadView, limits| {
+                                view.prism_projection_at(
+                                    &query,
+                                    at,
+                                    selection,
+                                    spec,
+                                    base.projection_limits,
+                                    limits,
+                                )
+                            };
+                            let expected = project(&cold, base.source_limits).unwrap();
+                            let actual = project(&warm, base.source_limits).unwrap();
+                            assert_eq!(actual.vertex_ids(), &[VId(1), VId(2), VId(3)]);
+                            assert_eq!(actual.binding(), expected.binding());
+                            assert_eq!(actual.digest(), expected.digest());
+                            assert_eq!(actual.input_edge_count(), expected.input_edge_count());
+                            assert_eq!(actual.edge_count(), expected.edge_count());
+                            for ordinal in 0..actual.vertex_ids().len() {
+                                assert_eq!(
+                                    actual.projected_row(ordinal),
+                                    expected.projected_row(ordinal)
+                                );
+                            }
+                            assert_eq!(actual.incoming_face(), expected.incoming_face());
+                            if relation == Some(RelationId(1))
+                                && directedness == Directedness::Directed
+                                && parallel_edges == ParallelEdgePolicy::Sum
+                            {
+                                assert_eq!(
+                                    actual.projected_weight(0, 1),
+                                    Some(if at == first { 519.0 } else { 522.0 }),
+                                );
+                            }
+                            if relation != Some(RelationId(2)) {
+                                let tight = FnxSourceLimits {
+                                    max_scratch_entries: 64,
+                                    ..base.source_limits
+                                };
+                                assert_eq!(
+                                    project(&warm, tight).unwrap().digest(),
+                                    expected.digest()
+                                );
+                                assert!(matches!(
+                                    project(&cold, tight),
+                                    Err(FnxReadError::SourceLimit {
+                                        resource: "scratch entries",
+                                        ..
+                                    })
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            warm.read_cache_status(&query).unwrap().projections.entries,
+            0
+        );
+        assert_eq!(
+            cold.read_cache_status(&query).unwrap().projections.entries,
+            0
+        );
         assert_eq!(contexts.outstanding_obligations(), 0);
     });
 }
