@@ -104,12 +104,26 @@ enum RestrictionCx {
 /// not. This adapter therefore reduces ambient authority but does not claim to
 /// close that upstream time/random escape. The explicit purpose wrapper remains
 /// the authoritative API passed to delegated code.
-pub struct RestrictedFuture<Fut> {
+pub struct RestrictedFuture<Fut: ?Sized> {
     future: Pin<Box<Fut>>,
     restriction: RestrictionCx,
 }
 
 impl<Fut> RestrictedFuture<Fut> {
+    /// Erase a Send delegate in its existing allocation. The restriction is
+    /// still installed for every poll, and borrowed delegates keep their
+    /// original lifetime. No polling, allocation or capability change occurs.
+    #[must_use]
+    pub fn erase_send<'a>(self) -> RestrictedFuture<dyn Future<Output = Fut::Output> + Send + 'a>
+    where
+        Fut: Future + Send + 'a,
+    {
+        RestrictedFuture {
+            future: self.future,
+            restriction: self.restriction,
+        }
+    }
+
     fn local(future: Fut, cx: Cx<LocalDatabaseCaps>) -> Self {
         Self {
             future: Box::pin(future),
@@ -132,7 +146,7 @@ impl<Fut> RestrictedFuture<Fut> {
     }
 }
 
-impl<Fut: Future> Future for RestrictedFuture<Fut> {
+impl<Fut: Future + ?Sized> Future for RestrictedFuture<Fut> {
     type Output = Fut::Output;
 
     fn poll(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Self::Output> {
@@ -1968,6 +1982,75 @@ mod tests {
                     assert_eq!(restored.task_id(), parent.task_id());
                     assert_eq!(restored.capabilities(), parent_caps);
                     assert!(restored.timer_driver().is_some());
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn erased_restricted_futures_preserve_borrows_masks_and_drop_ownership() {
+        struct Dropped(Arc<AtomicUsize>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        fn assert_send<T: Send>(_: &T) {}
+
+        under_lab(73, |_contexts, root| {
+            let parent = Cx::current().unwrap();
+            let parent_caps = parent.capabilities();
+            assert!(parent.timer_driver().is_some());
+            let inherited = {
+                let _guard = root.restrict::<cap::None>().set_current_restricted();
+                Cx::current().unwrap()
+            };
+            let narrowed = PurposeContexts::narrow_runtime_root(&inherited);
+            for role in 0..3 {
+                for complete in [false, true] {
+                    let polls = AtomicUsize::new(0);
+                    let borrowed = &polls;
+                    let drops = Arc::new(AtomicUsize::new(0));
+                    let watch = Dropped(Arc::clone(&drops));
+                    let delegate = async move {
+                        let _watch = watch;
+                        std::future::poll_fn(|_| {
+                            assert_empty_ambient_effects();
+                            if borrowed.fetch_add(1, Ordering::Relaxed) == 0 {
+                                Poll::Pending
+                            } else {
+                                Poll::Ready(17)
+                            }
+                        })
+                        .await
+                    };
+                    let restricted = match role {
+                        0 => narrowed.query().with_restriction_async(delegate),
+                        1 => narrowed.repl().with_restriction_async(delegate),
+                        _ => narrowed.merge_eval().with_restriction_async(delegate),
+                    };
+                    let allocation = restricted.future.as_ref().get_ref() as *const _ as *const ();
+                    let mut erased = restricted.erase_send();
+                    assert_send(&erased);
+                    assert_eq!(
+                        erased.future.as_ref().get_ref() as *const _ as *const (),
+                        allocation,
+                        "erasure must reuse the delegate allocation"
+                    );
+                    assert_eq!(polls.load(Ordering::Relaxed), 0, "erasure must not poll");
+                    let mut task = Context::from_waker(std::task::Waker::noop());
+                    assert!(Pin::new(&mut erased).poll(&mut task).is_pending());
+                    assert_eq!(drops.load(Ordering::Relaxed), 0);
+                    if complete {
+                        assert_eq!(Pin::new(&mut erased).poll(&mut task), Poll::Ready(17));
+                    }
+                    let restored = Cx::current().unwrap();
+                    assert_eq!(restored.task_id(), parent.task_id());
+                    assert_eq!(restored.capabilities(), parent_caps);
+                    assert!(restored.timer_driver().is_some());
+                    drop(erased);
+                    assert_eq!(drops.load(Ordering::Relaxed), 1);
+                    assert_eq!(polls.load(Ordering::Relaxed), if complete { 2 } else { 1 });
                 }
             }
         });

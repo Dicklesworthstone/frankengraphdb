@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 17;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 18;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -357,6 +357,13 @@ const SIGNATURES: &[FnxSignature] = &[
         "fgdb-prism/in-degree-directory-v2",
     ),
     directed_degree("fnx.out_degree_centrality", "fgdb-prism/out-degree-csr-v1"),
+    foundation(
+        "fnx.load_centrality",
+        FnxOutput::Score,
+        "explicit undirected simple projection; unweighted; self-loops refused; Newman load splits accumulated flow equally among shortest-path predecessors; normalized by (|V|-1)(|V|-2); isolates retained",
+        "O(|V| * (|V| + |E|)); O(|V|) kernel workspace",
+        "fgdb-prism/newman-load-csr-v1",
+    ),
 ];
 
 const fn directed_degree(name: &'static str, execution_kernel: &'static str) -> FnxSignature {
@@ -674,6 +681,7 @@ impl FnxAlgorithm {
             Self::SingleSourceDijkstraPathLength(_) => 5,
             Self::Triangles => 6,
             Self::ClusteringCoefficient => 7,
+            Self::Foundation(FoundationAlgorithm::LoadCentrality) => 18,
             Self::Foundation(algorithm) => 8 + algorithm as usize,
             Self::Cdlp { .. } => 14,
             Self::DirectedClusteringCoefficient => 15,
@@ -685,7 +693,8 @@ impl FnxAlgorithm {
 
 /// Catalog algorithms over the admitted in-core DECODED_CACHE. Each signature
 /// identifies the native CSR kernel and its pinned numeric profile. The ordinal
-/// selects the row after the first eight kernels.
+/// selects the original six rows after the first eight kernels; later entries
+/// append registry rows so existing procedure ordinals never move.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FoundationAlgorithm {
@@ -695,6 +704,7 @@ pub enum FoundationAlgorithm {
     BetweennessCentrality = 3,
     EigenvectorCentrality = 4,
     CoreNumber = 5,
+    LoadCentrality = 6,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FnxOutputColumn {
@@ -1045,6 +1055,7 @@ impl FnxCallSpec {
                 FnxAlgorithm::Foundation(FoundationAlgorithm::EigenvectorCentrality)
             }
             "fnx.core_number" => FnxAlgorithm::Foundation(FoundationAlgorithm::CoreNumber),
+            "fnx.load_centrality" => FnxAlgorithm::Foundation(FoundationAlgorithm::LoadCentrality),
             "fnx.in_degree_centrality" => FnxAlgorithm::InDegreeCentrality,
             "fnx.out_degree_centrality" => FnxAlgorithm::OutDegreeCentrality,
             "fnx.cdlp" => {

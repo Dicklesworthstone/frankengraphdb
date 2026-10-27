@@ -604,6 +604,7 @@ mod tests {
         for call in [
             "CALL fnx.core_number() YIELD core AS level, node AS id",
             "CALL fnx.eigenvector_centrality() YIELD score AS rank, node AS id",
+            "CALL fnx.load_centrality() YIELD score AS rank, node AS id",
         ] {
             for direction in ["directed", "reversed", "undirected"] {
                 let args: Vec<String> = [

@@ -43,6 +43,8 @@ mod directional_bfs;
 mod distance;
 #[path = "sealed_eigenvector.rs"]
 mod eigenvector;
+#[path = "sealed_load.rs"]
+mod load;
 #[path = "sealed_shortest_path.rs"]
 mod shortest_path;
 
@@ -653,6 +655,7 @@ impl FnxCallSpec {
                         | FoundationAlgorithm::BetweennessCentrality
                         | FoundationAlgorithm::CoreNumber
                         | FoundationAlgorithm::EigenvectorCentrality
+                        | FoundationAlgorithm::LoadCentrality
                 )
         )
     }
@@ -775,6 +778,12 @@ impl FnxCallSpec {
             FnxAlgorithm::Foundation(FoundationAlgorithm::BetweennessCentrality)
         ) {
             return betweenness::execute(self, cx, graph, limits, memory, &admission);
+        }
+        if matches!(
+            self.algorithm(),
+            FnxAlgorithm::Foundation(FoundationAlgorithm::LoadCentrality)
+        ) {
+            return load::execute(self, cx, graph, limits, memory, &admission);
         }
         let pass = execution_pass_work(self, graph)?;
         let (kernel, estimated_work, workspace, source) = match self.algorithm() {
@@ -1229,8 +1238,10 @@ fn source_digest() -> Digest {
             include_str!("sealed_betweenness_cooperative.rs"),
             include_str!("sealed_core.rs"),
             include_str!("sealed_distance.rs"),
+            include_str!("sealed_load.rs"),
             include_str!("sealed_eigenvector.rs"),
             include_str!("foundation.rs"),
+            include_str!("foundation/native.rs"),
             include_str!("sealed_clustering.rs"),
             include_str!("sealed_directed_clustering.rs"),
             include_str!("sealed_cdlp.rs"),

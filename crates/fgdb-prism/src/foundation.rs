@@ -19,7 +19,7 @@ mod brandes;
 mod distance;
 mod eigenvector;
 mod native;
-pub(crate) use native::directed_degree;
+pub(crate) use native::{Load, LoadStep, directed_degree};
 
 #[cfg(test)]
 use crate::FNX_METER_RUN;
@@ -45,6 +45,7 @@ pub(crate) fn estimated_work(
         FoundationAlgorithm::ClosenessCentrality | FoundationAlgorithm::HarmonicCentrality => {
             n.checked_mul(step)
         }
+        FoundationAlgorithm::LoadCentrality => native::load_work(n, arcs),
         FoundationAlgorithm::BetweennessCentrality => {
             // Every source visits only its undirected connected component.
             // Reached-only resets and sparse source-ordered reduction avoid
@@ -152,6 +153,7 @@ pub(crate) fn run<C>(
         FoundationAlgorithm::BetweennessCentrality => brandes::run(graph, checkpoint)?,
         FoundationAlgorithm::ClosenessCentrality => distance::run::<false, C>(graph, checkpoint)?,
         FoundationAlgorithm::HarmonicCentrality => distance::run::<true, C>(graph, checkpoint)?,
+        FoundationAlgorithm::LoadCentrality => native::load(graph, checkpoint)?,
     };
     checkpoint.unit().map_err(FnxExecutionError::Cancelled)?;
     Ok(result)

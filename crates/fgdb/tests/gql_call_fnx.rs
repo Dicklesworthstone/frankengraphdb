@@ -62,7 +62,7 @@ fn graph() -> WriteBatch {
 
 /// Every registered procedure: name, arguments, value output, and whether
 /// its signature law reads the graph undirected.
-const CALLS: [(&str, &str, &str, bool); 18] = [
+const CALLS: [(&str, &str, &str, bool); 19] = [
     ("pagerank", "", "score", false),
     ("single_source_shortest_path_length", "1", "distance", false),
     ("connected_components", "", "component", true),
@@ -85,6 +85,7 @@ const CALLS: [(&str, &str, &str, bool); 18] = [
     ("directed_clustering_coefficient", "", "score", false),
     ("in_degree_centrality", "", "score", false),
     ("out_degree_centrality", "", "score", false),
+    ("load_centrality", "", "score", true),
 ];
 
 /// The whole graph spelled out field by field, independent of
@@ -474,6 +475,34 @@ fn a_read_session_runs_the_call_at_its_own_snapshot_not_the_writer_head() {
         );
         assert_eq!(pinned.len(), 5);
         assert_eq!(rows(before).1, pinned);
+    });
+}
+
+#[test]
+fn load_centrality_composes_against_the_pinned_read_snapshot() {
+    run(async |commit, cx| {
+        let mut db = open(commit).await;
+        let old = db.read_session().unwrap();
+        let text = "CALL fnx.load_centrality() YIELD node, score RETURN node, score ORDER BY node";
+        let before = old
+            .query(cx, text, &GqlParameters::new(), symbols, policy())
+            .unwrap();
+        let mut more = WriteBatch::new(R);
+        more.add_edge(EId(6), VId(5), VId(6), vec![]);
+        db.write(commit, more).await.unwrap();
+        let head = db
+            .query(cx, text, &GqlParameters::new(), symbols, policy())
+            .unwrap();
+        assert_ne!(
+            rows(head).1,
+            rows(before.clone()).1,
+            "newly connected vertex changes the flow scores"
+        );
+        assert_eq!(
+            old.query(cx, text, &GqlParameters::new(), symbols, policy())
+                .unwrap(),
+            before
+        );
     });
 }
 

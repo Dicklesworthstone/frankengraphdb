@@ -213,6 +213,63 @@ fn live_counts_survive_history_replay_and_generation_changes() {
 
 type Footprint = (Result<Vec<GraphAggregateRow>, String>, usize, usize);
 
+#[test]
+fn computed_having_aliases_filter_capability_visible_counts_in_the_native_host_entry() {
+    let ((), report) = run_async_under_lab(0xc161_0004, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = database(&c.commit()).await;
+        let authority = issuer();
+        let full = authority.issue_at(&grant(), 100).unwrap();
+        let queries = [
+            "MATCH (n) RETURN COUNT(*) + 1 AS n HAVING n > 1",
+            "MATCH (a)-[r:R]->(b) RETURN COUNT(*) + 1 AS n HAVING n > 1",
+            "MATCH (a)-[:S]->(b) RETURN COUNT(*) + 1 AS n HAVING n > 1",
+        ];
+        for (restriction, visible) in [
+            (Restriction::Labels(Scope::only([A])), [5, 4, 1]),
+            (Restriction::Labels(Scope::only([B])), [1, 0, 0]),
+            (Restriction::Relations(Scope::only([R])), [6, 5, 0]),
+            (Restriction::Properties(Scope::only([])), [6, 5, 2]),
+        ] {
+            let scoped = full.attenuate(restriction).unwrap();
+            // Alternate full and scoped queries: an already admitted full
+            // count must never select a scoped HAVING result or its value.
+            for _ in 0..2 {
+                for (token, counts) in [(&full, [6, 5, 2]), (&scoped, visible)] {
+                    for (text, count) in queries.into_iter().zip(counts) {
+                        let fgdb::QueryResult::Rows { columns, rows } = db
+                            .query_authorized(
+                                &cx,
+                                &authority,
+                                token,
+                                "main",
+                                text,
+                                &GqlParameters::new(),
+                                symbols,
+                                policy(),
+                                || 100,
+                            )
+                            .unwrap()
+                        else {
+                            panic!("computed count returned a write result")
+                        };
+                        assert_eq!(columns, ["n"]);
+                        let expected = if count == 0 {
+                            Vec::new()
+                        } else {
+                            vec![vec![GraphAggregateValue::Integer(i128::from(count) + 1)]]
+                        };
+                        assert_eq!(rows, expected, "{text}, visible count {count}");
+                    }
+                }
+            }
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 fn footprint(
     db: &Database<MemVfs>,
     cx: &QueryCx,

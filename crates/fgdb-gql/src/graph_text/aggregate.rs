@@ -375,8 +375,14 @@ impl PreparedGraphAggregateText {
             };
             output_columns.push(column);
         }
-        let (having, having_expression) =
-            having::parse(&mut parser, &returned, &groups, &mut hidden, &mut computed)?;
+        let (having, having_expression) = having::parse(
+            &mut parser,
+            &returned,
+            &groups,
+            &output_columns,
+            &mut hidden,
+            &mut computed,
+        )?;
         // ORDER BY sorts the rows RETURN produces and never changes them. An
         // aggregate there needs a statement already grouped by GROUP BY, a
         // RETURN aggregate or HAVING; otherwise it would silently turn one
