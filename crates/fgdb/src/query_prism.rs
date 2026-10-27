@@ -47,7 +47,7 @@ pub(crate) use sealed_cache::{
     Request as SealedProjectionRequest, SealedProjectionCache, Source as SealedProjectionSource,
 };
 pub(crate) use sealed_prepare::{CooperativeSealedBuild, ImmediateSealedBuild, SealedBuild};
-pub use sealed_query::SealedReadView;
+pub use sealed_query::{SealedQueryError, SealedReadView};
 
 type Error = FnxReadError<ReadError, Cancel>;
 type SealedReadError = FnxSealedReadError<ReadError, Cancel>;

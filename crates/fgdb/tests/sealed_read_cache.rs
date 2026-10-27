@@ -900,6 +900,161 @@ fn sealed_sql_costs(pairs: &[(u128, f64)]) -> Vec<GraphValueRow> {
 }
 
 #[test]
+fn readonly_sealed_native_templates_preserve_pages_group_slots_and_typed_refusals() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let vfs = MemVfs::new().unwrap();
+        let database = seed(&commit, &vfs).await;
+        let view = Database::open_sealed_read_with_vfs(
+            &commit,
+            &cx,
+            vfs.clone(),
+            vfs.database_dir(),
+            keys(),
+            None,
+            R,
+            SealedLimits::default(),
+            RootReadLimits::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(view.snapshot_seq(), CommitSeq(3));
+        assert_eq!(
+            view.partition_root(),
+            database.read_session().unwrap().partition_root()
+        );
+        let params = GqlParameters::new().with_int64("minimum", 1).unwrap();
+        let empty = GqlParameters::new();
+        let arguments = [&params, &empty, &empty];
+        let texts = [
+            sealed_sql_bfs(
+                "vertex AS node, distance AS hops",
+                "WHERE hops >= $minimum RETURN node, hops ORDER BY hops DESC, node LIMIT 2",
+            ),
+            sealed_sql_weighted("directed", "sum"),
+            sealed_sql_bfs(
+                "vertex, distance",
+                "WITH vertex, distance, distance % 2 AS parity \
+                 RETURN SUM(distance) AS total, parity, COUNT(*) AS n \
+                 GROUP BY parity ORDER BY parity",
+            ),
+        ];
+        let prepared: Vec<_> = texts
+            .iter()
+            .zip(arguments)
+            .map(|(text, params)| {
+                fgdb::PreparedNativeRead::prepare(text, params, sealed_sql_symbols).unwrap()
+            })
+            .collect();
+        for ((text, prepared), params) in texts.iter().zip(&prepared).zip(arguments) {
+            let actual = view
+                .execute_prepared(&cx, prepared, params, sealed_sql_policy(), memory())
+                .unwrap();
+            let expected = database
+                .query(&cx, text, params, sealed_sql_symbols, sealed_sql_policy())
+                .unwrap();
+            assert_eq!(actual, expected, "{text}");
+        }
+        // Aggregate output order differs from both group-key order and the
+        // aggregate array. The native result must preserve those exact slots.
+        assert_eq!(
+            view.execute_prepared(&cx, &prepared[2], &empty, sealed_sql_policy(), memory())
+                .unwrap(),
+            fgdb::QueryResult::Rows {
+                columns: vec!["total".into(), "parity".into(), "n".into()],
+                rows: vec![
+                    vec![
+                        fgdb::QueryValue::Integer(2),
+                        fgdb::QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(0))),
+                        fgdb::QueryValue::Count(2)
+                    ],
+                    vec![
+                        fgdb::QueryValue::Integer(1),
+                        fgdb::QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(1))),
+                        fgdb::QueryValue::Count(1)
+                    ],
+                ],
+            },
+        );
+        let rebound = GqlParameters::new().with_int64("minimum", 2).unwrap();
+        assert_eq!(
+            view.execute_prepared(&cx, &prepared[0], &rebound, sealed_sql_policy(), memory())
+                .unwrap(),
+            fgdb::QueryResult::Rows {
+                columns: vec!["node".into(), "hops".into()],
+                rows: vec![vec![
+                    fgdb::QueryValue::Value(GraphValue::Vertex(VId(3))),
+                    fgdb::QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(2)))
+                ]],
+            },
+        );
+        assert!(matches!(
+            view.execute_prepared(
+                &cx,
+                &prepared[0],
+                &GqlParameters::new(),
+                sealed_sql_policy(),
+                memory()
+            ),
+            Err(fgdb::SealedQueryError::Query(fgdb::QueryError::SetText(_))),
+        ));
+        for text in [
+            "MATCH (n:L) RETURN n.p",
+            "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n.p AS p UNION ALL MATCH (m:L) RETURN m.p AS p",
+        ] {
+            let prepared =
+                fgdb::PreparedNativeRead::prepare(text, &empty, sealed_sql_symbols).unwrap();
+            let expected = prepared.facade_class();
+            assert!(matches!(
+                view.execute_prepared(&cx, &prepared, &empty, sealed_sql_policy(), memory()),
+                Err(fgdb::SealedQueryError::Unsupported { facade }) if facade == expected,
+            ));
+        }
+        let wrong_relation = fgdb::PreparedNativeRead::prepare(
+            "CALL fnx.weakly_connected_components(relation => 'Other') \
+             YIELD vertex, component RETURN vertex, component LIMIT 0",
+            &empty,
+            sealed_sql_symbols,
+        )
+        .unwrap();
+        assert!(matches!(
+            view.execute_prepared(&cx, &wrong_relation, &empty, sealed_sql_policy(), memory()),
+            Err(fgdb::SealedQueryError::Query(fgdb::QueryError::Set(
+                fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(
+                    fgdb::GqlError::Procedure(fgdb::ProcedureError::SealedRelationMismatch {
+                        requested: Some(RelationId(8)),
+                        retained: R,
+                    }),
+                )),
+            ))),
+        ));
+        let zero = fgdb::PreparedNativeRead::prepare(
+            &sealed_sql_bfs("vertex, distance", "RETURN vertex, distance LIMIT 0"),
+            &empty,
+            sealed_sql_symbols,
+        )
+        .unwrap();
+        assert!(matches!(
+            view.execute_prepared(
+                &cx,
+                &zero,
+                &empty,
+                sealed_sql_policy(),
+                FnxMemoryLimits {
+                    max_kernel_workspace_bytes: 0,
+                    ..memory()
+                }
+            ),
+            Err(fgdb::SealedQueryError::Query(fgdb::QueryError::Set(_))),
+        ));
+    });
+}
+
+#[test]
 fn composed_sealed_calls_match_decoded_queries_for_sparse_pages_aliases_and_projections() {
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);

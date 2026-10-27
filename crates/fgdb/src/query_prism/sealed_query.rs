@@ -5,9 +5,10 @@
 
 use super::*;
 use crate::gql_exec::AdmissionUsage;
+use crate::{NativeReadClass, PreparedNativeRead, QueryError, QueryResult};
 use fgdb_delta_types::RelationId;
 use fgdb_gql::{
-    GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension, GraphAggregateError,
+    GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension, GqlParameters, GraphAggregateError,
     GraphAggregateRow, GraphSetExecutionError, GraphSetSource, PreparedGraphSet,
     PreparedGraphSetAggregate,
 };
@@ -23,6 +24,42 @@ type AggregateResult = Result<
     GqlQueryExecution<GraphAggregateRow>,
     GqlQueryError<GraphAggregateError<GqlError>, Cancel>,
 >;
+
+/// A native template cannot silently select a decoded analytics source when
+/// execution was requested through a compressed read view. Supported native
+/// classes retain their original binding, budget and source errors.
+#[derive(Debug)]
+pub enum SealedQueryError {
+    Unsupported { facade: NativeReadClass },
+    Query(QueryError),
+}
+
+impl core::fmt::Display for SealedQueryError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Unsupported { facade } => write!(
+                f,
+                "native {facade:?} read has no supported compressed execution; use a set or relational aggregate at the sealed view's selected cut",
+            ),
+            Self::Query(error) => error.fmt(f),
+        }
+    }
+}
+
+impl core::error::Error for SealedQueryError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Unsupported { .. } => None,
+            Self::Query(error) => Some(error),
+        }
+    }
+}
+
+impl From<QueryError> for SealedQueryError {
+    fn from(error: QueryError) -> Self {
+        Self::Query(error)
+    }
+}
 
 /// A native read view paired with the compressed image earned from that same
 /// authenticated generation. Each FnX CALL must explicitly name `relation()`;
@@ -50,7 +87,128 @@ impl core::fmt::Debug for SealedReadView {
     }
 }
 
+impl Database<UnixVfs> {
+    /// Open a compressed native read owner beside a live writer. Selection
+    /// requires a current authenticated checkpoint and never repairs storage
+    /// or obtains a writer lease. The compressed relation and ordinary GQL
+    /// property/pattern source come from that same selected immutable root.
+    ///
+    /// `None` selects its publication; an explicit cut is exact. Source and
+    /// image construction have separate admission limits. The native source
+    /// is also decoded for GQL pattern/property access, so this is neither a
+    /// single source traversal nor an external-memory read owner.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_sealed_read(
+        cx: &CommitCx,
+        query_cx: &QueryCx,
+        path: impl AsRef<Path>,
+        keys: DatabaseKeys,
+        as_of: Option<CommitSeq>,
+        relation: RelationId,
+        sealing: SealedLimits,
+        source_limits: RootReadLimits,
+    ) -> Result<SealedReadView, SealedProjectionOpenError> {
+        Self::open_sealed_read_with_vfs(
+            cx,
+            query_cx,
+            UnixVfs::new(),
+            path,
+            keys,
+            as_of,
+            relation,
+            sealing,
+            source_limits,
+        )
+        .await
+    }
+}
+
 impl<V: Vfs + Clone> Database<V> {
+    /// Injected-filesystem equivalent of `open_sealed_read`. A writer may
+    /// publish during either source read: both still address the one pinned
+    /// root, and the finished owner survives writer advancement and drop.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_sealed_read_with_vfs(
+        cx: &CommitCx,
+        query_cx: &QueryCx,
+        vfs: V,
+        path: impl AsRef<Path>,
+        keys: DatabaseKeys,
+        as_of: Option<CommitSeq>,
+        relation: RelationId,
+        sealing: SealedLimits,
+        source_limits: RootReadLimits,
+    ) -> Result<SealedReadView, SealedProjectionOpenError> {
+        query_cx
+            .with_restriction_async(async {
+                query_cx
+                    .checkpoint()
+                    .map_err(Error::Cancelled)
+                    .map_err(SealedReadError::from)?;
+                let path = path.as_ref();
+                crate::require_database_dir(cx, &vfs, path).await?;
+                let published = match Self::read_current_generation(
+                    cx,
+                    &vfs,
+                    path,
+                    &keys,
+                    Some(&source_limits),
+                )
+                .await?
+                {
+                    crate::ReadGeneration::Current(published) => published,
+                    crate::ReadGeneration::Lagging(_) | crate::ReadGeneration::Unselected => {
+                        return Err(SealedProjectionOpenError::RecoveryRequired);
+                    }
+                };
+                let as_of = as_of.unwrap_or(published.published_at);
+                if as_of > published.published_at {
+                    return Err(
+                        SealedReadError::from(Error::Read(ReadError::BeyondFrontier {
+                            asked: as_of,
+                            frontier: published.published_at,
+                        }))
+                        .into(),
+                    );
+                }
+                // Keep the sealer's deep Send proof behind the same explicit
+                // future boundary as the existing read-only Prism opener.
+                let sealing: crate::SendFuture<'_, _> =
+                    Box::pin(published.store.seal_relation_with_source_limits(
+                        query_cx,
+                        published.root_id,
+                        as_of,
+                        relation,
+                        sealing,
+                        source_limits,
+                    ));
+                let partition = sealing.await.map_err(SealedReadError::Seal)?;
+                query_cx
+                    .checkpoint()
+                    .map_err(Error::Cancelled)
+                    .map_err(SealedReadError::from)?;
+                // Do not open a second generation: its pattern rows could
+                // otherwise race ahead of the already-sealed analytics cut.
+                let view = Self::read_published(cx, &keys, published).await?;
+                view.check_sealed_source(&partition, as_of)?;
+                partition
+                    .anchor()
+                    .check_relation(relation)
+                    .map_err(SealedReadError::Seal)?;
+                query_cx
+                    .checkpoint()
+                    .map_err(Error::Cancelled)
+                    .map_err(SealedReadError::from)?;
+                Ok(SealedReadView {
+                    view,
+                    partition,
+                    as_of,
+                    relation,
+                })
+            })
+            .await
+    }
+
     /// Pin one generation before I/O, authenticate the complete root, and seal
     /// only the requested relation through Strata's existing compaction path.
     /// `None` chooses the pinned publication. A future or unretained cut fails;
@@ -121,6 +279,53 @@ impl SealedReadView {
     #[must_use]
     pub fn relation(&self) -> RelationId {
         self.relation
+    }
+
+    /// Execute a prepared native set or relational aggregate using the
+    /// existing result schema and lossless aggregate slot mapping. Every
+    /// pattern and CALL uses this owner's exact `snapshot_seq()`; temporal
+    /// templates and other native classes refuse rather than selecting a
+    /// different cut or falling back to a decoded analytics projection.
+    pub fn execute_prepared(
+        &self,
+        cx: &QueryCx,
+        prepared: &PreparedNativeRead,
+        params: &GqlParameters,
+        policy: GqlQueryPolicy,
+        memory: FnxMemoryLimits,
+    ) -> Result<QueryResult, SealedQueryError> {
+        match prepared {
+            PreparedNativeRead::Set(prepared) => {
+                let query = prepared
+                    .bind_parameters(params)
+                    .map_err(QueryError::SetText)?;
+                let result = self
+                    .execute_graph_set_governed(cx, &query, policy, memory)
+                    .map_err(QueryError::Set)?;
+                Ok(crate::query::values(
+                    prepared.columns().to_vec(),
+                    result.value,
+                ))
+            }
+            PreparedNativeRead::PipelineAggregate(prepared)
+                if prepared.requires_relational_input() =>
+            {
+                let query = prepared
+                    .bind_relation_parameters(params)
+                    .map_err(QueryError::PipelineText)?;
+                let result = self
+                    .execute_graph_set_aggregate_governed(cx, &query, policy, memory)
+                    .map_err(QueryError::Aggregate)?;
+                Ok(crate::query::aggregates(
+                    prepared.columns().to_vec(),
+                    prepared.output_slots(),
+                    result.value,
+                ))
+            }
+            other => Err(SealedQueryError::Unsupported {
+                facade: other.facade_class(),
+            }),
+        }
     }
 
     /// Execute the existing set/page operators with compressed FnX sources.

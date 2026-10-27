@@ -182,7 +182,7 @@ pub use query::{
     NativeSpoolError, PinnedIndex, PreparedBufferedAggregate, PreparedBufferedOrder,
     PreparedNativeRead, ProcedureError, QueryError, QueryResult, QueryValue, QueryWriteError,
     ReadCacheLimits, ReadCacheStatus, ReadCacheUsage, RefreshReport, ReplayRefusal, ResidentIndex,
-    ResidentIndexError, SealedProjectionOpenError, SealedReadView,
+    ResidentIndexError, SealedProjectionOpenError, SealedQueryError, SealedReadView,
 };
 pub use write_txn::{
     AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession,

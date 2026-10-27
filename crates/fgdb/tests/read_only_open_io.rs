@@ -383,6 +383,95 @@ fn execute_sealed(
 }
 
 #[test]
+fn composed_sealed_open_is_read_only_and_pins_kernel_pattern_and_property_reads() {
+    let ((), report) = run_async_under_lab(0x7669_6614, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let vfs = RecordingVfs::new();
+        let path = vfs.memory.database_dir();
+        let mut writer = spokes(&commit, &vfs, 6).await;
+        let root_id = writer.read_session().unwrap().partition_root();
+        vfs.take_writes();
+        let view = Database::open_sealed_read_with_vfs(
+            &commit,
+            &query,
+            vfs.clone(),
+            &path,
+            keys(),
+            Some(CommitSeq(3)),
+            RELATION,
+            SealedLimits::default(),
+            RootReadLimits::default(),
+        )
+        .await
+        .unwrap();
+        assert!(vfs.take_writes().is_empty(), "no writer lease or repair");
+        assert_eq!(view.snapshot_seq(), CommitSeq(3));
+        assert_eq!(view.frontier(), CommitSeq(6));
+        assert_eq!(view.partition_root(), root_id);
+        assert_eq!(view.relation(), RELATION);
+        let params = fgdb_gql::GqlParameters::new();
+        let prepared = fgdb::PreparedNativeRead::prepare(
+            "CALL fnx.single_source_shortest_path_length(args => [1], relation => 'R', \
+             parallel => 'collapse') YIELD vertex AS n, distance \
+             MATCH (n) RETURN n.p AS p, distance ORDER BY p",
+            &params,
+            |kind, name: &str| match (kind, name) {
+                (fgdb_gql::GraphSymbolKind::Relation, "R") => {
+                    Some(fgdb_gql::GraphSymbol::Relation(RELATION))
+                }
+                (fgdb_gql::GraphSymbolKind::Property, "p") => {
+                    Some(fgdb_gql::GraphSymbol::Property(PROPERTY))
+                }
+                _ => None,
+            },
+        )
+        .unwrap();
+        let policy = fgdb_gql::GqlQueryPolicy::new(100_000, 1000, 10_000_000, 1_000_000);
+        let expected = fgdb::QueryResult::Rows {
+            columns: vec!["p".into(), "distance".into()],
+            rows: [(1, 0), (2, 1), (3, 1)]
+                .into_iter()
+                .map(|(property, distance)| {
+                    vec![
+                        fgdb::QueryValue::Value(fgdb_gql::algebra::GraphValue::Scalar(
+                            CanonicalScalar::Int(property),
+                        )),
+                        fgdb::QueryValue::Value(fgdb_gql::algebra::GraphValue::Scalar(
+                            CanonicalScalar::Int(distance),
+                        )),
+                    ]
+                })
+                .collect(),
+        };
+        assert_eq!(
+            view.execute_prepared(&query, &prepared, &params, policy, sealed_memory())
+                .unwrap(),
+            expected
+        );
+        writer.write(&commit, spoke(7)).await.unwrap();
+        let mut change = WriteBatch::new(RELATION);
+        change.set_vertex_property(VId(2), PROPERTY, Some(CanonicalScalar::Int(200)));
+        writer.write(&commit, change).await.unwrap();
+        drop(writer);
+        vfs.take_writes();
+        vfs.take_object_paths();
+        assert_eq!(
+            view.execute_prepared(&query, &prepared, &params, policy, sealed_memory())
+                .unwrap(),
+            expected
+        );
+        assert!(
+            vfs.take_object_paths().is_empty(),
+            "execution reuses the pinned owner"
+        );
+        assert!(vfs.take_writes().is_empty());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn sealed_open_reads_every_payload_once_beside_a_writer_and_owns_its_generation() {
     let ((), report) = run_async_under_lab(0x7669_6610, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -629,26 +718,45 @@ fn sealed_open_refuses_missing_and_lagging_checkpoints_without_healing() {
                 .unwrap();
                 drop(coordinator);
             }
-            vfs.take_writes();
-            let result = Database::open_prism_sealed_projection_with_vfs(
-                &commit,
-                &query,
-                vfs.clone(),
-                &path,
-                keys(),
-                sealed_options(&call, None),
-                SealedLimits::default(),
-                RootReadLimits::default(),
-            )
-            .await;
-            assert!(matches!(
-                result,
-                Err(SealedProjectionOpenError::RecoveryRequired)
-            ));
-            assert!(
-                vfs.take_writes().is_empty(),
-                "refusal must not heal storage"
-            );
+            for composed in [false, true] {
+                vfs.take_writes();
+                let result = if composed {
+                    Database::open_sealed_read_with_vfs(
+                        &commit,
+                        &query,
+                        vfs.clone(),
+                        &path,
+                        keys(),
+                        None,
+                        RELATION,
+                        SealedLimits::default(),
+                        RootReadLimits::default(),
+                    )
+                    .await
+                    .map(|_| ())
+                } else {
+                    Database::open_prism_sealed_projection_with_vfs(
+                        &commit,
+                        &query,
+                        vfs.clone(),
+                        &path,
+                        keys(),
+                        sealed_options(&call, None),
+                        SealedLimits::default(),
+                        RootReadLimits::default(),
+                    )
+                    .await
+                    .map(|_| ())
+                };
+                assert!(matches!(
+                    result,
+                    Err(SealedProjectionOpenError::RecoveryRequired)
+                ));
+                assert!(
+                    vfs.take_writes().is_empty(),
+                    "refusal must not heal storage"
+                );
+            }
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -693,49 +801,87 @@ fn sealed_open_applies_source_caps_and_future_cut_before_payload_reads() {
             },
         ];
         for cap in caps {
-            vfs.take_object_paths();
-            vfs.take_writes();
-            let result = Database::open_prism_sealed_projection_with_vfs(
-                &commit,
-                &query,
-                vfs.clone(),
-                &path,
-                keys(),
-                options,
-                SealedLimits::default(),
-                cap,
-            )
-            .await;
-            assert!(result.is_err(), "zero source cap must refuse: {cap:?}");
-            assert!(
-                vfs.take_object_paths()
-                    .iter()
-                    .all(|object| metadata.contains(object)),
-                "metadata refusal must precede source payload reads"
-            );
-            assert!(vfs.take_writes().is_empty());
+            for composed in [false, true] {
+                vfs.take_object_paths();
+                vfs.take_writes();
+                let result = if composed {
+                    Database::open_sealed_read_with_vfs(
+                        &commit,
+                        &query,
+                        vfs.clone(),
+                        &path,
+                        keys(),
+                        None,
+                        RELATION,
+                        SealedLimits::default(),
+                        cap,
+                    )
+                    .await
+                    .map(|_| ())
+                } else {
+                    Database::open_prism_sealed_projection_with_vfs(
+                        &commit,
+                        &query,
+                        vfs.clone(),
+                        &path,
+                        keys(),
+                        options,
+                        SealedLimits::default(),
+                        cap,
+                    )
+                    .await
+                    .map(|_| ())
+                };
+                assert!(result.is_err(), "zero source cap must refuse: {cap:?}");
+                assert!(
+                    vfs.take_object_paths()
+                        .iter()
+                        .all(|object| metadata.contains(object)),
+                    "metadata refusal must precede source payload reads"
+                );
+                assert!(vfs.take_writes().is_empty());
+            }
         }
         let mut future = options;
         future.as_of = Some(CommitSeq(view.frontier().0 + 1));
-        vfs.take_object_paths();
-        let result = Database::open_prism_sealed_projection_with_vfs(
-            &commit,
-            &query,
-            vfs.clone(),
-            &path,
-            keys(),
-            future,
-            SealedLimits::default(),
-            RootReadLimits::default(),
-        )
-        .await;
-        assert!(matches!(result, Err(SealedProjectionOpenError::Read(_))));
-        assert!(
-            vfs.take_object_paths()
-                .iter()
-                .all(|object| metadata.contains(object))
-        );
-        assert!(vfs.take_writes().is_empty());
+        for composed in [false, true] {
+            vfs.take_object_paths();
+            let result = if composed {
+                Database::open_sealed_read_with_vfs(
+                    &commit,
+                    &query,
+                    vfs.clone(),
+                    &path,
+                    keys(),
+                    future.as_of,
+                    RELATION,
+                    SealedLimits::default(),
+                    RootReadLimits::default(),
+                )
+                .await
+                .map(|_| ())
+            } else {
+                Database::open_prism_sealed_projection_with_vfs(
+                    &commit,
+                    &query,
+                    vfs.clone(),
+                    &path,
+                    keys(),
+                    future,
+                    SealedLimits::default(),
+                    RootReadLimits::default(),
+                )
+                .await
+                .map(|_| ())
+            };
+            assert!(matches!(result, Err(SealedProjectionOpenError::Read(_))));
+            assert!(
+                vfs.take_object_paths()
+                    .iter()
+                    .all(|object| metadata.contains(object))
+            );
+            assert!(vfs.take_writes().is_empty());
+        }
 
         let result = Database::open_prism_sealed_projection_with_vfs(
             &commit,
