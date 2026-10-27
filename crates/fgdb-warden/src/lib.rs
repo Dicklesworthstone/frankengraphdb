@@ -93,6 +93,9 @@ pub enum Rights {
     Read,
     Write,
     ReadWrite,
+    /// Whole-database physical maintenance. This grants no read or write
+    /// access and cannot be obtained by attenuating a query capability.
+    Admin,
 }
 
 impl Rights {
@@ -112,6 +115,7 @@ impl Rights {
             Self::Read => 1,
             Self::Write => 2,
             Self::ReadWrite => 3,
+            Self::Admin => 4,
         }
     }
 
@@ -121,16 +125,17 @@ impl Rights {
             1 => Ok(Self::Read),
             2 => Ok(Self::Write),
             3 => Ok(Self::ReadWrite),
+            4 => Ok(Self::Admin),
             _ => Err(Error::Malformed),
         }
     }
 
     pub(crate) fn intersect(self, other: Self) -> Self {
-        match self.bits() & other.bits() {
-            0 => Self::None,
-            1 => Self::Read,
-            2 => Self::Write,
-            _ => Self::ReadWrite,
+        match (self, other) {
+            (left, right) if left == right => left,
+            (Self::ReadWrite, Self::Read) | (Self::Read, Self::ReadWrite) => Self::Read,
+            (Self::ReadWrite, Self::Write) | (Self::Write, Self::ReadWrite) => Self::Write,
+            _ => Self::None,
         }
     }
 }

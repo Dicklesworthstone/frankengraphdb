@@ -37,10 +37,10 @@ USAGE:
                   [--label <name>=<u64>]... [--relation <name>=<u64>]... [--property <name>=<u64>]...
       [--max-connections <n>]
   fgdbd token --key-file <path> --issuer-key-file <path> [--policy-epoch <n>]
-      [--rights read|write|read-write] [--expires-in <seconds>]
+      [--rights read|write|read-write|admin] [--expires-in <seconds>]
       [--allow-label <u64>]... [--allow-relation <u64>]... [--allow-property <u64>]...
       [--max-nodes <n>] [--max-work <n>] [--max-rows <n>]
-  fgdbd attenuate [--rights read|write|read-write] [--expires-in <seconds>]
+  fgdbd attenuate [--rights read|write|read-write|admin] [--expires-in <seconds>]
       [--not-before-in <seconds>] [--allow-label <u64>]... [--allow-relation <u64>]...
       [--allow-property <u64>]... [--deny-property <u64>]...
       [--max-nodes <n>] [--max-work <n>] [--max-rows <n>]   < token.hex
@@ -97,6 +97,12 @@ body {\"statement\": \"<gql>\", \"parameters\": {...}} (or \"argument_sets\" for
 /write-batch); GET /v1/databases/<name>/schema; GET /v1/health. Requests must
 name an allowed Host (default localhost, 127.0.0.1, [::1] and the listen IP;
 --http-allow-host replaces that list).
+
+POST /v1/databases/<name>/compact and /scrub take an empty body and require
+--rights admin with unrestricted label, relation and property scope. Admin
+grants physical maintenance only; it grants no query reads or writes. Query
+rights cannot be attenuated into Admin rights. Query ceilings apply to query
+execution; maintenance uses the server's existing engine/recovery ownership.
 
 --bolt-listen adds the Bolt-compat adapter (BoltCompatProfileV1) for official
 Neo4j drivers: bolt:// or neo4j:// URIs, authenticated with the hex token as a
@@ -707,7 +713,12 @@ impl TokenOptions {
                         "read" => Rights::Read,
                         "write" => Rights::Write,
                         "read-write" => Rights::ReadWrite,
-                        _ => return Err(Failure::usage("--rights is read, write or read-write")),
+                        "admin" => Rights::Admin,
+                        _ => {
+                            return Err(Failure::usage(
+                                "--rights is read, write, read-write or admin",
+                            ));
+                        }
                     };
                 }
                 "--expires-in" => {
@@ -814,7 +825,12 @@ impl AttenuateOptions {
                         "read" => Rights::Read,
                         "write" => Rights::Write,
                         "read-write" => Rights::ReadWrite,
-                        _ => return Err(Failure::usage("--rights is read, write or read-write")),
+                        "admin" => Rights::Admin,
+                        _ => {
+                            return Err(Failure::usage(
+                                "--rights is read, write, read-write or admin",
+                            ));
+                        }
                     });
                 }
                 "--expires-in" if options.expires_in_seconds.is_none() => {
@@ -1164,6 +1180,33 @@ mod tests {
             }
             assert!(AttenuateOptions::parse(&strings(&["--deny-property", invalid])).is_err());
         }
+    }
+
+    #[test]
+    fn admin_token_and_attenuation_use_the_distinct_operation_right() {
+        let args: Vec<String> = [
+            "--key-file",
+            "db.key",
+            "--issuer-key-file",
+            "issuer.key",
+            "--rights",
+            "admin",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let options =
+            TokenOptions::parse(&args).unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(options.rights, Rights::Admin);
+        assert!(!options.rights.can_read());
+        assert!(!options.rights.can_write());
+        let args: Vec<String> = ["--rights", "admin"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let options =
+            AttenuateOptions::parse(&args).unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(options.rights, Some(Rights::Admin));
     }
 
     #[test]

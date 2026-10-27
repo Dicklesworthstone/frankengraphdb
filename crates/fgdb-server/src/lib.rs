@@ -39,7 +39,7 @@
 //! - `QUERY_CANCEL` (sender control only), `PING`/`PONG`, `DRAIN`/`GOODBYE`,
 //!   and supervised authoritative recovery per served database.
 //! - HTTP/1.1 JSON (`/v1/health`, `/v1/databases/<name>/schema`, `/query`,
-//!   `/write`, `/write-batch`) and the Bolt-compat profile
+//!   `/write`, `/write-batch`, Admin-only `/compact` and `/scrub`) and the Bolt-compat profile
 //!   (`BoltCompatProfileV1`: reads, explicit read-only transactions, and
 //!   bounded no-`RETURN` autocommit writes) over the same authorized execution
 //!   boundary; optional TLS 1.3 protects every configured listener.
@@ -50,6 +50,8 @@
 //!   not remote endpoints or rights granted by a query capability. Operators
 //!   can opt in per database to fixed compaction/scrub intervals in `fgdbd`;
 //!   [`Server::run_maintenance`] drives the same operations under host ownership.
+//!   HTTP maintenance requires a separate unrestricted Warden Admin token;
+//!   ordinary read/write tokens cannot authorize it. Admin grants no queries.
 //!
 //! Not served, and refused with a typed error rather than approximated: the
 //! durable `PublishedResultStream` class with `RESULT_ACK`/`RESULT_RELEASE`,

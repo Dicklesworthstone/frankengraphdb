@@ -19,6 +19,8 @@
 //! POST /v1/databases/<name>/write          (write)
 //! POST /v1/databases/<name>/write-if-current (exact-frontier conditional write)
 //! POST /v1/databases/<name>/write-batch    (one atomic ingestion program)
+//! POST /v1/databases/<name>/compact        (Admin only, empty body)
+//! POST /v1/databases/<name>/scrub          (Admin only, empty body)
 //!      Authorization: Bearer <hex capability token>
 //!      {"statement": "<gql>", "parameters": {"name": <json>, ...}}
 //!      {"statement": "<write script>", "argument_sets": [{"name": <json>}, ...]}
@@ -710,6 +712,105 @@ fn schema_response<'s>(
     }
 }
 
+/// Physical maintenance is an explicit Admin operation, never a GQL write.
+/// Verify before lifecycle/storage admission and again after waiting for the
+/// existing writer. The usual HTTP output fence guards the returned summary.
+async fn maintenance_response<'s>(
+    cx: &Cx,
+    server: &'s Server,
+    name: &str,
+    verb: &str,
+    request: &Request,
+    output: &OutputAuthority<'s>,
+) -> Response {
+    if request.method != Method::Post {
+        return json_response(
+            405,
+            r#"{"v":1,"error":{"code":"protocol","message":"use POST"}}"#.to_owned(),
+        );
+    }
+    let token = match bearer(request) {
+        Ok(token) => token,
+        Err(response) => return response,
+    };
+    let Some((db, verified)) = server.databases.get(name).and_then(|db| {
+        db.authority
+            .verify_at(&token, crate::TRUNK, crate::unix_millis())
+            .ok()
+            .map(|verified| (db, verified))
+    }) else {
+        return refusal_response(
+            ErrorCode::NotFoundOrUnauthorized,
+            "database not found or not authorized",
+        );
+    };
+    if verified
+        .check_admin_at(crate::TRUNK, crate::unix_millis())
+        .is_err()
+    {
+        return refusal_response(
+            ErrorCode::PermissionDenied,
+            "maintenance requires unrestricted Admin authority",
+        );
+    }
+    if !output.protected(cx, &db.authority, verified) {
+        return refusal_response(ErrorCode::Execution, "connection unavailable");
+    }
+    if !request.body.is_empty() {
+        return refusal_response(ErrorCode::Protocol, "maintenance takes an empty body");
+    }
+    let operation = async {
+        let (served, _operation) = server.maintenance_admission(cx, name)?;
+        let generation = served.db.generation().map_err(|_| crate::MaintenanceError::unavailable(cx, served))?;
+        let mut database = served.db.write(cx).await.map_err(|_| crate::MaintenanceError::unavailable(cx, served))?;
+        // A request may have waited behind another write until its credential
+        // expired or its issuer retired. No requested maintenance precedes this.
+        if served.authority.verify_at(&token, crate::TRUNK, crate::unix_millis())
+            .and_then(|verified| verified.check_admin_at(crate::TRUNK, crate::unix_millis()))
+            .is_err()
+        {
+            return Ok(refusal_response(ErrorCode::PermissionDenied, "maintenance authority is no longer valid"));
+        }
+        let contexts = fgdb_types::PurposeContexts::narrow_runtime_root(cx);
+        let body = if verb == "compact" {
+            database.compact(&contexts.commit()).await.map_err(crate::MaintenanceError::Engine)?;
+            r#"{"v":1,"operation":"compact","completed":true}"#.to_owned()
+        } else {
+            let summary = database.scrub(&contexts.commit()).await
+                .map_err(|error| crate::MaintenanceError::Engine(error.into()))?;
+            format!(r#"{{"v":1,"operation":"scrub","objects":{},"clean":{},"repaired":{},"block_objects":{},"metadata_objects":{}}}"#,
+                summary.objects, summary.clean.len(), summary.repaired.len(), summary.block_objects, summary.metadata_objects)
+        };
+        // Dropping the writer preserves the existing recovery/fencing path
+        // for scrub losses or ambiguous publication. Never report success on
+        // a retired generation, including while retained readers still exist.
+        drop(database);
+        if let Err(error) = generation.check() {
+            return Ok(refusal_response(error.code(), error.message()));
+        }
+        if !output.pin_generation(generation) {
+            return Ok(refusal_response(ErrorCode::Execution, "connection unavailable"));
+        }
+        Ok(json_response(200, body))
+    }.await;
+    match operation {
+        Ok(response) => response,
+        Err(error) => {
+            let code = match error {
+                crate::MaintenanceError::UnknownDatabase(_) => ErrorCode::NotFoundOrUnauthorized,
+                crate::MaintenanceError::Interrupted => ErrorCode::Cancelled,
+                crate::MaintenanceError::Draining => ErrorCode::Draining,
+                crate::MaintenanceError::DatabaseUnavailable(
+                    crate::DatabaseStatus::Recovering { .. },
+                ) => ErrorCode::DatabaseRecovering,
+                crate::MaintenanceError::DatabaseUnavailable(_) => ErrorCode::DatabaseUnavailable,
+                crate::MaintenanceError::Engine(_) => ErrorCode::Execution,
+            };
+            refusal_response(code, "database maintenance did not complete")
+        }
+    }
+}
+
 /// Answer one HTTP request.
 pub(crate) async fn respond<'s>(
     cx: &Cx,
@@ -750,6 +851,9 @@ pub(crate) async fn respond<'s>(
     };
     if verb == "schema" {
         return schema_response(cx, server, name, &request, output);
+    }
+    if matches!(verb, "compact" | "scrub") {
+        return maintenance_response(cx, server, name, verb, &request, output).await;
     }
     let mode = match verb {
         "query" => Some(ExecuteMode::Read),

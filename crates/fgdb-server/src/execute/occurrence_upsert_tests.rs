@@ -17,6 +17,7 @@ const E3: EId = EId(u128::MAX);
 const VALUE: PropertyKeyId = PropertyKeyId(1);
 const TEXT: &str = "MATCH (a)-[:Feed]->(b) MERGE (a)-[r:R]->(b) ON MATCH SET r.value=r.value+$inc";
 
+#[cfg(test)]
 fn accepted<T>(result: Result<T, Refusal>) -> T {
     result.unwrap_or_else(|error| panic!("{}: {}", error.code.name(), error.message))
 }
@@ -90,6 +91,79 @@ fn request(suffix: &str, increment: i64) -> Execute {
         statement: format!("{TEXT} {suffix}"),
         parameters: vec![("inc".into(), WireValue::Int(increment))],
     }
+}
+
+#[test]
+fn server_write_and_batch_persist_the_authorizing_decision_in_commit_markers() {
+    let ((), report) = run_async_under_lab(0x6524, |root| async move {
+        let (server, token) = fixture(&root, "server-authorization-markers", 100).await;
+        let db = &server.databases["test"];
+        let zero = fgdb_crypto::Digest([0; 32]);
+        let decision = |token: &CapabilityToken| {
+            let now = unix_millis();
+            let verified = db.authority.verify_at(token, TRUNK, now).unwrap();
+            fgdb_crypto::hash(
+                &verified
+                    .begin_write_at(TRUNK, now)
+                    .unwrap()
+                    .canonical_decision_bytes(),
+            )
+        };
+        let expected = decision(&token);
+        assert_ne!(expected, zero);
+        let narrower = token.attenuate(Restriction::MaxWork(9_000_000)).unwrap();
+        let narrowed_decision = decision(&narrower);
+        assert_ne!(narrowed_decision, zero);
+        assert_ne!(narrowed_decision, expected);
+        let start = db.db.read(&root).await.unwrap().frontier().unwrap();
+        let mut markers = vec![(start, zero)];
+
+        // This is the real dispatcher used by FGP EXECUTE Write and the
+        // HTTP write adapter, including the native authorized program path.
+        for (credential, digest) in [
+            (&token, expected),
+            (&token, expected),
+            (&narrower, narrowed_decision),
+        ] {
+            let answer = accepted(write(&root, db, credential, &request("", 1)).await);
+            let Outcome::WriteCommitted { seq, .. } = answer.outcome else {
+                panic!("the positive dispatch must commit a real write");
+            };
+            markers.push((fgdb_types::CommitSeq(seq), digest));
+        }
+        let batch = ExecuteBatch {
+            statement: TEXT.to_owned(),
+            argument_sets: vec![
+                vec![("inc".into(), WireValue::Int(2))],
+                vec![("inc".into(), WireValue::Int(3))],
+            ],
+        };
+        let answer = accepted(write_batch(&root, db, &token, &batch).await);
+        let Outcome::WriteCommitted { seq, .. } = answer.outcome else {
+            panic!("the positive batch dispatch must commit a real write");
+        };
+        markers.push((fgdb_types::CommitSeq(seq), expected));
+        assert_eq!(seq, start.0 + 4);
+
+        for after_maintenance in [false, true] {
+            if after_maintenance {
+                server.compact_database(&root, "test").await.unwrap();
+                let scrub = server.scrub_database(&root, "test").await.unwrap();
+                assert!(scrub.lost.is_empty());
+                assert!(scrub.block_lost.is_empty());
+                assert!(scrub.metadata_lost.is_empty());
+            }
+            let guard = db.db.read(&root).await.unwrap();
+            for (seq, digest) in &markers {
+                assert_eq!(
+                    guard.commit_authorization_decision_digest(*seq).unwrap(),
+                    Some(*digest)
+                );
+            }
+        }
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

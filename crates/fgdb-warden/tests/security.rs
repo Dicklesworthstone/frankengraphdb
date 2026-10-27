@@ -57,6 +57,104 @@ fn append_raw(token: &CapabilityToken, predicate: CaveatPredicate) -> Capability
 }
 
 #[test]
+fn admin_is_separate_from_query_rights_and_cannot_be_amplified_or_unmasked() {
+    let issuer = authority();
+    let mut whole = grant();
+    whole.labels = Scope::All;
+    whole.relations = Scope::All;
+    whole.properties = Scope::All;
+    whole.rights = Rights::Admin;
+    let admin = issuer.issue_at(&whole, START).unwrap();
+    let decoded = CapabilityToken::decode(&admin.encode()).unwrap();
+    let verified = issuer.verify_at(&decoded, BRANCH, START).unwrap();
+    verified.check_admin_at(BRANCH, START).unwrap();
+    assert!(matches!(
+        verified.begin_read_at(BRANCH, START),
+        Err(Error::PermissionDenied)
+    ));
+    assert!(matches!(
+        verified.begin_write_at(BRANCH, START),
+        Err(Error::PermissionDenied)
+    ));
+    assert!(matches!(
+        verified.check_admin_at(BRANCH, END),
+        Err(Error::Expired)
+    ));
+    assert!(matches!(
+        verified.check_admin_at("other", START),
+        Err(Error::ScopeDenied)
+    ));
+
+    for rights in [Rights::None, Rights::Read, Rights::Write, Rights::ReadWrite] {
+        whole.rights = rights;
+        let query = issuer.issue_at(&whole, START).unwrap();
+        let amplified = query.attenuate(Restriction::Rights(Rights::Admin)).unwrap();
+        for token in [&query, &amplified] {
+            assert!(matches!(
+                issuer
+                    .verify_at(token, BRANCH, START)
+                    .unwrap()
+                    .check_admin_at(BRANCH, START),
+                Err(Error::PermissionDenied)
+            ));
+        }
+        let narrowed = admin.attenuate(Restriction::Rights(rights)).unwrap();
+        let restored = narrowed
+            .attenuate(Restriction::Rights(Rights::Admin))
+            .unwrap();
+        assert_eq!(
+            issuer
+                .verify_at(&restored, BRANCH, START)
+                .unwrap()
+                .predicates()
+                .rights(),
+            Rights::None
+        );
+        assert!(
+            issuer
+                .verify_narrowing_at(&narrowed, &admin, BRANCH, START)
+                .is_err()
+        );
+    }
+    for (restriction, widen) in [
+        (
+            Restriction::Labels(Scope::only([LabelId(1)])),
+            Restriction::Labels(Scope::All),
+        ),
+        (
+            Restriction::Relations(Scope::only([RelationId(10)])),
+            Restriction::Relations(Scope::All),
+        ),
+        (
+            Restriction::Properties(Scope::only([PropertyKeyId(100)])),
+            Restriction::Properties(Scope::All),
+        ),
+        (
+            Restriction::DenyProperties(BTreeSet::from([PropertyKeyId(100)])),
+            Restriction::Properties(Scope::All),
+        ),
+    ] {
+        let narrowed = admin
+            .attenuate(restriction)
+            .unwrap()
+            .attenuate(widen)
+            .unwrap();
+        assert!(matches!(
+            issuer
+                .verify_at(&narrowed, BRANCH, START)
+                .unwrap()
+                .check_admin_at(BRANCH, START),
+            Err(Error::PermissionDenied)
+        ));
+    }
+    issuer.retire();
+    assert!(matches!(
+        verified.check_admin_at(BRANCH, START),
+        Err(Error::AuthorityRetired)
+    ));
+}
+
+#[test]
 fn issue_roundtrip_and_verify() {
     let authority = authority();
     let token = authority.issue_at(&grant(), START).unwrap();
@@ -907,7 +1005,10 @@ fn noncanonical_numeric_and_set_spellings_are_rejected() {
         ("fgdb/warden/v1/max-work", "01"),
         ("fgdb/warden/v1/max-work", "+1"),
         ("fgdb/warden/v1/max-work", "18446744073709551616"),
-        ("fgdb/warden/v1/rights", "4"),
+        ("fgdb/warden/v1/rights", "5"),
+        ("fgdb/warden/v1/rights", "6"),
+        ("fgdb/warden/v1/rights", "7"),
+        ("fgdb/warden/v1/rights", "8"),
         ("fgdb/warden/v1/relations", ""),
         ("fgdb/warden/v1/relations", "000000000000000A"),
         (

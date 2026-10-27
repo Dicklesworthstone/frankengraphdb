@@ -91,6 +91,24 @@ fn token(grant: &Grant) -> Vec<u8> {
     issue_token(&authority, grant).unwrap()
 }
 
+fn authorization_digest(bytes: &[u8]) -> fgdb_crypto::Digest {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap();
+    let authority = issuer(issuer_key(), &keys(), 1).unwrap();
+    let token = fgdb_warden::CapabilityToken::decode(bytes).unwrap();
+    let verified = authority
+        .verify_at(&token, fgdb_server::TRUNK, now)
+        .unwrap();
+    let permit = verified.begin_write_at(fgdb_server::TRUNK, now).unwrap();
+    let digest = fgdb_crypto::hash(&permit.canonical_decision_bytes());
+    assert_ne!(digest, fgdb_crypto::Digest([0; 32]));
+    digest
+}
+
 /// A served database plus a running server task, with a deliberately tiny
 /// flow window so every multi-row result needs several WINDOW_UPDATEs.
 async fn start(
@@ -160,7 +178,9 @@ fn fgp_atomic_parameter_batches_share_one_commit_and_refuse_without_a_prefix() {
         let (addr, shutdown, mut task) = start(cx, "atomic-parameter-batch").await;
         let mut scope = grant(Rights::Write);
         scope.limits.max_rows = 0;
-        let mut writer = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        let credential = token(&scope);
+        let expected_decision = authorization_digest(&credential);
+        let mut writer = Client::connect(cx, addr, credential).await.unwrap();
         writer.select(cx, "social").await.unwrap();
         let mut reader = Client::connect(cx, addr, token(&grant(Rights::Read)))
             .await
@@ -315,6 +335,28 @@ fn fgp_atomic_parameter_batches_share_one_commit_and_refuse_without_a_prefix() {
         reader.close(cx).await.unwrap();
         shutdown.trigger();
         task.join(cx).await.unwrap();
+        // fgdb-g9af0: verify authenticated durable markers after the real
+        // FGP connection and server have closed, using a fresh engine open.
+        let contexts = PurposeContexts::narrow_runtime_root(cx);
+        let mut reopened = Database::open(
+            &contexts.commit(),
+            &scratch("atomic-parameter-batch"),
+            keys(),
+        )
+        .await
+        .unwrap();
+        for seq in [1, 2] {
+            assert_eq!(
+                reopened
+                    .commit_authorization_decision_digest(fgdb_types::CommitSeq(seq))
+                    .unwrap(),
+                Some(expected_decision)
+            );
+        }
+        let scrub = reopened.scrub(&contexts.commit()).await.unwrap();
+        assert!(
+            scrub.lost.is_empty() && scrub.block_lost.is_empty() && scrub.metadata_lost.is_empty()
+        );
     });
 }
 
@@ -1522,9 +1564,9 @@ fn attenuated_tokens_only_narrow_compose_and_need_no_key() {
 fn committed_writes_survive_a_server_restart() {
     run(async |cx| {
         let (addr, shutdown, mut server) = start(cx, "restart").await;
-        let mut client = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
-            .await
-            .unwrap();
+        let credential = token(&grant(Rights::ReadWrite));
+        let expected_decision = authorization_digest(&credential);
+        let mut client = Client::connect(cx, addr, credential).await.unwrap();
         client.select(cx, "social").await.unwrap();
         client
             .execute(
@@ -1538,6 +1580,22 @@ fn committed_writes_survive_a_server_restart() {
         client.close(cx).await.unwrap();
         shutdown.trigger();
         server.join(cx).await.unwrap();
+
+        let contexts = PurposeContexts::narrow_runtime_root(cx);
+        let mut verified = Database::open(&contexts.commit(), &scratch("restart"), keys())
+            .await
+            .unwrap();
+        assert_eq!(
+            verified
+                .commit_authorization_decision_digest(fgdb_types::CommitSeq(1))
+                .unwrap(),
+            Some(expected_decision)
+        );
+        let scrub = verified.scrub(&contexts.commit()).await.unwrap();
+        assert!(
+            scrub.lost.is_empty() && scrub.block_lost.is_empty() && scrub.metadata_lost.is_empty()
+        );
+        drop(verified);
 
         // Serve the same directory again from a fresh server process state.
         let limits = ServerLimits::default();

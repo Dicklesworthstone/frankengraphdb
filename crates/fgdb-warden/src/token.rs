@@ -307,6 +307,22 @@ impl VerifiedCapability<'_> {
         &self.program
     }
 
+    /// Authorize whole-database physical maintenance, independently of query
+    /// rights and their per-query ceilings. A subgraph or field restriction
+    /// cannot authorize work over hidden objects. The host must recheck after
+    /// any admission wait, immediately before invoking the engine.
+    pub fn check_admin_at(&self, branch: &str, now_ms: u64) -> Result<(), Error> {
+        self._authority.check_active()?;
+        self.program.check_at(branch, now_ms)?;
+        if self.program.rights != Rights::Admin
+            || !self.program.sees_all_incidence()
+            || !self.program.sees_all_properties()
+        {
+            return Err(Error::PermissionDenied);
+        }
+        Ok(())
+    }
+
     pub fn begin_read_at(
         &self,
         branch: &str,
@@ -537,8 +553,15 @@ fn compile(token: &MacaroonToken) -> Result<PlannerPredicates, Error> {
                 program.properties.intersect(scope);
             }
             Restriction::Rights(rights) => {
+                let first = seen & (1 << 4) == 0;
                 seen |= 1 << 4;
-                program.rights = program.rights.intersect(rights);
+                // The first signed restriction is the root ceiling. There
+                // is no implicit read/write grant to intersect Admin with.
+                program.rights = if first {
+                    rights
+                } else {
+                    program.rights.intersect(rights)
+                };
             }
             Restriction::MaxNodes(limit) => {
                 seen |= 1 << 5;
