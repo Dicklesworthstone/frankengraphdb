@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "logical_object_kinds"
-registry_epoch = 75
+registry_epoch = 76
 
 [[kind]]
 object_kind = 0x0001
@@ -5477,7 +5477,7 @@ name = "DeltaRootSegment"
 status = "active"
 construction_order = 25
 role_predicate = "true"
-max_size_bytes = 16384
+max_size_bytes = 65536
 golden_corpus = "corpus/logical/delta_root_segment/"
 
 [[kind]]

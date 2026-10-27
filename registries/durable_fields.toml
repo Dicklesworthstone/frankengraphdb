@@ -6,7 +6,7 @@ schema_version = 1
 
 [registry]
 name = "durable_fields"
-registry_epoch = 104
+registry_epoch = 105
 
 [[field]]
 containing_schema = "ActivatedRetentionCutSet"
@@ -3114,11 +3114,11 @@ identity_class = "logical"
 reference_semantics = "weak_digest"
 construction_order = 30
 role_predicate = "true"
-retention_and_cut_rule = "unkeyed domain-separated transcript digest of the root's logical content (fgdb.strata.root-logical-digest.v1 in format V3, .v4 in format V4, .v5 in format V5; fgdb-6lyc, fgdb-d5vo4, fgdb-5gzaa): comparison only, verified on decode, never a reachability edge"
+retention_and_cut_rule = "unkeyed domain-separated transcript digest of the root's logical content (fgdb.strata.root-logical-digest.v1 in format V3, .v4 in format V4, .v5 in format V5, .v6 in format V6; fgdb-6lyc, fgdb-d5vo4, fgdb-5gzaa, fgdb-teypc): comparison only, verified on decode, never a reachability edge"
 version_status = "active"
 max_size_bytes = 32
 digest_class = "transcript"
-transcript_recipe = "V3: unkeyed BLAKE3 under domain fgdb.strata.root-logical-digest.v1 over graph, branch, partition, published_at, block count then ordered (block_id, first_seq, last_seq), patch count then ordered (patch_id, first_seq, last_seq), big-endian (root_logical_digest, fgdb-6lyc). V4: unkeyed BLAKE3 under domain fgdb.strata.root-logical-digest.v4 over graph, branch, partition, published_at, then per list (blocks, then vertex patches) its total count, each full segment's (canonical_segment_digest, first_seq, last_seq) and the inline tail's (id, first_seq, last_seq), big-endian (root_logical_digest_v4, fgdb-d5vo4). V5: the V4 transcript under domain fgdb.strata.root-logical-digest.v5, with each list's full index segments' (canonical_index_digest, first_seq, last_seq) before its named full segments, which are then only those after the last full index segment (root_logical_digest_segmented, fgdb-5gzaa)"
+transcript_recipe = "V3: unkeyed BLAKE3 under domain fgdb.strata.root-logical-digest.v1 over graph, branch, partition, published_at, block count then ordered (block_id, first_seq, last_seq), patch count then ordered (patch_id, first_seq, last_seq), big-endian (root_logical_digest, fgdb-6lyc). V4: unkeyed BLAKE3 under domain fgdb.strata.root-logical-digest.v4 over graph, branch, partition, published_at, then per list (blocks, then vertex patches) its total count, each full segment's (canonical_segment_digest, first_seq, last_seq) and the inline tail's (id, first_seq, last_seq), big-endian (root_logical_digest_v4, fgdb-d5vo4). V5: the V4 transcript under domain fgdb.strata.root-logical-digest.v5, with each list's full index segments' (canonical_index_digest, first_seq, last_seq) before its named full segments, which are then only those after the last full index segment (root_logical_digest_segmented, fgdb-5gzaa). V6: unkeyed BLAKE3 under domain fgdb.strata.root-logical-digest.v6 over the 32-byte base_membership_digest followed by every complete inline block descriptor (205 bytes) then vertex-patch descriptor (80 bytes), in membership order, including the present hosted_property_refs and canonical absent zero slots (described_root_digest, fgdb-teypc)"
 
 [[field]]
 containing_schema = "DeltaPartitionRoot"
@@ -3179,6 +3179,51 @@ role_predicate = "true"
 retention_and_cut_rule = "format V5 (fgdb-5gzaa): the full index segments, each naming 16 consecutive full vertex-patch segments in order, named with canonical_index_digest and span; strong while this root is published or retained. patch_segments then holds only the full segments after them"
 version_status = "active"
 max_size_bytes = 80
+
+[[field]]
+containing_schema = "DeltaPartitionRoot"
+field_tag = 0x000c
+stable_name = "base_membership_digest"
+exact_wire_type = "digest256"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "format V6 (fgdb-teypc): the V5 membership transcript, stored immediately after the membership lists and verified independently before descriptor admission; comparison only, retained with the root and never a reachability edge"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "the canonical_partition_digest V5 recipe over this V6 root's graph, branch, partition, publication sequence, index and segment references, and inline membership tails; the segment digests include their own V2 descriptors when present"
+
+[[field]]
+containing_schema = "DeltaPartitionRoot"
+field_tag = 0x000d
+stable_name = "descriptor_values"
+exact_wire_type = "bytes"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "format V6 (fgdb-teypc): scalar octets of one descriptor per inline membership ref, at most 255 blocks then 255 vertex patches. A block's 173 value octets are payload_length:u32, extent_checksum:32 bytes, row_count:u32, first_eid:u128, first_created_at:u64, last_eid:u128, source:u128, relation:u64, first_destination:u128, last_destination:u128, hosted_property_present:u8, hosted_property_length:u32, hosted_property_checksum:32 bytes. Its separately registered 32-byte hosted_property_refs slot lies immediately after the presence byte, making 205 wire bytes. A patch is 80 bytes: payload_length:u32, extent_checksum:32 bytes, row_count:u32, first_vid:u128, first_created_at:u64, last_vid:u128. Integers are big-endian, absent hosted-property slots are 69 zero bytes, payloads start at offset zero and are bounded at 16384 bytes, and each descriptor's identity comes from its matching membership ref. These values authenticate later payload reads; they do not independently certify payload history. Retained with the root"
+version_status = "active"
+max_size_bytes = 173
+
+[[field]]
+containing_schema = "DeltaPartitionRoot"
+field_tag = 0x000e
+stable_name = "hosted_property_refs"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "EdgePropertyPatch"
+construction_order = 30
+role_predicate = "true"
+retention_and_cut_rule = "format V6 (fgdb-teypc): one EdgePropertyPatch ObjectId in each inline block descriptor whose hosted_property_present is 1; the identity's 32 bytes follow that presence byte. Strong while this root is published or retained. A zero presence byte requires a zero identity, length and checksum slot and creates no edge; vertex-patch descriptors have no hosted-property slot"
+version_status = "active"
+max_size_bytes = 32
 
 [[field]]
 containing_schema = "DeltaRootIndexSegment"
@@ -3363,11 +3408,56 @@ identity_class = "logical"
 reference_semantics = "weak_digest"
 construction_order = 25
 role_predicate = "true"
-retention_and_cut_rule = "unkeyed domain-separated transcript digest of the segment's logical content (fgdb.strata.root-segment-logical-digest.v1, fgdb-d5vo4): the root binds it; verified on decode, never a reachability edge"
+retention_and_cut_rule = "unkeyed domain-separated transcript digest of the segment's logical content (fgdb.strata.root-segment-logical-digest.v1 for V1, .v2 for V2; fgdb-d5vo4, fgdb-teypc): the root or index segment binds it; verified on decode, never a reachability edge"
 version_status = "active"
 max_size_bytes = 32
 digest_class = "transcript"
-transcript_recipe = "unkeyed BLAKE3 under domain fgdb.strata.root-segment-logical-digest.v1 over graph, branch, partition, class, entry count then ordered (id, first_seq, last_seq), big-endian (segment_logical_digest, fgdb-d5vo4)"
+transcript_recipe = "V1: unkeyed BLAKE3 under domain fgdb.strata.root-segment-logical-digest.v1 over graph, branch, partition, class, entry count then ordered (id, first_seq, last_seq), big-endian (segment_logical_digest, fgdb-d5vo4). V2: unkeyed BLAKE3 under domain fgdb.strata.root-segment-logical-digest.v2 over the 32-byte base_membership_digest followed by the 256 complete class-selected descriptors in membership order, including present hosted_property_refs and canonical absent zero slots (described_digest, fgdb-teypc)"
+
+[[field]]
+containing_schema = "DeltaRootSegment"
+field_tag = 0x0008
+stable_name = "base_membership_digest"
+exact_wire_type = "digest256"
+cardinality = "optional"
+identity_class = "logical"
+reference_semantics = "weak_digest"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "format V2 (fgdb-teypc): the V1 membership transcript, stored immediately after the 256 membership refs and verified independently before descriptor admission; comparison only, retained with the segment and never a reachability edge"
+version_status = "active"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "the canonical_segment_digest V1 recipe over this V2 segment's graph, branch, partition, class and 256 ordered membership references"
+
+[[field]]
+containing_schema = "DeltaRootSegment"
+field_tag = 0x0009
+stable_name = "descriptor_values"
+exact_wire_type = "bytes"
+cardinality = "many"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "format V2 (fgdb-teypc): exactly 256 descriptors in membership order, with the same big-endian scalar layout and admission laws as DeltaPartitionRoot.descriptor_values. Class 0 uses each block's 173 scalar octets with a separately registered hosted_property_refs slot, making 205 wire bytes; class 1 uses each vertex patch's 80 scalar octets. A V2 block segment is exactly 64879 bytes and a patch segment 32879 bytes. These values authenticate later payload reads and do not independently certify payload history; retained with the segment"
+version_status = "active"
+max_size_bytes = 173
+
+[[field]]
+containing_schema = "DeltaRootSegment"
+field_tag = 0x000a
+stable_name = "hosted_property_refs"
+exact_wire_type = "StrongRef"
+cardinality = "many"
+identity_class = "logical"
+reference_semantics = "strong"
+target_schema_id = "EdgePropertyPatch"
+construction_order = 25
+role_predicate = "true"
+retention_and_cut_rule = "format V2 (fgdb-teypc), class 0: one EdgePropertyPatch ObjectId in each block descriptor whose hosted_property_present is 1; the identity's 32 bytes follow that presence byte. Strong while a published or retained root reaches this segment. A zero presence byte requires a zero identity, length and checksum slot and creates no edge; class 1 has no hosted-property slots"
+version_status = "active"
+max_size_bytes = 32
 
 [[field]]
 containing_schema = "DirectoryBoundCreationEvidence<Role:AuthorityOwningRole>"

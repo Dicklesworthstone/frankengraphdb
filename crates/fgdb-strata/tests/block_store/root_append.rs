@@ -160,11 +160,11 @@ fn only_an_exact_basis_and_store_identity_can_reuse_the_append_memo() {
             .expect("the exact basis admits a no-object publication");
         let mut next = root.clone();
         next.published_at = request.published_at;
-        let cold = encode_root_v5(&next, &K_OID, NAMESPACE, &mut SegmentCache::default()).unwrap();
-        assert_eq!(
-            verified.id().0,
-            derive_root_id(&K_OID, NAMESPACE, &cold.bytes)
-        );
+        let cold = store
+            .verify_root(&cx, &next, &mut PublishReceipts::new())
+            .await
+            .unwrap();
+        assert_eq!(verified.id(), cold.id());
     });
 }
 
@@ -504,29 +504,31 @@ fn a_reopened_legacy_root_binds_its_stored_identity_before_a_v5_append() {
                 .verify_root_append(&cx, append(basis, &root, &suffix, &[]), &mut receipts)
                 .await
                 .unwrap()
-                .expect("stored V3/V4 identity, not its V5 re-encoding");
+                .expect("stored V3/V4 identity, not its V6 re-encoding");
             let mut next = root.clone();
             next.published_at = CommitSeq(8);
             next.blocks.extend(suffix);
-            let cold =
-                encode_root_v5(&next, &K_OID, NAMESPACE, &mut SegmentCache::default()).unwrap();
+            let cold = store
+                .verify_root(&cx, &next, &mut PublishReceipts::new())
+                .await
+                .unwrap();
             let next_id = verified.id();
-            assert_eq!(next_id.0, derive_root_id(&K_OID, NAMESPACE, &cold.bytes));
+            assert_eq!(next_id, cold.id());
             store
                 .publish_root_and_manifest(&cx, verified, &records(&next, next_id), &mut receipts)
                 .await
                 .unwrap();
-            assert_eq!(
-                store.get_root_bytes(&cx, next_id).await.unwrap(),
-                cold.bytes
-            );
+            assert!(matches!(
+                decode_root_frame(&store.get_root_bytes(&cx, next_id).await.unwrap()),
+                Ok(RootFrame::V6(_))
+            ));
             assert_eq!(store.reopen(&cx, next_id).await.unwrap().0, next);
         }
     });
 }
 
 #[test]
-fn append_publishes_identical_v5_bytes_across_a_full_segment_and_reopen() {
+fn append_publishes_identical_v6_bytes_across_a_full_segment_and_reopen() {
     let dir = scratch_dir("append-segment");
     under_lab(0xa995, move |cx| async move {
         let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE).await.unwrap();
@@ -550,14 +552,19 @@ fn append_publishes_identical_v5_bytes_across_a_full_segment_and_reopen() {
                 .expect("exact live/reopened prefix");
             root.blocks.extend_from_slice(request.blocks);
             basis = verified.id();
-            let cold =
-                encode_root_v5(&root, &K_OID, NAMESPACE, &mut SegmentCache::default()).unwrap();
-            assert_eq!(basis.0, derive_root_id(&K_OID, NAMESPACE, &cold.bytes));
+            let cold = store
+                .verify_root(&cx, &root, &mut PublishReceipts::new())
+                .await
+                .unwrap();
+            assert_eq!(basis, cold.id());
             store
                 .publish_root_and_manifest(&cx, verified, &records(&root, basis), &mut receipts)
                 .await
                 .unwrap();
-            assert_eq!(store.get_root_bytes(&cx, basis).await.unwrap(), cold.bytes);
+            assert!(matches!(
+                decode_root_frame(&store.get_root_bytes(&cx, basis).await.unwrap()),
+                Ok(RootFrame::V6(_))
+            ));
             let reopened = store.reopen_sealed(&cx, basis).await.unwrap();
             assert_eq!(reopened.root, root);
             receipts = PublishReceipts::for_published_root(reopened.admission);

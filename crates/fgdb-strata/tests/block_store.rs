@@ -836,25 +836,19 @@ fn a_partition_reopens_from_disk_with_no_stream_replay() {
             }
             store.put_root(&cx, &root).await.expect("stores the root")
         };
-        // Publication writes format V5 (fgdb-5gzaa); its identity is the V5
-        // encoding's, whatever cache produced it.
-        let encoded_root = fgdb_strata::root::encode_root_v5(
-            &root,
-            &K_OID,
-            NAMESPACE,
-            &mut fgdb_strata::root::SegmentCache::default(),
-        )
-        .expect("encodes root");
-        assert_eq!(
-            root_id.0,
-            derive_root_id(&K_OID, NAMESPACE, &encoded_root.bytes),
-            "root publication and root verification share one authoritative transcript"
-        );
-
         // A FRESH handle, holding nothing but the root identity.
         let reopened = BlockStore::open(&cx, &dir, K_OID, NAMESPACE)
             .await
             .expect("reopens");
+        let cold = reopened
+            .verify_root(&cx, &root, &mut PublishReceipts::new())
+            .await
+            .expect("fresh full admission");
+        assert_eq!(
+            root_id,
+            cold.id(),
+            "root publication and full verification share one authoritative transcript"
+        );
         let (loaded_root, loaded_blocks, _block_props, _patches) = reopened
             .reopen(&cx, root_id)
             .await
@@ -2669,12 +2663,9 @@ fn edge_content_chains_admit_contiguously_and_refuse_aliasing_and_drift() {
 /// rebuild re-offered the same root on every later open: the directory
 /// admitted no recovery. The store now applies each family's own ceiling.
 ///
-/// Roots publish as format V5 (fgdb-5gzaa; V4's layout below 4,096
-/// references), which stores these 400 refs as one segment plus a
-/// 144-reference tail in about 7 KiB. A stored root crosses 16 KiB only at
-/// 151,551 references, so the object-layer seam itself
-/// is pinned by the store's own unit law
-/// (`a_root_object_past_the_block_bound_is_admitted_by_its_own_ceiling`).
+/// V6 stores these 400 refs as one described segment plus a 144-reference
+/// described tail. That root itself exceeds 16 KiB, so the same fixture also
+/// exercises publication under the root family's independent object ceiling.
 #[test]
 fn a_root_lawful_under_its_own_format_ceiling_is_admitted() {
     let dir = scratch_dir("root-format-ceiling-admission");
@@ -2696,6 +2687,7 @@ fn a_root_lawful_under_its_own_format_ceiling_is_admitted() {
             .put_root(&cx, &root)
             .await
             .expect("a format-lawful root is admitted");
+        assert!(store.get_root_bytes(&cx, root_id).await.unwrap().len() > 16_384);
         let read_back = store.get_root(&cx, root_id).await.expect("reads back");
         assert_eq!(read_back, root);
     });
@@ -2706,10 +2698,39 @@ fn a_root_lawful_under_its_own_format_ceiling_is_admitted() {
 // ---------------------------------------------------------------------------
 
 use fgdb_strata::root::{
-    MAX_ENCODED_ROOT_V4_BYTES, MAX_ENCODED_ROOT_V5_BYTES, MAX_ROOT_READ_BYTES, SegmentCache,
-    encode_root_v5,
+    MAX_ENCODED_ROOT_V4_BYTES, MAX_ENCODED_ROOT_V5_BYTES, MAX_ROOT_READ_BYTES, RootFrame,
+    SegmentCache, decode_root_frame,
 };
-use fgdb_strata::root_segment::{SEGMENT_BYTES, SEGMENT_REFS, SegmentError};
+use fgdb_strata::root_segment::{MAX_SEGMENT_BYTES, SEGMENT_BYTES, SEGMENT_REFS, SegmentError};
+
+async fn published_v6_segments(
+    store: &BlockStore,
+    cx: &CommitCx,
+    id: PartitionRootVersion,
+) -> Vec<(ObjectId, Vec<u8>)> {
+    let bytes = store.get_root_bytes(cx, id).await.unwrap();
+    let RootFrame::V6(frame) = decode_root_frame(&bytes).unwrap() else {
+        panic!("new publications carry V6 descriptors")
+    };
+    assert!(frame.membership.block_index.is_empty());
+    assert!(frame.membership.patch_index.is_empty());
+    let mut segments = Vec::new();
+    for reference in frame
+        .membership
+        .block_segments
+        .iter()
+        .chain(&frame.membership.patch_segments)
+    {
+        segments.push((
+            reference.segment_id,
+            store
+                .get_root_segment_bytes(cx, reference.segment_id)
+                .await
+                .unwrap(),
+        ));
+    }
+    segments
+}
 use fgdb_strata::store::{RootReadError, RootReadLimits};
 
 /// `count` single-entry blocks, each its own family, made durable through one
@@ -2758,19 +2779,18 @@ fn a_two_level_root_publishes_its_segments_and_reopens_through_them() {
         let stored = std::fs::read(store.path(root_id.0)).expect("root object");
         assert_eq!(
             stored.len(),
-            94 + 2 * 80 + 88 * 48,
-            "two segment refs + the tail"
+            94 + 2 * 80 + 88 * (48 + 205) + 32,
+            "two segment refs + membership digest + described tail"
         );
-        let cold = encode_root_v5(&root, &K_OID, NAMESPACE, &mut SegmentCache::default())
-            .expect("encodes");
-        assert_eq!(stored, cold.bytes);
-        assert_eq!(cold.new_segments.len(), 2);
-        assert!(
-            cold.new_index_segments.is_empty(),
-            "no full index below 4,096"
-        );
-        for (segment_id, bytes) in &cold.new_segments {
-            assert_eq!(bytes.len(), SEGMENT_BYTES);
+        let cold = store
+            .verify_root(&cx, &root, &mut PublishReceipts::new())
+            .await
+            .expect("full admission");
+        assert_eq!(root_id, cold.id());
+        let segments = published_v6_segments(&store, &cx, root_id).await;
+        assert_eq!(segments.len(), 2);
+        for (segment_id, bytes) in &segments {
+            assert_eq!(bytes.len(), MAX_SEGMENT_BYTES);
             assert_eq!(
                 &std::fs::read(store.path(*segment_id)).expect("segment object"),
                 bytes
@@ -2822,14 +2842,6 @@ fn a_root_publication_packs_a_bulk_commits_segments_and_keeps_its_root_loose() {
         let grown = batch_of_blocks(&cx, &store, (loose + packed) * SEGMENT_REFS + 1).await;
         let mut small = grown.clone();
         small.blocks.truncate(loose * SEGMENT_REFS + 1);
-        let segments: Vec<ObjectId> =
-            encode_root_v5(&grown, &K_OID, NAMESPACE, &mut SegmentCache::default())
-                .expect("encodes")
-                .new_segments
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect();
-        assert_eq!(segments.len(), loose + packed);
         let packs = || {
             std::fs::read_dir(dir.join(BLOCK_DIR).join(PACK_DIR))
                 .expect("the blocks were packed")
@@ -2841,9 +2853,10 @@ fn a_root_publication_packs_a_bulk_commits_segments_and_keeps_its_root_loose() {
 
         let mut receipts = PublishReceipts::new();
         let mut manifest = None;
-        for (root, new, packs_after) in [
-            (&small, &segments[..loose], block_packs),
-            (&grown, &segments[loose..], block_packs + 1),
+        let mut prior_segments = Vec::new();
+        for (root, carried, new_count, packs_after) in [
+            (&small, 0, loose, block_packs),
+            (&grown, loose, packed, block_packs + 1),
         ] {
             let verified = store
                 .verify_root(&cx, root, &mut receipts)
@@ -2861,8 +2874,11 @@ fn a_root_publication_packs_a_bulk_commits_segments_and_keeps_its_root_loose() {
                 .publish_root_and_manifest(&cx, verified, &records, &mut receipts)
                 .await
                 .expect("publishes");
+            let segments = published_v6_segments(&store, &cx, root_id).await;
+            assert_eq!(segments.len(), carried + new_count);
+            let new = &segments[carried..];
             assert_eq!(packs(), packs_after, "{} new segments", new.len());
-            for segment in new {
+            for (segment, _) in new {
                 assert_eq!(
                     store.path(*segment).is_file(),
                     new.len() < ROOT_SEGMENT_PACK_MIN,
@@ -2872,8 +2888,11 @@ fn a_root_publication_packs_a_bulk_commits_segments_and_keeps_its_root_loose() {
             assert!(store.path(root_id.0).is_file(), "the root is loose");
             assert!(store.path(manifest_id.0).is_file(), "the manifest is loose");
             manifest = Some((manifest_id, root_id));
+            if carried == 0 {
+                prior_segments = segments.into_iter().map(|(id, _)| id).collect();
+            }
         }
-        for segment in &segments[..loose] {
+        for segment in &prior_segments {
             assert!(
                 store.path(*segment).is_file(),
                 "an earlier root's segments stay put"
@@ -3011,9 +3030,7 @@ fn a_damaged_or_substituted_segment_refuses_the_root() {
             .expect("opens");
         let root = batch_of_blocks(&cx, &store, 2 * SEGMENT_REFS + 1).await;
         let root_id = store.put_root(&cx, &root).await.expect("publishes");
-        let segments = encode_root_v5(&root, &K_OID, NAMESPACE, &mut SegmentCache::default())
-            .expect("encodes")
-            .new_segments;
+        let segments = published_v6_segments(&store, &cx, root_id).await;
         let (first, genuine) = &segments[0];
         let path = store.path(*first);
 
@@ -3058,9 +3075,17 @@ fn a_bounded_root_read_charges_every_segment_it_names() {
         + V5_REFS / (SEGMENT_REFS * fgdb_strata::root_segment::INDEX_REFS)
             * fgdb_strata::root_segment::INDEX_BYTES
         + V5_REFS / SEGMENT_REFS * SEGMENT_BYTES;
+    const DESCRIBED_READ_CEILING: usize = MAX_ENCODED_ROOT_V5_BYTES
+        .saturating_add(32 + (SEGMENT_REFS - 1) * (205 + 80))
+        .saturating_add(
+            V5_REFS / (SEGMENT_REFS * fgdb_strata::root_segment::INDEX_REFS)
+                * fgdb_strata::root_segment::INDEX_BYTES,
+        )
+        .saturating_add((V5_REFS / SEGMENT_REFS).saturating_mul(MAX_SEGMENT_BYTES));
     const _: () = assert!(LARGEST_V4_READ > MAX_ENCODED_ROOT_BYTES);
     const _: () = assert!(MAX_ROOT_READ_BYTES >= LARGEST_V4_READ);
     const _: () = assert!(MAX_ROOT_READ_BYTES >= LARGEST_V5_READ);
+    const _: () = assert!(MAX_ROOT_READ_BYTES >= DESCRIBED_READ_CEILING);
     assert_eq!(
         RootReadLimits::default().max_root_bytes,
         MAX_ROOT_READ_BYTES
@@ -3078,7 +3103,7 @@ fn a_bounded_root_read_charges_every_segment_it_names() {
         let exact = std::fs::read(store.path(root_id.0))
             .expect("root object")
             .len()
-            + 2 * SEGMENT_BYTES;
+            + 2 * MAX_SEGMENT_BYTES;
         let limits = |max_root_bytes| RootReadLimits {
             max_root_bytes,
             ..RootReadLimits::default()
@@ -3131,11 +3156,13 @@ fn a_warm_segment_cache_publishes_exactly_what_a_cold_one_would() {
                 .put_root_verified(&cx, root, &mut receipts)
                 .await
                 .expect("publishes");
-            let cold = encode_root_v5(root, &K_OID, NAMESPACE, &mut SegmentCache::default())
-                .expect("encodes");
+            let cold = store
+                .verify_root(&cx, root, &mut PublishReceipts::new())
+                .await
+                .expect("full admission");
             assert_eq!(
-                warm.0,
-                derive_root_id(&K_OID, NAMESPACE, &cold.bytes),
+                warm,
+                cold.id(),
                 "branch {:?}, {} blocks",
                 root.branch,
                 root.blocks.len()

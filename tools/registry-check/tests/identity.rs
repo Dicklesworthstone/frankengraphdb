@@ -12433,7 +12433,10 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     // post-erratum addition and the historical witness reconstructs without
     // it. Filtered separately from post_erratum_a09_field so that cohort's
     // three-schema membership note stays a true accounting. ACCOUNTING:
-    // exactly 44 transcript lines — the 8 fgdb-5gzaa three-level root rows
+    // exactly 50 transcript lines — the 6 fgdb-teypc described root/segment
+    // rows (base_membership_digest, descriptor_values, hosted_property_refs
+    // on each of DeltaPartitionRoot and DeltaRootSegment), the 8 fgdb-5gzaa
+    // three-level root rows
     // (DeltaPartitionRoot block_index_segments + patch_index_segments, and
     // the 6 rows of the newly minted DeltaRootIndexSegment: graph/branch/
     // partition/class/segments/canonical_index_digest), the 9 fgdb-d5vo4
@@ -13065,7 +13068,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // post_erratum_ge6a_reachability_field (extended to
         // DeltaRootIndexSegment, which had zero rows before). The
         // reconstruction remains 225.
-        pre_erratum.fields.len() + 966,
+        // 966 -> 972 (fgdb-teypc): the six descriptor-format rows on
+        // DeltaPartitionRoot and DeltaRootSegment. Both schemas were already
+        // covered by post_erratum_ge6a_reachability_field, and the frozen
+        // historical reconstruction remains 225.
+        pre_erratum.fields.len() + 972,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );

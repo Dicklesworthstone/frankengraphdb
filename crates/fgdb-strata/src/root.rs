@@ -24,6 +24,8 @@
 
 use std::borrow::Borrow;
 
+pub(crate) mod descriptor;
+
 use crate::BlockError;
 use crate::root_segment::{
     INDEX_BYTES, INDEX_REFS, SEGMENT_BYTES, SEGMENT_REF_LEN, SEGMENT_REFS, SegmentClass,
@@ -205,6 +207,8 @@ pub struct EdgeIdentityConflict {
 /// Why a root could not be encoded, decoded, or resolved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RootError {
+    /// Authenticated descriptor metadata has an impossible or mismatched shape.
+    InvalidDescriptor,
     NotARoot,
     UnsupportedFormat {
         format: u16,
@@ -393,6 +397,7 @@ pub enum RootError {
 impl core::fmt::Display for RootError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::InvalidDescriptor => write!(f, "invalid authenticated root descriptor"),
             Self::NotARoot => write!(f, "not a strata partition root"),
             Self::UnsupportedFormat { format } => {
                 write!(f, "root format {format} is not implemented")
@@ -582,7 +587,7 @@ pub fn validate_root(root: &PartitionRoot) -> Result<(), RootError> {
 /// The caller must have validated the carried prefixes at a publication no
 /// later than this root's. The first new reference still compares against the
 /// final carried reference: skipping that boundary would admit a regression.
-fn validate_root_suffix(
+pub(crate) fn validate_root_suffix(
     root: PartitionRootRef<'_>,
     carried: (usize, usize),
 ) -> Result<(), RootError> {
@@ -842,6 +847,10 @@ pub const MAX_ENCODED_ROOT_V4_BYTES: usize = HEADER_LEN
 /// segment and one new index segment per list. Additive over V3
 /// and V4 (§16.6 additive-minor): both still decode, and writers emit V5.
 pub const ROOT_FORMAT_V5: u16 = 5;
+/// V6 preserves V5 membership and fanout, with authenticated payload
+/// descriptors in V2 leaves and bounded inline tails. Writers may emit this
+/// only after complete root publication admission.
+pub const ROOT_FORMAT_V6: u16 = 6;
 /// Domain separator for the V5 logical digest, which binds each full index
 /// segment and each named segment through that object's own logical digest.
 pub const ROOT_LOGICAL_DIGEST_DOMAIN_V5: &[u8] = b"fgdb.strata.root-logical-digest.v5";
@@ -859,7 +868,7 @@ const fn max_v5_list_bytes(ceiling: u32) -> usize {
 pub const MAX_ENCODED_ROOT_V5_BYTES: usize =
     HEADER_LEN + max_v5_list_bytes(MAX_ROOT_BLOCKS) + max_v5_list_bytes(MAX_ROOT_PATCHES);
 
-/// The most bytes one whole root read may consume: a V4 or V5 root together
+/// The most bytes one whole root read may consume: a V4, V5 or V6 root together
 /// with every object it names, or a flat V3 root, whichever ceiling is
 /// largest.
 ///
@@ -874,13 +883,17 @@ pub const MAX_ROOT_READ_BYTES: usize = {
         * SEGMENT_BYTES;
     let segments = (MAX_ROOT_BLOCKS as usize / SEGMENT_REFS
         + MAX_ROOT_PATCHES as usize / SEGMENT_REFS)
-        * SEGMENT_BYTES;
+        .saturating_mul(crate::root_segment::MAX_SEGMENT_BYTES);
     let v4 = MAX_ENCODED_ROOT_V4_BYTES + flat_segments;
-    let v5 = MAX_ENCODED_ROOT_V5_BYTES
-        + segments
-        + (MAX_ROOT_BLOCKS as usize / INDEX_COVERS + MAX_ROOT_PATCHES as usize / INDEX_COVERS)
-            * INDEX_BYTES;
-    let segmented = if v5 > v4 { v5 } else { v4 };
+    let described = MAX_ENCODED_ROOT_V5_BYTES
+        .saturating_add(32)
+        .saturating_add((SEGMENT_REFS - 1) * (descriptor::BLOCK_BYTES + descriptor::PATCH_BYTES))
+        .saturating_add(segments)
+        .saturating_add(
+            (MAX_ROOT_BLOCKS as usize / INDEX_COVERS + MAX_ROOT_PATCHES as usize / INDEX_COVERS)
+                * INDEX_BYTES,
+        );
+    let segmented = if described > v4 { described } else { v4 };
     if segmented > MAX_ENCODED_ROOT_BYTES {
         segmented
     } else {
@@ -911,9 +924,15 @@ pub struct SegmentCache {
     patches: Vec<SegmentRef>,
     block_index: Vec<SegmentRef>,
     patch_index: Vec<SegmentRef>,
+    described: bool,
+    pub(crate) descriptors: Option<descriptor::RootDescriptors>,
 }
 
 impl SegmentCache {
+    pub(crate) fn attach_descriptors(&mut self, descriptors: descriptor::RootDescriptors) {
+        self.described = true;
+        self.descriptors = Some(descriptors);
+    }
     /// Identities retained by the already-admitted root, independent of any
     /// later damage to its on-disk frame or either reference list, each with
     /// the kind of segment it names.
@@ -955,6 +974,8 @@ impl SegmentCache {
             patches: frame.patch_segments.clone(),
             block_index,
             patch_index,
+            described: false,
+            descriptors: None,
         }
     }
 }
@@ -1038,6 +1059,17 @@ pub enum RootFrame {
     V3(PartitionRoot),
     V4(RootFrameV4),
     V5(RootFrameV5),
+    V6(RootFrameV6),
+}
+
+/// V6 membership and authenticated inline descriptor tails. The store compares
+/// these with fully admitted payloads; an exact live admission receipt is
+/// required before they can exclude payload I/O. Root identity alone is not
+/// evidence that its descriptor or cross-object history claims are true.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RootFrameV6 {
+    pub membership: RootFrameV5,
+    pub(crate) descriptors: descriptor::RootDescriptors,
 }
 
 /// An encoded segmented root and the segments and index segments it names
@@ -1104,6 +1136,7 @@ fn seal_full_segments<R: Copy + Into<SegmentEntry>>(
     class: SegmentClass,
     identity: (&[u8; 32], DatabaseSecurityNamespaceId),
     new_segments: &mut Vec<(ObjectId, Vec<u8>)>,
+    descriptors: Option<&descriptor::RootDescriptors>,
 ) -> Result<bool, RootError> {
     let full = refs.len() / SEGMENT_REFS;
     let dropped = cache.len() > full;
@@ -1117,8 +1150,18 @@ fn seal_full_segments<R: Copy + Into<SegmentEntry>>(
             .map(|reference| (*reference).into())
             .collect();
         let (graph, branch, partition) = coordinate;
-        let (bytes, digest) = encode_segment(graph, branch, partition, class, &entries)
-            .map_err(RootError::Segment)?;
+        let (bytes, digest) = if let Some(descriptors) = descriptors {
+            let mut payload = Vec::new();
+            descriptors.encode_range(
+                class,
+                index * SEGMENT_REFS..(index + 1) * SEGMENT_REFS,
+                &mut payload,
+            )?;
+            crate::root_segment::encode_described_segment(coordinate, class, &entries, &payload)
+        } else {
+            encode_segment(graph, branch, partition, class, &entries)
+        }
+        .map_err(RootError::Segment)?;
         let segment_id = segment_id(identity.0, identity.1, &bytes);
         let (first_seq, last_seq) = segment_span(&entries);
         cache.push(SegmentRef {
@@ -1183,8 +1226,17 @@ fn seal_list<R: Copy + Into<SegmentEntry>>(
     identity: (&[u8; 32], DatabaseSecurityNamespaceId),
     format: Segmented,
     (new_segments, new_index_segments): &mut Sealed,
+    descriptors: Option<&descriptor::RootDescriptors>,
 ) -> Result<(), RootError> {
-    if seal_full_segments(refs, segments, coordinate, class, identity, new_segments)? {
+    if seal_full_segments(
+        refs,
+        segments,
+        coordinate,
+        class,
+        identity,
+        new_segments,
+        descriptors,
+    )? {
         index.clear();
     }
     if format == Segmented::V5 {
@@ -1211,7 +1263,7 @@ pub fn encode_root_v4(
 ) -> Result<EncodedRoot, RootError> {
     validate_root(root)?;
     within_flat_ceilings(root.into())?;
-    encode_segmented(root.into(), (k_oid, namespace), cache, Segmented::V4)
+    encode_segmented(root.into(), (k_oid, namespace), cache, Segmented::V4, None)
 }
 
 /// Encode a root in format V5, sealing only the full segments and full index
@@ -1224,13 +1276,14 @@ pub fn encode_root_v5(
     cache: &mut SegmentCache,
 ) -> Result<EncodedRoot, RootError> {
     validate_root(root)?;
-    encode_segmented(root.into(), (k_oid, namespace), cache, Segmented::V5)
+    encode_segmented(root.into(), (k_oid, namespace), cache, Segmented::V5, None)
 }
 
 /// Encode an extension of an authenticated publication memo. The store alone
 /// supplies `carried`, after checking the exact prior root identity, coordinate,
 /// reference counts and nonregressing publication. Everything after that prefix,
 /// including both append boundaries, takes the ordinary structural checks.
+#[cfg(test)]
 pub(crate) fn encode_root_v5_append(
     root: PartitionRootRef<'_>,
     carried: (usize, usize),
@@ -1239,7 +1292,21 @@ pub(crate) fn encode_root_v5_append(
     cache: &mut SegmentCache,
 ) -> Result<EncodedRoot, RootError> {
     validate_root_suffix(root, carried)?;
-    encode_segmented(root, (k_oid, namespace), cache, Segmented::V5)
+    encode_segmented(root, (k_oid, namespace), cache, Segmented::V5, None)
+}
+
+pub(crate) fn encode_root_v6_append(
+    root: PartitionRootRef<'_>,
+    carried: (usize, usize),
+    descriptors: &descriptor::RootDescriptors,
+    identity: (&[u8; 32], DatabaseSecurityNamespaceId),
+    cache: &mut SegmentCache,
+) -> Result<EncodedRoot, RootError> {
+    validate_root_suffix(root, carried)?;
+    if !descriptors.matches_suffix(root.blocks, root.vertex_patches, carried) {
+        return Err(RootError::InvalidDescriptor);
+    }
+    encode_segmented(root, identity, cache, Segmented::V5, Some(descriptors))
 }
 
 fn encode_segmented(
@@ -1247,11 +1314,13 @@ fn encode_segmented(
     identity: (&[u8; 32], DatabaseSecurityNamespaceId),
     cache: &mut SegmentCache,
     format: Segmented,
+    descriptors: Option<&descriptor::RootDescriptors>,
 ) -> Result<EncodedRoot, RootError> {
     let coordinate = (root.graph, root.branch, root.partition);
-    if cache.coordinate != Some(coordinate) {
+    if cache.coordinate != Some(coordinate) || cache.described != descriptors.is_some() {
         *cache = SegmentCache {
             coordinate: Some(coordinate),
+            described: descriptors.is_some(),
             ..SegmentCache::default()
         };
     }
@@ -1263,6 +1332,7 @@ fn encode_segmented(
         identity,
         format,
         &mut sealed,
+        descriptors,
     )?;
     seal_list(
         root.vertex_patches,
@@ -1271,6 +1341,7 @@ fn encode_segmented(
         identity,
         format,
         &mut sealed,
+        descriptors,
     )?;
     let (new_segments, new_index_segments) = sealed;
     // What the root names directly, per list: V4 every full segment; V5 its
@@ -1343,6 +1414,24 @@ fn encode_segmented(
             out.extend_from_slice(&entry.last_seq.0.to_be_bytes());
         }
     }
+    if let Some(descriptors) = descriptors {
+        let mut payload = Vec::new();
+        descriptors.encode_range(
+            SegmentClass::Blocks,
+            cache.blocks.len() * SEGMENT_REFS..root.blocks.len(),
+            &mut payload,
+        )?;
+        descriptors.encode_range(
+            SegmentClass::VertexPatches,
+            cache.patches.len() * SEGMENT_REFS..root.vertex_patches.len(),
+            &mut payload,
+        )?;
+        let described = described_root_digest(digest, &payload);
+        out[4..6].copy_from_slice(&ROOT_FORMAT_V6.to_be_bytes());
+        out[OFF_DIGEST..OFF_DIGEST + 32].copy_from_slice(&described);
+        out.extend_from_slice(&digest);
+        out.extend_from_slice(&payload);
+    }
     Ok(EncodedRoot {
         bytes: out,
         new_segments,
@@ -1359,6 +1448,9 @@ pub fn decode_root_frame(bytes: &[u8]) -> Result<RootFrame, RootError> {
         return Err(RootError::NotARoot);
     }
     let format = u16::from_be_bytes([bytes[4], bytes[5]]);
+    if format == ROOT_FORMAT_V6 {
+        return decode_root_v6(bytes).map(RootFrame::V6);
+    }
     if format == ROOT_FORMAT_V3 {
         return decode_root(bytes).map(RootFrame::V3);
     }
@@ -1527,6 +1619,92 @@ pub fn decode_root_frame(bytes: &[u8]) -> Result<RootFrame, RootError> {
             patch_segments,
             tail_patches,
         }),
+    })
+}
+
+fn described_root_digest(base: [u8; 32], descriptors: &[u8]) -> [u8; 32] {
+    let mut hash = fgdb_crypto::Hasher::new();
+    hash.update(b"fgdb.strata.root-logical-digest.v6");
+    hash.update(&base);
+    hash.update(descriptors);
+    hash.finalize().0
+}
+
+fn decode_root_v6(bytes: &[u8]) -> Result<RootFrameV6, RootError> {
+    let count =
+        |offset| u32::from_be_bytes(bytes[offset..offset + 4].try_into().expect("root header"));
+    let blocks = count(OFF_BLOCK_COUNT);
+    let patches = count(OFF_PATCH_COUNT);
+    if blocks > MAX_ROOT_BLOCKS {
+        return Err(RootError::ImplausibleBlockCount { declared: blocks });
+    }
+    if patches > MAX_ROOT_PATCHES {
+        return Err(RootError::ImplausiblePatchCount { declared: patches });
+    }
+    let list_bytes = |count: u32| {
+        let count = count as usize;
+        (count / INDEX_COVERS + (count / SEGMENT_REFS) % INDEX_REFS) * SEGMENT_REF_LEN
+            + (count % SEGMENT_REFS) * REF_LEN
+    };
+    let base_len = HEADER_LEN + list_bytes(blocks) + list_bytes(patches);
+    let block_tail = blocks as usize % SEGMENT_REFS;
+    let patch_tail = patches as usize % SEGMENT_REFS;
+    let expected =
+        base_len + 32 + block_tail * descriptor::BLOCK_BYTES + patch_tail * descriptor::PATCH_BYTES;
+    if bytes.len() < expected {
+        return Err(RootError::Truncated {
+            expected,
+            found: bytes.len(),
+        });
+    }
+    if bytes.len() > expected {
+        return Err(RootError::TrailingBytes {
+            extra: bytes.len() - expected,
+        });
+    }
+    let base: [u8; 32] = bytes[base_len..base_len + 32]
+        .try_into()
+        .expect("checked root length");
+    let payload = &bytes[base_len + 32..];
+    let declared = bytes[OFF_DIGEST..OFF_DIGEST + 32]
+        .try_into()
+        .expect("root header");
+    let recomputed = described_root_digest(base, payload);
+    if declared != recomputed {
+        return Err(RootError::DigestMismatch {
+            declared,
+            recomputed,
+        });
+    }
+    let mut original = bytes[..base_len].to_vec();
+    original[4..6].copy_from_slice(&ROOT_FORMAT_V5.to_be_bytes());
+    original[OFF_DIGEST..OFF_DIGEST + 32].copy_from_slice(&base);
+    let RootFrame::V5(membership) = decode_root_frame(&original)? else {
+        unreachable!("V5 framing")
+    };
+    let entries: Vec<_> = membership
+        .tail_blocks
+        .iter()
+        .copied()
+        .map(SegmentEntry::from)
+        .collect();
+    let block_bytes = block_tail * descriptor::BLOCK_BYTES;
+    let mut descriptors =
+        descriptor::decode(SegmentClass::Blocks, &entries, &payload[..block_bytes])?;
+    let entries: Vec<_> = membership
+        .tail_patches
+        .iter()
+        .copied()
+        .map(SegmentEntry::from)
+        .collect();
+    descriptors.append(descriptor::decode(
+        SegmentClass::VertexPatches,
+        &entries,
+        &payload[block_bytes..],
+    )?);
+    Ok(RootFrameV6 {
+        membership,
+        descriptors,
     })
 }
 

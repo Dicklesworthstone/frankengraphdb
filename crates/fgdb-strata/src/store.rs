@@ -294,7 +294,7 @@ impl StoredObjectKind {
     fn stored_limit(self) -> u64 {
         match self {
             Self::Root => crate::root::MAX_ENCODED_ROOT_BYTES as u64,
-            Self::Segment => crate::root_segment::SEGMENT_BYTES as u64,
+            Self::Segment => crate::root_segment::MAX_SEGMENT_BYTES as u64,
             Self::IndexSegment => crate::root_segment::INDEX_BYTES as u64,
             _ => MAX_STORED_OBJECT_BYTES,
         }
@@ -1702,7 +1702,7 @@ impl<V: Vfs> BlockStore<V> {
             cx,
             id,
             StoredObjectKind::Segment,
-            crate::root_segment::SEGMENT_BYTES as u64,
+            crate::root_segment::MAX_SEGMENT_BYTES as u64,
         )
         .await
     }
@@ -2529,30 +2529,8 @@ impl<V: Vfs> BlockStore<V> {
         cx: &CommitCx,
         root: &crate::root::PartitionRoot,
     ) -> Result<PartitionRootVersion, StoreError> {
-        // Encoded from scratch: every full segment and index segment this
-        // root names is sealed. Re-putting one an earlier root already named
-        // is idempotent.
-        let encoded = crate::root::encode_root_v5(
-            root,
-            self.k_oid.expose(),
-            self.namespace,
-            &mut crate::root::SegmentCache::default(),
-        )
-        .map_err(StoreError::MalformedRoot)?;
-        self.inspect_root_blocks(cx, root, |_, _| false).await?;
-        self.inspect_root_patches(cx, root, |_, _| false).await?;
-        self.put_segments(cx, &encoded.new_segments, &encoded.new_index_segments)
-            .await?;
-        self.put_object_with_steps(
-            StoredObjectKind::Root,
-            cx,
-            &encoded.bytes,
-            None,
-            || {},
-            || {},
-        )
-        .await
-        .map(PartitionRootVersion)
+        self.put_root_verified(cx, root, &mut PublishReceipts::new())
+            .await
     }
 
     /// Write a root's new segments, then its new index segments, each under
@@ -2599,6 +2577,11 @@ impl<V: Vfs> BlockStore<V> {
             .map_err(StoreError::MalformedRoot)?;
         if let Some(span) = crate::vertex::span_of_rows(&rows) {
             receipts.patch_spans.insert(id, span);
+            receipts.patch_descriptors.insert(
+                id,
+                crate::root::descriptor::PatchDescriptor::admitted(id, bytes, &rows)
+                    .map_err(StoreError::MalformedRoot)?,
+            );
         }
         Ok(stored)
     }
@@ -2656,10 +2639,10 @@ impl<V: Vfs> BlockStore<V> {
         }
         let stored = self.put_with_crash(cx, bytes, crash_at).await?;
         debug_assert_eq!(stored.0, id, "put derives identity from the same bytes");
-        let entries = self
+        let (entries, descriptor) = self
             .verify_block_payload(cx, bytes, patch_bytes, receipts.spans.len())
             .await?;
-        receipts.admit_block(id, &entries, crate::header_predecessor(bytes))?;
+        receipts.admit_block(id, &entries, crate::header_predecessor(bytes), descriptor)?;
         Ok(stored)
     }
 
@@ -2669,9 +2652,19 @@ impl<V: Vfs> BlockStore<V> {
         bytes: &[u8],
         patch_bytes: Option<&[u8]>,
         at: usize,
-    ) -> Result<Vec<crate::AdjacencyEntry>, StoreError> {
+    ) -> Result<
+        (
+            Vec<crate::AdjacencyEntry>,
+            crate::root::descriptor::BlockDescriptor,
+        ),
+        StoreError,
+    > {
         let (entries, declared_patch) =
             crate::decode_block_with_properties(bytes).map_err(StoreError::Malformed)?;
+        let id = block_id(self.k_oid.expose(), self.namespace, bytes);
+        let mut descriptor =
+            crate::root::descriptor::BlockDescriptor::admitted(id, bytes, &entries, None)
+                .map_err(StoreError::MalformedRoot)?;
         if let Some((patch_id, locators)) = declared_patch {
             // Prove the declared patch from the bytes in hand, or from disk
             // when the caller supplied none — either way the receipt is
@@ -2705,8 +2698,12 @@ impl<V: Vfs> BlockStore<V> {
                 &entries,
                 declared_digest,
             )?;
+            descriptor.properties = Some(
+                crate::root::descriptor::extent(patch_id, proof_bytes)
+                    .map_err(StoreError::MalformedRoot)?,
+            );
         }
-        Ok(entries)
+        Ok((entries, descriptor))
     }
 
     /// [`BlockStore::put_root`], with admission memoised under `receipts`
@@ -2782,20 +2779,14 @@ impl<V: Vfs> BlockStore<V> {
         // The memo's segments and index segments chunk the prefix it just
         // proved this root extends, so only those this root newly fills are
         // sealed and hashed (fgdb-d5vo4, fgdb-5gzaa).
-        let encoded = crate::root::encode_root_v5(
-            root,
-            self.k_oid.expose(),
-            self.namespace,
-            &mut memo.segments,
-        )
-        .map_err(StoreError::MalformedRoot)?;
+        crate::root::validate_root(root).map_err(StoreError::MalformedRoot)?;
         let carried = (memo.blocks.len(), memo.patches.len());
         memo.blocks.extend_from_slice(&root.blocks[carried.0..]);
         memo.patches
             .extend_from_slice(&root.vertex_patches[carried.1..]);
         self.verify_root_suffix(cx, &mut memo, carried, receipts)
             .await?;
-        Ok(self.finish_verified_root(root.graph, root.branch, root.published_at, encoded, memo))
+        self.finish_verified_root(root.graph, root.branch, root.published_at, carried, memo)
     }
 
     /// Verify an append to the exact root these receipts last published or
@@ -2851,7 +2842,7 @@ impl<V: Vfs> BlockStore<V> {
         }
         memo.blocks.extend_from_slice(append.blocks);
         memo.patches.extend_from_slice(append.vertex_patches);
-        let encoded = crate::root::encode_root_v5_append(
+        crate::root::validate_root_suffix(
             crate::root::PartitionRootRef {
                 graph: append.graph,
                 branch: append.branch,
@@ -2861,20 +2852,18 @@ impl<V: Vfs> BlockStore<V> {
                 vertex_patches: &memo.patches,
             },
             carried,
-            self.k_oid.expose(),
-            self.namespace,
-            &mut memo.segments,
         )
         .map_err(StoreError::MalformedRoot)?;
         self.verify_root_suffix(cx, &mut memo, carried, receipts)
             .await?;
-        Ok(Some(self.finish_verified_root(
+        self.finish_verified_root(
             append.graph,
             append.branch,
             append.published_at,
-            encoded,
+            carried,
             memo,
-        )))
+        )
+        .map(Some)
     }
 
     /// Both entry points use identical span, history and chain admission. A
@@ -2887,17 +2876,36 @@ impl<V: Vfs> BlockStore<V> {
         receipts: &mut PublishReceipts,
     ) -> Result<(), StoreError> {
         for (at, reference) in memo.blocks.iter().enumerate().skip(carried.0) {
+            cx.checkpoint().map_err(|_| {
+                StoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "root admission interrupted",
+                ))
+            })?;
             let receipted = receipts.spans.get(&reference.block_id)
-                == Some(&(reference.first_seq, reference.last_seq));
+                == Some(&(reference.first_seq, reference.last_seq))
+                && receipts.block_descriptors.contains_key(&reference.block_id);
             let (family, predecessor) = if receipted {
                 *receipts
                     .chains
                     .get(&reference.block_id)
                     .expect("every span receipt records its chain fields in the same insertion")
             } else {
-                let (entries, _props, predecessor) = self
-                    .resolve_root_block(cx, at, memo.partition, reference)
+                let read = self
+                    .resolve_root_block_observed(cx, at, memo.partition, reference, &mut |_| {
+                        Ok::<(), StoreError>(())
+                    })
                     .await?;
+                let descriptor = crate::root::descriptor::BlockDescriptor::admitted(
+                    reference.block_id,
+                    &read.bytes,
+                    &read.resolved.0,
+                    read.property_patch
+                        .as_ref()
+                        .map(|(id, bytes)| (*id, bytes.as_slice())),
+                )
+                .map_err(StoreError::MalformedRoot)?;
+                let (entries, _props, predecessor) = read.resolved;
                 receipts
                     .validator
                     .observe_block(at, &entries)
@@ -2911,6 +2919,9 @@ impl<V: Vfs> BlockStore<V> {
                 receipts
                     .chains
                     .insert(reference.block_id, (family, predecessor));
+                receipts
+                    .block_descriptors
+                    .insert(reference.block_id, descriptor);
                 (family, predecessor)
             };
             // THE CHAIN LAW (V6) holds on the memoised path too: receipts
@@ -2928,12 +2939,29 @@ impl<V: Vfs> BlockStore<V> {
                 }
                 memo.chain_heads.insert(family, reference.block_id);
             }
+            memo.descriptors.blocks.push(
+                *receipts
+                    .block_descriptors
+                    .get(&reference.block_id)
+                    .expect("successful admission records descriptor"),
+            );
         }
         for (at, reference) in memo.patches.iter().enumerate().skip(carried.1) {
+            cx.checkpoint().map_err(|_| {
+                StoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "root admission interrupted",
+                ))
+            })?;
             if receipts.patch_spans.get(&reference.patch_id)
                 != Some(&(reference.first_seq, reference.last_seq))
+                || !receipts.patch_descriptors.contains_key(&reference.patch_id)
             {
-                let rows = self.resolve_root_patch(cx, at, reference).await?;
+                let (rows, bytes) = self
+                    .resolve_root_patch_observed(cx, at, reference, &mut |_| {
+                        Ok::<(), StoreError>(())
+                    })
+                    .await?;
                 receipts
                     .vertex_validator
                     .observe_patch(at, &rows)
@@ -2943,7 +2971,22 @@ impl<V: Vfs> BlockStore<V> {
                     reference.patch_id,
                     (reference.first_seq, reference.last_seq),
                 );
+                receipts.patch_descriptors.insert(
+                    reference.patch_id,
+                    crate::root::descriptor::PatchDescriptor::admitted(
+                        reference.patch_id,
+                        &bytes,
+                        &rows,
+                    )
+                    .map_err(StoreError::MalformedRoot)?,
+                );
             }
+            memo.descriptors.patches.push(
+                *receipts
+                    .patch_descriptors
+                    .get(&reference.patch_id)
+                    .expect("successful admission records descriptor"),
+            );
         }
         Ok(())
     }
@@ -2953,20 +2996,35 @@ impl<V: Vfs> BlockStore<V> {
         graph: GraphId,
         branch: BranchId,
         published_at: CommitSeq,
-        encoded: crate::root::EncodedRoot,
+        carried: (usize, usize),
         mut memo: RootMemo,
-    ) -> VerifiedRoot {
+    ) -> Result<VerifiedRoot, StoreError> {
+        let encoded = crate::root::encode_root_v6_append(
+            crate::root::PartitionRootRef {
+                graph,
+                branch,
+                partition: memo.partition,
+                published_at,
+                blocks: &memo.blocks,
+                vertex_patches: &memo.patches,
+            },
+            carried,
+            &memo.descriptors,
+            (self.k_oid.expose(), self.namespace),
+            &mut memo.segments,
+        )
+        .map_err(StoreError::MalformedRoot)?;
         let id =
             StoredObjectKind::Root.identity(self.k_oid.expose(), self.namespace, &encoded.bytes);
         let id = PartitionRootVersion(id);
         memo.binding = Some(self.root_binding(id, graph, branch, published_at));
-        VerifiedRoot {
+        Ok(VerifiedRoot {
             id,
             bytes: encoded.bytes,
             segments: encoded.new_segments,
             index_segments: encoded.new_index_segments,
             memo,
-        }
+        })
     }
 
     fn root_identity_domain(&self) -> ObjectId {
@@ -3112,7 +3170,7 @@ impl<V: Vfs> BlockStore<V> {
         cx: &impl StorageReadCx,
         id: PartitionRootVersion,
     ) -> Result<ReopenedPartition, StoreError> {
-        let (root, segments) = self
+        let (root, mut segments) = self
             .get_root_and_segments(cx, id, crate::root::MAX_ROOT_READ_BYTES)
             .await?;
         let mut walk = RootWalk {
@@ -3134,7 +3192,19 @@ impl<V: Vfs> BlockStore<V> {
         let mut sealed_blocks = Vec::with_capacity(read.len());
         let mut chains = Vec::with_capacity(read.len());
         let mut property_patches = std::collections::BTreeSet::new();
+        let mut descriptors = crate::root::descriptor::RootDescriptors::default();
         for (reference, read) in read {
+            descriptors.blocks.push(
+                crate::root::descriptor::BlockDescriptor::admitted(
+                    reference.block_id,
+                    &read.bytes,
+                    &read.resolved.0,
+                    read.property_patch
+                        .as_ref()
+                        .map(|(id, bytes)| (*id, bytes.as_slice())),
+                )
+                .map_err(StoreError::MalformedRoot)?,
+            );
             let property_patch = read.property_patch.map(|(patch_id, bytes)| {
                 property_patches.insert(patch_id);
                 crate::writer::SealedPropertyPatch {
@@ -3170,6 +3240,14 @@ impl<V: Vfs> BlockStore<V> {
         let mut patches = Vec::with_capacity(read.len());
         let mut sealed_patches = Vec::with_capacity(read.len());
         for (reference, (rows, bytes)) in read {
+            descriptors.patches.push(
+                crate::root::descriptor::PatchDescriptor::admitted(
+                    reference.patch_id,
+                    &bytes,
+                    &rows,
+                )
+                .map_err(StoreError::MalformedRoot)?,
+            );
             sealed_patches.push(crate::writer::SealedPatch {
                 patch_id: reference.patch_id,
                 bytes: bytes.into(),
@@ -3177,6 +3255,15 @@ impl<V: Vfs> BlockStore<V> {
                 last_seq: reference.last_seq,
             });
             patches.push(rows);
+        }
+        if segments
+            .descriptors
+            .take()
+            .is_some_and(|published| published != descriptors)
+        {
+            return Err(StoreError::MalformedRoot(
+                crate::root::RootError::InvalidDescriptor,
+            ));
         }
         let admission = RootAdmission {
             partition: root.partition,
@@ -3187,6 +3274,7 @@ impl<V: Vfs> BlockStore<V> {
             property_patches,
             walk,
             segments,
+            descriptors,
         };
         Ok(ReopenedPartition {
             root,
@@ -3363,6 +3451,7 @@ pub struct RootAdmission {
     property_patches: std::collections::BTreeSet<ObjectId>,
     walk: RootWalk,
     segments: crate::root::SegmentCache,
+    descriptors: crate::root::descriptor::RootDescriptors,
 }
 
 impl RootAdmission {
@@ -3464,6 +3553,8 @@ pub struct PublishReceipts {
     >,
     vertex_validator: crate::root::VertexHistoryValidator,
     patch_spans: BTreeMap<ObjectId, (CommitSeq, CommitSeq)>,
+    block_descriptors: BTreeMap<ObjectId, crate::root::descriptor::BlockDescriptor>,
+    patch_descriptors: BTreeMap<ObjectId, crate::root::descriptor::PatchDescriptor>,
     /// Edge-property patches this session made durable (fgdb-8y2jj). A later
     /// block hosting byte-identical property rows names the same patch; like a
     /// block or vertex-patch receipt, it is then a filesystem skip rather than
@@ -3528,6 +3619,7 @@ struct RootMemo {
     /// Valid exactly as long as the memo is: a root that does not extend the
     /// prefix drops both.
     segments: crate::root::SegmentCache,
+    descriptors: crate::root::descriptor::RootDescriptors,
 }
 
 /// Exact publication provenance for the append fast path. The identity tag
@@ -3595,6 +3687,7 @@ impl PublishReceipts {
             property_patches,
             walk,
             segments,
+            descriptors,
         } = admission;
         let RootWalk {
             history,
@@ -3626,6 +3719,16 @@ impl PublishReceipts {
             chains: chain_fields,
             vertex_validator: vertex_history,
             patch_spans,
+            block_descriptors: descriptors
+                .blocks
+                .iter()
+                .map(|d| (d.block.object(), *d))
+                .collect(),
+            patch_descriptors: descriptors
+                .patches
+                .iter()
+                .map(|d| (d.extent.object(), *d))
+                .collect(),
             property_patches,
             root_memo: Some(RootMemo {
                 partition,
@@ -3634,6 +3737,7 @@ impl PublishReceipts {
                 chain_heads,
                 patches,
                 segments,
+                descriptors,
             }),
         }
     }
@@ -3643,12 +3747,14 @@ impl PublishReceipts {
         id: ObjectId,
         entries: &[crate::AdjacencyEntry],
         predecessor: Option<DeltaBlockVersion>,
+        descriptor: crate::root::descriptor::BlockDescriptor,
     ) -> Result<(), StoreError> {
         self.validator
             .observe_block(self.spans.len(), entries)
             .map_err(StoreError::MalformedRoot)?;
         if let Some(span) = crate::root::span_of(entries) {
             self.spans.insert(id, span);
+            self.block_descriptors.insert(id, descriptor);
             self.chains.insert(
                 id,
                 (
@@ -3691,8 +3797,13 @@ enum PendingAdmission {
         ObjectId,
         Vec<crate::AdjacencyEntry>,
         Option<DeltaBlockVersion>,
+        crate::root::descriptor::BlockDescriptor,
     ),
-    Patch(ObjectId, VertexPatchRows),
+    Patch(
+        ObjectId,
+        VertexPatchRows,
+        crate::root::descriptor::PatchDescriptor,
+    ),
     PropertyPatch(ObjectId),
 }
 
@@ -3981,7 +4092,7 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
             } else {
                 None
             };
-            let entries = self
+            let (entries, descriptor) = self
                 .store
                 .verify_block_payload(
                     cx,
@@ -4005,6 +4116,7 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
                 id,
                 entries,
                 crate::header_predecessor(bytes),
+                descriptor,
             ));
         }
         self.failed = false;
@@ -4025,7 +4137,10 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
                 .map_err(StoreError::MalformedPatch)?;
             self.put_object(cx, StoredObjectKind::VertexPatch, id, bytes)
                 .await?;
-            self.pending.push(PendingAdmission::Patch(id, rows));
+            let descriptor = crate::root::descriptor::PatchDescriptor::admitted(id, bytes, &rows)
+                .map_err(StoreError::MalformedRoot)?;
+            self.pending
+                .push(PendingAdmission::Patch(id, rows, descriptor));
         }
         self.failed = false;
         Ok(VertexPatchVersion(id))
@@ -4073,10 +4188,10 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
         }
         for admission in self.pending {
             let result = match admission {
-                PendingAdmission::Block(id, entries, predecessor) => {
-                    self.receipts.admit_block(id, &entries, predecessor)
-                }
-                PendingAdmission::Patch(id, rows) => self
+                PendingAdmission::Block(id, entries, predecessor, descriptor) => self
+                    .receipts
+                    .admit_block(id, &entries, predecessor, descriptor),
+                PendingAdmission::Patch(id, rows, descriptor) => self
                     .receipts
                     .vertex_validator
                     .observe_patch(self.receipts.patch_spans.len(), &rows)
@@ -4084,6 +4199,7 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
                     .map(|()| {
                         if let Some(span) = crate::vertex::span_of_rows(&rows) {
                             self.receipts.patch_spans.insert(id, span);
+                            self.receipts.patch_descriptors.insert(id, descriptor);
                         }
                     }),
                 PendingAdmission::PropertyPatch(id) => {
@@ -4272,7 +4388,7 @@ mod durability_tests {
             for (kind, limit) in [
                 (0, super::MANIFEST_HEADER_AND_RECORDS_CEILING),
                 (1, crate::root::MAX_ENCODED_ROOT_BYTES as u64),
-                (2, crate::root_segment::SEGMENT_BYTES as u64),
+                (2, crate::root_segment::MAX_SEGMENT_BYTES as u64),
                 (3, crate::root_segment::INDEX_BYTES as u64),
             ] {
                 let id = ObjectId([0x60 + kind; 32]);

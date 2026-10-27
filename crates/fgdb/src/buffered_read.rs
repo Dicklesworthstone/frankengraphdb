@@ -82,9 +82,11 @@ impl From<MemoryError> for BufferedOpenError {
 ///
 /// The metadata and graph read allowances belong to the supplied MemoryPool.
 /// Chronicle recovery and its marker-chain metadata remain outside that pool,
-/// as in the ordinary opener. Initial admission verifies every named graph
-/// object, and can refuse when its bounded identity/history metadata does not
-/// fit. The governed query methods execute native ordered vertex and single-edge
+/// as in the ordinary opener. A cold open verifies every named graph object
+/// and can refuse when its bounded identity/history metadata does not fit.
+/// Database::buffered_read_view reuses the live handle's complete admission,
+/// reading only descriptors before queries fault the extents they touch.
+/// The governed query methods execute native ordered vertex and single-edge
 /// GQL profiles through this same cache. Other physical profiles refuse before
 /// reading candidates. This is not an assertion that arbitrarily large
 /// databases can already be opened.
@@ -317,6 +319,34 @@ impl Database<UnixVfs> {
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Capture this healthy handle's exact published generation as an owned
+    /// buffered source. Its opaque publication receipts already prove every
+    /// payload, chain link and history law, so constructing another source
+    /// reads only authenticated metadata. Queries fault and authenticate
+    /// individual extents through the supplied pool. The resulting view owns
+    /// no writer lease and remains fixed across later writes or writer drop.
+    pub async fn buffered_read_view(
+        &self,
+        cx: &QueryCx,
+        pool: MemoryPool,
+        limits: BufferedReadLimits,
+    ) -> Result<BufferedReadView<V>, BufferedOpenError> {
+        self.ensure_readable()
+            .map_err(|_| BufferedOpenError::RecoveryRequired)?;
+        let partition = self
+            .store
+            .open_buffered_root_with_receipts(cx, self.snapshot.root, &self.receipts, pool, limits)
+            .await?;
+        Ok(BufferedReadView {
+            partition,
+            manifest: self.snapshot.manifest,
+            sealed_cache: crate::query::BufferedSealedCache::new(MemoryPool::new(
+                crate::query::SEALED_CACHE_BYTES,
+                0,
+            )?),
+        })
+    }
+
     /// Buffered open through the same injected filesystem as Chronicle and
     /// Strata. The native lab/fault seam, with identical production admission.
     pub async fn open_buffered_read_view_with_vfs(

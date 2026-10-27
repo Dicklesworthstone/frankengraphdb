@@ -683,7 +683,10 @@ mod publication_metadata {
                         .chain(&frame.patch_segments)
                         .map(|reference| reference.segment_id),
                 ),
-                RootFrame::V5(frame) => {
+                RootFrame::V5(frame)
+                | RootFrame::V6(fgdb_strata::root::RootFrameV6 {
+                    membership: frame, ..
+                }) => {
                     for index in frame.block_index.iter().chain(&frame.patch_index) {
                         segments.push(index.segment_id);
                         let bytes = vfs.read(&store.path(index.segment_id)).await.unwrap();

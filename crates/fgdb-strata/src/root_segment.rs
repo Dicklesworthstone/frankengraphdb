@@ -36,6 +36,9 @@ use fgdb_types::{BranchId, CommitSeq, GraphId};
 pub const SEGMENT_MAGIC: [u8; 4] = *b"FGSG";
 /// Format version, versioned from day one (§16.6).
 pub const SEGMENT_FORMAT_V1: u16 = 1;
+/// V2 binds a payload descriptor to every membership reference. Its graph
+/// edges are unchanged; hosted property extents are explicit strong children.
+pub const SEGMENT_FORMAT_V2: u16 = 2;
 /// References per segment. Mirrors `MAX_BLOCK_ENTRIES`, so every interior
 /// Tier-D object has one bounded fanout (ruling (b): K = 256).
 pub const SEGMENT_REFS: usize = 256;
@@ -55,6 +58,9 @@ const HEADER_LEN: usize = OFF_DIGEST + 32;
 const REF_LEN: usize = 32 + 8 + 8;
 /// The exact length of every segment: segments are always full.
 pub const SEGMENT_BYTES: usize = HEADER_LEN + SEGMENT_REFS * REF_LEN;
+/// Largest readable leaf, including V2's block descriptors.
+pub const MAX_SEGMENT_BYTES: usize =
+    SEGMENT_BYTES + 32 + SEGMENT_REFS * crate::root::descriptor::BLOCK_BYTES;
 
 /// `FGSI` — FrankenGraph Strata root Index segment (fgdb-5gzaa).
 pub const INDEX_MAGIC: [u8; 4] = *b"FGSI";
@@ -198,6 +204,7 @@ pub struct RootIndexSegment {
 /// Why a segment could not be encoded, decoded, or bound to its root.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SegmentError {
+    InvalidDescriptor,
     NotASegment,
     NotAnIndexSegment,
     UnsupportedFormat {
@@ -235,6 +242,7 @@ pub enum SegmentError {
 impl core::fmt::Display for SegmentError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::InvalidDescriptor => write!(f, "invalid root-segment payload descriptor"),
             Self::NotASegment => write!(f, "not a strata root segment"),
             Self::NotAnIndexSegment => write!(f, "not a strata root index segment"),
             Self::UnsupportedFormat { format } => {
@@ -395,6 +403,9 @@ fn bytes32_at(bytes: &[u8], at: usize) -> [u8; 32] {
 /// Decode a segment, re-checking its length, class and digest. Returns the
 /// segment and its verified logical digest.
 pub fn decode_segment(bytes: &[u8]) -> Result<(RootSegment, [u8; 32]), SegmentError> {
+    if bytes.get(4..6) == Some(&SEGMENT_FORMAT_V2.to_be_bytes()) {
+        return decode_described_segment(bytes).map(|(segment, digest, _)| (segment, digest));
+    }
     let ((graph, branch, partition), class, declared) = decode_header(
         bytes,
         (SEGMENT_MAGIC, SEGMENT_FORMAT_V1),
@@ -432,6 +443,74 @@ pub fn decode_segment(bytes: &[u8]) -> Result<(RootSegment, [u8; 32]), SegmentEr
         });
     }
     Ok((segment, recomputed))
+}
+
+fn described_digest(base: [u8; 32], descriptors: &[u8]) -> [u8; 32] {
+    let mut hash = fgdb_crypto::Hasher::new();
+    hash.update(b"fgdb.strata.root-segment-logical-digest.v2");
+    hash.update(&base);
+    hash.update(descriptors);
+    hash.finalize().0
+}
+
+pub(crate) fn encode_described_segment(
+    coordinate: (GraphId, BranchId, u64),
+    class: SegmentClass,
+    entries: &[SegmentEntry],
+    descriptors: &[u8],
+) -> Result<(Vec<u8>, [u8; 32]), SegmentError> {
+    crate::root::descriptor::decode(class, entries, descriptors)
+        .map_err(|_| SegmentError::InvalidDescriptor)?;
+    let (mut bytes, base) =
+        encode_segment(coordinate.0, coordinate.1, coordinate.2, class, entries)?;
+    let digest = described_digest(base, descriptors);
+    bytes[4..6].copy_from_slice(&SEGMENT_FORMAT_V2.to_be_bytes());
+    bytes[OFF_DIGEST..OFF_DIGEST + 32].copy_from_slice(&digest);
+    bytes.extend_from_slice(&base);
+    bytes.extend_from_slice(descriptors);
+    Ok((bytes, digest))
+}
+
+pub(crate) fn decode_described_segment(
+    bytes: &[u8],
+) -> Result<
+    (
+        RootSegment,
+        [u8; 32],
+        crate::root::descriptor::RootDescriptors,
+    ),
+    SegmentError,
+> {
+    let class = bytes
+        .get(OFF_CLASS)
+        .copied()
+        .and_then(SegmentClass::from_tag)
+        .ok_or(SegmentError::InvalidDescriptor)?;
+    let expected = SEGMENT_BYTES + 32 + crate::root::descriptor::encoded_len(class, SEGMENT_REFS);
+    let (_, _, declared) = decode_header(
+        bytes,
+        (SEGMENT_MAGIC, SEGMENT_FORMAT_V2),
+        expected,
+        SegmentError::NotASegment,
+    )?;
+    let base: [u8; 32] = bytes[SEGMENT_BYTES..SEGMENT_BYTES + 32]
+        .try_into()
+        .map_err(|_| SegmentError::InvalidDescriptor)?;
+    let payload = &bytes[SEGMENT_BYTES + 32..];
+    let recomputed = described_digest(base, payload);
+    if declared != recomputed {
+        return Err(SegmentError::DigestMismatch {
+            declared,
+            recomputed,
+        });
+    }
+    let mut original = bytes[..SEGMENT_BYTES].to_vec();
+    original[4..6].copy_from_slice(&SEGMENT_FORMAT_V1.to_be_bytes());
+    original[OFF_DIGEST..OFF_DIGEST + 32].copy_from_slice(&base);
+    let (segment, _) = decode_segment(&original)?;
+    let descriptors = crate::root::descriptor::decode(class, &segment.entries, payload)
+        .map_err(|_| SegmentError::InvalidDescriptor)?;
+    Ok((segment, recomputed, descriptors))
 }
 
 /// The content identity of an encoded segment, under its registered kind.

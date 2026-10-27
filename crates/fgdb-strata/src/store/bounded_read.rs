@@ -323,9 +323,16 @@ impl<V: Vfs> BlockStore<V> {
         // A segmented root's index segments and segments share the caller's
         // byte ceiling with the root itself.
         let mut remaining = maximum.saturating_sub(bytes.len() as u64);
-        let (frame, block_index, patch_index) = match crate::root::decode_root_frame(&bytes)
-            .map_err(StoreError::MalformedRoot)?
-        {
+        let decoded = crate::root::decode_root_frame(&bytes).map_err(StoreError::MalformedRoot)?;
+        let (decoded, tails) = match decoded {
+            crate::root::RootFrame::V6(frame) => (
+                crate::root::RootFrame::V5(frame.membership),
+                Some(frame.descriptors),
+            ),
+            frame => (frame, None),
+        };
+        let (frame, block_index, patch_index) = match decoded {
+            crate::root::RootFrame::V6(_) => unreachable!("V6 membership normalized to V5"),
             crate::root::RootFrame::V3(root) => {
                 check("root blocks", root.blocks.len(), max_blocks)?;
                 check(
@@ -415,7 +422,8 @@ impl<V: Vfs> BlockStore<V> {
                 (frame.flatten(blocks, patches), block_index, patch_index)
             }
         };
-        let segments = crate::root::SegmentCache::of_frame(&frame, block_index, patch_index);
+        let mut segments = crate::root::SegmentCache::of_frame(&frame, block_index, patch_index);
+        let mut descriptors = crate::root::descriptor::RootDescriptors::default();
         let coordinate = frame.coordinate();
         let mut lists = [Vec::new(), Vec::new()];
         for ((class, named), list) in [
@@ -432,7 +440,7 @@ impl<V: Vfs> BlockStore<V> {
         .zip(&mut lists)
         {
             for (at, reference) in named.iter().enumerate() {
-                let limit = remaining.min(crate::root_segment::SEGMENT_BYTES as u64);
+                let limit = remaining.min(crate::root_segment::MAX_SEGMENT_BYTES as u64);
                 let segment = self
                     .read_object_bytes(cx, reference.segment_id, limit)
                     .await?;
@@ -451,11 +459,27 @@ impl<V: Vfs> BlockStore<V> {
                         StoreError::MalformedRoot(crate::root::RootError::Segment(error))
                     })?,
                 );
+                if tails.is_some() {
+                    let (_, _, admitted) = crate::root_segment::decode_described_segment(&segment)
+                        .map_err(|error| {
+                            StoreError::MalformedRoot(crate::root::RootError::Segment(error))
+                        })?;
+                    descriptors.append(admitted);
+                }
             }
         }
         let [blocks, patches] = lists;
         let root = crate::root::assemble_root(frame, blocks, patches)
             .map_err(StoreError::MalformedRoot)?;
+        if let Some(tails) = tails {
+            descriptors.append(tails);
+            if !descriptors.matches_suffix(&root.blocks, &root.vertex_patches, (0, 0)) {
+                return Err(StoreError::MalformedRoot(
+                    crate::root::RootError::InvalidDescriptor,
+                ));
+            }
+            segments.attach_descriptors(descriptors);
+        }
         Ok((root, segments))
     }
 

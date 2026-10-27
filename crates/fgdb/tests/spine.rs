@@ -2499,14 +2499,14 @@ fn segmented_root_publication_faults_recover(per_commit: u128, seed: u64, index_
                 "{stage:?}: {} blocks is fewer than the fixture's families",
                 root.blocks.len()
             );
-            // Writers emit V5; the stored frame names exactly the full index
-            // segments the block list has.
+            // Writers emit V6; its membership names exactly the full index
+            // segments the block list has, alongside admitted descriptors.
             let frame = fgdb_strata::root::decode_root_frame(
                 &store.get_root_bytes(cx, root_id).await.expect("root bytes"),
             )
             .expect("decodes");
             let named = match frame {
-                fgdb_strata::root::RootFrame::V5(frame) => Some(frame.block_index.len()),
+                fgdb_strata::root::RootFrame::V6(frame) => Some(frame.membership.block_index.len()),
                 _ => None,
             };
             assert_eq!(named, Some(index_segments), "{stage:?}");
@@ -2953,19 +2953,19 @@ fn every_publish_leaves_a_resolvable_manifest() {
             .await
             .expect("the manifest resolves");
         assert_eq!(resolved.len(), 1, "one partition in the spine");
-        // Roots publish as format V5 (fgdb-5gzaa); a cold re-encode derives
-        // the same identity the warm, segment-cached writer published.
-        let root_bytes = fgdb_strata::root::encode_root_v5(
-            &resolved[0].1,
-            &K_OID,
-            NAMESPACE,
-            &mut fgdb_strata::root::SegmentCache::default(),
-        )
-        .expect("re-encodes")
-        .bytes;
+        // A fresh full admission derives the exact described V6 root that
+        // the warm, segment-cached writer published.
+        let verified = store
+            .verify_root(
+                cx,
+                &resolved[0].1,
+                &mut fgdb_strata::store::PublishReceipts::new(),
+            )
+            .await
+            .expect("fresh admission");
         assert_eq!(
-            fgdb_strata::root::root_id(&K_OID, NAMESPACE, &root_bytes),
-            root_after_writes.0,
+            verified.id(),
+            root_after_writes,
             "the manifest names the root the database published last"
         );
     });

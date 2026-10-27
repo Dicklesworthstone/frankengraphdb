@@ -1,12 +1,15 @@
 //! An admitted immutable partition whose payloads fault through ExtentBuffer.
 //!
-//! Opening proves the ordinary root history laws, retaining only descriptors
-//! afterwards. Vertex admission retains charged lifecycle metadata and birth
+//! Publication proves root history laws before sealing V6 descriptors.
+//! A live opaque receipt for the exact admitted root permits metadata-only
+//! source construction. Every cold open, including V6, still walks payloads
+//! and proves history: a keyed root or raw slot publication is not admission.
+//! Vertex admission retains charged lifecycle metadata and birth
 //! locators; restatements refault their authenticated birth patch for exact
 //! payload comparison. Resident admission therefore depends on version count,
 //! not the sum of vertex property bytes. A metadata-heavy history may still
 //! refuse; this is not an unbounded external history validator. No durable
-//! format changes or permission to reclaim objects follow from this reader.
+//! permission to reclaim objects follows from this reader.
 
 mod admission;
 mod block_directory;
@@ -16,6 +19,7 @@ mod scan_access;
 use super::{BlockStore, RootReadEvent, RootWalk, StoreError};
 use crate::edge_props::{BlockProps, EdgePropertyRow};
 use crate::root::PartitionRoot;
+use crate::root::descriptor::{BlockDescriptor, BlockSummary, PatchDescriptor};
 use crate::tiered::buffer::{
     Admission, BufferError, BufferHandle, BufferLimits, BufferStats, ExtentBuffer, ExtentKey,
     PreparedExtent, extent_checksum,
@@ -206,77 +210,6 @@ impl<T> core::ops::Deref for BufferedValue<T> {
 pub struct BufferedEdge {
     pub entry: AdjacencyEntry,
     pub props: EdgePropertyRow,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct BlockSummary {
-    // Adjacency order is not EId order. These bounds come from every entry,
-    // including retired histories, during the mandatory authenticated open.
-    first_edge: (EId, CommitSeq),
-    last_edge: EId,
-    source: VId,
-    relation: RelationId,
-    first_destination: VId,
-    last_destination: VId,
-}
-
-impl BlockSummary {
-    fn from_entries(entries: &[AdjacencyEntry]) -> Option<Self> {
-        let first = entries.first()?;
-        let last = entries.last()?;
-        Some(Self {
-            first_edge: entries.iter().map(|row| (row.eid, row.created_at)).min()?,
-            last_edge: entries.iter().map(|row| row.eid).max()?,
-            // The ordinary block decoder proves one (source, relation)
-            // descriptor and canonical destination order before this runs.
-            source: first.src,
-            relation: first.relation,
-            first_destination: first.dst,
-            last_destination: last.dst,
-        })
-    }
-
-    fn may_contain_edge(self, eid: EId) -> bool {
-        self.first_edge.0 <= eid && eid <= self.last_edge
-    }
-
-    fn may_contain_adjacency(
-        self,
-        endpoint: VId,
-        relation: Option<RelationId>,
-        incoming: bool,
-    ) -> bool {
-        relation.is_none_or(|relation| self.relation == relation)
-            && if incoming {
-                self.first_destination <= endpoint && endpoint <= self.last_destination
-            } else {
-                self.source == endpoint
-            }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct BlockDescriptor {
-    block: ExtentKey,
-    properties: Option<ExtentKey>,
-    summary: Option<BlockSummary>,
-    rows: usize,
-}
-
-#[derive(Clone, Copy)]
-struct PatchDescriptor {
-    extent: ExtentKey,
-    first: Option<(VId, CommitSeq)>,
-    last: Option<VId>,
-    rows: usize,
-}
-
-impl PatchDescriptor {
-    fn may_contain(self, vid: VId) -> bool {
-        self.first
-            .zip(self.last)
-            .is_some_and(|((first, _), last)| first <= vid && vid <= last)
-    }
 }
 
 /// One canonical identity encountered by a buffered scan. Invisible identities
@@ -492,8 +425,10 @@ impl<V: Vfs + Clone> BlockStore<V> {
         Ok(resolved)
     }
 
-    /// Authenticate all named objects and history before issuing a cold source.
-    /// No successfully validated prefix escapes on cancellation or quota error.
+    /// An arbitrary keyed root ID is not published-source authority. This
+    /// entry point always proves complete payload/history admission, including
+    /// V6 roots. Actual prior admission can be reused with
+    /// open_buffered_root_with_receipts.
     pub async fn open_buffered_root(
         &self,
         cx: &impl BufferedReadCx,
@@ -501,11 +436,44 @@ impl<V: Vfs + Clone> BlockStore<V> {
         pool: MemoryPool,
         limits: BufferedReadLimits,
     ) -> Result<BufferedPartition<V>, BufferedReadError> {
+        self.open_buffered_root_inner(cx, id, pool, limits, None)
+            .await
+    }
+
+    /// Reuse a complete admission already earned by this live publish lineage.
+    /// The opaque receipts bind the exact root, identity key, namespace,
+    /// coordinate, frontier and complete membership. An absent or stale match
+    /// takes the ordinary full payload/history admission path; possessing a
+    /// keyed root or publishing a raw root slot never mints this evidence.
+    ///
+    /// Immutable payloads are still authenticated on each cache miss. V6
+    /// descriptors must agree with the previously admitted bytes. This owner
+    /// API grants no Warden permission and does not create writer receipts.
+    pub async fn open_buffered_root_with_receipts(
+        &self,
+        cx: &impl BufferedReadCx,
+        id: PartitionRootVersion,
+        receipts: &super::PublishReceipts,
+        pool: MemoryPool,
+        limits: BufferedReadLimits,
+    ) -> Result<BufferedPartition<V>, BufferedReadError> {
+        self.open_buffered_root_inner(cx, id, pool, limits, Some(receipts))
+            .await
+    }
+
+    async fn open_buffered_root_inner(
+        &self,
+        cx: &impl BufferedReadCx,
+        id: PartitionRootVersion,
+        pool: MemoryPool,
+        limits: BufferedReadLimits,
+        receipts: Option<&super::PublishReceipts>,
+    ) -> Result<BufferedPartition<V>, BufferedReadError> {
         cx.buffered_checkpoint()
             .map_err(BufferedReadError::Interrupted)?;
         let buffer = ExtentBuffer::new(pool.clone(), limits.buffer)?;
         let metadata = pool.reserve(cx, limits.metadata_bytes()?)?;
-        let (root, segments) = self
+        let (root, mut segments) = self
             .get_root_and_segments_limited(
                 cx,
                 id,
@@ -514,129 +482,180 @@ impl<V: Vfs + Clone> BlockStore<V> {
                 limits.max_vertex_patches,
             )
             .await?;
+        let published = segments.descriptors.take();
         drop(segments);
-        let mut blocks = Vec::with_capacity(root.blocks.len());
-        let mut patches = Vec::with_capacity(root.vertex_patches.len());
-        // Declaration order keeps the charges alive until the validators drop.
-        let mut history_charges = Vec::new();
-        let mut walk = RootWalk::default();
-        let mut vertex_history = admission::VertexAdmission::new(cx, self, &root, pool.clone())?;
-        let mut work = 0;
-        let mut source_bytes = 0usize;
-        let mut observe = |event| {
-            cx.buffered_checkpoint()
-                .map_err(BufferedReadError::Interrupted)?;
-            match event {
-                RootReadEvent::ObjectStart => {
-                    limit(
-                        "buffered source bytes",
-                        source_bytes.saturating_add(1),
-                        limits.max_source_bytes,
-                    )?;
-                    advance(&mut work, 1, limits.max_work)
-                }
-                RootReadEvent::SourceBytes(bytes) => {
-                    source_bytes = source_bytes
-                        .checked_add(bytes)
-                        .ok_or(BufferedReadError::SizeOverflow)?;
-                    limit(
-                        "buffered source bytes",
-                        source_bytes,
-                        limits.max_source_bytes,
-                    )
-                }
-                RootReadEvent::Incidences(rows) | RootReadEvent::VertexVersions(rows) => {
-                    advance(&mut work, rows, limits.max_work)
-                }
-            }
-        };
-        for (at, reference) in root.blocks.iter().enumerate() {
-            let _workspace = pool.reserve(cx, OBJECT_WORKSPACE_BYTES)?;
-            observe(RootReadEvent::ObjectStart)?;
-            // Keep decoding in this future: the ordinary open's optional
-            // blocking-pool decode could outlive a dropped admission future
-            // and thus outlive this affine workspace charge. For the same
-            // reason no hosted patch is prefetched: admission reads it.
-            let bytes = self
-                .get_bytes(cx, crate::DeltaBlockVersion(reference.block_id))
-                .await?;
-            let decoded = crate::decode_block_with_properties(&bytes);
-            let read = self
-                .admit_root_block(
-                    cx,
-                    at,
-                    root.partition,
-                    reference,
-                    Ok(((bytes, decoded), None)),
-                    &mut observe,
-                )
-                .await?;
-            let (entries, _, predecessor) = &read.resolved;
-            history_charges.push(
-                pool.reserve(
-                    cx,
-                    entries
-                        .len()
-                        .checked_add(1)
-                        .and_then(|rows| rows.checked_mul(HISTORY_ENTRY_BYTES))
-                        .ok_or(BufferedReadError::SizeOverflow)?,
-                )?,
+        let identity = self.root_identity_domain();
+        let trusted = receipts
+            .and_then(|receipts| receipts.root_memo.as_ref())
+            .filter(|memo| {
+                memo.partition == root.partition
+                    && memo.blocks == root.blocks
+                    && memo.patches == root.vertex_patches
+                    && memo.binding.as_ref().is_some_and(|binding| {
+                        binding.identity == identity
+                            && binding.root == id
+                            && binding.graph == root.graph
+                            && binding.branch == root.branch
+                            && binding.published_at == root.published_at
+                    })
+            })
+            .map(|memo| &memo.descriptors);
+        if trusted
+            .zip(published.as_ref())
+            .is_some_and(|(admitted, stored)| admitted != stored)
+        {
+            return Err(
+                StoreError::MalformedRoot(crate::root::RootError::InvalidDescriptor).into(),
             );
-            if let Some(first) = entries.first() {
-                let family = (first.src, first.relation);
-                let expected = walk.chain_heads.get(&family).copied();
-                if predecessor.map(|link| link.0) != expected {
-                    return Err(StoreError::MalformedRoot(
-                        crate::root::RootError::BlockChainMismatch {
-                            at,
-                            declared: predecessor.map(|link| link.0),
-                            expected,
-                        },
-                    )
-                    .into());
+        }
+        let certified = trusted.is_some();
+        let untrusted = published;
+        let (mut blocks, mut patches) = trusted.map_or_else(
+            || {
+                (
+                    Vec::with_capacity(root.blocks.len()),
+                    Vec::with_capacity(root.vertex_patches.len()),
+                )
+            },
+            |descriptors| (descriptors.blocks.clone(), descriptors.patches.clone()),
+        );
+        let mut work = 0;
+        if !certified {
+            // Declaration order keeps the charges alive until the validators drop.
+            let mut history_charges = Vec::new();
+            let mut walk = RootWalk::default();
+            let mut vertex_history =
+                admission::VertexAdmission::new(cx, self, &root, pool.clone())?;
+            let mut source_bytes = 0usize;
+            let mut observe = |event| {
+                cx.buffered_checkpoint()
+                    .map_err(BufferedReadError::Interrupted)?;
+                match event {
+                    RootReadEvent::ObjectStart => {
+                        limit(
+                            "buffered source bytes",
+                            source_bytes.saturating_add(1),
+                            limits.max_source_bytes,
+                        )?;
+                        advance(&mut work, 1, limits.max_work)
+                    }
+                    RootReadEvent::SourceBytes(bytes) => {
+                        source_bytes = source_bytes
+                            .checked_add(bytes)
+                            .ok_or(BufferedReadError::SizeOverflow)?;
+                        limit(
+                            "buffered source bytes",
+                            source_bytes,
+                            limits.max_source_bytes,
+                        )
+                    }
+                    RootReadEvent::Incidences(rows) | RootReadEvent::VertexVersions(rows) => {
+                        advance(&mut work, rows, limits.max_work)
+                    }
                 }
-                walk.chain_heads.insert(family, reference.block_id);
+            };
+            for (at, reference) in root.blocks.iter().enumerate() {
+                let _workspace = pool.reserve(cx, OBJECT_WORKSPACE_BYTES)?;
+                observe(RootReadEvent::ObjectStart)?;
+                // Keep decoding in this future: the ordinary open's optional
+                // blocking-pool decode could outlive a dropped admission future
+                // and thus outlive this affine workspace charge. For the same
+                // reason no hosted patch is prefetched: admission reads it.
+                let bytes = self
+                    .get_bytes(cx, crate::DeltaBlockVersion(reference.block_id))
+                    .await?;
+                let decoded = crate::decode_block_with_properties(&bytes);
+                let read = self
+                    .admit_root_block(
+                        cx,
+                        at,
+                        root.partition,
+                        reference,
+                        Ok(((bytes, decoded), None)),
+                        &mut observe,
+                    )
+                    .await?;
+                let (entries, _, predecessor) = &read.resolved;
+                history_charges.push(
+                    pool.reserve(
+                        cx,
+                        entries
+                            .len()
+                            .checked_add(1)
+                            .and_then(|rows| rows.checked_mul(HISTORY_ENTRY_BYTES))
+                            .ok_or(BufferedReadError::SizeOverflow)?,
+                    )?,
+                );
+                if let Some(first) = entries.first() {
+                    let family = (first.src, first.relation);
+                    let expected = walk.chain_heads.get(&family).copied();
+                    if predecessor.map(|link| link.0) != expected {
+                        return Err(StoreError::MalformedRoot(
+                            crate::root::RootError::BlockChainMismatch {
+                                at,
+                                declared: predecessor.map(|link| link.0),
+                                expected,
+                            },
+                        )
+                        .into());
+                    }
+                    walk.chain_heads.insert(family, reference.block_id);
+                }
+                walk.history
+                    .observe_block(at, entries)
+                    .map_err(StoreError::MalformedRoot)?;
+                blocks.push(BlockDescriptor {
+                    block: descriptor(reference.block_id, &read.bytes)?,
+                    properties: read
+                        .property_patch
+                        .as_ref()
+                        .map(|(id, bytes)| descriptor(*id, bytes))
+                        .transpose()?,
+                    summary: BlockSummary::from_entries(entries),
+                    rows: entries.len(),
+                });
             }
-            walk.history
-                .observe_block(at, entries)
-                .map_err(StoreError::MalformedRoot)?;
-            blocks.push(BlockDescriptor {
-                block: descriptor(reference.block_id, &read.bytes)?,
-                properties: read
-                    .property_patch
-                    .as_ref()
-                    .map(|(id, bytes)| descriptor(*id, bytes))
-                    .transpose()?,
-                summary: BlockSummary::from_entries(entries),
-                rows: entries.len(),
-            });
+            for (at, reference) in root.vertex_patches.iter().enumerate() {
+                let _workspace = pool.reserve(cx, OBJECT_WORKSPACE_BYTES)?;
+                let (rows, bytes) = self
+                    .resolve_root_patch_observed(cx, at, reference, &mut observe)
+                    .await?;
+                vertex_history
+                    .observe_patch(cx, at, &rows, &mut observe)
+                    .await?;
+                patches.push(PatchDescriptor {
+                    extent: descriptor(reference.patch_id, &bytes)?,
+                    first: rows.first().map(|row| (row.vid, row.created_at)),
+                    last: rows.last().map(|row| row.vid),
+                    rows: rows.len(),
+                });
+            }
+            drop(vertex_history);
+            drop(walk);
+            drop(history_charges);
+            if untrusted
+                .as_ref()
+                .is_some_and(|claimed| claimed.blocks != blocks || claimed.patches != patches)
+            {
+                return Err(
+                    StoreError::MalformedRoot(crate::root::RootError::InvalidDescriptor).into(),
+                );
+            }
+        } else {
+            for _ in 0..blocks.len().saturating_add(patches.len()) {
+                cx.buffered_checkpoint()
+                    .map_err(BufferedReadError::Interrupted)?;
+                advance(&mut work, 1, limits.max_work)?;
+            }
         }
-        for (at, reference) in root.vertex_patches.iter().enumerate() {
-            let _workspace = pool.reserve(cx, OBJECT_WORKSPACE_BYTES)?;
-            let (rows, bytes) = self
-                .resolve_root_patch_observed(cx, at, reference, &mut observe)
-                .await?;
-            vertex_history
-                .observe_patch(cx, at, &rows, &mut observe)
-                .await?;
-            patches.push(PatchDescriptor {
-                extent: descriptor(reference.patch_id, &bytes)?,
-                first: rows.first().map(|row| (row.vid, row.created_at)),
-                last: rows.last().map(|row| row.vid),
-                rows: rows.len(),
-            });
-        }
-        drop(vertex_history);
-        drop(walk);
-        drop(history_charges);
         let patch_directory =
             patch_directory::PatchDirectory::new(&patches, cx, &pool, &mut || {
                 cx.buffered_checkpoint()
                     .map_err(BufferedReadError::Interrupted)?;
                 advance(&mut work, 1, limits.max_work)
             })?;
-        // The complete root walk has authenticated descriptor topology and
-        // immutable EId endpoints before these fences can exclude payloads.
+        // Publication (V6), or this open's complete legacy walk, authenticated
+        // descriptor topology before these fences may exclude payloads.
         let block_directory =
             block_directory::BlockDirectory::new(&blocks, cx, &pool, &mut || {
                 cx.buffered_checkpoint()

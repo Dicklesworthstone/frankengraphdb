@@ -50,7 +50,9 @@ where
 
 fn limits() -> BufferedReadLimits {
     BufferedReadLimits {
-        max_root_bytes: 4096,
+        // V6 additionally carries authenticated extent descriptors; this
+        // accommodates the fixture's 32 block and 32 patch metadata records.
+        max_root_bytes: 16 * 1024,
         max_source_bytes: 64 * 1024,
         max_blocks: 32,
         max_vertex_patches: 32,
@@ -1519,7 +1521,7 @@ fn propertied_durable_source_can_exceed_the_shared_resident_ceiling() {
         assert!(source_bytes > cap);
         let pool = MemoryPool::new(cap, 0).unwrap();
         let mut bounded = limits();
-        bounded.max_root_bytes = 16 * 1024;
+        bounded.max_root_bytes = 64 * 1024;
         bounded.max_source_bytes = source_bytes;
         bounded.max_blocks = 240;
         // Work is not under test: open also builds the charged descriptor
@@ -1639,6 +1641,140 @@ fn a_keyed_root_cannot_bypass_cross_object_identity_history() {
             // payloads whose reservations have already been refunded.
             drop(error);
         }
+    });
+}
+
+#[test]
+fn recomputed_v6_identity_cannot_turn_false_descriptors_into_admission() {
+    run(|contexts, dir| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let store = BlockStore::open(&commit, &dir, KEY, NS).await.unwrap();
+        let block = store
+            .put(
+                &commit,
+                &encode_block(0, None, &[edge(9, 1, 2, 1, None)]).unwrap(),
+            )
+            .await
+            .unwrap();
+        let patch = store
+            .put_patch(
+                &commit,
+                &encode_patch(&[scan_vertex(1, 1, None, 10), scan_vertex(2, 1, None, 20)]).unwrap(),
+            )
+            .await
+            .unwrap();
+        let root = PartitionRoot {
+            graph: GraphId(1),
+            branch: BranchId(2),
+            partition: 0,
+            published_at: CommitSeq(1),
+            blocks: vec![BlockRef {
+                block_id: block.0,
+                first_seq: CommitSeq(1),
+                last_seq: CommitSeq(1),
+            }],
+            vertex_patches: vec![PatchRef {
+                patch_id: patch.0,
+                first_seq: CommitSeq(1),
+                last_seq: CommitSeq(1),
+            }],
+        };
+        let id = store.put_root(&commit, &root).await.unwrap();
+        let genuine = store.get_root_bytes(&commit, id).await.unwrap();
+        let admission = store.reopen_sealed(&commit, id).await.unwrap().admission;
+        let receipts = fgdb_strata::store::PublishReceipts::for_published_root(admission);
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        drop(
+            store
+                .open_buffered_root(&query, id, pool.clone(), limits())
+                .await
+                .unwrap(),
+        );
+        assert_eq!(pool.used(), 0);
+
+        // Exact V6 wire layout for one block and one patch: V5 membership,
+        // its logical digest, then the fixed-width block and patch tails.
+        const MEMBERSHIP: usize = 94 + 2 * 48;
+        const BLOCK: usize = MEMBERSHIP + 32;
+        const PATCH: usize = BLOCK + 205;
+        assert_eq!(genuine.len(), PATCH + 80);
+        let lies: [(&str, fn(&mut Vec<u8>)); 6] = [
+            ("edge identity fence", |bytes| {
+                bytes[BLOCK + 40..BLOCK + 56].copy_from_slice(&10u128.to_be_bytes());
+                bytes[BLOCK + 64..BLOCK + 80].copy_from_slice(&10u128.to_be_bytes());
+            }),
+            ("edge row count", |bytes| {
+                bytes[BLOCK + 36..BLOCK + 40].copy_from_slice(&2u32.to_be_bytes())
+            }),
+            ("edge checksum", |bytes| bytes[BLOCK + 4] ^= 1),
+            ("vertex identity fence", |bytes| {
+                bytes[PATCH + 40..PATCH + 56].copy_from_slice(&5u128.to_be_bytes());
+                bytes[PATCH + 64..PATCH + 80].copy_from_slice(&5u128.to_be_bytes());
+            }),
+            ("vertex row count", |bytes| {
+                bytes[PATCH + 36..PATCH + 40].copy_from_slice(&3u32.to_be_bytes())
+            }),
+            ("vertex checksum", |bytes| bytes[PATCH + 4] ^= 1),
+        ];
+        for (law, lie) in lies {
+            let mut bytes = genuine.clone();
+            lie(&mut bytes);
+            let mut digest = fgdb_crypto::Hasher::new();
+            digest.update(b"fgdb.strata.root-logical-digest.v6");
+            digest.update(&bytes[MEMBERSHIP..BLOCK]);
+            digest.update(&bytes[BLOCK..]);
+            bytes[62..94].copy_from_slice(&digest.finalize().0);
+            assert!(
+                fgdb_strata::root::decode_root_frame(&bytes).is_ok(),
+                "{law}: this is a well-formed, correctly digested false claim"
+            );
+            let forged = PartitionRootVersion(fgdb_strata::root::root_id(&KEY, NS, &bytes));
+            std::fs::write(store.path(forged.0), bytes).unwrap();
+            for reuse in [false, true] {
+                let error = if reuse {
+                    store
+                        .open_buffered_root_with_receipts(
+                            &query,
+                            forged,
+                            &receipts,
+                            pool.clone(),
+                            limits(),
+                        )
+                        .await
+                        .err()
+                } else {
+                    store
+                        .open_buffered_root(&query, forged, pool.clone(), limits())
+                        .await
+                        .err()
+                }
+                .expect("a key-valid descriptor lie must refuse");
+                assert!(
+                    matches!(&error, BufferedReadError::Store(error)
+                    if matches!(**error, StoreError::MalformedRoot(fgdb_strata::root::RootError::InvalidDescriptor))),
+                    "{law}, reuse={reuse}: {error:?}"
+                );
+                assert_eq!(
+                    pool.used(),
+                    0,
+                    "{law}: failed admission releases all charges"
+                );
+            }
+            assert!(
+                matches!(
+                    store.reopen_sealed(&commit, forged).await,
+                    Err(StoreError::MalformedRoot(
+                        fgdb_strata::root::RootError::InvalidDescriptor
+                    ))
+                ),
+                "{law}: false persisted metadata cannot mint a RootAdmission receipt"
+            );
+        }
+        assert!(
+            store.reopen_sealed(&commit, id).await.is_ok(),
+            "the genuine generation still earns complete admission"
+        );
     });
 }
 
@@ -1856,7 +1992,7 @@ fn vertex_property_history_larger_than_the_resident_cap_opens_and_refaults() {
         );
         let pool = MemoryPool::new(cap, 0).unwrap();
         let mut bounded = limits();
-        bounded.max_root_bytes = 16 * 1024;
+        bounded.max_root_bytes = 32 * 1024;
         bounded.max_source_bytes = source_bytes;
         bounded.max_vertex_patches = COUNT;
         let (directory_bytes, directory_work) = patch_directory_overhead(COUNT);
@@ -1960,7 +2096,7 @@ fn vertex_restatements_bound_residency_and_meter_every_authenticated_birth_refau
         assert!(source_bytes > cap);
         let pool = MemoryPool::new(cap, 0).unwrap();
         let mut bounded = limits();
-        bounded.max_root_bytes = 16 * 1024;
+        bounded.max_root_bytes = 32 * 1024;
         bounded.max_vertex_patches = COUNT;
         bounded.max_source_bytes = source_bytes + (COUNT - 1) * birth_bytes;
         // Each incoming patch and each refault has one object plus two rows.

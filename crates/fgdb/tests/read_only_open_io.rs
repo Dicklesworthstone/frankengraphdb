@@ -243,6 +243,354 @@ fn read_only_opens_beside_a_live_writer_create_write_or_sync_nothing() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+#[test]
+fn live_admission_buffered_open_reads_descriptors_and_faults_only_selected_payloads() {
+    let ((), report) = run_async_under_lab(0x7669_6620, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let vfs = RecordingVfs::new();
+        let path = vfs.memory.database_dir();
+        let mut writer = spokes(&commit, &vfs, 6).await;
+        let root_id = writer.read_session().unwrap().partition_root();
+        let store = fgdb_strata::store::BlockStore::open_existing_for_read_with_vfs(
+            &commit,
+            vfs.clone(),
+            &path,
+            [0xc1; 32],
+            keys().namespace,
+        )
+        .await
+        .unwrap();
+        let membership = store.get_root(&commit, root_id).await.unwrap();
+        let payloads: Vec<_> = membership
+            .blocks
+            .iter()
+            .map(|entry| store.path(entry.block_id))
+            .chain(
+                membership
+                    .vertex_patches
+                    .iter()
+                    .map(|entry| store.path(entry.patch_id)),
+            )
+            .collect();
+        assert_eq!(
+            payloads.len(),
+            11,
+            "five edge blocks and six vertex patches"
+        );
+        let selected_patch = membership
+            .vertex_patches
+            .iter()
+            .find(|entry| entry.first_seq == CommitSeq(6))
+            .unwrap();
+        let selected_block = membership
+            .blocks
+            .iter()
+            .find(|entry| entry.first_seq == CommitSeq(6))
+            .unwrap();
+        vfs.take_object_paths();
+        vfs.take_writes();
+
+        // Zero graph-admission bytes are available. Real VFS reads, not a
+        // logical work counter, must show that open visits only root metadata.
+        let mut limits = buffered_limits();
+        limits.max_source_bytes = 0;
+        let mut view = writer
+            .buffered_read_view(
+                &query,
+                MemoryPool::new(16 * 1024 * 1024, 0).unwrap(),
+                limits,
+            )
+            .await
+            .unwrap();
+        let opened = vfs.take_object_paths();
+        assert!(
+            !opened.is_empty(),
+            "the selected immutable root is read cold"
+        );
+        assert!(
+            opened.iter().all(|path| !payloads.contains(path)),
+            "payload reads at open: {opened:?}"
+        );
+        assert!(vfs.take_writes().is_empty());
+
+        assert!(
+            view.vertex_at(&query, VId(6), CommitSeq(2))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            vfs.take_object_paths().is_empty(),
+            "the admitted sequence fence prunes future rows"
+        );
+        let vertex = view.vertex(&query, VId(6)).await.unwrap().unwrap();
+        assert_eq!(vertex.vid, VId(6));
+        assert_eq!(
+            vertex.props,
+            vec![(PROPERTY, CanonicalScalar::Int(6).into())]
+        );
+        assert_eq!(
+            vfs.take_object_paths(),
+            vec![store.path(selected_patch.patch_id)]
+        );
+        drop(vertex);
+        let edge = view.edge(&query, EId(1006)).await.unwrap().unwrap();
+        assert_eq!((edge.entry.src, edge.entry.dst), (VId(1), VId(6)));
+        assert_eq!(
+            vfs.take_object_paths(),
+            vec![store.path(selected_block.block_id)]
+        );
+        assert!(vfs.take_writes().is_empty());
+
+        // Possession of a keyed root ID, including this genuine current ID,
+        // does not mint published-source authority for the generic API.
+        let error = store
+            .open_buffered_root(
+                &query,
+                root_id,
+                MemoryPool::new(16 * 1024 * 1024, 0).unwrap(),
+                limits,
+            )
+            .await
+            .err()
+            .expect("an arbitrary root must earn full admission");
+        assert!(
+            matches!(
+                error,
+                fgdb::BufferedReadError::Limit {
+                    resource: "buffered source bytes",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+
+        // A raw slot selected by a fresh native opener carries no full
+        // history proof. The cold path retains its existing admission law.
+        let cold = Database::open_buffered_read_view_with_vfs(
+            &commit,
+            vfs.clone(),
+            &path,
+            keys(),
+            MemoryPool::new(16 * 1024 * 1024, 0).unwrap(),
+            limits,
+        )
+        .await
+        .err()
+        .expect("a cold source still proves the complete history");
+        assert!(
+            matches!(
+                cold,
+                fgdb::BufferedOpenError::Read(fgdb::BufferedReadError::Limit {
+                    resource: "buffered source bytes",
+                    ..
+                })
+            ),
+            "{cold:?}"
+        );
+        let admission = store
+            .reopen_sealed(&commit, root_id)
+            .await
+            .unwrap()
+            .admission;
+        let receipts = fgdb_strata::store::PublishReceipts::for_published_root(admission);
+        writer.write(&commit, spoke(7)).await.unwrap();
+        let advanced = writer.partition_root().unwrap();
+        let stale = store
+            .open_buffered_root_with_receipts(
+                &query,
+                advanced,
+                &receipts,
+                MemoryPool::new(16 * 1024 * 1024, 0).unwrap(),
+                limits,
+            )
+            .await
+            .err()
+            .expect("an older complete admission cannot authorize a different root");
+        assert!(
+            matches!(
+                stale,
+                fgdb::BufferedReadError::Limit {
+                    resource: "buffered source bytes",
+                    ..
+                }
+            ),
+            "{stale:?}"
+        );
+        drop(writer);
+        assert_eq!(view.frontier(), CommitSeq(6));
+        assert!(
+            view.vertex(&query, VId(7)).await.unwrap().is_none(),
+            "the owned source keeps its exact generation after writer advance and drop"
+        );
+
+        let pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let mut no_work = limits;
+        no_work.max_work = 0;
+        vfs.take_object_paths();
+        assert!(store.open_buffered_root_with_receipts(
+            &query, root_id, &receipts, pool.clone(), no_work,
+        ).await.is_err(), "reused metadata still obeys source work limits");
+        assert_eq!(
+            pool.used(),
+            0,
+            "a refused source releases every reservation"
+        );
+        assert!(
+            vfs.take_object_paths()
+                .iter()
+                .all(|path| !payloads.contains(path))
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn live_admission_descriptor_open_defers_faults_but_never_serves_corruption() {
+    let ((), report) = run_async_under_lab(0x7669_6621, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let vfs = RecordingVfs::new();
+        let path = vfs.memory.database_dir();
+        let writer = spokes(&commit, &vfs, 6).await;
+        let root_id = writer.read_session().unwrap().partition_root();
+        let store = fgdb_strata::store::BlockStore::open_existing_for_read_with_vfs(
+            &commit,
+            vfs.clone(),
+            &path,
+            [0xc1; 32],
+            keys().namespace,
+        )
+        .await
+        .unwrap();
+        let membership = store.get_root(&commit, root_id).await.unwrap();
+        let damaged = membership
+            .vertex_patches
+            .iter()
+            .find(|entry| entry.first_seq == CommitSeq(6))
+            .unwrap();
+        let damaged_path = store.path(damaged.patch_id);
+        let original = vfs.memory.read(&damaged_path).await.unwrap();
+        let mut corrupted = original.clone();
+        let last = corrupted.last_mut().unwrap();
+        *last ^= 0x40;
+        vfs.memory.write(&damaged_path, &corrupted).await.unwrap();
+        vfs.take_writes();
+        vfs.take_object_paths();
+
+        let mut limits = buffered_limits();
+        limits.max_source_bytes = 0;
+        let mut view = writer
+            .buffered_read_view(
+                &query,
+                MemoryPool::new(16 * 1024 * 1024, 0).unwrap(),
+                limits,
+            )
+            .await
+            .unwrap();
+        assert!(!vfs.take_object_paths().contains(&damaged_path));
+        assert_eq!(
+            view.vertex(&query, VId(1)).await.unwrap().unwrap().vid,
+            VId(1)
+        );
+        assert!(
+            matches!(
+                view.vertex(&query, VId(6)).await,
+                Err(fgdb::BufferedReadError::Buffer(
+                    fgdb_strata::tiered::buffer::BufferError::ChecksumMismatch
+                ))
+            ),
+            "the first fault must authenticate payload bytes"
+        );
+        assert!(
+            vfs.take_writes().is_empty(),
+            "read faults never repair storage"
+        );
+        assert!(
+            store.reopen_sealed(&commit, root_id).await.is_err(),
+            "full recovery admission still visits and rejects the damaged extent"
+        );
+        assert!(
+            Database::open_buffered_read_view_with_vfs(
+                &commit,
+                vfs.clone(),
+                &path,
+                keys(),
+                MemoryPool::new(16 * 1024 * 1024, 0).unwrap(),
+                buffered_limits(),
+            )
+            .await
+            .is_err(),
+            "fresh native opens keep complete history/payload admission"
+        );
+
+        vfs.memory.write(&damaged_path, &original).await.unwrap();
+        assert!(
+            store.reopen_sealed(&commit, root_id).await.is_ok(),
+            "restoring the exact immutable bytes restores complete admission"
+        );
+        drop(writer);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn a_recovery_fenced_writer_cannot_lend_an_old_admission_as_current() {
+    let ((), report) = run_async_under_lab(0x7669_6622, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let vfs = RecordingVfs::new();
+        let mut writer = spokes(&commit, &vfs, 1).await;
+        let mut limits = buffered_limits();
+        limits.max_source_bytes = 0;
+        let mut pinned = writer
+            .buffered_read_view(
+                &query,
+                MemoryPool::new(16 * 1024 * 1024, 0).unwrap(),
+                limits,
+            )
+            .await
+            .unwrap();
+        let error = writer
+            .write_with_publication_failure(
+                &commit,
+                spoke(2),
+                DerivedPublicationStage::FoldCommittedTemplate,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, WriteError::CommittedNeedsRecovery { .. }));
+        vfs.take_object_paths();
+        vfs.take_writes();
+        assert!(matches!(
+            writer
+                .buffered_read_view(
+                    &query,
+                    MemoryPool::new(16 * 1024 * 1024, 0).unwrap(),
+                    limits
+                )
+                .await,
+            Err(fgdb::BufferedOpenError::RecoveryRequired)
+        ));
+        assert!(
+            vfs.take_object_paths().is_empty(),
+            "the health fence precedes I/O"
+        );
+        assert!(vfs.take_writes().is_empty());
+        assert_eq!(pinned.frontier(), CommitSeq(1));
+        assert_eq!(
+            pinned.vertex(&query, VId(1)).await.unwrap().unwrap().vid,
+            VId(1)
+        );
+        assert!(pinned.vertex(&query, VId(2)).await.unwrap().is_none());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// A crash left the last commit durable with its root unpublished, and no
 /// writer is live, so the read-only open heals through a full open. It reads
 /// the partition once: the published root it selected is not decoded too.
