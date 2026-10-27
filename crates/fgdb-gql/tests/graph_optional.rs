@@ -485,7 +485,7 @@ fn maximum_optional_chain_keeps_all_65_columns_without_sentinel_or_slot_aliasing
     assert_eq!(execute(&pattern, &[VId(0)], &[]), vec![absent]);
     assert!(matches!(
         root.prepare_values_with_clauses(
-            &[GraphMatchClause::optional(&inners[0]); 65],
+            &vec![GraphMatchClause::optional(&inners[0]); 65],
             &columns,
             0,
             None

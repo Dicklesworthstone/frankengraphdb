@@ -519,9 +519,9 @@ fn malformed_or_out_of_scope_definitions_refuse_before_catalog_access() {
         "MATCH (a) WHERE EXISTS { MATCH (b)-[:R]->(c) } RETURN c",
         "MATCH (a) WHERE NOT EXISTS { MATCH (a) RETURN a } RETURN a",
         "MATCH (a) WHERE EXISTS { MATCH (a) RETURN a",
-        "MATCH (a) WHERE EXISTS { MATCH (a) WHERE EXISTS { MATCH (a) } } RETURN a",
+        "MATCH (a) WHERE EXISTS { MATCH (a) WHERE EXISTS { MATCH (local) } AND local.n > 0 } RETURN a",
         "MATCH (a) WHERE EXISTS { MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) } RETURN a",
-        "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b) } RETURN a",
+        "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (local) } RETURN local",
         "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE b.n > 0 OR RETURN a",
         "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE b.n > 0 OR OR b.n < 0 RETURN a",
         "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE missing.n > 0 RETURN a",
@@ -903,5 +903,531 @@ fn scoped_relationship_type_tests_narrow_their_edge() {
             PreparedGraphText::prepare(refused, symbols).is_err(),
             "{refused}"
         );
+    }
+}
+
+#[test]
+fn nested_existence_matches_finite_assignment_oracle_without_multiplying_bags() {
+    let vertices = [VId(0), VId(1), VId(2), VId(0)];
+    let universe = [
+        (VId(0), R, VId(1)),
+        (VId(1), R, VId(2)),
+        (VId(2), R, VId(2)),
+        (VId(0), S, VId(2)),
+        (VId(1), S, VId(0)),
+        (VId(2), S, VId(1)),
+    ];
+    for direction in 0..3 {
+        for outer_anti in [false, true] {
+            for inner_anti in [false, true] {
+                let text = format!(
+                    "MATCH (a) WHERE {}EXISTS {{ MATCH {} WHERE {}EXISTS {{ MATCH {} }} }} RETURN ALL a",
+                    if outer_anti { "NOT " } else { "" },
+                    path("a", "R", "x", direction),
+                    if inner_anti { "NOT " } else { "" },
+                    path("x", "S", "y", direction),
+                );
+                let prepared = query(&text);
+                for mask in 0..1_u32 << universe.len() {
+                    let mut edges: Vec<_> = universe
+                        .iter()
+                        .enumerate()
+                        .filter(|(at, _)| mask & (1 << at) != 0)
+                        .map(|(_, edge)| *edge)
+                        .collect();
+                    // Parallel occurrences cannot multiply either existential.
+                    if let Some(edge) = edges.first().copied() {
+                        edges.push(edge);
+                    }
+                    let mut expected: Vec<_> = vertices
+                        .iter()
+                        .copied()
+                        .filter(|&a| {
+                            orient(&edges, R, a, direction)
+                                .into_iter()
+                                .any(|x| !orient(&edges, S, x, direction).is_empty() != inner_anti)
+                                != outer_anti
+                        })
+                        .map(|a| vec![Some(a)])
+                        .collect();
+                    expected.sort();
+                    let result = prepared
+                        .plan()
+                        .execute_governed_with_properties(
+                            (vertices.len() + edges.len()) as u64,
+                            vertices,
+                            edges.iter().copied(),
+                            |_, _| Ok::<_, ()>(true),
+                            |_, _| Ok(None),
+                            wide(),
+                            || Ok::<_, ()>(()),
+                        )
+                        .unwrap();
+                    assert_eq!(ids(&result.value), expected, "{text}; mask={mask}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn nested_existence_carries_ancestors_but_keeps_local_names_and_nulls_private() {
+    use fgdb_types::EId;
+    let run = |text: &str| {
+        let result = query(text)
+            .plan()
+            .execute_governed_with_identified_properties(
+                7,
+                [VId(0), VId(1), VId(2), VId(3)],
+                [
+                    (EId(1), VId(0), R, VId(1)),
+                    (EId(2), VId(0), R, VId(2)),
+                    (EId(3), VId(1), S, VId(3)),
+                ],
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        ids(&result.value)
+    };
+    // a is absent from both intermediate MATCH patterns. The deepest scope
+    // must receive the original a, rather than scan an unrelated replacement.
+    assert_eq!(
+        run(
+            "MATCH (a) WHERE EXISTS { MATCH (x) WHERE EXISTS { MATCH (y) \
+             WHERE EXISTS { MATCH (a)-[:R]->(x)-[:S]->(y) } } } RETURN a"
+        ),
+        vec![vec![Some(VId(0))]],
+    );
+    // Different MATCH scopes may witness with the same edge. Flattening this
+    // into one DIFFERENT EDGES pattern would incorrectly require parallel IDs.
+    assert_eq!(
+        run("MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->(b) \
+             WHERE EXISTS { MATCH (a)-[:R]->(b) } } RETURN a"),
+        vec![vec![Some(VId(0))]],
+    );
+    // A rejected positive OPTIONAL witness is not a match. With no surviving
+    // witness its local is extended with NULL exactly once.
+    assert_eq!(
+        run("MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) \
+             WHERE NOT EXISTS { MATCH (b)-[:S]->(c) WHERE EXISTS { MATCH (c) } } \
+             RETURN ALL a,b"),
+        vec![
+            vec![Some(VId(0)), Some(VId(2))],
+            vec![Some(VId(1)), None],
+            vec![Some(VId(2)), None],
+            vec![Some(VId(3)), None],
+        ],
+    );
+    // The outer b is nullable. Passing it through an independent scope must
+    // not turn it into a positive scan, even for a zero-hop nested pattern.
+    assert_eq!(
+        run("MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) \
+             MATCH (z) WHERE EXISTS { MATCH (x) \
+             WHERE NOT EXISTS { MATCH (b)-[:R*0..0]->(x) } } RETURN a,b,z"),
+        (0..4)
+            .flat_map(|a| {
+                let bs = if a == 0 {
+                    vec![Some(VId(1)), Some(VId(2))]
+                } else {
+                    vec![None]
+                };
+                bs.into_iter()
+                    .flat_map(move |b| (0..4).map(move |z| vec![Some(VId(a)), b, Some(VId(z))]))
+            })
+            .collect::<Vec<_>>(),
+    );
+    // A nested local can be reused by a later independent clause, but never
+    // exported implicitly by EXISTS.
+    assert_eq!(
+        run("MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->(x) \
+             WHERE EXISTS { MATCH (x)-[:S]->(local) } } MATCH (local) RETURN a,local"),
+        (0..4)
+            .map(|id| vec![Some(VId(0)), Some(VId(id))])
+            .collect::<Vec<_>>(),
+    );
+    for text in [
+        "MATCH (a) WHERE EXISTS { MATCH (x) WHERE EXISTS { MATCH (local) } } RETURN local",
+        "MATCH (a) WHERE EXISTS { MATCH (x) WHERE EXISTS { MATCH (local) } AND local.n=1 } RETURN a",
+    ] {
+        assert!(PreparedGraphText::prepare(text, symbols).is_err(), "{text}");
+    }
+}
+
+#[test]
+fn nested_existence_rebinds_parameters_and_has_distinct_bounded_template_identity() {
+    use std::cell::Cell;
+    let text = "MATCH (a) WHERE EXISTS { MATCH (x) WHERE EXISTS { MATCH (a)-[:R]->(x) \
+        WHERE x.n > $floor } } RETURN a";
+    let calls = Cell::new(0);
+    let template = PreparedGraphText::prepare(text, |kind, name: &str| {
+        calls.set(calls.get() + 1);
+        symbols(kind, name)
+    })
+    .unwrap();
+    let before = calls.get();
+    let bind = |floor| {
+        template
+            .bind_parameters(&GqlParameters::new().with_int64("floor", floor).unwrap())
+            .unwrap()
+    };
+    let first = bind(1);
+    assert_ne!(first.canonical_bytes(), bind(2).canonical_bytes());
+    assert_eq!(first.canonical_bytes(), bind(1).canonical_bytes());
+    assert_eq!(calls.get(), before);
+    assert!(template.bind_parameters(&GqlParameters::new()).is_err());
+    let matches = |vid: VId, predicates: &[VertexPredicate]| {
+        Ok::<_, ()>(predicates.iter().all(|predicate| {
+            predicate.matches(
+                &[],
+                &[(
+                    P,
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(vid.0 as i64)),
+                )],
+            )
+        }))
+    };
+    for (floor, wanted) in [(1, vec![vec![Some(VId(0))]]), (2, vec![])] {
+        let bound = bind(floor);
+        let rows = bound
+            .plan()
+            .execute_governed_with_properties(
+                3,
+                [VId(0), VId(2)],
+                [(VId(0), R, VId(2))],
+                matches,
+                |_, _| Ok(None),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        assert_eq!(ids(&rows.value), wanted);
+        let aggregate = PreparedGraphAggregateText::prepare(
+            &text.replace("RETURN a", "RETURN count(*) AS c"),
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new().with_int64("floor", floor).unwrap())
+        .unwrap();
+        let rows = aggregate
+            .execute_governed(
+                3,
+                [VId(0), VId(2)],
+                [(VId(0), R, VId(2))],
+                matches,
+                |_, _| Ok(None),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        assert_eq!(rows.value.len(), 1);
+        assert_eq!(
+            rows.value[0].get(0).unwrap().as_count(),
+            Some(wanted.len() as u64)
+        );
+    }
+    let negative = text.replacen(
+        "WHERE EXISTS { MATCH (a)",
+        "WHERE NOT EXISTS { MATCH (a)",
+        1,
+    );
+    assert_ne!(
+        template.template_bytes(),
+        PreparedGraphText::prepare(&negative, symbols)
+            .unwrap()
+            .template_bytes(),
+    );
+    let nested = |count: usize| {
+        format!(
+            "MATCH (a) WHERE {}MATCH (a){} RETURN a",
+            "EXISTS { MATCH (a) WHERE ".repeat(count.saturating_sub(1)) + "EXISTS { ",
+            " }".repeat(count)
+        )
+    };
+    assert!(PreparedGraphText::prepare(&nested(64), symbols).is_ok());
+    let mut refused_calls = 0;
+    let error = PreparedGraphText::prepare(&nested(65), |kind, name: &str| {
+        refused_calls += 1;
+        symbols(kind, name)
+    })
+    .unwrap_err();
+    assert!(matches!(
+        error.kind,
+        GraphPatternTextErrorKind::Build(PatternBuildError::LimitExceeded { .. })
+    ));
+    assert_eq!(
+        refused_calls, 0,
+        "depth is refused before catalog observation"
+    );
+}
+
+#[test]
+fn nested_existence_preserves_short_circuit_limits_and_every_interruption_boundary() {
+    let pattern = query(
+        "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->(b) \
+        WHERE EXISTS { MATCH (b)-[:S]->(c) WHERE c.n + 1 >= 0 } } RETURN a",
+    );
+    let scalar = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(1));
+    let vertices = [VId(0)];
+    let edges = [
+        (VId(0), R, VId(1)),
+        (VId(0), R, VId(2)),
+        (VId(1), S, VId(3)),
+        (VId(2), S, VId(4)),
+    ];
+    let mut checkpoints = 0;
+    let full = pattern
+        .plan()
+        .execute_governed_with_properties(
+            5,
+            vertices,
+            edges,
+            |_, _| Ok::<_, &str>(true),
+            |vid, _| {
+                if vid == VId(4) {
+                    Err("unrequested witness")
+                } else {
+                    Ok(Some(&scalar))
+                }
+            },
+            wide(),
+            || {
+                checkpoints += 1;
+                Ok::<_, usize>(())
+            },
+        )
+        .unwrap();
+    assert_eq!(ids(&full.value), vec![vec![Some(VId(0))]]);
+    for stop in 1..=checkpoints {
+        let mut seen = 0;
+        let result = pattern.plan().execute_governed_with_properties(
+            5,
+            vertices,
+            edges,
+            |_, _| Ok::<_, &str>(true),
+            |_, _| Ok(Some(&scalar)),
+            wide(),
+            || {
+                seen += 1;
+                if seen == stop { Err(stop) } else { Ok(()) }
+            },
+        );
+        assert!(matches!(result, Err(GqlQueryError::Interrupted(at)) if at == stop));
+        assert_eq!(seen, stop);
+    }
+    let run = |policy| {
+        pattern.plan().execute_governed_with_properties(
+            5,
+            vertices,
+            edges,
+            |_, _| Ok::<_, &str>(true),
+            |_, _| Ok(Some(&scalar)),
+            policy,
+            || Ok::<_, usize>(()),
+        )
+    };
+    assert_eq!(
+        run(GqlQueryPolicy::new(
+            5,
+            1,
+            full.evaluator.work_units,
+            full.evaluator.scratch_entries
+        ))
+        .unwrap(),
+        full
+    );
+    for policy in [
+        GqlQueryPolicy::new(4, 1, u64::MAX, u64::MAX),
+        GqlQueryPolicy::new(5, 0, u64::MAX, u64::MAX),
+        GqlQueryPolicy::new(5, 1, full.evaluator.work_units - 1, u64::MAX),
+        GqlQueryPolicy::new(5, 1, u64::MAX, full.evaluator.scratch_entries - 1),
+    ] {
+        assert!(run(policy).is_err());
+    }
+    let error = pattern
+        .plan()
+        .execute_governed_with_properties(
+            5,
+            vertices,
+            edges,
+            |_, _| Ok::<_, &str>(true),
+            |_, _| Err("requested nested property"),
+            wide(),
+            || Ok::<_, usize>(()),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        GqlQueryError::Source("requested nested property")
+    ));
+}
+
+#[test]
+fn nested_existence_keeps_sibling_collection_group_slots_and_occurrences() {
+    use fgdb_gql::{PreparedGraphSetText, algebra::GraphValue};
+    let query = PreparedGraphSetText::prepare(
+        "MATCH (a) RETURN a, \
+         [(a)-[:R]->(b) WHERE EXISTS { MATCH (b)-[:S]->() } | b] AS connected, \
+         [(a)-[:R]->(b) | b] AS all_neighbors",
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    let result = query
+        .execute_governed_with_elements(
+            wide(),
+            |pattern, remaining| {
+                pattern.plan().execute_governed_with_properties(
+                    8,
+                    [VId(0), VId(1), VId(2), VId(3)],
+                    [
+                        (VId(0), R, VId(1)),
+                        (VId(0), R, VId(1)),
+                        (VId(0), R, VId(2)),
+                        (VId(1), S, VId(3)),
+                    ],
+                    |_, _| Ok::<_, ()>(true),
+                    |_, _| Ok(None),
+                    remaining,
+                    || Ok::<_, ()>(()),
+                )
+            },
+            |_, _, _| panic!("fixture has no procedure source"),
+            |_, _| panic!("identity collections read no properties"),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    let list = |ids: &[u128]| {
+        GraphValue::List(ids.iter().map(|&id| GraphValue::Vertex(VId(id))).collect())
+    };
+    let mut expected = vec![GraphValueRow::from_owned_values(vec![
+        GraphValue::Vertex(VId(0)),
+        list(&[1, 1]),
+        list(&[1, 1, 2]),
+    ])];
+    expected.extend((1..=3).map(|id| {
+        GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(id)), list(&[]), list(&[])])
+    }));
+    assert_eq!(result.value, expected);
+}
+
+#[test]
+fn nested_existence_keeps_anonymous_nodes_distinct_across_ancestor_frames() {
+    let run = |text: &str| {
+        let result = query(text)
+            .plan()
+            .execute_governed_with_properties(
+                9,
+                [VId(0), VId(1), VId(2)],
+                [(VId(0), R, VId(1)), (VId(0), S, VId(2))],
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        ids(&result.value)
+    };
+    for text in [
+        "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->() \
+         WHERE EXISTS { MATCH (a)-[:S]->() } } RETURN a",
+        "MATCH (a)-[:R]->() WHERE EXISTS { MATCH (a)-[:S]->() } RETURN a",
+        "MATCH (a)-[:R]->() WHERE EXISTS { MATCH (a)-[:S]->() \
+         WHERE EXISTS { MATCH (a)-[:R]->() } } RETURN a",
+        "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->() } \
+         AND EXISTS { MATCH (a)-[:S]->() } RETURN a",
+    ] {
+        assert_eq!(run(text), vec![vec![Some(VId(0))]], "{text}");
+    }
+    assert!(
+        run("MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->() \
+             WHERE NOT EXISTS { MATCH (a)-[:S]->() } } RETURN a")
+        .is_empty(),
+    );
+    assert_eq!(
+        run("MATCH ()-[:R]->(b) WHERE EXISTS { MATCH ()-[:S]->() } RETURN b"),
+        vec![vec![Some(VId(1))]],
+    );
+    let full = std::iter::repeat_n("()", fgdb_gql::algebra::MAX_PATTERN_VERTICES)
+        .collect::<Vec<_>>()
+        .join(",");
+    let error = PreparedGraphAggregateText::prepare(
+        &format!("MATCH {full} WHERE EXISTS {{ MATCH () }} RETURN count(*) AS c"),
+        symbols,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error.kind,
+        GraphPatternTextErrorKind::Build(PatternBuildError::LimitExceeded {
+            dimension: fgdb_gql::algebra::PatternLimitDimension::Vertices,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn nested_existence_audits_imported_and_element_names_at_every_depth() {
+    use fgdb_gql::{GraphSetTextErrorKind, PreparedGraphSetText};
+
+    for (text, expected) in [
+        (
+            "MATCH (a) WITH a MATCH (z) WHERE EXISTS { MATCH (x) \
+             WHERE EXISTS { MATCH (a)-[:R]->(x) } } RETURN a,z",
+            GraphSetTextErrorKind::Expected("imported vertices in the root MATCH"),
+        ),
+        (
+            "MATCH (a) RETURN [v IN [a] | COUNT { MATCH (x) \
+             WHERE EXISTS { MATCH (v)-[:R]->(x) } }] AS n",
+            GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::Expected(
+                "a pattern count that reads no enclosing comprehension local",
+            )),
+        ),
+        (
+            "MATCH (a) RETURN [v IN [a] | [(x)-[:S]->(y) \
+             WHERE EXISTS { MATCH (v)-[:R]->(x) } | x]] AS n",
+            GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::Expected(
+                "a pattern comprehension that reads no enclosing comprehension local",
+            )),
+        ),
+        (
+            "MATCH (a) RETURN any(v IN [a] WHERE EXISTS { MATCH (x) \
+             WHERE EXISTS { MATCH (v)-[:R]->(x) } }) AS n",
+            GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::Expected(
+                "a pattern count that reads no enclosing comprehension local",
+            )),
+        ),
+        (
+            "MATCH (a), (z) WITH z WHERE EXISTS { MATCH (x) \
+             WHERE EXISTS { MATCH (a)-[:R]->(x) } } RETURN z",
+            GraphSetTextErrorKind::Expected(
+                "an existence predicate over bindings its WITH carries under their own names",
+            ),
+        ),
+    ] {
+        let error = match PreparedGraphSetText::prepare(text, symbols) {
+            Ok(_) => panic!("silently rebound an out-of-scope name: {text}"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind, expected, "{text}");
+    }
+    // The supported forms keep the imported vertex in the root MATCH, or
+    // use an actual graph ancestor rather than a per-element local.
+    for text in [
+        "MATCH (a) WITH a MATCH (a), (z) WHERE EXISTS { MATCH (x) \
+         WHERE EXISTS { MATCH (a)-[:R]->(x) } } RETURN a,z",
+        "MATCH (a) RETURN [v IN [a] | COUNT { MATCH (x) \
+         WHERE EXISTS { MATCH (a)-[:R]->(x) } }] AS n",
+        "MATCH (a) RETURN [v IN [a] | [(x)-[:S]->(y) \
+         WHERE EXISTS { MATCH (a)-[:R]->(x) } | x]] AS n",
+        "MATCH (a) WITH a WHERE EXISTS { MATCH (x) \
+         WHERE EXISTS { MATCH (a)-[:R]->(x) } } RETURN a",
+    ] {
+        PreparedGraphSetText::prepare(text, symbols)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
     }
 }

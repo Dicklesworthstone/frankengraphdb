@@ -189,7 +189,12 @@ fn independent_edge_scopes_match_exhaustive_occurrence_oracles() {
                 };
                 for (offset, count) in [(0, None), (0, Some(0)), (1, Some(3))] {
                     let plan = root
-                        .prepare_values_with_clauses(&[clause], &columns, offset, count)
+                        .prepare_values_with_clauses(
+                            std::slice::from_ref(&clause),
+                            &columns,
+                            offset,
+                            count,
+                        )
                         .unwrap()
                         .with_duplicates();
                     for mut code in 0..81 {
@@ -474,8 +479,8 @@ fn independent_scopes_keep_names_local_and_preserve_empty_aggregate_semantics() 
     for text in [
         "MATCH (a) WHERE EXISTS { MATCH (z) } RETURN z",
         "MATCH (a) WHERE EXISTS { MATCH (z) } AND EXISTS { MATCH (x) WHERE x.p=z.p } RETURN a",
-        "MATCH (a) WHERE EXISTS { MATCH (z) WHERE EXISTS { MATCH (x) } } RETURN a",
-        "MATCH (a) OPTIONAL MATCH (f) WHERE EXISTS { MATCH (x) } RETURN a",
+        "MATCH (a) WHERE EXISTS { MATCH (z) WHERE EXISTS { MATCH (x) } AND x.p=1 } RETURN a",
+        "MATCH (a) OPTIONAL MATCH (f) WHERE EXISTS { MATCH (x) } RETURN x",
     ] {
         let mut calls = 0;
         assert!(
@@ -542,7 +547,7 @@ fn independent_frames_keep_all_columns_and_full_width_identities() {
     );
     assert!(
         root.prepare_values_with_clauses(
-            &[GraphMatchClause::optional(&children[0]); 65],
+            &vec![GraphMatchClause::optional(&children[0]); 65],
             &[GraphColumn::vertex("a", "a")],
             0,
             None

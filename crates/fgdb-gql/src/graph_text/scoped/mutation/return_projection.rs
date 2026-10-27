@@ -3477,14 +3477,9 @@ impl<'a> Parser<'a> {
         }
         // A list comprehension, quantifier or reduce local varies within the
         // row, and the count is gathered once per row (pattern_comprehension).
-        let body = &self.syntax.scopes[scope].body;
-        if let Some(local) = (body.variables.iter())
-            .chain(&body.captures)
-            .chain(body.edges.iter().filter_map(|edge| edge.variable.as_ref()))
-            .find(|name| {
-                (self.elements.iter()).any(|element| !element.is_empty() && *element == name.text)
-            })
-        {
+        if let Some(local) = self.syntax.scopes[scope].find_name(&|name| {
+            (self.elements.iter()).any(|element| !element.is_empty() && *element == name.text)
+        }) {
             return Err(GraphSetTextError {
                 offset: local.at,
                 kind: GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::Expected(
@@ -3591,14 +3586,9 @@ impl<'a> Parser<'a> {
         // comprehension, quantifier or reduce local varies within the row:
         // `[x IN nodes(p) | size([(x)-->() | 1])]` would read the row's x
         // for every element. Refuse it typed (TCK Pattern2 [7]).
-        let body = &self.syntax.scopes[scope].body;
-        if let Some(local) = (body.variables.iter())
-            .chain(&body.captures)
-            .chain(body.edges.iter().filter_map(|edge| edge.variable.as_ref()))
-            .find(|name| {
-                (self.elements.iter()).any(|element| !element.is_empty() && *element == name.text)
-            })
-        {
+        if let Some(local) = self.syntax.scopes[scope].find_name(&|name| {
+            (self.elements.iter()).any(|element| !element.is_empty() && *element == name.text)
+        }) {
             return Err(GraphSetTextError {
                 offset: local.at,
                 kind: GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::Expected(

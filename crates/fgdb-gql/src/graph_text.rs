@@ -893,6 +893,12 @@ struct Parser<'a> {
     predicates: usize,
     identities: usize,
     edge_count: usize,
+    /// All scopes started in this definition, including unfinished ancestors.
+    /// The common clause cap also bounds recursive EXISTS parsing depth.
+    scope_count: usize,
+    /// Anonymous nodes in active ancestor scopes. Their private spellings
+    /// must never make a newly parsed `()` correlate with an ancestor node.
+    outer_anonymous: Vec<&'a str>,
     parameter_types: BTreeMap<String, GqlParameterType>,
     read_row_bindings: Vec<Name<'a>>,
     read_correlations: Vec<(Name<'a>, Option<Name<'a>>, usize)>,
@@ -1108,6 +1114,8 @@ impl<'a> Parser<'a> {
             predicates: 0,
             identities: 0,
             edge_count: 0,
+            scope_count: 0,
+            outer_anonymous: Vec::new(),
             parameter_types: BTreeMap::new(),
             read_row_bindings: Vec::new(),
             read_correlations: Vec::new(),
@@ -1498,15 +1506,22 @@ impl<'a> Parser<'a> {
             // variables, so scoped bodies, boolean templates and property
             // filters work unchanged; they are invisible because `name()`
             // refuses the prefix and the RETURN * expansion skips it.
-            let mut ordinal = 0usize;
-            while self
-                .syntax
-                .variables
-                .iter()
-                .any(|var| var.text == Self::anonymous_name(ordinal))
-            {
-                ordinal += 1;
-            }
+            let ordinal = (0..MAX_PATTERN_VERTICES)
+                .find(|&ordinal| {
+                    let name = Self::anonymous_name(ordinal);
+                    !self.outer_anonymous.contains(&name)
+                        && !self.syntax.variables.iter().any(|var| var.text == name)
+                })
+                .ok_or_else(|| {
+                    error(
+                        self.current.at,
+                        GraphPatternTextErrorKind::Build(PatternBuildError::LimitExceeded {
+                            dimension: PatternLimitDimension::Vertices,
+                            limit: MAX_PATTERN_VERTICES,
+                            observed: MAX_PATTERN_VERTICES + 1,
+                        }),
+                    )
+                })?;
             self.syntax.variables.push(Name {
                 text: Self::anonymous_name(ordinal),
                 at: self.current.at,
@@ -2402,7 +2417,10 @@ impl PreparedGraphText {
             }
         }
         fn append_scope(bytes: &mut Vec<u8>, scope: &BoundScope) {
-            bytes.push(scope.kind_tag());
+            // The high bit introduces a nested predicate list. Old flat
+            // scopes retain their exact transcript bytes.
+            let nested = scope.nested();
+            bytes.push(scope.kind_tag() | if nested.is_empty() { 0 } else { 0x80 });
             // A Collect scope's element follows its tag (fgdb-7nwox).
             if scope.kind_tag() == 4 {
                 match scope.element() {
@@ -2417,6 +2435,12 @@ impl PreparedGraphText {
             bytes.extend_from_slice(&(scope.filters().len() as u64).to_be_bytes());
             for filter in scope.filters() {
                 append_filter(bytes, filter);
+            }
+            if !nested.is_empty() {
+                bytes.extend_from_slice(&(nested.len() as u64).to_be_bytes());
+                for child in nested {
+                    append_scope(bytes, child);
+                }
             }
         }
         let mut bytes = b"fgdb:gql:pattern-text-template:v1\0".to_vec();

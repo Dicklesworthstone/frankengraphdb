@@ -475,3 +475,75 @@ fn every_probe_poll_expiry_cut_retains_only_delivered_prefixes_and_closes_the_se
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn nested_existence_applies_capability_masks_at_every_scope() {
+    let ((), report) = run_async_under_lab(0x5ec0_7309, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = database(&contexts.commit()).await;
+        let authority = issuer();
+        let limited = authority.issue_at(&grant(), 100).unwrap();
+        let mut broad = grant();
+        broad.labels = Scope::All;
+        broad.relations = Scope::All;
+        broad.properties = Scope::All;
+        let broad = authority.issue_at(&broad, 100).unwrap();
+        let mut scoped = db
+            .authorized_read_session(&cx, &authority, &limited, BRANCH, symbols, policy(), || 100)
+            .unwrap();
+        let mut raw = db
+            .authorized_read_session(&cx, &authority, &broad, BRANCH, symbols, policy(), || 100)
+            .unwrap();
+        let args = GqlParameters::new();
+        for (condition, permitted, privileged) in [
+            (
+                "EXISTS { MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) WHERE c.p = 40 } }",
+                vec![],
+                vec![1],
+            ),
+            (
+                "EXISTS { MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b)-[:S]->(c) } }",
+                vec![],
+                vec![3],
+            ),
+            (
+                "EXISTS { MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (c) WHERE c=b AND c.hidden=999 } }",
+                vec![],
+                vec![1, 2, 3],
+            ),
+            (
+                "NOT EXISTS { MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b)-[:S]->(c) } }",
+                vec![1, 3, 4],
+                vec![1, 2, 4],
+            ),
+            (
+                "EXISTS { MATCH (b) WHERE EXISTS { MATCH (a)-[:R]->(b) } }",
+                vec![1, 3],
+                vec![1, 2, 3],
+            ),
+        ] {
+            let text = format!("MATCH (a) WHERE {condition} RETURN a AS id,a.p AS p");
+            let columns = vec!["id".to_owned(), "p".to_owned()];
+            assert_eq!(
+                scoped.query(&cx, &text, &args).unwrap(),
+                native(columns.clone(), &expected(&permitted)),
+                "{text}"
+            );
+            assert_eq!(
+                raw.query(&cx, &text, &args).unwrap(),
+                native(columns, &expected(&privileged)),
+                "{text}"
+            );
+            // This change admits the native buffered Probe executor. The
+            // separately bounded streaming profile still refuses nested probes
+            // at preparation instead of publishing a partial interpretation.
+            let prepared = scoped.prepare(&cx, &text, &args).unwrap();
+            assert!(matches!(
+                scoped.stream(&cx, &prepared, &args),
+                Err(QueryError::Stream(GqlQueryError::Source(_))),
+            ));
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

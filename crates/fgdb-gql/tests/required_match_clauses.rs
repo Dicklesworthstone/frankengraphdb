@@ -337,13 +337,13 @@ fn required_clauses_obey_definition_wide_limits_before_execution() {
     let root = builder(&["a"]);
     let repeat = builder(&["a"]);
     let columns = [GraphColumn::vertex("a", "a")];
-    let clauses = [GraphMatchClause::required(&repeat); 64];
+    let clauses = vec![GraphMatchClause::required(&repeat); 64];
     let frozen = root
         .prepare_values_with_clauses(&clauses, &columns, 0, None)
         .unwrap();
     assert!(matches!(
         root.prepare_values_with_clauses(
-            &[GraphMatchClause::required(&repeat); 65],
+            &vec![GraphMatchClause::required(&repeat); 65],
             &columns,
             0,
             None
@@ -356,7 +356,7 @@ fn required_clauses_obey_definition_wide_limits_before_execution() {
     let wide_frame = builder(&["a", "b", "c", "d"]);
     assert!(matches!(
         root.prepare_values_with_clauses(
-            &[GraphMatchClause::required(&wide_frame); 64],
+            &vec![GraphMatchClause::required(&wide_frame); 64],
             &columns,
             0,
             None

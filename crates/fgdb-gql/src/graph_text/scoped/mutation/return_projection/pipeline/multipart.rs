@@ -1501,11 +1501,8 @@ impl<'a> Parser<'a> {
             if !in_root
                 && self.syntax.scopes.iter().any(|scope| {
                     scope
-                        .body
-                        .variables
-                        .iter()
-                        .chain(&scope.body.captures)
-                        .any(|variable| variable.text == name.text)
+                        .find_name(&|variable| variable.text == name.text)
+                        .is_some()
                 })
             {
                 return Err(expected(name.at, "imported vertices in the root MATCH"));

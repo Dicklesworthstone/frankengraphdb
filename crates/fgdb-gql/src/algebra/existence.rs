@@ -55,13 +55,16 @@ pub(crate) enum GraphMatchKind {
 /// and never multiply the incoming bag. Shared names are bound correlations;
 /// a child without shared names is independent. A null correlation cannot be
 /// rebound, including by a zero-hop walk. Predicates belong to their own clause.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct GraphMatchClause<'a> {
     pub(crate) pattern: &'a GraphPatternBuilder,
     pub(crate) kind: GraphMatchKind,
     /// A Collect clause's element: the local vertex, relationship or path
     /// each witness contributes, or none (each contributes NULL).
     pub(crate) element: Option<&'a str>,
+    /// Predicates evaluated inside this clause, before its witness is accepted.
+    /// Their locals and transient bindings never enter the containing scope.
+    pub(crate) nested: Vec<GraphMatchClause<'a>>,
 }
 
 impl<'a> GraphMatchClause<'a> {
@@ -74,6 +77,7 @@ impl<'a> GraphMatchClause<'a> {
             pattern,
             kind: GraphMatchKind::Required,
             element: None,
+            nested: Vec::new(),
         }
     }
 
@@ -83,6 +87,7 @@ impl<'a> GraphMatchClause<'a> {
             pattern,
             kind: GraphMatchKind::Optional,
             element: None,
+            nested: Vec::new(),
         }
     }
     #[must_use]
@@ -91,6 +96,7 @@ impl<'a> GraphMatchClause<'a> {
             pattern,
             kind: GraphMatchKind::Exists,
             element: None,
+            nested: Vec::new(),
         }
     }
     #[must_use]
@@ -99,6 +105,7 @@ impl<'a> GraphMatchClause<'a> {
             pattern,
             kind: GraphMatchKind::NotExists,
             element: None,
+            nested: Vec::new(),
         }
     }
     /// A pattern comprehension's scope (fgdb-7nwox): once per incoming
@@ -111,6 +118,7 @@ impl<'a> GraphMatchClause<'a> {
             pattern,
             kind: GraphMatchKind::Collect,
             element,
+            nested: Vec::new(),
         }
     }
 }

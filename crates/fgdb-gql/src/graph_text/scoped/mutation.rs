@@ -1319,7 +1319,7 @@ impl PreparedGraphMutationText {
                 .selection
                 .scopes
                 .iter()
-                .any(|scope| reads_written_field(scope.builder(), scope.filters()))
+                .any(|scope| scope.any_pattern(&reads_written_field))
     }
 
     /// Exact argument validation precedes all instantiation. No lexing,

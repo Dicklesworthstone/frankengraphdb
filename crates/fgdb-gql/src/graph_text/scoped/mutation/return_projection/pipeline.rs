@@ -1180,10 +1180,12 @@ impl<'a> Parser<'a> {
             self.current = token;
             let start = token.at;
             let scope = self.syntax.scopes.len();
+            let scope_count = self.scope_count;
             if self.existence_body().is_err() {
                 // Edge-shaped arithmetic such as `(x) - -1` is no pattern:
                 // the WHERE reads it as written.
                 self.syntax.scopes.truncate(scope);
+                self.scope_count = scope_count;
                 if matches!(token.kind, TokenKind::Punct(b'(')) {
                     depth += 1;
                 }
@@ -1245,7 +1247,6 @@ impl<'a> Parser<'a> {
         scope: usize,
         at: usize,
     ) -> Result<(), GraphSetTextError> {
-        let body = &self.syntax.scopes[scope].body;
         let outer = |name: &Name<'a>| {
             self.syntax
                 .variables
@@ -1253,11 +1254,8 @@ impl<'a> Parser<'a> {
                 .any(|variable| variable.text == name.text)
                 || self.syntax.visible_edge(name.text).is_some()
         };
-        let read = (body.variables.iter())
-            .chain(&body.captures)
-            .chain(body.edges.iter().filter_map(|edge| edge.variable.as_ref()))
-            .filter(|name| outer(name))
-            .find(|name| !carries_own(head, offset, name.text));
+        let read = self.syntax.scopes[scope]
+            .find_name(&|name| outer(name) && !carries_own(head, offset, name.text));
         match read {
             Some(name) => Err(expected(
                 name.at.max(at),

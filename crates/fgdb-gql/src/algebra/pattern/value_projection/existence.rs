@@ -74,7 +74,16 @@ impl GraphPatternBuilder {
         let mut predicates = self.predicate_count;
         let mut identities = self.identities.len();
         let mut path_captures = self.path_captures.len();
-        for clause in clauses {
+        let mut scope_count = 0;
+        let mut pending: Vec<_> = clauses.iter().rev().collect();
+        while let Some(clause) = pending.pop() {
+            scope_count += 1;
+            check_total(
+                scope_count,
+                MAX_PATTERN_IDENTITIES,
+                PatternLimitDimension::Identities,
+            )?;
+            pending.extend(clause.nested.iter().rev());
             if clause.pattern.variables.iter().any(|variable| {
                 self.path_captures
                     .iter()
@@ -108,401 +117,466 @@ impl GraphPatternBuilder {
         let mut scope = self.clone();
         let (mut operators, mut scope_slots) = self.compile()?;
         let mut width = super::super::binding_width(&operators);
-        let mut definition_bindings = width as usize;
-        for (group, clause) in clauses.iter().enumerate() {
-            let mut inner = (*clause.pattern).clone();
-            if inner.variables.is_empty() {
-                return Err(PatternBuildError::EmptyPattern);
-            }
-            // A shared edge name would mean an edge correlation, not a fresh
-            // local binding. Refuse that unsupported contract rather than
-            // silently shadowing a visible vertex or relationship.
-            if inner.path_captures.iter().any(|capture| {
-                scope
-                    .variables
-                    .iter()
-                    .any(|variable| variable.name == capture.name)
-                    || scope
-                        .path_captures
-                        .iter()
-                        .any(|outer| outer.name == capture.name)
-            }) || inner.variables.iter().any(|variable| {
-                scope
-                    .path_captures
-                    .iter()
-                    .any(|capture| capture.name == variable.name)
-            }) {
-                return Err(PatternBuildError::DuplicateVariable);
-            }
-            let mut captures = Vec::new();
-            for (at, variable) in inner.variables.iter().enumerate() {
-                if variable.outer {
-                    let outer = scope
-                        .variable(&variable.name)
-                        .map_err(|_| PatternBuildError::UnknownOuterVertex)?;
-                    captures.push((at, scope_slots[outer]));
+        struct ClauseFrames {
+            next_group: usize,
+            bindings: usize,
+        }
+        fn append_clauses(
+            scope: &mut GraphPatternBuilder,
+            scope_slots: &mut Vec<BindingSlot>,
+            width: &mut u32,
+            operators: &mut Vec<GlaOperator>,
+            clauses: &[GraphMatchClause<'_>],
+            first_group: usize,
+            frames: &mut ClauseFrames,
+        ) -> Result<(), PatternBuildError> {
+            for (ordinal, clause) in clauses.iter().enumerate() {
+                let group = first_group + ordinal;
+                let mut inner = (*clause.pattern).clone();
+                if inner.variables.is_empty() {
+                    return Err(PatternBuildError::EmptyPattern);
                 }
-            }
-            let correlation = |inner_at: usize| {
-                scope
-                    .variables
-                    .iter()
-                    .position(|outer| outer.name == inner.variables[inner_at].name)
-            };
-            let edge_anchor = inner.edges.iter().enumerate().find_map(|(at, edge)| {
-                correlation(edge.source)
-                    .map(|outer| (at, outer))
-                    .or_else(|| correlation(edge.destination).map(|outer| (at, outer)))
-            });
-            // Only positive pattern vertices may anchor traversal. A predicate
-            // capture can be null and must not suppress independent witnesses.
-            let (outer_at, root) = if inner
-                .path_captures
-                .iter()
-                .any(|capture| !capture.edge_identity)
-            {
-                // CapturePath concatenates traversal segments in DECLARED
-                // order from the declared start. Re-rooting at a correlated
-                // destination reverses a segment; swapping a later edge also
-                // destroys a captured range's order. Keep the native root and
-                // edge order for these clauses. A shared native root can still
-                // be bound directly; other correlations are enforced at their
-                // ordinary binding slots, before any capture or path predicate.
-                // This uses the existing governed scan/expand family, not an
-                // endpoint-to-edge reconstruction or a second path evaluator.
-                let first = inner
-                    .edges
-                    .first()
-                    .map(|edge| edge.source)
-                    .or_else(|| inner.variables.iter().position(|variable| !variable.outer));
-                (first.and_then(correlation), None)
-            } else if let Some((edge_at, outer_at)) = edge_anchor {
-                inner.edges.swap(0, edge_at);
-                // Captures address declared edges, not positions chosen by a
-                // correlated traversal. Preserve that identity when a later
-                // edge is moved to the root; both swapped positions matter.
-                for capture in &mut inner.path_captures {
-                    if capture.first_edge == 0 {
-                        capture.first_edge = edge_at;
-                    } else if capture.first_edge == edge_at {
-                        capture.first_edge = 0;
-                    }
-                }
-                if inner.variables[inner.edges[0].source].name != scope.variables[outer_at].name {
-                    let edge = &mut inner.edges[0];
-                    core::mem::swap(&mut edge.source, &mut edge.destination);
-                    edge.direction = super::super::reverse(edge.direction);
-                }
-                (Some(outer_at), None)
-            } else if let Some((inner_at, outer_at)) = (0..inner.variables.len())
-                .filter(|&at| !inner.variables[at].outer)
-                .find_map(|at| correlation(at).map(|outer| (at, outer)))
-            {
-                (Some(outer_at), Some(inner_at))
-            } else {
-                (None, None)
-            };
-            let (body, inner_slots) = inner.compile_with_root(root)?;
-            let inner_width = super::super::binding_width(&body);
-            definition_bindings = definition_bindings.saturating_add(inner_width as usize);
-            check_total(
-                definition_bindings,
-                super::super::MAX_PATTERN_BINDINGS,
-                PatternLimitDimension::Bindings,
-            )?;
-            let captures: Vec<_> = captures
-                .into_iter()
-                .map(|(at, outer)| (inner_slots[at], outer))
-                .collect();
-            let correlations: Vec<_> = inner
-                .variables
-                .iter()
-                .enumerate()
-                .filter(|(_, variable)| !variable.outer)
-                .filter_map(|(at, variable)| {
+                // A shared edge name would mean an edge correlation, not a fresh
+                // local binding. Refuse that unsupported contract rather than
+                // silently shadowing a visible vertex or relationship.
+                if inner.path_captures.iter().any(|capture| {
                     scope
                         .variables
                         .iter()
-                        .position(|outer| outer.name == variable.name)
-                        .map(|outer| (inner_slots[at], scope_slots[outer]))
-                })
-                .collect();
-            let start = operators.len();
-            let optional = clause.kind == GraphMatchKind::Optional;
-            let required = clause.kind == GraphMatchKind::Required;
-            let collect = clause.kind == GraphMatchKind::Collect;
-            if optional {
-                operators.push(GlaOperator::Optional {
-                    group: group as u32,
-                    end: 0,
-                    slots: 0,
-                });
-            } else if collect {
-                operators.push(GlaOperator::Collect {
-                    group: group as u32,
-                    end: 0,
-                    slots: 0,
-                });
-            } else if !required {
-                operators.push(GlaOperator::Probe {
-                    group: group as u32,
-                    end: 0,
-                    anti: clause.kind == GraphMatchKind::NotExists,
-                });
-            }
-            // Required MATCH is the ordinary positive continuation, not a probe
-            // or a nullable scope. Emit it at this exact point; moving it into
-            // a preceding OPTIONAL would change which rows are null-extended.
-            let base = width;
-            let map = |slot: BindingSlot| BindingSlot(base + slot.ordinal());
-            // A clause's captures follow every capture exported so far, so a
-            // probe cannot replace a visible relationship. Sequential probes
-            // reuse their private slots: the native capture continuation
-            // restores them on success, absence and refusal. An OPTIONAL
-            // clause's slots are written only inside its scope, so absence
-            // leaves them null.
-            let capture_base = scope.path_captures.len() as u32;
-            let map_capture = |capture| capture_base + capture;
-            let mut available = 0_u32;
-            if let Some(outer_at) = outer_at {
-                // Copy only an actual correlation. An unrelated nullable outer
-                // variable cannot suppress an independent child's witnesses.
-                operators.push(GlaOperator::BindVertex {
-                    source: scope_slots[outer_at],
-                });
-                emit_correlations(&mut operators, &correlations, 0, map);
-                available = 1;
-            }
-            for (at, operator) in body.into_iter().enumerate() {
-                match operator {
-                    GlaOperator::ScanVertices if at == 0 && outer_at.is_some() => {}
-                    GlaOperator::ScanVertices => {
-                        // A captured operand keeps null; a matched correlation
-                        // must reject it. Neither is another graph scan. Do not
-                        // emit NULL = NULL for captures: they are value copies,
-                        // not additional positive identity constraints.
-                        if let Some((_, outer)) = captures
+                        .any(|variable| variable.name == capture.name)
+                        || scope
+                            .path_captures
                             .iter()
-                            .find(|(inner, _)| inner.ordinal() == available)
-                        {
-                            operators.push(GlaOperator::BindOuterVertex { source: *outer });
-                        } else if let Some((_, outer)) = correlations
-                            .iter()
-                            .find(|(inner, _)| inner.ordinal() == available)
-                        {
-                            operators.push(GlaOperator::BindVertex { source: *outer });
-                        } else {
-                            operators.push(GlaOperator::ScanVertices);
-                        }
-                        emit_correlations(&mut operators, &correlations, available, map);
-                        available += 1;
+                            .any(|outer| outer.name == capture.name)
+                }) || inner.variables.iter().any(|variable| {
+                    scope
+                        .path_captures
+                        .iter()
+                        .any(|capture| capture.name == variable.name)
+                }) {
+                    return Err(PatternBuildError::DuplicateVariable);
+                }
+                let mut captures = Vec::new();
+                for (at, variable) in inner.variables.iter().enumerate() {
+                    if variable.outer {
+                        let outer = scope
+                            .variable(&variable.name)
+                            .map_err(|_| PatternBuildError::UnknownOuterVertex)?;
+                        captures.push((at, scope_slots[outer]));
                     }
-                    GlaOperator::ScanEdges {
-                        relation,
-                        direction,
-                    } if at == 0 => {
-                        if outer_at.is_none() {
-                            // A fixed edge root owns two slots. In a scope,
-                            // create its independent source then append its
-                            // destination through the ordinary expansion path.
-                            operators.push(GlaOperator::ScanVertices);
+                }
+                let correlation = |inner_at: usize| {
+                    scope
+                        .variables
+                        .iter()
+                        .position(|outer| outer.name == inner.variables[inner_at].name)
+                };
+                let edge_anchor = inner.edges.iter().enumerate().find_map(|(at, edge)| {
+                    correlation(edge.source)
+                        .map(|outer| (at, outer))
+                        .or_else(|| correlation(edge.destination).map(|outer| (at, outer)))
+                });
+                // Only positive pattern vertices may anchor traversal. A predicate
+                // capture can be null and must not suppress independent witnesses.
+                let (outer_at, root) = if inner
+                    .path_captures
+                    .iter()
+                    .any(|capture| !capture.edge_identity)
+                {
+                    // CapturePath concatenates traversal segments in DECLARED
+                    // order from the declared start. Re-rooting at a correlated
+                    // destination reverses a segment; swapping a later edge also
+                    // destroys a captured range's order. Keep the native root and
+                    // edge order for these clauses. A shared native root can still
+                    // be bound directly; other correlations are enforced at their
+                    // ordinary binding slots, before any capture or path predicate.
+                    // This uses the existing governed scan/expand family, not an
+                    // endpoint-to-edge reconstruction or a second path evaluator.
+                    let first =
+                        inner.edges.first().map(|edge| edge.source).or_else(|| {
+                            inner.variables.iter().position(|variable| !variable.outer)
+                        });
+                    (first.and_then(correlation), None)
+                } else if let Some((edge_at, outer_at)) = edge_anchor {
+                    inner.edges.swap(0, edge_at);
+                    // Captures address declared edges, not positions chosen by a
+                    // correlated traversal. Preserve that identity when a later
+                    // edge is moved to the root; both swapped positions matter.
+                    for capture in &mut inner.path_captures {
+                        if capture.first_edge == 0 {
+                            capture.first_edge = edge_at;
+                        } else if capture.first_edge == edge_at {
+                            capture.first_edge = 0;
+                        }
+                    }
+                    if inner.variables[inner.edges[0].source].name != scope.variables[outer_at].name
+                    {
+                        let edge = &mut inner.edges[0];
+                        core::mem::swap(&mut edge.source, &mut edge.destination);
+                        edge.direction = super::super::reverse(edge.direction);
+                    }
+                    (Some(outer_at), None)
+                } else if let Some((inner_at, outer_at)) = (0..inner.variables.len())
+                    .filter(|&at| !inner.variables[at].outer)
+                    .find_map(|at| correlation(at).map(|outer| (at, outer)))
+                {
+                    (Some(outer_at), Some(inner_at))
+                } else {
+                    (None, None)
+                };
+                let (body, inner_slots) = inner.compile_with_root(root)?;
+                let inner_width = super::super::binding_width(&body);
+                frames.bindings = frames.bindings.saturating_add(inner_width as usize);
+                check_total(
+                    frames.bindings,
+                    super::super::MAX_PATTERN_BINDINGS,
+                    PatternLimitDimension::Bindings,
+                )?;
+                let captures: Vec<_> = captures
+                    .into_iter()
+                    .map(|(at, outer)| (inner_slots[at], outer))
+                    .collect();
+                let correlations: Vec<_> = inner
+                    .variables
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, variable)| !variable.outer)
+                    .filter_map(|(at, variable)| {
+                        scope
+                            .variables
+                            .iter()
+                            .position(|outer| outer.name == variable.name)
+                            .map(|outer| (inner_slots[at], scope_slots[outer]))
+                    })
+                    .collect();
+                let start = operators.len();
+                let optional = clause.kind == GraphMatchKind::Optional;
+                let required = clause.kind == GraphMatchKind::Required;
+                let collect = clause.kind == GraphMatchKind::Collect;
+                if optional {
+                    operators.push(GlaOperator::Optional {
+                        group: group as u32,
+                        end: 0,
+                        slots: 0,
+                    });
+                } else if collect {
+                    operators.push(GlaOperator::Collect {
+                        group: group as u32,
+                        end: 0,
+                        slots: 0,
+                    });
+                } else if !required {
+                    operators.push(GlaOperator::Probe {
+                        group: group as u32,
+                        end: 0,
+                        anti: clause.kind == GraphMatchKind::NotExists,
+                    });
+                }
+                // Required MATCH is the ordinary positive continuation, not a probe
+                // or a nullable scope. Emit it at this exact point; moving it into
+                // a preceding OPTIONAL would change which rows are null-extended.
+                let base = *width;
+                let map = |slot: BindingSlot| BindingSlot(base + slot.ordinal());
+                // A clause's captures follow every capture exported so far, so a
+                // probe cannot replace a visible relationship. Sequential probes
+                // reuse their private slots: the native capture continuation
+                // restores them on success, absence and refusal. An OPTIONAL
+                // clause's slots are written only inside its scope, so absence
+                // leaves them null.
+                let capture_base = scope.path_captures.len() as u32;
+                let map_capture = |capture| capture_base + capture;
+                let mut available = 0_u32;
+                if let Some(outer_at) = outer_at {
+                    // Copy only an actual correlation. An unrelated nullable outer
+                    // variable cannot suppress an independent child's witnesses.
+                    operators.push(GlaOperator::BindVertex {
+                        source: scope_slots[outer_at],
+                    });
+                    emit_correlations(operators, &correlations, 0, map);
+                    available = 1;
+                }
+                for (at, operator) in body.into_iter().enumerate() {
+                    match operator {
+                        GlaOperator::ScanVertices if at == 0 && outer_at.is_some() => {}
+                        GlaOperator::ScanVertices => {
+                            // A captured operand keeps null; a matched correlation
+                            // must reject it. Neither is another graph scan. Do not
+                            // emit NULL = NULL for captures: they are value copies,
+                            // not additional positive identity constraints.
+                            if let Some((_, outer)) = captures
+                                .iter()
+                                .find(|(inner, _)| inner.ordinal() == available)
+                            {
+                                operators.push(GlaOperator::BindOuterVertex { source: *outer });
+                            } else if let Some((_, outer)) = correlations
+                                .iter()
+                                .find(|(inner, _)| inner.ordinal() == available)
+                            {
+                                operators.push(GlaOperator::BindVertex { source: *outer });
+                            } else {
+                                operators.push(GlaOperator::ScanVertices);
+                            }
+                            emit_correlations(operators, &correlations, available, map);
                             available += 1;
                         }
-                        operators.push(GlaOperator::Expand {
-                            source: BindingSlot(base),
+                        GlaOperator::ScanEdges {
                             relation,
                             direction,
-                        });
-                        emit_correlations(&mut operators, &correlations, available, map);
-                        available += 1;
-                    }
-                    GlaOperator::Expand {
-                        source,
-                        relation,
-                        direction,
-                    } => {
-                        operators.push(GlaOperator::Expand {
-                            source: map(source),
+                        } if at == 0 => {
+                            if outer_at.is_none() {
+                                // A fixed edge root owns two slots. In a scope,
+                                // create its independent source then append its
+                                // destination through the ordinary expansion path.
+                                operators.push(GlaOperator::ScanVertices);
+                                available += 1;
+                            }
+                            operators.push(GlaOperator::Expand {
+                                source: BindingSlot(base),
+                                relation,
+                                direction,
+                            });
+                            emit_correlations(operators, &correlations, available, map);
+                            available += 1;
+                        }
+                        GlaOperator::Expand {
+                            source,
                             relation,
                             direction,
-                        });
-                        emit_correlations(&mut operators, &correlations, available, map);
-                        available += 1;
-                    }
-                    GlaOperator::VarLengthExpand {
-                        source,
-                        relation,
-                        direction,
-                        bounds,
-                        search,
-                    } => {
-                        // A whole bounded walk appends one endpoint, not one
-                        // slot per hop. Correlations constrain that endpoint
-                        // after enumeration without filtering its transit nodes.
-                        operators.push(GlaOperator::VarLengthExpand {
-                            source: map(source),
+                        } => {
+                            operators.push(GlaOperator::Expand {
+                                source: map(source),
+                                relation,
+                                direction,
+                            });
+                            emit_correlations(operators, &correlations, available, map);
+                            available += 1;
+                        }
+                        GlaOperator::VarLengthExpand {
+                            source,
                             relation,
                             direction,
                             bounds,
                             search,
-                        });
-                        emit_correlations(&mut operators, &correlations, available, map);
-                        available += 1;
-                    }
-                    GlaOperator::Select { slot, predicates } => {
-                        operators.push(GlaOperator::Select {
-                            slot: map(slot),
-                            predicates,
-                        })
-                    }
-                    GlaOperator::VertexIdentity { left, right, equal } => {
-                        operators.push(GlaOperator::VertexIdentity {
-                            left: map(left),
-                            right: map(right),
-                            equal,
-                        })
-                    }
-                    GlaOperator::CompareProperties {
-                        left,
-                        left_key,
-                        right,
-                        right_key,
-                        comparison,
-                    } => {
-                        operators.push(GlaOperator::CompareProperties {
-                            left: map(left),
+                        } => {
+                            // A whole bounded walk appends one endpoint, not one
+                            // slot per hop. Correlations constrain that endpoint
+                            // after enumeration without filtering its transit nodes.
+                            operators.push(GlaOperator::VarLengthExpand {
+                                source: map(source),
+                                relation,
+                                direction,
+                                bounds,
+                                search,
+                            });
+                            emit_correlations(operators, &correlations, available, map);
+                            available += 1;
+                        }
+                        GlaOperator::Select { slot, predicates } => {
+                            operators.push(GlaOperator::Select {
+                                slot: map(slot),
+                                predicates,
+                            })
+                        }
+                        GlaOperator::VertexIdentity { left, right, equal } => {
+                            operators.push(GlaOperator::VertexIdentity {
+                                left: map(left),
+                                right: map(right),
+                                equal,
+                            })
+                        }
+                        GlaOperator::CompareProperties {
+                            left,
                             left_key,
-                            right: map(right),
+                            right,
                             right_key,
                             comparison,
-                        });
-                    }
-                    GlaOperator::CapturePath {
-                        capture,
-                        start,
-                        segments,
-                    } => {
-                        operators.push(GlaOperator::CapturePath {
-                            capture: map_capture(capture),
-                            start: map(start),
-                            segments: segments.into_iter().map(map).collect(),
-                        });
-                    }
-                    GlaOperator::SelectPathLength {
-                        capture,
-                        comparison,
-                        value,
-                    } => {
-                        operators.push(GlaOperator::SelectPathLength {
-                            capture: map_capture(capture),
+                        } => {
+                            operators.push(GlaOperator::CompareProperties {
+                                left: map(left),
+                                left_key,
+                                right: map(right),
+                                right_key,
+                                comparison,
+                            });
+                        }
+                        GlaOperator::CapturePath {
+                            capture,
+                            start,
+                            segments,
+                        } => {
+                            operators.push(GlaOperator::CapturePath {
+                                capture: map_capture(capture),
+                                start: map(start),
+                                segments: segments.into_iter().map(map).collect(),
+                            });
+                        }
+                        GlaOperator::SelectPathLength {
+                            capture,
                             comparison,
                             value,
-                        });
-                    }
-                    GlaOperator::SelectPathNull {
-                        capture,
-                        function,
-                        is_null,
-                    } => {
-                        operators.push(GlaOperator::SelectPathNull {
-                            capture: map_capture(capture),
+                        } => {
+                            operators.push(GlaOperator::SelectPathLength {
+                                capture: map_capture(capture),
+                                comparison,
+                                value,
+                            });
+                        }
+                        GlaOperator::SelectPathNull {
+                            capture,
                             function,
                             is_null,
-                        });
-                    }
-                    GlaOperator::DifferentEdges { segments } => {
-                        operators.push(GlaOperator::DifferentEdges {
-                            segments: segments.into_iter().map(map).collect(),
-                        });
-                    }
-                    GlaOperator::SelectBoolean { expression } => {
-                        operators.push(GlaOperator::SelectBoolean {
-                            expression: expression.remap_elements(map, map_capture),
-                        });
-                    }
-                    _ => unreachable!(
-                        "the positive compiler emits only admitted pattern instructions"
-                    ),
-                }
-            }
-            debug_assert_eq!(available, inner_width);
-            let end = operators.len() as u32;
-            if optional {
-                operators.push(GlaOperator::OptionalEnd {
-                    group: group as u32,
-                });
-                operators[start] = GlaOperator::Optional {
-                    group: group as u32,
-                    end,
-                    slots: available,
-                };
-            } else if collect {
-                // Each witness contributes its local vertex, relationship or
-                // path, at the slot or capture this clause gave it.
-                let value = clause
-                    .element
-                    .map(|name| {
-                        if let Some(at) = inner.variables.iter().position(|v| v.name == name) {
-                            Ok(ValueProjection::Vertex {
-                                slot: map(inner_slots[at]),
-                            })
-                        } else if let Some(capture) =
-                            inner.path_captures.iter().position(|c| c.name == name)
-                        {
-                            Ok(ValueProjection::Path {
-                                capture: map_capture(capture as u32),
-                                function: if inner.path_captures[capture].edge_identity {
-                                    GraphPathFunction::Edge
-                                } else {
-                                    GraphPathFunction::Value
-                                },
-                            })
-                        } else {
-                            Err(PatternBuildError::UnknownVariable)
+                        } => {
+                            operators.push(GlaOperator::SelectPathNull {
+                                capture: map_capture(capture),
+                                function,
+                                is_null,
+                            });
                         }
-                    })
-                    .transpose()?;
-                operators.push(GlaOperator::CollectEnd {
-                    group: group as u32,
-                    value,
-                });
-                operators[start] = GlaOperator::Collect {
-                    group: group as u32,
-                    end,
-                    slots: available,
-                };
-            } else if !required {
-                operators.push(GlaOperator::ProbeEnd {
-                    group: group as u32,
-                });
-                operators[start] = GlaOperator::Probe {
-                    group: group as u32,
-                    end,
-                    anti: clause.kind == GraphMatchKind::NotExists,
-                };
-            }
-            if optional || required {
-                for (at, variable) in inner.variables.iter().enumerate() {
-                    if !scope
-                        .variables
-                        .iter()
-                        .any(|outer| outer.name == variable.name)
-                    {
-                        scope.vertex(&variable.name)?;
-                        scope_slots.push(map(inner_slots[at]));
+                        GlaOperator::DifferentEdges { segments } => {
+                            operators.push(GlaOperator::DifferentEdges {
+                                segments: segments.into_iter().map(map).collect(),
+                            });
+                        }
+                        GlaOperator::SelectBoolean { expression } => {
+                            operators.push(GlaOperator::SelectBoolean {
+                                expression: expression.remap_elements(map, map_capture),
+                            });
+                        }
+                        _ => unreachable!(
+                            "the positive compiler emits only admitted pattern instructions"
+                        ),
                     }
                 }
-                // Exported in declaration order at capture_base + i, the
-                // numbering map_capture gave this clause's CapturePath.
-                scope
-                    .path_captures
-                    .extend(inner.path_captures.iter().cloned());
-                // Count actual producers, including independent scan roots and
-                // copied correlations. The definition-wide cap bounds all such
-                // frames, including transient probes, before execution begins.
-                width += available;
+                debug_assert_eq!(available, inner_width);
+                if !clause.nested.is_empty() {
+                    // Nested probes run after this positive witness is complete,
+                    // but before this clause accepts it. Give them the entire
+                    // visible ancestor chain, with this body's locals added only
+                    // to their private scope. Correlations still copy/recheck the
+                    // real slots; a nullable ancestor is never another root scan.
+                    let mut nested_scope = scope.clone();
+                    let mut nested_slots = scope_slots.clone();
+                    for (at, variable) in inner.variables.iter().enumerate() {
+                        if !nested_scope
+                            .variables
+                            .iter()
+                            .any(|outer| outer.name == variable.name)
+                        {
+                            nested_scope.vertex(&variable.name)?;
+                            nested_slots.push(map(inner_slots[at]));
+                        }
+                    }
+                    nested_scope
+                        .path_captures
+                        .extend(inner.path_captures.iter().cloned());
+                    let mut nested_width = base + available;
+                    let first_nested = frames.next_group;
+                    frames.next_group += clause.nested.len();
+                    append_clauses(
+                        &mut nested_scope,
+                        &mut nested_slots,
+                        &mut nested_width,
+                        operators,
+                        &clause.nested,
+                        first_nested,
+                        frames,
+                    )?;
+                }
+                let end = operators.len() as u32;
+                if optional {
+                    operators.push(GlaOperator::OptionalEnd {
+                        group: group as u32,
+                    });
+                    operators[start] = GlaOperator::Optional {
+                        group: group as u32,
+                        end,
+                        slots: available,
+                    };
+                } else if collect {
+                    // Each witness contributes its local vertex, relationship or
+                    // path, at the slot or capture this clause gave it.
+                    let value = clause
+                        .element
+                        .map(|name| {
+                            if let Some(at) = inner.variables.iter().position(|v| v.name == name) {
+                                Ok(ValueProjection::Vertex {
+                                    slot: map(inner_slots[at]),
+                                })
+                            } else if let Some(capture) =
+                                inner.path_captures.iter().position(|c| c.name == name)
+                            {
+                                Ok(ValueProjection::Path {
+                                    capture: map_capture(capture as u32),
+                                    function: if inner.path_captures[capture].edge_identity {
+                                        GraphPathFunction::Edge
+                                    } else {
+                                        GraphPathFunction::Value
+                                    },
+                                })
+                            } else {
+                                Err(PatternBuildError::UnknownVariable)
+                            }
+                        })
+                        .transpose()?;
+                    operators.push(GlaOperator::CollectEnd {
+                        group: group as u32,
+                        value,
+                    });
+                    operators[start] = GlaOperator::Collect {
+                        group: group as u32,
+                        end,
+                        slots: available,
+                    };
+                } else if !required {
+                    operators.push(GlaOperator::ProbeEnd {
+                        group: group as u32,
+                    });
+                    operators[start] = GlaOperator::Probe {
+                        group: group as u32,
+                        end,
+                        anti: clause.kind == GraphMatchKind::NotExists,
+                    };
+                }
+                if optional || required {
+                    for (at, variable) in inner.variables.iter().enumerate() {
+                        if !scope
+                            .variables
+                            .iter()
+                            .any(|outer| outer.name == variable.name)
+                        {
+                            scope.vertex(&variable.name)?;
+                            scope_slots.push(map(inner_slots[at]));
+                        }
+                    }
+                    // Exported in declaration order at capture_base + i, the
+                    // numbering map_capture gave this clause's CapturePath.
+                    scope
+                        .path_captures
+                        .extend(inner.path_captures.iter().cloned());
+                    // Count actual producers, including independent scan roots and
+                    // copied correlations. The definition-wide cap bounds all such
+                    // frames, including transient probes, before execution begins.
+                    *width += available;
+                }
             }
+            Ok(())
         }
+        // Keep top-level group ordinals unchanged: collection projections
+        // address their own top-level clause. Nested probes use the remaining
+        // definition-wide group slots, never an ancestor's active group.
+        let mut frames = ClauseFrames {
+            next_group: clauses.len(),
+            bindings: width as usize,
+        };
+        append_clauses(
+            &mut scope,
+            &mut scope_slots,
+            &mut width,
+            &mut operators,
+            clauses,
+            0,
+            &mut frames,
+        )?;
         // A collection column reads its own Collect clause's list.
         if columns.iter().any(|column| {
             matches!(column, GraphColumn::Collection { clause, .. }

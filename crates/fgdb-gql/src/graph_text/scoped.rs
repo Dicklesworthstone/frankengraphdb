@@ -43,6 +43,7 @@ struct PatternSyntax<'a> {
 pub(super) struct ScopeSyntax<'a> {
     kind: ScopeKind,
     body: PatternSyntax<'a>,
+    nested: Vec<ScopeSyntax<'a>>,
     /// A Collect scope's element: the local each witness contributes.
     element: Option<Name<'a>>,
 }
@@ -53,17 +54,20 @@ pub(super) struct BoundScope {
     builder: GraphPatternBuilder,
     filters: Vec<BoundFilter>,
     element: Option<String>,
+    nested: Vec<BoundScope>,
 }
 
 impl BoundScope {
     pub(super) fn clause(&self) -> GraphMatchClause<'_> {
-        match self.kind {
+        let mut clause = match self.kind {
             ScopeKind::Required => GraphMatchClause::required(&self.builder),
             ScopeKind::Optional => GraphMatchClause::optional(&self.builder),
             ScopeKind::Exists => GraphMatchClause::exists(&self.builder),
             ScopeKind::NotExists => GraphMatchClause::not_exists(&self.builder),
             ScopeKind::Collect => GraphMatchClause::collect(&self.builder, self.element.as_deref()),
-        }
+        };
+        clause.nested = self.nested.iter().map(Self::clause).collect();
+        clause
     }
     /// Facade transcript tag for this scope kind, matching the resolved
     /// lowering distinction: optional extends nulls, exists/not-exists probe,
@@ -87,6 +91,16 @@ impl BoundScope {
     pub(super) fn filters(&self) -> &[BoundFilter] {
         &self.filters
     }
+    pub(super) fn nested(&self) -> &[Self] {
+        &self.nested
+    }
+    pub(super) fn any_pattern(
+        &self,
+        predicate: &impl Fn(&GraphPatternBuilder, &[BoundFilter]) -> bool,
+    ) -> bool {
+        predicate(&self.builder, &self.filters)
+            || self.nested.iter().any(|scope| scope.any_pattern(predicate))
+    }
 
     pub(super) fn bind_values(
         &self,
@@ -98,11 +112,39 @@ impl BoundScope {
             builder: bind_builder(&self.builder, &self.filters, values, at)?,
             filters: Vec::new(),
             element: self.element.clone(),
+            nested: self
+                .nested
+                .iter()
+                .map(|scope| scope.bind_values(values, at))
+                .collect::<Result<_, _>>()?,
         })
     }
 }
 
 impl<'a> ScopeSyntax<'a> {
+    /// Find a binding mentioned anywhere in this bounded scope tree. Audits
+    /// at row and comprehension boundaries must also see names that appear
+    /// only in a descendant, before they can become fresh graph locals.
+    pub(super) fn find_name(&self, predicate: &impl Fn(&Name<'a>) -> bool) -> Option<Name<'a>> {
+        self.body
+            .variables
+            .iter()
+            .chain(&self.body.captures)
+            .chain(
+                self.body
+                    .edges
+                    .iter()
+                    .filter_map(|edge| edge.variable.as_ref()),
+            )
+            .copied()
+            .find(predicate)
+            .or_else(|| {
+                self.nested
+                    .iter()
+                    .find_map(|scope| scope.find_name(predicate))
+            })
+    }
+
     /// Relationship patterns visible after this clause closes, each with
     /// whether it can be NULL. A required clause exports its edges; an
     /// OPTIONAL clause's edges read NULL where it has no witness. Existential
@@ -135,6 +177,11 @@ impl<'a> ScopeSyntax<'a> {
             builder,
             filters,
             element: self.element.map(|name| name.text.to_owned()),
+            nested: self
+                .nested
+                .into_iter()
+                .map(|scope| scope.resolve(symbol))
+                .collect::<Result<_, _>>()?,
         })
     }
 }
@@ -1298,24 +1345,16 @@ impl<'a> Parser<'a> {
         existence_follows(self.current.kind, &self.lexer)
     }
 
-    fn scoped_predicates(&mut self, allow_existence: bool) -> Result<(), GraphPatternTextError> {
+    fn scoped_predicates(&mut self, root: bool) -> Result<(), GraphPatternTextError> {
         let mut has_existence = false;
         let mut has_boolean = false;
-        let path_predicates = allow_existence && self.syntax.path.is_some();
+        let path_predicates = root && self.syntax.path.is_some();
         loop {
             if self.starts_existence()? {
                 if has_boolean {
                     return Err(error(
                         self.current.at,
                         GraphPatternTextErrorKind::UnsupportedBooleanScope,
-                    ));
-                }
-                if !allow_existence {
-                    return Err(error(
-                        self.current.at,
-                        GraphPatternTextErrorKind::Expected(
-                            "positive predicates inside a scoped MATCH",
-                        ),
                     ));
                 }
                 let anti = self.take_word("NOT")?;
@@ -1509,11 +1548,21 @@ impl<'a> Parser<'a> {
     fn scope(&mut self, kind: ScopeKind, form: ScopeForm) -> Result<(), GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
         self.capacity(
-            self.syntax.scopes.len(),
+            self.scope_count,
             MAX_PATTERN_IDENTITIES,
             PatternLimitDimension::Identities,
         )?;
+        self.scope_count += 1;
+        let scopes_at = self.syntax.scopes.len();
         let outer = self.take_pattern();
+        let anonymous_at = self.outer_anonymous.len();
+        self.outer_anonymous.extend(
+            outer
+                .variables
+                .iter()
+                .filter(|name| name.text.starts_with(Self::ANONYMOUS_PREFIX))
+                .map(|name| name.text),
+        );
         // Leading row aliases are lowered at the root join. They must not
         // escape an OPTIONAL/EXISTS predicate into a post-join filter. A
         // later required MATCH is an inner join, so its equality with a row
@@ -1665,12 +1714,37 @@ impl<'a> Parser<'a> {
             let mut body = self.take_pattern();
             body.variables.truncate(matched_variables);
             body.captures = predicate_captures(&mut body.variables, &body.filters, &body.edges)?;
-            Ok::<_, GraphPatternTextError>((body, path, edges))
+            let nested = self.syntax.scopes.split_off(scopes_at);
+            // A grandchild may name an ancestor that this body's own pattern
+            // and predicates never mention. Carry that value through this
+            // frame as a nullable capture, never as an independent node scan.
+            // Each child has already propagated its own descendants' reads.
+            for child in &nested {
+                for &name in &child.body.variables {
+                    if outer
+                        .variables
+                        .iter()
+                        .any(|visible| visible.text == name.text)
+                        && !body.variables.iter().any(|local| local.text == name.text)
+                    {
+                        self.capacity(
+                            body.variables.len(),
+                            MAX_PATTERN_VERTICES,
+                            PatternLimitDimension::Vertices,
+                        )?;
+                        body.variables.push(name);
+                        body.captures.push(name);
+                    }
+                }
+            }
+            Ok::<_, GraphPatternTextError>((body, path, edges, nested))
         })();
+        self.outer_anonymous.truncate(anonymous_at);
         self.read_row_bindings = row_bindings;
-        let (body, path, edges) = match parsed {
+        let (body, path, edges, nested) = match parsed {
             Ok(parsed) => parsed,
             Err(error) => {
+                self.syntax.scopes.truncate(scopes_at);
                 self.restore_pattern(outer);
                 return Err(error);
             }
@@ -1720,6 +1794,7 @@ impl<'a> Parser<'a> {
         self.syntax.scopes.push(ScopeSyntax {
             kind,
             body,
+            nested,
             element: None,
         });
         Ok(())

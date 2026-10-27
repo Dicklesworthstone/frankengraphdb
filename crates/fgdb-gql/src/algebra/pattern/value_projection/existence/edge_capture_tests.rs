@@ -214,7 +214,7 @@ fn local_edges_do_not_silently_rebind_outer_names_or_export_from_probes() {
             GraphMatchClause::required(&inner),
         ] {
             let result = outer.prepare_values_with_clauses(
-                &[clause],
+                std::slice::from_ref(&clause),
                 &[GraphColumn::vertex("a", "a")],
                 0,
                 Some(0),
@@ -224,7 +224,7 @@ fn local_edges_do_not_silently_rebind_outer_names_or_export_from_probes() {
                 assert!(
                     outer
                         .prepare_values_with_clauses(
-                            &[clause],
+                            std::slice::from_ref(&clause),
                             &[GraphColumn::edge_property("p", name, P)],
                             0,
                             None
