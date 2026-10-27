@@ -656,6 +656,217 @@ fn degree_bits(result: &FnxResult) -> BTreeMap<VId, u64> {
         .collect()
 }
 
+#[test]
+fn load_centrality_matches_pinned_fnx_for_every_small_simple_graph() {
+    let vertices = [u128::MAX, 0, 1 << 100, 29, 101];
+    let mut cases = 0;
+    for n in 0..=5 {
+        let pairs: Vec<_> = (0..n)
+            .flat_map(|a| ((a + 1)..n).map(move |b| (a, b)))
+            .collect();
+        for mask in 0usize..(1 << pairs.len()) {
+            let edges: Vec<_> = pairs
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| mask & (1 << bit) != 0)
+                .map(|(_, &(a, b))| (vertices[a], vertices[b]))
+                .collect();
+            let graph = view(&vertices[..n], &edges, SelfLoopPolicy::Keep);
+            let oracle = fnx_algorithms::load_centrality(&copied_graph(&graph));
+            let expected: BTreeMap<_, _> = oracle
+                .scores
+                .iter()
+                .map(|score| {
+                    (
+                        VId(u128::from_str_radix(&score.node, 16).unwrap()),
+                        score.score.to_bits(),
+                    )
+                })
+                .collect();
+            let actual = run("load_centrality", &graph);
+            assert_eq!(degree_bits(&actual), expected, "n={n} mask={mask}");
+            assert_eq!(
+                actual.certificate.execution_kernel,
+                "fgdb-prism/newman-load-csr-v1"
+            );
+            assert_eq!(
+                actual.certificate.kernel_workspace_bytes,
+                n * (3 * size_of::<usize>() + 2 * size_of::<f64>())
+            );
+            // Permute input storage while preserving every edge identity.
+            // Reassigning EIds would correctly change the evidence binding.
+            let mut reversed: Vec<_> = edges
+                .iter()
+                .enumerate()
+                .map(|(eid, &(source, target))| ProjectionEdge {
+                    eid: EId(eid as u128 + 1),
+                    source: VId(source),
+                    target: VId(target),
+                    weight: 1.0,
+                })
+                .collect();
+            reversed.reverse();
+            let mut permuted: Vec<_> = vertices[..n].iter().copied().map(VId).collect();
+            permuted.reverse();
+            let reordered = SnapshotGraphView::build(
+                graph.binding(),
+                &permuted,
+                &reversed,
+                graph.spec(),
+                ProjectionLimits {
+                    max_vertices: n,
+                    max_input_edges: reversed.len(),
+                    max_adjacency_entries: reversed.len() * 2,
+                    max_workspace_bytes: 1 << 24,
+                },
+            )
+            .unwrap();
+            assert_eq!(run("load_centrality", &reordered), actual);
+            cases += 1;
+        }
+    }
+    assert_eq!(cases, 1100);
+    assert_values(
+        "load_centrality",
+        &path(),
+        &[(40, 0.0), (10, 2.0 / 3.0), (30, 2.0 / 3.0), (20, 0.0)],
+    );
+    assert_values(
+        "load_centrality",
+        &view(
+            &[0, 1, 2, 3],
+            &[(0, 1), (0, 2), (1, 3), (2, 3)],
+            SelfLoopPolicy::Keep,
+        ),
+        &[
+            (0, 1.0 / 6.0),
+            (1, 1.0 / 6.0),
+            (2, 1.0 / 6.0),
+            (3, 1.0 / 6.0),
+        ],
+    );
+    // Three shortest paths reach 4 from 0: two through 3 and one through 5.
+    // Newman splits flow 1/2,1/2; Brandes assigns the sigma ratios 2/3,1/3.
+    let graph = view(
+        &[0, 1, 2, 3, 4, 5],
+        &[(0, 1), (0, 2), (1, 3), (2, 3), (3, 4), (2, 5), (5, 4)],
+        SelfLoopPolicy::Keep,
+    );
+    let oracle = fnx_algorithms::load_centrality(&copied_graph(&graph));
+    let expected: BTreeMap<_, _> = oracle
+        .scores
+        .iter()
+        .map(|score| {
+            (
+                VId(u128::from_str_radix(&score.node, 16).unwrap()),
+                score.score.to_bits(),
+            )
+        })
+        .collect();
+    assert_eq!(degree_bits(&run("load_centrality", &graph)), expected);
+    assert_ne!(
+        degree_bits(&run("load_centrality", &graph)),
+        degree_bits(&run("betweenness_centrality", &graph))
+    );
+}
+
+#[test]
+fn seeded_load_graphs_keep_pinned_bits_across_the_upstream_parallel_threshold() {
+    let mut seed = 0x10ad_cafe_7791_2903u64;
+    for n in [8, 17, 33, 501] {
+        let vertices: Vec<_> = (0..n).map(|i| (1u128 << 100) + i as u128 * 31).collect();
+        // The last case contains a nontrivial component and 468 isolates and
+        // crosses FNX's >=500-source parallel reduction branch. It must still
+        // reduce sources in exactly the registered canonical order.
+        let active = n.min(33);
+        let mut edges = Vec::new();
+        for a in 0..active {
+            for b in (a + 1)..active {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                if seed >> 61 == 0 {
+                    edges.push((vertices[a], vertices[b]));
+                }
+            }
+        }
+        let graph = view(&vertices, &edges, SelfLoopPolicy::Keep);
+        let oracle = fnx_algorithms::load_centrality(&copied_graph(&graph));
+        let expected: BTreeMap<_, _> = oracle
+            .scores
+            .iter()
+            .map(|score| {
+                (
+                    VId(u128::from_str_radix(&score.node, 16).unwrap()),
+                    score.score.to_bits(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            degree_bits(&run("load_centrality", &graph)),
+            expected,
+            "n={n}"
+        );
+    }
+}
+
+#[test]
+fn load_centrality_admission_and_every_live_stop_are_preserved() {
+    let graph = path();
+    let procedure = call("load_centrality");
+    let mut meter = NativeControl::default();
+    let result = procedure
+        .execute(&graph, limits(1 << 20), &mut meter)
+        .unwrap();
+    assert!(meter.units <= result.certificate.estimated_work);
+    for stop in (1..=meter.units)
+        .map(NativeStop::Work)
+        .chain((1..=meter.polls.len()).map(NativeStop::Poll))
+    {
+        let mut control = NativeControl {
+            stop: Some(stop),
+            ..NativeControl::default()
+        };
+        assert!(
+            matches!(procedure.execute(&graph, limits(1 << 20), &mut control),
+            Err(FnxExecutionError::Cancelled(actual)) if actual == stop)
+        );
+        assert!(control.stopped);
+    }
+    let exact = result.certificate.estimated_work;
+    assert_eq!(
+        procedure
+            .execute(&graph, limits(exact), &mut NativeControl::default())
+            .unwrap(),
+        result
+    );
+    assert!(matches!(
+        procedure.execute(&graph, limits(exact - 1), &mut NativeControl::default()),
+        Err(FnxExecutionError::LimitExceeded {
+            resource: "estimated work",
+            ..
+        })
+    ));
+    assert!(matches!(
+        procedure.execute(
+            &view(&[1], &[(1, 1)], SelfLoopPolicy::Keep),
+            limits(1 << 20),
+            &mut NativeControl::default()
+        ),
+        Err(FnxExecutionError::SelfLoopRefused)
+    ));
+    for direction in [Directedness::Directed, Directedness::Reversed] {
+        assert!(matches!(
+            procedure.execute(
+                &view_direction(&[1], &[], SelfLoopPolicy::Keep, direction),
+                limits(1 << 20),
+                &mut NativeControl::default()
+            ),
+            Err(FnxExecutionError::GraphKind {
+                required: FnxGraphKind::Undirected
+            })
+        ));
+    }
+}
+
 fn core_values(result: &FnxResult) -> BTreeMap<VId, u64> {
     result
         .rows

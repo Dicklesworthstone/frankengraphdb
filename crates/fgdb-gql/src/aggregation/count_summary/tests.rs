@@ -549,10 +549,128 @@ fn exact_metadata_keeps_the_native_finalizer_and_has_cardinality_independent_wor
 }
 
 #[test]
+fn computed_having_aliases_keep_hidden_summaries_and_full_width_counts() {
+    let policy = GqlQueryPolicy::new(1, 10, 100_000, 100_000);
+    for text in [
+        "MATCH (n) RETURN COUNT(*) + 1 AS n HAVING n > COUNT(*)",
+        "MATCH (n) RETURN COUNT(*) + 1 AS n, COUNT(*) AS raw HAVING n > raw",
+    ] {
+        let prepared = query(text);
+        for count in [0, 1, u64::MAX] {
+            let result = run_metadata::<false>(&prepared, count, policy, None)
+                .0
+                .unwrap();
+            assert_eq!(result.value.len(), 1, "{text}, count {count}");
+            assert_eq!(
+                result.value[0].values()[0].as_integer(),
+                Some(i128::from(count) + 1)
+            );
+            if result.value[0].values().len() == 2 {
+                assert_eq!(result.value[0].values()[1].as_count(), Some(count));
+            }
+        }
+    }
+    let prepared = query("MATCH (n) RETURN COUNT(*) + 1 AS n HAVING n > 2");
+    for (count, expected) in [(0, None), (1, None), (2, Some(3))] {
+        let result = run_metadata::<false>(&prepared, count, policy, None)
+            .0
+            .unwrap();
+        assert_eq!(result.value.len(), usize::from(expected.is_some()));
+        assert_eq!(
+            result
+                .value
+                .first()
+                .and_then(|row| row.values()[0].as_integer()),
+            expected
+        );
+    }
+    let maintained = prepared.incremental_source_definition().unwrap();
+    let source = query("MATCH (n) RETURN COUNT(*) AS c");
+    for count in [0, 1, 2, u64::MAX] {
+        let row = source
+            .incremental_row(Vec::new(), vec![GraphAggregateValue::Count(count)])
+            .unwrap();
+        assert_eq!(
+            maintained
+                .evaluate_incremental_having(&row, &mut |_| Ok::<_, ()>(()))
+                .unwrap(),
+            Some(count > 1),
+        );
+    }
+}
+
+#[test]
+fn computed_having_errors_survive_decisive_booleans_and_empty_pages() {
+    let policy = GqlQueryPolicy::new(1, 10, 100_000, 100_000);
+    for condition in ["TRUE OR bad > 0", "FALSE AND bad > 0", "bad IS NULL"] {
+        let text = format!(
+            "MATCH (n) RETURN COUNT(*) / (COUNT(*) - COUNT(*)) AS bad HAVING {condition} LIMIT 0"
+        );
+        let prepared = query(&text);
+        assert!(
+            matches!(
+                run_metadata::<false>(&prepared, 7, policy, None).0,
+                Err(GqlQueryError::Source(
+                    GraphAggregateError::OutputExpression {
+                        column: 0,
+                        error: crate::GraphIntegerError {
+                            kind: crate::GraphIntegerErrorKind::DivisionByZero,
+                            ..
+                        },
+                    }
+                ))
+            ),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn computed_having_checks_input_columns_and_refuses_unowned_element_reads() {
+    use crate::{
+        GraphElementKey, GraphHavingExpression, GraphHavingOp, GraphHavingOperand, GraphSetValue,
+    };
+    let expression = |value| {
+        GraphHavingExpression::prepare(&[GraphHavingOp::IsNull {
+            operand: GraphHavingOperand::Expression {
+                value: std::sync::Arc::new(value),
+                column: 0,
+            },
+            is_null: false,
+        }])
+        .unwrap()
+    };
+    assert!(matches!(
+        query("MATCH (n) RETURN COUNT(*) AS c")
+            .with_having_expression(&expression(GraphSetValue::Column(99))),
+        Err(crate::GraphHavingError::InvalidExpression {
+            column: 0,
+            error: crate::GraphSetProjectionError::UnknownInput { input: 99, .. },
+        })
+    ));
+    assert!(
+        query("MATCH (n) RETURN COUNT(*) AS c")
+            .with_having_expression(&expression(GraphSetValue::Column(0)))
+            .is_ok()
+    );
+    let value = GraphSetValue::MapGet {
+        map: Box::new(GraphSetValue::Column(0)),
+        key: "p".into(),
+        property: GraphElementKey::Property(PropertyKeyId(1)),
+    };
+    assert!(matches!(
+        query("MATCH (n) RETURN n, COUNT(*) AS c GROUP BY n")
+            .with_having_expression(&expression(value)),
+        Err(crate::GraphHavingError::ExpressionElementRead { column: 0 })
+    ));
+}
+
+#[test]
 fn exact_metadata_checks_every_budget_and_cancellation_boundary() {
     for text in [
         "MATCH (n) RETURN COUNT(*) AS n",
         "MATCH (n:L) RETURN COUNT(*) AS n",
+        "MATCH (n:L) RETURN COUNT(*) + 1 AS n HAVING n > 2 ORDER BY n DESC LIMIT 1",
         "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n, COUNT(*) AS m",
         "MATCH (n) RETURN COUNT(*) AS n SKIP 1 LIMIT 0",
     ] {

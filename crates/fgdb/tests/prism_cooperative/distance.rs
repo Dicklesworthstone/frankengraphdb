@@ -179,8 +179,9 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
         let db = small_database(&contexts.commit(), 3, true).await;
         let opt = options(Directedness::Undirected);
         let graph = projection(&db, &cx, opt).await;
-        for harmonic in [false, true] {
-            let call = call(harmonic);
+        for call in [call(false), call(true), FnxCallSpec::bind(
+            "CALL fnx.load_centrality() YIELD score AS rank,vertex AS id", &FnxParameters::new(),
+        ).unwrap()] {
             let expected = call.execute_sealed(&cx, &graph, opt.execution_limits, memory()).unwrap();
             let columns = call.outputs().len() * size_of::<String>()
                 + call.outputs().iter().map(|column| column.name.len()).sum::<usize>();
@@ -219,6 +220,93 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
                         FnxExecutionError::LimitExceeded { resource: actual, .. })) if actual == resource));
                 }
             }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn compressed_load_preserves_history_flow_bits_quanta_and_every_live_cancellation() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let (mut db, old) = database(&contexts.commit()).await;
+        let mut change = WriteBatch::new(RelationId(1));
+        change.create_vertex(VId(3), vec![LabelId(1)], vec![]);
+        change.add_edge(EId(7), VId(2), VId(0), vec![(PropertyKeyId(1), CanonicalScalar::Int(-4))]);
+        db.write(&contexts.commit(), change).await.unwrap();
+        let current = db.frontier().unwrap();
+        let call = FnxCallSpec::bind("CALL fnx.load_centrality() YIELD vertex,score", &FnxParameters::new()).unwrap();
+        assert!(call.supports_cooperative_sealed_execution());
+        for at in [old, current] {
+            for reduction in [ParallelEdgePolicy::Sum, ParallelEdgePolicy::Minimum,
+                ParallelEdgePolicy::Maximum, ParallelEdgePolicy::CollapseUnit] {
+                let mut opt = options(Directedness::Undirected);
+                opt.as_of = Some(at);
+                opt.projection.self_loops = SelfLoopPolicy::Drop;
+                opt.projection.parallel_edges = reduction;
+                let graph = projection(&db, &cx, opt).await;
+                assert!(graph.scan_incidence_bound() > graph.adjacency_entry_count());
+                let expected = call.execute_sealed(&cx, &graph, opt.execution_limits, memory()).unwrap();
+                let native = db.execute_fnx(&cx, &call, opt).unwrap().analytics;
+                assert_eq!(expected.rows, native.rows);
+                assert_eq!(expected.certificate.result_digest, native.certificate.result_digest);
+                assert_eq!(expected.certificate.adapter, AdapterPath::CompressedCursor);
+                assert_eq!(expected.certificate.execution_kernel, "fgdb-prism/sealed-newman-load-v1");
+                assert_eq!(expected.certificate.kernel_workspace_bytes,
+                    graph.node_count() * (3 * size_of::<usize>() + 2 * size_of::<f64>()));
+                if at == current {
+                    assert!(expected.rows.contains(&vec![FnxValue::Vertex(VId(3)), FnxValue::Score(0.0)]));
+                }
+                for q in [1, 7, 257] {
+                    let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                    let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                    let (actual, pending) = drive(call.execute_sealed_cooperative(
+                        &controlled, &graph, opt.execution_limits, memory(), quantum(q), yield_now,
+                    ), &probe, q);
+                    let actual = actual.unwrap();
+                    compare_execution(&actual, &expected);
+                    assert_eq!(actual.certificate.execution_kernel, "fgdb-prism/sealed-newman-load-cooperative-v1");
+                    if q == 1 { assert!(pending > 700); }
+                }
+                assert_eq!(db.execute_fnx_sealed(&cx, &call, opt, memory(), SealedLimits::default()).await.unwrap().analytics, expected);
+            }
+        }
+        // Sweep a small real compressed graph, including scalar-only phases,
+        // source cursor pulls, normalization and result conversion.
+        let small = small_database(&contexts.commit(), 4, true).await;
+        let opt = options(Directedness::Undirected);
+        let graph = projection(&small, &cx, opt).await;
+        let seen = Cell::new(0);
+        call.execute_sealed_with_checkpoint(&cx, &graph, opt.execution_limits, memory(), || {
+            seen.set(seen.get() + 1); Ok(())
+        }).unwrap();
+        for stop in 1..=seen.get() {
+            let at = Cell::new(0);
+            let error = call.execute_sealed_with_checkpoint(&cx, &graph, opt.execution_limits, memory(), || {
+                at.set(at.get() + 1);
+                if at.get() == stop { Err(SealedProjectionError::UnknownOrdinal(stop)) } else { Ok(()) }
+            }).unwrap_err();
+            assert!(matches!(error, FnxSealedExecutionError::Source(SealedProjectionError::UnknownOrdinal(actual)) if actual == stop));
+            assert_eq!(at.get(), stop);
+        }
+        for n in [0, 1, 2] {
+            let empty = small_database(&contexts.commit(), n, false).await;
+            let graph = projection(&empty, &cx, opt).await;
+            let expected = call.execute_sealed(&cx, &graph, opt.execution_limits, memory()).unwrap();
+            assert_eq!(expected.rows.len(), n);
+            assert!(expected.rows.iter().all(|row| row[1] == FnxValue::Score(0.0)));
+            compare_execution(&call.execute_sealed_cooperative(&cx, &graph, opt.execution_limits,
+                memory(), quantum(1), yield_now).await.unwrap(), &expected);
+        }
+        let kept = projection(&db, &cx, opt).await;
+        assert!(matches!(call.execute_sealed(&cx, &kept, opt.execution_limits, memory()),
+            Err(FnxSealedExecutionError::Execution(FnxExecutionError::SelfLoopRefused))));
+        for direction in [Directedness::Directed, Directedness::Reversed] {
+            assert!(matches!(call.validate_sealed_projection(direction), Err(FnxSealedExecutionError::Execution(
+                FnxExecutionError::GraphKind { required: FnxGraphKind::Undirected }))));
         }
         assert_eq!(contexts.outstanding_obligations(), 0);
     });
@@ -511,8 +599,15 @@ fn compressed_distance_centralities_cancel_or_drop_at_every_checkpoint_and_suspe
         let opt = options(Directedness::Undirected);
         let graph = projection(&db, &cx, opt).await;
         let root_before = db.read_session().unwrap().partition_root();
-        for harmonic in [false, true] {
-            let call = call(harmonic);
+        for call in [
+            call(false),
+            call(true),
+            FnxCallSpec::bind(
+                "CALL fnx.load_centrality() YIELD score AS rank,vertex AS id",
+                &FnxParameters::new(),
+            )
+            .unwrap(),
+        ] {
             let probe = Arc::new(SimulationCheckpointProbe::new(None));
             let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
             let (expected, yields) = drive(

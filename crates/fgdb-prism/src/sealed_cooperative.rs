@@ -118,6 +118,7 @@ impl FnxCallSpec {
                         | FoundationAlgorithm::BetweennessCentrality
                         | FoundationAlgorithm::CoreNumber
                         | FoundationAlgorithm::EigenvectorCentrality
+                        | FoundationAlgorithm::LoadCentrality
                 )
         )
     }
@@ -291,6 +292,19 @@ impl FnxCallSpec {
                     &mut control,
                 )
                 .await;
+            }
+            if matches!(
+                self.algorithm(),
+                FnxAlgorithm::Foundation(FoundationAlgorithm::LoadCentrality)
+            ) {
+                let mut control = Cooperate {
+                    cx,
+                    fuel: SealedScanBudget::new(quantum.get()),
+                    quantum,
+                    yield_now,
+                };
+                return super::load::execute_cooperative(self, graph, limits, memory, &mut control)
+                    .await;
             }
             let n = graph.node_count();
             let admission = ResultAdmission::new(self, limits, memory)?;

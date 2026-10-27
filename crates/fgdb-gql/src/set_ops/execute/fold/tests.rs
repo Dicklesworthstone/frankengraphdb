@@ -217,13 +217,18 @@ mod completed_procedures {
                 GraphSetQuantifier::All,
             )
             .unwrap();
+        assert!(matches!(
+            input.clone().with_order_by(&[]),
+            Err(crate::algebra::GraphOrderError::EmptyOrder)
+        ));
         for order in [vec![], vec![crate::algebra::GraphValueOrder::descending(1)]] {
-            for (skip, count) in [(0, 0), (0, 5), (3, 8), (298, 9)] {
-                let query = input
-                    .clone()
-                    .with_order_by(&order)
-                    .unwrap()
-                    .with_page(skip, Some(count));
+            let ordered = if order.is_empty() {
+                input.clone()
+            } else {
+                input.clone().with_order_by(&order).unwrap()
+            };
+            for (skip, count, expected_len) in [(0, 0, 0), (0, 5, 5), (3, 8, 8), (298, 9, 2)] {
+                let query = ordered.clone().with_page(skip, Some(count));
                 let expected = query
                     .execute_governed_from_source(wide(), Host::new(300, false), || Ok(()))
                     .unwrap();
@@ -232,6 +237,7 @@ mod completed_procedures {
                 let actual = query
                     .execute_governed_from_source(wide(), host, || Ok(()))
                     .unwrap();
+                assert_eq!(actual.value.len(), expected_len);
                 assert_eq!(actual.value, expected.value);
                 assert_eq!(actual.rows, expected.rows);
                 assert_eq!(

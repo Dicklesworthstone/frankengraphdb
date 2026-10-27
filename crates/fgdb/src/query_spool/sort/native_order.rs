@@ -537,77 +537,82 @@ impl PreparedNativeRead {
 #[allow(clippy::too_many_arguments)]
 // Scoped sources enter this same pipeline after the host has reserved their
 // signed physical allowance. They retain their native statistics and errors.
-pub(crate) async fn ordered_input<I, A, B>(
-    cx: &QueryCx,
+// Erase once per ordered source, so downstream Send proofs stop here rather
+// than walking every concrete source's complete pull and I/O future. Row
+// pulls retain their existing representation and allocation behavior.
+pub(crate) fn ordered_input<'q, I, A, B>(
+    cx: &'q QueryCx,
     columns: Vec<String>,
     cursor: I,
     tail: ScanSortTail,
     policy: GqlQueryPolicy,
-    scratch: &mut SpillFile<A>,
-    destination: &mut SpillFile<B>,
+    scratch: &'q mut SpillFile<A>,
+    destination: &'q mut SpillFile<B>,
     run_rows: usize,
     max_runs: usize,
     page_bytes: usize,
     max_row_bytes: usize,
     max_sort_work: u64,
-) -> Result<(NativeResultSpool, u64)>
+) -> crate::SendFuture<'q, Result<(NativeResultSpool, u64)>>
 where
-    I: SpoolInput,
-    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
-    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    I: SpoolInput + 'q,
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
 {
-    cx.with_restriction(|| cx.checkpoint())
-        .map_err(SpillError::Interrupted)?;
-    if columns.len() != tail.visible_width() {
-        return Err(SpillError::InvalidRun.into());
-    }
-    validate_order(tail.order(), tail.evaluation_width())?;
-    validate_spill_limits(run_rows, max_runs, page_bytes, max_sort_work)?;
-    let mut work = Work {
-        cx,
-        used: 0,
-        limit: max_sort_work,
-    };
-    let input = drain(
-        cx,
-        columns,
-        tail.evaluation_width(),
-        cursor,
-        destination,
-        page_bytes,
-        max_row_bytes,
-        Some(&mut work),
-    )
-    .await?;
-    // The bound terminal operator owns its comparison law. A synthesized
-    // canonical key vector can equal an explicit ASC NULLS FIRST vector;
-    // never infer language ordering from that vector or from observed rows.
-    let (sorted, used) = input
-        .sort_query_continuing(
+    Box::pin(async move {
+        cx.with_restriction(|| cx.checkpoint())
+            .map_err(SpillError::Interrupted)?;
+        if columns.len() != tail.visible_width() {
+            return Err(SpillError::InvalidRun.into());
+        }
+        validate_order(tail.order(), tail.evaluation_width())?;
+        validate_spill_limits(run_rows, max_runs, page_bytes, max_sort_work)?;
+        let mut work = Work {
             cx,
+            used: 0,
+            limit: max_sort_work,
+        };
+        let input = drain(
+            cx,
+            columns,
+            tail.evaluation_width(),
+            cursor,
             destination,
-            scratch,
-            tail.order(),
-            tail.has_explicit_order(),
-            run_rows,
-            max_runs,
             page_bytes,
-            max_sort_work,
-            work.used,
+            max_row_bytes,
+            Some(&mut work),
         )
         .await?;
-    work.used = used;
-    let result = window(
-        &sorted,
-        scratch,
-        destination,
-        &tail,
-        policy.rows,
-        page_bytes,
-        &mut work,
-    )
-    .await?;
-    Ok((result, work.used))
+        // The bound terminal operator owns its comparison law. A synthesized
+        // canonical key vector can equal an explicit ASC NULLS FIRST vector;
+        // never infer language ordering from that vector or from observed rows.
+        let (sorted, used) = input
+            .sort_query_continuing(
+                cx,
+                destination,
+                scratch,
+                tail.order(),
+                tail.has_explicit_order(),
+                run_rows,
+                max_runs,
+                page_bytes,
+                max_sort_work,
+                work.used,
+            )
+            .await?;
+        work.used = used;
+        let result = window(
+            &sorted,
+            scratch,
+            destination,
+            &tail,
+            policy.rows,
+            page_bytes,
+            &mut work,
+        )
+        .await?;
+        Ok((result, work.used))
+    })
 }
 
 trait Window: Sync {

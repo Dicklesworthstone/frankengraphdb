@@ -1297,6 +1297,7 @@ fn an_authorized_read_hosts_call_over_the_masked_projection() {
             "CALL fnx.single_source_shortest_path_length(1) YIELD vertex, distance \
              RETURN vertex, distance ORDER BY vertex",
             "CALL fnx.degree_centrality() YIELD vertex, score RETURN vertex, score ORDER BY vertex",
+            "CALL fnx.load_centrality() YIELD vertex, score RETURN vertex, score ORDER BY vertex",
             "CALL fnx.connected_components() YIELD vertex, component \
              RETURN vertex, component ORDER BY vertex",
             "CALL fnx.single_source_shortest_path_length(1) YIELD vertex, distance \

@@ -236,7 +236,7 @@ impl PreparedNativeRead {
         max_row_bytes: usize,
         max_input_rows: u64,
         max_work_units: u64,
-    ) -> impl Future<Output = VisitResult<NativeSpoolDifference<'q, B>>> + Send + 's + use<'q, 's, V, A, B>
+    ) -> crate::SendFuture<'s, VisitResult<NativeSpoolDifference<'q, B>>>
     where
         'q: 's,
         V: Vfs + Clone,
@@ -247,7 +247,7 @@ impl PreparedNativeRead {
             .read_session()
             .map_err(QueryError::Read)
             .and_then(|view| open(self, &view, cx, params, before, after));
-        execute(
+        Box::pin(execute(
             opened,
             cx,
             policy,
@@ -259,7 +259,7 @@ impl PreparedNativeRead {
             max_row_bytes,
             max_input_rows,
             max_work_units,
-        )
+        ))
     }
 
     /// Compare cuts retained by this immutable view, never a newer writer pin.
@@ -283,13 +283,13 @@ impl PreparedNativeRead {
         max_row_bytes: usize,
         max_input_rows: u64,
         max_work_units: u64,
-    ) -> impl Future<Output = VisitResult<NativeSpoolDifference<'q, B>>> + Send + 's + use<'q, 's, A, B>
+    ) -> crate::SendFuture<'s, VisitResult<NativeSpoolDifference<'q, B>>>
     where
         'q: 's,
         A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 's,
         B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
     {
-        execute(
+        Box::pin(execute(
             open(self, view, cx, params, before, after),
             cx,
             policy,
@@ -301,7 +301,7 @@ impl PreparedNativeRead {
             max_row_bytes,
             max_input_rows,
             max_work_units,
-        )
+        ))
     }
 }
 

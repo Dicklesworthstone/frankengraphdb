@@ -47,6 +47,7 @@ impl<V: Vfs + Clone> AsyncEdgeJoinSource for Source<'_, '_, V> {
                     })
                 },
             ))
+            .erase_send()
             .await
             .map_err(|error| {
                 EdgeExpansionSourceError::Read(match error {
