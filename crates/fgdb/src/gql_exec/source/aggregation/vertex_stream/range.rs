@@ -9,7 +9,10 @@
 //! It is not a byte-memory guarantee for the pinned database generation.
 
 use super::{IndexMap, index_successor, numeric};
-use crate::gql_exec::source::{EqualityCandidates, History, PropertyEqualityIndex, PropertyRange};
+use crate::gql_exec::source::{
+    EqualityCandidates, History, PropertyEqualityIndex, PropertyRange, SourceEvent,
+    VertexHistoryScanCursor,
+};
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_gql::scan_stream::SourceStep;
 use fgdb_gql::stream::VertexScanEvent;
@@ -26,7 +29,12 @@ pub(super) struct Head {
 enum Frontier {
     Pending,
     Buckets(Vec<Head>),
-    Histories,
+    Histories {
+        scan: VertexHistoryScanCursor,
+        // Membership checking can refuse after the history spine has advanced.
+        // Retain that identity until the complete source step is admitted.
+        pending: Option<VId>,
+    },
 }
 
 pub(super) struct RangeCandidates {
@@ -48,6 +56,13 @@ impl RangeCandidates {
 
     pub(super) fn accepts(&self, value: &CanonicalScalar) -> bool {
         self.bounds.accepts(value)
+    }
+
+    pub(super) fn history(&self, vid: VId) -> Option<&History> {
+        match &self.frontier {
+            Frontier::Histories { scan, .. } => scan.history(vid),
+            Frontier::Pending | Frontier::Buckets(_) => None,
+        }
     }
 
     pub(super) fn next<C>(
@@ -95,7 +110,10 @@ impl RangeCandidates {
                 // empty lookup stays initialized, including contradictory bounds.
                 self.frontier = Frontier::Buckets(heads);
             } else {
-                self.frontier = Frontier::Histories;
+                self.frontier = Frontier::Histories {
+                    scan: VertexHistoryScanCursor::default(),
+                    pending: None,
+                };
             }
         }
         match &mut self.frontier {
@@ -109,9 +127,14 @@ impl RangeCandidates {
                 }
                 Ok(SourceStep::Exhausted)
             }
-            Frontier::Histories => {
-                history_step(&index.histories, patches, &self.bounds, after, control)
-            }
+            Frontier::Histories { scan, pending } => history_step(
+                scan,
+                pending,
+                &index.histories,
+                patches,
+                &self.bounds,
+                control,
+            ),
             Frontier::Pending => unreachable!("frontier selected above"),
         }
     }
@@ -179,30 +202,35 @@ where
 /// populate the scalar buckets. It must not choose the winner or apply as_of:
 /// future, retired and restated candidates still have one native admission.
 fn history_step<C>(
+    scan: &mut VertexHistoryScanCursor,
+    pending: &mut Option<VId>,
     histories: &IndexMap<VId, History>,
     patches: &[VertexPatchRows],
     bounds: &numeric::NumericBounds,
-    after: Option<VId>,
     control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
 ) -> Result<SourceStep<VId>, C> {
-    let mut node = histories.0.as_deref();
-    let mut successor = None;
-    while let Some(current) = node {
-        control(VertexScanEvent::Work)?;
-        if after.is_none_or(|after| current.key > after) {
-            successor = Some(current);
-            node = current.left.0.as_deref();
-        } else {
-            node = current.right.0.as_deref();
-        }
+    if pending.is_none() {
+        *pending = scan.next(histories, &mut |event| {
+            control(match event {
+                SourceEvent::Work | SourceEvent::SnapshotRecord => VertexScanEvent::Work,
+                SourceEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
+            })
+        })?;
     }
-    let Some(node) = successor else {
+    let Some(vid) = *pending else {
         return Ok(SourceStep::Exhausted);
     };
-    Ok(if history_matches(&node.value, patches, bounds, control)? {
-        SourceStep::Item(node.key)
+    let history = scan
+        .history(vid)
+        .expect("pending identity retains its history");
+    let matches = history_matches(history, patches, bounds, control)?;
+    // No fallible operation follows this publication. A refused predicate
+    // leaves pending set, so a retry cannot skip the unadmitted identity.
+    *pending = None;
+    Ok(if matches {
+        SourceStep::Item(vid)
     } else {
-        SourceStep::Skipped(node.key)
+        SourceStep::Skipped(vid)
     })
 }
 

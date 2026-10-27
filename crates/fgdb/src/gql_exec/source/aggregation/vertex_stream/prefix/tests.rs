@@ -36,6 +36,12 @@ fn drain<C>(
         match source.next(index, *after, control)? {
             SourceStep::Item(vid) => {
                 assert!(after.is_none_or(|previous| previous < vid));
+                assert_eq!(
+                    source.history(vid).is_some(),
+                    matches!(source.frontier, Frontier::Histories(_)),
+                    "the fallback reuses its current history without another root search",
+                );
+                assert!(source.history(VId(vid.0 ^ 1)).is_none());
                 *after = Some(vid);
                 output.push(vid);
             }
@@ -86,7 +92,14 @@ fn every_prefix_refusal_preserves_the_full_ordered_retry_at_the_capacity_boundar
         })
         .unwrap();
         assert_eq!(full, expected);
-        assert_eq!(scratch, if indexed { distinct } else { 0 });
+        assert_eq!(
+            scratch,
+            if indexed {
+                distinct
+            } else {
+                usize::from(index.histories.height())
+            },
+        );
         assert_eq!(matches!(source.frontier, Frontier::Buckets(_)), indexed);
         for stop in 1..=total {
             let mut source = PrefixCandidates::new(KEY, "Ad").unwrap();
@@ -105,6 +118,52 @@ fn every_prefix_refusal_preserves_the_full_ordered_retry_at_the_capacity_boundar
             })
             .unwrap();
             assert_eq!(output, expected, "distinct={distinct}, stop={stop}");
+        }
+    }
+}
+
+#[test]
+fn wide_prefix_traversal_is_linear_against_repeated_successor_descent() {
+    for count in [128, 4096, 16_384_usize] {
+        let rows: Vec<_> = (0..count)
+            .map(|at| row(VId((at as u128) << 64), 1, text(&format!("Ad{at}"))))
+            .collect();
+        let expected: Vec<_> = rows.iter().map(|row| row.vid).collect();
+        let patches: Vec<_> = rows
+            .chunks(fgdb_strata::vertex::MAX_PATCH_ROWS as usize)
+            .map(|chunk| patch(chunk.to_vec()))
+            .collect();
+        let index = PropertyEqualityIndex::build(&patches);
+        let mut source = PrefixCandidates::new(KEY, "Ad").unwrap();
+        let mut output = Vec::new();
+        let (mut work, mut scratch) = (0_usize, 0_usize);
+        drain(&mut source, &index, &mut None, &mut output, &mut |event| {
+            match event {
+                VertexScanEvent::Work => work += 1,
+                VertexScanEvent::ScratchEntry => scratch += 1,
+            }
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        assert_eq!(output, expected);
+        assert_eq!(scratch, usize::from(index.histories.height()));
+        assert!(work <= 3 * count + 512, "count={count}, work={work}");
+        let mut old_rows = Vec::new();
+        let mut old_work = 0_usize;
+        let mut after = None;
+        while let Some(vid) = index_successor(&index.histories, after, &mut |event| {
+            assert!(matches!(event, VertexScanEvent::Work));
+            old_work += 1;
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+        {
+            old_rows.push(vid);
+            after = Some(vid);
+        }
+        assert_eq!(old_rows, expected);
+        if count >= 4096 {
+            assert!(old_work > 3 * work, "old={old_work}, linear={work}");
         }
     }
 }

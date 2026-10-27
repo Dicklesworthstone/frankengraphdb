@@ -162,7 +162,7 @@ fn each_mixed_or_collated_control_refusal_keeps_a_complete_retry() {
         .unwrap();
         assert_eq!(output, expected);
         assert_eq!(
-            matches!(complete.frontier, Frontier::Histories),
+            matches!(complete.frontier, Frontier::Histories(_)),
             alternate_binding
         );
         assert!(!complete.accepts(&CanonicalScalar::Int(0)));

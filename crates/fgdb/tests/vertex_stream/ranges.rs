@@ -222,7 +222,10 @@ fn range_streams_keep_pinned_winners_and_candidate_budgets_across_both_routes() 
                         expected,
                     );
                     if broad {
-                        assert_eq!(cursor.evaluator_stats().scratch_entries, 0);
+                        assert!(
+                            (1..=47).contains(&cursor.evaluator_stats().scratch_entries),
+                            "the broad route retains only its governed AVL spine",
+                        );
                     }
                 }
             }
@@ -233,18 +236,16 @@ fn range_streams_keep_pinned_winners_and_candidate_budgets_across_both_routes() 
             assert_eq!(limited.next().unwrap().unwrap(), VId(0));
             assert_eq!(limited.row_stats().snapshot_records, 1);
             assert!(limited.next().is_none());
-            if !broad {
-                let mut refused = db
-                    .stream_graph_vertices_governed(&cx, &one, GqlQueryPolicy::new(1, 1, 10_000, 0))
-                    .unwrap();
-                assert!(matches!(
-                    refused.next(),
-                    Some(Err(GqlQueryError::Evaluator(_)))
-                ));
-                assert_eq!(refused.row_stats().snapshot_records, 0);
-                assert_eq!(refused.state(), VertexScanState::Failed);
-                assert!(refused.next().is_none());
-            }
+            let mut refused = db
+                .stream_graph_vertices_governed(&cx, &one, GqlQueryPolicy::new(1, 1, 10_000, 0))
+                .unwrap();
+            assert!(matches!(
+                refused.next(),
+                Some(Err(GqlQueryError::Evaluator(_)))
+            ));
+            assert_eq!(refused.row_stats().snapshot_records, 0);
+            assert_eq!(refused.state(), VertexScanState::Failed);
+            assert!(refused.next().is_none());
         }
         let zero = range(&constraints, u64::MAX, Some(0));
         let mut empty = db

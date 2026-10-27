@@ -368,6 +368,8 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
             let history = match &self.candidates {
                 RootCandidates::Histories(scan) => scan.history(vid),
                 RootCandidates::Membership(membership) => membership.history(vid),
+                RootCandidates::Range(range) => range.history(vid),
+                RootCandidates::Prefix(prefix) => prefix.history(vid),
                 _ => None,
             };
             snapshot

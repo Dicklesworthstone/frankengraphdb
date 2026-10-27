@@ -5,7 +5,10 @@
 //! remain the complete fallback; scoped admission retains the selected prefix.
 
 use super::{EqualityKey, index_successor, range};
-use crate::gql_exec::source::{PropertyEqualityIndex, PropertyRange, prefix_range};
+use crate::gql_exec::source::{
+    History, PropertyEqualityIndex, PropertyRange, SourceEvent, VertexHistoryScanCursor,
+    prefix_range,
+};
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_gql::scan_stream::SourceStep;
 use fgdb_gql::stream::VertexScanEvent;
@@ -15,7 +18,7 @@ use std::sync::Arc;
 enum Frontier {
     Pending,
     Buckets(Vec<range::Head>),
-    Histories,
+    Histories(VertexHistoryScanCursor),
 }
 
 pub(super) struct PrefixCandidates {
@@ -45,6 +48,13 @@ impl PrefixCandidates {
             // raise an arithmetic exception. Label admission precedes this
             // private recheck in scoped sources.
             _ => false,
+        }
+    }
+
+    pub(super) fn history(&self, vid: VId) -> Option<&History> {
+        match &self.frontier {
+            Frontier::Histories(scan) => scan.history(vid),
+            Frontier::Pending | Frontier::Buckets(_) => None,
         }
     }
 
@@ -86,7 +96,7 @@ impl PrefixCandidates {
                 // empty range. Refused setup can be retried without lost roots.
                 self.frontier = Frontier::Buckets(heads);
             } else {
-                self.frontier = Frontier::Histories;
+                self.frontier = Frontier::Histories(VertexHistoryScanCursor::default());
             }
         }
         let next = match &mut self.frontier {
@@ -100,7 +110,12 @@ impl PrefixCandidates {
                 }
                 None
             }
-            Frontier::Histories => index_successor(&index.histories, after, control)?,
+            Frontier::Histories(scan) => scan.next(&index.histories, &mut |event| {
+                control(match event {
+                    SourceEvent::Work | SourceEvent::SnapshotRecord => VertexScanEvent::Work,
+                    SourceEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
+                })
+            })?,
             Frontier::Pending => unreachable!("frontier selected above"),
         };
         Ok(next.map_or(SourceStep::Exhausted, SourceStep::Item))
