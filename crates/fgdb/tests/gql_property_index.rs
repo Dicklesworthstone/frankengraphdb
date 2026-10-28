@@ -491,6 +491,205 @@ async fn graph_of(db: &mut Database<MemVfs>, cx: &fgdb_types::CommitCx, total: u
     seq
 }
 
+/// Each root needs its own candidates. A shared table narrowed to just `a`
+/// loses `b`; concatenating postings instead of unioning them duplicates rows.
+/// The Boolean twin retains whole-source admission, while the storage oracle
+/// computes the product without either query evaluator.
+#[test]
+fn independent_vertex_roots_union_indexed_domains_through_history() {
+    let ((), report) = run_async_under_lab(0xb01_0060, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(R);
+        for id in 0..256 {
+            let value = match id {
+                1 => CanonicalScalar::Int(1),
+                2 => CanonicalScalar::Int(2),
+                3 => CanonicalScalar::Float(fgdb_types::CanonicalF64::new(1.0)),
+                _ => CanonicalScalar::Int(100 + id as i64),
+            };
+            batch.create_vertex(VId(id), vec![L], vec![(P, value)]);
+        }
+        let old = db.write(&commit, batch).await.unwrap();
+        let pinned = db.read_session().unwrap();
+        let symbols = |kind: GraphSymbolKind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+            (GraphSymbolKind::Label, "Tag") => Some(GraphSymbol::Label(L)),
+            _ => None,
+        };
+        let prepare = |text| {
+            PreparedGraphText::prepare(text, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap()
+        };
+        let indexed = prepare("MATCH (a:Tag), (b:Tag) WHERE a.p=1 AND b.p=2 RETURN a,b");
+        let scan = prepare("MATCH (a:Tag), (b:Tag) WHERE NOT NOT (a.p=1 AND b.p=2) RETURN a,b");
+        let range = prepare(
+            "MATCH (a:Tag), (b:Tag) WHERE a.p>=1 AND a.p<=1 AND b.p>=2 AND b.p<=2 RETURN a,b",
+        );
+        let overlap = prepare("MATCH (a), (b) WHERE a.p=1 AND b.p=1 RETURN a,b");
+        let wide = GqlQueryPolicy::new(10_000, 10_000, 100_000_000, 10_000_000);
+        let pairs = |rows: &[fgdb_gql::algebra::GraphValueRow]| {
+            rows.iter()
+                .map(|row| {
+                    (
+                        row.get(0).unwrap().as_vertex().unwrap(),
+                        row.get(1).unwrap().as_vertex().unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = vec![(VId(1), VId(2)), (VId(3), VId(2))];
+        for query in [&indexed, &range] {
+            let result = db.execute_graph_pattern_governed(&cx, query, wide).unwrap();
+            assert_eq!(pairs(&result.value), before);
+            assert_eq!(result.rows.snapshot_records, 3);
+        }
+        let complete = db.execute_graph_pattern_governed(&cx, &scan, wide).unwrap();
+        assert_eq!(pairs(&complete.value), before);
+        assert_eq!(complete.rows.snapshot_records, 256);
+        let shared = db
+            .execute_graph_pattern_governed(&cx, &overlap, wide)
+            .unwrap();
+        assert_eq!(
+            pairs(&shared.value),
+            vec![
+                (VId(1), VId(1)),
+                (VId(1), VId(3)),
+                (VId(3), VId(1)),
+                (VId(3), VId(3))
+            ]
+        );
+        assert_eq!(
+            shared.rows.snapshot_records, 4,
+            "each root's actual reads are charged"
+        );
+        assert!(matches!(
+            db.execute_graph_pattern_governed(
+                &cx,
+                &indexed,
+                GqlQueryPolicy::new(2, 100, 100_000, 100_000)
+            ),
+            Err(fgdb_gql::GqlQueryError::Rows(error))
+                if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords
+                    && error.limit == 2 && error.observed == 3
+        ));
+        let three = prepare("MATCH (a), (b), (c) WHERE a.p=1 AND b.p=2 AND c.p=1 RETURN a,b,c");
+        let result = db
+            .execute_graph_pattern_governed(&cx, &three, wide)
+            .unwrap();
+        assert_eq!(result.rows.snapshot_records, 5);
+        assert_eq!(result.value.len(), 4);
+        assert_eq!(
+            result
+                .value
+                .iter()
+                .map(|row| row.get(2).unwrap().as_vertex().unwrap())
+                .collect::<Vec<_>>(),
+            vec![VId(1), VId(3), VId(1), VId(3)],
+        );
+        // An unbounded second root still owns the entire vertex domain.
+        let unbounded = prepare("MATCH (a), (b) WHERE a.p=1 RETURN a,b");
+        let result = db
+            .execute_graph_pattern_governed(&cx, &unbounded, wide)
+            .unwrap();
+        assert_eq!(result.rows.snapshot_records, 256);
+        assert_eq!(result.value.len(), 512);
+        assert!(pairs(&result.value).contains(&(VId(1), VId(255))));
+
+        let mut txn = db.begin(&contexts.txn()).unwrap();
+        let mut staged = WriteBatch::new(R);
+        staged.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(2)));
+        staged.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(1)));
+        staged.delete_vertex(VId(3));
+        staged.create_vertex(VId(300), vec![L], vec![(P, CanonicalScalar::Int(1))]);
+        txn.write(&mut db, staged).unwrap();
+        let after = vec![(VId(2), VId(1)), (VId(300), VId(1))];
+        for query in [&indexed, &range, &scan] {
+            let result = txn
+                .execute_graph_pattern_governed(&db, &cx, query, wide)
+                .unwrap();
+            assert_eq!(
+                pairs(&result.value),
+                after,
+                "staged candidates and visible winners"
+            );
+            assert_eq!(
+                pairs(
+                    &db.execute_graph_pattern_governed(&cx, query, wide)
+                        .unwrap()
+                        .value
+                ),
+                before,
+            );
+        }
+        let current = txn.commit(&mut db, &commit).await.unwrap();
+        for pass in 0..3 {
+            for (at, expected) in [(old, &before), (current, &after)] {
+                let vertices = db.vertices_at(at).unwrap();
+                let domain = |wanted| {
+                    vertices.iter().filter_map(move |row| {
+                        row.props
+                            .iter()
+                            .any(|(key, value)| {
+                                *key == P
+                                    && match value {
+                                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(
+                                            value,
+                                        )) => *value == wanted,
+                                        CanonicalPropertyValue::Scalar(CanonicalScalar::Float(
+                                            value,
+                                        )) => value.get() == wanted as f64,
+                                        _ => false,
+                                    }
+                            })
+                            .then_some(row.vid)
+                    })
+                };
+                let oracle: Vec<_> = domain(1)
+                    .flat_map(|a| domain(2).map(move |b| (a, b)))
+                    .collect();
+                assert_eq!(&oracle, expected);
+                for query in [&indexed, &range, &scan] {
+                    let result = db
+                        .execute_graph_pattern_governed_at(&cx, query, at, wide)
+                        .unwrap();
+                    assert_eq!(pairs(&result.value), oracle, "pass={pass} at={at:?}");
+                }
+            }
+            assert_eq!(
+                pairs(
+                    &pinned
+                        .execute_graph_pattern_governed(&cx, &indexed, wide)
+                        .unwrap()
+                        .value
+                ),
+                before,
+            );
+            match pass {
+                0 => {
+                    db.compact(&commit).await.unwrap();
+                }
+                1 => {
+                    drop(db);
+                    db = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
+                        .await
+                        .unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 fn membership_symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),

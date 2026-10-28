@@ -219,6 +219,25 @@ fn equality_operand(
     Some((key, peers))
 }
 
+/// Definition-only eligibility for an independently bound vertex domain.
+/// Keep this in step with the equality and numeric-range paths below, before
+/// the caller charges or admits any other domain of the same shared source.
+pub(super) fn can_bound(predicate: &VertexPredicate) -> bool {
+    match predicate {
+        VertexPredicate::IntegerProperty { comparison, .. } => *comparison != C::NotEqual,
+        VertexPredicate::ScalarProperty { predicate, .. } => {
+            (predicate.comparison() == C::Equal
+                && !matches!(predicate.value(), CanonicalScalar::Null))
+                || (predicate.comparison() != C::NotEqual
+                    && matches!(
+                        predicate.value(),
+                        CanonicalScalar::Int(_) | CanonicalScalar::Float(_)
+                    ))
+        }
+        _ => false,
+    }
+}
+
 enum BoundCandidates<'a> {
     Posting(super::Candidates<'a>),
     Union(BTreeSet<VId>),

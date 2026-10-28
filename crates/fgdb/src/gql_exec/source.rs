@@ -1988,6 +1988,92 @@ impl PropertyEqualityIndex {
 /// Whether property-bound single-domain scans use the maintained index.
 const PROPERTY_INDEX_SERVING: bool = true;
 
+/// Independent positive vertex roots share one source table. Admit the union
+/// of ALL roots' indexed domains, never just the first root's candidates.
+/// Every original selection remains in the GLA plan, so a row admitted for a
+/// different root cannot bind where that root's predicates reject it.
+fn bound_independent_vertices<'a, E, Row>(
+    snapshot: &'a Snapshot,
+    logical: &fgdb_gql::algebra::GlaPlan<Row>,
+    as_of: CommitSeq,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<Option<(Vec<&'a VertexRow>, u64)>, E> {
+    use fgdb_gql::algebra::GlaOperator;
+    let operators = logical.operators();
+    let mut roots = 0;
+    let mut body_end = 0;
+    for operator in operators {
+        match operator {
+            GlaOperator::ScanVertices => roots += 1,
+            GlaOperator::Select { slot, .. } if (slot.ordinal() as usize) < roots => {}
+            GlaOperator::VertexIdentity { left, right, .. }
+                if (left.ordinal() as usize) < roots && (right.ordinal() as usize) < roots => {}
+            _ => break,
+        }
+        body_end += 1;
+    }
+    // No paging/filter can move across a new root, and no nested scope or
+    // expansion may read a vertex outside these explicitly selected domains.
+    if roots < 2
+        || !operators[body_end..].iter().all(|operator| {
+            matches!(
+                operator,
+                GlaOperator::Project { .. }
+                    | GlaOperator::Distinct
+                    | GlaOperator::OrderByVertexId
+                    | GlaOperator::ProjectBindings { .. }
+                    | GlaOperator::OrderByBindings
+                    | GlaOperator::ProjectValues { .. }
+                    | GlaOperator::OrderByValues
+                    | GlaOperator::OrderByValueColumns { .. }
+                    | GlaOperator::Limit { .. }
+            )
+        })
+    {
+        return Ok(None);
+    }
+    let predicates = |root| {
+        operators[..body_end]
+            .iter()
+            .filter_map(move |operator| match operator {
+                GlaOperator::Select { slot, predicates } if slot.ordinal() as usize == root => {
+                    Some(predicates.as_slice())
+                }
+                _ => None,
+            })
+            .flatten()
+    };
+    // Shape recognition must finish before any index work. One unbounded
+    // root requires the full shared domain, even if every other root is tiny.
+    if !(0..roots).all(|root| predicates(root).any(numeric::can_bound)) {
+        return Ok(None);
+    }
+    let mut union = BTreeMap::new();
+    let mut records = 0;
+    for root in 0..roots {
+        let Some((rows, count)) =
+            numeric::bound_rows(snapshot, || predicates(root), as_of, control)?
+        else {
+            return Ok(None);
+        };
+        records += count;
+        for row in rows {
+            control(SourceEvent::Work)?;
+            if let std::collections::btree_map::Entry::Vacant(entry) = union.entry(row.vid) {
+                control(SourceEvent::ScratchEntry)?;
+                entry.insert(row);
+            }
+        }
+    }
+    let mut rows = Vec::new();
+    for row in union.into_values() {
+        control(SourceEvent::Work)?;
+        control(SourceEvent::ScratchEntry)?;
+        rows.push(row);
+    }
+    Ok(Some((rows, records)))
+}
+
 /// Serve equality, literal membership, or range predicates over one vertex domain.
 /// The admitted rows also supply every nested scan and property lookup, so a
 /// root predicate cannot prune that shared table when later operators introduce
@@ -2001,6 +2087,9 @@ pub(crate) fn bound_vertices<'a, E, Row>(
     use fgdb_gql::algebra::{GlaOperator, IntegerComparison, VertexPredicate};
     if !matches!(logical.operators().first(), Some(GlaOperator::ScanVertices)) {
         return Ok(None);
+    }
+    if let Some(admitted) = bound_independent_vertices(snapshot, logical, as_of, control)? {
+        return Ok(Some(admitted));
     }
     let prefix = &logical.operators()[1..];
     let mut membership_predicate = false;
