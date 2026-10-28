@@ -292,14 +292,15 @@ pub(super) fn template_len(ordinal: usize, row: &BulkRow) -> Result<usize, BulkL
             .iter()
             .filter(|(_, value)| !crate::is_null_property(value))
             .try_fold(4_usize, |len, (_, value)| {
-            let encoded = value
-                .encode()
-                .map_err(|source| BulkLoadErrorKind::SourceEncoding {
-                    row: ordinal,
-                    source,
-                })?;
-            Ok(len.saturating_add(8 + 4 + encoded.len()))
-        })
+                let encoded =
+                    value
+                        .encode()
+                        .map_err(|source| BulkLoadErrorKind::SourceEncoding {
+                            row: ordinal,
+                            source,
+                        })?;
+                Ok(len.saturating_add(8 + 4 + encoded.len()))
+            })
     };
     // Tag, identity, ordinal, label count and valid-time tag; an edge adds
     // its endpoints and relation and the canonical-key tag but no labels.

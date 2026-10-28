@@ -453,7 +453,10 @@ mod tests {
         assert_eq!(
             value,
             GraphValue::map(vec![
-                ("alpha".into(), GraphValue::Scalar(CanonicalScalar::Bool(false))),
+                (
+                    "alpha".into(),
+                    GraphValue::Scalar(CanonicalScalar::Bool(false))
+                ),
                 ("zeta".into(), GraphValue::Scalar(CanonicalScalar::Int(7))),
             ])
             .unwrap()

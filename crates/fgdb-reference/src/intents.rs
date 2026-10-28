@@ -555,9 +555,7 @@ fn reduce(state: &ReferenceGraph, intent: &Intent, ordinal: u64) -> Reduction {
             },
             valid_time: None,
         }]),
-        Intent::SetProp { elem, name, value } if is_null(value) => {
-            remove_prop(state, *elem, *name)
-        }
+        Intent::SetProp { elem, name, value } if is_null(value) => remove_prop(state, *elem, *name),
         Intent::SetProp { elem, name, value } => {
             // The before image comes from the STATE, not the caller. That is the
             // difference between an intent and an effect: an effect declares its

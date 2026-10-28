@@ -4240,9 +4240,9 @@ impl<V: Vfs + Clone> Database<V> {
                         ElementId::Vertex(vid) => {
                             &mut vertex_content_entry(&mut prefix_content, &self.snapshot, vid).1
                         }
-                        ElementId::Edge(eid) => prefix_edge_rows.entry(eid).or_insert_with(|| {
-                            self.writer.live_edge_row(eid).unwrap_or_default()
-                        }),
+                        ElementId::Edge(eid) => prefix_edge_rows
+                            .entry(eid)
+                            .or_insert_with(|| self.writer.live_edge_row(eid).unwrap_or_default()),
                     };
                     match (props.binary_search_by_key(&key, |(k, _)| *k), after) {
                         (Ok(at), Some(after)) => props[at].1 = after,

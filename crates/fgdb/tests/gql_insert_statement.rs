@@ -3350,7 +3350,11 @@ fn relationship_merge_maps_read_the_row() {
             }
             CanonicalPropertyValue::List(list) => format!(
                 "[{}]",
-                list.values().iter().map(render).collect::<Vec<_>>().join(",")
+                list.values()
+                    .iter()
+                    .map(render)
+                    .collect::<Vec<_>>()
+                    .join(",")
             ),
             _ => "?".to_owned(),
         }
@@ -3480,7 +3484,10 @@ fn relationship_merge_maps_read_the_row() {
             .unwrap()
         };
         let rows_parameter = GqlParameters::new()
-            .with_list("rows", vec![row(10, 20, 2020), row(10, 20, 2020), row(20, 10, 1)])
+            .with_list(
+                "rows",
+                vec![row(10, 20, 2020), row(10, 20, 2020), row(20, 10, 1)],
+            )
             .unwrap();
         for _ in 0..2 {
             let returned = write(
@@ -3494,7 +3501,11 @@ fn relationship_merge_maps_read_the_row() {
             let QueryResult::Rows { rows, .. } = returned else {
                 unreachable!("MERGE ... RETURN answers rows")
             };
-            let int = |value| vec![QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)))];
+            let int = |value| {
+                vec![QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(
+                    value,
+                )))]
+            };
             assert_eq!(rows, vec![int(2020), int(2020), int(1)]);
         }
         assert_eq!(

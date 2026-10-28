@@ -243,7 +243,10 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
                 row,
                 property,
                 source,
-            } => write!(f, "relationship MERGE row {row} property {property}: {source}"),
+            } => write!(
+                f,
+                "relationship MERGE row {row} property {property}: {source}"
+            ),
         }
     }
 }
@@ -595,7 +598,10 @@ impl PreparedGraphEdgeMerge {
         )
             -> Result<(), crate::GqlQueryError<GraphEdgeMergeError<E, A>, C>>,
     ) -> Result<
-        (Vec<(PropertyKeyId, CanonicalPropertyValue)>, Option<Vec<u8>>),
+        (
+            Vec<(PropertyKeyId, CanonicalPropertyValue)>,
+            Option<Vec<u8>>,
+        ),
         crate::GqlQueryError<GraphEdgeMergeError<E, A>, C>,
     > {
         use crate::vertex_merge::GraphVertexMergeRowValue;
