@@ -2336,7 +2336,12 @@ impl<'a> Parser<'a> {
         let mut next_schema: RowSchema<'a> = Vec::new();
         if self.take(b'*')? {
             let visible = self.visible_width(schema);
-            let mut columns: Vec<_> = schema[..visible].iter().copied().enumerate().collect();
+            let mut columns: Vec<_> = schema[..visible]
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(_, (name, _))| !name.text.starts_with(Self::ANONYMOUS_PREFIX))
+                .collect();
             // openCypher orders RETURN *'s columns by name (fgdb-7jja3);
             // WITH * keeps the row's order.
             if returning {

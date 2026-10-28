@@ -241,10 +241,44 @@ pub(super) fn mutation_element_property<V: Vfs + Clone, Clock: FnMut() -> u64>(
     scope: &PlannerPredicates,
     execution: &RefCell<&mut Execution<'_, '_, Clock>>,
 ) -> Result<Option<CanonicalPropertyValue>, WriteTxnError> {
+    mutation_element_property_controlled(
+        transaction,
+        database,
+        cx,
+        element,
+        key,
+        scope,
+        execution,
+        &mut |_| {
+            cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+            execution.borrow_mut().checkpoint()
+        },
+        core::convert::identity,
+    )
+}
+
+/// As the ordinary mutation reader, with the caller's live native/signed
+/// evaluator admitting selected payload and witness ownership before copying.
+/// Visibility and physical hidden searches preserve their original transcript.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn mutation_element_property_controlled<V: Vfs + Clone, Clock: FnMut() -> u64, E>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    cx: &QueryCx,
+    element: ElementId,
+    key: PropertyKeyId,
+    scope: &PlannerPredicates,
+    execution: &RefCell<&mut Execution<'_, '_, Clock>>,
+    control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), E>,
+    source_error: impl Fn(WriteTxnError) -> E,
+) -> Result<Option<CanonicalPropertyValue>, E> {
     if !scope.allows_property(key) {
         return Ok(None);
     }
-    if mutation_element_visible(transaction, database, cx, element, scope, execution)?.is_none() {
+    if mutation_element_visible(transaction, database, cx, element, scope, execution)
+        .map_err(&source_error)?
+        .is_none()
+    {
         return Ok(None);
     }
     property(
@@ -254,14 +288,13 @@ pub(super) fn mutation_element_property<V: Vfs + Clone, Clock: FnMut() -> u64>(
         key,
         scope,
         || {
-            cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-            execution.borrow_mut().poll()
+            cx.checkpoint()
+                .map_err(WriteTxnError::Interrupted)
+                .map_err(&source_error)?;
+            execution.borrow_mut().poll().map_err(&source_error)
         },
-        &mut |_| {
-            cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-            execution.borrow_mut().checkpoint()
-        },
-        core::convert::identity,
+        control,
+        &source_error,
     )
     .map(Some)
 }

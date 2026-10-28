@@ -112,6 +112,627 @@ fn int(value: i64) -> GraphValue {
     GraphValue::Scalar(CanonicalScalar::Int(value))
 }
 
+async fn whole_pattern_merge(
+    contexts: &PurposeContexts,
+    db: &mut Database<MemVfs>,
+    authorized: bool,
+    program: &PreparedGraphWriteChain,
+    allowance: GraphInsertPolicy,
+) -> Result<(GraphInsertStats, Vec<GraphValueRow>), String> {
+    let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+    let result = if authorized {
+        let issuer = authority();
+        let token = issuer
+            .issue_at(&grant(Rights::ReadWrite, 100_000), NOW)
+            .unwrap();
+        db.execute_graph_write_chain_authorized(
+            &txn,
+            &query,
+            &commit,
+            &issuer,
+            &token,
+            "main",
+            program,
+            allowance,
+            || NOW,
+        )
+        .await
+        .map(|(stats, rows, _)| (stats, rows.value))
+        .map_err(|error| format!("{error:?}"))
+    } else {
+        let mut transaction = db.begin(&txn).unwrap();
+        match transaction.execute_graph_write_chain_engine_governed(db, &query, program, allowance)
+        {
+            Ok((stats, rows, _)) => {
+                transaction.finish(db, &commit).await.unwrap();
+                Ok((stats, rows.value))
+            }
+            Err(error) => Err(format!("{error:?}")),
+        }
+    };
+    assert_eq!(txn.outstanding_obligations(), 0);
+    result
+}
+
+#[test]
+fn whole_pattern_merge_creates_missing_endpoints_without_reusing_partial_matches() {
+    lab(0xc4a1_3810, |contexts| async move {
+        let commit = contexts.commit();
+        for authorized in [false, true] {
+            for (text, created, reverse, same) in [
+                (
+                    "MATCH (a:Visible {p:1}) MERGE (a)-[r:R {q:7}]->(b:Visible {p:2}) RETURN a,b,r",
+                    1,
+                    false,
+                    false,
+                ),
+                (
+                    "MERGE (a:Visible {p:1})-[r:R {q:7}]->(b:Visible {p:2}) RETURN a,b,r",
+                    2,
+                    false,
+                    false,
+                ),
+                (
+                    "MERGE (a:Visible {p:1})<-[r:R {q:7}]-(b:Visible {p:2}) RETURN a,b,r",
+                    2,
+                    true,
+                    false,
+                ),
+                (
+                    "MERGE (a:Visible {p:1})-[r:R {q:7}]-(b:Visible {p:2}) RETURN a,b,r",
+                    2,
+                    false,
+                    false,
+                ),
+                (
+                    "MERGE (a:Visible {p:1})-[r:R {q:7}]->(a) RETURN a,a AS b,r",
+                    1,
+                    false,
+                    true,
+                ),
+            ] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(S);
+                for id in 1..=2 {
+                    seed.create_vertex(
+                        VId(id as u128),
+                        vec![L],
+                        vec![(P, CanonicalScalar::Int(id))],
+                    );
+                }
+                db.write(&commit, seed).await.unwrap();
+                let program = chain(text);
+                let (stats, rows) =
+                    whole_pattern_merge(&contexts, &mut db, authorized, &program, policy(10))
+                        .await
+                        .unwrap_or_else(|error| panic!("{text}: {error}"));
+                assert_eq!(
+                    (stats.created_vertices, stats.created_edges),
+                    (created, 1),
+                    "{text}"
+                );
+                assert_eq!(rows.len(), 1, "{text}");
+                let [
+                    GraphValue::Vertex(a),
+                    GraphValue::Vertex(b),
+                    GraphValue::Edge(r),
+                ] = rows[0].values()
+                else {
+                    panic!("expected both resolved endpoints and relationship: {text}");
+                };
+                let (a, b, r) = (*a, *b, *r);
+                if text.starts_with("MATCH") {
+                    assert_eq!(a, VId(1));
+                } else {
+                    assert_ne!(
+                        a,
+                        VId(1),
+                        "a matching isolated node is not a complete pattern"
+                    );
+                    assert_ne!(a, VId(2));
+                }
+                assert_ne!(
+                    b,
+                    VId(2),
+                    "the isolated matching destination must survive unused"
+                );
+                assert_eq!(a == b, same, "{text}");
+                let edge = db
+                    .edges()
+                    .unwrap()
+                    .into_iter()
+                    .find(|edge| edge.entry.eid == r)
+                    .unwrap();
+                assert_eq!(
+                    (edge.entry.src, edge.entry.dst),
+                    if reverse { (b, a) } else { (a, b) }
+                );
+                assert_eq!(edge.props, [(Q, CanonicalScalar::Int(7).into())]);
+                assert_eq!(db.vertices().unwrap().len(), 2 + created as usize);
+                assert_eq!(
+                    db.vertex(VId(1)).unwrap().unwrap().props,
+                    [(P, CanonicalScalar::Int(1).into())]
+                );
+                assert_eq!(
+                    db.vertex(VId(2)).unwrap().unwrap().props,
+                    [(P, CanonicalScalar::Int(2).into())]
+                );
+                let before = (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap(),
+                );
+                let mut matched_only = policy(10);
+                matched_only.max_vertices = 0;
+                matched_only.max_edges = 0;
+                let (again, repeated) =
+                    whole_pattern_merge(&contexts, &mut db, authorized, &program, matched_only)
+                        .await
+                        .unwrap_or_else(|error| panic!("repeat {text}: {error}"));
+                assert_eq!((again.created_vertices, again.created_edges), (0, 0));
+                assert_eq!(repeated, rows);
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
+                    before
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn whole_pattern_merge_anonymous_endpoints_stay_distinct_and_private_across_steps() {
+    lab(0xc4a1_3817, |contexts| async move {
+        let commit = contexts.commit();
+        for authorized in [false, true] {
+            for (text, expected_columns, vertices) in [
+                (
+                    "MERGE (a:Visible {p:1})-[:R]->(:Visible {p:2}) \
+                     MERGE (a)-[:S]->(:Visible {p:3}) RETURN a",
+                    vec!["a"],
+                    3,
+                ),
+                (
+                    "MERGE (a:Visible {p:1})-[:R]->(:Visible {p:2}) \
+                     MERGE (a)-[:S]->(:Visible {p:3}) \
+                     CREATE (c:Visible {p:4}) RETURN *",
+                    vec!["a", "c"],
+                    4,
+                ),
+            ] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let program = chain(text);
+                assert_eq!(program.columns(), expected_columns, "{text}");
+                let (stats, rows) =
+                    whole_pattern_merge(&contexts, &mut db, authorized, &program, policy(10))
+                        .await
+                        .unwrap_or_else(|error| panic!("{text}: {error}"));
+                assert_eq!((stats.created_vertices, stats.created_edges), (vertices, 2));
+                assert_eq!(rows.len(), 1, "{text}");
+                assert_eq!(rows[0].values().len(), expected_columns.len());
+                let GraphValue::Vertex(a) = rows[0].values()[0] else {
+                    panic!("the named source is the first public result");
+                };
+                let edges = db.edges().unwrap();
+                let r = edges.iter().find(|edge| edge.entry.relation == R).unwrap();
+                let s = edges.iter().find(|edge| edge.entry.relation == S).unwrap();
+                assert_eq!((r.entry.src, s.entry.src), (a, a));
+                assert_ne!(r.entry.dst, s.entry.dst);
+                assert_ne!(r.entry.dst, a);
+                assert_ne!(s.entry.dst, a);
+                for (id, value) in [(a, 1), (r.entry.dst, 2), (s.entry.dst, 3)] {
+                    assert_eq!(
+                        db.vertex(id).unwrap().unwrap().props,
+                        [(P, CanonicalScalar::Int(value).into())]
+                    );
+                }
+                assert_eq!(db.vertices().unwrap().len(), vertices as usize);
+                if expected_columns.len() == 2 {
+                    let GraphValue::Vertex(c) = rows[0].values()[1] else {
+                        panic!("only the named CREATE vertex follows the named MERGE source");
+                    };
+                    assert_eq!(
+                        db.vertex(c).unwrap().unwrap().props,
+                        [(P, CanonicalScalar::Int(4).into())]
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn whole_pattern_merge_reuses_prior_occurrences_and_runs_new_endpoint_actions() {
+    lab(0xc4a1_3811, |contexts| async move {
+        let commit = contexts.commit();
+        for authorized in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(S);
+            seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(1))]);
+            db.write(&commit, seed).await.unwrap();
+            let program = chain(
+                "MATCH (a:Visible {p:1}) UNWIND [1,1] AS occurrence \
+                 MERGE (a)-[r:R {p:7}]->(b:Visible {p:2}) \
+                 ON CREATE SET b.q=10,r.q=1 \
+                 ON MATCH SET b.q=b.q+1,r.q=b.q SET r.q=r.q+1 \
+                 RETURN b.p AS key,b.q AS vertex_value,r.q AS edge_value",
+            );
+            let (stats, rows) = whole_pattern_merge(
+                &contexts,
+                &mut db,
+                authorized,
+                &program,
+                policy(10).with_mutation_limit(10),
+            )
+            .await
+            .unwrap();
+            assert_eq!((stats.created_vertices, stats.created_edges), (1, 1));
+            assert_eq!(db.vertices().unwrap().len(), 2);
+            assert_eq!(db.edges().unwrap().len(), 1);
+            // First occurrence creates q=10 and edge q=1, then SET makes 2.
+            // Second matches that full pattern: its simultaneous ON MATCH
+            // reads old b.q=10 for both assignments, then SET makes edge q=11.
+            assert_eq!(
+                rows,
+                vec![GraphValueRow::from_owned_values(vec![int(2), int(11), int(11)]); 2]
+            );
+
+            let program = chain(
+                "MATCH (a:Visible {p:1}) WITH a UNWIND [{p:3,q:9},{p:3,q:8}] AS row \
+                 MERGE (a)-[r:S]->(b:Visible {p:row.p}) \
+                 ON CREATE SET b.q=row.q ON MATCH SET b.q=row.q RETURN b.p AS key,b.q AS value",
+            );
+            let (stats, rows) =
+                whole_pattern_merge(&contexts, &mut db, authorized, &program, policy(10))
+                    .await
+                    .unwrap();
+            assert_eq!((stats.created_vertices, stats.created_edges), (1, 1));
+            assert_eq!(
+                rows,
+                vec![GraphValueRow::from_owned_values(vec![int(3), int(8)]); 2]
+            );
+        }
+    });
+}
+
+#[test]
+fn whole_pattern_merge_keeps_parallel_matches_and_live_binding_provenance() {
+    lab(0xc4a1_3812, |contexts| async move {
+        let commit = contexts.commit();
+        for authorized in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(
+                VId(1),
+                vec![L],
+                vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(3))],
+            );
+            seed.create_vertex(VId(2), vec![L], vec![(P, CanonicalScalar::Int(2))]);
+            for (edge, q) in [(10, 10), (11, 20)] {
+                seed.add_edge(
+                    EId(edge),
+                    VId(1),
+                    VId(2),
+                    vec![(Q, CanonicalScalar::Int(q))],
+                );
+            }
+            seed.add_edge(EId(12), VId(1), VId(1), vec![]);
+            db.write(&commit, seed).await.unwrap();
+            let program = chain(
+                "MATCH (a:Visible {p:1}) UNWIND [0,0] AS occurrence \
+                 MERGE (a)-[r:R]->(b:Visible {p:2}) ON MATCH SET r.q=r.q+1 \
+                 RETURN b,r,r.q AS value ORDER BY r",
+            );
+            let mut bounded = policy(10).with_mutation_limit(10);
+            bounded.max_vertices = 0;
+            bounded.max_edges = 0;
+            let (stats, rows) =
+                whole_pattern_merge(&contexts, &mut db, authorized, &program, bounded)
+                    .await
+                    .unwrap();
+            assert_eq!((stats.created_vertices, stats.created_edges), (0, 0));
+            assert_eq!(
+                rows,
+                [(10, 12), (10, 12), (11, 22), (11, 22)]
+                    .map(|(edge, q)| {
+                        GraphValueRow::from_owned_values(vec![
+                            GraphValue::Vertex(VId(2)),
+                            GraphValue::Edge(EId(edge)),
+                            int(q),
+                        ])
+                    })
+                    .to_vec()
+            );
+
+            // Newly bound b and carried a name the SAME physical vertex.
+            // Provenance chooses the cut: b sees earlier occurrences, while
+            // a remains the frozen input. Identity-based dispatch is wrong.
+            let program = chain(
+                "MATCH (a:Visible {p:1}) WITH a UNWIND [0,0] AS occurrence \
+                 MERGE (a)-[r:R]->(b:Visible {p:1}) \
+                 ON MATCH SET b.q=b.q+1,r.q=a.q RETURN b.q AS live,r.q AS frozen",
+            );
+            let (stats, rows) =
+                whole_pattern_merge(&contexts, &mut db, authorized, &program, bounded)
+                    .await
+                    .unwrap();
+            assert_eq!((stats.created_vertices, stats.created_edges), (0, 0));
+            assert_eq!(
+                rows,
+                vec![GraphValueRow::from_owned_values(vec![int(5), int(3)]); 2]
+            );
+        }
+    });
+}
+
+#[test]
+fn whole_pattern_merge_reads_only_reached_new_endpoint_action_operands() {
+    lab(0xc4a1_3816, |contexts| async move {
+        let commit = contexts.commit();
+        let program = chain(
+            "MATCH (a:Visible {p:1}) UNWIND [0,0] AS occurrence \
+             MERGE (a)-[r:R]->(b:Visible {p:1}) \
+             ON MATCH SET b.q=CASE WHEN occurrence=0 THEN b.q+1 ELSE size(b.secret) END",
+        );
+        for authorized in [false, true] {
+            let mut baseline = None;
+            for size in [8, 16_384] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(R);
+                seed.create_vertex(
+                    VId(1),
+                    vec![L],
+                    vec![
+                        (P, CanonicalScalar::Int(1)),
+                        (SECRET, CanonicalScalar::bytes(vec![0x57; size]).unwrap()),
+                        (Q, CanonicalScalar::Int(3)),
+                    ],
+                );
+                seed.add_edge(EId(1), VId(1), VId(1), vec![]);
+                db.write(&commit, seed).await.unwrap();
+                let (stats, rows) = whole_pattern_merge(
+                    &contexts,
+                    &mut db,
+                    authorized,
+                    &program,
+                    policy(0).with_mutation_limit(2),
+                )
+                .await
+                .unwrap();
+                assert!(rows.is_empty());
+                assert_eq!((stats.created_vertices, stats.created_edges), (0, 0));
+                assert_eq!(
+                    db.vertex(VId(1))
+                        .unwrap()
+                        .unwrap()
+                        .props
+                        .iter()
+                        .find(|(key, _)| *key == Q)
+                        .map(|(_, value)| value.clone()),
+                    Some(CanonicalScalar::Int(5).into())
+                );
+                if let Some(expected) = baseline {
+                    assert_eq!(
+                        stats, expected,
+                        "an unselected CASE operand cannot read or copy its payload"
+                    );
+                } else {
+                    baseline = Some(stats);
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn whole_pattern_merge_rolls_back_created_endpoints_on_late_value_or_limit_refusal() {
+    lab(0xc4a1_3813, |contexts| async move {
+        let commit = contexts.commit();
+        for authorized in [false, true] {
+            for (text, vertices, edges) in [
+                (
+                    "MATCH (a:Visible {p:1}) UNWIND [{p:2},{p:null}] AS row MERGE (a)-[:R]->(b:Visible {p:row.p})",
+                    100,
+                    100,
+                ),
+                (
+                    "MATCH (a:Visible {p:1}) UNWIND [{p:2},{p:{nested:3}}] AS row MERGE (a)-[:R]->(b:Visible {p:row.p})",
+                    100,
+                    100,
+                ),
+                (
+                    "MATCH (a:Visible {p:1}) UNWIND [1,2] AS x MERGE (a)-[:R]->(b:Visible {p:x+1}) ON CREATE SET b.q=7/(2-x)",
+                    100,
+                    100,
+                ),
+                (
+                    "MATCH (a:Visible {p:1}) UNWIND [2,3] AS x MERGE (a)-[:R]->(b:Visible {p:x})",
+                    1,
+                    100,
+                ),
+                (
+                    "MATCH (a:Visible {p:1}) UNWIND [2,3] AS x MERGE (a)-[:R]->(b:Visible {p:x})",
+                    100,
+                    1,
+                ),
+                (
+                    "MATCH (a:Visible {p:1}) WITH a,[a,7] AS targets UNWIND targets AS target \
+                     MERGE (target)-[:R]->(b:Visible {p:2})",
+                    100,
+                    100,
+                ),
+            ] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(S);
+                seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(1))]);
+                db.write(&commit, seed).await.unwrap();
+                let before = (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap(),
+                );
+                let mut allowance = policy(10);
+                allowance.max_vertices = vertices;
+                allowance.max_edges = edges;
+                assert!(
+                    whole_pattern_merge(&contexts, &mut db, authorized, &chain(text), allowance)
+                        .await
+                        .is_err(),
+                    "{text}"
+                );
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
+                    before,
+                    "{text}"
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn whole_pattern_merge_accounts_for_new_vertices_and_shared_native_allowances() {
+    async fn attempt(
+        contexts: &PurposeContexts,
+        authorized: bool,
+        allowance: GraphInsertPolicy,
+    ) -> Option<GraphInsertStats> {
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(S);
+        seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(1))]);
+        db.write(&commit, seed).await.unwrap();
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        let program = chain(
+            "MATCH (a:Visible {p:1}) UNWIND [2,3] AS value \
+             MERGE (a)-[r:R]->(b:Visible {p:value}) ON CREATE SET b.q=value+10,r.q=value",
+        );
+        match whole_pattern_merge(contexts, &mut db, authorized, &program, allowance).await {
+            Ok((stats, rows)) => {
+                assert!(rows.is_empty());
+                assert_eq!((stats.created_vertices, stats.created_edges), (2, 2));
+                assert_eq!(db.vertices().unwrap().len(), 3);
+                assert_eq!(db.edges().unwrap().len(), 2);
+                Some(stats)
+            }
+            Err(_) => {
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
+                    before
+                );
+                None
+            }
+        }
+    }
+    lab(0xc4a1_3815, |contexts| async move {
+        for authorized in [false, true] {
+            let allowance = policy(0).with_mutation_limit(4);
+            let measured = attempt(&contexts, authorized, allowance).await.unwrap();
+            let mut exact = allowance;
+            exact.max_vertices = 2;
+            exact.max_edges = 2;
+            exact.query.evaluator.max_work_units = measured.evaluator.work_units;
+            exact.query.evaluator.max_scratch_entries = measured.evaluator.scratch_entries;
+            assert_eq!(attempt(&contexts, authorized, exact).await, Some(measured));
+            for dimension in 0..5 {
+                let mut short = exact;
+                match dimension {
+                    0 => short.max_vertices -= 1,
+                    1 => short.max_edges -= 1,
+                    2 => short.max_mutation_effects -= 1,
+                    3 => short.query.evaluator.max_work_units -= 1,
+                    4 => short.query.evaluator.max_scratch_entries -= 1,
+                    _ => unreachable!(),
+                }
+                assert!(
+                    attempt(&contexts, authorized, short).await.is_none(),
+                    "dimension {dimension}"
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn whole_pattern_merge_authorization_hides_candidates_and_refuses_denied_creation() {
+    lab(0xc4a1_3814, |contexts| async move {
+        let commit = contexts.commit();
+        let program = chain(
+            "MATCH (a:Visible {p:1}) MERGE (a)-[r:R]->(b:Visible {p:2}) \
+             ON CREATE SET b.q=7 RETURN b.p AS key,b.q AS value",
+        );
+        let mut baseline = None;
+        for hidden in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(1))]);
+            if hidden {
+                for id in 2..=5 {
+                    seed.create_vertex(VId(id), vec![HIDDEN], vec![(P, CanonicalScalar::Int(2))]);
+                    seed.add_edge(EId(id), VId(1), VId(id), vec![]);
+                }
+            }
+            db.write(&commit, seed).await.unwrap();
+            let result = whole_pattern_merge(&contexts, &mut db, true, &program, policy(10))
+                .await
+                .unwrap();
+            assert_eq!((result.0.created_vertices, result.0.created_edges), (1, 1));
+            assert_eq!(
+                result.1,
+                vec![GraphValueRow::from_owned_values(vec![int(2), int(7)])]
+            );
+            if let Some(expected) = &baseline {
+                assert_eq!(
+                    &result, expected,
+                    "hidden endpoint candidates cannot change visible rows or charged work"
+                );
+            } else {
+                baseline = Some(result);
+            }
+            for text in [
+                "CREATE (marker:Visible) MERGE (a:Visible {p:10})-[:R]->(b:Hidden {p:11})",
+                "CREATE (marker:Visible) MERGE (a:Visible {p:10})-[:R]->(b:Visible {secret:11})",
+                "CREATE (marker:Visible) MERGE (a:Visible {p:10})-[:R]->(b:Visible {p:11}) ON CREATE SET b.secret=9",
+            ] {
+                let before = (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap(),
+                );
+                let error = whole_pattern_merge(&contexts, &mut db, true, &chain(text), policy(10))
+                    .await
+                    .unwrap_err();
+                assert!(error.contains("ScopeDenied"), "{text}: {error}");
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
+                    before,
+                    "{text}"
+                );
+            }
+        }
+    });
+}
+
 /// A named relationship MERGE path with ON actions whose WITH tail reads to
 /// the statement's end, with no further write, refuses before any catalog or
 /// execution: the chain hosts run no read tail for a relationship MERGE step

@@ -3,6 +3,8 @@
 //! The ordinary MERGE definition owns endpoint identity and exact matching.
 //! These clauses own only property assignments to each resolved relationship.
 
+mod provenance;
+
 use crate::algebra::GraphValueRow;
 use crate::{
     GraphEdgeUpsertAction, GraphEdgeUpsertBranch, GraphEdgeUpsertBuildError, GraphEdgeUpsertValue,
@@ -158,6 +160,7 @@ impl PreparedGraphEdgeUpsertRows {
         actions: GraphEdgeMergeRowActions,
     ) -> Result<Self, GraphEdgeUpsertBuildError> {
         let types = merge.input_column_types();
+        let new_endpoints: Vec<_> = merge.unbound_columns().collect();
         for (branch, selected) in [
             (GraphEdgeUpsertBranch::Match, &actions.on_match),
             (GraphEdgeUpsertBranch::Create, &actions.on_create),
@@ -229,6 +232,17 @@ impl PreparedGraphEdgeUpsertRows {
                         }
                     };
                     if !valid {
+                        return Err(GraphEdgeUpsertBuildError::InvalidExpressionInput {
+                            branch,
+                            action,
+                        });
+                    }
+                    // The native schema check above bounds the expression
+                    // before the preparation-only provenance walk visits it.
+                    if let GraphEdgeMergeRowAction::Value { value, .. }
+                    | GraphEdgeMergeRowAction::RowVertex { value, .. } = assignment
+                        && !provenance::direct_endpoint_reads(&value.0.0, &new_endpoints)
+                    {
                         return Err(GraphEdgeUpsertBuildError::InvalidExpressionInput {
                             branch,
                             action,

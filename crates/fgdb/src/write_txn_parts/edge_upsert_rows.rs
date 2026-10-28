@@ -33,6 +33,178 @@ impl EdgeMergeOutput for EdgeUpsertRowTargets {
     }
 }
 
+/// A carried pair shares its original row across parallel relationships. A
+/// whole-pattern match has a separately resolved endpoint row per match.
+/// These adapters move already admitted ownership without copying row payloads.
+pub(crate) enum EdgeUpsertResolvedRows {
+    Bound(fgdb_gql::algebra::GraphValueRow, EdgeUpsertRowTargets),
+    Whole(Vec<fgdb_gql::GraphEdgeWholeMergeRow>),
+}
+
+pub(crate) enum EdgeUpsertResolvedTargets {
+    Many(Vec<(fgdb_gql::GraphEdgeMergeOutcome, (VId, VId))>),
+    One((fgdb_gql::GraphEdgeMergeOutcome, (VId, VId))),
+}
+
+impl EdgeUpsertResolvedRows {
+    pub(crate) fn rows(
+        self,
+    ) -> impl Iterator<Item = (fgdb_gql::algebra::GraphValueRow, EdgeUpsertResolvedTargets)> {
+        let (bound, whole) = match self {
+            Self::Bound(row, targets) => (
+                Some((row, EdgeUpsertResolvedTargets::Many(targets.0))),
+                None,
+            ),
+            Self::Whole(rows) => (None, Some(rows)),
+        };
+        bound
+            .into_iter()
+            .chain(whole.into_iter().flatten().map(|row| {
+                (
+                    row.input,
+                    EdgeUpsertResolvedTargets::One((row.outcome, row.endpoints)),
+                )
+            }))
+    }
+}
+
+impl EdgeUpsertResolvedTargets {
+    pub(crate) fn as_slice(&self) -> &[(fgdb_gql::GraphEdgeMergeOutcome, (VId, VId))] {
+        match self {
+            Self::Many(targets) => targets,
+            Self::One(target) => std::slice::from_ref(target),
+        }
+    }
+
+    pub(crate) fn targets(
+        self,
+    ) -> impl Iterator<Item = (fgdb_gql::GraphEdgeMergeOutcome, (VId, VId))> {
+        let (many, one) = match self {
+            Self::Many(targets) => (Some(targets), None),
+            Self::One(target) => (None, Some(target)),
+        };
+        many.into_iter().flatten().chain(one)
+    }
+}
+
+/// The whole-pattern collector needs only native pattern leaves and controlled
+/// point fields. Its source reserves the selected payload before returning an
+/// owned value; it does not advertise unrelated procedure/metadata capabilities.
+pub(crate) struct WholeEdgeMergeSource<P, R> {
+    pub(crate) patterns: P,
+    pub(crate) properties: R,
+}
+
+impl<P, R, E, C> fgdb_gql::GraphSetSource<E, C> for WholeEdgeMergeSource<P, R>
+where
+    P: FnMut(
+        &fgdb_gql::algebra::PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
+        fgdb_gql::GqlQueryPolicy,
+    ) -> Result<
+        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+        fgdb_gql::GqlQueryError<E, C>,
+    >,
+    R: FnMut(
+        ElementId,
+        fgdb_delta_types::PropertyKeyId,
+        &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Result<Option<CanonicalPropertyValue>, fgdb_gql::GraphElementPropertyError<E>>,
+{
+    fn pattern(
+        &mut self,
+        pattern: &fgdb_gql::algebra::PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Result<
+        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+        fgdb_gql::GqlQueryError<E, C>,
+    > {
+        (self.patterns)(pattern, policy)
+    }
+
+    fn element_property_with_control(
+        &mut self,
+        element: ElementId,
+        key: fgdb_delta_types::PropertyKeyId,
+        control: &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<Result<Option<CanonicalPropertyValue>, fgdb_gql::GraphElementPropertyError<E>>>
+    {
+        Some((self.properties)(element, key, control))
+    }
+}
+
+fn whole_edge_merge_property<V: Vfs + Clone>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    element: ElementId,
+    key: fgdb_delta_types::PropertyKeyId,
+    control: &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), ()>,
+) -> Result<Option<CanonicalPropertyValue>, fgdb_gql::GraphElementPropertyError<WriteTxnError>> {
+    use crate::gql_exec::source::SourceEvent;
+    use fgdb_gql::{GlaExecutionEvent, GraphElementPropertyError};
+    let mut control = |event| {
+        control(match event {
+            SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+            SourceEvent::Work | SourceEvent::SnapshotRecord => GlaExecutionEvent::Work,
+        })
+        .map_err(|()| GraphElementPropertyError::Interrupted)
+    };
+    control(SourceEvent::Work)?;
+    let _ = transaction
+        .query_snapshot(database)
+        .map_err(GraphElementPropertyError::Source)?;
+    let mut attempt = ProjectionReadAttempt {
+        reads: &transaction.point_reads,
+        element,
+        accepted: false,
+    };
+    let field = PointReadField::Property(key);
+    let projected = transaction.point_projection_with_control(
+        database,
+        element,
+        field,
+        &mut control,
+        &GraphElementPropertyError::Source,
+    )?;
+    if let Some(value) = projected.property {
+        point_payload_admission(value, &mut control)?;
+    }
+    control(SourceEvent::ScratchEntry)?;
+    control(SourceEvent::ScratchEntry)?;
+    transaction.point_reads.borrow_mut().record(element, field);
+    control(SourceEvent::ScratchEntry)?;
+    let value = projected.property.cloned();
+    attempt.accepted = true;
+    Ok(value)
+}
+
+struct EdgeMergeRowElementReader<F>(F);
+
+impl<E, F> fgdb_gql::GraphElementReader<E> for EdgeMergeRowElementReader<F>
+where
+    F: FnMut(
+        Option<usize>,
+        ElementId,
+        fgdb_delta_types::PropertyKeyId,
+    ) -> Result<Option<CanonicalPropertyValue>, E>,
+{
+    fn element_property(
+        &mut self,
+        element: ElementId,
+        key: fgdb_delta_types::PropertyKeyId,
+    ) -> Result<Option<CanonicalPropertyValue>, E> {
+        (self.0)(None, element, key)
+    }
+
+    fn element_property_for_column(
+        &mut self,
+        column: usize,
+        element: ElementId,
+        key: fgdb_delta_types::PropertyKeyId,
+    ) -> Result<Option<CanonicalPropertyValue>, E> {
+        (self.0)(Some(column), element, key)
+    }
+}
+
 /// Evaluate the selected ON clause and trailing SET for one resolved edge.
 /// The caller admits the cumulative effect count first. Every RHS of one
 /// clause completes before its original assignments reach the staging host.
@@ -49,6 +221,7 @@ pub(crate) fn edge_merge_row_actions_controlled<E, A, C>(
         &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> EdgeUpsertActionResult<(), E, A, C>,
     ) -> EdgeUpsertActionResult<fgdb_gql::algebra::GraphValue, E, A, C>,
     mut read_row: impl FnMut(
+        Option<usize>,
         ElementId,
         fgdb_delta_types::PropertyKeyId,
         &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> EdgeUpsertActionResult<(), E, A, C>,
@@ -186,11 +359,11 @@ pub(crate) fn edge_merge_row_actions_controlled<E, A, C>(
                         .written_with_elements(
                             row,
                             &mut |event| controls.borrow_mut()(event),
-                            &mut |element, property| {
-                                read_row(element, property, &mut |event| {
+                            &mut EdgeMergeRowElementReader(|column, element, property| {
+                                read_row(column, element, property, &mut |event| {
                                     controls.borrow_mut()(event)
                                 })
-                            },
+                            }),
                         )
                         .map_err(|error| match error {
                             GraphIntegerEvaluationError::Control(error) => error,
@@ -414,173 +587,251 @@ impl WriteTxn {
                 &mut stats.evaluator,
                 GlaExecutionEvent::ScratchEntry,
             )?;
-            let remaining = policy
-                .max_edges
-                .checked_sub(stats.created_edges)
-                .ok_or_else(invalid)?;
-            let proposal = collect_edge_merge_output::<EdgeUpsertRowTargets, WriteTxnError, A, _>(
-                merge,
-                GraphEdgeMergePolicy::new(private).with_creation_limit(remaining),
-                |_| {
-                    Ok(GqlQueryExecution {
-                        value: vec![row],
-                        rows: GqlExecutionStats {
-                            snapshot_records: stats.selection.snapshot_records,
-                            result_rows: 1,
+            let resolved = if merge.has_unbound_endpoints() {
+                let proposal = {
+                    let mut source = WholeEdgeMergeSource {
+                        patterns: |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
+                            GraphValueRow,
+                        >,
+                                   allowance| {
+                            self.execute_graph_pattern_governed(database, cx, pattern, allowance)
                         },
-                        evaluator: stats.evaluator,
-                    })
-                },
-                |source, destination| {
-                    self.merge_candidate_edges(database, merge, source, destination, || {
-                        cx.checkpoint()
-                    })
-                },
-                |_| allocate(GraphInsertRequest::Edge { row: at, edge: 0 }),
-                || cx.checkpoint(),
-            )
-            .map_err(|error| {
-                error.map_source(|error| {
-                    chained(GraphEdgeUpsertError::Merge(match error {
-                        GraphEdgeMergeError::CreationLimit { observed, .. } => {
-                            GraphEdgeMergeError::CreationLimit {
-                                limit: policy.max_edges,
-                                observed: u128::from(stats.created_edges) + observed,
-                            }
-                        }
-                        GraphEdgeMergeError::InputSchema { column, .. } => {
-                            GraphEdgeMergeError::InputSchema { row: at, column }
-                        }
-                        GraphEdgeMergeError::NullEndpoint { column, .. } => {
-                            GraphEdgeMergeError::NullEndpoint { row: at, column }
-                        }
-                        GraphEdgeMergeError::RowValue { property, .. } => {
-                            GraphEdgeMergeError::RowValue { row: at, property }
-                        }
-                        GraphEdgeMergeError::RowExpression {
-                            property, source, ..
-                        } => GraphEdgeMergeError::RowExpression {
-                            row: at,
-                            property,
-                            source,
-                        },
-                        error => error,
-                    }))
-                })
-            })?;
-            let EdgeMergeProposal {
-                stats: merged,
-                outcome,
-                creation,
-                mut selected,
-            } = proposal;
-            stats.selection.snapshot_records = merged
-                .match_selection
-                .snapshot_records
-                .checked_add(merged.overlay_edges)
-                .ok_or_else(invalid)?;
-            stats.created_edges = stats
-                .created_edges
-                .checked_add(merged.created_edges)
-                .ok_or_else(invalid)?;
-            stats.evaluator = merged.evaluator;
-            if selected.len() != 1 {
-                return Err(invalid());
-            }
-            let row = selected.pop().ok_or_else(invalid)?;
-            if let Some(batch) = creation {
-                cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-                self.stage_edge_upsert_row_batch(database, batch)
-                    .map_err(|error| {
-                        GqlQueryError::Source(chained(GraphEdgeUpsertError::Staging(error)))
-                    })?;
-            }
-            let input_at = input.len();
-            // The collector froze all parallel matches for this occurrence.
-            // A key rewrite below affects only the next occurrence's lookup.
-            for (outcome, endpoints) in outcome.0 {
-                let (edge, branch, on) = match outcome {
-                    GraphEdgeMergeOutcome::Matched(edge) => (
-                        edge,
-                        GraphEdgeUpsertBranch::Match,
-                        &upsert.actions().on_match,
-                    ),
-                    GraphEdgeMergeOutcome::Created(edge) => (
-                        edge,
-                        GraphEdgeUpsertBranch::Create,
-                        &upsert.actions().on_create,
-                    ),
-                    GraphEdgeMergeOutcome::NoInput => return Err(invalid()),
-                };
-                let observed = u128::from(effects) + upsert.action_count(branch) as u128;
-                if observed > u128::from(policy.max_mutation_effects) {
-                    return Err(GqlQueryError::Source(GraphWriteChainError::Mutation(
-                        GraphMutationQueryError::Mutation(GraphMutationError::EffectLimit {
-                            limit: policy.max_mutation_effects,
-                            observed,
-                        }),
-                    )));
-                }
-                let state = std::cell::RefCell::new((&mut *self, &mut *database));
-                edge_merge_row_actions_controlled::<WriteTxnError, A, _>(
-                    (merge.relation(), edge),
-                    (at, &row),
-                    [on, &upsert.actions().after],
-                    private,
-                    &mut stats.evaluator,
-                    || cx.checkpoint(),
-                    |key, control| {
-                        let state = state.borrow();
-                        edge_upsert_row_property(
-                            state.0,
-                            state.1,
-                            ElementId::Edge(edge),
-                            key,
-                            control,
+                        properties: |element,
+                                     key,
+                                     control: &mut dyn FnMut(
+                            fgdb_gql::GlaExecutionEvent,
                         )
-                    },
-                    |element, key, control| {
-                        let mut state = state.borrow_mut();
-                        let (transaction, database) = &mut *state;
-                        transaction.with_prepared_point_read(&input_prepared, |transaction| {
-                            edge_upsert_row_property_with(
-                                transaction,
-                                database,
-                                element,
-                                key,
-                                control,
-                                |value| Ok(value.cloned()),
-                            )
-                        })
-                    },
-                    |batch| {
-                        let mut state = state.borrow_mut();
-                        let (transaction, database) = &mut *state;
-                        transaction
-                            .stage_edge_upsert_row_batch(database, batch)
+                            -> Result<(), ()>| {
+                            whole_edge_merge_property(self, database, element, key, control)
+                        },
+                    };
+                    merge.resolve_whole_row(
+                        row,
+                        at,
+                        fgdb_gql::insertion::GraphInsertPolicy {
+                            query: private,
+                            ..policy
+                        },
+                        stats,
+                        &mut source,
+                        &mut allocate,
+                        || cx.checkpoint(),
+                    )
+                }
+                .map_err(|error| {
+                    error.map_source(|error| chained(GraphEdgeUpsertError::Merge(error)))
+                })?;
+                stats = proposal.stats;
+                if let Some(creation) = proposal.creation {
+                    let (_, batches, _, _) = graph_insert_batches_with_control(
+                        merge.relation(),
+                        creation,
+                        false,
+                        || cx.checkpoint(),
+                    )
+                    .map_err(GqlQueryError::Interrupted)?;
+                    for batch in batches {
+                        self.stage_edge_upsert_row_batch(database, batch)
                             .map_err(|error| {
-                                GqlQueryError::Source(GraphEdgeUpsertError::Staging(error))
+                                GqlQueryError::Source(chained(GraphEdgeUpsertError::Staging(error)))
+                            })?;
+                    }
+                }
+                EdgeUpsertResolvedRows::Whole(proposal.rows)
+            } else {
+                let remaining = policy
+                    .max_edges
+                    .checked_sub(stats.created_edges)
+                    .ok_or_else(invalid)?;
+                let proposal =
+                    collect_edge_merge_output::<EdgeUpsertRowTargets, WriteTxnError, A, _>(
+                        merge,
+                        GraphEdgeMergePolicy::new(private).with_creation_limit(remaining),
+                        |_| {
+                            Ok(GqlQueryExecution {
+                                value: vec![row],
+                                rows: GqlExecutionStats {
+                                    snapshot_records: stats.selection.snapshot_records,
+                                    result_rows: 1,
+                                },
+                                evaluator: stats.evaluator,
                             })
-                    },
-                )
-                .map_err(|error| error.map_source(chained))?;
-                effects = observed as u64;
-                if retain_receipt {
-                    vertex_targets_event::<GraphWriteChainError<WriteTxnError, A>>(
-                        cx,
+                        },
+                        |source, destination| {
+                            self.merge_candidate_edges(database, merge, source, destination, || {
+                                cx.checkpoint()
+                            })
+                        },
+                        |_| allocate(GraphInsertRequest::Edge { row: at, edge: 0 }),
+                        || cx.checkpoint(),
+                    )
+                    .map_err(|error| {
+                        error.map_source(|error| {
+                            chained(GraphEdgeUpsertError::Merge(match error {
+                                GraphEdgeMergeError::CreationLimit { observed, .. } => {
+                                    GraphEdgeMergeError::CreationLimit {
+                                        limit: policy.max_edges,
+                                        observed: u128::from(stats.created_edges) + observed,
+                                    }
+                                }
+                                GraphEdgeMergeError::InputSchema { column, .. } => {
+                                    GraphEdgeMergeError::InputSchema { row: at, column }
+                                }
+                                GraphEdgeMergeError::NullEndpoint { column, .. } => {
+                                    GraphEdgeMergeError::NullEndpoint { row: at, column }
+                                }
+                                GraphEdgeMergeError::RowValue { property, .. } => {
+                                    GraphEdgeMergeError::RowValue { row: at, property }
+                                }
+                                GraphEdgeMergeError::RowExpression {
+                                    property, source, ..
+                                } => GraphEdgeMergeError::RowExpression {
+                                    row: at,
+                                    property,
+                                    source,
+                                },
+                                error => error,
+                            }))
+                        })
+                    })?;
+                let EdgeMergeProposal {
+                    stats: merged,
+                    outcome,
+                    creation,
+                    mut selected,
+                } = proposal;
+                stats.selection.snapshot_records = merged
+                    .match_selection
+                    .snapshot_records
+                    .checked_add(merged.overlay_edges)
+                    .ok_or_else(invalid)?;
+                stats.created_edges = stats
+                    .created_edges
+                    .checked_add(merged.created_edges)
+                    .ok_or_else(invalid)?;
+                stats.evaluator = merged.evaluator;
+                if selected.len() != 1 {
+                    return Err(invalid());
+                }
+                let row = selected.pop().ok_or_else(invalid)?;
+                if let Some(batch) = creation {
+                    cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                    self.stage_edge_upsert_row_batch(database, batch)
+                        .map_err(|error| {
+                            GqlQueryError::Source(chained(GraphEdgeUpsertError::Staging(error)))
+                        })?;
+                }
+                EdgeUpsertResolvedRows::Bound(row, outcome)
+            };
+            for (row, targets) in resolved.rows() {
+                let input_at = input.len();
+                // The collector froze all parallel matches for this occurrence.
+                // A key rewrite below affects only the next occurrence's lookup.
+                for (outcome, endpoints) in targets.targets() {
+                    let (edge, branch, on) = match outcome {
+                        GraphEdgeMergeOutcome::Matched(edge) => (
+                            edge,
+                            GraphEdgeUpsertBranch::Match,
+                            &upsert.actions().on_match,
+                        ),
+                        GraphEdgeMergeOutcome::Created(edge) => (
+                            edge,
+                            GraphEdgeUpsertBranch::Create,
+                            &upsert.actions().on_create,
+                        ),
+                        GraphEdgeMergeOutcome::NoInput => return Err(invalid()),
+                    };
+                    let observed = u128::from(effects) + upsert.action_count(branch) as u128;
+                    if observed > u128::from(policy.max_mutation_effects) {
+                        return Err(GqlQueryError::Source(GraphWriteChainError::Mutation(
+                            GraphMutationQueryError::Mutation(GraphMutationError::EffectLimit {
+                                limit: policy.max_mutation_effects,
+                                observed,
+                            }),
+                        )));
+                    }
+                    let state = std::cell::RefCell::new((&mut *self, &mut *database));
+                    edge_merge_row_actions_controlled::<WriteTxnError, A, _>(
+                        (merge.relation(), edge),
+                        (at, &row),
+                        [on, &upsert.actions().after],
                         private,
                         &mut stats.evaluator,
-                        GlaExecutionEvent::ScratchEntry,
-                    )?;
-                    outcomes.push(outcome);
-                    if outcome.created() {
+                        || cx.checkpoint(),
+                        |key, control| {
+                            let state = state.borrow();
+                            edge_upsert_row_property(
+                                state.0,
+                                state.1,
+                                ElementId::Edge(edge),
+                                key,
+                                control,
+                            )
+                        },
+                        |column, element, key, control| {
+                            let mut state = state.borrow_mut();
+                            let (transaction, database) = &mut *state;
+                            if column.is_some_and(|column| {
+                                merge.unbound_columns().any(|new| new == column)
+                            }) {
+                                return edge_upsert_row_property_with(
+                                    transaction,
+                                    database,
+                                    element,
+                                    key,
+                                    control,
+                                    |value| Ok(value.cloned()),
+                                );
+                            }
+                            transaction.with_prepared_point_read(&input_prepared, |transaction| {
+                                edge_upsert_row_property_with(
+                                    transaction,
+                                    database,
+                                    element,
+                                    key,
+                                    control,
+                                    |value| Ok(value.cloned()),
+                                )
+                            })
+                        },
+                        |batch| {
+                            let mut state = state.borrow_mut();
+                            let (transaction, database) = &mut *state;
+                            transaction
+                                .stage_edge_upsert_row_batch(database, batch)
+                                .map_err(|error| {
+                                    GqlQueryError::Source(GraphEdgeUpsertError::Staging(error))
+                                })
+                        },
+                    )
+                    .map_err(|error| error.map_source(chained))?;
+                    effects = observed as u64;
+                    if retain_receipt {
                         vertex_targets_event::<GraphWriteChainError<WriteTxnError, A>>(
                             cx,
                             private,
                             &mut stats.evaluator,
                             GlaExecutionEvent::ScratchEntry,
                         )?;
-                        created.push(edge);
+                        outcomes.push(outcome);
+                        if outcome.created() {
+                            vertex_targets_event::<GraphWriteChainError<WriteTxnError, A>>(
+                                cx,
+                                private,
+                                &mut stats.evaluator,
+                                GlaExecutionEvent::ScratchEntry,
+                            )?;
+                            created.push(edge);
+                        }
+                    }
+                    if retain_input {
+                        vertex_targets_event::<GraphWriteChainError<WriteTxnError, A>>(
+                            cx,
+                            private,
+                            &mut stats.evaluator,
+                            GlaExecutionEvent::ScratchEntry,
+                        )?;
+                        pairs.push((input_at, edge, endpoints));
                     }
                 }
                 if retain_input {
@@ -590,17 +841,8 @@ impl WriteTxn {
                         &mut stats.evaluator,
                         GlaExecutionEvent::ScratchEntry,
                     )?;
-                    pairs.push((input_at, edge, endpoints));
+                    input.push(row);
                 }
-            }
-            if retain_input {
-                vertex_targets_event::<GraphWriteChainError<WriteTxnError, A>>(
-                    cx,
-                    private,
-                    &mut stats.evaluator,
-                    GlaExecutionEvent::ScratchEntry,
-                )?;
-                input.push(row);
             }
         }
         let result = if let GraphWriteChainStep::EdgeUpsertQuery { query, .. } = step {

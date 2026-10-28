@@ -640,6 +640,11 @@ impl<'a> Parser<'a> {
             // A WITH row's hidden reads are never columns of `*`.
             let visible = self.visible_width(source);
             for (index, &(name, kind)) in source[..visible].iter().enumerate() {
+                // An implicit chain row may retain an anonymous occurrence
+                // carrier. It is never a variable of a written WITH/RETURN *.
+                if !implicit && name.text.starts_with(Self::ANONYMOUS_PREFIX) {
+                    continue;
+                }
                 let column = returning.column(Binding::Input(index), name, kind)?;
                 returning.projection.push(ReadProjectionTemplate {
                     name: name.text.to_owned(),

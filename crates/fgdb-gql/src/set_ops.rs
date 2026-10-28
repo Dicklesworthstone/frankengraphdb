@@ -45,8 +45,8 @@ pub(crate) use projection::{
 };
 pub use projection::{
     GqlTimeZones, GraphElementKey, GraphElementMetadata, GraphElementMetadataError,
-    GraphListQuantifier, GraphSetProjection, GraphSetProjectionError, GraphSetValue,
-    GraphTemporalFunction, GraphValueFunction,
+    GraphElementPropertyError, GraphListQuantifier, GraphSetProjection, GraphSetProjectionError,
+    GraphSetValue, GraphTemporalFunction, GraphValueFunction,
 };
 
 use crate::algebra::{

@@ -9,6 +9,7 @@ use crate::{
     GraphWriteChainStep, GraphWriteChainTextError, PreparedGraphWriteChain,
     PreparedGraphWriteChainText,
 };
+use std::collections::BTreeSet;
 
 enum MatchedWrite {
     Insert,
@@ -24,10 +25,11 @@ impl PreparedGraphWriteChainText {
     /// followed by another write in the same statement:
     /// - a CREATE, a WITH after it, then another CREATE;
     /// - a MERGE after a CREATE, with or without a WITH between;
-    /// - a vertex MERGE first, then another CREATE or MERGE.
+    /// - a vertex MERGE first, then another CREATE or MERGE;
+    /// - a relationship MERGE introducing an endpoint, or after a WITH.
     ///
     /// Consecutive CREATE clauses without a WITH are one insertion. A first
-    /// MERGE with ON or SET clauses is an upsert, not a chain. Quoted values,
+    /// vertex MERGE with ON or SET clauses is an upsert, not a chain. Quoted values,
     /// property keys, aliases, `ON CREATE` and `STARTS WITH` / `ENDS WITH`
     /// are not clauses. A second statement ends the scan. This validates
     /// nothing and resolves no symbol.
@@ -90,13 +92,29 @@ impl PreparedGraphWriteChainText {
         // the unique upsert reads a MATCH only, so a relationship MERGE's
         // ON/SET clauses there are the chain's row actions.
         let mut staged = false;
+        // Known bindings suffice to retain the established bound-endpoint
+        // owner. A WITH may drop, rename or introduce them, so its following
+        // relationship MERGE uses the chain's complete native row prefix.
+        // This is framing only: preparation checks actual scopes and types.
+        let mut bindings = BTreeSet::new();
+        let (mut match_pattern, mut unwind_source, mut projected) = (false, false, false);
         let mut depth = 0_usize;
         let mut previous: Option<TokenKind<'_>> = None;
         loop {
             let token = script::next_script_token(&mut lexer)?;
             match token.kind {
                 TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
-                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(open @ (b'(' | b'[' | b'{')) => {
+                    if depth == 0
+                        && match_pattern
+                        && matches!(open, b'(' | b'[')
+                        && let TokenKind::Word(name) =
+                            script::next_script_token(&mut lexer.clone())?.kind
+                    {
+                        bindings.insert(name);
+                    }
+                    depth += 1;
+                }
                 TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
                 TokenKind::Word(word) if depth == 0 => {
                     let clause = !matches!(previous, Some(TokenKind::Punct(b'.')))
@@ -109,6 +127,32 @@ impl PreparedGraphWriteChainText {
                             TokenKind::Punct(b'(')
                         ))
                     };
+                    if clause {
+                        if word.eq_ignore_ascii_case("MATCH")
+                            && (pattern()? || Self::named_merge_pattern(lexer.clone())?)
+                        {
+                            match_pattern = true;
+                            unwind_source = false;
+                        } else if [
+                            "WHERE", "WITH", "UNWIND", "CALL", "RETURN", "CREATE", "INSERT",
+                            "MERGE", "SET", "REMOVE", "DELETE", "DETACH",
+                        ]
+                        .iter()
+                        .any(|end| word.eq_ignore_ascii_case(end))
+                        {
+                            match_pattern = false;
+                            unwind_source = word.eq_ignore_ascii_case("UNWIND");
+                            projected |= word.eq_ignore_ascii_case("WITH");
+                        }
+                    }
+                    if unwind_source && word.eq_ignore_ascii_case("AS") {
+                        if let TokenKind::Word(name) =
+                            script::next_script_token(&mut lexer.clone())?.kind
+                        {
+                            bindings.insert(name);
+                        }
+                        unwind_source = false;
+                    }
                     let mutation = || -> Result<bool, GraphPatternTextError> {
                         if word.eq_ignore_ascii_case("SET") || word.eq_ignore_ascii_case("REMOVE") {
                             Self::mutation_clause_target(lexer.clone())
@@ -210,6 +254,15 @@ impl PreparedGraphWriteChainText {
                                 script::next_script_token(&mut lookahead)?.kind,
                                 TokenKind::Punct(b'-' | b'<')
                             );
+                            if !vertex
+                                && (projected
+                                    || Self::edge_merge_has_unbound_endpoint(
+                                        lexer.clone(),
+                                        &bindings,
+                                    )?)
+                            {
+                                return Ok(true);
+                            }
                             if parameter_matched && vertex {
                                 return Ok(true);
                             }
@@ -258,6 +311,41 @@ impl PreparedGraphWriteChainText {
                 _ => {}
             }
             previous = Some(token.kind);
+        }
+    }
+
+    /// Inspect endpoint names without mistaking labels, map values, quoted
+    /// text or a named path for bindings. An anonymous endpoint is new too.
+    /// The caller already framed a relationship after the first node; the
+    /// actual pattern compiler owns malformed or multi-edge patterns.
+    fn edge_merge_has_unbound_endpoint(
+        mut lexer: Lexer<'_>,
+        bindings: &BTreeSet<&str>,
+    ) -> Result<bool, GraphPatternTextError> {
+        let (mut depth, mut endpoints) = (0_usize, 0_usize);
+        loop {
+            match script::next_script_token(&mut lexer)?.kind {
+                TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
+                TokenKind::Punct(open @ (b'(' | b'[' | b'{')) => {
+                    if depth == 0 && open == b'(' {
+                        endpoints += 1;
+                        if !matches!(
+                            script::next_script_token(&mut lexer.clone())?.kind,
+                            TokenKind::Word(name) if bindings.contains(name)
+                        ) {
+                            return Ok(true);
+                        }
+                    }
+                    depth += 1;
+                }
+                TokenKind::Punct(b')' | b']' | b'}') => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 && endpoints == 2 {
+                        return Ok(false);
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -1339,12 +1427,8 @@ mod tests {
             "CREATE (a); MATCH (n) WITH n CREATE (b)",
             "MATCH (a) SET a.p = 1; MATCH (b) CREATE (c)",
             "RETURN 1",
-            // A lone MATCH-led or UNWIND-led relationship MERGE, a first
-            // relationship MERGE, and a lone first MERGE with ON or SET
-            // clauses keep their own families.
-            "MERGE (a)-[:X]->(b)",
-            "MERGE (a)-[:X]->(b) MERGE (c)",
-            "MATCH (a), (b) WITH a, b MERGE (a)-[:X]->(b)",
+            // A lone relationship MERGE with already bound endpoints and a
+            // lone first vertex MERGE keep their established families.
             "MATCH (a), (b) MERGE (a)-[:X]->(b) RETURN a",
             "OPTIONAL MATCH (a) MERGE (b)",
             // ON/SET clauses that write and read only the named relationship
@@ -1359,7 +1443,6 @@ mod tests {
             "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n.name = row.name",
             "UNWIND $pairs AS row MATCH (a {id: row.a}), (b {id: row.b}) MERGE (a)-[:R]->(b)",
             "UNWIND $rows AS row MERGE (n:Entity {p: 'RETURN'})",
-            "UNWIND [1] AS x MERGE (a)-[:R]->(b)",
             "MERGE (a:A) ON CREATE SET a.p = 1",
             "MERGE (a:A) ON CREATE SET a.p = 1 ON MATCH SET a.q = 2 RETURN a",
             "MERGE (n:L) SET n.p = 1",
@@ -1370,6 +1453,53 @@ mod tests {
             "MATCH (n) SET n.p = 1 WITH n RETURN n.p",
             "MATCH (n) WITH n SET n.p = 1 RETURN n",
             "MATCH (n {p: 'CREATE (x)'}) DELETE n",
+        ] {
+            assert!(
+                !PreparedGraphWriteChainText::is_chain(text).unwrap(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn whole_pattern_relationship_merges_use_native_chain_rows() {
+        for text in [
+            "MERGE (a)-[:R]->(b)",
+            "MERGE (a)-[:R]->(b) MERGE (c)",
+            "MERGE ()-[:R]->()",
+            "MERGE (a:Visible {p:1})<-[r:R {p:2}]-(b:Visible {p:3}) RETURN a,b,r",
+            "MERGE route=(a:Visible {p:1})-[r:R]-(a) RETURN route",
+            "MATCH (a) MERGE (a)-[:R]->(b)",
+            "MATCH (b) MERGE (a)<-[:R]-(b)",
+            "MATCH (a) MERGE (a)-[:R]->()",
+            "MATCH (a {b:1}) MERGE (a)-[:R]->(b)",
+            "MATCH (a) WHERE coalesce(b,1)=1 MERGE (a)-[:R]->(b)",
+            "MATCH (a) MERGE route=(a)-[r:R {p:[1,(2+3)]}]->(b:Visible {p:2})",
+            "UNWIND [1] AS x MERGE (a {p:x})-[:R]->(b)",
+            "UNWIND $rows AS row MERGE (a {p:row.a})-[:R]->(b {p:row.b})",
+            "UNWIND $rows AS row MATCH (a {p:row.a}) MERGE (a)-[:R]->(b {p:row.b})",
+            "UNWIND $rows AS row MATCH route=(a)-[:R]->(b) MERGE (b)-[:R]->(c)",
+            "MATCH (a), (b) WITH a,b MERGE (a)-[:R]->(b)",
+            "MATCH (a), (b) WITH a MERGE (a)-[:R]->(b)",
+            "MATCH (a) WITH a AS b MERGE (a)-[:R]->(b)",
+            "WITH 1 AS value MERGE (a {p:value})-[:R]->(b)",
+        ] {
+            assert!(
+                PreparedGraphWriteChainText::is_chain(text).unwrap(),
+                "{text}"
+            );
+        }
+        for text in [
+            "MATCH (a), (b) MERGE (a)-[:R]->(b)",
+            "MATCH (a) MATCH (b) MERGE (a)-[r:R]->(b) ON CREATE SET r.p=1",
+            "MATCH route=(a)-[edge:R]->(b) MERGE (a)-[:R]->(b)",
+            "MATCH (a) MERGE (a)-[:R]->(a)",
+            "MATCH (a),(b) WHERE a.p STARTS WITH 'WITH' MERGE (a)-[:R]->(b)",
+            "MATCH (a {p:'MERGE (new)-[:R]->()'}),(b) MERGE (a)-[:R]->(b)",
+            "UNWIND $pairs AS row MATCH (a {p:row.a}),(b {p:row.b}) MERGE (a)-[:R]->(b)",
+            "UNWIND $left AS a UNWIND $right AS b MERGE (a)-[:R]->(b)",
+            "MATCH (a),(b) MERGE (a)-[:R]->(b); MERGE (new)-[:R]->()",
+            "MATCH (a) RETURN a; MERGE (new)-[:R]->()",
         ] {
             assert!(
                 !PreparedGraphWriteChainText::is_chain(text).unwrap(),

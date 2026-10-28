@@ -244,6 +244,10 @@ pub enum GraphElementMetadataError<E> {
     Interrupted,
 }
 
+/// Controlled property and metadata reads share the same source/control
+/// failure vocabulary. The evaluator restores the original control error.
+pub type GraphElementPropertyError<E> = GraphElementMetadataError<E>;
+
 /// The openCypher value functions over lists and text (fgdb-13l85).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphValueFunction {
@@ -2037,6 +2041,30 @@ pub(crate) trait ElementReader<E> {
         key: PropertyKeyId,
     ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>>;
 
+    fn property_for_column(
+        &mut self,
+        _column: usize,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
+        self.property(element, key)
+    }
+
+    fn property_with_control(
+        &mut self,
+        column: Option<usize>,
+        element: ElementId,
+        key: PropertyKeyId,
+        _control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, GraphElementPropertyError<E>>>
+    {
+        match column {
+            Some(column) => self.property_for_column(column, element, key),
+            None => self.property(element, key),
+        }
+        .map(|result| result.map_err(GraphElementPropertyError::Source))
+    }
+
     fn metadata(
         &mut self,
         _element: ElementId,
@@ -2088,6 +2116,17 @@ impl<S: super::GraphSetSource<E, C> + ?Sized, E, C> ElementReader<E>
     ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
         self.source.element_property(element, key)
     }
+    fn property_with_control(
+        &mut self,
+        _column: Option<usize>,
+        element: ElementId,
+        key: PropertyKeyId,
+        control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, GraphElementPropertyError<E>>>
+    {
+        self.source
+            .element_property_with_control(element, key, control)
+    }
     fn metadata(
         &mut self,
         element: ElementId,
@@ -2113,6 +2152,15 @@ impl<E> ElementReader<E> for HostElements<'_, E> {
         Some(self.0.element_property(element, key))
     }
 
+    fn property_for_column(
+        &mut self,
+        column: usize,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
+        Some(self.0.element_property_for_column(column, element, key))
+    }
+
     fn metadata(
         &mut self,
         element: ElementId,
@@ -2131,6 +2179,15 @@ impl<E> super::GraphElementReader<E> for HostElements<'_, E> {
         key: PropertyKeyId,
     ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E> {
         self.0.element_property(element, key)
+    }
+
+    fn element_property_for_column(
+        &mut self,
+        column: usize,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E> {
+        self.0.element_property_for_column(column, element, key)
     }
 
     fn element_metadata(
@@ -2158,6 +2215,37 @@ impl<E, T, F: FnMut(E) -> T> ElementReader<T> for MappedElements<'_, '_, E, F> {
         self.read
             .property(element, key)
             .map(|result| result.map_err(&mut self.error))
+    }
+    fn property_for_column(
+        &mut self,
+        column: usize,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, T>> {
+        self.read
+            .property_for_column(column, element, key)
+            .map(|result| result.map_err(&mut self.error))
+    }
+    fn property_with_control(
+        &mut self,
+        column: Option<usize>,
+        element: ElementId,
+        key: PropertyKeyId,
+        control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, GraphElementPropertyError<T>>>
+    {
+        self.read
+            .property_with_control(column, element, key, control)
+            .map(|result| {
+                result.map_err(|error| match error {
+                    GraphElementPropertyError::Source(error) => {
+                        GraphElementPropertyError::Source((self.error)(error))
+                    }
+                    GraphElementPropertyError::Interrupted => {
+                        GraphElementPropertyError::Interrupted
+                    }
+                })
+            })
     }
     fn metadata(
         &mut self,
@@ -2204,6 +2292,30 @@ pub(crate) fn read_metadata<E>(
         // A host cannot invent a cancellation. Such a contract violation
         // keeps the typed unavailable-source refusal and exposes no value.
         Some(Err(GraphElementMetadataError::Interrupted)) | None => None,
+    }
+}
+
+fn read_property<E>(
+    read: &mut ElementRead<'_, E>,
+    column: Option<usize>,
+    element: ElementId,
+    key: PropertyKeyId,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
+    let mut interrupted = None;
+    let result = read.property_with_control(column, element, key, &mut |event| {
+        if interrupted.is_some() {
+            return Err(());
+        }
+        control(event).map_err(|error| interrupted = Some(error))
+    });
+    if let Some(error) = interrupted {
+        return Some(Err(error));
+    }
+    match result {
+        Some(Ok(value)) => Some(Ok(value)),
+        Some(Err(GraphElementPropertyError::Source(error))) => Some(Err(error)),
+        Some(Err(GraphElementPropertyError::Interrupted)) | None => None,
     }
 }
 
@@ -2305,6 +2417,16 @@ trait SynchronousElementSource {
         self.element_property(element, key)
     }
 
+    fn element_property_for_column_with_control(
+        &mut self,
+        _column: Option<usize>,
+        element: ElementId,
+        key: PropertyKeyId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), Self::Error>,
+    ) -> Option<Result<Option<Self::Property>, Self::Error>> {
+        self.element_property_with_control(element, key, control)
+    }
+
     fn element_metadata_with_control(
         &mut self,
         element: ElementId,
@@ -2324,6 +2446,16 @@ impl<E> SynchronousElementSource for dyn ElementReader<E> + '_ {
         key: PropertyKeyId,
     ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, E>> {
         self.property(element, key)
+    }
+
+    fn element_property_for_column_with_control(
+        &mut self,
+        column: Option<usize>,
+        element: ElementId,
+        key: PropertyKeyId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Option<Result<Option<Self::Property>, E>> {
+        read_property(self, column, element, key, control)
     }
 
     fn element_metadata_with_control(
@@ -2941,6 +3073,10 @@ where
             value
         }
         GraphSetValue::MapGet { map, key, property } => {
+            let input_column = match map.as_ref() {
+                GraphSetValue::Column(column) => Some(*column),
+                _ => None,
+            };
             let map = projection_await!(
                 $mode,
                 operand(map, row, column, control, depth + 1, nodes, reserve)
@@ -2964,7 +3100,7 @@ where
                         control(GlaExecutionEvent::Work).map_err(ProjectionFailure::Control)?;
                         projection_await!(
                             $mode,
-                            nodes.read.element_property_with_control(element, *key, control)
+                            nodes.read.element_property_for_column_with_control(input_column, element, *key, control)
                         )
                     }
                 };

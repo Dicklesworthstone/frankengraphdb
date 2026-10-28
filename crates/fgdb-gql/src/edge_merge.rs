@@ -17,9 +17,12 @@
 //! or, over a row relation, values each input row computes (fgdb-at06q).
 //! ON MATCH/ON CREATE actions remain above this primitive.
 
+mod whole_pattern;
+pub use whole_pattern::{GraphEdgeWholeMergeProposal, GraphEdgeWholeMergeRow};
+
 use crate::algebra::{GraphValueRow, PreparedGraphPattern, ValueProjection};
 use crate::{GlaExecutionStats, GqlExecutionStats, GqlQueryPolicy, GqlScalarParameter};
-use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::sync::Arc;
 
@@ -53,6 +56,18 @@ pub enum GraphEdgeMergeBuildError {
     RowProperty {
         key: PropertyKeyId,
     },
+    /// A new endpoint must name a distinct source/destination placeholder in
+    /// the relation input, never a carried bound vertex or an unrelated field.
+    UnboundEndpoint {
+        column: usize,
+    },
+    DuplicateLabel {
+        column: usize,
+    },
+    Pattern(crate::algebra::PatternBuildError),
+    Projection(crate::GraphSetProjectionError),
+    Filter(crate::GraphSetFilterError),
+    Creation(crate::insertion::GraphInsertBuildError),
 }
 impl core::fmt::Display for GraphEdgeMergeBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -80,6 +95,12 @@ impl core::fmt::Display for GraphEdgeMergeBuildError {
             Self::RowProperty { .. } => {
                 f.write_str("relationship MERGE map value reads a column its input row lacks")
             }
+            Self::UnboundEndpoint { column } => write!(f, "relationship MERGE has an invalid new endpoint column {column}"),
+            Self::DuplicateLabel { column } => write!(f, "relationship MERGE endpoint column {column} repeats a label"),
+            Self::Pattern(error) => error.fmt(f),
+            Self::Projection(error) => error.fmt(f),
+            Self::Filter(error) => error.fmt(f),
+            Self::Creation(error) => error.fmt(f),
         }
     }
 }
@@ -198,6 +219,8 @@ pub enum GraphEdgeMergeError<E, A> {
         property: usize,
         source: crate::GraphIntegerError,
     },
+    WholePattern(GraphEdgeMergeBuildError),
+    Creation(Box<crate::insertion::GraphInsertError<E, A>>),
 }
 impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
     for GraphEdgeMergeError<E, A>
@@ -247,6 +270,10 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
                 f,
                 "relationship MERGE row {row} property {property}: {source}"
             ),
+            Self::WholePattern(error) => write!(f, "relationship MERGE whole pattern: {error}"),
+            Self::Creation(error) => {
+                write!(f, "relationship MERGE whole-pattern creation: {error}")
+            }
         }
     }
 }
@@ -259,6 +286,8 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
             Self::InputRelation(error) => Some(error),
             Self::IdentitySource(error) => Some(error),
             Self::RowExpression { source, .. } => Some(source),
+            Self::WholePattern(error) => Some(error),
+            Self::Creation(error) => Some(error),
             _ => None,
         }
     }
@@ -313,6 +342,16 @@ struct StoredMergeProperty {
     reflexive: bool,
 }
 
+/// Compiler-owned declaration of a newly introduced endpoint. The NULL input
+/// slot is explicit schema evidence, not a runtime inference from an ordinary
+/// nullable bound endpoint. Repeated references to one variable share a slot.
+#[derive(Clone, PartialEq, Eq)]
+struct UnboundEndpoint {
+    column: usize,
+    labels: Vec<LabelId>,
+    properties: Vec<(PropertyKeyId, crate::vertex_merge::GraphVertexMergeRowValue)>,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphEdgeMerge {
     input: Input,
@@ -324,6 +363,7 @@ pub struct PreparedGraphEdgeMerge {
     /// Map values each input row computes (fgdb-at06q), in key order: a
     /// column, or a value over the row. Never `Bound`.
     row_properties: Vec<(PropertyKeyId, crate::vertex_merge::GraphVertexMergeRowValue)>,
+    unbound_endpoints: Vec<UnboundEndpoint>,
     undirected: bool,
 }
 impl core::fmt::Debug for PreparedGraphEdgeMerge {
@@ -437,6 +477,7 @@ impl PreparedGraphEdgeMerge {
             properties,
             stored_properties: Arc::from([]),
             row_properties: Vec::new(),
+            unbound_endpoints: Vec::new(),
             undirected: false,
         })
     }
@@ -578,6 +619,127 @@ impl PreparedGraphEdgeMerge {
     #[must_use]
     pub fn has_row_properties(&self) -> bool {
         !self.row_properties.is_empty()
+    }
+
+    /// Attach newly declared vertices to a single native whole-pattern MERGE.
+    /// All maps are parsed against the final input schema. The host replaces
+    /// only these NULL slots after the complete pattern matches or is created.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn with_unbound_endpoints(
+        mut self,
+        endpoints: Vec<(
+            usize,
+            Vec<LabelId>,
+            Vec<(PropertyKeyId, crate::vertex_merge::GraphVertexMergeRowValue)>,
+        )>,
+    ) -> Result<Self, GraphEdgeMergeBuildError> {
+        use crate::vertex_merge::GraphVertexMergeRowValue;
+        if endpoints.is_empty() {
+            return Ok(self);
+        }
+        let Input::Relation(input) = &self.input else {
+            return Err(GraphEdgeMergeBuildError::UnboundEndpoint {
+                column: self.source,
+            });
+        };
+        let types = input.column_types();
+        let mut declared = self
+            .unbound_endpoints
+            .iter()
+            .map(|endpoint| endpoint.column)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut label_count = self
+            .unbound_endpoints
+            .iter()
+            .map(|endpoint| endpoint.labels.len())
+            .sum::<usize>();
+        for (column, mut labels, mut properties) in endpoints {
+            if ![self.source, self.destination].contains(&column)
+                || column >= types.len()
+                || !declared.insert(column)
+            {
+                return Err(GraphEdgeMergeBuildError::UnboundEndpoint { column });
+            }
+            labels.sort_unstable();
+            if labels.windows(2).any(|pair| pair[0] == pair[1]) {
+                return Err(GraphEdgeMergeBuildError::DuplicateLabel { column });
+            }
+            label_count = label_count.saturating_add(labels.len());
+            if label_count > crate::algebra::MAX_PATTERN_PREDICATES {
+                return Err(GraphEdgeMergeBuildError::Pattern(
+                    crate::algebra::PatternBuildError::LimitExceeded {
+                        dimension: crate::algebra::PatternLimitDimension::Predicates,
+                        limit: crate::algebra::MAX_PATTERN_PREDICATES,
+                        observed: label_count,
+                    },
+                ));
+            }
+            if properties.len() > MAX_GRAPH_EDGE_MERGE_PROPERTIES {
+                return Err(GraphEdgeMergeBuildError::TooManyProperties {
+                    limit: MAX_GRAPH_EDGE_MERGE_PROPERTIES,
+                    observed: properties.len(),
+                });
+            }
+            properties.sort_by_key(|(key, _)| *key);
+            if properties.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+                return Err(GraphEdgeMergeBuildError::DuplicateProperty);
+            }
+            for (key, value) in &properties {
+                match value {
+                    GraphVertexMergeRowValue::Bound(value)
+                        if matches!(value.value(), CanonicalScalar::Null) =>
+                    {
+                        return Err(GraphEdgeMergeBuildError::NullProperty { key: *key });
+                    }
+                    GraphVertexMergeRowValue::Column(column) if *column >= types.len() => {
+                        return Err(GraphEdgeMergeBuildError::RowProperty { key: *key });
+                    }
+                    GraphVertexMergeRowValue::Computed(value)
+                        if !matches!(
+                            crate::GraphSetProjection::admit_output(value, types, column),
+                            Ok(crate::GraphSetColumnType::Scalar
+                                | crate::GraphSetColumnType::Stored
+                                | crate::GraphSetColumnType::List
+                                | crate::GraphSetColumnType::Any)
+                        ) =>
+                    {
+                        return Err(GraphEdgeMergeBuildError::RowProperty { key: *key });
+                    }
+                    _ => {}
+                }
+            }
+            self.unbound_endpoints.push(UnboundEndpoint {
+                column,
+                labels,
+                properties,
+            });
+        }
+        self.unbound_endpoints
+            .sort_by_key(|endpoint| endpoint.column);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn has_unbound_endpoints(&self) -> bool {
+        !self.unbound_endpoints.is_empty()
+    }
+
+    pub fn unbound_columns(&self) -> impl ExactSizeIterator<Item = usize> + '_ {
+        self.unbound_endpoints
+            .iter()
+            .map(|endpoint| endpoint.column)
+    }
+
+    pub fn unbound_labels(&self) -> impl Iterator<Item = LabelId> + '_ {
+        self.unbound_endpoints
+            .iter()
+            .flat_map(|endpoint| endpoint.labels.iter().copied())
+    }
+
+    pub fn unbound_property_keys(&self) -> impl Iterator<Item = PropertyKeyId> + '_ {
+        self.unbound_endpoints
+            .iter()
+            .flat_map(|endpoint| endpoint.properties.iter().map(|(key, _)| *key))
     }
 
     /// The map values input row `at` computes, in key order, with their
@@ -926,9 +1088,11 @@ impl PreparedGraphEdgeMerge {
     /// value would not match the next occurrence under query equality.
     #[must_use]
     pub fn shares_pair_outcomes(&self) -> bool {
-        self.stored_properties
-            .iter()
-            .all(|property| property.reflexive)
+        !self.has_unbound_endpoints()
+            && self
+                .stored_properties
+                .iter()
+                .all(|property| property.reflexive)
     }
 
     /// All keys read by the existence predicate, including stored lists and
@@ -1082,6 +1246,42 @@ impl PreparedGraphEdgeMerge {
                     }
                     // with_row_properties keeps constants with the constant map.
                     GraphVertexMergeRowValue::Bound(_) => bytes.push(255),
+                }
+            }
+        }
+        if !self.unbound_endpoints.is_empty() {
+            use crate::vertex_merge::GraphVertexMergeRowValue;
+            bytes.extend_from_slice(b"fgdb:whole-pattern-edge-merge:v1\0");
+            bytes.extend_from_slice(&(self.unbound_endpoints.len() as u64).to_be_bytes());
+            for endpoint in &self.unbound_endpoints {
+                bytes.extend_from_slice(&(endpoint.column as u64).to_be_bytes());
+                bytes.extend_from_slice(&(endpoint.labels.len() as u64).to_be_bytes());
+                for label in &endpoint.labels {
+                    bytes.extend_from_slice(&label.0.to_be_bytes());
+                }
+                bytes.extend_from_slice(&(endpoint.properties.len() as u64).to_be_bytes());
+                for (key, value) in &endpoint.properties {
+                    bytes.extend_from_slice(&key.0.to_be_bytes());
+                    match value {
+                        GraphVertexMergeRowValue::Bound(value) => {
+                            bytes.push(0);
+                            bytes.extend_from_slice(
+                                &(value.canonical_bytes().len() as u64).to_be_bytes(),
+                            );
+                            bytes.extend_from_slice(value.canonical_bytes());
+                        }
+                        GraphVertexMergeRowValue::Column(column) => {
+                            bytes.push(1);
+                            bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+                        }
+                        GraphVertexMergeRowValue::Computed(value) => {
+                            bytes.push(2);
+                            let mut encoded = Vec::new();
+                            value.append_canonical_bytes(&mut encoded);
+                            bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                            bytes.extend_from_slice(&encoded);
+                        }
+                    }
                 }
             }
         }

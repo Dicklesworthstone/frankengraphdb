@@ -5,7 +5,8 @@
 use super::super::{Database, Execution, Vfs, WriteTxn, WriteTxnError, edge_merge, selection};
 use super::{Fault, admit_pattern};
 use crate::write_txn::{
-    EdgeUpsertRowTargets, edge_merge_path_value, edge_merge_row_actions_controlled,
+    EdgeUpsertResolvedRows, EdgeUpsertRowTargets, WholeEdgeMergeSource, edge_merge_path_value,
+    edge_merge_row_actions_controlled,
 };
 use fgdb_delta_types::ElementId;
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
@@ -112,6 +113,12 @@ pub(super) fn preflight(
     }
     if !scope.allows_relation(merge.relation())
         || merge.property_keys().any(|key| !scope.allows_property(key))
+        || merge
+            .unbound_property_keys()
+            .any(|key| !scope.allows_property(key))
+        || merge
+            .unbound_labels()
+            .any(|label| !scope.allows_label(label))
     {
         return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
     }
@@ -601,193 +608,315 @@ pub(super) fn execute_actions<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 GlaExecutionEvent::ScratchEntry,
             )
             .map_err(action_context)?;
-            let allowance = GraphEdgeMergePolicy::new(private).with_creation_limit(
-                policy
-                    .max_edges
-                    .checked_sub(stats.created_edges)
-                    .ok_or_else(|| action_context(invalid()))?,
-            );
-            // Move the original row into and back out of the native collector;
-            // do not duplicate a carried list/map for each relationship probe.
-            let (merged, targets, mut rows) =
-                edge_merge::apply_occurrence::<EdgeUpsertRowTargets, _, _>(
-                    transaction,
-                    database,
-                    cx,
-                    merge,
-                    allowance,
-                    scope,
-                    execution,
-                    GqlQueryExecution {
-                        value: vec![row],
-                        rows: GqlExecutionStats {
-                            snapshot_records: stats.selection.snapshot_records,
-                            result_rows: 1,
-                        },
-                        evaluator: stats.evaluator,
-                    },
-                    at,
-                )
-                .map_err(|error| {
-                    action_error(error.map_source(|error| {
-                        GraphEdgeUpsertError::Merge(match error {
-                            GraphEdgeMergeError::CreationLimit { observed, .. } => {
-                                GraphEdgeMergeError::CreationLimit {
-                                    limit: policy.max_edges,
-                                    observed: u128::from(stats.created_edges) + observed,
-                                }
-                            }
-                            GraphEdgeMergeError::InputSchema { column, .. } => {
-                                GraphEdgeMergeError::InputSchema { row: at, column }
-                            }
-                            GraphEdgeMergeError::NullEndpoint { column, .. } => {
-                                GraphEdgeMergeError::NullEndpoint { row: at, column }
-                            }
-                            GraphEdgeMergeError::RowValue { property, .. } => {
-                                GraphEdgeMergeError::RowValue { row: at, property }
-                            }
-                            GraphEdgeMergeError::RowExpression {
-                                property, source, ..
-                            } => GraphEdgeMergeError::RowExpression {
-                                row: at,
-                                property,
-                                source,
-                            },
-                            error => error,
-                        })
-                    }))
-                })?;
-            if rows.len() != 1 {
-                return Err(action_context(invalid()));
-            }
-            let row = rows.pop().ok_or_else(|| action_context(invalid()))?;
-            stats.selection.snapshot_records = merged
-                .match_selection
-                .snapshot_records
-                .checked_add(merged.overlay_edges)
-                .ok_or_else(|| action_context(invalid()))?;
-            stats.evaluator = merged.evaluator;
-            stats.created_edges = stats
-                .created_edges
-                .checked_add(merged.created_edges)
-                .ok_or_else(|| action_context(invalid()))?;
-            for &(outcome, _) in &targets.0 {
-                let (edge, branch) = match outcome {
-                    GraphEdgeMergeOutcome::Matched(edge) => (edge, GraphEdgeUpsertBranch::Match),
-                    GraphEdgeMergeOutcome::Created(edge) => (edge, GraphEdgeUpsertBranch::Create),
-                    GraphEdgeMergeOutcome::NoInput => return Err(action_context(invalid())),
-                };
-                let actions = upsert.actions();
-                let selected = match branch {
-                    GraphEdgeUpsertBranch::Match => &actions.on_match,
-                    GraphEdgeUpsertBranch::Create => &actions.on_create,
-                    GraphEdgeUpsertBranch::NoInput => return Err(action_context(invalid())),
-                };
-                let clauses = [selected.as_slice(), actions.after.as_slice()];
-                admit_actions(clauses, scope).map_err(action_error)?;
-                let observed = u128::from(effects) + upsert.action_count(branch) as u128;
-                if observed > u128::from(policy.max_mutation_effects) {
-                    return Err(GqlQueryError::Source(GraphWriteChainError::Mutation(
-                        GraphMutationQueryError::Mutation(GraphMutationError::EffectLimit {
-                            limit: policy.max_mutation_effects,
-                            observed,
-                        }),
-                    )));
-                }
-                let state = RefCell::new((&mut *transaction, &mut *database));
-                let controls = RefCell::new(&mut *execution);
-                edge_merge_row_actions_controlled::<WriteTxnError, WriteTxnError, _>(
-                    (merge.relation(), edge),
-                    (at, &row),
-                    clauses,
-                    private,
-                    &mut stats.evaluator,
-                    || {
-                        cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                        controls.borrow_mut().checkpoint()
-                    },
-                    |key, control| {
-                        // Hidden reads have the same NULL transcript as an
-                        // absent property, before lookup or witness creation.
-                        if !scope.allows_property(key) {
-                            control(GlaExecutionEvent::Work)?;
-                            control(GlaExecutionEvent::ScratchEntry)?;
-                            return Ok(GraphValue::Scalar(CanonicalScalar::Null));
+            let resolved = if merge.has_unbound_endpoints() {
+                let proposal = {
+                    let database = RefCell::new(&mut *database);
+                    let controls = RefCell::new(&mut *execution);
+                    // Carried identities grant no authority. Recheck current
+                    // endpoint visibility before either matching or allocation,
+                    // as the ordinary bound-pair MERGE collector does.
+                    for column in [merge.source_column(), merge.destination_column()] {
+                        if !merge.unbound_columns().any(|new| new == column)
+                            && let Some(GraphValue::Vertex(vertex)) = row.values().get(column)
+                            && controls
+                                .borrow_mut()
+                                .vertex(transaction, &database.borrow(), *vertex)
+                                .map_err(|error| action_error(action_source(error)))?
+                                .is_none()
+                        {
+                            return Err(action_error(action_source(WriteTxnError::Authorization(
+                                Error::ScopeDenied,
+                            ))));
                         }
-                        let state = state.borrow();
-                        let value = selection::property(
-                            state.0,
-                            state.1,
-                            ElementId::Edge(edge),
-                            key,
-                            scope,
-                            || {
-                                cx.checkpoint()
-                                    .map_err(WriteTxnError::Interrupted)
-                                    .map_err(GqlQueryError::Interrupted)?;
-                                controls
-                                    .borrow_mut()
-                                    .poll()
-                                    .map_err(GqlQueryError::Interrupted)
-                            },
-                            control,
-                            action_source,
-                        )?;
-                        GraphValue::admit_property_value(&value, &mut |event| control(event))
-                    },
-                    |element, key, _control| {
-                        let mut state = state.borrow_mut();
-                        let (transaction, database) = &mut *state;
-                        transaction.with_prepared_point_read(&input_prepared, |transaction| {
-                            // The shared scoped reader admits the key and
-                            // complete element visibility before payload or
-                            // witness access; hidden values remain NULL.
-                            selection::mutation_element_property(
+                    }
+                    let mut source = WholeEdgeMergeSource {
+                        patterns: |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
+                            GraphValueRow,
+                        >,
+                                   allowance| {
+                            admit_pattern(pattern, scope).map_err(GqlQueryError::Source)?;
+                            selection::select_overlay(
                                 transaction,
-                                database,
+                                &database.borrow(),
+                                cx,
+                                pattern,
+                                scope,
+                                allowance,
+                                &controls,
+                            )
+                        },
+                        properties: |element,
+                                     key,
+                                     control: &mut dyn FnMut(
+                            GlaExecutionEvent,
+                        )
+                            -> Result<(), ()>| {
+                            selection::mutation_element_property_controlled(
+                                transaction,
+                                &database.borrow(),
                                 cx,
                                 element,
                                 key,
                                 scope,
                                 &controls,
+                                &mut |event| {
+                                    control(event).map_err(|()| {
+                                        fgdb_gql::GraphElementPropertyError::Interrupted
+                                    })
+                                },
+                                fgdb_gql::GraphElementPropertyError::Source,
+                            )
+                        },
+                    };
+                    merge
+                        .resolve_whole_row(
+                            row,
+                            at,
+                            GraphInsertPolicy {
+                                query: private,
+                                ..policy
+                            },
+                            stats,
+                            &mut source,
+                            |request| database.borrow_mut().allocate_identity(cx, request),
+                            || {
+                                cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                                controls.borrow_mut().checkpoint()
+                            },
+                        )
+                        .map_err(|error| {
+                            action_error(error.map_source(GraphEdgeUpsertError::Merge))
+                        })?
+                };
+                stats = proposal.stats;
+                if let Some(creation) = proposal.creation {
+                    let (_, batches, _, _) = crate::write_txn::graph_insert_batches_with_control(
+                        merge.relation(),
+                        creation,
+                        false,
+                        || {
+                            cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                            execution.checkpoint()
+                        },
+                    )
+                    .map_err(|error| action_error(action_source(error)))?;
+                    for batch in batches {
+                        super::stage_batch(transaction, database, cx, batch, None, execution)
+                            .map_err(|error| action_error(action_source(error)))?;
+                    }
+                }
+                EdgeUpsertResolvedRows::Whole(proposal.rows)
+            } else {
+                let allowance = GraphEdgeMergePolicy::new(private).with_creation_limit(
+                    policy
+                        .max_edges
+                        .checked_sub(stats.created_edges)
+                        .ok_or_else(|| action_context(invalid()))?,
+                );
+                // Move the original row into and back out of the native collector;
+                // do not duplicate a carried list/map for each relationship probe.
+                let (merged, targets, mut rows) =
+                    edge_merge::apply_occurrence::<EdgeUpsertRowTargets, _, _>(
+                        transaction,
+                        database,
+                        cx,
+                        merge,
+                        allowance,
+                        scope,
+                        execution,
+                        GqlQueryExecution {
+                            value: vec![row],
+                            rows: GqlExecutionStats {
+                                snapshot_records: stats.selection.snapshot_records,
+                                result_rows: 1,
+                            },
+                            evaluator: stats.evaluator,
+                        },
+                        at,
+                    )
+                    .map_err(|error| {
+                        action_error(error.map_source(|error| {
+                            GraphEdgeUpsertError::Merge(match error {
+                                GraphEdgeMergeError::CreationLimit { observed, .. } => {
+                                    GraphEdgeMergeError::CreationLimit {
+                                        limit: policy.max_edges,
+                                        observed: u128::from(stats.created_edges) + observed,
+                                    }
+                                }
+                                GraphEdgeMergeError::InputSchema { column, .. } => {
+                                    GraphEdgeMergeError::InputSchema { row: at, column }
+                                }
+                                GraphEdgeMergeError::NullEndpoint { column, .. } => {
+                                    GraphEdgeMergeError::NullEndpoint { row: at, column }
+                                }
+                                GraphEdgeMergeError::RowValue { property, .. } => {
+                                    GraphEdgeMergeError::RowValue { row: at, property }
+                                }
+                                GraphEdgeMergeError::RowExpression {
+                                    property, source, ..
+                                } => GraphEdgeMergeError::RowExpression {
+                                    row: at,
+                                    property,
+                                    source,
+                                },
+                                error => error,
+                            })
+                        }))
+                    })?;
+                if rows.len() != 1 {
+                    return Err(action_context(invalid()));
+                }
+                let row = rows.pop().ok_or_else(|| action_context(invalid()))?;
+                stats.selection.snapshot_records = merged
+                    .match_selection
+                    .snapshot_records
+                    .checked_add(merged.overlay_edges)
+                    .ok_or_else(|| action_context(invalid()))?;
+                stats.evaluator = merged.evaluator;
+                stats.created_edges = stats
+                    .created_edges
+                    .checked_add(merged.created_edges)
+                    .ok_or_else(|| action_context(invalid()))?;
+                EdgeUpsertResolvedRows::Bound(row, targets)
+            };
+            for (row, targets) in resolved.rows() {
+                for &(outcome, _) in targets.as_slice() {
+                    let (edge, branch) = match outcome {
+                        GraphEdgeMergeOutcome::Matched(edge) => {
+                            (edge, GraphEdgeUpsertBranch::Match)
+                        }
+                        GraphEdgeMergeOutcome::Created(edge) => {
+                            (edge, GraphEdgeUpsertBranch::Create)
+                        }
+                        GraphEdgeMergeOutcome::NoInput => return Err(action_context(invalid())),
+                    };
+                    let actions = upsert.actions();
+                    let selected = match branch {
+                        GraphEdgeUpsertBranch::Match => &actions.on_match,
+                        GraphEdgeUpsertBranch::Create => &actions.on_create,
+                        GraphEdgeUpsertBranch::NoInput => return Err(action_context(invalid())),
+                    };
+                    let clauses = [selected.as_slice(), actions.after.as_slice()];
+                    admit_actions(clauses, scope).map_err(action_error)?;
+                    let observed = u128::from(effects) + upsert.action_count(branch) as u128;
+                    if observed > u128::from(policy.max_mutation_effects) {
+                        return Err(GqlQueryError::Source(GraphWriteChainError::Mutation(
+                            GraphMutationQueryError::Mutation(GraphMutationError::EffectLimit {
+                                limit: policy.max_mutation_effects,
+                                observed,
+                            }),
+                        )));
+                    }
+                    let state = RefCell::new((&mut *transaction, &mut *database));
+                    let controls = RefCell::new(&mut *execution);
+                    edge_merge_row_actions_controlled::<WriteTxnError, WriteTxnError, _>(
+                        (merge.relation(), edge),
+                        (at, &row),
+                        clauses,
+                        private,
+                        &mut stats.evaluator,
+                        || {
+                            cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                            controls.borrow_mut().checkpoint()
+                        },
+                        |key, control| {
+                            // Hidden reads have the same NULL transcript as an
+                            // absent property, before lookup or witness creation.
+                            if !scope.allows_property(key) {
+                                control(GlaExecutionEvent::Work)?;
+                                control(GlaExecutionEvent::ScratchEntry)?;
+                                return Ok(GraphValue::Scalar(CanonicalScalar::Null));
+                            }
+                            let state = state.borrow();
+                            let value = selection::property(
+                                state.0,
+                                state.1,
+                                ElementId::Edge(edge),
+                                key,
+                                scope,
+                                || {
+                                    cx.checkpoint()
+                                        .map_err(WriteTxnError::Interrupted)
+                                        .map_err(GqlQueryError::Interrupted)?;
+                                    controls
+                                        .borrow_mut()
+                                        .poll()
+                                        .map_err(GqlQueryError::Interrupted)
+                                },
+                                control,
+                                action_source,
+                            )?;
+                            GraphValue::admit_property_value(&value, &mut |event| control(event))
+                        },
+                        |column, element, key, control| {
+                            let mut state = state.borrow_mut();
+                            let (transaction, database) = &mut *state;
+                            if column.is_some_and(|column| {
+                                merge.unbound_columns().any(|new| new == column)
+                            }) {
+                                return selection::mutation_element_property_controlled(
+                                    transaction,
+                                    database,
+                                    cx,
+                                    element,
+                                    key,
+                                    scope,
+                                    &controls,
+                                    control,
+                                    action_source,
+                                );
+                            }
+                            transaction.with_prepared_point_read(&input_prepared, |transaction| {
+                                // The shared scoped reader admits the key and
+                                // complete element visibility before payload or
+                                // witness access; hidden values remain NULL.
+                                selection::mutation_element_property(
+                                    transaction,
+                                    database,
+                                    cx,
+                                    element,
+                                    key,
+                                    scope,
+                                    &controls,
+                                )
+                                .map_err(action_source)
+                            })
+                        },
+                        |batch| {
+                            let mut state = state.borrow_mut();
+                            let (transaction, database) = &mut *state;
+                            super::stage_batch(
+                                transaction,
+                                database,
+                                cx,
+                                batch,
+                                None,
+                                &mut controls.borrow_mut(),
                             )
                             .map_err(action_source)
-                        })
-                    },
-                    |batch| {
-                        let mut state = state.borrow_mut();
-                        let (transaction, database) = &mut *state;
-                        super::stage_batch(
-                            transaction,
-                            database,
-                            cx,
-                            batch,
-                            None,
-                            &mut controls.borrow_mut(),
-                        )
-                        .map_err(action_source)
-                    },
-                )
-                .map_err(action_error)?;
-                effects = observed as u64;
-            }
-            if !matches!(step, GraphWriteChainStep::EdgeUpsert(_)) {
-                event(
-                    cx,
-                    &RefCell::new(&mut *execution),
-                    private,
-                    &mut stats.evaluator,
-                    GlaExecutionEvent::ScratchEntry,
-                )
-                .map_err(action_context)?;
-                retained.push((row, targets.0));
+                        },
+                    )
+                    .map_err(action_error)?;
+                    effects = observed as u64;
+                }
+                if !matches!(step, GraphWriteChainStep::EdgeUpsert(_)) {
+                    event(
+                        cx,
+                        &RefCell::new(&mut *execution),
+                        private,
+                        &mut stats.evaluator,
+                        GlaExecutionEvent::ScratchEntry,
+                    )
+                    .map_err(action_context)?;
+                    retained.push((row, targets));
+                }
             }
         }
         let controls = RefCell::new(&mut *execution);
         let mut continued = Vec::new();
         let mut returning = Vec::new();
         for (input, targets) in retained {
-            for (outcome, endpoints) in targets {
+            for (outcome, endpoints) in targets.targets() {
                 let edge = match outcome {
                     GraphEdgeMergeOutcome::Matched(edge) | GraphEdgeMergeOutcome::Created(edge) => {
                         edge

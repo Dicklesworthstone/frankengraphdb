@@ -388,6 +388,25 @@ pub trait GraphSetSource<E, C> {
         None
     }
 
+    /// An owned field may reserve its selected payload and witnesses through
+    /// the executing evaluator before copying. Existing sources retain their
+    /// original reader; hosts that own controlled point projection override
+    /// this hook. A control refusal must stop before ownership grows.
+    fn element_property_with_control(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+        _control: &mut dyn FnMut(crate::GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<
+        Result<
+            Option<fgdb_types::CanonicalPropertyValue>,
+            super::projection::GraphElementPropertyError<E>,
+        >,
+    > {
+        self.element_property(element, key)
+            .map(|result| result.map_err(super::projection::GraphElementPropertyError::Source))
+    }
+
     /// Read visible metadata with the same cut and authority as `pattern`.
     /// Reserve work and scratch BEFORE retaining metadata or copying payloads.
     /// A control error is a stop signal: return `Interrupted` immediately.
@@ -729,6 +748,19 @@ pub trait GraphElementReader<E> {
         key: PropertyKeyId,
     ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E>;
 
+    /// The reached property operand is exactly one original row column.
+    /// Ordinary readers retain their one pinned cut. A mutation that resolves
+    /// new bindings can distinguish that column's current occurrence from a
+    /// carried input's frozen preimage even when their identities coincide.
+    fn element_property_for_column(
+        &mut self,
+        _column: usize,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E> {
+        self.element_property(element, key)
+    }
+
     /// Charge before constructing any owned metadata. `None` means the
     /// capability is unavailable; `Some(Ok(None))` means the element is absent
     /// or masked. A control refusal must stop construction and return
@@ -794,6 +826,16 @@ where
         key: PropertyKeyId,
     ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E> {
         self.source.element_property(element, key)
+    }
+
+    fn element_property_for_column(
+        &mut self,
+        column: usize,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, E> {
+        self.source
+            .element_property_for_column(column, element, key)
     }
 
     fn element_metadata(
