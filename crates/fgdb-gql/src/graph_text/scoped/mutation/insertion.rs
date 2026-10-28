@@ -972,6 +972,15 @@ impl PreparedGraphInsertText {
         statement: &str,
         declarations: &[(&str, GqlParameterType)],
     ) -> Result<bool, GraphPatternTextError> {
+        Ok(Self::multipart_source_kind(statement, declarations)? == Some(ReadWriteKind::Insert))
+    }
+
+    /// Shared read/write framing. The selected native compiler still checks
+    /// every scope and expression; this only finds the first real write.
+    pub(in crate::graph_text::scoped::mutation) fn multipart_source_kind(
+        statement: &str,
+        declarations: &[(&str, GqlParameterType)],
+    ) -> Result<Option<ReadWriteKind>, GraphPatternTextError> {
         use crate::set_text::TextKind;
         let tokens = PreparedGraphText::composition_tokens(statement, declarations)?;
         let word = |index: usize, expected: &str| {
@@ -985,6 +994,9 @@ impl PreparedGraphInsertText {
                 .is_some_and(|token| matches!(token.kind, TextKind::Punct(found) if found == byte))
         };
         let mut depth = 0_usize;
+        let mut matches = 0_usize;
+        let mut row_stage = false;
+        let mut call = false;
         for (index, token) in tokens.iter().enumerate() {
             match token.kind {
                 TextKind::Punct(b'(' | b'[' | b'{') => depth += 1,
@@ -999,31 +1011,90 @@ impl PreparedGraphInsertText {
                     }) {
                         continue;
                     }
-                    if ["MERGE", "SET", "REMOVE", "DELETE", "DETACH"]
+                    // A completed read owns its RETURN expressions. In
+                    // particular, `RETURN delete + 1` is a legal use of a
+                    // row alias, never a later computed DELETE target.
+                    if name.eq_ignore_ascii_case("RETURN") {
+                        return Ok(None);
+                    }
+                    let pattern = punct(index + 1, b'(')
+                        || (matches!(
+                            tokens.get(index + 1).map(|token| token.kind),
+                            Some(TextKind::Word(_))
+                        ) && punct(index + 2, b'=')
+                            && punct(index + 3, b'('));
+                    if name.eq_ignore_ascii_case("MERGE") && pattern {
+                        return Ok(None);
+                    }
+                    let kind = if (name.eq_ignore_ascii_case("CREATE")
+                        || name.eq_ignore_ascii_case("INSERT"))
+                        && pattern
+                    {
+                        Some(ReadWriteKind::Insert)
+                    } else if ["SET", "REMOVE", "DELETE", "DETACH"]
                         .iter()
                         .any(|write| name.eq_ignore_ascii_case(write))
                     {
-                        return Ok(false);
-                    }
-                    if (name.eq_ignore_ascii_case("CREATE") || name.eq_ignore_ascii_case("INSERT"))
-                        && (punct(index + 1, b'(')
-                            || (matches!(
-                                tokens.get(index + 1).map(|token| token.kind),
-                                Some(TextKind::Word(_))
-                            ) && punct(index + 2, b'=')
-                                && punct(index + 3, b'(')))
-                    {
-                        return Ok(
+                        let mut lexer = Lexer {
+                            text: statement,
+                            at: token.at,
+                            tokens: 0,
+                        };
+                        lexer.next()?;
+                        let previous =
+                            index
+                                .checked_sub(1)
+                                .and_then(|index| match tokens[index].kind {
+                                    TextKind::Word(word) => Some(TokenKind::Word(word)),
+                                    TextKind::Punct(byte) => Some(TokenKind::Punct(byte)),
+                                    _ => None,
+                                });
+                        let target = if name.eq_ignore_ascii_case("SET")
+                            || name.eq_ignore_ascii_case("REMOVE")
+                        {
+                            crate::PreparedGraphWriteChainText::mutation_clause_target(lexer)?
+                        } else {
+                            crate::PreparedGraphWriteChainText::deletion_clause_target(
+                                lexer,
+                                previous,
+                                name.eq_ignore_ascii_case("DETACH"),
+                            )?
+                        };
+                        target.then_some(ReadWriteKind::Mutation)
+                    } else {
+                        None
+                    };
+                    if let Some(kind) = kind {
+                        let multipart =
                             crate::set_text::multipart::has_continuation(&tokens[..index])
                                 || word(0, "OPTIONAL")
-                                || word(0, "CALL"),
-                        );
+                                || word(0, "CALL")
+                                || (kind == ReadWriteKind::Mutation && word(0, "WITH"));
+                        // Keep the established direct OPTIONAL mutation and
+                        // its one-pattern frozen-input contract unchanged.
+                        let plain_optional = kind == ReadWriteKind::Mutation
+                            && word(0, "OPTIONAL")
+                            && matches == 1
+                            && !row_stage
+                            && !call;
+                        return Ok((multipart && !plain_optional).then_some(kind));
+                    }
+                    if name.eq_ignore_ascii_case("MATCH") {
+                        matches += 1;
+                    }
+                    if name.eq_ignore_ascii_case("WITH") || name.eq_ignore_ascii_case("UNWIND") {
+                        row_stage = true;
+                    }
+                    if name.eq_ignore_ascii_case("CALL")
+                        && (punct(index + 1, b'{') || punct(index + 1, b'('))
+                    {
+                        call = true;
                     }
                 }
                 _ => {}
             }
         }
-        Ok(false)
+        Ok(None)
     }
 
     /// Prepare INSERT (a:Label {p:$value})-[:R]->(b), optionally after MATCH.
@@ -2035,6 +2106,23 @@ mod graph_row_source_tests {
 
     fn prepare(text: &str) -> PreparedGraphInsertText {
         PreparedGraphInsertText::prepare(text, RelationId(7), symbols).unwrap()
+    }
+
+    #[test]
+    fn terminal_read_aliases_do_not_become_first_writes() {
+        for name in ["set", "remove", "delete", "with"] {
+            let text = format!("CALL {{ RETURN 1 AS {name} }} RETURN {name} + 1");
+            assert!(
+                PreparedGraphInsertText::multipart_source_kind(&text, &[])
+                    .unwrap()
+                    .is_none(),
+                "{text}"
+            );
+            crate::PreparedGraphSetText::prepare(&text, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+        }
     }
 
     #[test]

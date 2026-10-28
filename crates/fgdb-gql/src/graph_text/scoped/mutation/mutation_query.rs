@@ -1412,8 +1412,8 @@ pub(super) fn statement_body<'s>(
 }
 
 impl PreparedGraphMutationQueryText {
-    /// Classify write text with native token framing: a MATCH-led (or
-    /// UNWIND-led, fgdb-0s2pq) statement with a top-level SET, REMOVE, DELETE
+    /// Classify write text with native token framing: a read-led statement
+    /// (including multipart and read-only CALL) with a top-level SET, REMOVE, DELETE
     /// or DETACH DELETE clause followed by RETURN. SET/REMOVE also admit the
     /// parser's `(name).property` target. A CREATE, INSERT or MERGE clause, or
     /// a second statement, keeps its owner. Quoted values, property keys and
@@ -1433,7 +1433,7 @@ impl PreparedGraphMutationQueryText {
             tokens: 0,
         };
         let first = script::next_script_token(&mut lexer)?;
-        if !matches!(first.kind, TokenKind::Word(word) if ["MATCH", "OPTIONAL", "UNWIND"].iter().any(|lead| word.eq_ignore_ascii_case(lead)))
+        if !matches!(first.kind, TokenKind::Word(word) if ["MATCH", "OPTIONAL", "UNWIND", "WITH", "CALL"].iter().any(|lead| word.eq_ignore_ascii_case(lead)))
         {
             return Ok(false);
         }

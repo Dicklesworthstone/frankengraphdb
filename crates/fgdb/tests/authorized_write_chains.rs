@@ -458,6 +458,102 @@ fn computed_replacement_metadata_interruptions_keep_their_channel_and_discard_cr
     });
 }
 
+#[test]
+fn multipart_mutations_between_writes_use_staged_values_and_rollback_the_whole_chain() {
+    lab(0xc4a1_2033, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(10))]);
+        seed.create_vertex(VId(2), vec![HIDDEN], vec![(P, CanonicalScalar::Int(20))]);
+        seed.add_edge(EId(11), VId(1), VId(2), vec![]);
+        db.write(&commit, seed).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let original_vertices = db.vertices().unwrap();
+        let original_edges = db.edges().unwrap();
+        let issuer = authority();
+        let token = issuer
+            .issue_at(&grant(Rights::ReadWrite, 100), NOW)
+            .unwrap();
+        let body = "CREATE (start:Visible {p:1}) WITH start \
+            MATCH (a:Visible) WHERE a.p >= 10 WITH start,a \
+            OPTIONAL MATCH (a)-[:R]->(b) WITH start,a,b,a.p AS value \
+            SET a.p=value+1,b.p=1/0 WITH start,a \
+            CALL (a) { RETURN a.p AS updated } SET start.p=updated";
+        let program = chain(&format!("{body} RETURN a.p,start.p"));
+        db.execute_graph_write_chain_authorized(
+            &txn,
+            &query,
+            &commit,
+            &issuer,
+            &token,
+            "main",
+            &program,
+            policy(100).with_mutation_limit(1),
+            || NOW,
+        )
+        .await
+        .expect_err("the second SET's effect limit discards the CREATE and first SET");
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert_eq!(db.vertices().unwrap(), original_vertices);
+        assert_eq!(db.edges().unwrap(), original_edges);
+        let late_failure = chain(&format!("{body} RETURN 1/(11-start.p) AS bad LIMIT 0"));
+        db.execute_graph_write_chain_authorized(
+            &txn,
+            &query,
+            &commit,
+            &issuer,
+            &token,
+            "main",
+            &late_failure,
+            policy(100),
+            || NOW,
+        )
+        .await
+        .expect_err("LIMIT 0 cannot hide a late RETURN failure or publish earlier writes");
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert_eq!(db.vertices().unwrap(), original_vertices);
+        assert_eq!(db.edges().unwrap(), original_edges);
+        let (stats, rows, completion) = db
+            .execute_graph_write_chain_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &program,
+                policy(100).with_mutation_limit(2),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        // The hidden endpoint never becomes a SET target. CALL then reads
+        // the first SET's staged value and supplies it to the second SET.
+        assert_eq!((stats.created_vertices, stats.created_edges), (1, 0));
+        assert_eq!(rows.value.len(), 1);
+        assert_eq!(
+            rows.value[0].values(),
+            &[
+                GraphValue::Scalar(CanonicalScalar::Int(11)),
+                GraphValue::Scalar(CanonicalScalar::Int(11)),
+            ]
+        );
+        assert_eq!(db.vertices().unwrap().len(), 3);
+        assert_eq!(
+            db.vertex(VId(1)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(11).into())]
+        );
+        assert_eq!(db.vertex(VId(2)).unwrap().unwrap(), original_vertices[1]);
+        assert_eq!(db.edges().unwrap(), original_edges);
+        assert!(matches!(completion,
+            EmbeddedTxnCompletion::WriteCommitted { commit_seq } if commit_seq.0 == basis.0 + 1
+        ));
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
 fn chain(text: &str) -> PreparedGraphWriteChain {
     assert!(
         PreparedGraphWriteChainText::is_chain(text).unwrap(),

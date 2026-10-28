@@ -14,6 +14,7 @@ enum MatchedWrite {
     Insert,
     MultipartInsert,
     Mutation,
+    MultipartMutation,
     VertexMerge,
     EdgeMerge,
 }
@@ -58,7 +59,9 @@ impl PreparedGraphWriteChainText {
         // Whether that MERGE was a vertex MERGE: only one returns rows as a
         // chain; a relationship MERGE stays the batch writer's.
         let mut merged_vertex = false;
-        let (mut unwound, mut matched) = (false, false);
+        let multipart_mutation = PreparedGraphInsertText::multipart_source_kind(statement, &[])?
+            == Some(ReadWriteKind::Mutation);
+        let (mut unwound, mut matched) = (false, multipart_mutation);
         // `UNWIND $rows`: one MERGE after it is the batch writer's, but a
         // vertex MERGE another write follows heads a chain (fgdb-0s2pq).
         let mut parameter_unwound = false;
@@ -87,6 +90,21 @@ impl PreparedGraphWriteChainText {
                             TokenKind::Punct(b'(')
                         ))
                     };
+                    let mutation = || -> Result<bool, GraphPatternTextError> {
+                        if word.eq_ignore_ascii_case("SET") || word.eq_ignore_ascii_case("REMOVE") {
+                            Self::mutation_clause_target(lexer.clone())
+                        } else if word.eq_ignore_ascii_case("DELETE")
+                            || word.eq_ignore_ascii_case("DETACH")
+                        {
+                            Self::deletion_clause_target(
+                                lexer.clone(),
+                                previous,
+                                word.eq_ignore_ascii_case("DETACH"),
+                            )
+                        } else {
+                            Ok(false)
+                        }
+                    };
                     if clause
                         && (written || merged || mutated)
                         && (word.eq_ignore_ascii_case("MATCH")
@@ -114,21 +132,11 @@ impl PreparedGraphWriteChainText {
                         }
                     } else if clause && written && word.eq_ignore_ascii_case("WITH") {
                         headed = true;
-                    } else if clause
-                        && written
-                        && ["SET", "REMOVE", "DELETE", "DETACH"]
-                            .iter()
-                            .any(|kind| word.eq_ignore_ascii_case(kind))
-                    {
+                    } else if clause && written && mutation()? {
                         // A SET, REMOVE or DELETE after a CREATE writes its
                         // rows (`CREATE (n) SET n.p = 1`, fgdb-cpny9).
                         return Ok(true);
-                    } else if clause
-                        && matched
-                        && ["SET", "REMOVE", "DELETE", "DETACH"]
-                            .iter()
-                            .any(|kind| word.eq_ignore_ascii_case(kind))
-                    {
+                    } else if clause && matched && mutation()? {
                         mutated = true;
                     } else if previous.is_none() && word.eq_ignore_ascii_case("UNWIND") {
                         parameter_unwound = matches!(
@@ -289,8 +297,8 @@ impl PreparedGraphWriteChainText {
 
     /// The write family owning a read prefix after an earlier write. CREATE
     /// keeps its established direct MATCH prefix and uses the complete native
-    /// read relation for multipart, OPTIONAL and CALL prefixes. Mutations and
-    /// MERGE retain their existing mandatory MATCH profile. Everything else
+    /// read relation for multipart, OPTIONAL and CALL prefixes. Mutations
+    /// share that relation while MERGE retains its mandatory MATCH profile. Everything else
     /// remains a terminal read. This is framing only: the selected compiler
     /// still admits the complete relation and write.
     /// Property keys, labels, aliases, map entries and STARTS/ENDS WITH are
@@ -367,10 +375,11 @@ impl PreparedGraphWriteChainText {
                     if (word.eq_ignore_ascii_case("SET") || word.eq_ignore_ascii_case("REMOVE"))
                         && Self::mutation_clause_target(lexer.clone())?
                     {
-                        if multipart {
-                            return Ok(None);
-                        }
-                        return Ok(Some(MatchedWrite::Mutation));
+                        return Ok(Some(if multipart {
+                            MatchedWrite::MultipartMutation
+                        } else {
+                            MatchedWrite::Mutation
+                        }));
                     }
                     if (word.eq_ignore_ascii_case("DELETE") || word.eq_ignore_ascii_case("DETACH"))
                         && Self::deletion_clause_target(
@@ -379,10 +388,11 @@ impl PreparedGraphWriteChainText {
                             word.eq_ignore_ascii_case("DETACH"),
                         )?
                     {
-                        if multipart {
-                            return Ok(None);
-                        }
-                        return Ok(Some(MatchedWrite::Mutation));
+                        return Ok(Some(if multipart {
+                            MatchedWrite::MultipartMutation
+                        } else {
+                            MatchedWrite::Mutation
+                        }));
                     }
                     if TERMINAL.iter().any(|read| word.eq_ignore_ascii_case(read)) {
                         return Ok(None);
@@ -430,7 +440,7 @@ impl PreparedGraphWriteChainText {
     /// `WITH delete`, `ORDER BY detach` and `n.p = delete` remain row uses.
     /// The mutation compiler owns the target's actual type and scope, including
     /// list/map/path targets and the runtime refusal of a non-element value.
-    fn deletion_clause_target(
+    pub(in crate::graph_text::scoped::mutation) fn deletion_clause_target(
         mut lexer: Lexer<'_>,
         previous: Option<TokenKind<'_>>,
         detach: bool,
@@ -480,7 +490,9 @@ impl PreparedGraphWriteChainText {
     /// distinguishes a mutation clause from `WITH set`, `ORDER BY remove`,
     /// or a property of either name. The mutation compiler validates the
     /// target's scope, domain and complete action after this framing check.
-    fn mutation_clause_target(mut lexer: Lexer<'_>) -> Result<bool, GraphPatternTextError> {
+    pub(in crate::graph_text::scoped::mutation) fn mutation_clause_target(
+        mut lexer: Lexer<'_>,
+    ) -> Result<bool, GraphPatternTextError> {
         match script::next_script_token(&mut lexer)?.kind {
             TokenKind::Word(_) => match script::next_script_token(&mut lexer)?.kind {
                 TokenKind::Punct(b'.' | b':' | b'=') => Ok(true),
@@ -524,7 +536,9 @@ impl PreparedGraphWriteChainText {
         // leading MATCH and its read stages; otherwise it is a CREATE. A SET,
         // REMOVE or DELETE after a leading MATCH is a first mutation step
         // (`first_mutation`), which is_chain admits only before another write.
-        let mut first_mutation = false;
+        let mut first_mutation =
+            PreparedGraphInsertText::multipart_source_kind(body, declarations)?
+                == Some(ReadWriteKind::Mutation);
         let first_merge = {
             let mut lexer = Lexer {
                 text: body,
@@ -532,7 +546,7 @@ impl PreparedGraphWriteChainText {
                 tokens: 0,
             };
             let (mut depth, mut first, mut unwound) = (0_usize, true, false);
-            let mut matched = false;
+            let mut matched = first_mutation;
             loop {
                 let token = script::next_script_token(&mut lexer)?;
                 match token.kind {
@@ -708,8 +722,10 @@ impl PreparedGraphWriteChainText {
             // A SET, REMOVE or DELETE: a RETURN or the end of the statement
             // follows it, or a WITH head or another write, which reads its
             // post-write rows.
-            if matches!(matched, Some(MatchedWrite::Mutation))
-                || matches!(lexer.clone().next()?.kind, TokenKind::Word(word)
+            if matches!(
+                matched,
+                Some(MatchedWrite::Mutation | MatchedWrite::MultipartMutation)
+            ) || matches!(lexer.clone().next()?.kind, TokenKind::Word(word)
                     if ["SET", "REMOVE", "DELETE", "DETACH"]
                         .iter()
                         .any(|kind| word.eq_ignore_ascii_case(kind)))
@@ -721,6 +737,7 @@ impl PreparedGraphWriteChainText {
                         declarations,
                         &mut resolve,
                         from,
+                        matches!(matched, Some(MatchedWrite::MultipartMutation)),
                     )?;
                 steps.push(ChainTextStep::Mutation(Box::new((step, returning))));
                 next = after;

@@ -202,8 +202,11 @@ fn classify(
     statement: &Statement<'_>,
     declarations: &[(&str, GqlParameterType)],
 ) -> Result<Kind, GraphPatternTextError> {
-    if PreparedGraphInsertText::has_multipart_source(text, declarations)? {
-        return Ok(Kind::Insert);
+    if let Some(kind) = PreparedGraphInsertText::multipart_source_kind(text, declarations)? {
+        return Ok(match kind {
+            ReadWriteKind::Insert => Kind::Insert,
+            ReadWriteKind::Mutation => Kind::Mutation,
+        });
     }
     let mut parser = Parser::new_with_parameter_types(text, declarations)?;
     let unwind_led = parser.is_word("UNWIND");

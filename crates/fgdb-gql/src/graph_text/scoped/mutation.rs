@@ -17,7 +17,7 @@ use super::*;
 use crate::GraphSymbolResolver;
 use crate::graph_text::GraphPathFunction;
 use crate::mutation_text::{
-    MutationActionTemplate, MutationIntegerTemplateOp, MutationReturnTemplate,
+    MutationActionTemplate, MutationIntegerTemplateOp, MutationReturnTemplate, MutationTextInput,
 };
 use crate::set_text::ReadValueTemplate;
 use crate::{
@@ -44,6 +44,12 @@ enum Operand {
         program: Vec<MutationIntegerTemplateOp>,
         at: usize,
     },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReadWriteKind {
+    Insert,
+    Mutation,
 }
 enum ActionKind<'a> {
     Property {
@@ -1002,6 +1008,33 @@ impl PreparedGraphMutationText {
         mut resolve: impl GraphSymbolResolver,
         returning: bool,
     ) -> Result<(Self, Option<MutationReturnTemplate>), GraphMutationTextError> {
+        if crate::PreparedGraphInsertText::multipart_source_kind(statement, declarations)?
+            == Some(ReadWriteKind::Mutation)
+        {
+            let (step, returning, continuation) =
+                crate::mutation_text::PreparedGraphMutationRowsText::prepare_multipart(
+                    statement,
+                    relation,
+                    declarations,
+                    &mut resolve,
+                    None,
+                    returning,
+                    false,
+                )?;
+            debug_assert!(continuation.is_none());
+            return Ok((
+                Self {
+                    input: MutationTextInput::Relation {
+                        statement: statement.to_owned(),
+                        input: Box::new(step.input),
+                    },
+                    relation,
+                    actions: step.actions,
+                    optional_root: false,
+                },
+                returning,
+            ));
+        }
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones());
         // UNWIND ... MATCH ... SET/REMOVE/DELETE (fgdb-0s2pq): the write reads
@@ -1162,19 +1195,18 @@ impl PreparedGraphMutationText {
             let returning = returning
                 .map(|returning| returning.resolve(&mut symbol))
                 .transpose()?;
-            let selection = row.selection.clone().ok_or_else(|| {
-                error(
-                    statement.len(),
-                    GraphPatternTextErrorKind::Expected("a MATCH before the WITH"),
-                )
-            })?;
             return Ok((
                 Self {
-                    selection,
+                    input: MutationTextInput::Relation {
+                        statement: statement.to_owned(),
+                        input: Box::new(crate::set_text::multipart::BoundReadInput {
+                            first: row,
+                            continuations: Vec::new(),
+                        }),
+                    },
                     relation,
                     actions,
                     optional_root: false,
-                    row: Some(Box::new(row)),
                 },
                 returning,
             ));
@@ -1277,11 +1309,10 @@ impl PreparedGraphMutationText {
         };
         Ok((
             Self {
-                selection,
+                input: MutationTextInput::Pattern(selection),
                 relation,
                 actions,
                 optional_root,
-                row: None,
             },
             returning,
         ))
@@ -1289,13 +1320,16 @@ impl PreparedGraphMutationText {
 
     #[must_use]
     pub fn statement(&self) -> &str {
-        self.selection.statement()
+        match &self.input {
+            MutationTextInput::Pattern(selection) => selection.statement(),
+            MutationTextInput::Relation { statement, .. } => statement,
+        }
     }
     #[must_use]
     pub fn parameter_schema(&self) -> &[GqlParameterSpec] {
-        match &self.row {
-            Some(row) => row.parameter_schema(),
-            None => self.selection.parameter_schema(),
+        match &self.input {
+            MutationTextInput::Pattern(selection) => selection.parameter_schema(),
+            MutationTextInput::Relation { input, .. } => input.parameter_schema(),
         }
     }
 
@@ -1304,15 +1338,31 @@ impl PreparedGraphMutationText {
         &self,
         arguments: &GqlParameters,
     ) -> Result<Vec<GqlParameterValue>, GraphMutationTextError> {
-        Ok(match &self.row {
-            Some(row) => row.checked_arguments(arguments)?,
-            None => self.selection.checked_arguments(arguments)?,
+        Ok(match &self.input {
+            MutationTextInput::Pattern(selection) => selection.checked_arguments(arguments)?,
+            MutationTextInput::Relation { input, .. } => input.checked_arguments(arguments)?,
         })
+    }
+
+    /// The established one-pattern profiles may inspect their original
+    /// source. A multipart row has different target ordinals and cannot
+    /// authorize a frozen profile by borrowing one of its graph leaves.
+    fn source_pattern(&self) -> Option<&PreparedGraphText> {
+        match &self.input {
+            MutationTextInput::Pattern(selection) => Some(selection),
+            MutationTextInput::Relation { input, .. } if input.continuations.is_empty() => {
+                input.first.selection.as_ref()
+            }
+            MutationTextInput::Relation { .. } => None,
+        }
     }
 
     /// The closed vertex-field profile for the frozen UNWIND input contract.
     /// Inspect resolved target columns, never aliases or current graph data.
     pub(crate) fn is_vertex_update_only(&self) -> bool {
+        let Some(selection) = self.source_pattern() else {
+            return false;
+        };
         self.actions.iter().all(|action| {
             let target = match action {
                 MutationActionTemplate::ParameterProperty { target, .. }
@@ -1334,7 +1384,7 @@ impl PreparedGraphMutationText {
                 | MutationActionTemplate::DeleteValue { .. }
                 | MutationActionTemplate::SetProperties { .. } => return false,
             };
-            self.selection
+            selection
                 .columns
                 .get(target)
                 .is_some_and(|column| column.key.is_none() && column.path.is_none())
@@ -1345,6 +1395,9 @@ impl PreparedGraphMutationText {
     /// target is a resolved edge column; endpoint mutations and deletion are
     /// excluded before the UNWIND binder can issue frozen input provenance.
     pub(crate) fn is_edge_update_only(&self) -> bool {
+        let Some(selection) = self.source_pattern() else {
+            return false;
+        };
         !self.actions.is_empty()
             && self.actions.iter().all(|action| {
                 let target = match action {
@@ -1359,7 +1412,7 @@ impl PreparedGraphMutationText {
                     ) => *target,
                     _ => return false,
                 };
-                self.selection.columns.get(target).is_some_and(|column| {
+                selection.columns.get(target).is_some_and(|column| {
                     column.key.is_none() && column.path == Some(GraphPathFunction::Edge)
                 })
             })
@@ -1369,6 +1422,9 @@ impl PreparedGraphMutationText {
     /// provenance. Unknown targets and deletions cannot enter the field-only
     /// staging contract; executable binding separately proves constant RHSs.
     pub(crate) fn is_mixed_update_only(&self) -> bool {
+        let Some(selection) = self.source_pattern() else {
+            return false;
+        };
         let mut vertex = false;
         let mut edge = false;
         for action in &self.actions {
@@ -1385,7 +1441,7 @@ impl PreparedGraphMutationText {
                 ) => *target,
                 _ => return false,
             };
-            match self.selection.columns.get(target) {
+            match selection.columns.get(target) {
                 Some(column) if column.key.is_none() && column.path.is_none() => vertex = true,
                 Some(column)
                     if column.key.is_none() && column.path == Some(GraphPathFunction::Edge) =>
@@ -1403,6 +1459,9 @@ impl PreparedGraphMutationText {
     /// data and argument values, not a proof that aliases identify different
     /// elements. RHS-only projections do not restrict the MATCH domain.
     pub(crate) fn feeds_own_match(&self) -> bool {
+        let Some(selection) = self.source_pattern() else {
+            return true;
+        };
         let writes_property = |read_kind, read| {
             self.actions.iter().any(|action| {
                 let (target, key) = match action {
@@ -1434,7 +1493,7 @@ impl PreparedGraphMutationText {
                 }
                 // Action targets are resolved element columns, not RHS
                 // projections. Unknown future target shapes stay conservative.
-                let written_kind = self.selection.columns.get(target).and_then(|column| {
+                let written_kind = selection.columns.get(target).and_then(|column| {
                     match (column.key, column.path) {
                         (None, None) => Some(crate::GraphSetColumnType::Vertex),
                         (None, Some(GraphPathFunction::Edge)) => {
@@ -1469,7 +1528,7 @@ impl PreparedGraphMutationText {
                 ) | MutationActionTemplate::DeleteValue { .. }
             )
         }) {
-            return self.selection.deletion_feeds_later_match();
+            return selection.deletion_feeds_later_match();
         }
         let reads_written_field = |builder: &GraphPatternBuilder, filters: &[BoundFilter]| {
             builder.selects_on_any_field(writes_property, writes_label)
@@ -1483,9 +1542,8 @@ impl PreparedGraphMutationText {
                     BoundFilter::PathLength { .. } => false,
                 })
         };
-        reads_written_field(&self.selection.builder, &self.selection.filters)
-            || self
-                .selection
+        reads_written_field(&selection.builder, &selection.filters)
+            || selection
                 .scopes
                 .iter()
                 .any(|scope| scope.any_pattern(&reads_written_field))
@@ -1498,15 +1556,21 @@ impl PreparedGraphMutationText {
         arguments: &GqlParameters,
     ) -> Result<PreparedGraphMutation, GraphMutationTextError> {
         let values = self.checked_arguments(arguments)?;
-        let at = self.selection.return_at;
+        let at = match &self.input {
+            MutationTextInput::Pattern(selection) => selection.return_at,
+            MutationTextInput::Relation { input, .. } => input.first.return_at,
+        };
         let actions = Self::bind_actions(&self.actions, &values, at)?;
-        if let Some(row) = &self.row {
+        if let MutationTextInput::Relation { input, .. } = &self.input {
             // The read relation's rows, each the WITH row its actions index.
-            let input = row.bind_values(&values)?;
+            let input = input.bind_values(&values)?;
             return PreparedGraphMutation::prepare_relation(input, self.relation, actions)
                 .map_err(|error| build_error(at, error));
         }
-        let selection = self.selection.bind_values(&values)?;
+        let MutationTextInput::Pattern(selection) = &self.input else {
+            unreachable!("relational mutations bound above")
+        };
+        let selection = selection.bind_values(&values)?;
         if !self.optional_root {
             return PreparedGraphMutation::prepare(selection, self.relation, actions)
                 .map_err(|error| build_error(at, error));
@@ -1658,37 +1722,41 @@ type ChainMutation<'a> = (
 );
 
 impl<'a> Parser<'a> {
-    fn chain_mutation(
+    fn row_mutation(
         &mut self,
         row: &[(Name<'a>, crate::GraphSetColumnType)],
+        returning: bool,
+        chain: bool,
     ) -> Result<ChainMutation<'a>, GraphMutationTextError> {
         self.write_row_scope = true;
-        self.chain_write = true;
+        self.chain_write = chain;
         let (mut projections, parsed_actions) = self.mutation_actions(Some(row))?;
-        let returning =
-            if self.is_word("RETURN") || self.is_word("WITH") || self.at_chained_write()? {
-                let scope = mutation_query::ReturnScope {
-                    labels_changed: parsed_actions.iter().any(|action| {
-                        !matches!(
-                            action.kind,
-                            ActionKind::Property { .. }
-                                | ActionKind::RowProperty { .. }
-                                | ActionKind::SetProperties { .. }
-                                | ActionKind::Clear { .. }
-                        )
-                    }),
-                    deleting: parsed_actions.iter().any(|action| {
-                        matches!(
-                            action.kind,
-                            ActionKind::Delete { detach: true }
-                                | ActionKind::RowDelete { detach: true, .. }
-                        )
-                    }),
-                };
-                Some(self.mutation_return(&mut projections, scope, Some(row))?)
-            } else {
-                None
+        let returning = if returning
+            || (chain
+                && (self.is_word("RETURN") || self.is_word("WITH") || self.at_chained_write()?))
+        {
+            let scope = mutation_query::ReturnScope {
+                labels_changed: parsed_actions.iter().any(|action| {
+                    !matches!(
+                        action.kind,
+                        ActionKind::Property { .. }
+                            | ActionKind::RowProperty { .. }
+                            | ActionKind::SetProperties { .. }
+                            | ActionKind::Clear { .. }
+                    )
+                }),
+                deleting: parsed_actions.iter().any(|action| {
+                    matches!(
+                        action.kind,
+                        ActionKind::Delete { detach: true }
+                            | ActionKind::RowDelete { detach: true, .. }
+                    )
+                }),
             };
+            Some(self.mutation_return(&mut projections, scope, Some(row))?)
+        } else {
+            None
+        };
         let continuation = self.continuation();
         if continuation.is_none() {
             self.end()?;
@@ -1699,6 +1767,68 @@ impl<'a> Parser<'a> {
 }
 
 impl crate::mutation_text::PreparedGraphMutationRowsText {
+    /// One mutation over the complete native read relation, either before
+    /// the first write or after the previous write's owned output. Keep RHS
+    /// expressions in the mutation collector: an absent optional target must
+    /// skip its assignment before evaluating a fallible expression.
+    pub(crate) fn prepare_multipart<'a, R>(
+        statement: &'a str,
+        relation: RelationId,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: &mut R,
+        from: Option<ChainContinuation<'a>>,
+        returning: bool,
+        chain: bool,
+    ) -> Result<
+        (
+            Self,
+            Option<MutationReturnTemplate>,
+            Option<ChainContinuation<'a>>,
+        ),
+        GraphMutationTextError,
+    >
+    where
+        R: GraphSymbolResolver + ?Sized,
+    {
+        let mut parser = Parser::new_with_parameter_types(statement, declarations)?
+            .with_zones(resolve.time_zones());
+        let (incoming, owned) = match from {
+            Some(from) => {
+                let owned = Some(Box::new(from.owned_columns()));
+                parser = parser.resume_after(from.boundary, &from.parameters, from.at)?;
+                (Some(from.row), owned)
+            }
+            None => (None, None),
+        };
+        parser.chain_write = chain;
+        let (mut source, schema) =
+            parser.multipart_write_prefix(statement, declarations, incoming)?;
+        let at = parser.current.at;
+        let (projections, actions, returning, continuation) =
+            parser.row_mutation(&schema, returning, chain)?;
+        if !projections.is_empty() {
+            return Err(error(
+                at,
+                GraphPatternTextErrorKind::Expected("a mutation over the completed read row"),
+            )
+            .into());
+        }
+        if let Some(returning) = &returning {
+            returning.admit(&parser.syntax.parameters)?;
+        }
+        parser
+            .syntax
+            .element_catalog
+            .resolve(&mut *resolve, statement);
+        source.share_parameters(&parser.syntax.parameters, &parser.syntax.parameter_offsets);
+        source.append_element_keys(&mut parser.syntax.element_keys);
+        let mut input = source.resolve(resolve)?;
+        input.first.owned = owned;
+        let (step, returning) =
+            Self::resolve_chain_step(resolve, relation, at, input, actions, returning)?;
+        Ok((step, returning, continuation))
+    }
+
     /// The SET, REMOVE or DELETE of a chain over the row the previous write
     /// left (`CREATE (n:P) SET n.name = $name RETURN n.name`, fgdb-cpny9).
     /// A RETURN or the end of the statement may follow it, or a WITH head or
@@ -1713,6 +1843,7 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
         declarations: &[(&str, GqlParameterType)],
         resolve: &mut R,
         from: ChainContinuation<'a>,
+        multipart: bool,
     ) -> Result<
         (
             Self,
@@ -1724,6 +1855,17 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
     where
         R: GraphSymbolResolver + ?Sized,
     {
+        if multipart {
+            return Self::prepare_multipart(
+                statement,
+                relation,
+                declarations,
+                resolve,
+                Some(from),
+                false,
+                true,
+            );
+        }
         let (columns, types) = from.owned_columns();
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones())
@@ -1735,7 +1877,8 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
             (None, from.row)
         };
         let at = parser.current.at;
-        let (projections, parsed_actions, returning, continuation) = parser.chain_mutation(&row)?;
+        let (projections, parsed_actions, returning, continuation) =
+            parser.row_mutation(&row, false, true)?;
         if let Some(returning) = &returning {
             returning.admit(&parser.syntax.parameters)?;
         }
@@ -1794,6 +1937,10 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
             }
         };
         input.owned = Some(Box::new((columns, types)));
+        let input = crate::set_text::multipart::BoundReadInput {
+            first: input,
+            continuations: Vec::new(),
+        };
         let (step, returning) =
             Self::resolve_chain_step(resolve, relation, at, input, parsed_actions, returning)?;
         Ok((step, returning, continuation))
@@ -1820,6 +1967,19 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
     where
         R: GraphSymbolResolver + ?Sized,
     {
+        if crate::PreparedGraphInsertText::multipart_source_kind(statement, declarations)?
+            == Some(ReadWriteKind::Mutation)
+        {
+            return Self::prepare_multipart(
+                statement,
+                relation,
+                declarations,
+                resolve,
+                None,
+                false,
+                true,
+            );
+        }
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones());
         // A WHERE the graph predicate cannot hold is the row filter of the
@@ -1832,7 +1992,7 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
         };
         let at = parser.current.at;
         let (projections, parsed_actions, returning, continuation) =
-            parser.chain_mutation(&schema)?;
+            parser.row_mutation(&schema, false, true)?;
         if let Some(returning) = &returning {
             returning.admit(&parser.syntax.parameters)?;
         }
@@ -1864,6 +2024,10 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
                 ReverseSymbolCatalog::from_resolver(&mut *resolve, statement),
             ));
         }
+        let input = crate::set_text::multipart::BoundReadInput {
+            first: input,
+            continuations: Vec::new(),
+        };
         let (step, returning) =
             Self::resolve_chain_step(resolve, relation, at, input, parsed_actions, returning)?;
         Ok((step, returning, continuation))
@@ -1875,7 +2039,7 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
         resolve: &mut R,
         relation: RelationId,
         at: usize,
-        input: crate::set_text::BoundSetTextInput,
+        input: crate::set_text::multipart::BoundReadInput,
         parsed_actions: Vec<Action<'a>>,
         returning: Option<mutation_query::ParsedMutationReturn<'a>>,
     ) -> Result<(Self, Option<MutationReturnTemplate>), GraphMutationTextError>
@@ -1925,6 +2089,7 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
     /// The previous write's row this step reads.
     pub(crate) fn owned_column_types(&self) -> Option<&[crate::GraphSetColumnType]> {
         self.input
+            .first
             .owned
             .as_deref()
             .map(|(_, types)| types.as_slice())
@@ -1945,8 +2110,8 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
     ) -> Result<PreparedGraphMutation, GraphMutationTextError> {
         let actions = PreparedGraphMutationText::bind_actions(&self.actions, values, self.at)?;
         let input = self.input.bind_values(values)?;
-        // A first step reads its MATCH; a later one only the previous
-        // write's rows.
+        // Every real graph leaf uses the relation collector; an owned/unit
+        // relation retains its source-free execution contract.
         if input.reads_graph() {
             PreparedGraphMutation::prepare_relation(input, self.relation, actions)
         } else {

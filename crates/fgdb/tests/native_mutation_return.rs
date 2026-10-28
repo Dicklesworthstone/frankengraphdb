@@ -104,6 +104,82 @@ fn seed() -> WriteBatch {
     batch
 }
 
+#[test]
+fn multipart_text_mutations_reach_native_dispatch_and_keep_null_targets_inert() {
+    let ((), report) = run_async_under_lab(0xa071_0041, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let before = pinned.vertices().unwrap();
+        let write = async |db: &mut Database<_>, text: &str| {
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(10, 10, 0),
+                no_allocate,
+            )
+            .await
+        };
+        let result = write(
+            &mut db,
+            "MATCH (a:L) WITH a OPTIONAL MATCH (a)-[:R]->(b) \
+             WITH a,b,a.p AS value SET a.p=value+1,b.id=1/0 \
+             RETURN a.id AS id,a.p AS p,b ORDER BY id",
+        )
+        .await
+        .unwrap();
+        let result = rows(result, &["id", "p", "b"]);
+        assert_eq!(result.len(), 2);
+        for (row, (id, expected)) in result.iter().zip([(1, 5), (2, 8)]) {
+            assert_eq!(row[..2], [int(id), int(expected)]);
+            assert!(row[2].is_null(), "a missing OPTIONAL target remains NULL");
+        }
+        let result = write(
+            &mut db,
+            "MATCH (n:L) WITH n CALL (n) { RETURN n.p+2 AS amount } \
+             SET n.p=amount RETURN sum(n.p) AS total",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(result, &["total"]), vec![vec![int(17)]]);
+        let result = write(
+            &mut db,
+            "MATCH (a:L) WITH a MATCH (b:L) WHERE a.id=b.id WITH a,b \
+             REMOVE a.p RETURN a.id AS id,a.p AS p ORDER BY id",
+        )
+        .await
+        .unwrap();
+        let result = rows(result, &["id", "p"]);
+        assert_eq!(result.len(), 2);
+        for (row, id) in result.iter().zip([1, 2]) {
+            assert_eq!(row[0], int(id));
+            assert!(row[1].is_null());
+        }
+        let result = write(
+            &mut db,
+            "MATCH (a:L) WITH a CALL (a) { RETURN a AS target } \
+             DELETE target RETURN count(*) AS removed",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows(result, &["removed"]), vec![vec![int(2)]]);
+        assert!(db.vertices().unwrap().is_empty());
+        assert!(db.edges().unwrap().is_empty());
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 4);
+        assert_eq!(pinned.vertices().unwrap(), before);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// fgdb-sl4ym (TCK Delete6 [5]-[7], [12]-[14]): `MATCH ... WITH ... SET /
 /// REMOVE / DELETE` writes once per WITH row. Targets are the elements the
 /// row carries, values read the row, and RETURN or a WITH tail reads the

@@ -2373,10 +2373,10 @@ impl<'a> Parser<'a> {
         Ok((result, schema, depth))
     }
 
-    /// A CREATE/INSERT reads the complete native relation before allocating
-    /// its identities. A later write starts from the previous write's owned
-    /// rows and staged graph. Leave the write token and live parameter table
-    /// with its owner; no manufactured RETURN is needed.
+    /// An insertion or mutation reads the complete native relation before
+    /// producing its effects. A later write starts from the previous write's
+    /// owned rows and staged graph. Leave the write token and live parameter
+    /// table with its owner; no manufactured RETURN is needed.
     pub(in crate::graph_text::scoped::mutation) fn multipart_write_prefix(
         &mut self,
         statement: &'a str,
@@ -2409,13 +2409,13 @@ impl<'a> Parser<'a> {
                 0,
                 incoming.is_some(),
             )?;
-            parser.write_prefix = false;
-            if !parser.is_word("CREATE") && !parser.is_word("INSERT") {
+            if !parser.at_multipart_write() {
                 return Err(expected(
                     parser.current.at,
-                    "CREATE or INSERT after the complete read",
+                    "CREATE, INSERT, SET, REMOVE or DELETE after the complete read",
                 ));
             }
+            parser.write_prefix = false;
             parser.admit_multipart_size(&input)?;
             Ok((parser, input, schema))
         };
@@ -2462,7 +2462,11 @@ impl<'a> Parser<'a> {
     }
 
     fn at_multipart_write(&self) -> bool {
-        self.write_prefix && !self.call_body && (self.is_word("CREATE") || self.is_word("INSERT"))
+        self.write_prefix
+            && !self.call_body
+            && ["CREATE", "INSERT", "SET", "REMOVE", "DELETE", "DETACH"]
+                .iter()
+                .any(|write| self.is_word(write))
     }
 
     fn multipart_parts(

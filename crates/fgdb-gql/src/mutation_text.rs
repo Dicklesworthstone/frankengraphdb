@@ -112,25 +112,31 @@ pub(crate) enum MutationActionTemplate {
     },
 }
 
-/// MATCH [WALK] ... SET / REMOVE / DETACH DELETE, with one parameter schema and
-/// catalog pass. The retained native selection is private: its generated value
-/// projection is compiler metadata, never a synthesized RETURN query string.
-/// Its original statement bytes are retained only for export and diagnostics.
-/// Actions are simultaneous over one pre-statement overlay, not sequential
-/// expressions observing preceding assignments.
+#[derive(Clone)]
+pub(crate) enum MutationTextInput {
+    Pattern(PreparedGraphText),
+    /// A complete native read relation. Its first leaf may be the previous
+    /// write's owned rows; no graph pattern is invented for that input.
+    Relation {
+        statement: String,
+        input: Box<crate::set_text::multipart::BoundReadInput>,
+    },
+}
+
+/// A native read relation feeding SET / REMOVE / DELETE, with one parameter
+/// schema and preparation-time catalog binding. The retained input is private:
+/// its value projection is compiler metadata, never a synthesized RETURN query.
+/// Original statement bytes are retained only for export and diagnostics.
+/// Actions are simultaneous over one frozen input, not sequential expressions
+/// observing preceding assignments.
 #[derive(Clone)]
 pub struct PreparedGraphMutationText {
-    pub(crate) selection: PreparedGraphText,
+    pub(crate) input: MutationTextInput,
     pub(crate) relation: RelationId,
     pub(crate) actions: Vec<MutationActionTemplate>,
     /// A leading OPTIONAL MATCH: binding left-joins the unit relation with
     /// the selection, so an empty match still yields one all-NULL row.
     pub(crate) optional_root: bool,
-    /// `MATCH ... WITH ... SET`: the read relation through the last WITH
-    /// stage (fgdb-sl4ym). Every action and RETURN binding indexes its row,
-    /// and it owns the statement's parameter table. Boxed: most mutations
-    /// have no WITH row, and inline it doubled every write statement's size.
-    pub(crate) row: Option<Box<crate::set_text::BoundSetTextInput>>,
 }
 impl core::fmt::Debug for PreparedGraphMutationText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -141,14 +147,14 @@ impl core::fmt::Debug for PreparedGraphMutationText {
     }
 }
 
-/// A chain step's SET, REMOVE or DELETE over the previous write's rows
-/// (fgdb-cpny9): `CREATE (n:P) SET n.name = $name RETURN n.name`. Its input
-/// is one owned leaf of those rows, and every action addresses that row.
+/// A chain step's SET, REMOVE or DELETE over a complete native read relation
+/// (fgdb-cpny9). A later step's first leaf holds the previous write's rows;
+/// further reads observe its staged graph. Actions address the final row.
 #[derive(Clone)]
 pub(crate) struct PreparedGraphMutationRowsText {
     pub(crate) relation: RelationId,
     pub(crate) actions: Vec<MutationActionTemplate>,
-    pub(crate) input: crate::set_text::BoundSetTextInput,
+    pub(crate) input: crate::set_text::multipart::BoundReadInput,
     /// The write's own clause, where its binding errors point.
     pub(crate) at: usize,
 }
