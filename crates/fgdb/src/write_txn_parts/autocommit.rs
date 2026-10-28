@@ -400,6 +400,16 @@ impl<V: Vfs + Clone> Database<V> {
         self.engine_allocator(cx)?(request)
     }
 
+    /// Compute ahead, in parallel, the identities the next `vertices` vertex
+    /// and `edges` edge allocations issue (see `IdentityAllocation::prefetch`).
+    /// Which identities they issue does not change. A poisoned allocator is
+    /// left alone: every allocation refuses it anyway.
+    pub(crate) fn prefetch_identities(&self, vertices: usize, edges: usize) {
+        if let Ok(mut allocation) = self.identity_allocation.lock() {
+            allocation.prefetch(vertices, edges);
+        }
+    }
+
     fn engine_allocator<'a>(
         &mut self,
         cx: &'a fgdb_types::QueryCx,

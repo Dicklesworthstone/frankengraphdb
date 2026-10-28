@@ -148,6 +148,65 @@ pub(crate) struct IdentityAllocation {
     counters: fgdb_chronicle::IdentityCounters,
     vertices: IdentityPermutation,
     edges: IdentityPermutation,
+    /// Each kind's permutation of a run of counters, computed ahead by
+    /// [`Self::prefetch`]: vertices, then edges. A run holds values only, so
+    /// it never changes which identity a counter issues or which counter the
+    /// next issue takes.
+    ahead: [PermutedRun; 2],
+}
+
+/// `permute(first + i)` at `values[i]`.
+#[derive(Default)]
+struct PermutedRun {
+    first: u64,
+    values: Vec<u64>,
+}
+
+impl PermutedRun {
+    fn get(&self, counter: u64) -> Option<u64> {
+        let at = usize::try_from(counter.checked_sub(self.first)?).ok()?;
+        self.values.get(at).copied()
+    }
+}
+
+/// Counters below this many permute on the calling thread.
+const PERMUTE_INLINE_BELOW: u64 = 4_096;
+/// At most this many threads permute one run.
+const PERMUTE_WORKERS: usize = 8;
+
+/// `permutation.permute(counter)` for every counter in `first..=last`, all in
+/// the domain, in order, across up to [`PERMUTE_WORKERS`] scoped threads.
+fn permute_run(permutation: &IdentityPermutation, first: u64, last: u64) -> Vec<u64> {
+    let permute = |counter| {
+        permutation
+            .permute(counter)
+            .expect("a run's counters lie in the permutation's domain")
+    };
+    let len = last - first + 1;
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(PERMUTE_WORKERS) as u64;
+    if workers < 2 || len < PERMUTE_INLINE_BELOW {
+        return (first..=last).map(permute).collect();
+    }
+    let share = len.div_ceil(workers);
+    std::thread::scope(|scope| {
+        let parts: Vec<_> = (0..workers)
+            .map(|part| first + part * share)
+            .take_while(|&start| start <= last)
+            .map(|start| {
+                let end = start.saturating_add(share - 1).min(last);
+                scope.spawn(move || (start..=end).map(permute).collect::<Vec<_>>())
+            })
+            .collect();
+        parts
+            .into_iter()
+            .flat_map(|part| {
+                part.join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    })
 }
 
 impl IdentityAllocation {
@@ -168,6 +227,7 @@ impl IdentityAllocation {
                 .unwrap_or_default(),
             vertices: IdentityPermutation::vertices(keys),
             edges: IdentityPermutation::edges(keys),
+            ahead: Default::default(),
         }
     }
 
@@ -176,24 +236,54 @@ impl IdentityAllocation {
         self.counters
     }
 
+    /// Compute ahead, in parallel, the identities the next `vertices` vertex
+    /// and `edges` edge counters issue, replacing any earlier run. Each is
+    /// four keyed hashes, and a bulk-load chunk issues tens of thousands in a
+    /// row: about 7% of a road-ny load on its one thread
+    /// (fgdb-load-beats-memgraph-xf2n8). A collision consumes an extra
+    /// counter, so a run can end before its issues do; past it, an issue
+    /// permutes its counter itself.
+    pub(crate) fn prefetch(&mut self, vertices: usize, edges: usize) {
+        for (kind, wanted) in [vertices, edges].into_iter().enumerate() {
+            let (counter, permutation) = if kind == 0 {
+                (self.counters.vertex, &self.vertices)
+            } else {
+                (self.counters.edge, &self.edges)
+            };
+            let first = counter.saturating_add(1);
+            let last = counter
+                .saturating_add(u64::try_from(wanted).unwrap_or(u64::MAX))
+                .min(IdentityPermutation::MAX);
+            self.ahead[kind] = PermutedRun {
+                first,
+                values: if first <= last {
+                    permute_run(permutation, first, last)
+                } else {
+                    Vec::new()
+                },
+            };
+        }
+    }
+
     /// Issue the next identity of one kind that `spent` does not already
     /// hold. Each skipped collision consumes its counter.
     fn issue(&mut self, vertex: bool, spent: impl Fn(u128) -> bool) -> Result<u128, WriteTxnError> {
-        let (counter, permutation) = if vertex {
-            (&mut self.counters.vertex, &self.vertices)
+        let (counter, permutation, ahead) = if vertex {
+            (&mut self.counters.vertex, &self.vertices, &self.ahead[0])
         } else {
-            (&mut self.counters.edge, &self.edges)
+            (&mut self.counters.edge, &self.edges, &self.ahead[1])
         };
         loop {
             *counter = counter
                 .checked_add(1)
                 .filter(|next| *next <= IdentityPermutation::MAX)
                 .ok_or(WriteTxnError::IdentityExhausted)?;
-            let identity = u128::from(
-                permutation
+            let identity = u128::from(match ahead.get(*counter) {
+                Some(identity) => identity,
+                None => permutation
                     .permute(*counter)
                     .ok_or(WriteTxnError::IdentityExhausted)?,
-            );
+            });
             if !spent(identity) {
                 return Ok(identity);
             }
@@ -333,6 +423,76 @@ mod identity_allocation_tests {
             allocation.issue(false, |id| id == last),
             Err(WriteTxnError::IdentityExhausted)
         ));
+    }
+
+    /// A prefetched run changes no issue. An allocator that prefetches and
+    /// one that never does issue the same identities, with the same counters
+    /// after each, through randomly interleaved kinds. The cases cover:
+    /// - spent identities inside the run and at its last counter, each
+    ///   consuming a counter, so the run ends before its issues do;
+    /// - issues past the run;
+    /// - a run the domain bound cuts short, then exhaustion;
+    /// - a run long enough to be permuted on worker threads, which must
+    ///   equal permuting each counter.
+    #[test]
+    fn prefetched_issues_equal_plain_issues() {
+        let keys = keys();
+        let permutations = [
+            IdentityPermutation::vertices(&keys),
+            IdentityPermutation::edges(&keys),
+        ];
+        let near_bound = IdentityPermutation::MAX - 20;
+        for (start, run, issues) in [(0, 10_000, 15_500), (37, 300, 500), (near_bound, 100, 60)] {
+            let mut plain = IdentityAllocation::from_chain(&MarkerChain::new(), &keys);
+            let mut ahead = IdentityAllocation::from_chain(&MarkerChain::new(), &keys);
+            for allocation in [&mut plain, &mut ahead] {
+                allocation.counters.vertex = start;
+                allocation.counters.edge = start / 2;
+            }
+            let run_len = u64::try_from(run).unwrap();
+            let spent: [std::collections::BTreeSet<u128>; 2] = [
+                (start, [1, 5, 6, run_len]),
+                (start / 2, [3, 4, run_len / 2, run_len / 2 + 1]),
+            ]
+            .map(|(base, offsets)| {
+                offsets
+                    .into_iter()
+                    .filter_map(|offset| {
+                        let kind = usize::from(base != start);
+                        permutations[kind].permute(base.checked_add(offset)?)
+                    })
+                    .map(u128::from)
+                    .collect()
+            });
+            ahead.prefetch(run, run / 2);
+            let vertex_run = (start + 1..=(start + run_len).min(IdentityPermutation::MAX))
+                .map(|counter| permutations[0].permute(counter).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(ahead.ahead[0].values, vertex_run);
+            assert_eq!(ahead.ahead[1].values.len(), run / 2);
+            let mut state = 0x1234_5678_9abc_def0_u64;
+            let mut exhausted = 0;
+            for _ in 0..issues {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let vertex = !state.is_multiple_of(3);
+                let held = &spent[usize::from(!vertex)];
+                match (
+                    plain.issue(vertex, |id| held.contains(&id)),
+                    ahead.issue(vertex, |id| held.contains(&id)),
+                ) {
+                    (Ok(plain), Ok(ahead)) => assert_eq!(plain, ahead),
+                    (
+                        Err(WriteTxnError::IdentityExhausted),
+                        Err(WriteTxnError::IdentityExhausted),
+                    ) => exhausted += 1,
+                    other => panic!("{other:?}"),
+                }
+                assert_eq!(plain.counters(), ahead.counters());
+            }
+            assert_eq!(exhausted > 0, start == near_bound, "{start}");
+        }
     }
 }
 

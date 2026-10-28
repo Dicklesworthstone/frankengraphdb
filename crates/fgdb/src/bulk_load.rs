@@ -939,6 +939,11 @@ impl<V: Vfs + Clone> Database<V> {
             let mut new_vertices = HashMap::new();
             let mut new_edges = BTreeMap::new();
             let prepared = (|| {
+                let vertices = chunk
+                    .iter()
+                    .filter(|row| matches!(row, BulkRow::Vertex(_)))
+                    .count();
+                self.prefetch_identities(vertices, chunk.len() - vertices);
                 let mut vertex_batch = WriteBatch::new(policy.vertex_relation);
                 let mut edge_batches: BTreeMap<RelationId, WriteBatch> = BTreeMap::new();
                 for (offset, row) in chunk.into_iter().enumerate() {
