@@ -158,6 +158,105 @@ fn multipart_read_before_create_masks_hidden_matches_and_freezes_optional_rows()
     });
 }
 
+#[test]
+fn multipart_reads_between_writes_mask_hidden_witnesses_and_commit_atomically() {
+    lab(0xc4a1_2032, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(20))]);
+        seed.create_vertex(VId(2), vec![HIDDEN], vec![(P, CanonicalScalar::Int(40))]);
+        seed.add_edge(EId(11), VId(1), VId(2), vec![]);
+        db.write(&commit, seed).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let original_vertices = db.vertices().unwrap();
+        let original_edges = db.edges().unwrap();
+        let issuer = authority();
+        let token = issuer
+            .issue_at(&grant(Rights::ReadWrite, 100), NOW)
+            .unwrap();
+        let program = chain(
+            "CREATE (start:Visible {p:1}) WITH start \
+             MATCH (candidate) WHERE candidate.p >= 10 WITH start,candidate \
+             OPTIONAL MATCH (candidate)-[:R]->(peer) \
+             WITH start,candidate.p + coalesce(peer.p,-1) AS value \
+             CREATE (copy:Visible {p:value}),(start)-[:S]->(copy) \
+             RETURN copy.p AS p",
+        );
+        let mut bounded = policy(100);
+        bounded.max_vertices = 1;
+        db.execute_graph_write_chain_authorized(
+            &txn,
+            &query,
+            &commit,
+            &issuer,
+            &token,
+            "main",
+            &program,
+            bounded,
+            || NOW,
+        )
+        .await
+        .expect_err("a later creation quota failure must discard the earlier CREATE");
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert_eq!(db.vertices().unwrap(), original_vertices);
+        assert_eq!(db.edges().unwrap(), original_edges);
+
+        let write_only = issuer.issue_at(&grant(Rights::Write, 100), NOW).unwrap();
+        db.execute_graph_write_chain_authorized(
+            &txn,
+            &query,
+            &commit,
+            &issuer,
+            &write_only,
+            "main",
+            &program,
+            policy(100),
+            || NOW,
+        )
+        .await
+        .expect_err("the intervening graph read requires read authority");
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert_eq!(db.vertices().unwrap(), original_vertices);
+        assert_eq!(db.edges().unwrap(), original_edges);
+
+        let (stats, rows, completion) = db
+            .execute_graph_write_chain_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &program,
+                policy(100),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        // The hidden vertex is absent both as a MATCH candidate and as an
+        // OPTIONAL witness. The new copy would itself pass the MATCH filter,
+        // but the complete input bag is frozen before it is allocated.
+        assert_eq!((stats.created_vertices, stats.created_edges), (2, 1));
+        assert_eq!(rows.value.len(), 1);
+        assert_eq!(
+            rows.value[0].values(),
+            &[GraphValue::Scalar(CanonicalScalar::Int(19))]
+        );
+        assert!(matches!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted { commit_seq } if commit_seq.0 == basis.0 + 1
+        ));
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(db.vertices().unwrap().len(), 4);
+        assert_eq!(db.edges().unwrap().len(), 2);
+        assert_eq!(db.vertex(VId(1)).unwrap().unwrap(), original_vertices[0]);
+        assert_eq!(db.vertex(VId(2)).unwrap().unwrap(), original_vertices[1]);
+        assert_eq!(db.edge(EId(11)).unwrap().unwrap(), original_edges[0]);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
 fn chain(text: &str) -> PreparedGraphWriteChain {
     assert!(
         PreparedGraphWriteChainText::is_chain(text).unwrap(),

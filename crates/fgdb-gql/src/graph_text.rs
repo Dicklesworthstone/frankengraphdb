@@ -1081,6 +1081,7 @@ type HoistedReads = (usize, Vec<(usize, usize, usize)>);
 /// read by its own WHERE and pages only, never by the RETURN or a later
 /// stage. Each is the binding, the property (`None` for the element itself)
 /// and the hidden column.
+#[derive(Clone)]
 struct BoundaryReads<'a> {
     visible: usize,
     width: usize,

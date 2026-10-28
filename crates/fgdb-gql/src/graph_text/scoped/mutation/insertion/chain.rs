@@ -12,6 +12,7 @@ use crate::{
 
 enum MatchedWrite {
     Insert,
+    MultipartInsert,
     Mutation,
     VertexMerge,
     EdgeMerge,
@@ -44,7 +45,7 @@ impl PreparedGraphWriteChainText {
         };
         // Peek the first clause without consuming it: it may be the write.
         let first = script::next_script_token(&mut lexer.clone())?;
-        if !matches!(first.kind, TokenKind::Word(word) if ["CREATE", "INSERT", "UNWIND", "MATCH", "MERGE", "WITH"].iter().any(|kind| word.eq_ignore_ascii_case(kind)))
+        if !matches!(first.kind, TokenKind::Word(word) if ["CREATE", "INSERT", "UNWIND", "MATCH", "OPTIONAL", "CALL", "MERGE", "WITH"].iter().any(|kind| word.eq_ignore_ascii_case(kind)))
         {
             return Ok(false);
         }
@@ -91,7 +92,12 @@ impl PreparedGraphWriteChainText {
                         && (word.eq_ignore_ascii_case("MATCH")
                             || (word.eq_ignore_ascii_case("OPTIONAL")
                                 && matches!(script::next_script_token(&mut lexer.clone())?.kind,
-                                    TokenKind::Word(next) if next.eq_ignore_ascii_case("MATCH"))))
+                                    TokenKind::Word(next) if next.eq_ignore_ascii_case("MATCH")))
+                            || (word.eq_ignore_ascii_case("CALL")
+                                && matches!(
+                                    script::next_script_token(&mut lexer.clone())?.kind,
+                                    TokenKind::Punct(b'{' | b'(')
+                                )))
                     {
                         // A graph read after the write consumes its private
                         // rows and complete staged overlay in this statement.
@@ -281,17 +287,20 @@ impl PreparedGraphWriteChainText {
         }
     }
 
-    /// The write family owning a mandatory MATCH prefix after an earlier
-    /// write. CREATE keeps its direct MATCH prefix; mutations use the typed
-    /// leading-row compiler, including intervening WITH/UNWIND stages.
-    /// Everything else remains a terminal read. This is framing only: the
-    /// selected compiler still admits the complete relation and write.
+    /// The write family owning a read prefix after an earlier write. CREATE
+    /// keeps its established direct MATCH prefix and uses the complete native
+    /// read relation for multipart, OPTIONAL and CALL prefixes. Mutations and
+    /// MERGE retain their existing mandatory MATCH profile. Everything else
+    /// remains a terminal read. This is framing only: the selected compiler
+    /// still admits the complete relation and write.
     /// Property keys, labels, aliases, map entries and STARTS/ENDS WITH are
     /// never clause boundaries.
     fn matched_write(mut lexer: Lexer<'_>) -> Result<Option<MatchedWrite>, GraphPatternTextError> {
-        const READS: [&str; 5] = ["OPTIONAL", "RETURN", "CALL", "UNION", "FOREACH"];
+        const TERMINAL: [&str; 3] = ["RETURN", "UNION", "FOREACH"];
         let mut depth = 0_usize;
         let mut row_stages = false;
+        let mut multipart = false;
+        let mut matched = false;
         let mut previous: Option<TokenKind<'_>> = None;
         loop {
             let token = script::next_script_token(&mut lexer)?;
@@ -305,8 +314,17 @@ impl PreparedGraphWriteChainText {
                         && !matches!(previous, Some(TokenKind::Word(prior))
                             if ["AS", "STARTS", "ENDS"].iter().any(|not| prior.eq_ignore_ascii_case(not))) =>
                 {
-                    if word.eq_ignore_ascii_case("CREATE") || word.eq_ignore_ascii_case("INSERT") {
-                        return Ok((!row_stages).then_some(MatchedWrite::Insert));
+                    if (word.eq_ignore_ascii_case("CREATE") || word.eq_ignore_ascii_case("INSERT"))
+                        && (matches!(
+                            script::next_script_token(&mut lexer.clone())?.kind,
+                            TokenKind::Punct(b'(')
+                        ) || Self::named_merge_pattern(lexer.clone())?)
+                    {
+                        return Ok(Some(if row_stages || multipart {
+                            MatchedWrite::MultipartInsert
+                        } else {
+                            MatchedWrite::Insert
+                        }));
                     }
                     if word.eq_ignore_ascii_case("MERGE")
                         && (matches!(
@@ -314,6 +332,9 @@ impl PreparedGraphWriteChainText {
                             TokenKind::Punct(b'(')
                         ) || Self::named_merge_pattern(lexer.clone())?)
                     {
+                        if multipart {
+                            return Ok(None);
+                        }
                         // Both MERGE families read the complete MATCH
                         // relation. Inspect past the whole node pattern,
                         // including nested property values, before choosing
@@ -346,6 +367,9 @@ impl PreparedGraphWriteChainText {
                     if (word.eq_ignore_ascii_case("SET") || word.eq_ignore_ascii_case("REMOVE"))
                         && Self::mutation_clause_target(lexer.clone())?
                     {
+                        if multipart {
+                            return Ok(None);
+                        }
                         return Ok(Some(MatchedWrite::Mutation));
                     }
                     if (word.eq_ignore_ascii_case("DELETE") || word.eq_ignore_ascii_case("DETACH"))
@@ -355,10 +379,20 @@ impl PreparedGraphWriteChainText {
                             word.eq_ignore_ascii_case("DETACH"),
                         )?
                     {
+                        if multipart {
+                            return Ok(None);
+                        }
                         return Ok(Some(MatchedWrite::Mutation));
                     }
-                    if READS.iter().any(|read| word.eq_ignore_ascii_case(read)) {
+                    if TERMINAL.iter().any(|read| word.eq_ignore_ascii_case(read)) {
                         return Ok(None);
+                    }
+                    if word.eq_ignore_ascii_case("MATCH") {
+                        multipart |= matched;
+                        matched = true;
+                    }
+                    if word.eq_ignore_ascii_case("OPTIONAL") || word.eq_ignore_ascii_case("CALL") {
+                        multipart = true;
                     }
                     if ["WITH", "UNWIND", "ORDER", "SKIP", "LIMIT"]
                         .iter()
@@ -641,19 +675,18 @@ impl PreparedGraphWriteChainText {
                 at: from.at,
                 tokens: 0,
             };
-            // The native write family owns a supported MATCH prefix joined
-            // to these rows. A terminal read keeps its multipart compiler.
+            // The native write family owns a supported read prefix joined
+            // to these rows. CREATE may consume a complete multipart read;
+            // a terminal read keeps its existing compiler and result owner.
             let clause = lexer.clone().next()?.kind;
-            let matched = if matches!(clause, TokenKind::Word(word) if word.eq_ignore_ascii_case("MATCH"))
-            {
+            let reading = matches!(clause, TokenKind::Word(word)
+                if ["MATCH", "OPTIONAL", "CALL"].iter().any(|read| word.eq_ignore_ascii_case(read)));
+            let matched = if reading {
                 Self::matched_write(lexer.clone())?
             } else {
                 None
             };
-            if matches!(clause, TokenKind::Word(word) if word.eq_ignore_ascii_case("OPTIONAL"))
-                || (matches!(clause, TokenKind::Word(word) if word.eq_ignore_ascii_case("MATCH"))
-                    && matched.is_none())
-            {
+            if reading && matched.is_none() {
                 let (columns, types) = from.owned_columns();
                 let parser = Parser::new_with_parameter_types(body, declarations)?
                     .with_zones(resolve.time_zones())
@@ -753,6 +786,7 @@ impl PreparedGraphWriteChainText {
                     declarations,
                     crate::graph_text::LentResolver(&mut resolve),
                     from,
+                    matches!(matched, Some(MatchedWrite::MultipartInsert)),
                 )?;
                 steps.push(ChainTextStep::Insert(Box::new((step, returning))));
                 next = after;
@@ -982,9 +1016,12 @@ impl PreparedGraphWriteChainText {
                     let (insertion, returning) = &**step;
                     let values =
                         insertion.checked_arguments(&own(insertion.parameter_schema())?)?;
-                    if let InsertTextInput::Relation { input, .. } = &insertion.input {
-                        reads_previous(input.owned.as_deref(), &previous, insertion.create_at)?;
-                    }
+                    let owned = match &insertion.input {
+                        InsertTextInput::Relation { input, .. } => input.owned.as_deref(),
+                        InsertTextInput::Multipart { input, .. } => input.first.owned.as_deref(),
+                        InsertTextInput::Match(_) | InsertTextInput::Unit { .. } => None,
+                    };
+                    reads_previous(owned, &previous, insertion.create_at)?;
                     let selection = match &insertion.input {
                         InsertTextInput::Match(selection) => Some(selection.bind_values(&values)?),
                         InsertTextInput::Relation { .. }

@@ -3,7 +3,7 @@
 //! actual CREATE collectors independently of the adapter being checked.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, WriteBatch};
+use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
 use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertRequest};
@@ -280,6 +280,145 @@ fn allocate(next: &AtomicU64, request: GraphInsertRequest) -> Result<ElementId, 
         GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(id)),
         GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(id)),
     })
+}
+
+#[test]
+fn multipart_reads_between_creates_use_the_staged_graph_and_freeze_the_next_bag() {
+    let ((), report) = run_async_under_lab(0xc4a1_1050, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let program = prepare(
+            "CREATE (a {p:10}),(b {p:20}),(c {p:30}),(z {p:40}), \
+             (a)-[:R]->(b),(a)-[:R]->(b),(b)-[:R]->(c) \
+             WITH [a,z] AS roots UNWIND roots AS start \
+             OPTIONAL MATCH (start)-[:R]->(middle) WITH start,middle \
+             OPTIONAL MATCH (middle)-[:R]->(target) \
+             WITH start,coalesce(target.p,-1) AS value \
+             CREATE (copy {p:value}),(start)-[:R]->(copy) \
+             RETURN start,copy,copy.p AS p ORDER BY p,copy",
+        );
+        let mut transaction = db.begin(&txcx).unwrap();
+        let next = AtomicU64::new(1_000);
+        let (stats, rows, _) = transaction
+            .execute_graph_write_chain_governed(
+                &mut db,
+                &cx,
+                &program,
+                policy(100, HIGH, HIGH),
+                |request| allocate(&next, request),
+            )
+            .unwrap();
+        // Earlier creates supply every graph witness: the durable database
+        // is empty. Parallel a->b edges keep two paths to c; z keeps one
+        // NULL-extended row through both OPTIONAL clauses.
+        assert_eq!((stats.created_vertices, stats.created_edges), (7, 6));
+        assert_eq!(rows.value.len(), 3);
+        let mut topology = Vec::new();
+        for (row, amount) in rows.value.iter().zip([-1, 30, 30]) {
+            let (Some(source), Some(destination)) =
+                (row.values()[0].as_vertex(), row.values()[1].as_vertex())
+            else {
+                panic!("the write returns its carried and created vertex identities");
+            };
+            assert_eq!(
+                row.values()[2],
+                GraphValue::Scalar(CanonicalScalar::Int(amount))
+            );
+            topology.push((source, destination, amount));
+        }
+        let staged_edges = transaction.edges(&db).unwrap();
+        assert_eq!(staged_edges.len(), 6);
+        for &(source, destination, _) in &topology {
+            assert_eq!(
+                staged_edges
+                    .iter()
+                    .filter(|edge| {
+                        edge.entry.src == source
+                            && edge.entry.dst == destination
+                            && edge.entry.relation == R
+                    })
+                    .count(),
+                1
+            );
+        }
+        assert!(db.vertices().unwrap().is_empty());
+        assert!(pinned.vertices().unwrap().is_empty());
+        assert_eq!(db.frontier().unwrap(), basis);
+        transaction.finish(&mut db, &commit).await.unwrap();
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(db.vertices().unwrap().len(), 7);
+        assert_eq!(db.edges().unwrap().len(), 6);
+        assert!(pinned.vertices().unwrap().is_empty());
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(db.vertices().unwrap().len(), 7);
+        assert_eq!(db.edges().unwrap().len(), 6);
+        for (_, destination, amount) in topology {
+            assert_eq!(
+                db.vertex(destination).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(amount).into())]
+            );
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn a_late_inter_write_read_or_creation_failure_restores_the_prior_transaction() {
+    let ((), report) = run_async_under_lab(0xc4a1_1051, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let mut transaction = db.begin(&txcx).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(7), vec![], vec![(P, CanonicalScalar::Int(99))]);
+        transaction.write(&mut db, prefix).unwrap();
+        let digest = transaction.staged_effect_digest().unwrap();
+        let next = AtomicU64::new(1_000);
+        for text in [
+            "CREATE (a {p:10})-[:R]->(b {p:20}) WITH a \
+             OPTIONAL MATCH (a)-[:R]->(b) WITH 1/(20-b.p) AS value \
+             CREATE (copy {p:value}) RETURN copy.p LIMIT 0",
+            "CREATE (a {p:10})-[:R]->(b {p:20}) WITH a \
+             MATCH (a)-[:R]->(b) WITH b MATCH (b) WITH b.p AS value \
+             CREATE (copy {p:value}) RETURN 1/(20-copy.p) LIMIT 0",
+        ] {
+            transaction
+                .execute_graph_write_chain_governed(
+                    &mut db,
+                    &cx,
+                    &prepare(text),
+                    policy(100, HIGH, HIGH),
+                    |request| allocate(&next, request),
+                )
+                .expect_err("a later read or RETURN error must discard all writes in the chain");
+            assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+            assert_eq!(transaction.vertices(&db).unwrap().len(), 1);
+            assert!(transaction.edges(&db).unwrap().is_empty());
+            assert_eq!(db.frontier().unwrap(), basis);
+        }
+        transaction.finish(&mut db, &commit).await.unwrap();
+        assert_eq!(db.vertices().unwrap().len(), 1);
+        assert_eq!(
+            db.vertex(VId(7)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(99).into())]
+        );
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 struct Reference {

@@ -3307,6 +3307,334 @@ fn row_scope_pattern_counts_rebind_anchors_and_count_parallel_witnesses() {
 }
 
 #[test]
+fn row_scope_pattern_lists_rebind_anchors_and_keep_null_witnesses() {
+    let template = PreparedGraphSetText::prepare(
+        "UNWIND $items AS x RETURN x,[(x)-[:R]->(y) WHERE y.p >= $minimum | y.p] AS values,\
+         [(x)-[:R]->() | null] AS missing",
+        symbols,
+    )
+    .unwrap();
+    let frozen = template.canonical_template_bytes();
+    let properties = [1_i64, 2, 2, 3];
+    for items in [
+        vec![
+            GraphValue::Vertex(VId(1)),
+            GraphValue::Vertex(VId(1)),
+            GraphValue::Vertex(VId(4)),
+            GraphValue::Vertex(VId(u128::MAX)),
+            GraphValue::Scalar(CanonicalScalar::Null),
+            GraphValue::Scalar(CanonicalScalar::Int(1)),
+            GraphValue::Edge(fgdb_types::EId(1)),
+            GraphValue::List(Vec::new().into()),
+        ],
+        vec![GraphValue::Vertex(VId(2)), GraphValue::Vertex(VId(3))],
+        Vec::new(),
+    ] {
+        for minimum in [1_i64, 2, 3] {
+            let mut expected: Vec<_> = items
+                .iter()
+                .map(|item| {
+                    let matched: Vec<_> = EDGES
+                        .iter()
+                        .filter(|&&(from, _, _)| *item == GraphValue::Vertex(from))
+                        .map(|&(_, _, to)| properties[to.0 as usize - 1])
+                        .collect();
+                    GraphValueRow::from_owned_values(vec![
+                        item.clone(),
+                        GraphValue::List(
+                            matched
+                                .iter()
+                                .copied()
+                                .filter(|value| *value >= minimum)
+                                .map(|value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+                                .collect(),
+                        ),
+                        GraphValue::List(
+                            vec![GraphValue::Scalar(CanonicalScalar::Null); matched.len()].into(),
+                        ),
+                    ])
+                })
+                .collect();
+            expected.sort();
+            let arguments = GqlParameters::new()
+                .with_list("items", items.clone())
+                .unwrap()
+                .with_int64("minimum", minimum)
+                .unwrap();
+            let query = template.bind_parameters(&arguments).unwrap();
+            assert_eq!(query.columns(), ["x", "values", "missing"]);
+            let mut actual = run(&query, wide(), &mut || Ok(())).unwrap().value;
+            actual.sort();
+            assert_eq!(actual, expected, "minimum {minimum}");
+        }
+    }
+    assert_eq!(template.canonical_template_bytes(), frozen);
+    assert!(template.bind_parameters(&GqlParameters::new()).is_err());
+}
+
+#[test]
+fn row_scope_pattern_lists_evaluate_only_the_selected_anchor_projection() {
+    // Vertex 3 has p=2 and reaches p=3. Either the anchor or its target can
+    // make the projection divide by zero. That root must not affect valid
+    // witnesses of vertex 1 or any absent anchor.
+    let items = vec![
+        GraphValue::Vertex(VId(1)),
+        GraphValue::Vertex(VId(4)),
+        GraphValue::Vertex(VId(u128::MAX)),
+        GraphValue::Scalar(CanonicalScalar::Null),
+        GraphValue::Scalar(CanonicalScalar::Int(3)),
+    ];
+    let arguments = GqlParameters::new()
+        .with_list("items", items.clone())
+        .unwrap();
+    let mut expected: Vec<_> = items
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| {
+            GraphValueRow::from_owned_values(vec![
+                item,
+                GraphValue::List(
+                    vec![
+                        GraphValue::Scalar(CanonicalScalar::Int(-1));
+                        if index == 0 { 3 } else { 0 }
+                    ]
+                    .into(),
+                ),
+            ])
+        })
+        .collect();
+    expected.sort();
+    let failing = GqlParameters::new()
+        .with_list("items", vec![GraphValue::Vertex(VId(3))])
+        .unwrap();
+    for expression in ["1 / (y.p - 3)", "1 / (x.p - 2)"] {
+        let template = PreparedGraphSetText::prepare(
+            &format!("UNWIND $items AS x RETURN x,[(x)-[:R]->(y) | {expression}] AS values"),
+            symbols,
+        )
+        .unwrap();
+        let query = template.bind_parameters(&arguments).unwrap();
+        let mut actual = run(&query, wide(), &mut || Ok(())).unwrap().value;
+        actual.sort();
+        assert_eq!(actual, expected, "{expression}");
+        assert!(
+            run(
+                &template.bind_parameters(&failing).unwrap(),
+                wide(),
+                &mut || Ok(())
+            )
+            .is_err(),
+            "{expression}"
+        );
+    }
+}
+
+#[test]
+fn row_scope_pattern_lists_keep_paths_multiple_locals_and_row_boundaries() {
+    let prefix = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x";
+    let list = |values: &[i64]| {
+        GraphValue::List(
+            values
+                .iter()
+                .map(|value| GraphValue::Scalar(CanonicalScalar::Int(*value)))
+                .collect(),
+        )
+    };
+    let expected: Vec<_> = [(1, vec![4, 4, 5]), (2, vec![5]), (3, vec![]), (4, vec![])]
+        .into_iter()
+        .map(|(id, values)| {
+            GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(id)), list(&values)])
+        })
+        .collect();
+    assert_eq!(
+        execute(&format!(
+            "{prefix} RETURN x,[(x)-[:R]->(middle)-[:R]->(end) | middle.p+end.p] AS values ORDER BY x"
+        )),
+        expected
+    );
+    assert_eq!(
+        execute(&format!(
+            "{prefix} CALL (x) {{ RETURN [path=(x)-[:R]->() | length(path)] AS lengths }} \
+             RETURN x,lengths ORDER BY x"
+        )),
+        [3_usize, 1, 1, 0]
+            .into_iter()
+            .enumerate()
+            .map(|(index, count)| GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(index as u128 + 1)),
+                list(&vec![1; count]),
+            ]))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        execute(&format!(
+            "{prefix} WITH x WHERE size([(x)-[:R]->() | 1]) > 1 RETURN x"
+        )),
+        vec![vertices(&[1])]
+    );
+    assert_eq!(
+        execute("MATCH (n) WITH n AS x RETURN x,[(x)-[:R]->(y) | y.p] AS values ORDER BY x"),
+        [(1, vec![2, 2, 2]), (2, vec![2]), (3, vec![3]), (4, vec![])]
+            .into_iter()
+            .map(|(id, values)| GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(id)),
+                list(&values),
+            ]))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        execute(&format!(
+            "{prefix} UNWIND nodes AS y RETURN x,y,[(x)-[:R]->(y) | x.p+y.p] AS values \
+             ORDER BY x,y"
+        )),
+        (1..=4)
+            .flat_map(|from| {
+                (1..=4).map(move |to| {
+                    let properties = [1_i64, 2, 2, 3];
+                    let values: Vec<_> = EDGES
+                        .iter()
+                        .filter(|&&(left, _, right)| left == VId(from) && right == VId(to))
+                        .map(|_| properties[from as usize - 1] + properties[to as usize - 1])
+                        .collect();
+                    GraphValueRow::from_owned_values(vec![
+                        GraphValue::Vertex(VId(from)),
+                        GraphValue::Vertex(VId(to)),
+                        list(&values),
+                    ])
+                })
+            })
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        execute(&format!(
+            "{prefix} RETURN DISTINCT [(x)-[:R]->(y) | y.p] AS values \
+             ORDER BY values DESC SKIP 1 LIMIT 2"
+        )),
+        vec![
+            GraphValueRow::from_owned_values(vec![list(&[2, 2, 2])]),
+            GraphValueRow::from_owned_values(vec![list(&[2])]),
+        ]
+    );
+}
+
+#[test]
+fn row_scope_pattern_lists_keep_private_names_and_nested_local_refusals() {
+    let prefix = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x";
+    for expression in [
+        "[(fresh)-[:R]->() | 1] AS values",
+        "[(x)-[:R]->(local) | local] AS values,local AS leaked",
+        "[(x)-[:R]->() | 1] AS values,__fg_boundary_0 AS leaked",
+        "[(nodes)-[:R]->() | 1] AS values",
+        "[(x)-[:R]->() | 1] AS values,[local IN nodes | [(local)-[:R]->() | 1]] AS nested",
+    ] {
+        let statement = format!("{prefix} RETURN {expression}");
+        let resolutions = std::cell::Cell::new(0);
+        assert!(
+            PreparedGraphSetText::prepare(&statement, |kind, name| {
+                resolutions.set(resolutions.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{statement}"
+        );
+        assert_eq!(resolutions.get(), 0, "scope admission before catalog reads");
+    }
+}
+
+#[test]
+fn row_scope_pattern_lists_keep_late_errors_and_one_cumulative_budget() {
+    let prefix = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x";
+    for suffix in ["", " LIMIT 0"] {
+        let query = prepare(&format!(
+            "{prefix} RETURN x,[(x)-[:R]->(y) | y.p] AS values{suffix}"
+        ));
+        let mut checkpoints = 0;
+        let measured = run(&query, wide(), &mut || {
+            checkpoints += 1;
+            Ok(())
+        })
+        .unwrap();
+        let caps = [
+            measured.rows.snapshot_records,
+            measured.rows.result_rows,
+            measured.evaluator.work_units,
+            measured.evaluator.scratch_entries,
+        ];
+        assert_eq!(
+            run(
+                &query,
+                GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+                &mut || Ok(()),
+            )
+            .unwrap(),
+            measured
+        );
+        for dimension in 0..4 {
+            if caps[dimension] == 0 {
+                continue;
+            }
+            let mut bounded = caps;
+            bounded[dimension] -= 1;
+            assert!(
+                run(
+                    &query,
+                    GqlQueryPolicy::new(bounded[0], bounded[1], bounded[2], bounded[3]),
+                    &mut || Ok(()),
+                )
+                .is_err(),
+                "{suffix}, dimension {dimension}"
+            );
+        }
+        for stop in [1, checkpoints / 2, checkpoints] {
+            let mut seen = 0;
+            assert!(matches!(
+                run(&query, wide(), &mut || {
+                    seen += 1;
+                    if seen == stop { Err(stop) } else { Ok(()) }
+                }),
+                Err(GqlQueryError::Interrupted(at)) if at == stop
+            ));
+        }
+        assert!(matches!(
+            run_reading(&query, wide(), &mut || Ok(()), true),
+            Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+                "element-read-error"
+            )))
+        ));
+    }
+    let query = prepare(&format!(
+        "{prefix} RETURN CASE WHEN true THEN 7 ELSE [(x)-[:R]->() | 1] END AS values LIMIT 0"
+    ));
+    let mut calls = 0;
+    let result = query.execute_governed(
+        wide(),
+        |pattern, remaining| {
+            calls += 1;
+            if calls == 3 {
+                return Err(GqlQueryError::Source("later-comprehension-witness-error"));
+            }
+            pattern.plan().execute_governed_with_properties(
+                (4 + EDGES.len()) as u64,
+                (1..=4).map(VId),
+                EDGES,
+                |_, _| Ok::<_, &'static str>(true),
+                |_, _| Ok(None),
+                remaining,
+                || Ok::<_, usize>(()),
+            )
+        },
+        || Ok::<_, usize>(()),
+    );
+    assert_eq!(calls, 3);
+    assert!(matches!(
+        result,
+        Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+            "later-comprehension-witness-error"
+        )))
+    ));
+}
+
+#[test]
 fn row_scope_pattern_counts_compose_with_where_values_and_call_boundaries() {
     let prefix = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x";
     for (expression, counts) in [

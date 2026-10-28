@@ -1856,20 +1856,27 @@ impl<'a> Parser<'a> {
             && matches!(lexer.next()?.kind, TokenKind::Punct(b'-' | b'<')))
     }
 
-    /// A terminal graph read continues the write's private occurrence bag.
+    /// A graph read continues the write's private occurrence bag, either
+    /// through RETURN or up to another write over its completed relation.
     /// ON MATCH is consumed by the MERGE owner before this boundary is asked.
     pub(super) fn at_chained_read(&self) -> Result<bool, GraphPatternTextError> {
         Ok(self.is_word("MATCH")
             || (self.is_word("OPTIONAL")
                 && matches!(self.lexer.clone().next()?.kind,
-                    TokenKind::Word(word) if word.eq_ignore_ascii_case("MATCH"))))
+                    TokenKind::Word(word) if word.eq_ignore_ascii_case("MATCH")))
+            || (self.is_word("CALL")
+                && matches!(
+                    self.lexer.clone().next()?.kind,
+                    TokenKind::Punct(b'{' | b'(')
+                )))
     }
 
-    /// A next write or terminal graph read over the carried row (fgdb-cpny9).
+    /// A next write or graph read over the carried row (fgdb-cpny9).
     /// The chain compiler dispatches the read to its native relational owner.
     pub(super) fn at_chained_write(&self) -> Result<bool, GraphPatternTextError> {
         Ok(self.at_chained_read()?
             || self.is_word("CREATE")
+            || self.is_word("INSERT")
             || (self.is_word("MERGE")
                 && (matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
                     || crate::PreparedGraphWriteChainText::named_merge_pattern(

@@ -97,6 +97,186 @@ fn grant() -> Grant {
 }
 
 #[test]
+fn carried_pattern_lists_preserve_nulls_parallel_witnesses_and_native_read_boundaries() {
+    use fgdb_gql::algebra::GraphValue;
+
+    let ((), report) = run_async_under_lab(0xa681_0011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = database(&commit).await;
+        let mut extra = WriteBatch::new(R);
+        for (id, source, destination) in [(12, 1, 2), (13, 1, 4), (14, 2, 1), (15, 2, 3)] {
+            extra.add_edge(EId(id), VId(source), VId(destination), vec![]);
+        }
+        db.write(&commit, extra).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let text = "MATCH (n) WITH collect(n) AS inputs UNWIND inputs AS x \
+            RETURN x,[(x)-[:R]->(y) | y.n] AS values ORDER BY x";
+        let parameters = GqlParameters::new();
+        let prepared = PreparedNativeRead::prepare(text, &parameters, symbols).unwrap();
+        let values = |result: QueryResult| {
+            let QueryResult::Rows { columns, rows } = result else {
+                panic!("expected read rows");
+            };
+            assert_eq!(columns, ["x", "values"]);
+            rows.into_iter()
+                .map(|row| {
+                    let Some(GraphValue::Vertex(vertex)) = row[0].as_value() else {
+                        panic!("expected the carried vertex");
+                    };
+                    let list = row[1]
+                        .as_value()
+                        .and_then(GraphValue::as_list)
+                        .expect("a pattern comprehension always returns a list");
+                    let list = list
+                        .iter()
+                        .map(|value| match value.as_scalar() {
+                            Some(CanonicalScalar::Null) => None,
+                            Some(CanonicalScalar::Int(value)) => Some(*value),
+                            other => panic!("expected an integer or a retained NULL: {other:?}"),
+                        })
+                        .collect::<Vec<_>>();
+                    (*vertex, list)
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = vec![
+            (VId(1), vec![Some(10), Some(10), Some(11)]),
+            (VId(2), vec![None, Some(7)]),
+            (VId(3), vec![]),
+            (VId(4), vec![]),
+            (VId(5), vec![None]),
+        ];
+        assert_eq!(
+            values(db.query(&cx, text, &parameters, symbols, policy()).unwrap()),
+            before
+        );
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &parameters, policy()).unwrap()),
+            before
+        );
+        // Pattern-bound collection is an independent preparation route.
+        assert_eq!(
+            values(
+                db.query(
+                    &cx,
+                    "MATCH (x) RETURN x,[(x)-[:R]->(y) | y.n] AS values ORDER BY x",
+                    &parameters,
+                    symbols,
+                    policy(),
+                )
+                .unwrap()
+            ),
+            before
+        );
+        let issuer = authority();
+        for (allowed, expected) in [
+            (
+                grant(),
+                vec![
+                    (VId(1), vec![Some(10), Some(10)]),
+                    (VId(2), vec![None, Some(7)]),
+                    (VId(3), vec![]),
+                    (VId(5), vec![None]),
+                ],
+            ),
+            (
+                {
+                    let mut allowed = grant();
+                    allowed.relations = Scope::only([S]);
+                    allowed
+                },
+                vec![
+                    (VId(1), vec![]),
+                    (VId(2), vec![]),
+                    (VId(3), vec![]),
+                    (VId(5), vec![]),
+                ],
+            ),
+        ] {
+            let token = issuer.issue_at(&allowed, 100).unwrap();
+            for result in [
+                db.query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    text,
+                    &parameters,
+                    symbols,
+                    policy(),
+                    || 100,
+                )
+                .unwrap(),
+                prepared
+                    .execute_authorized(
+                        &db,
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        &parameters,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap(),
+            ] {
+                assert_eq!(values(result), expected);
+            }
+        }
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut staged = WriteBatch::new(R);
+        staged.set_vertex_property(VId(2), N, Some(CanonicalScalar::Int(12)));
+        staged.delete_edge(EId(12));
+        staged.add_edge(EId(16), VId(3), VId(5), vec![]);
+        txn.write(&mut db, staged).unwrap();
+        let after = vec![
+            (VId(1), vec![Some(12), Some(11)]),
+            (VId(2), vec![None, Some(7)]),
+            (VId(3), vec![None]),
+            (VId(4), vec![]),
+            (VId(5), vec![None]),
+        ];
+        assert_eq!(
+            values(
+                txn.query(&db, &cx, text, &parameters, symbols, policy())
+                    .unwrap()
+            ),
+            after
+        );
+        assert_eq!(
+            values(
+                prepared
+                    .execute_in_transaction(&txn, &db, &cx, &parameters, policy())
+                    .unwrap()
+            ),
+            after
+        );
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &parameters, policy()).unwrap()),
+            before
+        );
+        txn.commit(&mut db, &commit).await.unwrap();
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &parameters, policy()).unwrap()),
+            after
+        );
+        assert_eq!(
+            values(
+                pinned
+                    .query(&cx, text, &parameters, symbols, policy())
+                    .unwrap()
+            ),
+            before
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn carried_graph_values_aggregate_inside_native_snapshot_and_authority_boundaries() {
     let ((), report) = run_async_under_lab(0xa681_0010, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

@@ -1574,27 +1574,42 @@ impl<'a> Parser<'a> {
         Ok((result, schema, depth))
     }
 
-    /// A first CREATE/INSERT reads the complete native relation before any
-    /// identities or effects exist. Leave the write token and the statement's
-    /// live parameter table with its owner; no manufactured RETURN is needed.
+    /// A CREATE/INSERT reads the complete native relation before allocating
+    /// its identities. A later write starts from the previous write's owned
+    /// rows and staged graph. Leave the write token and live parameter table
+    /// with its owner; no manufactured RETURN is needed.
     pub(in crate::graph_text::scoped::mutation) fn multipart_write_prefix(
         &mut self,
         statement: &'a str,
         declarations: &[(&str, GqlParameterType)],
+        incoming: Option<RowSchema<'a>>,
     ) -> Result<(UnresolvedReadInput<'a>, RowSchema<'a>), GraphSetTextError> {
         let tokens = PreparedGraphText::composition_tokens(statement, declarations)?;
         let zones = self.zones.clone();
         let chain_write = self.chain_write;
+        let at = self.current.at;
+        let boundary = self.boundary_reads.clone();
+        let parameter_types = self.parameter_types.clone();
         let parse = |deferred: &[usize], implicit: &[usize]| -> Result<_, GraphSetTextError> {
             let mut parser =
                 Self::new_with_parameter_types(statement, declarations)?.with_zones(zones.clone());
+            if incoming.is_some() {
+                parser.parameter_types.clone_from(&parameter_types);
+                parser = parser.resume_after(boundary.clone(), &[], at)?;
+            }
             parser.deferred_wheres = deferred.to_vec();
             parser.implicit_withs = implicit.to_vec();
             parser.chain_write = chain_write;
             parser.read_elements = true;
             parser.call_element_reads = true;
             parser.write_prefix = true;
-            let (input, schema) = parser.multipart_parts(statement, true)?;
+            let (input, schema) = parser.multipart_parts_with_input(
+                statement,
+                true,
+                incoming.clone().unwrap_or_default(),
+                0,
+                incoming.is_some(),
+            )?;
             parser.write_prefix = false;
             if !parser.is_word("CREATE") && !parser.is_word("INSERT") {
                 return Err(expected(
@@ -1620,17 +1635,17 @@ impl<'a> Parser<'a> {
                             .or_else(|| {
                                 crate::set_text::multipart::existence_where_at(&tokens, offset)
                             })
-                            .filter(|at| !deferred.contains(at))
+                            .filter(|candidate| *candidate >= at && !deferred.contains(candidate))
                     {
                         deferred.push(at);
                     } else if let Some(at) =
                         crate::set_text::multipart::implicit_with_at(&tokens, offset)
-                            .filter(|at| !implicit.contains(at))
+                            .filter(|candidate| *candidate >= at && !implicit.contains(candidate))
                     {
                         implicit.push(at);
                     } else if let Some(at) =
                         crate::set_text::multipart::optional_where_at(&tokens, offset)
-                            .filter(|at| !deferred.contains(at))
+                            .filter(|candidate| *candidate >= at && !deferred.contains(candidate))
                     {
                         deferred.push(at);
                     } else {

@@ -1098,6 +1098,7 @@ impl PreparedGraphInsertText {
                 declarations,
                 resolve,
                 returning,
+                None,
             );
         }
         let (leading, mut row_schema) = parser.insertion_unwind_prefix()?;
@@ -1567,8 +1568,17 @@ impl PreparedGraphInsertText {
         declarations: &[(&str, GqlParameterType)],
         mut resolve: impl GraphSymbolResolver,
         returning: bool,
+        incoming: Option<Vec<(Name<'a>, GraphSetColumnType)>>,
     ) -> Result<InsertStep<'a>, GraphInsertTextError> {
-        let (mut source, schema) = parser.multipart_write_prefix(statement, declarations)?;
+        let owned = incoming.as_ref().map(|schema| {
+            let (columns, types): (Vec<_>, Vec<_>) = schema
+                .iter()
+                .map(|(name, kind)| (name.text.to_owned(), *kind))
+                .unzip();
+            Box::new((columns, types))
+        });
+        let (mut source, schema) =
+            parser.multipart_write_prefix(statement, declarations, incoming)?;
         let at = parser.current.at;
         let (mut parsed, returning, continuation) =
             parser.insertion_over_row(&schema, returning)?;
@@ -1632,7 +1642,8 @@ impl PreparedGraphInsertText {
         }
         source.share_parameters(&parser.syntax.parameters, &parser.syntax.parameter_offsets);
         source.append_element_keys(&mut parser.syntax.element_keys);
-        let input = source.resolve(&mut resolve)?;
+        let mut input = source.resolve(&mut resolve)?;
+        input.first.owned = owned;
         let (template, returning) = Self::finish_over_row(
             statement,
             relation,
@@ -1651,18 +1662,34 @@ impl PreparedGraphInsertText {
     /// A later write of a chain (`CREATE (a) WITH a CREATE (b)`): CREATE runs
     /// once per row the previous write's WITH tail returned. As after `MATCH
     /// ... WITH`, that row is the whole scope, its hidden reads included; the
-    /// input is the previous write's owned rows, never a second graph read.
+    /// input is the previous write's owned rows. A native read may join and
+    /// transform them against the staged graph before the next CREATE.
     pub(crate) fn prepare_chained<'a>(
         statement: &'a str,
         relation: RelationId,
         declarations: &[(&str, GqlParameterType)],
         mut resolve: impl GraphSymbolResolver,
         from: ChainContinuation<'a>,
+        multipart: bool,
     ) -> Result<InsertStep<'a>, GraphInsertTextError> {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones())
             .resume_after(from.boundary, &from.parameters, from.at)?;
         parser.chain_write = true;
+        if multipart {
+            return Self::prepare_after_multipart(
+                parser,
+                statement,
+                relation,
+                declarations,
+                InsertionResolver {
+                    inner: resolve,
+                    symbols: BTreeMap::new(),
+                },
+                false,
+                Some(from.row),
+            );
+        }
         // `... WITH p UNWIND $tags AS tag MATCH (t:Tag {id: tag}) CREATE
         // (p)-[:HAS_TAG]->(t)` (LDBC SNB IU1, IU4, IU6, IU7): the MATCH joins
         // the previous write's rows by its correlations and reads the graph

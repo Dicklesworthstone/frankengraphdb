@@ -8,7 +8,8 @@ use fgdb_gql::{
     GqlParameterType, GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
     GraphInsertQueryBatch, GraphInsertQueryError, GraphInsertTextErrorKind,
     GraphPatternTextErrorKind, GraphSetColumnType, GraphSymbol, GraphSymbolKind,
-    PreparedGraphInsertQuery, PreparedGraphInsertQueryText, PreparedGraphInsertText,
+    GraphWriteChainStep, PreparedGraphInsertQuery, PreparedGraphInsertQueryText,
+    PreparedGraphInsertText, PreparedGraphWriteChainText,
 };
 use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::Cell;
@@ -636,6 +637,355 @@ impl fgdb_gql::GraphSetSource<(), ()> for MultipartInsertSource<'_> {
             ElementId::Vertex(vertex) => self.properties.get(&(vertex, key)).cloned(),
             ElementId::Edge(_) => None,
         }))
+    }
+}
+
+/// The first native CREATE's proposal is the later read's staged graph. This
+/// fixture copies native intents; query execution still belongs to the normal
+/// graph source, owned-row operators and insertion owner.
+fn staged_insert_graph(batch: &GraphInsertQueryBatch) -> (Vec<VId>, Vec<Triple>, Props) {
+    let mut vertices = Vec::new();
+    let mut edges = Vec::new();
+    let mut properties = Props::new();
+    for intent in batch.insertion().intents() {
+        match intent {
+            GraphInsertIntent::Vertex {
+                vertex,
+                properties: fields,
+                ..
+            } => {
+                vertices.push(*vertex);
+                properties.extend(
+                    fields
+                        .iter()
+                        .map(|(key, value)| ((*vertex, *key), value.clone())),
+                );
+            }
+            GraphInsertIntent::Edge {
+                relation,
+                source,
+                destination,
+                ..
+            } => edges.push((*source, *relation, *destination)),
+        }
+    }
+    (vertices, edges, properties)
+}
+
+struct ChainedInsertSource<'a> {
+    graph: MultipartInsertSource<'a>,
+    allocations: &'a Cell<usize>,
+    patterns: &'a Cell<usize>,
+    fail_pattern: Option<usize>,
+}
+
+impl fgdb_gql::GraphSetSource<(), ()> for ChainedInsertSource<'_> {
+    fn pattern(
+        &mut self,
+        selection: &fgdb_gql::algebra::PreparedGraphPattern<GraphValueRow>,
+        allowance: GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<(), ()>> {
+        assert_eq!(
+            self.allocations.get(),
+            0,
+            "freeze every read before creating"
+        );
+        self.patterns.set(self.patterns.get() + 1);
+        if self.fail_pattern == Some(self.patterns.get()) {
+            return Err(GqlQueryError::Source(()));
+        }
+        fgdb_gql::GraphSetSource::pattern(&mut self.graph, selection, allowance)
+    }
+
+    fn element_property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<CanonicalPropertyValue>, ()>> {
+        assert_eq!(
+            self.allocations.get(),
+            0,
+            "freeze every field before creating"
+        );
+        fgdb_gql::GraphSetSource::element_property(&mut self.graph, element, key)
+    }
+}
+
+#[test]
+fn complete_read_pipeline_between_creates_keeps_staged_duplicates_nulls_and_parameter_rebinding() {
+    for write in ["CREATE", "INSERT"] {
+        let text = format!(
+            "CREATE (a {{p:$seed}}),(b {{p:20}}),(a)-[:R]->(b),(a)-[:R]->(b) \
+             WITH a,b UNWIND [a,b,a] AS x OPTIONAL MATCH (x)-[:R]->(t) \
+             WITH x,coalesce(t.p,0) AS value UNWIND $offsets AS offset \
+             MATCH (owner {{p:x.p}}) WHERE owner.p >= $floor \
+             WITH value+offset+$step AS value {write} (copy {{p:value}}) \
+             RETURN copy.p AS copied ORDER BY copied"
+        );
+        assert!(PreparedGraphWriteChainText::is_chain(&text).unwrap());
+        let calls = Cell::new(0);
+        let template = PreparedGraphWriteChainText::prepare(&text, R, |kind, name: &str| {
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        })
+        .unwrap();
+        let resolved = calls.get();
+        assert!(resolved > 0);
+        for (seed, floor, step, offsets, expected) in [
+            (
+                10,
+                0,
+                1,
+                vec![0, 1],
+                vec![1, 2, 21, 21, 21, 21, 22, 22, 22, 22],
+            ),
+            (12, 15, 4, vec![0, 0], vec![4, 4]),
+            (12, 30, 9, vec![0, 1], vec![]),
+            (10, 0, 7, vec![], vec![]),
+        ] {
+            let arguments = GqlParameters::new()
+                .with_int64("seed", seed)
+                .unwrap()
+                .with_int64("floor", floor)
+                .unwrap()
+                .with_int64("step", step)
+                .unwrap()
+                .with_list("offsets", offsets.into_iter().map(int).collect())
+                .unwrap();
+            let chain = template.bind_parameters(&arguments).unwrap();
+            assert_eq!(chain, template.bind_parameters(&arguments).unwrap());
+            assert_eq!(
+                calls.get(),
+                resolved,
+                "binding never resolves the catalog again"
+            );
+            assert_eq!(chain.columns(), &["copied"]);
+            assert!(chain.read_continuation().is_none());
+            let [
+                GraphWriteChainStep::Query(first),
+                GraphWriteChainStep::Query(second),
+            ] = chain.steps()
+            else {
+                panic!("two native CREATE query steps own the whole statement");
+            };
+            let created = run(first).unwrap();
+            assert_eq!(created.insertion().stats().created_vertices, 2);
+            assert_eq!(created.insertion().stats().created_edges, 2);
+            let (vertices, edges, properties) = staged_insert_graph(&created);
+            let allocations = Cell::new(0);
+            let patterns = Cell::new(0);
+            let mut allowance = policy();
+            allowance.query = GqlQueryPolicy::new(10_000, 1_000, 2_000_000, 1_000_000);
+            let batch = second
+                .execute_governed_over(
+                    Some(created.returning().value.clone()),
+                    allowance,
+                    ChainedInsertSource {
+                        graph: MultipartInsertSource {
+                            vertices: &vertices,
+                            edges: &edges,
+                            properties: &properties,
+                        },
+                        allocations: &allocations,
+                        patterns: &patterns,
+                        fail_pattern: None,
+                    },
+                    |request| {
+                        allocations.set(allocations.get() + 1);
+                        Ok::<_, ()>(match identity(request).unwrap() {
+                            ElementId::Vertex(id) => ElementId::Vertex(VId(id.0 + 10_000)),
+                            ElementId::Edge(id) => ElementId::Edge(EId(id.0 + 10_000)),
+                        })
+                    },
+                    || Ok(()),
+                )
+                .unwrap();
+            assert_eq!(
+                values(&batch),
+                expected
+                    .iter()
+                    .map(|value| vec![int(*value)])
+                    .collect::<Vec<_>>(),
+                "{write}, floor={floor}"
+            );
+            assert_eq!(allocations.get(), expected.len());
+            assert_eq!(
+                batch.insertion().stats().created_vertices as usize,
+                expected.len()
+            );
+            assert_eq!(batch.insertion().stats().created_edges, 0);
+        }
+        assert!(template.bind_parameters(&GqlParameters::new()).is_err());
+    }
+}
+
+#[test]
+fn inline_read_call_between_creates_counts_the_staged_parallel_witnesses() {
+    for call in [
+        "CALL (x) { MATCH (x)-[:R]->(t) RETURN count(*) AS degree }",
+        "CALL { WITH x MATCH (x)-[:R]->(t) RETURN count(*) AS degree }",
+    ] {
+        let text = format!(
+            "CREATE (a {{p:10}}),(b {{p:20}}),(a)-[:R]->(b),(a)-[:R]->(b) \
+             WITH a,b UNWIND [a,b,a] AS x {call} \
+             INSERT (copy {{p:degree}}) RETURN copy.p AS copied ORDER BY copied"
+        );
+        let chain = PreparedGraphWriteChainText::prepare(&text, R, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let [
+            GraphWriteChainStep::Query(first),
+            GraphWriteChainStep::Query(second),
+        ] = chain.steps()
+        else {
+            panic!("a correlated read CALL must feed the second native creation");
+        };
+        let created = run(first).unwrap();
+        let (vertices, edges, properties) = staged_insert_graph(&created);
+        let allocations = Cell::new(0);
+        let patterns = Cell::new(0);
+        let mut allowance = policy();
+        allowance.query = GqlQueryPolicy::new(10_000, 1_000, 2_000_000, 1_000_000);
+        let batch = second
+            .execute_governed_over(
+                Some(created.returning().value.clone()),
+                allowance,
+                ChainedInsertSource {
+                    graph: MultipartInsertSource {
+                        vertices: &vertices,
+                        edges: &edges,
+                        properties: &properties,
+                    },
+                    allocations: &allocations,
+                    patterns: &patterns,
+                    fail_pattern: None,
+                },
+                |request| {
+                    allocations.set(allocations.get() + 1);
+                    Ok::<_, ()>(match identity(request).unwrap() {
+                        ElementId::Vertex(id) => ElementId::Vertex(VId(id.0 + 10_000)),
+                        ElementId::Edge(id) => ElementId::Edge(EId(id.0 + 10_000)),
+                    })
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(
+            values(&batch),
+            vec![vec![int(0)], vec![int(2)], vec![int(2)]]
+        );
+        assert_eq!(allocations.get(), 3);
+        assert!(patterns.get() > 0);
+    }
+}
+
+#[test]
+fn a_late_read_or_field_failure_between_creates_exposes_no_second_proposal() {
+    for (tail, fail_pattern, expected_allocations) in [
+        (
+            "WITH 1/(1-k) AS value CREATE (copy {p:value}) RETURN copy.p LIMIT 0",
+            None,
+            0,
+        ),
+        ("CREATE (copy {p:1/(1-k)}) RETURN copy.p LIMIT 0", None, 0),
+        ("CREATE (copy {p:k}) RETURN copy.p LIMIT 0", Some(2), 0),
+        (
+            "CREATE (copy {p:k}) RETURN 1/(1-copy.p) AS bad LIMIT 0",
+            None,
+            2,
+        ),
+    ] {
+        let text = format!(
+            "CREATE (a {{p:1}}) WITH a MATCH (x) WITH a,x \
+             UNWIND [0,1] AS k MATCH (y) {tail}"
+        );
+        let chain = PreparedGraphWriteChainText::prepare(&text, R, symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let [
+            GraphWriteChainStep::Query(first),
+            GraphWriteChainStep::Query(second),
+        ] = chain.steps()
+        else {
+            panic!("two native CREATE query steps");
+        };
+        let created = run(first).unwrap();
+        let (vertices, edges, properties) = staged_insert_graph(&created);
+        let allocations = Cell::new(0);
+        let patterns = Cell::new(0);
+        let mut allowance = policy();
+        allowance.query = GqlQueryPolicy::new(10_000, 1_000, 2_000_000, 1_000_000);
+        let result = second.execute_governed_over(
+            Some(created.returning().value.clone()),
+            allowance,
+            ChainedInsertSource {
+                graph: MultipartInsertSource {
+                    vertices: &vertices,
+                    edges: &edges,
+                    properties: &properties,
+                },
+                allocations: &allocations,
+                patterns: &patterns,
+                fail_pattern,
+            },
+            |request| {
+                allocations.set(allocations.get() + 1);
+                Ok::<_, ()>(match identity(request).unwrap() {
+                    ElementId::Vertex(id) => ElementId::Vertex(VId(id.0 + 10_000)),
+                    ElementId::Edge(id) => ElementId::Edge(EId(id.0 + 10_000)),
+                })
+            },
+            || Ok(()),
+        );
+        assert!(result.is_err(), "{tail}");
+        assert_eq!(allocations.get(), expected_allocations, "{tail}");
+        if let Some(at) = fail_pattern {
+            assert_eq!(patterns.get(), at);
+        }
+    }
+}
+
+#[test]
+fn invalid_read_between_writes_refuses_the_whole_chain_without_resolving_invalid_fields() {
+    for text in [
+        "CREATE (a {p:1}) WITH a MATCH (b) WITH b CREATE (copy {p:a.q}) RETURN copy",
+        "CREATE (a) WITH a CALL (a) { CREATE (b) RETURN b } CREATE (copy) RETURN copy",
+        "CREATE (a) WITH a MATCH (b) RETURN b CREATE (copy) RETURN copy",
+        "CREATE (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) CREATE (copy {p:missing.q}) RETURN copy",
+    ] {
+        // Earlier valid steps may already resolve p or R. A dropped or
+        // unknown late binding must refuse before resolving its own field.
+        let invalid_fields = Cell::new(0);
+        assert!(
+            PreparedGraphWriteChainText::prepare(text, R, |kind, name: &str| {
+                if kind == GraphSymbolKind::Property && name == "q" {
+                    invalid_fields.set(invalid_fields.get() + 1);
+                }
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(
+            invalid_fields.get(),
+            0,
+            "invalid late binding never resolves its field: {text}"
+        );
+    }
+    for text in [
+        "CALL { RETURN 1 AS value } CREATE (a {p:value}) WITH a MATCH (b) CREATE (copy) RETURN copy",
+        "OPTIONAL MATCH (a) CREATE (copy) WITH copy MATCH (b) INSERT (other) RETURN other",
+    ] {
+        assert!(
+            PreparedGraphWriteChainText::is_chain(text).unwrap(),
+            "{text}"
+        );
+        PreparedGraphWriteChainText::prepare(text, R, symbols)
+            .expect(text)
+            .bind_parameters(&GqlParameters::new())
+            .expect(text);
     }
 }
 
