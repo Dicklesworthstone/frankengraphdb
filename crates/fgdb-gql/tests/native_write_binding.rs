@@ -31,6 +31,87 @@ fn row(p: i64, q: CanonicalScalar) -> GraphValue {
 fn rows(values: Vec<GraphValue>) -> GqlParameters {
     GqlParameters::new().with_list("rows", values).unwrap()
 }
+fn object(entries: Vec<(&str, GraphValue)>) -> GraphValue {
+    GraphValue::map(
+        entries
+            .into_iter()
+            .map(|(name, value)| (name.into(), value))
+            .collect(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn computed_map_unwind_uses_one_native_statement_and_keeps_scalar_batch_routing() {
+    let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+    let arguments = rows(vec![
+        object(vec![("p", int(1)), ("props", object(vec![("p", int(2))]))]),
+        object(vec![("p", int(2)), ("props", object(vec![("q", int(77))]))]),
+        object(vec![("p", int(3)), ("props", object(vec![]))]),
+    ]);
+    let original = arguments.canonical_bytes();
+    for assignment in ["+=", "="] {
+        let text = format!(
+            "UNWIND $rows AS row MATCH (n:Person {{p:row.p}}) SET n {assignment} row.props"
+        );
+        BoundNativeGraphWrite::probe_definition(&text, &arguments, R, symbols).unwrap();
+        let bound = BoundNativeGraphWrite::bind(&text, &arguments, R, symbols).unwrap();
+        assert_eq!(bound.input_records(), None, "{text}");
+        assert_eq!(bound.program().statements().len(), 1, "{text}");
+        assert!(!bound.program().freezes_field_update_input());
+    }
+    assert_eq!(arguments.canonical_bytes(), original);
+
+    let scalar = "UNWIND $rows AS row MATCH (n:Person {p:row.p}) SET n.q=row.q";
+    let bound = BoundNativeGraphWrite::bind(
+        scalar,
+        &rows(vec![
+            row(1, CanonicalScalar::Int(10)),
+            row(2, CanonicalScalar::Int(20)),
+        ]),
+        R,
+        symbols,
+    )
+    .unwrap();
+    assert_eq!(bound.input_records(), Some(2));
+    let error = BoundNativeGraphWrite::bind(
+        scalar,
+        &rows(vec![
+            row(1, CanonicalScalar::Int(10)),
+            row(2, CanonicalScalar::Bool(true)),
+        ]),
+        R,
+        |_, _| panic!("scalar row refusal still precedes catalog resolution"),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        NativeGraphWriteBindError::Unwind(GraphUnwindWriteError::Row {
+            row: 1,
+            offset,
+            kind: GraphUnwindRowError::IncompatibleFieldTypes,
+        }) if offset == scalar.find("row.q").unwrap()
+    ));
+}
+
+#[test]
+fn computed_map_probe_and_binding_keep_original_diagnostic_offsets() {
+    let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+    let arguments = rows(vec![object(vec![("props", object(vec![("q", int(7))]))])])
+        .with_map("filter", vec![("p".into(), int(1))])
+        .unwrap();
+    let text = "UNWIND $rows AS row MATCH (n {p:$filter.p}) SET n += row.props,n.unknown=1";
+    for error in [
+        BoundNativeGraphWrite::probe_definition(text, &arguments, R, symbols).unwrap_err(),
+        BoundNativeGraphWrite::bind(text, &arguments, R, symbols).unwrap_err(),
+    ] {
+        let NativeGraphWriteBindError::ScriptPreparation(error) = error else {
+            panic!("the native script compiler must report this symbol failure: {error:?}");
+        };
+        assert_eq!(error.statement, Some(0));
+        assert_eq!(error.offset, text.find("unknown").unwrap());
+    }
+}
 
 #[test]
 fn bounded_unwind_expands_beyond_the_script_definition_limit() {

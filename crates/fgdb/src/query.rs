@@ -314,6 +314,14 @@ fn map_arguments(
     params: &GqlParameters,
 ) -> Option<(GqlMapArgumentText, GqlParameters)> {
     if matches!(
+        fgdb_gql::unwind_write::GraphUnwindWriteText::requires_computed_map_input(text),
+        Ok(true)
+    ) {
+        // Keep computed whole maps intact until native script admission, even
+        // when their input rows happen to share a key set.
+        return GqlMapArgumentText::lower_fields(text, params);
+    }
+    if matches!(
         fgdb_gql::unwind_write::GraphUnwindWriteText::parse_if_supported(text),
         Ok(Some(_))
     ) {

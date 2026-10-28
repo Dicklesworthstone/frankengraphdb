@@ -67,8 +67,9 @@ impl BoundNativeGraphWrite {
     /// Probe a native no-RETURN definition without expanding argument rows.
     ///
     /// This is a dispatch probe, not a bound program or authority. Ordinary
-    /// scripts are prepared but not bound; UNWIND mutation admission is lexical
-    /// only. Values, row shapes, downstream types and execution budgets still
+    /// scripts, including computed-map UNWIND updates, are prepared but not
+    /// bound; row-expanded UNWIND admission is lexical only. Values, row shapes,
+    /// downstream types and execution budgets still
     /// require the ordinary binder. Collection contents are never inspected.
     /// Native reads should be admitted by their own compiler before this probe.
     /// Map arguments standing for property maps splice as `bind` splices
@@ -81,13 +82,20 @@ impl BoundNativeGraphWrite {
         relation: RelationId,
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<(), NativeGraphWriteBindError> {
-        if GraphUnwindWriteText::parse_if_supported(text)
-            .map_err(NativeGraphWriteBindError::Unwind)?
-            .is_some()
+        let computed_maps = GraphUnwindWriteText::requires_computed_map_input(text)
+            .map_err(NativeGraphWriteBindError::Unwind)?;
+        if !computed_maps
+            && GraphUnwindWriteText::parse_if_supported(text)
+                .map_err(NativeGraphWriteBindError::Unwind)?
+                .is_some()
         {
             return Ok(());
         }
-        let lowered = GqlMapArgumentText::lower(text, arguments);
+        let lowered = if computed_maps {
+            GqlMapArgumentText::lower_fields(text, arguments)
+        } else {
+            GqlMapArgumentText::lower(text, arguments)
+        };
         let (text, arguments) = lowered
             .as_ref()
             .map_or((text, arguments), |(lowered, derived)| {
@@ -127,8 +135,11 @@ impl BoundNativeGraphWrite {
         relation: RelationId,
         mut resolve: impl crate::GraphSymbolResolver,
     ) -> Result<Self, NativeGraphWriteBindError> {
-        if let Some(unwind) = GraphUnwindWriteText::parse_if_supported(text)
-            .map_err(NativeGraphWriteBindError::Unwind)?
+        let computed_maps = GraphUnwindWriteText::requires_computed_map_input(text)
+            .map_err(NativeGraphWriteBindError::Unwind)?;
+        if !computed_maps
+            && let Some(unwind) = GraphUnwindWriteText::parse_if_supported(text)
+                .map_err(NativeGraphWriteBindError::Unwind)?
         {
             let batch = unwind
                 .bind_with_limit_resolver(
@@ -140,9 +151,15 @@ impl BoundNativeGraphWrite {
                 .map_err(NativeGraphWriteBindError::Unwind)?;
             return Ok(Self(BoundInput::Unwind(batch)));
         }
-        // A map argument standing for a property map (`SET n += $props`)
-        // binds as the literal map of its keys (fgdb-0s2pq).
-        let lowered = GqlMapArgumentText::lower(text, arguments);
+        // Computed whole-map UNWIND updates keep one relational MATCH bag,
+        // including heterogeneous maps and rekeys. As on authorized ingress,
+        // only pattern fields are lowered; whole map operands stay values.
+        // Other scripts retain their ordinary literal-map argument lowering.
+        let lowered = if computed_maps {
+            GqlMapArgumentText::lower_fields(text, arguments)
+        } else {
+            GqlMapArgumentText::lower(text, arguments)
+        };
         let (text, arguments) = lowered
             .as_ref()
             .map_or((text, arguments), |(lowered, derived)| {
