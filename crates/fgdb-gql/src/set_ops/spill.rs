@@ -60,6 +60,19 @@ pub trait AsyncSpillElementSource: Send {
         self.element_property(element, key)
     }
 
+    /// Ordinary external relations have one pinned read cut. Preserve the
+    /// reached-operand contract when the shared evaluator also identifies an
+    /// original input column for mutation-specific resident readers.
+    fn element_property_for_column_with_control(
+        &mut self,
+        _column: Option<usize>,
+        element: ElementId,
+        key: PropertyKeyId,
+        control: &mut (impl FnMut(GlaExecutionEvent) -> Result<(), Self::Error> + Send),
+    ) -> impl Future<Output = Option<Result<Option<Self::Property>, Self::Error>>> + Send {
+        self.element_property_with_control(element, key, control)
+    }
+
     /// Metadata uses the same cumulative evaluator control and snapshot as
     /// property reads. Hosts must charge before constructing any list/map or
     /// copying a payload, and stop on the first control error. The supplied

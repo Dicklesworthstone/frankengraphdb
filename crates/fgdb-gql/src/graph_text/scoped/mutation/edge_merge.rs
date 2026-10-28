@@ -21,9 +21,28 @@ struct ParsedEdgeMerge<'a> {
     properties: Vec<super::merge::MergeProperty<'a>>,
     /// Map values the row computes (fgdb-at06q); empty without a row.
     row_properties: Vec<(Name<'a>, crate::mutation_text::VertexMergeRowValueTemplate)>,
+    unbound: Vec<ParsedMergeVertex<'a>>,
+    unbound_at: usize,
+    /// The MERGE's row domain, including its newly introduced identities.
+    row: Vec<(Name<'a>, GraphSetColumnType)>,
     undirected: bool,
     actions: Option<super::merge::ParsedEdgeRowActions<'a>>,
 }
+
+struct ParsedMergeVertex<'a> {
+    name: Name<'a>,
+    column: usize,
+    labels: Vec<Name<'a>>,
+    properties: Vec<(Name<'a>, crate::mutation_text::VertexMergeRowValueTemplate)>,
+}
+
+type EdgeMergeRowDomain<'a> = (
+    Vec<(Name<'a>, GraphSetColumnType)>,
+    Vec<ParsedMergeVertex<'a>>,
+    usize,
+    [Name<'a>; 2],
+);
+
 /// A relationship MERGE over a WITH row: the pattern, its source and
 /// destination row columns, and its RETURN.
 type RowMerge<'a> = (
@@ -41,6 +60,122 @@ fn build_error(at: usize, source: crate::GraphEdgeMergeBuildError) -> GraphEdgeM
 }
 
 impl<'a> Parser<'a> {
+    /// Reserve new endpoint slots before compiling any map or action. The
+    /// framing pass reads only native tokens; the ordinary parser below still
+    /// validates every label, map, direction and binding. All MERGE expressions
+    /// consequently use the final row coordinates, including hidden preimages.
+    fn edge_merge_row_domain(
+        &mut self,
+        incoming: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<EdgeMergeRowDomain<'a>, GraphEdgeMergeTextError> {
+        let mut lexer = self.lexer.clone();
+        let mut depth = 0_usize;
+        let mut names = Vec::<Name<'a>>::new();
+        loop {
+            let token = lexer.next()?;
+            match token.kind {
+                TokenKind::End | TokenKind::Punct(b';') => {
+                    return Err(error(
+                        token.at,
+                        GraphPatternTextErrorKind::Expected("two relationship MERGE endpoints"),
+                    )
+                    .into());
+                }
+                TokenKind::Punct(b'(') if depth == 0 => {
+                    let next = lexer.clone().next()?;
+                    let text = match next.kind {
+                        TokenKind::Word(name) | TokenKind::DelimitedKeyword(name) => name,
+                        _ => (0..MAX_PATTERN_VERTICES)
+                            .map(Self::anonymous_name)
+                            .find(|name| {
+                                incoming.iter().all(|(known, _)| known.text != *name)
+                                    && names.iter().all(|known| known.text != *name)
+                            })
+                            .ok_or_else(|| {
+                                error(
+                                    next.at,
+                                    GraphPatternTextErrorKind::Expected(
+                                        "bounded private MERGE endpoint slots",
+                                    ),
+                                )
+                            })?,
+                    };
+                    names.push(Name { text, at: next.at });
+                    depth = 1;
+                }
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 && names.len() == 2 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let at = self.visible_width(incoming);
+        let endpoints = [names[0], names[1]];
+        let mut unbound = Vec::<ParsedMergeVertex<'a>>::new();
+        for name in names {
+            if let Some((_, kind)) = incoming.iter().find(|(known, _)| known.text == name.text) {
+                if !matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Any) {
+                    return Err(error(
+                        name.at,
+                        GraphPatternTextErrorKind::Expected("a vertex-valued bound MERGE endpoint"),
+                    )
+                    .into());
+                }
+            } else if !unbound.iter().any(|known| known.name.text == name.text) {
+                unbound.push(ParsedMergeVertex {
+                    name,
+                    column: at + unbound.len(),
+                    labels: Vec::new(),
+                    properties: Vec::new(),
+                });
+            }
+        }
+        let count = unbound.len();
+        self.capacity(
+            incoming.len() + count - usize::from(incoming.len() + count > 0),
+            MAX_PATTERN_VERTICES,
+            crate::algebra::PatternLimitDimension::Columns,
+        )?;
+        let mut row = incoming[..at].to_vec();
+        row.extend(
+            unbound
+                .iter()
+                .map(|endpoint| (endpoint.name, GraphSetColumnType::Vertex)),
+        );
+        row.extend_from_slice(&incoming[at..]);
+        if count != 0
+            && let Some(boundary) = self
+                .boundary_reads
+                .as_mut()
+                .filter(|boundary| boundary.width == incoming.len())
+        {
+            let shift = |column: &mut usize| {
+                if *column >= at {
+                    *column += count;
+                }
+            };
+            for (_, _, column) in &mut boundary.reads {
+                shift(column);
+            }
+            for (_, _, column) in &mut boundary.functions {
+                shift(column);
+            }
+            for (_, _, _, column) in &mut boundary.grouped {
+                shift(column);
+            }
+            for (_, _, column) in &mut boundary.scoped {
+                shift(column);
+            }
+            boundary.width += count;
+            boundary.visible += count;
+        }
+        Ok((row, unbound, at, endpoints))
+    }
+
     /// A plain SET may also write carried endpoints. Keep that existing
     /// mutation family intact unless every assignment targets this edge.
     fn edge_only_set(&self, relationship: Option<Name<'a>>) -> Result<bool, GraphPatternTextError> {
@@ -96,6 +231,8 @@ impl<'a> Parser<'a> {
     fn edge_merge_pattern(
         &mut self,
         row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+        mut unbound: Vec<ParsedMergeVertex<'a>>,
+        endpoints: Option<[Name<'a>; 2]>,
     ) -> Result<ParsedEdgeMerge<'a>, GraphEdgeMergeTextError> {
         self.word("MERGE")?;
         let path = if self.starts_path_binding()? {
@@ -115,7 +252,7 @@ impl<'a> Parser<'a> {
             None
         };
         self.punct(b'(', "(")?;
-        let left = self.edge_merge_endpoint()?;
+        let left = self.edge_merge_endpoint(row, &mut unbound, endpoints.map(|names| names[0]))?;
         self.punct(b')', ")")?;
 
         let incoming = self.take(b'<')?;
@@ -168,7 +305,7 @@ impl<'a> Parser<'a> {
         }
 
         self.punct(b'(', "(")?;
-        let right = self.edge_merge_endpoint()?;
+        let right = self.edge_merge_endpoint(row, &mut unbound, endpoints.map(|names| names[1]))?;
         self.punct(b')', ")")?;
         if let Some(path) = path
             && (path.text == left.text
@@ -195,6 +332,9 @@ impl<'a> Parser<'a> {
             relation,
             properties,
             row_properties,
+            unbound,
+            unbound_at: 0,
+            row: row.unwrap_or_default().to_vec(),
             undirected: !incoming && !outgoing,
             actions: None,
         })
@@ -237,12 +377,75 @@ impl<'a> Parser<'a> {
     /// An endpoint of the MERGE pattern: a MATCH vertex, or after WITH (or
     /// in a later write of a chain) a name the row carries, which the row
     /// MERGE checks against that row (fgdb-cpny9).
-    fn edge_merge_endpoint(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
-        if self.write_row_scope {
-            self.name()
+    fn edge_merge_endpoint(
+        &mut self,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+        unbound: &mut [ParsedMergeVertex<'a>],
+        reserved: Option<Name<'a>>,
+    ) -> Result<Name<'a>, GraphEdgeMergeTextError> {
+        let name = if self.write_row_scope {
+            if self.is_punct(b':') || self.is_punct(b'{') || self.is_punct(b')') {
+                // Anonymous endpoints have distinct reserved names assigned by
+                // the same token-framing pass that reserved their row slots.
+                reserved.expect("row endpoint framing reserved its anonymous identity")
+            } else {
+                self.name()?
+            }
         } else {
-            self.variable()
+            self.variable()?
+        };
+        let Some(endpoint) = unbound
+            .iter_mut()
+            .find(|endpoint| endpoint.name.text == name.text)
+        else {
+            return Ok(name);
+        };
+        while self.take(b':')? {
+            let label = self.schema_name()?;
+            if !endpoint.labels.iter().any(|known| known.text == label.text) {
+                endpoint.labels.push(label);
+            }
         }
+        let refused = |refusal| match refusal {
+            super::merge::MergeMapError::Pattern(error) => error.into(),
+            super::merge::MergeMapError::Value(error) => error.into(),
+            super::merge::MergeMapError::TooManyFields { at, observed } => build_error(
+                at,
+                crate::GraphEdgeMergeBuildError::TooManyProperties {
+                    limit: crate::MAX_GRAPH_EDGE_MERGE_PROPERTIES,
+                    observed,
+                },
+            ),
+            super::merge::MergeMapError::DuplicateProperty { at } => {
+                build_error(at, crate::GraphEdgeMergeBuildError::DuplicateProperty)
+            }
+        };
+        let (properties, computed) = self
+            .merge_row_property_map(row.expect("new endpoints belong to the row compiler"))
+            .map_err(refused)?;
+        for (key, value) in properties
+            .into_iter()
+            .map(|property| {
+                (
+                    property.key,
+                    crate::mutation_text::VertexMergeRowValueTemplate::Value(property.value),
+                )
+            })
+            .chain(computed)
+        {
+            if endpoint
+                .properties
+                .iter()
+                .any(|(known, _)| known.text == key.text)
+            {
+                return Err(build_error(
+                    key.at,
+                    crate::GraphEdgeMergeBuildError::DuplicateProperty,
+                ));
+            }
+            endpoint.properties.push((key, value));
+        }
+        Ok(name)
     }
 }
 
@@ -360,7 +563,7 @@ impl PreparedGraphEdgeMergeText {
                 deferred || computed,
             );
         }
-        let parsed = parser.edge_merge_pattern(None)?;
+        let parsed = parser.edge_merge_pattern(None, Vec::new(), None)?;
         let mut projections = Vec::new();
         let source = parser.mutation_projection(&mut projections, parsed.source, None)?;
         let destination = parser.mutation_projection(&mut projections, parsed.destination, None)?;
@@ -517,6 +720,8 @@ impl PreparedGraphEdgeMergeText {
                 destination,
                 properties,
                 row_properties: Vec::new(),
+                unbound: Vec::new(),
+                unbound_at: 0,
                 undirected: parsed.undirected,
                 row_actions: None,
             },
@@ -704,6 +909,39 @@ impl PreparedGraphEdgeMergeText {
     {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones());
+        if parser.is_word("MERGE") {
+            parser.chain_write = true;
+            let (merged, continues) = Self::row_merge(&mut parser, &[], None)?;
+            let continuation = Self::chain_continuation(&mut parser, &[], 0, &merged, continues)?;
+            parser
+                .syntax
+                .element_catalog
+                .resolve(&mut *resolve, statement);
+            for (key, slot) in &parser.syntax.element_keys {
+                slot.resolve(
+                    match resolve.resolve_symbol(GraphSymbolKind::Property, key) {
+                        Some(GraphSymbol::Property(key)) => Some(key),
+                        _ => None,
+                    },
+                );
+            }
+            let input = BoundSetTextInput {
+                selection: None,
+                parameters: parser.syntax.parameters,
+                parameter_offsets: parser.syntax.parameter_offsets,
+                return_at: statement.len(),
+                projection: None,
+                quantifier: GraphSetQuantifier::All,
+                pipeline: Vec::new(),
+                singleton: true,
+                leading: Vec::new(),
+                correlations: Vec::new(),
+                row_fields: Vec::new(),
+                owned: None,
+            };
+            let (merge, returning) = Self::resolve_row_merge(statement, resolve, merged, input)?;
+            return Ok((merge, returning, continuation));
+        }
         // A multipart read before the MERGE (`MATCH (a) WITH a MATCH (b)
         // MERGE (a)-[r:R]->(b) ON CREATE SET ...`): its complete relation,
         // as prepare_after_multipart reads it, with the chain's row actions.
@@ -785,7 +1023,7 @@ impl PreparedGraphEdgeMergeText {
     /// them.
     fn chain_continuation<'a>(
         parser: &mut Parser<'a>,
-        schema: &[(Name<'a>, GraphSetColumnType)],
+        _schema: &[(Name<'a>, GraphSetColumnType)],
         keep: usize,
         merged: &RowMerge<'a>,
         continues: bool,
@@ -793,6 +1031,8 @@ impl PreparedGraphEdgeMergeText {
         if !continues {
             return Ok(None);
         }
+        let schema = merged.0.row.as_slice();
+        let keep = keep + merged.0.unbound.len();
         // The shared write-tail compiler carries final-state property cells
         // with their boundary metadata. They remain private input columns of
         // the following write, just as after CREATE's implicit WITH head.
@@ -842,7 +1082,19 @@ impl PreparedGraphEdgeMergeText {
         returning: Option<bool>,
     ) -> Result<(RowMerge<'a>, bool), GraphEdgeMergeTextError> {
         parser.write_row_scope = true;
-        let mut parsed = parser.edge_merge_pattern(Some(schema))?;
+        let (row, unbound, unbound_at, endpoints) = parser.edge_merge_row_domain(schema)?;
+        if !parser.chain_write && !unbound.is_empty() {
+            return Err(error(
+                parser.current.at,
+                GraphPatternTextErrorKind::Expected(
+                    "the statement write-chain executor for unbound MERGE endpoints",
+                ),
+            )
+            .into());
+        }
+        let schema = row.as_slice();
+        let mut parsed = parser.edge_merge_pattern(Some(schema), unbound, Some(endpoints))?;
+        parsed.unbound_at = unbound_at;
         // A carried vertex, or an open column the row computes (`ns[i]`, an
         // UNWIND member) whose value the selector checks per row.
         let endpoint = |name: Name<'_>| {
@@ -892,7 +1144,14 @@ impl PreparedGraphEdgeMergeText {
                 text: "",
                 at: parser.current.at,
             });
-            parsed.actions = Some(parser.edge_row_actions(relationship, schema)?);
+            // New bindings have no input preimage. Their property accesses
+            // compile to the native column-aware reader, which selects the
+            // occurrence's live cut while carried columns keep the frozen cut.
+            let reads = parser.call_element_reads;
+            parser.call_element_reads |= !parsed.unbound.is_empty();
+            let actions = parser.edge_row_actions(relationship, schema);
+            parser.call_element_reads = reads;
+            parsed.actions = Some(actions?);
         }
         let continues = parser.chain_write && parser.at_chained_write()?;
         // In a chain, a WITH head after the pattern is a query step whose
@@ -1043,6 +1302,28 @@ impl PreparedGraphEdgeMergeText {
             };
             row_properties.push((key, value));
         }
+        let mut unbound = Vec::with_capacity(parsed.unbound.len());
+        for endpoint in parsed.unbound {
+            let mut labels = Vec::with_capacity(endpoint.labels.len());
+            for name in endpoint.labels {
+                let GraphSymbol::Label(label) = symbol(GraphSymbolKind::Label, name)? else {
+                    unreachable!("symbol domain checked by shared resolver")
+                };
+                labels.push(label);
+            }
+            let mut fields = Vec::with_capacity(endpoint.properties.len());
+            for (name, value) in endpoint.properties {
+                let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, name)? else {
+                    unreachable!("symbol domain checked by shared resolver")
+                };
+                fields.push((key, value));
+            }
+            unbound.push(crate::mutation_text::EdgeMergeVertexTemplate {
+                column: endpoint.column,
+                labels,
+                properties: fields,
+            });
+        }
         let returning = parsed_return
             .map(|parsed| parsed.resolve(&mut symbol))
             .transpose()?;
@@ -1058,6 +1339,8 @@ impl PreparedGraphEdgeMergeText {
                 destination,
                 properties,
                 row_properties,
+                unbound,
+                unbound_at: parsed.unbound_at,
                 undirected: parsed.undirected,
                 row_actions,
             },
@@ -1143,6 +1426,61 @@ impl PreparedGraphEdgeMergeText {
                 },
             ));
         }
+        let mut unbound = Vec::with_capacity(self.unbound.len());
+        for endpoint in &self.unbound {
+            let mut fields = Vec::with_capacity(endpoint.properties.len());
+            for (key, template) in &endpoint.properties {
+                use crate::mutation_text::{
+                    VertexMergeRowValueTemplate as RowValue, VertexMergeValueTemplate as Value,
+                };
+                use crate::vertex_merge::GraphVertexMergeRowValue as Bound;
+                let bound = match template {
+                    RowValue::Column(column) => Bound::Column(*column),
+                    RowValue::Computed { value, at }
+                    | RowValue::Value(Value::Stored { value, at }) => Bound::Computed(
+                        super::return_projection::bind_read_value(value, values).map_err(
+                            |error| GraphEdgeMergeTextError {
+                                offset: *at,
+                                ..GraphEdgeMergeTextError::from(error)
+                            },
+                        )?,
+                    ),
+                    RowValue::Value(Value::Bound(value)) => Bound::Bound(value.clone()),
+                    RowValue::Value(Value::Parameter { index, at }) => {
+                        Bound::Bound(scalar(values[*index].clone(), *at)?)
+                    }
+                };
+                fields.push((*key, bound));
+            }
+            unbound.push((endpoint.column, endpoint.labels.clone(), fields));
+        }
+        let pad = |input: crate::PreparedGraphSet| -> Result<crate::PreparedGraphSet, GraphEdgeMergeTextError> {
+            if self.unbound.is_empty() { return Ok(input); }
+            let width = input.column_types().len();
+            let mut projection = Vec::with_capacity(width + self.unbound.len());
+            for column in 0..=width {
+                if column == self.unbound_at {
+                    for _ in &self.unbound {
+                        projection.push(GraphSetProjection::new(
+                            format!("_merge_slot_{}", projection.len()),
+                            crate::GraphSetValue::TypedNull(GraphSetColumnType::Vertex),
+                        ));
+                    }
+                }
+                if column < width {
+                    projection.push(GraphSetProjection::new(
+                        format!("_merge_slot_{}", projection.len()),
+                        crate::GraphSetValue::Column(column),
+                    ));
+                }
+            }
+            // This is a private input-frame extension. It must retain the
+            // source's occurrence order, because MERGE observes earlier rows.
+            input.project_ordered_output(projection).map_err(|source| crate::GraphSetTextError {
+                offset: self.input.return_at(),
+                kind: crate::GraphSetTextErrorKind::ProjectionBuild(source),
+            }.into())
+        };
         // A NULL argument refuses as NullProperty: it can neither match nor
         // be created.
         let merge = match &self.input {
@@ -1154,7 +1492,7 @@ impl PreparedGraphEdgeMergeText {
                 properties,
             ),
             EdgeMergeTextInput::Row { input, .. } => PreparedGraphEdgeMerge::prepare_relation(
-                input.bind_values(values)?,
+                pad(input.bind_values(values)?)?,
                 self.relation,
                 self.source,
                 self.destination,
@@ -1162,7 +1500,7 @@ impl PreparedGraphEdgeMergeText {
             ),
             EdgeMergeTextInput::Multipart { input, .. } => {
                 PreparedGraphEdgeMerge::prepare_relation(
-                    input.bind_values(values)?,
+                    pad(input.bind_values(values)?)?,
                     self.relation,
                     self.source,
                     self.destination,
@@ -1172,6 +1510,7 @@ impl PreparedGraphEdgeMergeText {
         }
         .and_then(|merge| merge.with_stored_properties(stored_properties))
         .and_then(|merge| merge.with_row_properties(row_properties))
+        .and_then(|merge| merge.with_unbound_endpoints(unbound))
         .map_err(|source| build_error(self.input.return_at(), source))?;
         Ok(if self.undirected {
             merge.with_undirected()
@@ -1192,8 +1531,15 @@ impl PreparedGraphEdgeMergeText {
             GraphEdgeUpsertAction, GraphEdgeUpsertValue, GraphVertexMergeRowAction as VertexAction,
             GraphVertexMergeRowInput as VertexInput, GraphVertexUpsertAction,
         };
-        let Some(templates) = &self.row_actions else {
-            return Ok(None);
+        let empty = crate::mutation_text::VertexMergeRowActionTemplates {
+            on_match: Vec::new(),
+            on_create: Vec::new(),
+            after: Vec::new(),
+        };
+        let templates = match &self.row_actions {
+            Some(templates) => templates,
+            None if merge.has_unbound_endpoints() => &empty,
+            None => return Ok(None),
         };
         let bind = |templates: &[crate::mutation_text::VertexMergeRowActionTemplate]| {
             templates

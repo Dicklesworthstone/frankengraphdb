@@ -673,6 +673,15 @@ pub(crate) enum EdgeMergeTextInput {
     },
 }
 
+/// An explicitly introduced vertex of a whole relationship MERGE. Its row
+/// slot is filled only after the complete pattern matches or is created.
+#[derive(Clone)]
+pub(crate) struct EdgeMergeVertexTemplate {
+    pub(crate) column: usize,
+    pub(crate) labels: Vec<fgdb_delta_types::LabelId>,
+    pub(crate) properties: Vec<(PropertyKeyId, VertexMergeRowValueTemplate)>,
+}
+
 /// Native `MATCH ... MERGE (a)-[r:R {k: v}]->(b)` over already-bound
 /// endpoint variables, its reverse arrow, or an undirected `-[:R]-`. The
 /// property map's values are the MERGE's exact-equality predicates and its
@@ -687,6 +696,9 @@ pub struct PreparedGraphEdgeMergeText {
     /// Map values the input row computes (fgdb-at06q): a row column or a
     /// value over the row. Only a row relation input has them.
     pub(crate) row_properties: Vec<(PropertyKeyId, VertexMergeRowValueTemplate)>,
+    pub(crate) unbound: Vec<EdgeMergeVertexTemplate>,
+    /// Insert explicit unresolved slots before the input's private read suffix.
+    pub(crate) unbound_at: usize,
     pub(crate) undirected: bool,
     /// Chain-only ON/SET templates, compiled by the shared row-action grammar.
     pub(crate) row_actions: Option<VertexMergeRowActionTemplates>,

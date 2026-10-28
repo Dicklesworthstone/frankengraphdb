@@ -127,8 +127,8 @@ pub use deletion::{
 };
 pub use edge_merge::{
     GraphEdgeMergeBuildError, GraphEdgeMergeError, GraphEdgeMergeOutcome, GraphEdgeMergePolicy,
-    GraphEdgeMergeRequest, GraphEdgeMergeStats, MAX_GRAPH_EDGE_MERGE_PROPERTIES,
-    PreparedGraphEdgeMerge,
+    GraphEdgeMergeRequest, GraphEdgeMergeStats, GraphEdgeWholeMergeProposal,
+    GraphEdgeWholeMergeRow, MAX_GRAPH_EDGE_MERGE_PROPERTIES, PreparedGraphEdgeMerge,
 };
 pub use edge_merge_query::{
     GraphEdgeMergeBinding, GraphEdgeMergeQueryBuildError, GraphEdgeMergeQueryError,
@@ -231,16 +231,16 @@ pub use prepared::{
 pub use set_ops::row_filter;
 pub use set_ops::{
     GqlTimeZones, GraphElementKey, GraphElementMetadata, GraphElementMetadataError,
-    GraphElementReader, GraphListQuantifier, GraphPatternFactorExecution, GraphProcedureExecution,
-    GraphProcedureRowCursor, GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError,
-    GraphSetFilterError, GraphSetOperand, GraphSetOperation, GraphSetPredicateOp,
-    GraphSetProjection, GraphSetProjectionError, GraphSetQuantifier, GraphSetRowPull,
-    GraphSetSource, GraphSetValue, GraphTemporalFunction, GraphValueFunction, MAX_GRAPH_SET_DEPTH,
-    MAX_GRAPH_SET_OPERANDS, PreparedGraphSet, PreparedGraphSetAggregate, PreparedProcedureCall,
-    ProcedureGraphDirection, ProcedureGraphProjection, ProcedureGraphWeight,
-    ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops, WithElementMetadata,
-    WithElementReads, WithProcedureRows, WithProcedures, procedure_row_source,
-    with_element_metadata,
+    GraphElementPropertyError, GraphElementReader, GraphListQuantifier,
+    GraphPatternFactorExecution, GraphProcedureExecution, GraphProcedureRowCursor,
+    GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError, GraphSetFilterError,
+    GraphSetOperand, GraphSetOperation, GraphSetPredicateOp, GraphSetProjection,
+    GraphSetProjectionError, GraphSetQuantifier, GraphSetRowPull, GraphSetSource, GraphSetValue,
+    GraphTemporalFunction, GraphValueFunction, MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS,
+    PreparedGraphSet, PreparedGraphSetAggregate, PreparedProcedureCall, ProcedureGraphDirection,
+    ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
+    ProcedureSelfLoops, WithElementMetadata, WithElementReads, WithProcedureRows, WithProcedures,
+    procedure_row_source, with_element_metadata,
 };
 pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
 pub use shortest_walk::GraphShortestWalkCursor;
