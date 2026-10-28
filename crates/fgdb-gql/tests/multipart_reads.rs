@@ -4886,7 +4886,8 @@ mod graph_reading_quantifiers {
             .map(|template| template.canonical_template_bytes());
         // Independent truth-table oracles; vertex 1 has three witnesses,
         // while vertex 4 has none. Duplicate members remain distinct.
-        let cases: &[(&[Option<u128>], [Option<bool>; 4])] = &[
+        type QuantifierCase<'a> = (&'a [Option<u128>], [Option<bool>; 4]);
+        let cases: &[QuantifierCase<'_>] = &[
             (&[], [Some(false), Some(true), Some(true), Some(false)]),
             (&[None], [None, None, None, None]),
             (&[Some(1), None], [Some(true), None, Some(false), None]),

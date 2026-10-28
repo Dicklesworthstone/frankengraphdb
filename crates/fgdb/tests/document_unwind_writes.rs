@@ -418,7 +418,7 @@ fn heterogeneous_document_map_updates_and_carried_replacement_survive_reopen() {
         let mut replacement = GqlParameters::new();
         replacement
             .insert(
-                "replacement".into(),
+                "replacement",
                 GqlParameterValue::Map(
                     GqlMapParameter::new(vec![("id".into(), int(2)), ("score".into(), int(22))])
                         .unwrap(),

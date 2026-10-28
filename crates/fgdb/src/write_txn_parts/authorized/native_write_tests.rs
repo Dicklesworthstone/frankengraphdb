@@ -1041,7 +1041,7 @@ fn computed_property_maps_preserve_authority_and_prepared_session_catalogs() {
                                     .iter()
                                     .map(|(name, value)| {
                                         (
-                                            (*name).to_owned(),
+                                            Box::<str>::from(*name),
                                             GraphValue::Scalar(CanonicalScalar::Int(*value)),
                                         )
                                     })
