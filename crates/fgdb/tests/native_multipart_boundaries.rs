@@ -228,6 +228,169 @@ fn carried_graph_values_aggregate_inside_native_snapshot_and_authority_boundarie
 }
 
 #[test]
+fn carried_pattern_lists_preserve_native_order_nulls_and_snapshot_authority() {
+    let ((), report) = run_async_under_lab(0xa681_0011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = database(&commit).await;
+        let mut extra = WriteBatch::new(S);
+        extra.add_edge(EId(22), VId(1), VId(4), vec![]);
+        extra.add_edge(EId(23), VId(2), VId(3), vec![]);
+        db.write(&commit, extra).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let tail = "RETURN x,[(x)-[:S]->(target) | target.n] AS amounts, \
+                    [(x)-[:S]->() | null] AS missing, \
+                    [p=(x)-[:S]->(target) | size(relationships(p))] AS lengths ORDER BY x";
+        let text = format!("MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x {tail}");
+        let direct = format!("MATCH (x) {tail}");
+        let params = GqlParameters::new();
+        let prepared = PreparedNativeRead::prepare(&text, &params, symbols).unwrap();
+        let values = |result: &QueryResult| {
+            let QueryResult::Rows { columns, rows } = result else {
+                panic!("expected list-valued rows");
+            };
+            assert_eq!(columns, &["x", "amounts", "missing", "lengths"]);
+            rows.iter()
+                .map(|row| {
+                    let Some(fgdb_gql::GraphValue::Vertex(id)) = row[0].as_value() else {
+                        panic!("expected the carried vertex");
+                    };
+                    let amounts = row[1].as_value().unwrap().as_list().unwrap();
+                    let missing = row[2].as_value().unwrap().as_list().unwrap();
+                    let lengths = row[3].as_value().unwrap().as_list().unwrap();
+                    assert_eq!(missing.len(), amounts.len());
+                    assert_eq!(lengths.len(), amounts.len());
+                    assert!(missing.iter().all(|value| value.is_null()));
+                    assert!(lengths.iter().all(|value| {
+                        matches!(value.as_scalar(), Some(CanonicalScalar::Int(1)))
+                    }));
+                    let mut amounts = amounts
+                        .iter()
+                        .map(|value| match value.as_scalar() {
+                            Some(CanonicalScalar::Int(amount)) => Some(*amount),
+                            Some(CanonicalScalar::Null) => None,
+                            _ => panic!("expected a scalar property or NULL"),
+                        })
+                        .collect::<Vec<_>>();
+                    amounts.sort();
+                    (id.0, amounts)
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = vec![
+            (1, vec![Some(11)]),
+            (2, vec![Some(7), Some(7), Some(11)]),
+            (3, vec![]),
+            (4, vec![]),
+            (5, vec![]),
+        ];
+        let first = db.query(&cx, &text, &params, symbols, policy()).unwrap();
+        assert_eq!(values(&first), before);
+        // The existing graph-head collector is also an order oracle: a join
+        // must not sort the contents of the already-collected witness list.
+        assert_eq!(
+            first,
+            db.query(&cx, &direct, &params, symbols, policy()).unwrap()
+        );
+        assert_eq!(
+            prepared.execute(&db, &cx, &params, policy()).unwrap(),
+            first
+        );
+        let issuer = authority();
+        for (allowed, expected) in [
+            (
+                grant(),
+                vec![
+                    (1, vec![]),
+                    (2, vec![Some(7), Some(7)]),
+                    (3, vec![]),
+                    (5, vec![]),
+                ],
+            ),
+            (
+                {
+                    let mut restricted = grant();
+                    restricted.properties = Scope::only([]);
+                    restricted
+                },
+                vec![(1, vec![]), (2, vec![None, None]), (3, vec![]), (5, vec![])],
+            ),
+            (
+                {
+                    let mut restricted = grant();
+                    restricted.relations = Scope::only([R]);
+                    restricted
+                },
+                vec![(1, vec![]), (2, vec![]), (3, vec![]), (5, vec![])],
+            ),
+        ] {
+            let token = issuer.issue_at(&allowed, 100).unwrap();
+            let direct = db
+                .query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    &text,
+                    &params,
+                    symbols,
+                    policy(),
+                    || 100,
+                )
+                .unwrap();
+            let bound = prepared
+                .execute_authorized(&db, &cx, &issuer, &token, BRANCH, &params, policy(), || 100)
+                .unwrap();
+            assert_eq!(values(&direct), expected);
+            assert_eq!(direct, bound);
+        }
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut staged = WriteBatch::new(S);
+        staged.delete_edge(EId(20));
+        staged.delete_edge(EId(23));
+        staged.add_edge(EId(30), VId(5), VId(3), vec![]);
+        staged.set_vertex_property(VId(3), N, Some(CanonicalScalar::Int(13)));
+        txn.write(&mut db, staged).unwrap();
+        let after = vec![
+            (1, vec![Some(11)]),
+            (2, vec![Some(11)]),
+            (3, vec![]),
+            (4, vec![]),
+            (5, vec![Some(13)]),
+        ];
+        let staged_result = txn
+            .query(&db, &cx, &text, &params, symbols, policy())
+            .unwrap();
+        assert_eq!(values(&staged_result), after);
+        assert_eq!(
+            prepared
+                .execute_in_transaction(&txn, &db, &cx, &params, policy())
+                .unwrap(),
+            staged_result
+        );
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert_eq!(
+            prepared.execute(&db, &cx, &params, policy()).unwrap(),
+            first
+        );
+        txn.commit(&mut db, &commit).await.unwrap();
+        assert_eq!(
+            values(&prepared.execute(&db, &cx, &params, policy()).unwrap()),
+            after
+        );
+        assert_eq!(
+            pinned
+                .query(&cx, &text, &params, symbols, policy())
+                .unwrap(),
+            first
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn multipart_transaction_reads_staged_second_source_without_committing_or_falling_back() {
     let ((), report) = run_async_under_lab(0xa681_0001, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

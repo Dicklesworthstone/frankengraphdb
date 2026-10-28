@@ -41,9 +41,16 @@ pub(crate) enum BoundContinuationOperation {
 
 #[derive(Clone, Copy)]
 pub(crate) enum RowPatternResult {
-    Filter { negated: bool },
+    Filter {
+        negated: bool,
+    },
     Exists,
     Count,
+    /// The graph source already owns the witness list. Its native selection
+    /// column stays one cell per correlated row, including NULL witnesses.
+    Collect {
+        column: usize,
+    },
 }
 
 #[derive(Clone)]
@@ -500,6 +507,10 @@ impl BoundReadInput {
                             }
                             RowPatternResult::Exists => bytes.push(4),
                             RowPatternResult::Count => bytes.push(5),
+                            RowPatternResult::Collect { column } => {
+                                bytes.push(7);
+                                bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+                            }
                         }
                         join.append_template_transcript(bytes);
                         pattern.append_template_transcript(bytes);

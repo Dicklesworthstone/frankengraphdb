@@ -1549,10 +1549,10 @@ impl<'a> Parser<'a> {
                             return Ok(None);
                         }
                         if guard.refused.contains(&word) {
-                            // A row COUNT has its own identity-correlated
-                            // Apply owner. Leave a rebound alias with that
-                            // row rather than counting its old graph binding.
-                            if self.read_elements && count && self.is_word("COUNT") {
+                            // Row counts and pattern comprehensions have an
+                            // identity-correlated Apply owner. Leave a rebound
+                            // alias with its row instead of its old graph binding.
+                            if self.read_elements && (!count || self.is_word("COUNT")) {
                                 return Ok(None);
                             }
                             return Err(expected(

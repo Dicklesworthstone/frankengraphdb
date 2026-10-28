@@ -1036,6 +1036,7 @@ fn carried_existence_aggregate_sources_share_budgets_and_fail_before_empty_resul
     )
     .unwrap();
     for items in [vec![], vec![GraphValue::Vertex(VId(1))]] {
+        let empty = items.is_empty();
         let arguments = GqlParameters::new().with_list("items", items).unwrap();
         let query = template.bind_relation_parameters(&arguments).unwrap();
         let mut calls = 0;
@@ -1047,13 +1048,20 @@ fn carried_existence_aggregate_sources_share_budgets_and_fail_before_empty_resul
             },
             || Ok::<_, usize>(()),
         );
-        assert!(matches!(
-            result,
-            Err(GqlQueryError::Source(GraphAggregateError::InputRelation(
-                GraphSetExecutionError::Source("aggregate-probe")
-            )))
-        ));
-        assert_eq!(calls, 1);
+        if empty {
+            // A correlated Apply has no body invocation without an outer row.
+            assert!(result.unwrap().value.is_empty());
+            assert_eq!(calls, 0);
+        } else {
+            // LIMIT 0 cannot suppress a source failure for an existing row.
+            assert!(matches!(
+                result,
+                Err(GqlQueryError::Source(GraphAggregateError::InputRelation(
+                    GraphSetExecutionError::Source("aggregate-probe")
+                )))
+            ));
+            assert_eq!(calls, 1);
+        }
     }
 
     let query = prepare(
@@ -1103,5 +1111,32 @@ fn carried_existence_aggregate_sources_share_budgets_and_fail_before_empty_resul
         });
         assert!(matches!(result, Err(GqlQueryError::Interrupted(at)) if at == stop));
         assert_eq!(seen, stop);
+    }
+}
+
+#[test]
+fn carried_pattern_comprehensions_keep_null_witnesses_through_aggregate_arguments() {
+    let rows = execute(
+        "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x \
+         UNWIND [0,0] AS occurrence \
+         RETURN sum(size([(x)-[:R]->(t) | NULL])) AS witnesses, \
+         count([(x)-[:R]->(t) | t]) AS lists, \
+         sum(size([(x)-[:R]->(t) WHERE t.p >= 3 | t.p])) AS high",
+    );
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].keys().is_empty());
+    assert_eq!(rows[0].values()[0].as_integer(), Some(10));
+    assert_eq!(rows[0].values()[1].as_count(), Some(8));
+    assert_eq!(rows[0].values()[2].as_integer(), Some(2));
+
+    let rows = execute(
+        "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x \
+         CALL (x) { RETURN sum(size([(x)-[:R]->(t) | NULL])) AS degree } \
+         RETURN x,sum(degree) AS total ORDER BY x",
+    );
+    assert_eq!(rows.len(), 4);
+    for (row, (id, degree)) in rows.iter().zip([(1, 3), (2, 1), (3, 1), (4, 0)]) {
+        assert_eq!(row.keys(), &[GraphValue::Vertex(VId(id))]);
+        assert_eq!(row.values()[0].as_integer(), Some(degree));
     }
 }

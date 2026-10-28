@@ -368,15 +368,21 @@ impl PreparedGraphPipelineAggregateText {
                         let selection = pattern.selection.as_ref().expect("existence graph source");
                         operators.push("ScanGraphText");
                         operators.extend(selection.template_operators());
-                        if matches!(result, RowPatternResult::Count) {
-                            operators.extend(["InnerJoin", "Aggregate", "Apply"]);
-                        } else {
-                            operators.extend([
-                                "InnerJoin",
-                                "ProjectValues",
-                                "OrderByPage",
-                                "Apply",
-                            ]);
+                        match result {
+                            RowPatternResult::Count => {
+                                operators.extend(["InnerJoin", "Aggregate", "Apply"]);
+                            }
+                            RowPatternResult::Collect { .. } => {
+                                operators.extend(["InnerJoin", "ProjectValues", "Apply"]);
+                            }
+                            RowPatternResult::Filter { .. } | RowPatternResult::Exists => {
+                                operators.extend([
+                                    "InnerJoin",
+                                    "ProjectValues",
+                                    "OrderByPage",
+                                    "Apply",
+                                ]);
+                            }
                         }
                         if matches!(result, RowPatternResult::Filter { .. }) {
                             operators.push("Select");

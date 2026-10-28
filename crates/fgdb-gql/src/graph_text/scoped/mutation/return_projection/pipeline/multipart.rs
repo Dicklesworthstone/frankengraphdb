@@ -43,18 +43,44 @@ pub(crate) struct UnresolvedReadInput<'a> {
 }
 
 impl<'a> UnresolvedReadInput<'a> {
-    /// Every element property slot the read's parts recorded. The slots are
-    /// shared with their parts, so they read each key once it resolves.
+    /// Every element property slot the read's parts recorded, including
+    /// private graph-expression sources and nested Apply bodies. Write-chain
+    /// admission must see named map reads before any write, even when their
+    /// value templates are evaluated by another part after correlation.
     pub(in crate::graph_text) fn element_key_slots(&self) -> Vec<crate::set_text::ElementKeySlot> {
-        core::iter::once(&self.first)
-            .chain(self.continuations.iter().map(|part| &part.input))
-            .flat_map(|part| {
-                part.syntax
+        let mut slots: Vec<_> = self
+            .first
+            .syntax
+            .element_keys
+            .iter()
+            .map(|(_, slot)| slot.clone())
+            .collect();
+        for part in &self.continuations {
+            slots.extend(
+                part.input
+                    .syntax
                     .element_keys
                     .iter()
-                    .map(|(_, slot)| slot.clone())
-            })
-            .collect()
+                    .map(|(_, slot)| slot.clone()),
+            );
+            match &part.operation {
+                UnresolvedContinuationOperation::Pattern { pattern, .. } => {
+                    slots.extend(
+                        pattern
+                            .syntax
+                            .element_keys
+                            .iter()
+                            .map(|(_, slot)| slot.clone()),
+                    );
+                }
+                UnresolvedContinuationOperation::Apply { body, .. }
+                | UnresolvedContinuationOperation::ExistsBody { body, .. } => {
+                    slots.extend(body.element_key_slots());
+                }
+                UnresolvedContinuationOperation::Match(_) => {}
+            }
+        }
+        slots
     }
 
     pub(in crate::graph_text) fn from_first(
@@ -132,7 +158,9 @@ impl<'a> UnresolvedReadInput<'a> {
                         // Apply + filter + ordered removal of the witness.
                         UnresolvedContinuationOperation::Pattern { result, .. } => match result {
                             RowPatternResult::Filter { .. } => 6,
-                            RowPatternResult::Exists | RowPatternResult::Count => 4,
+                            RowPatternResult::Exists
+                            | RowPatternResult::Count
+                            | RowPatternResult::Collect { .. } => 4,
                         },
                         UnresolvedContinuationOperation::ExistsBody { body, negated, .. } => {
                             body.depth() + if negated.is_some() { 4 } else { 2 }
@@ -531,9 +559,16 @@ fn row_pattern_expressions<'a>(
         {
             return Ok(expressions);
         }
-        // A pattern comprehension and a list-local predicate are not a graph
-        // test of the enclosing row. Never hoist their bodies out of the list.
+        // A complete graph comprehension belongs to this row. Its own body
+        // stays inside the original native Collect scope. Ordinary lists and
+        // per-element list scopes keep their existing owner and are skipped.
         if matches!(token.kind, TokenKind::Punct(b'[')) {
+            if locals.scopes.is_empty()
+                && !hoisted(token.at)
+                && super::super::pattern_comprehension_follows(token.kind, lexer)?
+            {
+                expressions.push((token, lexer.clone()));
+            }
             let Some(after) = after_balanced(lexer, b'[')? else {
                 return Ok(expressions);
             };
@@ -883,17 +918,34 @@ impl<'a> Parser<'a> {
             self.current = token;
             self.lexer = lexer;
             let count = self.is_word("COUNT");
-            let operation = self.multipart_existence_operation(
-                statement,
-                &schema,
-                visible,
-                call_depth,
-                if count {
-                    RowPatternResult::Count
-                } else {
-                    RowPatternResult::Exists
-                },
-            )?;
+            let collected = self.starts_pattern_comprehension()?;
+            let (operation, mapped) = if collected {
+                let (pattern, join, column, value) =
+                    self.multipart_comprehension_pattern(statement, &schema, visible, token.at)?;
+                (
+                    UnresolvedContinuationOperation::Pattern {
+                        pattern: Box::new(pattern),
+                        join,
+                        result: RowPatternResult::Collect { column },
+                    },
+                    Some(value),
+                )
+            } else {
+                (
+                    self.multipart_existence_operation(
+                        statement,
+                        &schema,
+                        visible,
+                        call_depth,
+                        if count {
+                            RowPatternResult::Count
+                        } else {
+                            RowPatternResult::Exists
+                        },
+                    )?,
+                    None,
+                )
+            };
             self.capacity(
                 schema.len(),
                 MAX_PATTERN_VERTICES,
@@ -906,7 +958,7 @@ impl<'a> Parser<'a> {
                 return Err(expected(token.at, "bounded private row existence columns"));
             };
             let column = schema.len();
-            if count {
+            if count || collected {
                 counts.push((token.at, self.current.at, column));
             } else {
                 spans.push((token.at, self.current.at, column));
@@ -921,7 +973,9 @@ impl<'a> Parser<'a> {
                 .collect();
             projection.push(ReadProjectionTemplate {
                 name: name.to_owned(),
-                value: if count {
+                value: if let Some(value) = mapped {
+                    value
+                } else if count {
                     ReadValueTemplate::Column(column)
                 } else {
                     ReadValueTemplate::Integer {
@@ -942,7 +996,11 @@ impl<'a> Parser<'a> {
                     text: name,
                     at: token.at,
                 },
-                GraphSetColumnType::Scalar,
+                if collected {
+                    GraphSetColumnType::List
+                } else {
+                    GraphSetColumnType::Scalar
+                },
             ));
             let mut syntax = self.take_part_syntax()?;
             syntax.return_at = at;
@@ -1154,9 +1212,184 @@ impl<'a> Parser<'a> {
             negated: match result {
                 RowPatternResult::Filter { negated } => Some(negated),
                 RowPatternResult::Exists => None,
-                RowPatternResult::Count => unreachable!("only EXISTS has a returning body"),
+                RowPatternResult::Count | RowPatternResult::Collect { .. } => {
+                    unreachable!("only EXISTS has a returning body")
+                }
             },
         })
+    }
+
+    /// Keep the native Collect scope's witness order and NULL placeholders
+    /// intact while correlating its root with a completed row. The projection
+    /// map runs only after that correlation, through the ordinary value reader.
+    #[allow(clippy::type_complexity)]
+    fn multipart_comprehension_pattern(
+        &mut self,
+        statement: &'a str,
+        incoming: &RowSchema<'a>,
+        captures: usize,
+        at: usize,
+    ) -> Result<
+        (
+            UnresolvedGraphText<'a>,
+            RowJoinSpec,
+            usize,
+            ReadValueTemplate,
+        ),
+        GraphSetTextError,
+    > {
+        self.punct(b'[', "[ before a pattern comprehension")?;
+        let scope = self.syntax.scopes.len();
+        self.scope(ScopeKind::Collect, ScopeForm::Comprehension)?;
+        if let Some(local) = self.syntax.scopes[scope].find_name(&|name| {
+            self.elements
+                .iter()
+                .any(|element| !element.is_empty() && *element == name.text)
+        }) {
+            return Err(expected(
+                local.at,
+                "a pattern comprehension that reads no enclosing comprehension local",
+            ));
+        }
+        if !self.read_correlations.is_empty()
+            || !self.read_row_fields.is_empty()
+            || self
+                .read_comparisons
+                .as_ref()
+                .is_some_and(|comparisons| !comparisons.is_empty())
+        {
+            return Err(expected(
+                at,
+                "local graph predicates and parameters inside a carried pattern comprehension",
+            ));
+        }
+        let mut inputs = Vec::new();
+        let mut keys = Vec::new();
+        for (left, &(name, kind)) in incoming[..captures].iter().enumerate() {
+            let body = &self.syntax.scopes[scope].body;
+            if body.edges.iter().any(|edge| {
+                edge.variable
+                    .is_some_and(|binding| binding.text == name.text)
+            }) || body
+                .filters
+                .iter()
+                .any(|filter| matches!(filter, Filter::PathCapture(path) if path.text == name.text))
+            {
+                return Err(expected(
+                    name.at,
+                    "new relationship and path bindings inside a carried pattern comprehension",
+                ));
+            }
+            let variable = body
+                .variables
+                .iter()
+                .find(|variable| variable.text == name.text)
+                .copied();
+            if let Some(variable) = variable {
+                if !matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Any) {
+                    return Err(expected(name.at, "a vertex-valued imported binding"));
+                }
+                self.capacity(
+                    self.syntax.variables.len(),
+                    MAX_PATTERN_VERTICES,
+                    crate::algebra::PatternLimitDimension::Vertices,
+                )?;
+                self.syntax.variables.push(variable);
+                let right = self.mutation_projection(&mut inputs, variable, None)?;
+                keys.push((left, right));
+            } else if self.syntax.scopes[scope]
+                .find_name(&|binding| binding.text == name.text)
+                .is_some()
+            {
+                // scope() propagates ancestor captures during parsing. A
+                // nested-only row reference cannot become a fresh graph local
+                // merely because this bridge discovers its roots afterwards.
+                return Err(expected(
+                    name.at,
+                    "imported vertices in the comprehension's positive pattern",
+                ));
+            }
+        }
+        if keys.is_empty() {
+            return Err(expected(
+                at,
+                "a pattern comprehension anchored on a carried vertex",
+            ));
+        }
+        self.syntax.root_variables = self.syntax.variables.len();
+        let Some(&list_name) = BOUNDARY_READ_NAMES
+            .iter()
+            .find(|name| incoming.iter().all(|(binding, _)| binding.text != **name))
+        else {
+            return Err(expected(
+                at,
+                "bounded private pattern comprehension columns",
+            ));
+        };
+        let column = self.projection_slot(
+            &mut inputs,
+            Projection {
+                variable: Name {
+                    text: list_name,
+                    at,
+                },
+                property: None,
+                path: None,
+                collect: Some(scope),
+            },
+        )?;
+        self.capacity(
+            incoming.len() + inputs.len() - 1,
+            MAX_PATTERN_VERTICES,
+            crate::algebra::PatternLimitDimension::Columns,
+        )?;
+        let map = self.pattern_comprehension_projection(
+            scope,
+            None,
+            &incoming[..captures],
+            &mut None,
+            0,
+        )?;
+        // Missing/NULL/nonvertex anchors have no implicit root. Normalize
+        // only that absent list, never a projected NULL witness value.
+        let list = ReadValueTemplate::Function {
+            function: crate::GraphValueFunction::Coalesce,
+            argument: Box::new(ReadValueTemplate::List(vec![
+                ReadValueTemplate::Column(incoming.len()),
+                ReadValueTemplate::List(Vec::new()),
+            ])),
+        };
+        let value = ReadValueTemplate::Comprehension {
+            list: Box::new(list),
+            filter: None,
+            map: (!matches!(map, ReadValueTemplate::Local(0))).then(|| Box::new(map)),
+        };
+        let types: Vec<_> = incoming.iter().map(|(_, kind)| *kind).collect();
+        let join = join_spec(&types, &inputs, &keys, &[], at)?;
+        self.syntax.columns = inputs
+            .into_iter()
+            .map(|input| Column {
+                variable: input.variable,
+                property: input.property,
+                path: input.path,
+                alias: input.variable,
+                collect: input.collect,
+            })
+            .collect();
+        self.syntax.return_at = at;
+        let pattern = UnresolvedGraphText {
+            statement,
+            syntax: self.take_part_syntax()?,
+            projection: None,
+            pipeline: Vec::new(),
+            singleton: false,
+            leading: Vec::new(),
+            leading_types: Vec::new(),
+            correlations: Vec::new(),
+            row_fields: Vec::new(),
+        };
+        self.read_row_bindings.clear();
+        Ok((pattern, join, column, value))
     }
 
     /// Parse one positive graph witness with the shared lexer and parameter
@@ -2610,6 +2843,18 @@ impl BoundReadInput {
                             offset: at,
                             kind: GraphSetTextErrorKind::AggregateBuild(kind),
                         })?
+                } else if let RowPatternResult::Collect { column } = result {
+                    // The graph source already collected this opaque list in
+                    // native witness order. Joining/sorting outer rows must
+                    // never reorder its entries or drop NULL placeholders.
+                    body.project_ordered_output(vec![GraphSetProjection::new(
+                        witness_name,
+                        GraphSetValue::Column(width + column),
+                    )])
+                    .map_err(|kind| GraphSetTextError {
+                        offset: at,
+                        kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                    })?
                 } else {
                     let witness = GqlScalarParameter::new(CanonicalScalar::Bool(true))
                         .expect("true is a bounded scalar");

@@ -122,6 +122,38 @@ pub(super) fn skip_group(lexer: &mut Lexer<'_>) -> Result<(), GraphPatternTextEr
     }
 }
 
+/// Shared lexical proof for a graph pattern comprehension. Multipart row
+/// routing consumes the same admitted tokens as the ordinary graph owner;
+/// a list literal or list-local comprehension never becomes a graph source.
+fn pattern_comprehension_follows(
+    first: TokenKind<'_>,
+    lexer: &Lexer<'_>,
+) -> Result<bool, GraphPatternTextError> {
+    if !matches!(first, TokenKind::Punct(b'[')) {
+        return Ok(false);
+    }
+    let mut lexer = lexer.clone();
+    let mut first = lexer.next()?;
+    if matches!(first.kind, TokenKind::Word(_)) {
+        if !matches!(lexer.next()?.kind, TokenKind::Punct(b'=')) {
+            return Ok(false);
+        }
+        first = lexer.next()?;
+    }
+    let mut after = lexer.clone();
+    if !crate::graph_text::scoped::pattern_predicate_follows(first.kind, &mut lexer)? {
+        return Ok(false);
+    }
+    skip_group(&mut after)?;
+    if matches!(
+        (after.next()?.kind, after.next()?.kind),
+        (TokenKind::Punct(b'-'), TokenKind::Punct(b'-'))
+    ) {
+        return Ok(matches!(after.next()?.kind, TokenKind::Punct(b'(' | b'>')));
+    }
+    Ok(true)
+}
+
 /// Whether the next token starts an operator that binds tighter than a
 /// comparison: arithmetic, a null predicate (`IS`), IN, a string predicate
 /// or `=~`. `a < b IS NOT NULL` is `a < (b IS NOT NULL)` (TCK Precedence1
@@ -3585,29 +3617,7 @@ impl<'a> Parser<'a> {
     /// `--` must reach a node or an arrow head, so `[(x) - -1]` stays
     /// arithmetic.
     fn starts_pattern_comprehension(&self) -> Result<bool, GraphPatternTextError> {
-        if !self.is_punct(b'[') {
-            return Ok(false);
-        }
-        let mut lexer = self.lexer.clone();
-        let mut first = lexer.next()?;
-        if matches!(first.kind, TokenKind::Word(_)) {
-            if !matches!(lexer.next()?.kind, TokenKind::Punct(b'=')) {
-                return Ok(false);
-            }
-            first = lexer.next()?;
-        }
-        let mut after = lexer.clone();
-        if !crate::graph_text::scoped::pattern_predicate_follows(first.kind, &mut lexer)? {
-            return Ok(false);
-        }
-        skip_group(&mut after)?;
-        if matches!(
-            (after.next()?.kind, after.next()?.kind),
-            (TokenKind::Punct(b'-'), TokenKind::Punct(b'-'))
-        ) {
-            return Ok(matches!(after.next()?.kind, TokenKind::Punct(b'(' | b'>')));
-        }
-        Ok(true)
+        pattern_comprehension_follows(self.current.kind, &self.lexer)
     }
 
     /// Whether a pattern count starts here: `COUNT {`, a count subquery, or
@@ -3789,13 +3799,6 @@ impl<'a> Parser<'a> {
                 )),
             });
         }
-        let elements = self.comprehension_elements(scope)?;
-        let tuple = elements.len() > 1;
-        if tuple {
-            self.syntax.scopes[scope].tuple = Some(elements.clone());
-        } else {
-            self.syntax.scopes[scope].element = elements.first().copied();
-        }
         let column = self.projection_slot(
             inputs,
             Projection {
@@ -3805,6 +3808,37 @@ impl<'a> Parser<'a> {
                 collect: Some(scope),
             },
         )?;
+        let map =
+            self.pattern_comprehension_projection(scope, Some(inputs), schema, resolve, depth)?;
+        Ok(if matches!(map, ReadValueTemplate::Local(0)) {
+            ReadValueTemplate::Column(column)
+        } else {
+            ReadValueTemplate::Comprehension {
+                list: Box::new(ReadValueTemplate::Column(column)),
+                filter: None,
+                map: Some(Box::new(map)),
+            }
+        })
+    }
+    /// Bind the locals of one native Collect witness while parsing its map.
+    /// The graph owner reads graph projections; a carried-row owner reads its
+    /// unchanged row namespace after identity correlation. Both use the same
+    /// tuple capture and value grammar, including NULL projection results.
+    fn pattern_comprehension_projection(
+        &mut self,
+        scope: usize,
+        inputs: Option<&mut Vec<Projection<'a>>>,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
+        depth: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        let elements = self.comprehension_elements(scope)?;
+        let tuple = elements.len() > 1;
+        if tuple {
+            self.syntax.scopes[scope].tuple = Some(elements.clone());
+        } else {
+            self.syntax.scopes[scope].element = elements.first().copied();
+        }
         self.punct(b'|', "| and the projection of a pattern comprehension")?;
         let outer = self.elements.len();
         if tuple {
@@ -3817,7 +3851,7 @@ impl<'a> Parser<'a> {
             self.elements
                 .push(elements.first().map_or("", |name| name.text));
         }
-        let map = self.read_recursive_value(Some(inputs), schema, resolve, depth + 1);
+        let map = self.read_recursive_value(inputs, schema, resolve, depth + 1);
         self.elements.truncate(outer);
         let mut map = map?;
         self.punct(b']', "]")?;
@@ -3836,15 +3870,7 @@ impl<'a> Parser<'a> {
                 body: Box::new(map),
             };
         }
-        Ok(if matches!(map, ReadValueTemplate::Local(0)) {
-            ReadValueTemplate::Column(column)
-        } else {
-            ReadValueTemplate::Comprehension {
-                list: Box::new(ReadValueTemplate::Column(column)),
-                filter: None,
-                map: Some(Box::new(map)),
-            }
-        })
+        Ok(map)
     }
 }
 
