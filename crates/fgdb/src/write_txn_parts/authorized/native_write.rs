@@ -191,11 +191,11 @@ fn prepare_admitted<Clock: FnMut() -> u64>(
     let mut failure = None;
     let prepared = {
         let mut control = || checkpoint(cx, execution);
-        PreparedGraphWriteScript::prepare_with_parameter_types(
+        PreparedGraphWriteScript::prepare_with_parameter_types_and_resolver(
             text,
             relation,
             &declarations,
-            ControlledCatalog {
+            &mut ControlledCatalog {
                 resolver: &mut resolver,
                 control: &mut control,
                 failure: &mut failure,
