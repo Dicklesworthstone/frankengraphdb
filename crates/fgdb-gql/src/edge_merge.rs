@@ -330,8 +330,10 @@ impl PreparedGraphEdgeMerge {
 
     /// MERGE over a row relation: `MATCH ... WITH ... MERGE (a)-[:R]->(b)`,
     /// or a chained write's owned rows (`CREATE (a), (b) WITH * MERGE ...`).
-    /// The endpoints are vertex columns of that row; every row's pair
-    /// resolves as a MATCH-selected one does.
+    /// The endpoints are vertex columns of that row, or open columns the row
+    /// computes (`ns[i]`, an UNWIND member) that hold a vertex at run time:
+    /// the selector refuses a NULL (NullEndpoint) or any other value
+    /// (InputSchema). Every row's pair resolves as a MATCH-selected one does.
     pub fn prepare_relation(
         input: crate::PreparedGraphSet,
         relation: RelationId,
@@ -340,10 +342,16 @@ impl PreparedGraphEdgeMerge {
         properties: Vec<(PropertyKeyId, GqlScalarParameter)>,
     ) -> Result<Self, GraphEdgeMergeBuildError> {
         let types = input.column_types();
-        if types.get(source) != Some(&crate::GraphSetColumnType::Vertex) {
+        let endpoint = |column: usize| {
+            matches!(
+                types.get(column),
+                Some(crate::GraphSetColumnType::Vertex | crate::GraphSetColumnType::Any)
+            )
+        };
+        if !endpoint(source) {
             return Err(GraphEdgeMergeBuildError::SourceColumn { column: source });
         }
-        if types.get(destination) != Some(&crate::GraphSetColumnType::Vertex) {
+        if !endpoint(destination) {
             return Err(GraphEdgeMergeBuildError::DestinationColumn {
                 column: destination,
             });

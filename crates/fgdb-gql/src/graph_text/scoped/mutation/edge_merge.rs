@@ -712,11 +712,14 @@ impl PreparedGraphEdgeMergeText {
     ) -> Result<(RowMerge<'a>, bool), GraphEdgeMergeTextError> {
         parser.write_row_scope = true;
         let mut parsed = parser.edge_merge_pattern()?;
+        // A carried vertex, or an open column the row computes (`ns[i]`, an
+        // UNWIND member) whose value the selector checks per row.
         let endpoint = |name: Name<'_>| {
             schema
                 .iter()
                 .position(|(row, kind)| {
-                    row.text == name.text && *kind == GraphSetColumnType::Vertex
+                    row.text == name.text
+                        && matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Any)
                 })
                 .ok_or_else(|| {
                     error(

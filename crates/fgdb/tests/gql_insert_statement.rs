@@ -22,6 +22,10 @@ const T: RelationId = RelationId(2);
 const PERSON: LabelId = LabelId(1);
 const SOURCE: LabelId = LabelId(2);
 const COPY: LabelId = LabelId(3);
+/// Labels and a type spelled like the COUNT and EXISTS subqueries.
+const COUNT: LabelId = LabelId(4);
+const EXISTS: LabelId = LabelId(5);
+const COUNTED: RelationId = RelationId(3);
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 const NAME: PropertyKeyId = PropertyKeyId(3);
@@ -44,6 +48,9 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         (GraphSymbolKind::Label, "Person") => Some(GraphSymbol::Label(PERSON)),
         (GraphSymbolKind::Label, "Source") => Some(GraphSymbol::Label(SOURCE)),
         (GraphSymbolKind::Label, "Copy") => Some(GraphSymbol::Label(COPY)),
+        (GraphSymbolKind::Label, "Count") => Some(GraphSymbol::Label(COUNT)),
+        (GraphSymbolKind::Label, "Exists") => Some(GraphSymbol::Label(EXISTS)),
+        (GraphSymbolKind::Relation, "COUNT") => Some(GraphSymbol::Relation(COUNTED)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
         (GraphSymbolKind::Property, "name") => Some(GraphSymbol::Property(NAME)),
@@ -3227,6 +3234,170 @@ fn write_right_sides_read_element_identity_and_presence() {
             NAME,
             CanonicalPropertyValue::from(CanonicalScalar::Bool(false))
         )));
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// A relationship MERGE takes endpoints the WITH row computes, not only
+/// carried MATCH vertices: list subscripts, head()/last() and UNWIND members
+/// of collected vertices (the linked-list idiom `UNWIND range(0, size(ns)-2)
+/// AS i WITH ns[i] AS x, ns[i+1] AS y MERGE (x)-[:NEXT]->(y)`). It was refused
+/// at prepare ("a vertex the WITH row carries"), though CREATE and SET
+/// admitted the same open-typed columns. A NULL endpoint refuses as for a
+/// carried vertex, and a value that is not a vertex refuses the statement.
+#[test]
+fn relationship_merge_takes_endpoints_the_row_computes() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4b2, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let write = async |db: &mut Database<MemVfs>, text: &str| {
+            let (mut vertices, mut edges) = reserve(db, &cx, 4, 4);
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => vertices.pop_front().unwrap(),
+                        GraphInsertRequest::Edge { .. } => edges.pop_front().unwrap(),
+                    })
+                },
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        let merged = |db: &Database<MemVfs>| {
+            let mut pairs: Vec<_> = db
+                .edges()
+                .unwrap()
+                .into_iter()
+                .filter(|edge| edge.entry.relation == T)
+                .map(|edge| (edge.entry.src, edge.entry.dst))
+                .collect();
+            pairs.sort();
+            pairs
+        };
+        for (text, expected) in [
+            (
+                "MATCH (n:Source) WITH n ORDER BY n.p WITH collect(n) AS ns \
+                 UNWIND range(0, size(ns)-2) AS i WITH ns[i] AS x, ns[i+1] AS y \
+                 MERGE (x)-[:T]->(y)",
+                vec![(VId(10), VId(20))],
+            ),
+            (
+                "MATCH (n:Source) WITH n ORDER BY n.p WITH collect(n) AS ns \
+                 WITH head(ns) AS x, last(ns) AS y MERGE (y)-[:T]->(x)",
+                vec![(VId(20), VId(10))],
+            ),
+            (
+                "MATCH (n:Source) WITH collect(n) AS ns UNWIND ns AS x MERGE (x)-[:T]->(x)",
+                vec![(VId(10), VId(10)), (VId(20), VId(20))],
+            ),
+        ] {
+            let mut db = fresh(&commit, true).await;
+            // A second run matches the first run's relationships.
+            for _ in 0..2 {
+                write(&mut db, text).await.unwrap();
+                assert_eq!(merged(&db), expected, "{text}");
+            }
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+        // An out-of-range subscript is a NULL endpoint, and an unwound value
+        // that is not a vertex is no endpoint: each refuses with no effect.
+        let mut db = fresh(&commit, true).await;
+        let before = (db.frontier().unwrap(), db.edges().unwrap());
+        for text in [
+            "MATCH (n:Source) WITH collect(n) AS ns WITH ns[0] AS x, ns[5] AS y \
+             MERGE (x)-[:T]->(y)",
+            "MATCH (n:Source {p:10}) WITH [n, 1] AS xs UNWIND xs AS x MERGE (x)-[:T]->(x)",
+        ] {
+            assert!(write(&mut db, text).await.is_err(), "{text}");
+            assert_eq!(
+                (db.frontier().unwrap(), db.edges().unwrap()),
+                before,
+                "{text}"
+            );
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// A label or relationship type spelled like the COUNT or EXISTS subquery
+/// takes its property map in a write after a WITH. The WITH head's hoist scan
+/// read `Count {` there as `COUNT {` and refused the statement ("expected
+/// MATCH"), with or without an aggregate. A real subquery still hoists,
+/// bare or as a map value.
+#[test]
+fn labels_spelled_like_subqueries_take_property_maps_after_with() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4b3, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = fresh(&commit, true).await;
+        for text in [
+            "MATCH (n:Source) WITH count(n) AS total CREATE (:Count {p:total})",
+            "MATCH (n:Source) WITH sum(n.p) AS total CREATE (:Exists {p:total})",
+            "MATCH (n:Source) WITH n CREATE (:Copy:Count {p:n.p})",
+            "MATCH (a:Source {p:10}),(b:Source {p:20}) WITH a,b CREATE (a)-[:COUNT {q:1}]->(b)",
+            "MATCH (n:Source) WITH n MERGE (:Count {p:7})",
+            "MATCH (n:Source) WITH n, COUNT { (n)-->() } AS c CREATE (:Copy {q:c})",
+            "MATCH (n:Source) WITH n, {c: COUNT { (n)-->() }} AS m CREATE (:Copy {name:m.c})",
+        ] {
+            let (mut vertices, mut edges) = reserve(&mut db, &cx, 4, 4);
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => vertices.pop_front().unwrap(),
+                        GraphInsertRequest::Edge { .. } => edges.pop_front().unwrap(),
+                    })
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{text}: {error}"));
+        }
+        let int = |value| CanonicalPropertyValue::from(CanonicalScalar::Int(value));
+        let mut labelled: Vec<_> = db
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .filter(|vertex| vertex.labels != [SOURCE])
+            .map(|vertex| (vertex.labels, vertex.props))
+            .collect();
+        labelled.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+        let mut expected = vec![
+            (vec![COUNT], vec![(P, int(2))]),
+            (vec![EXISTS], vec![(P, int(30))]),
+            (vec![COPY, COUNT], vec![(P, int(10))]),
+            (vec![COPY, COUNT], vec![(P, int(20))]),
+            (vec![COUNT], vec![(P, int(7))]),
+            // Vertex 10 has two outgoing relationships by then: the seeded R
+            // and the COUNT one created above; vertex 20 has none.
+            (vec![COPY], vec![(Q, int(2))]),
+            (vec![COPY], vec![(Q, int(0))]),
+            (vec![COPY], vec![(NAME, int(2))]),
+            (vec![COPY], vec![(NAME, int(0))]),
+        ];
+        expected.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+        assert_eq!(labelled, expected);
+        assert!(db.edges().unwrap().iter().any(|edge| {
+            (edge.entry.src, edge.entry.relation, edge.entry.dst) == (VId(10), COUNTED, VId(20))
+                && edge.props == [(Q, int(1))]
+        }));
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

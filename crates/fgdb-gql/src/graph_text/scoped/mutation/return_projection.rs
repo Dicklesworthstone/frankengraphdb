@@ -3753,8 +3753,22 @@ impl<'a> Parser<'a> {
         &self,
     ) -> Result<bool, GraphPatternTextError> {
         let mut lexer = self.lexer.clone();
+        // A label or type spelled COUNT or EXISTS before its property map
+        // (`CREATE (:Count {c: 1})` after a WITH) is no subquery: braces that
+        // hold `key:` or nothing are a map, which no subquery body starts as.
+        let subquery_body = |mut lexer: Lexer<'a>| -> Result<bool, GraphPatternTextError> {
+            Ok(match lexer.next()?.kind {
+                TokenKind::Punct(b'}') => false,
+                TokenKind::Word(_) | TokenKind::DelimitedKeyword(_) => {
+                    !matches!(lexer.next()?.kind, TokenKind::Punct(b':'))
+                }
+                _ => true,
+            })
+        };
         if self.is_word("COUNT") {
-            return Ok(matches!(lexer.next()?.kind, TokenKind::Punct(b'{')));
+            return Ok(
+                matches!(lexer.next()?.kind, TokenKind::Punct(b'{')) && subquery_body(lexer)?
+            );
         }
         // A bare pattern in a Boolean position (boolean_operand_at).
         if self.boolean_operand_at == self.current.at && self.is_punct(b'(') {
@@ -3767,7 +3781,7 @@ impl<'a> Parser<'a> {
             return Ok(false);
         }
         match lexer.next()?.kind {
-            TokenKind::Punct(b'{') => Ok(true),
+            TokenKind::Punct(b'{') => subquery_body(lexer),
             TokenKind::Punct(b'(') => {
                 let first = lexer.next()?;
                 crate::graph_text::scoped::pattern_predicate_follows(first.kind, &mut lexer)
