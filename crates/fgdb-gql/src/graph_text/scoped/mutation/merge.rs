@@ -261,8 +261,12 @@ impl<'a> Parser<'a> {
                 });
             }
             let key = self.schema_name()?;
-            if constants.iter().any(|previous| previous.key.text == key.text)
-                || computed.iter().any(|(previous, _)| previous.text == key.text)
+            if constants
+                .iter()
+                .any(|previous| previous.key.text == key.text)
+                || computed
+                    .iter()
+                    .any(|(previous, _)| previous.text == key.text)
             {
                 return Err(MergeMapError::DuplicateProperty { at: key.at });
             }
@@ -479,13 +483,19 @@ impl<'a> Parser<'a> {
             self.upsert_capacity(target.len(), branch)?;
             let actual = self.name()?;
             if actual.text != variable.text {
-                // `b.key = value` on a vertex the row carries. Its value
-                // reads the row and not the merged relationship.
+                // `b.key = value` on a vertex the row carries. Computed
+                // endpoints (head/list access/UNWIND) have an open type;
+                // the native action evaluator checks their actual identity.
+                // Its value reads the row and not the merged relationship.
                 let carried = row.filter(|_| row_vertices).and_then(|row| {
                     row[..self.visible_width(row)]
                         .iter()
                         .position(|(name, kind)| {
-                            name.text == actual.text && *kind == GraphSetColumnType::Vertex
+                            name.text == actual.text
+                                && matches!(
+                                    kind,
+                                    GraphSetColumnType::Vertex | GraphSetColumnType::Any
+                                )
                         })
                         .map(|column| (row, column))
                 });

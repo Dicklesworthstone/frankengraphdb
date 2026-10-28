@@ -5,6 +5,40 @@ mod point_effect_selector {
     include!("point_effect_selector.rs");
 }
 
+impl WriteTxn {
+    /// Run a point read against an earlier immutable prepared prefix of this
+    /// transaction. Point projection and scoped point-visibility readers use
+    /// only `basis` plus `prepared`; they do not inspect `staged` or a cached
+    /// materialized overlay. The caller captures the prefix before its first
+    /// effect, so computed values share the input row's frozen preimage.
+    ///
+    /// The callback cannot stage an effect or retain a borrowed projection.
+    /// Observation sets stay live on the transaction. The current write prefix
+    /// is restored on success, refusal and unwinding, without copying graph
+    /// state, replacing a transaction or granting a new allowance.
+    fn with_prepared_point_read<T>(
+        &mut self,
+        prepared: &Option<std::sync::Arc<PreparedWrite>>,
+        read: impl FnOnce(&WriteTxn) -> T,
+    ) -> T {
+        struct Restore<'a> {
+            txn: &'a mut WriteTxn,
+            prepared: Option<std::sync::Arc<PreparedWrite>>,
+        }
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                self.txn.prepared = self.prepared.take();
+            }
+        }
+        let current = core::mem::replace(&mut self.prepared, prepared.clone());
+        let restored = Restore {
+            txn: self,
+            prepared: current,
+        };
+        read(restored.txn)
+    }
+}
+
 #[derive(Default)]
 struct PointProjection<'a> {
     exists: bool,

@@ -849,6 +849,500 @@ fn relationship_actions_write_carried_endpoints_only_within_scope() {
     });
 }
 
+/// fgdb-r37yy: head/last, list access and UNWIND preserve the vertex identity
+/// even though the row's static type is open. Both hosts use the same native
+/// action evaluator and keep simultaneous ON-clause before-images.
+#[test]
+fn relationship_actions_write_computed_endpoints_in_both_hosts() {
+    lab(0xc4a1_3711, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 10), NOW).unwrap();
+        for authorized in [false, true] {
+            for endpoints in [
+                "WITH ns[0] AS a, ns[1] AS b",
+                "WITH head(ns) AS a, last(ns) AS b",
+                "UNWIND ns AS a WITH a, a AS b",
+            ] {
+                let self_loops = endpoints.starts_with("UNWIND");
+                let program = chain(&format!(
+                    "MATCH (n:Visible) WITH n ORDER BY n.p WITH collect(n) AS ns {endpoints} \
+                     MERGE (a)-[r:R]->(b) \
+                     ON CREATE SET a.q=b.p+10 ON MATCH SET b.q=a.q+1"
+                ));
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(S);
+                for id in 1..=2 {
+                    seed.create_vertex(
+                        VId(id as u128),
+                        vec![L],
+                        vec![(P, CanonicalScalar::Int(id))],
+                    );
+                }
+                db.write(&commit, seed).await.unwrap();
+                for created in [true, false] {
+                    let before = db.frontier().unwrap();
+                    let stats = if authorized {
+                        db.execute_graph_write_chain_authorized(
+                            &txn,
+                            &query,
+                            &commit,
+                            &issuer,
+                            &token,
+                            "main",
+                            &program,
+                            policy(10).with_mutation_limit(10),
+                            || NOW,
+                        )
+                        .await
+                        .unwrap()
+                        .0
+                    } else {
+                        let mut transaction = db.begin(&txn).unwrap();
+                        let (stats, _, _) = transaction
+                            .execute_graph_write_chain_engine_governed(
+                                &mut db,
+                                &query,
+                                &program,
+                                policy(10).with_mutation_limit(10),
+                            )
+                            .unwrap();
+                        transaction.finish(&mut db, &commit).await.unwrap();
+                        stats
+                    };
+                    let expected_edges = if self_loops { 2 } else { 1 };
+                    assert_eq!(stats.created_vertices, 0);
+                    assert_eq!(
+                        stats.created_edges,
+                        if created { expected_edges } else { 0 }
+                    );
+                    assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+                    assert_eq!(db.edges().unwrap().len() as u64, expected_edges);
+                    let property = |id| {
+                        db.vertex(VId(id))
+                            .unwrap()
+                            .unwrap()
+                            .props
+                            .into_iter()
+                            .find(|(key, _)| *key == Q)
+                            .map(|(_, value)| value)
+                    };
+                    if self_loops {
+                        assert_eq!(
+                            property(1),
+                            Some(CanonicalScalar::Int(if created { 11 } else { 12 }).into())
+                        );
+                        assert_eq!(
+                            property(2),
+                            Some(CanonicalScalar::Int(if created { 12 } else { 13 }).into())
+                        );
+                    } else {
+                        assert_eq!(property(1), Some(CanonicalScalar::Int(12).into()));
+                        assert_eq!(
+                            property(2),
+                            (!created).then(|| CanonicalScalar::Int(13).into())
+                        );
+                    }
+                    assert_eq!(txn.outstanding_obligations(), 0);
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn computed_endpoint_action_fields_keep_one_frozen_input_cut() {
+    lab(0xc4a1_3714, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 10), NOW).unwrap();
+        for authorized in [false, true] {
+            let (entry, written) = if authorized { (1, 2) } else { (10, 11) };
+            let program = chain(&format!(
+                "MATCH (a:Visible {{p:{entry}}}),(b:Visible {{p:2}}) \
+                 WITH a,b,[a,a] AS targets UNWIND targets AS target \
+                 MERGE (a)-[r:R]->(b) \
+                 ON CREATE SET target.p=target.p+1,target.q=target.p \
+                 ON MATCH SET target.p=target.p+1,target.q=target.p"
+            ));
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(S);
+            for id in 1..=2 {
+                seed.create_vertex(
+                    VId(id as u128),
+                    vec![L],
+                    vec![(P, CanonicalScalar::Int(id))],
+                );
+            }
+            db.write(&commit, seed).await.unwrap();
+            let stats = if authorized {
+                db.execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    policy(10).with_mutation_limit(10),
+                    || NOW,
+                )
+                .await
+                .unwrap()
+                .0
+            } else {
+                let mut transaction = db.begin(&txn).unwrap();
+                // The input cut includes the caller's uncommitted prefix,
+                // not just the database basis or this statement's effects.
+                let mut prior = WriteBatch::new(S);
+                prior.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(entry)));
+                transaction.write(&mut db, prior).unwrap();
+                let (stats, _, _) = transaction
+                    .execute_graph_write_chain_engine_governed(
+                        &mut db,
+                        &query,
+                        &program,
+                        policy(10).with_mutation_limit(10),
+                    )
+                    .unwrap();
+                transaction.finish(&mut db, &commit).await.unwrap();
+                stats
+            };
+            assert_eq!(stats.created_edges, 1);
+            assert_eq!(db.edges().unwrap().len(), 1);
+            // Both input occurrences read the entry value. Reading the growing
+            // overlay would add twice; reading within an assignment clause
+            // would incorrectly make q follow that clause's new p.
+            assert_eq!(
+                db.vertex(VId(1)).unwrap().unwrap().props,
+                [
+                    (P, CanonicalScalar::Int(written).into()),
+                    (Q, CanonicalScalar::Int(entry).into()),
+                ]
+            );
+            assert_eq!(
+                db.vertex(VId(2)).unwrap().unwrap().props,
+                [(P, CanonicalScalar::Int(2).into())]
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn open_relationship_action_targets_keep_null_noops_and_late_type_rollback() {
+    lab(0xc4a1_3712, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 10), NOW).unwrap();
+        for authorized in [false, true] {
+            for last in ["null", "1", "{p:1}"] {
+                let program = chain(&format!(
+                    "MATCH (a:Visible {{p:1}}),(b:Visible {{p:2}}) \
+                     WITH a,b,[a,{last}] AS targets UNWIND targets AS target \
+                     MERGE (a)-[r:R]->(b) ON CREATE SET target.q=7 ON MATCH SET target.q=8"
+                ));
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(S);
+                for id in 1..=2 {
+                    seed.create_vertex(
+                        VId(id as u128),
+                        vec![L],
+                        vec![(P, CanonicalScalar::Int(id))],
+                    );
+                }
+                db.write(&commit, seed).await.unwrap();
+                let before = (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap(),
+                );
+                let result = if authorized {
+                    db.execute_graph_write_chain_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        &program,
+                        policy(10).with_mutation_limit(10),
+                        || NOW,
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| format!("{error:?}"))
+                } else {
+                    let mut transaction = db.begin(&txn).unwrap();
+                    let result = transaction
+                        .execute_graph_write_chain_engine_governed(
+                            &mut db,
+                            &query,
+                            &program,
+                            policy(10).with_mutation_limit(10),
+                        )
+                        .map(|_| ())
+                        .map_err(|error| format!("{error:?}"));
+                    // Even a refused statement leaves a usable transaction.
+                    // Finishing it proves the statement guard, rather than an
+                    // outer transaction abort, removed the earlier row's effects.
+                    transaction.finish(&mut db, &commit).await.unwrap();
+                    result
+                };
+                if last == "null" {
+                    result.unwrap();
+                    assert_eq!(db.edges().unwrap().len(), 1);
+                    assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
+                    assert!(
+                        db.vertex(VId(1))
+                            .unwrap()
+                            .unwrap()
+                            .props
+                            .contains(&(Q, CanonicalScalar::Int(7).into()))
+                    );
+                    assert!(
+                        db.vertex(VId(2))
+                            .unwrap()
+                            .unwrap()
+                            .props
+                            .iter()
+                            .all(|(key, _)| *key != Q)
+                    );
+                } else {
+                    let error = result.unwrap_err();
+                    assert!(error.contains("InputSchema"), "{error}");
+                    assert_eq!(
+                        (
+                            db.frontier().unwrap(),
+                            db.vertices().unwrap(),
+                            db.edges().unwrap()
+                        ),
+                        before
+                    );
+                }
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+    });
+}
+
+#[test]
+fn computed_endpoint_actions_keep_selected_branch_authority_and_rollback() {
+    lab(0xc4a1_3713, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 10), NOW).unwrap();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(S);
+        for id in 1..=2 {
+            seed.create_vertex(
+                VId(id as u128),
+                vec![L],
+                vec![(P, CanonicalScalar::Int(id))],
+            );
+        }
+        db.write(&commit, seed).await.unwrap();
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        for actions in [
+            "ON CREATE SET a.secret=9",
+            "ON CREATE SET a.q=1 ON MATCH SET b.secret=9",
+        ] {
+            let program = chain(&format!(
+                "MATCH (n:Visible) WITH n ORDER BY n.p WITH collect(n) AS ns \
+                 WITH head(ns) AS a,last(ns) AS b \
+                 WITH a,b,[1,2] AS occurrences UNWIND occurrences AS occurrence \
+                 MERGE (a)-[r:R]->(b) {actions}"
+            ));
+            let error = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    policy(10).with_mutation_limit(10),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(authorization(&error), Some(Error::ScopeDenied), "{error:?}");
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn computed_endpoint_fields_share_native_and_signed_budgets_without_hidden_work() {
+    async fn attempt(
+        contexts: &PurposeContexts,
+        issuer: &Authority,
+        hidden: bool,
+        payload: usize,
+        budget: GraphInsertPolicy,
+        signed_work: u64,
+    ) -> Option<GraphInsertStats> {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(S);
+        for id in 1..=2 {
+            let mut properties = vec![
+                (P, CanonicalScalar::Int(id)),
+                (Q, CanonicalScalar::bytes(vec![0x37; payload]).unwrap()),
+            ];
+            if hidden {
+                properties.push((SECRET, CanonicalScalar::bytes(vec![0x99; 16_384]).unwrap()));
+            }
+            seed.create_vertex(VId(id as u128), vec![L], properties);
+        }
+        if hidden {
+            for id in 3..=8 {
+                seed.create_vertex(
+                    VId(id as u128),
+                    vec![HIDDEN],
+                    vec![(P, CanonicalScalar::Int(id))],
+                );
+                seed.add_edge(EId(id as u128), VId(1), VId(id as u128), vec![]);
+            }
+        }
+        db.write(&commit, seed).await.unwrap();
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        let token = issuer
+            .issue_at(&grant(Rights::ReadWrite, 10), NOW)
+            .unwrap()
+            .attenuate(Restriction::MaxWork(signed_work))
+            .unwrap();
+        let program = chain(
+            "MATCH (a:Visible {p:1}),(b:Visible {p:2}) \
+             WITH a,b,[a,a] AS targets UNWIND targets AS target \
+             MERGE (a)-[r:R]->(b) \
+             ON CREATE SET target.q=coalesce(target.secret,target.q) \
+             ON MATCH SET target.q=coalesce(target.secret,target.q)",
+        );
+        let result = db
+            .execute_graph_write_chain_authorized(
+                &txn,
+                &query,
+                &commit,
+                issuer,
+                &token,
+                "main",
+                &program,
+                budget,
+                || NOW,
+            )
+            .await;
+        assert_eq!(txn.outstanding_obligations(), 0);
+        match result {
+            Ok((stats, rows, _)) => {
+                assert!(rows.value.is_empty());
+                assert_eq!((stats.created_vertices, stats.created_edges), (0, 1));
+                assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
+                assert_eq!(db.vertices().unwrap(), before.1);
+                assert_eq!(db.edges().unwrap().len(), before.2.len() + 1);
+                Some(stats)
+            }
+            Err(_) => {
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
+                    before,
+                    "a later field-read refusal must discard the first occurrence's relationship",
+                );
+                None
+            }
+        }
+    }
+
+    lab(0xc4a1_3715, |contexts| async move {
+        let issuer = authority();
+        let budget = policy(10).with_mutation_limit(10);
+        let small = attempt(&contexts, &issuer, false, 8, budget, 1_000_000)
+            .await
+            .unwrap();
+        let measured = attempt(&contexts, &issuer, false, 8_192, budget, 1_000_000)
+            .await
+            .unwrap();
+        assert!(measured.evaluator.work_units > small.evaluator.work_units);
+        assert!(measured.evaluator.scratch_entries > small.evaluator.scratch_entries);
+        assert_eq!(
+            attempt(&contexts, &issuer, true, 8_192, budget, 1_000_000)
+                .await
+                .unwrap(),
+            measured,
+            "hidden payload and physical probes cannot change native logical usage",
+        );
+        let mut exact = budget;
+        exact.query.evaluator.max_work_units = measured.evaluator.work_units;
+        exact.query.evaluator.max_scratch_entries = measured.evaluator.scratch_entries;
+        for hidden in [false, true] {
+            assert_eq!(
+                attempt(&contexts, &issuer, hidden, 8_192, exact, 1_000_000).await,
+                Some(measured)
+            );
+            for scratch in [false, true] {
+                let mut short = exact;
+                if scratch {
+                    short.query.evaluator.max_scratch_entries -= 1;
+                } else {
+                    short.query.evaluator.max_work_units -= 1;
+                }
+                assert!(
+                    attempt(&contexts, &issuer, hidden, 8_192, short, 1_000_000)
+                        .await
+                        .is_none()
+                );
+            }
+        }
+        // The scoped point reader and effects share the original signed work
+        // permit. Find its exact boundary without fixing an internal event count.
+        let (mut low, mut high) = (0, 1_000_000);
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if attempt(&contexts, &issuer, false, 8_192, exact, middle)
+                .await
+                .is_some()
+            {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        assert!(low > 0);
+        for hidden in [false, true] {
+            assert_eq!(
+                attempt(&contexts, &issuer, hidden, 8_192, exact, low).await,
+                Some(measured)
+            );
+            assert!(
+                attempt(&contexts, &issuer, hidden, 8_192, exact, low - 1)
+                    .await
+                    .is_none()
+            );
+        }
+    });
+}
+
 #[test]
 fn whole_pair_reduction_preserves_parallel_orientation_and_private_bag_rows() {
     lab(0xc4a1_3101, |contexts| async move {

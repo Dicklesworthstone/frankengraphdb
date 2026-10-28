@@ -436,7 +436,7 @@ fn renamed_elements<'a>(head: &GraphProjectionHead<'a>, offset: usize) -> Vec<&'
                 .is_some_and(|input| {
                     input.variable.text != output.text
                         && input.property.is_none()
-                        && input.path.is_none()
+                        && matches!(input.path, None | Some(GraphPathFunction::Edge))
                         && input.collect.is_none()
                 }))
         })
@@ -1226,12 +1226,75 @@ impl<'a> Parser<'a> {
             self.current = token;
             let start = token.at;
             let scope = self.syntax.scopes.len();
-            let scope_count = self.scope_count;
-            if self.existence_body().is_err() {
+            // A probe may become a row-owned expression or ordinary scalar
+            // syntax. Neither consumes graph-definition capacity until its
+            // actual owner parses it. Keep shared parameter declarations: they
+            // are interned by name, with their first original source offset.
+            let admission = (
+                self.scope_count,
+                self.edge_count,
+                self.predicates,
+                self.identities,
+                self.random_sites,
+                self.collected_scalar_calls,
+            );
+            let scalar_state = (
+                self.comparison_start,
+                self.predicate_start,
+                self.boolean_operand_at,
+                self.let_base,
+                self.membership_list,
+                self.metadata_probe,
+                self.label_test,
+                self.percentile_leaf,
+            );
+            let reads = (
+                self.read_correlations.len(),
+                self.read_row_fields.len(),
+                self.read_comparisons.as_ref().map(Vec::len),
+                self.syntax.element_keys.len(),
+                self.elements.len(),
+            );
+            let path_state = (self.split_paths, self.comma_clause);
+            let parsed = self.existence_body();
+            let deferred = parsed.is_ok() && !self.carried_existence(head, offset, scope, start)?;
+            if parsed.is_err() || deferred {
+                self.syntax.scopes.truncate(scope);
+                (
+                    self.scope_count,
+                    self.edge_count,
+                    self.predicates,
+                    self.identities,
+                    self.random_sites,
+                    self.collected_scalar_calls,
+                ) = admission;
+                (
+                    self.comparison_start,
+                    self.predicate_start,
+                    self.boolean_operand_at,
+                    self.let_base,
+                    self.membership_list,
+                    self.metadata_probe,
+                    self.label_test,
+                    self.percentile_leaf,
+                ) = scalar_state;
+                self.read_correlations.truncate(reads.0);
+                self.read_row_fields.truncate(reads.1);
+                match reads.2 {
+                    Some(len) => {
+                        if let Some(comparisons) = self.read_comparisons.as_mut() {
+                            comparisons.truncate(len);
+                        }
+                    }
+                    None => self.read_comparisons = None,
+                }
+                self.syntax.element_keys.truncate(reads.3);
+                self.elements.truncate(reads.4);
+                (self.split_paths, self.comma_clause) = path_state;
+            }
+            if parsed.is_err() {
                 // Edge-shaped arithmetic such as `(x) - -1` is no pattern:
                 // the WHERE reads it as written.
-                self.syntax.scopes.truncate(scope);
-                self.scope_count = scope_count;
                 if matches!(token.kind, TokenKind::Punct(b'(')) {
                     depth += 1;
                 }
@@ -1240,7 +1303,15 @@ impl<'a> Parser<'a> {
                 continue;
             }
             let end = self.current.at;
-            self.carried_existence(head, offset, scope, start)?;
+            if deferred {
+                // The row owner must correlate a renamed identity after the
+                // WITH has projected it. Discard this speculative graph scope
+                // instead of keeping an uncorrelated hidden witness column.
+                lexer = self.lexer.clone();
+                previous = Some(TokenKind::Punct(b')'));
+                token = self.current;
+                continue;
+            }
             let input = self.projection_slot(
                 &mut head.inputs,
                 Projection {
@@ -1283,16 +1354,17 @@ impl<'a> Parser<'a> {
         self.scope(ScopeKind::Collect, ScopeForm::Pattern)
     }
 
-    /// Refuse a hoisted existence predicate (Collect scope `scope`) that
-    /// reads a MATCH binding its head does not carry under its own name: a
-    /// renamed or dropped binding would correlate the wrong element.
+    /// Whether an existence predicate can be gathered at this graph head.
+    /// Renamed identities belong to the native row owner after projection;
+    /// bindings the row drops still refuse instead of correlating the wrong
+    /// element. A host without that row owner retains the typed refusal.
     fn carried_existence(
         &self,
         head: &GraphProjectionHead<'a>,
         offset: usize,
         scope: usize,
         at: usize,
-    ) -> Result<(), GraphSetTextError> {
+    ) -> Result<bool, GraphSetTextError> {
         let outer = |name: &Name<'a>| {
             self.syntax
                 .variables
@@ -1303,16 +1375,26 @@ impl<'a> Parser<'a> {
         // A renamed element's new alias (`WITH n AS x`) is no binding of this
         // graph scope either: the predicate would bind it afresh.
         let renamed = renamed_elements(head, offset);
-        let read = self.syntax.scopes[scope].find_name(&|name| {
-            (outer(name) && !carries_own(head, offset, name.text)) || renamed.contains(&name.text)
-        });
-        match read {
-            Some(name) => Err(expected(
+        let body = &self.syntax.scopes[scope];
+        if let Some(name) = body.find_name(&|name| {
+            outer(name) && !carries_own(head, offset, name.text) && !renamed.contains(&name.text)
+        }) {
+            return Err(expected(
                 name.at.max(at),
                 "an existence predicate over bindings its WITH carries under their own names",
-            )),
-            None => Ok(()),
+            ));
         }
+        if let Some(name) = body.find_name(&|name| renamed.contains(&name.text)) {
+            return if self.read_elements {
+                Ok(false)
+            } else {
+                Err(expected(
+                    name.at.max(at),
+                    "an existence predicate over bindings its WITH carries under their own names",
+                ))
+            };
+        }
+        Ok(true)
     }
 
     /// Whether a row of `width` carries a hidden boundary read of `alias.key`,
@@ -1595,10 +1677,13 @@ impl<'a> Parser<'a> {
                             return Ok(None);
                         }
                         if guard.refused.contains(&word) {
-                            // Row counts and pattern comprehensions have an
-                            // identity-correlated Apply owner. Leave a rebound
-                            // alias with its row instead of its old graph binding.
-                            if self.read_elements && (!count || self.is_word("COUNT")) {
+                            // Row counts, explicit existence tests and pattern
+                            // comprehensions have an identity-correlated Apply
+                            // owner. Leave a rebound alias with its row instead
+                            // of its old graph binding.
+                            if self.read_elements
+                                && (!count || self.is_word("COUNT") || self.is_word("EXISTS"))
+                            {
                                 return Ok(None);
                             }
                             return Err(expected(

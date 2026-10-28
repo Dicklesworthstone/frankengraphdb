@@ -48,6 +48,11 @@ pub(crate) fn edge_merge_row_actions_controlled<E, A, C>(
         fgdb_delta_types::PropertyKeyId,
         &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> EdgeUpsertActionResult<(), E, A, C>,
     ) -> EdgeUpsertActionResult<fgdb_gql::algebra::GraphValue, E, A, C>,
+    mut read_row: impl FnMut(
+        ElementId,
+        fgdb_delta_types::PropertyKeyId,
+        &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> EdgeUpsertActionResult<(), E, A, C>,
+    ) -> EdgeUpsertActionResult<Option<CanonicalPropertyValue>, E, A, C>,
     mut stage: impl FnMut(WriteBatch) -> EdgeUpsertActionResult<(), E, A, C>,
 ) -> EdgeUpsertActionResult<(), E, A, C> {
     use crate::gql_exec::source::SourceEvent;
@@ -173,8 +178,20 @@ pub(crate) fn edge_merge_row_actions_controlled<E, A, C>(
                 }
                 GraphEdgeMergeRowAction::Value { key, value }
                 | GraphEdgeMergeRowAction::RowVertex { key, value, .. } => {
+                    // Both callbacks spend the same evaluator allowance. The
+                    // host's row reader retains the input cut, whereas `read`
+                    // above reads the resolved edge at this ON/SET clause.
+                    let controls = std::cell::RefCell::new(&mut control);
                     let written = value
-                        .written(row, &mut control)
+                        .written_with_elements(
+                            row,
+                            &mut |event| controls.borrow_mut()(event),
+                            &mut |element, property| {
+                                read_row(element, property, &mut |event| {
+                                    controls.borrow_mut()(event)
+                                })
+                            },
+                        )
                         .map_err(|error| match error {
                             GraphIntegerEvaluationError::Control(error) => error,
                             GraphIntegerEvaluationError::Value(error) => expression(error),
@@ -210,8 +227,34 @@ fn edge_upsert_row_property<V: Vfs + Clone, A, C>(
         fgdb_gql::GlaExecutionEvent,
     ) -> EdgeUpsertActionResult<(), WriteTxnError, A, C>,
 ) -> EdgeUpsertActionResult<fgdb_gql::algebra::GraphValue, WriteTxnError, A, C> {
-    use crate::gql_exec::source::SourceEvent;
     use fgdb_gql::algebra::GraphValue;
+    edge_upsert_row_property_with(transaction, database, element, key, control, |value| {
+        Ok(match value {
+            None => GraphValue::Scalar(CanonicalScalar::Null),
+            Some(value) => GraphValue::from_property_value(value).ok_or(
+                fgdb_gql::GqlQueryError::Data(fgdb_gql::GraphIntegerError {
+                    instruction: 0,
+                    kind: fgdb_gql::GraphIntegerErrorKind::StoredValueBounds,
+                }),
+            )?,
+        })
+    })
+}
+
+/// Admit the selected stored payload and its witness before the caller copies
+/// it into its native value domain. The row reader needs an owned stored value;
+/// an edge expression needs GraphValue. Neither copies through the other one.
+fn edge_upsert_row_property_with<V: Vfs + Clone, A, C, T>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    element: ElementId,
+    key: fgdb_delta_types::PropertyKeyId,
+    control: &mut dyn FnMut(
+        fgdb_gql::GlaExecutionEvent,
+    ) -> EdgeUpsertActionResult<(), WriteTxnError, A, C>,
+    copy: impl FnOnce(Option<&CanonicalPropertyValue>) -> EdgeUpsertActionResult<T, WriteTxnError, A, C>,
+) -> EdgeUpsertActionResult<T, WriteTxnError, A, C> {
+    use crate::gql_exec::source::SourceEvent;
     use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GraphEdgeUpsertError};
     control(GlaExecutionEvent::Work)?;
     let field = PointReadField::Property(key);
@@ -240,15 +283,7 @@ fn edge_upsert_row_property<V: Vfs + Clone, A, C>(
     source_control(SourceEvent::ScratchEntry)?;
     transaction.point_reads.borrow_mut().record(element, field);
     source_control(SourceEvent::ScratchEntry)?;
-    let value = match projected.property {
-        None => GraphValue::Scalar(CanonicalScalar::Null),
-        Some(value) => GraphValue::from_property_value(value).ok_or(GqlQueryError::Data(
-            fgdb_gql::GraphIntegerError {
-                instruction: 0,
-                kind: fgdb_gql::GraphIntegerErrorKind::StoredValueBounds,
-            },
-        ))?,
-    };
+    let value = copy(projected.property)?;
     attempt.accepted = true;
     Ok(value)
 }
@@ -300,6 +335,9 @@ impl WriteTxn {
             _ => return Err(invalid()),
         };
         let merge = upsert.merge();
+        // Computed row properties keep the selection's immutable preimage,
+        // even when an earlier occurrence changes one of those properties.
+        let input_prepared = self.prepared.clone();
         if let GraphWriteChainStep::EdgeUpsertQuery { query, .. } = step
             && query.merge() != merge
         {
@@ -500,6 +538,20 @@ impl WriteTxn {
                             key,
                             control,
                         )
+                    },
+                    |element, key, control| {
+                        let mut state = state.borrow_mut();
+                        let (transaction, database) = &mut *state;
+                        transaction.with_prepared_point_read(&input_prepared, |transaction| {
+                            edge_upsert_row_property_with(
+                                transaction,
+                                database,
+                                element,
+                                key,
+                                control,
+                                |value| Ok(value.cloned()),
+                            )
+                        })
                     },
                     |batch| {
                         let mut state = state.borrow_mut();
