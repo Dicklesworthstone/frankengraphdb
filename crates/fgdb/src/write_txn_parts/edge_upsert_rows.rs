@@ -416,6 +416,16 @@ impl WriteTxn {
                         GraphEdgeMergeError::NullEndpoint { column, .. } => {
                             GraphEdgeMergeError::NullEndpoint { row: at, column }
                         }
+                        GraphEdgeMergeError::RowValue { property, .. } => {
+                            GraphEdgeMergeError::RowValue { row: at, property }
+                        }
+                        GraphEdgeMergeError::RowExpression {
+                            property, source, ..
+                        } => GraphEdgeMergeError::RowExpression {
+                            row: at,
+                            property,
+                            source,
+                        },
                         error => error,
                     }))
                 })

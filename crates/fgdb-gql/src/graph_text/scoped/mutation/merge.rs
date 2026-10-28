@@ -230,6 +230,76 @@ impl<'a> Parser<'a> {
         Ok(properties)
     }
 
+    /// A relationship MERGE map over a row (fgdb-at06q): each value is a row
+    /// column, a value computed from the row (`a.v`, `s + 1`), or, reading
+    /// no row binding, a literal or parameter as merge_property_map takes
+    /// it. The constants and the row values come back apart, each in text
+    /// order; a key appears in at most one of them.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn merge_row_property_map(
+        &mut self,
+        row: &[(Name<'a>, GraphSetColumnType)],
+    ) -> Result<(Vec<MergeProperty<'a>>, Vec<(Name<'a>, RowValueTemplate)>), MergeMapError> {
+        let mut constants: Vec<MergeProperty<'a>> = Vec::new();
+        let mut computed: Vec<(Name<'a>, RowValueTemplate)> = Vec::new();
+        if !self.take(b'{')? {
+            return Ok((constants, computed));
+        }
+        if self.is_punct(b'}') {
+            return Err(error(
+                self.current.at,
+                GraphPatternTextErrorKind::Expected("at least one MERGE property"),
+            )
+            .into());
+        }
+        loop {
+            let count = constants.len() + computed.len();
+            if count >= crate::insertion::MAX_GRAPH_INSERT_FIELDS {
+                return Err(MergeMapError::TooManyFields {
+                    at: self.current.at,
+                    observed: count + 1,
+                });
+            }
+            let key = self.schema_name()?;
+            if constants.iter().any(|previous| previous.key.text == key.text)
+                || computed.iter().any(|(previous, _)| previous.text == key.text)
+            {
+                return Err(MergeMapError::DuplicateProperty { at: key.at });
+            }
+            self.punct(b':', ":")?;
+            // As in a vertex MERGE step: a bare column or hidden read is the
+            // column itself, and a longer value that reads the row is
+            // computed per row by the shared value compiler.
+            let start = (self.lexer.clone(), self.current);
+            let column = self.merge_row_column(row)?;
+            match column {
+                Some(column) if self.is_punct(b',') || self.is_punct(b'}') => {
+                    computed.push((key, RowValueTemplate::Column(column)));
+                }
+                _ if column.is_some() || self.merge_value_reads_row(row)? => {
+                    (self.lexer, self.current) = start;
+                    let at = self.current.at;
+                    computed.push((
+                        key,
+                        RowValueTemplate::Computed {
+                            value: Box::new(self.merge_row_value(row)?),
+                            at,
+                        },
+                    ));
+                }
+                _ => {
+                    let (filter, value) = self.merge_property_value(true)?;
+                    constants.push(MergeProperty { key, filter, value });
+                }
+            }
+            if !self.take(b',')? {
+                break;
+            }
+        }
+        self.punct(b'}', "}")?;
+        Ok((constants, computed))
+    }
+
     /// One MERGE map value: a non-null literal or a parameter, as both the
     /// exact-equality filter and the creation field.
     fn merge_property_value(

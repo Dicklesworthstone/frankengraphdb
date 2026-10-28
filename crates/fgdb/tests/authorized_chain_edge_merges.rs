@@ -1274,6 +1274,17 @@ fn explicit_hidden_bindings_and_write_only_merge_refuse_the_entire_chain() {
                 Rights::ReadWrite,
                 Error::ScopeDenied,
             ),
+            // A hidden key whose value the row computes (fgdb-at06q).
+            (
+                "WITH a, b, 7 AS s MERGE (a)-[:R {secret: s}]->(b)",
+                Rights::ReadWrite,
+                Error::ScopeDenied,
+            ),
+            (
+                "WITH a, b, 7 AS s MERGE (a)-[:R {p: s, secret: s + 1}]->(b)",
+                Rights::ReadWrite,
+                Error::ScopeDenied,
+            ),
             (
                 "MERGE (a)-[e:R]->(b) CREATE (c:Visible {p:e.secret})",
                 Rights::ReadWrite,

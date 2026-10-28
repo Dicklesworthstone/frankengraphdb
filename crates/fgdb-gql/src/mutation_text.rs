@@ -684,6 +684,9 @@ pub struct PreparedGraphEdgeMergeText {
     pub(crate) source: usize,
     pub(crate) destination: usize,
     pub(crate) properties: Vec<(PropertyKeyId, VertexMergeValueTemplate)>,
+    /// Map values the input row computes (fgdb-at06q): a row column or a
+    /// value over the row. Only a row relation input has them.
+    pub(crate) row_properties: Vec<(PropertyKeyId, VertexMergeRowValueTemplate)>,
     pub(crate) undirected: bool,
     /// Chain-only ON/SET templates, compiled by the shared row-action grammar.
     pub(crate) row_actions: Option<VertexMergeRowActionTemplates>,

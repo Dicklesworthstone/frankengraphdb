@@ -534,6 +534,7 @@ impl PreparedGraphEdgeUpsertText {
             source,
             destination,
             properties,
+            row_properties: Vec::new(),
             undirected: parsed.undirected,
             row_actions: None,
         };

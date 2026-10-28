@@ -80,6 +80,9 @@ impl PreparedGraphWriteChainText {
         // A MATCH after `UNWIND $rows`: the batch writer lowers no vertex
         // MERGE over its bindings, so one heads a chain.
         let mut parameter_matched = false;
+        // A MATCH after a leading UNWIND of a non-parameter source: it binds
+        // a relationship MERGE's endpoints, which the chain reads per row.
+        let mut unwound_matched = false;
         // A SET, REMOVE or DELETE after a leading MATCH: a chain once a
         // CREATE or MERGE follows it.
         let mut mutated = false;
@@ -175,6 +178,8 @@ impl PreparedGraphWriteChainText {
                         matched = true;
                     } else if clause && parameter_unwound && word.eq_ignore_ascii_case("MATCH") {
                         parameter_matched = true;
+                    } else if clause && unwound && word.eq_ignore_ascii_case("MATCH") {
+                        unwound_matched = true;
                     } else if clause
                         && word.eq_ignore_ascii_case("MERGE")
                         && (pattern()? || Self::named_merge_pattern(lexer.clone())?)
@@ -221,9 +226,11 @@ impl PreparedGraphWriteChainText {
                             }
                             if previous.is_some() && !parameter_unwound && (vertex || !matched) {
                                 // A vertex MERGE after the leading UNWIND or
-                                // MATCH; a relationship MERGE after UNWIND is
-                                // its own statement.
-                                return Ok(vertex);
+                                // MATCH. A relationship MERGE after UNWIND is
+                                // its own statement, unless a MATCH after the
+                                // UNWIND binds its endpoints: the chain reads
+                                // those rows (fgdb-at06q).
+                                return Ok(vertex || unwound_matched);
                             }
                             // A first vertex MERGE, a vertex MERGE after
                             // `UNWIND $rows`, or a relationship MERGE after a
@@ -234,12 +241,14 @@ impl PreparedGraphWriteChainText {
                         }
                     } else if clause
                         && parameter_unwound
-                        && merged_vertex
+                        && (merged_vertex || (merged && parameter_matched))
                         && word.eq_ignore_ascii_case("RETURN")
                     {
                         // The batch writer has no RETURN: a vertex MERGE over
                         // `UNWIND $rows` that returns rows is the chain's, as
-                        // over a literal UNWIND (fgdb-0s2pq).
+                        // over a literal UNWIND (fgdb-0s2pq), and so is a
+                        // relationship MERGE between the MATCH's vertices
+                        // there (fgdb-at06q).
                         return Ok(true);
                     }
                     // A first MERGE's ON/SET clauses stay with it: a lone
@@ -1288,6 +1297,14 @@ mod tests {
              MERGE (e:Event {id: event.id}) MERGE (y)<-[:IN]-(e) RETURN e.id AS x ORDER BY x",
             "UNWIND $events AS event MATCH (y:Year {year: event.year}) MERGE (e:Event {id: event.id})",
             "UNWIND [1, 2] AS v MATCH (y:Year {year: v}) MERGE (e:Event {id: v})",
+            // A relationship MERGE between the vertices of a MATCH after a
+            // literal UNWIND, and one over `UNWIND $pairs` that returns rows:
+            // the batch writer has no RETURN, and refused it at RETURN
+            // (fgdb-at06q).
+            "UNWIND [1, 2] AS i MATCH (n {id: i}), (y {id: 9}) MERGE (n)-[:R]->(y)",
+            "UNWIND [1, 2] AS x MATCH (a:A), (b:B) MERGE (a)-[r:R {k: x}]->(b) RETURN r.k",
+            "UNWIND $pairs AS row MATCH (a {id: row.a}), (b {id: row.b}) MERGE (a)-[:R]->(b) \
+             RETURN count(*) AS c",
             // A SET, REMOVE or DELETE after a CREATE writes its rows.
             "CREATE (n) SET n.p = 1",
             "CREATE (n:P {p: 1}) SET n.p = n.p + 1 RETURN n.p",
@@ -1335,12 +1352,11 @@ mod tests {
             "MATCH (a), (b) MERGE (a)-[r:R]->(b) SET r += {p: 1, q: 'a.b'} RETURN a.p, r.p",
             "MATCH (a), (b) MERGE (a)-[r:R]->(b) ON CREATE SET r.p = $x.p",
             // An UNWIND of a parameter before one MERGE is the batch writer's,
-            // its ON/SET clauses and a relationship MERGE after MATCH included.
+            // its ON/SET clauses and a relationship MERGE after MATCH included,
+            // unless a RETURN follows.
             "UNWIND $rows AS row MERGE (n:Entity {id: row.id})",
             "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n.name = row.name",
             "UNWIND $pairs AS row MATCH (a {id: row.a}), (b {id: row.b}) MERGE (a)-[:R]->(b)",
-            "UNWIND $pairs AS row MATCH (a {id: row.a}), (b {id: row.b}) MERGE (a)-[:R]->(b) \
-             RETURN count(*) AS c",
             "UNWIND $rows AS row MERGE (n:Entity {p: 'RETURN'})",
             "UNWIND [1] AS x MERGE (a)-[:R]->(b)",
             "MERGE (a:A) ON CREATE SET a.p = 1",

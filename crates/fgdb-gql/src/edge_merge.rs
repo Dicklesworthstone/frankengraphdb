@@ -13,7 +13,8 @@
 //! - Every matching edge is a match. The singular primitive refuses parallel
 //!   matches as ambiguous; native write programs keep each one.
 //!
-//! Map values are already-bound non-null scalars or bounded stored lists.
+//! Map values are already-bound non-null scalars or bounded stored lists,
+//! or, over a row relation, values each input row computes (fgdb-at06q).
 //! ON MATCH/ON CREATE actions remain above this primitive.
 
 use crate::algebra::{GraphValueRow, PreparedGraphPattern, ValueProjection};
@@ -47,6 +48,11 @@ pub enum GraphEdgeMergeBuildError {
     },
     /// A row relation input exceeds the parent depth a write admits.
     RelationalInput(crate::GraphSetBuildError),
+    /// A map value reads an input row, and the input is a MATCH pattern
+    /// rather than a row relation, or the row has no such column.
+    RowProperty {
+        key: PropertyKeyId,
+    },
 }
 impl core::fmt::Display for GraphEdgeMergeBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -71,6 +77,9 @@ impl core::fmt::Display for GraphEdgeMergeBuildError {
                 f.write_str("relationship MERGE requires a non-null scalar or bounded stored list")
             }
             Self::RelationalInput(error) => error.fmt(f),
+            Self::RowProperty { .. } => {
+                f.write_str("relationship MERGE map value reads a column its input row lacks")
+            }
         }
     }
 }
@@ -176,6 +185,19 @@ pub enum GraphEdgeMergeError<E, A> {
         observed: u128,
     },
     IdentityKind,
+    /// A map value the input row computes (fgdb-at06q) read NULL, a map, a
+    /// graph element or a value beyond the stored bounds: openCypher cannot
+    /// MERGE on it. `property` counts the row-valued properties in key order.
+    RowValue {
+        row: usize,
+        property: usize,
+    },
+    /// Such a value raised an arithmetic exception.
+    RowExpression {
+        row: usize,
+        property: usize,
+        source: crate::GraphIntegerError,
+    },
 }
 impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
     for GraphEdgeMergeError<E, A>
@@ -213,6 +235,15 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
             Self::IdentityKind => {
                 f.write_str("relationship MERGE allocator returned a non-edge identity")
             }
+            Self::RowValue { row, property } => write!(
+                f,
+                "relationship MERGE row {row} property {property} is not a non-null scalar or bounded list property value"
+            ),
+            Self::RowExpression {
+                row,
+                property,
+                source,
+            } => write!(f, "relationship MERGE row {row} property {property}: {source}"),
         }
     }
 }
@@ -224,6 +255,7 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
             Self::Source(error) => Some(error),
             Self::InputRelation(error) => Some(error),
             Self::IdentitySource(error) => Some(error),
+            Self::RowExpression { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -286,6 +318,9 @@ pub struct PreparedGraphEdgeMerge {
     destination: usize,
     properties: Vec<(PropertyKeyId, GqlScalarParameter)>,
     stored_properties: Arc<[StoredMergeProperty]>,
+    /// Map values each input row computes (fgdb-at06q), in key order: a
+    /// column, or a value over the row. Never `Bound`.
+    row_properties: Vec<(PropertyKeyId, crate::vertex_merge::GraphVertexMergeRowValue)>,
     undirected: bool,
 }
 impl core::fmt::Debug for PreparedGraphEdgeMerge {
@@ -293,7 +328,7 @@ impl core::fmt::Debug for PreparedGraphEdgeMerge {
         f.debug_struct("PreparedGraphEdgeMerge")
             .field(
                 "properties",
-                &(self.properties.len() + self.stored_properties.len()),
+                &(self.properties.len() + self.stored_properties.len() + self.row_properties.len()),
             )
             .field("definition", &"[REDACTED]")
             .finish()
@@ -398,6 +433,7 @@ impl PreparedGraphEdgeMerge {
             destination,
             properties,
             stored_properties: Arc::from([]),
+            row_properties: Vec::new(),
             undirected: false,
         })
     }
@@ -436,7 +472,10 @@ impl PreparedGraphEdgeMerge {
                 CanonicalPropertyValue::Map(_) => false,
             }
         }
-        let observed = self.properties.len() + self.stored_properties.len() + properties.len();
+        let observed = self.properties.len()
+            + self.stored_properties.len()
+            + self.row_properties.len()
+            + properties.len();
         if observed > MAX_GRAPH_EDGE_MERGE_PROPERTIES {
             return Err(GraphEdgeMergeBuildError::TooManyProperties {
                 limit: MAX_GRAPH_EDGE_MERGE_PROPERTIES,
@@ -479,6 +518,175 @@ impl PreparedGraphEdgeMerge {
         Ok(self)
     }
 
+    /// Add map values the input row computes (fgdb-at06q): a row column
+    /// (`{k: s}` of a WITH alias) or a value over the row (`{k: a.v}`,
+    /// `{k: s + 1}`). Only a row relation input has a row. Each row's values
+    /// join the constant map: they filter existing edges and fill a created
+    /// one, and rows whose values are query-equal share one outcome per
+    /// endpoint pair ([`Self::row_values`]). A `Bound` value is a constant.
+    pub(crate) fn with_row_properties(
+        mut self,
+        properties: Vec<(PropertyKeyId, crate::vertex_merge::GraphVertexMergeRowValue)>,
+    ) -> Result<Self, GraphEdgeMergeBuildError> {
+        use crate::vertex_merge::GraphVertexMergeRowValue;
+        let observed = self.properties.len()
+            + self.stored_properties.len()
+            + self.row_properties.len()
+            + properties.len();
+        if observed > MAX_GRAPH_EDGE_MERGE_PROPERTIES {
+            return Err(GraphEdgeMergeBuildError::TooManyProperties {
+                limit: MAX_GRAPH_EDGE_MERGE_PROPERTIES,
+                observed,
+            });
+        }
+        let width = match &self.input {
+            Input::Relation(relation) => relation.column_types().len(),
+            Input::Pattern(_) => 0,
+        };
+        let mut keys = self
+            .property_keys()
+            .collect::<std::collections::BTreeSet<_>>();
+        for (key, value) in properties {
+            if !keys.insert(key) {
+                return Err(GraphEdgeMergeBuildError::DuplicateProperty);
+            }
+            match value {
+                GraphVertexMergeRowValue::Bound(value) => {
+                    if matches!(value.value(), CanonicalScalar::Null) {
+                        return Err(GraphEdgeMergeBuildError::NullProperty { key });
+                    }
+                    self.properties.push((key, value));
+                }
+                GraphVertexMergeRowValue::Column(column) if column >= width => {
+                    return Err(GraphEdgeMergeBuildError::RowProperty { key });
+                }
+                _ if matches!(self.input, Input::Pattern(_)) => {
+                    return Err(GraphEdgeMergeBuildError::RowProperty { key });
+                }
+                value => self.row_properties.push((key, value)),
+            }
+        }
+        self.properties.sort_by_key(|(key, _)| *key);
+        self.row_properties.sort_by_key(|(key, _)| *key);
+        Ok(self)
+    }
+
+    /// Whether a map value reads the input row (fgdb-at06q).
+    #[must_use]
+    pub fn has_row_properties(&self) -> bool {
+        !self.row_properties.is_empty()
+    }
+
+    /// The map values input row `at` computes, in key order, with their
+    /// query-equality key: rows of one endpoint pair whose keys are equal
+    /// share one outcome, as a later row would match the edge an earlier one
+    /// created. Int and Float peers (1 and 1.0) share a key. The key is
+    /// `None` when a value does not equal itself (NaN, a NULL list member);
+    /// such a row resolves alone. NULL, a map, a graph element or a value
+    /// beyond the stored bounds refuses (RowValue), as a vertex MERGE over
+    /// rows does. Every evaluation, comparison and copy is charged.
+    #[allow(clippy::type_complexity)]
+    pub fn row_values<E, A, C>(
+        &self,
+        at: usize,
+        row: &GraphValueRow,
+        control: &mut impl FnMut(
+            crate::GlaExecutionEvent,
+        )
+            -> Result<(), crate::GqlQueryError<GraphEdgeMergeError<E, A>, C>>,
+    ) -> Result<
+        (Vec<(PropertyKeyId, CanonicalPropertyValue)>, Option<Vec<u8>>),
+        crate::GqlQueryError<GraphEdgeMergeError<E, A>, C>,
+    > {
+        use crate::vertex_merge::GraphVertexMergeRowValue;
+        // Length-prefixed, tagged equality encodings, so the concatenation
+        // of the values in key order is unambiguous.
+        fn equality_key(value: &CanonicalPropertyValue, key: &mut Vec<u8>) -> bool {
+            match value {
+                CanonicalPropertyValue::Scalar(scalar) => {
+                    if crate::algebra::IntegerComparison::Equal
+                        .evaluate_scalar_pair(Some(scalar), Some(scalar))
+                        != Some(true)
+                    {
+                        return false;
+                    }
+                    let Some(bytes) = crate::algebra::equality_value_bytes(scalar) else {
+                        return false;
+                    };
+                    key.push(0);
+                    key.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+                    key.extend_from_slice(&bytes);
+                    true
+                }
+                CanonicalPropertyValue::List(list) => {
+                    key.push(1);
+                    key.extend_from_slice(&(list.values().len() as u64).to_be_bytes());
+                    list.values().iter().all(|value| equality_key(value, key))
+                }
+                CanonicalPropertyValue::Map(_) => false,
+            }
+        }
+        let mut values = Vec::with_capacity(self.row_properties.len());
+        let mut key = Some(Vec::new());
+        for (property, (name, value)) in self.row_properties.iter().enumerate() {
+            control(crate::GlaExecutionEvent::Work)?;
+            let invalid = || {
+                crate::GqlQueryError::Source(GraphEdgeMergeError::RowValue { row: at, property })
+            };
+            let value = match value {
+                GraphVertexMergeRowValue::Column(column) => {
+                    let value = row.values().get(*column).ok_or_else(invalid)?;
+                    crate::vertex_merge::written_merge_value(value, control)?
+                }
+                GraphVertexMergeRowValue::Computed(value) => {
+                    let value = crate::set_ops::evaluate_value(value, row, property, control)
+                        .map_err(|failure| match failure {
+                            crate::set_ops::ProjectionFailure::Control(error) => error,
+                            crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
+                                crate::GqlQueryError::Source(GraphEdgeMergeError::RowExpression {
+                                    row: at,
+                                    property,
+                                    source: error,
+                                })
+                            }
+                        })?;
+                    crate::vertex_merge::written_merge_value(&value, control)?
+                }
+                // with_row_properties keeps constants with the constant map.
+                GraphVertexMergeRowValue::Bound(_) => None,
+            }
+            .ok_or_else(invalid)?;
+            if let Some(bytes) = &mut key
+                && !equality_key(&value, bytes)
+            {
+                key = None;
+            }
+            values.push((*name, value));
+        }
+        Ok((values, key))
+    }
+
+    /// Whether an existing edge's stored properties equal one row's map
+    /// values ([`Self::row_values`]), by the comparator MATCH uses.
+    pub fn matches_row_values<'s, E: From<crate::GraphIntegerError>>(
+        &self,
+        mut stored: impl FnMut(PropertyKeyId) -> Option<&'s CanonicalPropertyValue>,
+        values: &[(PropertyKeyId, CanonicalPropertyValue)],
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        for (key, value) in values {
+            control(crate::GlaExecutionEvent::Work)?;
+            if !crate::algebra::IntegerComparison::Equal.accepts_property_pair(
+                stored(*key),
+                Some(value),
+                control,
+            )? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// An undirected MERGE, `(a)-[:R]-(b)` (fgdb-at06q): an existing edge in
     /// either orientation matches, and a new edge goes source to destination.
     #[must_use]
@@ -514,6 +722,7 @@ impl PreparedGraphEdgeMerge {
         mut stored: impl FnMut(PropertyKeyId) -> Option<&'s CanonicalScalar>,
     ) -> bool {
         self.stored_properties.is_empty()
+            && self.row_properties.is_empty()
             && self.properties.iter().all(|(key, wanted)| {
                 crate::algebra::IntegerComparison::Equal
                     .evaluate_scalar_pair(stored(*key), Some(wanted.value()))
@@ -571,6 +780,27 @@ impl PreparedGraphEdgeMerge {
             control(crate::GlaExecutionEvent::ScratchEntry)?;
             crate::algebra::GraphValue::charge_property_value(&property.value, control)?;
             properties.push((property.key, property.value.clone()));
+        }
+        properties.sort_by_key(|(key, _)| *key);
+        Ok(properties)
+    }
+
+    /// As [`Self::creation_properties_with_control`], with one row's map
+    /// values ([`Self::row_values`]) beside the constants, in key order.
+    pub fn creation_properties_with_row<E>(
+        &self,
+        values: &[(PropertyKeyId, CanonicalPropertyValue)],
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Vec<(PropertyKeyId, CanonicalPropertyValue)>, E> {
+        let mut properties = self.creation_properties_with_control(control)?;
+        if values.is_empty() {
+            return Ok(properties);
+        }
+        properties.reserve(values.len());
+        for (key, value) in values {
+            control(crate::GlaExecutionEvent::ScratchEntry)?;
+            crate::algebra::GraphValue::charge_property_value(value, control)?;
+            properties.push((*key, value.clone()));
         }
         properties.sort_by_key(|(key, _)| *key);
         Ok(properties)
@@ -695,13 +925,15 @@ impl PreparedGraphEdgeMerge {
             .all(|property| property.reflexive)
     }
 
-    /// All keys read by the existence predicate, including stored lists.
-    /// Hosts must authorize this complete set before selection or observation.
+    /// All keys read by the existence predicate, including stored lists and
+    /// row-valued keys. Hosts must authorize this complete set before
+    /// selection or observation.
     pub fn property_keys(&self) -> impl Iterator<Item = PropertyKeyId> + '_ {
         self.properties
             .iter()
             .map(|(key, _)| *key)
             .chain(self.stored_properties.iter().map(|property| property.key))
+            .chain(self.row_properties.iter().map(|(key, _)| *key))
     }
 
     /// Explicit borrowed export of the stored-list keys; Debug stays redacted.
@@ -822,6 +1054,29 @@ impl PreparedGraphEdgeMerge {
                 bytes.extend_from_slice(&property.key.0.to_be_bytes());
                 bytes.extend_from_slice(&(property.encoded.len() as u64).to_be_bytes());
                 bytes.extend_from_slice(&property.encoded);
+            }
+        }
+        if !self.row_properties.is_empty() {
+            use crate::vertex_merge::GraphVertexMergeRowValue;
+            bytes.extend_from_slice(b"fgdb:row-edge-merge-properties:v1\0");
+            bytes.extend_from_slice(&(self.row_properties.len() as u64).to_be_bytes());
+            for (key, value) in &self.row_properties {
+                bytes.extend_from_slice(&key.0.to_be_bytes());
+                match value {
+                    GraphVertexMergeRowValue::Column(column) => {
+                        bytes.push(0);
+                        bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+                    }
+                    GraphVertexMergeRowValue::Computed(value) => {
+                        bytes.push(1);
+                        let mut encoded = Vec::new();
+                        value.append_canonical_bytes(&mut encoded);
+                        bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                        bytes.extend_from_slice(&encoded);
+                    }
+                    // with_row_properties keeps constants with the constant map.
+                    GraphVertexMergeRowValue::Bound(_) => bytes.push(255),
+                }
             }
         }
         bytes
