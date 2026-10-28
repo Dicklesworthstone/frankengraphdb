@@ -548,28 +548,32 @@ fn nested_incidence_eof_returns_to_each_live_root_memory_baseline() {
             // Keep the parent edge/endpoints alive. Its heap and decoder
             // position are legitimate retained state, not child allocations.
             let parent = pool.used();
-            let nested = scan
-                .next_incident_retained_with_endpoints(
-                    &cx,
-                    VId(2),
-                    Some(S),
-                    BufferedEdgeDirection::Outgoing,
-                    None,
-                    &mut |_| Ok::<_, ()>(()),
-                )
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(nested.eid, EId(0));
-            assert_eq!(nested.row.as_ref().unwrap().edge().entry.relation, S);
-            drop(nested);
+            let mut after = None;
+            for expected in [EId(0), EId(2), EId(8)] {
+                let nested = scan
+                    .next_incident_retained_with_endpoints(
+                        &cx,
+                        VId(2),
+                        Some(S),
+                        BufferedEdgeDirection::Outgoing,
+                        after,
+                        &mut |_| Ok::<_, ()>(()),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(nested.eid, expected);
+                assert_eq!(nested.row.as_ref().unwrap().edge().entry.relation, S);
+                after = Some(nested.eid);
+                drop(nested);
+            }
             assert!(
                 scan.next_incident_retained_with_endpoints(
                     &cx,
                     VId(2),
                     Some(S),
                     BufferedEdgeDirection::Outgoing,
-                    Some(EId(0)),
+                    after,
                     &mut |_| Ok::<_, ()>(()),
                 )
                 .await
@@ -1430,11 +1434,42 @@ fn one_row_blocks_are_read_once_and_the_source_budget_is_cumulative() {
         let mut bounds = limits();
         bounds.max_blocks = count;
         bounds.max_root_bytes = 16 * 1024;
+        // This V6 inline tail includes authenticated descriptors. Its encoded
+        // frame no longer fits the old fixture's 16KiB root allowance. Keep
+        // that refusal and the exact one-byte-short refusal before admitting
+        // the whole frame; the scan's block, pool and work bounds stay fixed.
+        assert!(count < crate::root_segment::SEGMENT_REFS);
+        let root_bytes = store.get_root_bytes(&cx, id).await.unwrap();
+        let root_bytes_len = root_bytes.len();
+        drop(root_bytes);
+        assert!(root_bytes_len > bounds.max_root_bytes);
         // Open admission now also builds the charged descriptor directory
         // (68bf6b14): 6,925 units for these 160 blocks, measured. The scan
         // keeps its own linear allowance, asserted below.
         bounds.max_work = count * 50;
         let pool = MemoryPool::new(4 * 1024 * 1024, 0).unwrap();
+        assert!(matches!(
+            store
+                .open_buffered_root(&cx, id, pool.clone(), bounds)
+                .await,
+            Err(BufferedReadError::Store(
+                crate::store::StoreError::ObjectTooLarge {
+                    limit: 16_384,
+                    observed: 16_385,
+                }
+            ))
+        ));
+        assert_eq!(pool.used(), 0);
+        bounds.max_root_bytes = root_bytes_len - 1;
+        assert!(matches!(
+            store.open_buffered_root(&cx, id, pool.clone(), bounds).await,
+            Err(BufferedReadError::Store(crate::store::StoreError::ObjectTooLarge {
+                limit,
+                observed,
+            })) if (limit, observed) == ((root_bytes_len - 1) as u64, root_bytes_len as u64)
+        ));
+        assert_eq!(pool.used(), 0);
+        bounds.max_root_bytes = root_bytes_len;
         let mut view = store
             .open_buffered_root(&cx, id, pool.clone(), bounds)
             .await
