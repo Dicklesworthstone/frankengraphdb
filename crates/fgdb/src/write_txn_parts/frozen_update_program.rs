@@ -1,8 +1,9 @@
 // Batch binders admit field-update profiles for vertices and edges, vertex
 // upserts with pairwise distinct MERGE keys, and directed relationship MERGEs
-// with pairwise distinct endpoint keys (fgdb-2l3pt). Every selection and RHS
-// uses the real transaction overlay at entry; one ordered preparation then
-// stages all proposals, without rewalking a growing prefix.
+// with pairwise distinct endpoint keys (fgdb-2l3pt). Every selection uses the
+// real transaction overlay at entry. Expression upserts retain ordinary
+// within-row staging; one ordered preparation then composes all proposals,
+// without rewalking a prefix that grows with every input row.
 
 impl WriteTxn {
     #[allow(clippy::type_complexity)]
@@ -168,8 +169,11 @@ impl WriteTxn {
     /// MERGE matches against the entry overlay and allocates its creation
     /// exactly as the sequential path does; its creation and ON/SET actions
     /// append to that row's batch instead of re-preparing every earlier row.
-    /// One ordered preparation stages all rows after the last statement.
-    /// Distinct keys and key-free constant actions make this the sequential
+    /// Expression-bearing upserts use an ordinary row workspace so ON and
+    /// trailing SET see their preceding clause's effects. The original row
+    /// batches survive, but its staged effects are reset before the next row.
+    /// One ordered preparation composes all rows after the last statement.
+    /// Distinct unchanged keys and target-local actions make this the sequential
     /// program's result; receipts, per-statement statistics and each
     /// statement kind's errors keep their ordinary shape.
     #[allow(clippy::type_complexity)]
@@ -190,9 +194,9 @@ impl WriteTxn {
         use fgdb_gql::insertion::{GraphInsertError, GraphInsertIntent};
         use fgdb_gql::{
             GlaExecutionEvent, GqlQueryError, GraphMutationProgramError, GraphVertexMergeError,
-            GraphVertexUpsertBranch, GraphVertexUpsertError, GraphVertexUpsertStats,
-            GraphWriteIdentityRequest, GraphWriteProgramError, GraphWriteStatement,
-            GraphWriteStepError, GraphWriteStepStats,
+            GraphVertexUpsertAction, GraphVertexUpsertBranch, GraphVertexUpsertError,
+            GraphVertexUpsertStats, GraphWriteIdentityRequest, GraphWriteProgramError,
+            GraphWriteStatement, GraphWriteStepError, GraphWriteStepStats,
         };
         debug_assert!(program.freezes_vertex_upsert_input());
         cx.with_restriction(|| {
@@ -230,7 +234,48 @@ impl WriteTxn {
                         }
                     };
                     let mut batch = WriteBatch::new(relation);
-                    let stats = if let GraphWriteStatement::VertexMerge(merge) = input {
+                    let stats = if let GraphWriteStatement::VertexUpsert(upsert) = input
+                        && upsert
+                            .on_match()
+                            .iter()
+                            .chain(upsert.on_create())
+                            .chain(upsert.after())
+                            .any(|action| {
+                                matches!(action, GraphVertexUpsertAction::SetExpression { .. })
+                            }) {
+                        // Ordinary plural execution owns target selection, clause
+                        // snapshots, arithmetic, controls and receipts. Restrict its
+                        // growing overlay to this independent row, not the batch.
+                        let row = MutationProgramWorkspace::new(workspace.txn);
+                        let (stats, receipt) = row
+                            .txn
+                            .execute_graph_vertex_upserts_governed(
+                                database,
+                                cx,
+                                upsert,
+                                remaining.vertex_upsert_policy(),
+                                |request| {
+                                    allocate(GraphWriteIdentityRequest { statement, request })
+                                },
+                            )
+                            .and_then(vertex_upsert_program_result)
+                            .map_err(GraphWriteStepError::VertexUpsert)?;
+                        // Keep every original clause batch, including overwritten
+                        // assignments. Leave the staged tail intact until the guard
+                        // drops so it also retains preparation read dependencies.
+                        batches.extend(
+                            row.txn.staged[row.staged_len..]
+                                .iter()
+                                .cloned()
+                                .map(|batch| (statement, batch)),
+                        );
+                        receipts.push(receipt);
+                        // Dropping restores entry effects while preserving source
+                        // observations and spent identities. The outer workspace
+                        // remains the rollback boundary for final composition.
+                        drop(row);
+                        stats
+                    } else if let GraphWriteStatement::VertexMerge(merge) = input {
                         let policy = remaining.vertex_merge_policy();
                         let (stats, receipt) = (|| {
                             let proposal = collect_vertex_merge_output::<

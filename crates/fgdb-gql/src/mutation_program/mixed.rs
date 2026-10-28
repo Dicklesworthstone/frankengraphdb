@@ -521,14 +521,15 @@ impl PreparedGraphWriteProgram {
     }
 
     /// Every statement is one vertex MERGE or upsert of a single template
-    /// whose MERGE keys are pairwise distinct and whose actions, if any,
-    /// write constant values to neither a key property (other than its own
-    /// key value, as `SET n += row` does) nor a key label (fgdb-2l3pt). A
-    /// plain MERGE has no actions at all. No row can then
-    /// match a vertex another row creates or changes, so evaluating each MERGE
-    /// against the entry overlay and staging all rows once in input order is
-    /// the sequential program's result. A physical execution choice only: the
-    /// transcript, receipts and every answer equal sequential execution.
+    /// whose MERGE keys are pairwise distinct and whose actions preserve its
+    /// key properties and required labels (fgdb-2l3pt). A constant may rewrite
+    /// a key with its own equal value, as `SET n += row` does. Expressions read
+    /// only their target vertex and write non-key fields. No row can then
+    /// match a vertex another row creates or changes. Each row selects against
+    /// the entry overlay, while its ON and trailing SET clauses retain their
+    /// ordinary within-row staging; composing the original batches once in
+    /// input order is the sequential program's result. A physical execution
+    /// choice only: the transcript, receipts and every answer are unchanged.
     #[must_use]
     pub const fn freezes_vertex_upsert_input(&self) -> bool {
         self.frozen_vertex_upsert_input
@@ -590,9 +591,12 @@ impl PreparedGraphWriteProgram {
                         !names.contains(written)
                     }
                     GraphVertexUpsertAction::SetLabel { label, .. } => !key.labels.contains(label),
-                    // Reads the target's own state, which another row's staged
-                    // effects do not change but this row's earlier ones do.
-                    GraphVertexUpsertAction::SetExpression { .. } => false,
+                    // Prepared upsert expressions read only their own target.
+                    // Distinct unchanged keys make those targets disjoint, but
+                    // execution must preserve this row's ON-before-SET staging.
+                    GraphVertexUpsertAction::SetExpression { key: written, .. } => {
+                        !names.contains(written)
+                    }
                 };
                 if !safe {
                     return false;

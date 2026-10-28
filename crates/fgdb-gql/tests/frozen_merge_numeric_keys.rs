@@ -69,6 +69,7 @@ fn query_equal_numeric_keys_never_receive_disjoint_merge_profiles() {
             "MERGE (n:N {id:$id})",
             "MERGE (n:N {id:$id}) SET n.value=7",
             "MERGE (n:N {id:$id}) SET n.id=$id",
+            "MERGE (n:N {id:$id}) SET n.value=COALESCE(n.value,0)+1",
         ] {
             assert!(
                 !program(text, &values).freezes_vertex_upsert_input(),
@@ -118,6 +119,52 @@ fn exact_numeric_distinctions_remain_eligible_without_rounding_or_decimal_coerci
             )
             .freezes_edge_merge_input(),
             "{values:?}"
+        );
+    }
+}
+
+#[test]
+fn distinct_key_upserts_admit_target_local_arithmetic_in_each_clause() {
+    let values = [CanonicalScalar::Int(1), CanonicalScalar::Int(2)];
+    for text in [
+        "MERGE (n:N {id:$id}) SET n.value=COALESCE(n.value,0)+1",
+        "MERGE (n:N {id:$id}) ON CREATE SET n.value=n.id+10",
+        "MERGE (n:N {id:$id}) ON MATCH SET n.value=n.value+1",
+        "MERGE (n:N {id:$id}) ON CREATE SET n.value=10 \
+         ON MATCH SET n.value=n.value+1 SET n.value=n.value*2",
+    ] {
+        let frozen = program(text, &values);
+        assert!(frozen.freezes_vertex_upsert_input(), "{text}");
+        let ordinary = PreparedGraphWriteProgram::prepare(frozen.statements().to_vec()).unwrap();
+        assert!(!ordinary.freezes_vertex_upsert_input(), "{text}");
+        assert_eq!(
+            frozen.canonical_bytes(),
+            ordinary.canonical_bytes(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn arithmetic_cannot_freeze_duplicate_keys_key_changes_or_required_label_actions() {
+    let distinct = [CanonicalScalar::Int(1), CanonicalScalar::Int(2)];
+    let duplicate = [CanonicalScalar::Int(1), CanonicalScalar::Int(1)];
+    assert!(
+        !program(
+            "MERGE (n:N {id:$id}) SET n.value=COALESCE(n.value,0)+1",
+            &duplicate,
+        )
+        .freezes_vertex_upsert_input()
+    );
+    for text in [
+        "MERGE (n:N {id:$id}) SET n.id=n.id+1",
+        "MERGE (n:N {id:$id}) ON CREATE SET n.id=n.id+1",
+        "MERGE (n:N {id:$id}) ON MATCH SET n.id=n.id+1",
+        "MERGE (n:N {id:$id}) SET n:N, n.value=COALESCE(n.value,0)+1",
+    ] {
+        assert!(
+            !program(text, &distinct).freezes_vertex_upsert_input(),
+            "{text}"
         );
     }
 }

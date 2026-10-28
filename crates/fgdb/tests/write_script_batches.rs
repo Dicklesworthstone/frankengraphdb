@@ -680,3 +680,260 @@ fn real_large_batch_shares_exact_source_row_work_and_scratch_allowances() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn arithmetic_merge_batches_match_sequential_plural_and_create_branch_results() {
+    let ((), report) = run_async_under_lab(0xba7c_0041, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let txcx = contexts.txn();
+        let query = contexts.query();
+        let commit = contexts.commit();
+        let script = PreparedGraphWriteScript::prepare(
+            "MERGE (n {p:$key}) ON CREATE SET n.q=$value \
+             ON MATCH SET n.q=n.q+$value SET n.q=n.q*2",
+            R,
+            symbols,
+        )
+        .unwrap();
+        let arguments = [(1, 2), (2, 4), (3, 7)].map(|(key, value)| {
+            GqlParameters::new()
+                .with_int64("key", key)
+                .unwrap()
+                .with_int64("value", value)
+                .unwrap()
+        });
+        let batch = script.bind_parameter_sets(&arguments).unwrap();
+        assert!(batch.program().freezes_vertex_upsert_input());
+        let sequential =
+            PreparedGraphWriteProgram::prepare(batch.program().statements().to_vec()).unwrap();
+        assert!(!sequential.freezes_vertex_upsert_input());
+        let mut expected = None;
+        for program in [&sequential, batch.program()] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            for (id, key, value) in [(10, 1, 3), (11, 1, 30), (20, 2, -5)] {
+                seed.create_vertex(
+                    VId(id),
+                    vec![],
+                    vec![
+                        (P, CanonicalScalar::Int(key)),
+                        (Q, CanonicalScalar::Int(value)),
+                    ],
+                );
+            }
+            db.write(&commit, seed).await.unwrap();
+            let before = db.frontier().unwrap();
+            let mut allocations = 0;
+            let (receipt, completion) = db
+                .execute_graph_write_program_returning_autocommit_governed(
+                    &txcx,
+                    &query,
+                    &commit,
+                    program,
+                    policy(1, 8),
+                    |request| {
+                        allocations += 1;
+                        Ok::<_, ()>(ElementId::Vertex(VId(100 + request.statement as u128)))
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(allocations, 1);
+            assert_eq!(receipt.stats().completed_statements, 3);
+            assert_eq!(receipt.stats().created_vertices, 1);
+            assert_eq!(receipt.stats().mutation_effects, 8);
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            // Both ON branches precede the common SET. The two vertices with
+            // key 1 retain their separate values; neither is reduced to one match.
+            for (id, key, value) in [(10, 1, 10), (11, 1, 64), (20, 2, -2), (102, 3, 14)] {
+                assert_eq!(
+                    db.vertex(VId(id)).unwrap().unwrap().props,
+                    vec![
+                        (P, CanonicalScalar::Int(key).into()),
+                        (Q, CanonicalScalar::Int(value).into()),
+                    ]
+                );
+            }
+            let actual = (db.vertices().unwrap(), receipt.steps().to_vec(), completion);
+            if let Some(expected) = &expected {
+                assert_eq!(&actual, expected);
+            } else {
+                expected = Some(actual);
+            }
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn arithmetic_merge_duplicate_and_key_changing_rows_keep_sequential_visibility() {
+    let ((), report) = run_async_under_lab(0xba7c_0042, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let txcx = contexts.txn();
+        let query = contexts.query();
+        let commit = contexts.commit();
+        for (text, row_keys, final_key) in [
+            ("MERGE (n {p:$key}) SET n.q=COALESCE(n.q,0)+1", [1, 1], 1),
+            (
+                "MERGE (n {p:$key}) SET n.p=n.p+1, n.q=COALESCE(n.q,0)+1",
+                [1, 2],
+                3,
+            ),
+        ] {
+            let script = PreparedGraphWriteScript::prepare(text, R, symbols).unwrap();
+            let arguments =
+                row_keys.map(|key| GqlParameters::new().with_int64("key", key).unwrap());
+            let batch = script.bind_parameter_sets(&arguments).unwrap();
+            assert!(!batch.program().freezes_vertex_upsert_input(), "{text}");
+            let sequential =
+                PreparedGraphWriteProgram::prepare(batch.program().statements().to_vec()).unwrap();
+            let mut expected = None;
+            for program in [&sequential, batch.program()] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(R);
+                seed.create_vertex(
+                    VId(10),
+                    vec![],
+                    vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(10))],
+                );
+                db.write(&commit, seed).await.unwrap();
+                let (receipt, completion) = db
+                    .execute_graph_write_program_returning_autocommit_governed(
+                        &txcx,
+                        &query,
+                        &commit,
+                        program,
+                        policy(0, 4),
+                        |_| Err::<ElementId, _>("both rows must reuse the visible vertex"),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(receipt.stats().completed_statements, 2);
+                assert_eq!(receipt.stats().created_vertices, 0);
+                assert_eq!(
+                    db.vertex(VId(10)).unwrap().unwrap().props,
+                    vec![
+                        (P, CanonicalScalar::Int(final_key).into()),
+                        (Q, CanonicalScalar::Int(12).into()),
+                    ],
+                    "{text}"
+                );
+                let actual = (db.vertices().unwrap(), receipt.steps().to_vec(), completion);
+                if let Some(expected) = &expected {
+                    assert_eq!(&actual, expected, "{text}");
+                } else {
+                    expected = Some(actual);
+                }
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn late_arithmetic_merge_error_restores_entry_effects_and_outer_prefix() {
+    let ((), report) = run_async_under_lab(0xba7c_0043, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let txcx = contexts.txn();
+        let query = contexts.query();
+        let commit = contexts.commit();
+        let script = PreparedGraphWriteScript::prepare(
+            "MERGE (n {p:$key}) ON CREATE SET n.q=$value \
+             ON MATCH SET n.q=n.q+$value SET n.q=n.q/$divisor",
+            R,
+            symbols,
+        )
+        .unwrap();
+        let arguments = [(1, 2, 1), (2, 7, 1), (3, 3, 0)].map(|(key, value, divisor)| {
+            GqlParameters::new()
+                .with_int64("key", key)
+                .unwrap()
+                .with_int64("value", value)
+                .unwrap()
+                .with_int64("divisor", divisor)
+                .unwrap()
+        });
+        let batch = script.bind_parameter_sets(&arguments).unwrap();
+        assert!(batch.program().freezes_vertex_upsert_input());
+        let sequential =
+            PreparedGraphWriteProgram::prepare(batch.program().statements().to_vec()).unwrap();
+        let mut expected_error = None;
+        for program in [&sequential, batch.program()] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            for (id, key, value) in [(1, 1, 5), (3, 3, 9)] {
+                seed.create_vertex(
+                    VId(id),
+                    vec![],
+                    vec![
+                        (P, CanonicalScalar::Int(key)),
+                        (Q, CanonicalScalar::Int(value)),
+                    ],
+                );
+            }
+            db.write(&commit, seed).await.unwrap();
+            let before = db.frontier().unwrap();
+            let mut txn = db.begin(&txcx).unwrap();
+            let mut prefix = WriteBatch::new(R);
+            prefix.create_vertex(
+                VId(999),
+                vec![],
+                vec![(P, CanonicalScalar::Int(99)), (Q, CanonicalScalar::Int(40))],
+            );
+            txn.write(&mut db, prefix).unwrap();
+            let digest = txn.staged_effect_digest().unwrap();
+            let mut allocations = 0;
+            let error = txn
+                .execute_graph_write_program_returning_governed(
+                    &mut db,
+                    &query,
+                    program,
+                    policy(1, 6),
+                    |request| {
+                        allocations += 1;
+                        Ok::<_, &'static str>(ElementId::Vertex(VId(
+                            100 + request.statement as u128
+                        )))
+                    },
+                )
+                .unwrap_err();
+            assert!(matches!(
+                &error,
+                GraphWriteProgramError::VertexUpsert {
+                    statement: 2,
+                    source: fgdb_gql::GqlQueryError::Source(
+                        fgdb_gql::GraphVertexUpsertError::Expression { .. }
+                    ),
+                }
+            ));
+            let message = error.to_string();
+            if let Some(expected) = &expected_error {
+                assert_eq!(&message, expected);
+            } else {
+                expected_error = Some(message);
+            }
+            assert_eq!(allocations, 1);
+            assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+            assert!(txn.vertex(&db, VId(101)).unwrap().is_none());
+            assert!(txn.vertex(&db, VId(999)).unwrap().is_some());
+            for (id, key, value) in [(1, 1, 5), (3, 3, 9)] {
+                assert_eq!(
+                    txn.vertex(&db, VId(id)).unwrap().unwrap().props,
+                    vec![
+                        (P, CanonicalScalar::Int(key).into()),
+                        (Q, CanonicalScalar::Int(value).into()),
+                    ]
+                );
+            }
+            assert_eq!(db.frontier().unwrap(), before);
+            txn.commit(&mut db, &commit).await.unwrap();
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            assert!(db.vertex(VId(999)).unwrap().is_some());
+            assert!(db.vertex(VId(101)).unwrap().is_none());
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
