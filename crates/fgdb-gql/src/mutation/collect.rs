@@ -695,14 +695,28 @@ fn returned_row<E, C, F: FnMut() -> Result<(), C>>(
     Ok(GraphValueRow::from_owned_values(values))
 }
 
-/// A selection source behind a trait object: called at most once.
-type ErasedSource<'a, E, C> = Box<
+type OnceSource<'a, E, C> = Box<
     dyn FnOnce(
             &PreparedGraphPattern<GraphValueRow>,
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>
         + 'a,
 >;
+
+type ReusableSource<'a, E, C> = Box<
+    dyn FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>
+        + 'a,
+>;
+
+/// Erase caller closure types while retaining the legacy once-only contract.
+/// The relation adapter returns a typed refusal if it consumes Once twice.
+pub(super) enum ErasedSource<'a, E, C> {
+    Once(Option<OnceSource<'a, E, C>>),
+    Reusable(ReusableSource<'a, E, C>),
+}
 
 /// `owned` are a chain step's input rows (fgdb-cpny9); `None` for every
 /// other statement. `elements` is the host's element property reader
@@ -730,7 +744,7 @@ pub(super) fn execute<'a, E, C>(
         policy,
         bindings,
         owned,
-        Box::new(source),
+        ErasedSource::Once(Some(Box::new(source))),
         elements,
         field_admission,
         &mut checkpoint,
@@ -738,7 +752,7 @@ pub(super) fn execute<'a, E, C>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn execute_erased<E, C>(
+pub(super) fn execute_erased<E, C>(
     mutation: &PreparedGraphMutation,
     policy: GraphMutationPolicy,
     bindings: Option<&[GraphMutationBinding]>,

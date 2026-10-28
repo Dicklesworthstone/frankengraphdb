@@ -93,7 +93,7 @@ pub(super) fn admit_declared_mutation_fields<Clock: FnMut() -> u64>(
 impl<V: Vfs + Clone> Database<V> {
     /// Execute a mutation and its RETURN projection under one ReadWrite permit.
     ///
-    /// The native collector reads the masked selection once and computes the
+    /// The native collector completes the masked input relation and computes the
     /// post-statement values, DISTINCT, ordering and page before staging. Every
     /// original intent still passes before/after image authorization, including
     /// hidden-field writes and restricted DETACH DELETE. Hidden fields read as
@@ -214,36 +214,38 @@ impl<V: Vfs + Clone> Database<V> {
                     let controls = RefCell::new(&mut execution);
                     let transaction: &WriteTxn = workspace.transaction();
                     let element_failure = RefCell::new(None);
-                    let result = query.execute_governed_reading_with_field_admission(
-                        policy,
-                        |pattern, allowance| {
-                            selection::select_overlay(
+                    let result = query
+                        .execute_governed_over_reading_with_source_and_field_admission(
+                            None,
+                            policy,
+                            |pattern, allowance| {
+                                selection::select_overlay(
+                                    transaction,
+                                    self,
+                                    query_cx,
+                                    pattern,
+                                    verified.predicates(),
+                                    allowance,
+                                    &controls,
+                                )
+                            },
+                            scoped_element_reader(
                                 transaction,
                                 self,
                                 query_cx,
-                                pattern,
                                 verified.predicates(),
-                                allowance,
+                                &element_failure,
                                 &controls,
-                            )
-                        },
-                        scoped_element_reader(
-                            transaction,
-                            self,
-                            query_cx,
-                            verified.predicates(),
-                            &element_failure,
-                            &controls,
-                        ),
-                        |key| admit_computed_property(query_cx, key, &controls),
-                        || {
-                            if let Some(error) = element_failure.borrow_mut().take() {
-                                return Err(WriteTxnError::Interrupted(error));
-                            }
-                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                            controls.borrow_mut().checkpoint()
-                        },
-                    );
+                            ),
+                            |key| admit_computed_property(query_cx, key, &controls),
+                            || {
+                                if let Some(error) = element_failure.borrow_mut().take() {
+                                    return Err(WriteTxnError::Interrupted(error));
+                                }
+                                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                                controls.borrow_mut().checkpoint()
+                            },
+                        );
                     match element_failure.into_inner() {
                         Some(error) => Err(GqlQueryError::Interrupted(WriteTxnError::Interrupted(
                             error,
@@ -492,7 +494,8 @@ fn select_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
         // before any await. No RefCell or query result escapes.
         let execution = RefCell::new(&mut *execution);
         let element_failure = RefCell::new(None);
-        let result = mutation.execute_governed_reading_with_field_admission(
+        let result = mutation.execute_governed_over_reading_with_source_and_field_admission(
+            None,
             policy,
             |pattern, allowance| {
                 selection::select_overlay(

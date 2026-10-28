@@ -963,6 +963,34 @@ impl PreparedGraphSet {
         }
     }
 
+    /// Visit every real graph leaf before execution, including conditional
+    /// Apply bodies. This is admission, not source execution: a body is visited
+    /// once here even when its owning Apply executes it for many outer rows.
+    pub(crate) fn admit_patterns<E>(
+        &self,
+        visitor: &mut impl FnMut(&PreparedGraphPattern<GraphValueRow>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        match &self.node {
+            SetNode::Pattern(pattern) => visitor(pattern),
+            SetNode::Aggregate(summary) => summary.input().admit_patterns(visitor),
+            SetNode::Scope(input)
+            | SetNode::Project { input, .. }
+            | SetNode::Unwind { input, .. }
+            | SetNode::Filter { input, .. } => input.admit_patterns(visitor),
+            SetNode::Apply { left, right, .. }
+            | SetNode::CrossJoin { left, right }
+            | SetNode::Join { left, right, .. }
+            | SetNode::Binary { left, right, .. } => {
+                left.admit_patterns(visitor)?;
+                right.admit_patterns(visitor)
+            }
+            SetNode::Values
+            | SetNode::Arguments
+            | SetNode::ProcedureCall(_)
+            | SetNode::Owned { .. } => Ok(()),
+        }
+    }
+
     fn preserves_row_order(&self) -> bool {
         match &self.node {
             SetNode::Values

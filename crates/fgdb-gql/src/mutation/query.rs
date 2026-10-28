@@ -294,7 +294,14 @@ impl PreparedGraphMutationQuery {
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<E>, C>> {
-        self.execute_with(owned, policy, source, None, None, checkpoint)
+        self.execute_with(
+            owned,
+            policy,
+            collect::ErasedSource::Once(Some(Box::new(source))),
+            None,
+            None,
+            checkpoint,
+        )
     }
 
     /// [`Self::execute_governed`] with the host's element property reader
@@ -330,7 +337,7 @@ impl PreparedGraphMutationQuery {
         self.execute_with(
             owned,
             policy,
-            source,
+            collect::ErasedSource::Once(Some(Box::new(source))),
             Some(&mut crate::set_ops::projection::HostElements(&mut elements)),
             None,
             checkpoint,
@@ -372,7 +379,58 @@ impl PreparedGraphMutationQuery {
         self.execute_with(
             owned,
             policy,
-            source,
+            collect::ErasedSource::Once(Some(Box::new(source))),
+            Some(&mut crate::set_ops::projection::HostElements(&mut elements)),
+            Some(&mut admit),
+            checkpoint,
+        )
+    }
+
+    /// Execute multipart selection and RETURN through one atomic collector.
+    /// The reusable graph callback and element reader share the same pinned
+    /// overlay and authority. All leaves, correlated bodies, assignments and
+    /// final projection spend the same statement allowance. No proposed write
+    /// or result row escapes when a later source or RETURN expression fails.
+    pub fn execute_governed_over_reading_with_source<E, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GraphMutationPolicy,
+        source: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut elements: impl crate::GraphElementReader<E>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<E>, C>> {
+        self.execute_with(
+            owned,
+            policy,
+            collect::ErasedSource::Reusable(Box::new(source)),
+            Some(&mut crate::set_ops::projection::HostElements(&mut elements)),
+            None,
+            checkpoint,
+        )
+    }
+
+    /// Returning multipart mutation with actual-key admission for computed
+    /// maps. A denied assigned or removed key cannot reach final bindings,
+    /// grouping, projection or a WITH tail, including equal-to-current writes.
+    pub fn execute_governed_over_reading_with_source_and_field_admission<E, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GraphMutationPolicy,
+        source: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut elements: impl crate::GraphElementReader<E>,
+        mut admit: impl FnMut(PropertyKeyId) -> Result<(), GqlQueryError<E, C>>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<E>, C>> {
+        self.execute_with(
+            owned,
+            policy,
+            collect::ErasedSource::Reusable(Box::new(source)),
             Some(&mut crate::set_ops::projection::HostElements(&mut elements)),
             Some(&mut admit),
             checkpoint,
@@ -383,10 +441,7 @@ impl PreparedGraphMutationQuery {
         &self,
         owned: Option<Vec<GraphValueRow>>,
         policy: GraphMutationPolicy,
-        source: impl FnOnce(
-            &PreparedGraphPattern<GraphValueRow>,
-            GqlQueryPolicy,
-        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        source: collect::ErasedSource<'_, E, C>,
         mut elements: Option<&mut super::collect::MutationElementReader<'_, E>>,
         field_admission: Option<&mut super::collect::MutationFieldAdmission<'_, E, C>>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
@@ -401,7 +456,7 @@ impl PreparedGraphMutationQuery {
             policy.query.evaluator.max_work_units,
             policy.query.evaluator.max_scratch_entries,
         );
-        let (mutation, value) = collect::execute(
+        let (mutation, value) = collect::execute_erased(
             &self.mutation,
             selection,
             Some(&self.bindings),

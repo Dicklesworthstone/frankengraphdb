@@ -567,9 +567,9 @@ impl<V: Vfs + Clone> Database<V> {
                             GraphMutationQueryError::Mutation(GraphMutationError::Source(error)),
                         ))
                     })?;
-                if let Some(pattern) = mutation.selection() {
-                    admit_pattern(pattern, scope).map_err(source)?;
-                }
+                mutation
+                    .admit_patterns(|pattern| admit_pattern(pattern, scope))
+                    .map_err(source)?;
                 continue;
             }
             let insertion = match statement {
@@ -877,7 +877,7 @@ impl<V: Vfs + Clone> Database<V> {
                                         allowance.max_mutation_effects,
                                     );
                                     let proposal = mutation
-                                        .execute_governed_over_reading_with_field_admission(
+                                        .execute_governed_over_reading_with_source_and_field_admission(
                                             rows.take(),
                                             policy,
                                             |pattern, budget| graph.pattern(pattern, budget),
@@ -907,7 +907,7 @@ impl<V: Vfs + Clone> Database<V> {
                                         allowance.max_mutation_effects,
                                     );
                                     let proposal = query
-                                        .execute_governed_over_reading_with_field_admission(
+                                        .execute_governed_over_reading_with_source_and_field_admission(
                                             rows.take(),
                                             policy,
                                             |pattern, budget| graph.pattern(pattern, budget),

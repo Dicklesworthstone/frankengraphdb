@@ -129,6 +129,156 @@ async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx, hidden: bool) {
 }
 
 #[test]
+fn multipart_mutation_masks_each_source_and_skips_a_missing_targets_rhs() {
+    use fgdb_gql::{
+        GraphIntegerBinary, GraphIntegerExpression, GraphIntegerOp, GraphMutationAction,
+        GraphMutationBinding, GraphMutationValue, GraphSetProjection, GraphSetQuantifier,
+        GraphSetValue, PreparedGraphMutationQuery, PreparedGraphSetText,
+    };
+    lab(0xa980, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        for (id, label, value) in [(1, L, 10), (2, HIDDEN, 20), (3, HIDDEN, 30)] {
+            seed.create_vertex(
+                VId(id),
+                vec![label],
+                vec![
+                    (P, CanonicalScalar::Int(value)),
+                    (SECRET, CanonicalScalar::Int(70 + value)),
+                ],
+            );
+        }
+        for (id, target) in [(11, 2), (12, 2), (13, 3)] {
+            seed.add_edge(EId(id), VId(1), VId(target), vec![]);
+        }
+        db.write(&commit, seed).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let before_vertices = db.vertices().unwrap();
+        let before_edges = db.edges().unwrap();
+        let pinned = db.read_session().unwrap();
+        let input = PreparedGraphSetText::prepare(
+            "MATCH (a:Visible) WITH a OPTIONAL MATCH (a)-[:R]->(b) WITH a,b \
+             CALL { MATCH (v:Visible) RETURN count(*) AS visible } \
+             RETURN a,b,visible,a.q AS old",
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let division = GraphIntegerExpression::prepare(&[
+            GraphIntegerOp::Literal(Some(1)),
+            GraphIntegerOp::Literal(Some(0)),
+            GraphIntegerOp::Binary(GraphIntegerBinary::Divide),
+        ])
+        .unwrap();
+        let mutation = PreparedGraphMutation::prepare_relation(
+            input,
+            R,
+            vec![
+                GraphMutationAction::SetProperty {
+                    target: 0,
+                    key: Q,
+                    value: GraphMutationValue::Column(2),
+                },
+                GraphMutationAction::SetProperty {
+                    target: 1,
+                    key: Q,
+                    value: GraphMutationValue::Expression(division),
+                },
+            ],
+        )
+        .unwrap();
+        let returning = PreparedGraphMutationQuery::prepare(
+            mutation.clone(),
+            vec![
+                GraphMutationBinding::Property {
+                    target: 0,
+                    key: Q,
+                    current: 3,
+                },
+                GraphMutationBinding::Input(1),
+            ],
+            vec![
+                GraphSetProjection::new("updated", GraphSetValue::Column(0)),
+                GraphSetProjection::new("optional", GraphSetValue::Column(1)),
+            ],
+            GraphSetQuantifier::All,
+        )
+        .unwrap();
+        let authority = authority();
+        let token = authority.issue_at(&grant(), NOW).unwrap();
+        let mut exhausted = policy();
+        exhausted.max_effects = 0;
+        db.execute_graph_mutation_authorized(
+            &txn,
+            &query,
+            &commit,
+            &authority,
+            &token,
+            "main",
+            &mutation,
+            exhausted,
+            || NOW,
+        )
+        .await
+        .expect_err("a late effect limit cannot publish a partial mutation");
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert_eq!(db.vertices().unwrap(), before_vertices);
+        assert_eq!(db.edges().unwrap(), before_edges);
+        let (stats, rows, completion) = db
+            .execute_graph_mutation_query_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                &returning,
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        // Hidden optional witnesses cannot turn the absent target into a
+        // division-by-zero error or a write. The independent CALL sees only
+        // the visible node, and the final row observes its new property.
+        assert_eq!(
+            (
+                stats.selection.result_rows,
+                stats.target_vertices,
+                stats.effects
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!(rows.value.len(), 1);
+        assert_eq!(
+            rows.value[0].values()[0],
+            fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(1))
+        );
+        assert!(rows.value[0].values()[1].is_null());
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: db.frontier().unwrap()
+            }
+        );
+        let changed = db.vertex(VId(1)).unwrap().unwrap();
+        assert!(changed.props.contains(&(Q, CanonicalScalar::Int(1).into())));
+        for id in [VId(2), VId(3)] {
+            assert_eq!(
+                db.vertex(id).unwrap().as_ref(),
+                before_vertices.iter().find(|row| row.vid == id)
+            );
+        }
+        assert_eq!(db.edges().unwrap(), before_edges);
+        assert_eq!(pinned.vertices().unwrap(), before_vertices);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
 fn masked_simultaneous_vertex_and_edge_updates_deduplicate_and_reopen() {
     lab(0xa951, |contexts| async move {
         let commit = contexts.commit();

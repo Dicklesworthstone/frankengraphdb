@@ -88,6 +88,126 @@ fn staged_prefix() -> WriteBatch {
 }
 
 #[test]
+fn multipart_mutation_reads_the_whole_staged_relation_and_publishes_once() {
+    use fgdb_gql::{
+        GraphMutationAction, GraphMutationBinding, GraphMutationValue, GraphSetProjection,
+        GraphSetQuantifier, GraphSetValue, GraphSymbol, GraphSymbolKind,
+        PreparedGraphMutationQuery, PreparedGraphSetText,
+    };
+    let ((), report) = run_async_under_lab(0x6a7e_0021, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let basis = seed(&mut db, &commit).await;
+        let before = logical(&db.vertices().unwrap());
+        let pinned = db.read_session().unwrap();
+        let input = PreparedGraphSetText::prepare(
+            "MATCH (a) WHERE a.p = 10 OR a.p = 30 WITH a \
+             OPTIONAL MATCH (a)-[:R]->(b) WITH b \
+             MATCH (c) WHERE c.p = 99 RETURN b,c.p AS value,b.q AS old",
+            |kind: GraphSymbolKind, name: &str| match (kind, name) {
+                (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+                (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+                (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
+                _ => None,
+            },
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let mutation = PreparedGraphMutation::prepare_relation(
+            input,
+            R,
+            vec![GraphMutationAction::SetProperty {
+                target: 0,
+                key: Q,
+                value: GraphMutationValue::Column(1),
+            }],
+        )
+        .unwrap();
+        let returning = PreparedGraphMutationQuery::prepare(
+            mutation.clone(),
+            vec![
+                GraphMutationBinding::Input(0),
+                GraphMutationBinding::Property {
+                    target: 0,
+                    key: Q,
+                    current: 2,
+                },
+            ],
+            vec![
+                GraphSetProjection::new("target", GraphSetValue::Column(0)),
+                GraphSetProjection::new("written", GraphSetValue::Column(1)),
+            ],
+            GraphSetQuantifier::All,
+        )
+        .unwrap();
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut prior = staged_prefix();
+        prior.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(25)));
+        txn.write(&mut db, prior).unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        let mut exhausted = policy();
+        exhausted.max_effects = 0;
+        txn.execute_graph_mutation_governed(&mut db, &query, &mutation, exhausted)
+            .expect_err("a refused multipart proposal cannot alter prior staged work");
+        assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        let (stats, rows) = txn
+            .execute_graph_mutation_query_governed(&mut db, &query, &returning, policy())
+            .unwrap();
+        assert_eq!(
+            (
+                stats.selection.result_rows,
+                stats.target_vertices,
+                stats.effects
+            ),
+            (3, 1, 1)
+        );
+        assert_eq!(rows.value.len(), 3);
+        let mut present = 0;
+        let mut absent = 0;
+        for row in &rows.value {
+            if row.values()[0].as_vertex() == Some(VId(2)) {
+                present += 1;
+                assert_eq!(
+                    row.values()[1],
+                    fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(99))
+                );
+            } else {
+                absent += 1;
+                assert!(row.values()[0].is_null());
+                assert!(row.values()[1].is_null());
+            }
+        }
+        assert_eq!((present, absent), (2, 1));
+        assert_eq!(logical(&db.vertices().unwrap()), before);
+        assert_eq!(logical(&pinned.vertices().unwrap()), before);
+        assert_eq!(db.frontier().unwrap(), basis);
+        let staged = txn.vertices(&db).unwrap();
+        let changed = staged.iter().find(|row| row.vid == VId(2)).unwrap();
+        assert_eq!(value(changed, P), Some(&CanonicalScalar::Int(25).into()));
+        assert_eq!(value(changed, Q), Some(&CanonicalScalar::Int(99).into()));
+        let expected = logical(&staged);
+        txn.finish(&mut db, &commit).await.unwrap();
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(logical(&db.vertices().unwrap()), expected);
+        assert_eq!(logical(&pinned.vertices().unwrap()), before);
+        assert_eq!(db.edges().unwrap().len(), 3);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn simultaneous_updates_commit_as_one_batch_and_pinned_history_survives_reopen() {
     let ((), report) = run_async_under_lab(0x6a7e_0001, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

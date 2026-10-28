@@ -409,7 +409,7 @@ impl WriteTxn {
         TxnGqlError<fgdb_gql::GraphMutationError<WriteTxnError>>,
     > {
         let failure = std::cell::RefCell::new(None);
-        let result = mutation.execute_governed_over_reading(
+        let result = mutation.execute_governed_over_reading_with_source(
             owned,
             policy,
             |pattern, budget| self.execute_graph_pattern_governed(database, cx, pattern, budget),
@@ -437,7 +437,7 @@ impl WriteTxn {
         TxnGqlError<fgdb_gql::GraphMutationQueryError<WriteTxnError>>,
     > {
         let failure = std::cell::RefCell::new(None);
-        let result = query.execute_governed_over_reading(
+        let result = query.execute_governed_over_reading_with_source(
             owned,
             policy,
             |pattern, budget| self.execute_graph_pattern_governed(database, cx, pattern, budget),

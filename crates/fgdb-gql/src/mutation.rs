@@ -192,6 +192,8 @@ impl core::fmt::Debug for GraphMutationAction {
 pub enum GraphMutationBuildError {
     RequiresSingleGraphSource,
     RelationalInput(crate::GraphSetBuildError),
+    /// Real graph leaves must agree on symbol identities and their names.
+    IncompatibleSourceCatalog,
     TooManyActions {
         limit: usize,
         observed: usize,
@@ -226,6 +228,9 @@ impl core::fmt::Display for GraphMutationBuildError {
                 f.write_str("a mutation requires exactly one graph source")
             }
             Self::RelationalInput(error) => error.fmt(f),
+            Self::IncompatibleSourceCatalog => {
+                f.write_str("mutation sources disagree on reverse symbol names")
+            }
             Self::TooManyActions { limit, observed } => {
                 write!(f, "mutation has {observed} actions, limit {limit}")
             }
@@ -267,6 +272,9 @@ pub enum GraphMutationError<E> {
     Source(E),
     /// A relational selection failed before any assignment was proposed.
     InputRelation(crate::GraphSetExecutionError<E>),
+    /// A legacy once-only source was asked to execute another graph leaf or
+    /// another occurrence of an Apply body. No mutation batch is released.
+    ReusableSourceRequired,
     InvalidSourceStatistics,
     InputSchema {
         row: usize,
@@ -337,6 +345,9 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphMutationError<E> {
         match self {
             Self::Source(error) => error.fmt(f),
             Self::InputRelation(error) => write!(f, "mutation input relation: {error}"),
+            Self::ReusableSourceRequired => {
+                f.write_str("mutation input requires a reusable graph source")
+            }
             Self::InvalidSourceStatistics => {
                 f.write_str("mutation source returned inconsistent statistics")
             }
@@ -502,11 +513,11 @@ impl GraphMutationBatch {
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphMutation {
-    /// The graph source. `None` only for a chain step over the previous
-    /// write's rows (fgdb-cpny9), whose input relation reads its one owned
-    /// leaf and never the graph.
+    /// The sole eager graph source when there is one. A multipart relation,
+    /// conditional body-only input or owned/unit relation need not have one.
     selection: Option<PreparedGraphPattern<GraphValueRow>>,
     input_relation: Option<crate::PreparedGraphSet>,
+    reverse_catalog: Option<std::sync::Arc<crate::ReverseSymbolCatalog>>,
     columns: Vec<GraphSetColumnType>,
     relation: RelationId,
     actions: Vec<GraphMutationAction>,
@@ -601,17 +612,15 @@ impl PreparedGraphMutation {
             .actions
             .iter()
             .map(|action| match action {
-                GraphMutationAction::ClearProperties { keep, .. } => self
-                    .selection
-                    .as_ref()
-                    .and_then(|selection| selection.plan().reverse_catalog.as_ref())
-                    .map_or(0, |catalog| {
+                GraphMutationAction::ClearProperties { keep, .. } => {
+                    self.reverse_catalog().map_or(0, |catalog| {
                         catalog
                             .properties
                             .keys()
                             .filter(|key| !keep.contains(key))
                             .count() as u128
-                    }),
+                    })
+                }
                 GraphMutationAction::SetProperties { catalog, .. } => {
                     catalog.properties.len() as u128
                 }
@@ -665,6 +674,12 @@ impl PreparedGraphMutation {
                 .map(GraphSetColumnType::from)
                 .collect(),
             (None, None) => return Err(GraphMutationBuildError::RequiresSingleGraphSource),
+        };
+        let mut reverse_catalog = match &input_relation {
+            Some(input) => relational::input_catalog(input)?,
+            None => selection
+                .as_ref()
+                .and_then(|selection| selection.plan().reverse_catalog.clone()),
         };
         let deleting = actions.first().is_some_and(GraphMutationAction::deletes);
         let detaching = actions.first().is_some_and(GraphMutationAction::detaches);
@@ -736,13 +751,10 @@ impl PreparedGraphMutation {
                 // The frozen property map, read by name through the reverse
                 // catalog: one name per property identity, or a removal could
                 // land on the wrong key.
-                let injective = selection
-                    .as_ref()
-                    .and_then(|selection| selection.plan().reverse_catalog.as_ref())
-                    .is_some_and(|catalog| {
-                        let mut names = std::collections::BTreeSet::new();
-                        catalog.properties.values().all(|name| names.insert(name))
-                    });
+                let injective = reverse_catalog.as_ref().is_some_and(|catalog| {
+                    let mut names = std::collections::BTreeSet::new();
+                    catalog.properties.values().all(|name| names.insert(name))
+                });
                 if columns.get(*current) != Some(&GraphSetColumnType::Any) || !injective {
                     return Err(GraphMutationBuildError::ValueColumn {
                         action: at,
@@ -817,27 +829,35 @@ impl PreparedGraphMutation {
                 return Err(GraphMutationBuildError::MixedDeleteModes);
             }
         }
+        // A computed map owns a trusted property catalog even when its input
+        // leaf never read an assigned key. Preserve those names for final
+        // metadata bindings, while refusing disagreements with any real leaf.
+        // Only properties participate: they are the action's encoded catalog.
+        for action in &actions {
+            if let GraphMutationAction::SetProperties { catalog, .. } = action {
+                relational::merge_property_catalog(&mut reverse_catalog, catalog)?;
+            }
+        }
         Ok(Self {
             selection,
             input_relation,
+            reverse_catalog,
             columns,
             relation,
             actions,
         })
     }
     #[must_use]
-    /// Actual graph source for the trusted reader. Actions address the completed
-    /// input_relation schema when present, not this leaf's private columns.
-    /// `None` for a chain step over the previous write's rows.
+    /// Sole eager graph source, when present. Actions address the completed
+    /// input_relation schema, not this leaf's private columns. Use
+    /// [`Self::admit_patterns`] to admit every graph source of a multipart input.
     pub fn selection(&self) -> Option<&PreparedGraphPattern<GraphValueRow>> {
         self.selection.as_ref()
     }
-    /// The selection's label and property names, when it carries them. A
-    /// chain step over owned rows has none.
+    /// Compatible names from every real graph leaf and the explicit property
+    /// catalogs of computed-map actions. Owned/unit input invents no names.
     pub(crate) fn reverse_catalog(&self) -> Option<&crate::graph_text::ReverseSymbolCatalog> {
-        self.selection
-            .as_ref()
-            .and_then(|selection| selection.plan().reverse_catalog.as_deref())
+        self.reverse_catalog.as_deref()
     }
     #[must_use]
     pub const fn relation(&self) -> RelationId {
@@ -979,13 +999,71 @@ impl PreparedGraphMutation {
         .map(|(batch, _)| batch)
     }
 
+    /// Execute a complete multipart input with a reusable frozen graph reader.
+    /// Each leaf and each correlated Apply occurrence receives the remaining
+    /// allowance from the same statement meter. `elements` shares the source's
+    /// pinned overlay and authority; all rows finish before assignments begin.
+    /// Owned rows feed the relation's owned leaf when present. A failure of any
+    /// source, expression, checkpoint or quota releases no mutation batch.
+    pub fn execute_governed_over_reading_with_source<E, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GraphMutationPolicy,
+        source: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut elements: impl crate::GraphElementReader<E>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
+        collect::execute_erased(
+            self,
+            policy,
+            None,
+            owned,
+            collect::ErasedSource::Reusable(Box::new(source)),
+            Some(&mut crate::set_ops::projection::HostElements(&mut elements)),
+            None,
+            &mut checkpoint,
+        )
+        .map(|(batch, _)| batch)
+    }
+
+    /// Reusable multipart selection with admission of every computed-map
+    /// field. Assigned and replacement-removed keys are admitted before any
+    /// proposal, deduplication or RETURN observes them, including no-op writes.
+    pub fn execute_governed_over_reading_with_source_and_field_admission<E, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GraphMutationPolicy,
+        source: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut elements: impl crate::GraphElementReader<E>,
+        mut admit: impl FnMut(PropertyKeyId) -> Result<(), GqlQueryError<E, C>>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
+        collect::execute_erased(
+            self,
+            policy,
+            None,
+            owned,
+            collect::ErasedSource::Reusable(Box::new(source)),
+            Some(&mut crate::set_ops::projection::HostElements(&mut elements)),
+            Some(&mut admit),
+            &mut checkpoint,
+        )
+        .map(|(batch, _)| batch)
+    }
+
     /// Application transcript, not a durable format or authorization permit.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = b"fgdb:graph-mutation:v1\0".to_vec();
         bytes.extend_from_slice(&self.relation.0.to_be_bytes());
-        // A chain step over owned rows has no graph source: its length is
-        // u64::MAX, which no encoded selection reaches.
+        // Inputs without a sole eager graph source use u64::MAX, which no
+        // encoded selection reaches. Their full relation follows below.
         match &self.selection {
             Some(selection) => {
                 let input = selection.canonical_bytes();
