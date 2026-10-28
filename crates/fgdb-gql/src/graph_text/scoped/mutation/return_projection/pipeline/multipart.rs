@@ -1569,15 +1569,16 @@ impl<'a> Parser<'a> {
                 .as_mut()
                 .expect("the source owns its incoming row")
                 .width = expanded_width;
-            for reads in [
+            for (guard, _) in [
                 &mut self.existence_reads,
                 &mut self.comprehension_reads,
                 &mut self.grouped_comprehensions,
                 &mut self.projected_sources,
-            ] {
-                if let Some((guard, _)) = reads {
-                    *guard = expanded_width;
-                }
+            ]
+            .into_iter()
+            .flatten()
+            {
+                *guard = expanded_width;
             }
             self.existence_reads
                 .get_or_insert_with(|| (expanded_width, Vec::new()))

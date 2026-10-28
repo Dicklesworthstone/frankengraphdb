@@ -114,7 +114,7 @@ pub(crate) enum MutationActionTemplate {
 
 #[derive(Clone)]
 pub(crate) enum MutationTextInput {
-    Pattern(PreparedGraphText),
+    Pattern(Box<PreparedGraphText>),
     /// A complete native read relation. Its first leaf may be the previous
     /// write's owned rows; no graph pattern is invented for that input.
     Relation {

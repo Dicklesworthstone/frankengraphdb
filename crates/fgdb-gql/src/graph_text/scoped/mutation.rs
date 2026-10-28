@@ -1309,7 +1309,7 @@ impl PreparedGraphMutationText {
         };
         Ok((
             Self {
-                input: MutationTextInput::Pattern(selection),
+                input: MutationTextInput::Pattern(Box::new(selection)),
                 relation,
                 actions,
                 optional_root,
@@ -1349,7 +1349,7 @@ impl PreparedGraphMutationText {
     /// authorize a frozen profile by borrowing one of its graph leaves.
     fn source_pattern(&self) -> Option<&PreparedGraphText> {
         match &self.input {
-            MutationTextInput::Pattern(selection) => Some(selection),
+            MutationTextInput::Pattern(selection) => Some(selection.as_ref()),
             MutationTextInput::Relation { input, .. } if input.continuations.is_empty() => {
                 input.first.selection.as_ref()
             }

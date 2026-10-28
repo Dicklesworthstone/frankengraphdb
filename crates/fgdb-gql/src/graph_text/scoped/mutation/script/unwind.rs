@@ -271,48 +271,6 @@ fn mutating_tail(tokens: &[(Token<'_>, usize)]) -> bool {
     false
 }
 
-#[cfg(test)]
-mod computed_map_routing_tests {
-    use super::GraphUnwindWriteText;
-
-    #[test]
-    fn routes_computed_maps_with_native_tokens_and_preserves_other_write_families() {
-        for tail in [
-            "MATCH (n) SET n += row.props",
-            "MATCH (n) SET n=row.props",
-            "MATCH (n) SET n.q=1,n += row.props",
-            "MATCH (n) SET n += CASE WHEN row.p=1 THEN row.props ELSE {} END",
-            "MATCH (n) SET // assignment follows\n n += row.props",
-        ] {
-            assert!(
-                GraphUnwindWriteText::requires_computed_map_input(&format!(
-                    "UNWIND $rows AS row {tail}"
-                ))
-                .unwrap(),
-                "{tail}",
-            );
-        }
-        for tail in [
-            "MATCH (n) SET n.q=row.q",
-            "MATCH (n) SET n += {q:row.q}",
-            "MATCH (n) SET n={q:row.q}",
-            "MATCH (n) SET n.q='SET n += row.props'",
-            "MATCH (n) SET n.q=row.props.SET // SET n += row.props\n",
-            "MERGE (n {p:row.p}) SET n += row.props",
-            "MATCH (n) MERGE (m {p:row.p}) SET m += row.props",
-            "MATCH (n) CREATE (m {p:row.p}) SET m += row.props",
-        ] {
-            assert!(
-                !GraphUnwindWriteText::requires_computed_map_input(&format!(
-                    "UNWIND $rows AS row {tail}"
-                ))
-                .unwrap(),
-                "{tail}",
-            );
-        }
-    }
-}
-
 impl GraphUnwindWriteText {
     /// Whether native ingress must keep a computed whole-map MATCH update as
     /// one relational statement. Row expansion cannot preserve heterogeneous
@@ -712,5 +670,47 @@ impl GraphUnwindWriteText {
             external_parameters: external_parameters.into_boxed_slice(),
             fields: fields.into_boxed_slice(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod computed_map_routing_tests {
+    use super::GraphUnwindWriteText;
+
+    #[test]
+    fn routes_computed_maps_with_native_tokens_and_preserves_other_write_families() {
+        for tail in [
+            "MATCH (n) SET n += row.props",
+            "MATCH (n) SET n=row.props",
+            "MATCH (n) SET n.q=1,n += row.props",
+            "MATCH (n) SET n += CASE WHEN row.p=1 THEN row.props ELSE {} END",
+            "MATCH (n) SET // assignment follows\n n += row.props",
+        ] {
+            assert!(
+                GraphUnwindWriteText::requires_computed_map_input(&format!(
+                    "UNWIND $rows AS row {tail}"
+                ))
+                .unwrap(),
+                "{tail}",
+            );
+        }
+        for tail in [
+            "MATCH (n) SET n.q=row.q",
+            "MATCH (n) SET n += {q:row.q}",
+            "MATCH (n) SET n={q:row.q}",
+            "MATCH (n) SET n.q='SET n += row.props'",
+            "MATCH (n) SET n.q=row.props.SET // SET n += row.props\n",
+            "MERGE (n {p:row.p}) SET n += row.props",
+            "MATCH (n) MERGE (m {p:row.p}) SET m += row.props",
+            "MATCH (n) CREATE (m {p:row.p}) SET m += row.props",
+        ] {
+            assert!(
+                !GraphUnwindWriteText::requires_computed_map_input(&format!(
+                    "UNWIND $rows AS row {tail}"
+                ))
+                .unwrap(),
+                "{tail}",
+            );
+        }
     }
 }
