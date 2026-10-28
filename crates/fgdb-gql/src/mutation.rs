@@ -567,21 +567,21 @@ impl PreparedGraphMutation {
         vertex && edge
     }
 
-    /// Every assignment writes a bound constant or row-independent scalar
-    /// expression, changes a label, or removes a field. The bytecode's own
-    /// dependency inventory proves it reads no selection column or element
-    /// local. An expression can still fail; normal execution must evaluate it
-    /// and preserve its original row's error and budget charges.
+    /// Every assignment writes a bound constant or row-independent scalar or
+    /// collection expression, changes a label, or removes a field. Bytecode
+    /// dependencies and lexical value scopes prove that it reads no selection
+    /// column or graph state. An expression can still fail; normal execution
+    /// must evaluate it and preserve its original row's error and budget charges.
     pub(crate) fn writes_only_constants(&self) -> bool {
         self.actions.iter().all(|action| match action {
             GraphMutationAction::SetProperty { value, .. } => match value {
                 GraphMutationValue::Literal(_) => true,
-                GraphMutationValue::Expression(expression)
-                | GraphMutationValue::Composite(crate::GraphSetValue::Integer(expression)) => {
+                GraphMutationValue::Expression(expression) => {
                     expression.referenced_columns().next().is_none()
                         && expression.referenced_locals().next().is_none()
                 }
-                GraphMutationValue::Column(_) | GraphMutationValue::Composite(_) => false,
+                GraphMutationValue::Composite(value) => value.is_input_independent(),
+                GraphMutationValue::Column(_) => false,
             },
             GraphMutationAction::RemoveProperty { .. } | GraphMutationAction::SetLabel { .. } => {
                 true

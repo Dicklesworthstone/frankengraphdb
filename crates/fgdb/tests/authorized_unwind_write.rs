@@ -1169,6 +1169,112 @@ mod frozen_updates {
     }
 
     #[test]
+    fn closed_collection_rekeys_keep_authorization_and_hidden_data_independence() {
+        lab(0xa611_0105, |contexts| async move {
+            let text = "UNWIND $rows AS row MATCH (n {p:row.p}) \
+                SET n.p=row.q, n.q=[x IN [row.p,row.q] | x + 10]";
+            let frozen = program(text, &[(1, 2), (2, 1), (1, 3)]);
+            let mut receipts = Vec::new();
+            for hidden in [false, true] {
+                let (receipt, graph) = execute(&contexts, &frozen, grant(), hidden).await.unwrap();
+                assert_eq!(receipt.stats().completed_statements, 3);
+                assert_eq!(receipt.stats().mutation_effects, 6);
+                for (id, before, after) in [(1, 1, 3), (2, 2, 1)] {
+                    let vertex = graph.iter().find(|vertex| vertex.vid == VId(id)).unwrap();
+                    let list = GraphValue::List(
+                        vec![
+                            GraphValue::Scalar(CanonicalScalar::Int(before + 10)),
+                            GraphValue::Scalar(CanonicalScalar::Int(after + 10)),
+                        ]
+                        .into_boxed_slice(),
+                    )
+                    .to_property_value()
+                    .unwrap();
+                    assert_eq!(vertex.props[0].1, CanonicalScalar::Int(after).into());
+                    assert_eq!(vertex.props[1].1, list);
+                    if hidden {
+                        assert!(
+                            vertex
+                                .props
+                                .contains(&(SECRET, CanonicalScalar::Int(7).into()))
+                        );
+                    }
+                }
+                for vertex in graph
+                    .iter()
+                    .filter(|vertex| vertex.labels.contains(&HIDDEN))
+                {
+                    assert_eq!(vertex.props[1].1, CanonicalScalar::Int(777).into());
+                }
+                receipts.push(receipt);
+            }
+            assert_eq!(
+                receipts[0], receipts[1],
+                "hidden data changes neither rows nor metering"
+            );
+
+            let forbidden = program(
+                "UNWIND $rows AS row MATCH (n {p:row.p}) SET n.p=row.q, n.secret=[row.q]",
+                &[(1, 2), (2, 1)],
+            );
+            assert!(
+                authorization(
+                    &execute(&contexts, &forbidden, grant(), true)
+                        .await
+                        .unwrap_err()
+                )
+                .is_some()
+            );
+
+            let fails_late = program(
+                "UNWIND $rows AS row MATCH (n {p:row.p}) SET n.p=row.q, n.q=[10 / row.q]",
+                &[(1, 2), (2, 0)],
+            );
+            let error = execute(&contexts, &fails_late, grant(), true)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    ProgramFault::Program(GraphMutationProgramError::Statement {
+                        statement: 1,
+                        ..
+                    })
+                ),
+                "the second row retains its expression failure: {error:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn disjoint_collection_updates_use_bounded_candidate_work() {
+        lab(0xa611_0106, |contexts| async move {
+            let mut counters = Vec::new();
+            for count in [8, 16, 32] {
+                let values: Vec<_> = (1..=count).map(|id| (id, id + 100)).collect();
+                let program = program(
+                    "UNWIND $rows AS row MATCH (n {p:row.p}) SET n.q=[row.p,row.q]",
+                    &values,
+                );
+                let (receipt, actual) = execute(&contexts, &program, grant(), false).await.unwrap();
+                let (ordinary, expected) =
+                    execute(&contexts, &sequential(&program), grant(), false)
+                        .await
+                        .unwrap();
+                assert_eq!(actual, expected);
+                assert_keyed_selection_receipts(&receipt, &ordinary, count as u64);
+                counters.push(receipt.stats().evaluator.work_units);
+            }
+            assert!(
+                counters
+                    .windows(2)
+                    .all(|pair| pair[1] > pair[0] && pair[1] <= pair[0] * 3),
+                "doubling a disjoint collection batch must stay below quadratic work: {counters:?}"
+            );
+        });
+    }
+
+    #[test]
     fn disjoint_update_signed_work_is_linear_and_hidden_data_independent() {
         lab(0xa611_0102, |contexts| async move {
             let mut thresholds = Vec::new();

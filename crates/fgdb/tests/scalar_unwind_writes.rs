@@ -280,6 +280,159 @@ fn rekey_and_label_feedback_freeze_while_cascades_refuse_and_disjoint_updates_co
 }
 
 #[test]
+fn collection_rekeys_freeze_entry_matches_preserve_errors_and_survive_reopen() {
+    let ((), report) =
+        run_async_under_lab(0x7363_6141, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let (cx, commit, txcx) = (contexts.query(), contexts.commit(), contexts.txn());
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let mut seed = WriteBatch::new(R);
+            for id in 1..=2 {
+                seed.create_vertex(
+                    VId(id),
+                    vec![ENTITY],
+                    vec![
+                        (ID, CanonicalScalar::Int(id as i64)),
+                        (P, CanonicalScalar::Int(0)),
+                    ],
+                );
+            }
+            for id in 1..=2 {
+                seed.add_edge(
+                    EId(id),
+                    VId(id),
+                    VId(3 - id),
+                    vec![
+                        (ID, CanonicalScalar::Int(id as i64)),
+                        (P, CanonicalScalar::Int(0)),
+                    ],
+                );
+            }
+            db.write(&commit, seed).await.unwrap();
+            let input = args(vec![
+                object(vec![("a", int(1)), ("b", int(2))]),
+                object(vec![("a", int(2)), ("b", int(1))]),
+                object(vec![("a", int(1)), ("b", int(3))]),
+            ]);
+            let expected = |a, b| {
+                list(vec![int(a + 10), int(b + 10)])
+                    .to_property_value()
+                    .unwrap()
+            };
+            let mut txn = db.begin(&txcx).unwrap();
+            txn.savepoint(&db, "entry").unwrap();
+            let entry = txn.staged_effect_digest().unwrap();
+            let vertex_statement = "UNWIND $rows AS row MATCH (n:Entity {id:row.a}) \
+            SET n.id=row.b, n.p=[x IN [row.a,row.b] | x + 10]";
+            for (statement, vertices, edges) in [
+                (vertex_statement, true, false),
+                (
+                    "UNWIND $rows AS row MATCH (a)-[e:R {id:row.a}]->(b) \
+             SET e.id=row.b, e.p=[x IN [row.a,row.b] | x + 10]",
+                    false,
+                    true,
+                ),
+                (
+                    "UNWIND $rows AS row MATCH (a:Entity {id:row.a})-[e:R]->(b) \
+             SET a.id=row.b, e.p=[x IN [row.a,row.b] | x + 10]",
+                    true,
+                    true,
+                ),
+            ] {
+                staged(
+                    txn.query_write(
+                        &mut db,
+                        &cx,
+                        statement,
+                        &input,
+                        symbols,
+                        R,
+                        policy(6, 0),
+                        no_allocation,
+                    )
+                    .unwrap_or_else(|error| panic!("{statement}: {error:?}")),
+                    3,
+                );
+                // The third row still addresses original id=1, not the element
+                // that acquired that key in the second row. Last input wins only
+                // on that original identity; the swapped pair never collapses.
+                for (id, before, after) in [(1, 1, 3), (2, 2, 1)] {
+                    let vertex = txn.vertex(&db, VId(id)).unwrap().unwrap();
+                    assert_eq!(
+                        vertex.props[0].1,
+                        CanonicalScalar::Int(if vertices { after } else { before }).into()
+                    );
+                    if vertices && !edges {
+                        assert_eq!(vertex.props[1].1, expected(before, after));
+                    }
+                    let edge = txn.edge(&db, EId(id)).unwrap().unwrap();
+                    if edges {
+                        assert_eq!(edge.props[1].1, expected(before, after));
+                        assert_eq!(
+                            edge.props[0].1,
+                            CanonicalScalar::Int(if vertices { before } else { after }).into()
+                        );
+                    }
+                }
+                txn.rollback_to_savepoint(&db, "entry").unwrap();
+                assert_eq!(txn.staged_effect_digest().unwrap(), entry);
+            }
+
+            let failed = args(vec![
+                object(vec![("a", int(1)), ("b", int(2))]),
+                object(vec![("a", int(2)), ("b", int(0))]),
+            ]);
+            assert!(txn.query_write(
+            &mut db, &cx,
+            "UNWIND $rows AS row MATCH (n:Entity {id:row.a}) SET n.id=row.b, n.p=[10 / row.b]",
+            &failed, symbols, R, policy(4, 0), no_allocation,
+        ).is_err());
+            assert_eq!(
+                txn.staged_effect_digest().unwrap(),
+                entry,
+                "a later collection expression failure stages nothing"
+            );
+            assert_eq!(db.frontier().unwrap(), CommitSeq(1));
+
+            staged(
+                txn.query_write(
+                    &mut db,
+                    &cx,
+                    vertex_statement,
+                    &input,
+                    symbols,
+                    R,
+                    policy(6, 0),
+                    no_allocation,
+                )
+                .unwrap(),
+                3,
+            );
+            txn.finish(&mut db, &commit).await.unwrap();
+            drop(db);
+            let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+                .await
+                .unwrap();
+            for (id, before, after) in [(1, 1, 3), (2, 2, 1)] {
+                assert_eq!(
+                    db.vertex(VId(id)).unwrap().unwrap().props,
+                    [
+                        (ID, CanonicalScalar::Int(after).into()),
+                        (P, expected(before, after)),
+                    ]
+                );
+            }
+            assert_eq!(db.frontier().unwrap(), CommitSeq(2));
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn relationship_rekey_batches_match_entry_edge_oracle_and_preserve_rollback_and_reopen() {
     let ((), report) = run_async_under_lab(0x7363_6131, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

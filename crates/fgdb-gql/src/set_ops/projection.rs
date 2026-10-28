@@ -535,6 +535,84 @@ impl GraphListQuantifier {
     }
 }
 impl GraphSetValue {
+    /// A closed value depends only on bound literals and its own lexical
+    /// locals, never the input row, graph state, or a row-ordinal draw. Frozen
+    /// write batches may evaluate such values against their entry workspace:
+    /// preceding writes cannot change them. This does not evaluate or fold
+    /// anything; lazy errors and ordinary work/scratch charges stay at runtime.
+    pub(crate) fn is_input_independent(&self) -> bool {
+        fn independent(value: &GraphSetValue, locals: usize) -> bool {
+            let same_scope = |value: &GraphSetValue| independent(value, locals);
+            match value {
+                GraphSetValue::Column(_)
+                | GraphSetValue::ElementMetadata { .. }
+                | GraphSetValue::Random { .. } => false,
+                GraphSetValue::Literal(_) | GraphSetValue::TypedNull(_) => true,
+                GraphSetValue::Value(value) => value.is_stored_value(),
+                GraphSetValue::Local(offset) => *offset < locals,
+                GraphSetValue::Integer(expression) => {
+                    expression.referenced_columns().next().is_none()
+                        && expression.referenced_locals().all(|offset| offset < locals)
+                }
+                GraphSetValue::List(values) => values.iter().all(same_scope),
+                GraphSetValue::Index { list, index } => same_scope(list) && same_scope(index),
+                GraphSetValue::Size(value)
+                | GraphSetValue::Keys(value)
+                | GraphSetValue::MapGet { map: value, .. }
+                | GraphSetValue::Function {
+                    argument: value, ..
+                } => same_scope(value),
+                GraphSetValue::Temporal {
+                    function, argument, ..
+                } => *function != GraphTemporalFunction::Clock && same_scope(argument),
+                GraphSetValue::In { value, list } => same_scope(value) && same_scope(list),
+                GraphSetValue::Equal { left, right }
+                | GraphSetValue::Ordered { left, right, .. } => {
+                    same_scope(left) && same_scope(right)
+                }
+                GraphSetValue::Comprehension { list, filter, map } => {
+                    same_scope(list)
+                        && filter
+                            .as_deref()
+                            .is_none_or(|value| independent(value, locals + 1))
+                        && map
+                            .as_deref()
+                            .is_none_or(|value| independent(value, locals + 1))
+                }
+                GraphSetValue::Quantifier {
+                    list, predicate, ..
+                } => same_scope(list) && independent(predicate, locals + 1),
+                GraphSetValue::Slice { list, from, to } => {
+                    same_scope(list)
+                        && from.as_deref().is_none_or(same_scope)
+                        && to.as_deref().is_none_or(same_scope)
+                }
+                GraphSetValue::Range { start, end, step } => {
+                    same_scope(start) && same_scope(end) && step.as_deref().is_none_or(same_scope)
+                }
+                GraphSetValue::Reduce { init, list, expr } => {
+                    same_scope(init) && same_scope(list) && independent(expr, locals + 2)
+                }
+                GraphSetValue::MapLiteral { values, guard, .. } => {
+                    values.iter().all(same_scope) && guard.as_deref().is_none_or(same_scope)
+                }
+                GraphSetValue::MapOverlay { base, values, .. } => {
+                    same_scope(base) && values.iter().all(same_scope)
+                }
+                GraphSetValue::Let { values, body } => {
+                    values.iter().all(same_scope) && independent(body, locals + values.len())
+                }
+                GraphSetValue::Case { arms, otherwise } => {
+                    arms.iter()
+                        .all(|(condition, value)| same_scope(condition) && same_scope(value))
+                        && otherwise.as_deref().is_none_or(same_scope)
+                }
+            }
+        }
+
+        independent(self, 0)
+    }
+
     // A conservative preparation-time effect check. All children, including
     // lazy branches, participate; no value is evaluated and no source is read.
     // Typed admission already bounds this tree. The exhaustive match keeps new

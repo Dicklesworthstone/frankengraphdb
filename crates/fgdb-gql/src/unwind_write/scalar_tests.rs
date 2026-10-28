@@ -133,6 +133,94 @@ fn duplicate_vertex_and_relationship_feedback_cannot_freeze_current_property_rea
 }
 
 #[test]
+fn frozen_updates_admit_closed_collection_expressions_but_keep_graph_reads_live() {
+    let input = rows(vec![
+        object(vec![("id", int(1)), ("p", int(2))]),
+        object(vec![("id", int(2)), ("p", int(3))]),
+    ]);
+    for expression in [
+        "[row.id, row.p]",
+        "reverse([row.id, row.p])",
+        "[x IN [row.id, row.p] WHERE x > 0 | x + 1]",
+        "[x IN [row.id] | [y IN [row.p] | x + y]]",
+        "[reduce(s = 0, x IN [row.id, row.p] | s + x)]",
+        "[{a: row.id, b: row.p}.a, row.p]",
+        "CASE WHEN row.id > 0 THEN [row.p] ELSE [1 / 0] END",
+        "range(row.id, row.p)",
+        "[row.id, row.p][0..1]",
+    ] {
+        for (pattern, actions, vertex, edge) in [
+            ("(n:Entity {id:row.id})", "n.id=row.p, n.p", true, false),
+            ("(a)-[e:R {id:row.id}]->(b)", "e.id=row.p, e.p", false, true),
+            (
+                "(a:Entity {id:row.id})-[e:R]->(b)",
+                "a.id=row.p, e.p",
+                false,
+                false,
+            ),
+        ] {
+            let text = format!("UNWIND $rows AS row MATCH {pattern} SET {actions}={expression}");
+            let bound = GraphUnwindWriteText::parse(&text)
+                .unwrap()
+                .bind(&input, RelationId(1), symbols)
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            assert!(bound.program().freezes_field_update_input(), "{text}");
+            assert_eq!(
+                bound.program().freezes_vertex_update_input(),
+                vertex,
+                "{text}"
+            );
+            assert_eq!(bound.program().freezes_edge_update_input(), edge, "{text}");
+            assert_eq!(
+                bound.program().freezes_mixed_update_input(),
+                !vertex && !edge,
+                "{text}"
+            );
+        }
+    }
+
+    for expression in [
+        "[n.p, row.p]",
+        "[x IN [row.id] | n.p + x]",
+        "[x IN [n] | x.p]",
+        "[reduce(s = 0, x IN [row.id] | s + n.p)]",
+        "CASE WHEN row.id > 0 THEN [row.p] ELSE [n.p] END",
+        "[rand()]",
+    ] {
+        let feedback = format!(
+            "UNWIND $rows AS row MATCH (n:Entity {{id:row.id}}) SET n.id=row.p, n.p={expression}"
+        );
+        let result =
+            GraphUnwindWriteText::parse(&feedback)
+                .unwrap()
+                .bind(&input, RelationId(1), symbols);
+        assert!(
+            matches!(
+                result,
+                Err(GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 })
+            ),
+            "{feedback}: {result:?}"
+        );
+    }
+
+    // The same collections are batchable without feedback; a collection that
+    // reads the current target must stay on the ordinary sequential path.
+    for (expression, frozen) in [("[row.p, row.id]", true), ("[n.p, row.p]", false)] {
+        let text =
+            format!("UNWIND $rows AS row MATCH (n:Entity {{id:row.id}}) SET n.p={expression}");
+        let bound = GraphUnwindWriteText::parse(&text)
+            .unwrap()
+            .bind(&input, RelationId(1), symbols)
+            .unwrap();
+        assert_eq!(
+            bound.program().freezes_vertex_update_input(),
+            frozen,
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn mixed_field_updates_freeze_feedback_and_preserve_their_own_provenance() {
     let input = rows(vec![
         object(vec![("id", int(1)), ("p", int(2))]),
