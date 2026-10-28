@@ -1452,21 +1452,21 @@ fn one_row_blocks_are_read_once_and_the_source_budget_is_cumulative() {
             store
                 .open_buffered_root(&cx, id, pool.clone(), bounds)
                 .await,
-            Err(BufferedReadError::Store(
-                crate::store::StoreError::ObjectTooLarge {
+            Err(BufferedReadError::Store(error))
+                if matches!(error.as_ref(), crate::store::StoreError::ObjectTooLarge {
                     limit: 16_384,
                     observed: 16_385,
-                }
-            ))
+                })
         ));
         assert_eq!(pool.used(), 0);
         bounds.max_root_bytes = root_bytes_len - 1;
         assert!(matches!(
             store.open_buffered_root(&cx, id, pool.clone(), bounds).await,
-            Err(BufferedReadError::Store(crate::store::StoreError::ObjectTooLarge {
-                limit,
-                observed,
-            })) if (limit, observed) == ((root_bytes_len - 1) as u64, root_bytes_len as u64)
+            Err(BufferedReadError::Store(error))
+                if matches!(error.as_ref(), crate::store::StoreError::ObjectTooLarge {
+                    limit,
+                    observed,
+                } if (*limit, *observed) == ((root_bytes_len - 1) as u64, root_bytes_len as u64))
         ));
         assert_eq!(pool.used(), 0);
         bounds.max_root_bytes = root_bytes_len;

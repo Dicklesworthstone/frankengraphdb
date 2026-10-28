@@ -1293,7 +1293,7 @@ fn every_refusal_keeps_each_item_exactly_once() {
                 Ok(())
             }
         });
-        assert_eq!(result, Err(SealedError::NonCanonical));
+        assert!(matches!(result, Err(SealedError::NonCanonical)));
         assert_eq!(calls, stop);
         values.sort_unstable();
         assert_eq!(values, expected);
@@ -1353,10 +1353,10 @@ fn real_pending_futures_preserve_results_and_exact_refusals() {
                 yields: 0,
                 stop: Some(stop),
             };
-            assert_eq!(
+            assert!(matches!(
                 drive_sort_future(construction::sort(&mut values, &mut control)),
                 Err(SealedError::NonCanonical)
-            );
+            ));
             assert_eq!(control.calls, stop);
             values.sort_unstable();
             assert_eq!(values, expected);
