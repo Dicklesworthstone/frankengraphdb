@@ -62,14 +62,17 @@ impl PreparedGraphWriteChainText {
         let multipart_mutation =
             match PreparedGraphInsertText::multipart_source_kind(statement, &[]) {
                 Ok(kind) => kind == Some(ReadWriteKind::Mutation),
-                // Composition accepts one statement; the script owner admits
-                // separators with the same lexer. A classifier must leave an
-                // actual separator to that owner, including after RETURN.
+                // Composition accepts one statement. Probe only the first
+                // native-token-framed statement; the scan below still decides
+                // whether that statement is a chain before its separator.
                 Err(source)
                     if source.kind == GraphPatternTextErrorKind::InvalidToken
                         && statement.as_bytes().get(source.offset) == Some(&b';') =>
                 {
-                    return Ok(false);
+                    PreparedGraphInsertText::multipart_source_kind(
+                        &statement[..source.offset],
+                        &[],
+                    )? == Some(ReadWriteKind::Mutation)
                 }
                 Err(source) => return Err(source.into()),
             };
