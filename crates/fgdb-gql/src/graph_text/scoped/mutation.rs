@@ -50,6 +50,9 @@ enum Operand {
 pub(super) enum ReadWriteKind {
     Insert,
     Mutation,
+    /// A plain relationship MERGE between row vertices after a multipart
+    /// read (`MATCH (n) WITH n MATCH (y) MERGE (n)-[:R]->(y)`).
+    EdgeMerge,
 }
 enum ActionKind<'a> {
     Property {

@@ -665,6 +665,12 @@ pub(crate) enum EdgeMergeTextInput {
         statement: String,
         input: Box<crate::set_text::BoundSetTextInput>,
     },
+    /// A complete multipart read (`MATCH ... WITH ... MATCH ... MERGE`):
+    /// its relation's vertex or open columns are the endpoints.
+    Multipart {
+        statement: String,
+        input: Box<crate::set_text::multipart::BoundReadInput>,
+    },
 }
 
 /// Native `MATCH ... MERGE (a)-[r:R {k: v}]->(b)` over already-bound

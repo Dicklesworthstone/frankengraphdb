@@ -3402,3 +3402,82 @@ fn labels_spelled_like_subqueries_take_property_maps_after_with() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// A relationship MERGE after a multipart read (`MATCH ... WITH ... MATCH
+/// ... MERGE (a)-[:R]->(b)`) reads that read's complete relation, as CREATE
+/// and SET do there. It refused at the second MATCH ("expected CREATE, SET,
+/// REMOVE, DELETE or a relationship MERGE after MATCH ... WITH"). Endpoints
+/// may be carried vertices or open columns (an UNWIND member); a NULL from
+/// an OPTIONAL MATCH refuses the statement with no effect.
+#[test]
+fn relationship_merge_reads_a_multipart_read() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4b4, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let write = async |db: &mut Database<MemVfs>, text: &str| {
+            let (mut vertices, mut edges) = reserve(db, &cx, 4, 4);
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => vertices.pop_front().unwrap(),
+                        GraphInsertRequest::Edge { .. } => edges.pop_front().unwrap(),
+                    })
+                },
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        let merged = |db: &Database<MemVfs>| {
+            let mut pairs: Vec<_> = db
+                .edges()
+                .unwrap()
+                .into_iter()
+                .filter(|edge| edge.entry.relation == T)
+                .map(|edge| (edge.entry.src, edge.entry.dst))
+                .collect();
+            pairs.sort();
+            pairs
+        };
+        for (text, expected) in [
+            (
+                "MATCH (n:Source) WITH n MATCH (m:Source {p:20}) MERGE (n)-[:T]->(m)",
+                vec![(VId(10), VId(20)), (VId(20), VId(20))],
+            ),
+            (
+                "MATCH (n:Source) WITH collect(n) AS ns UNWIND ns AS x \
+                 MATCH (y:Source {p:10}) MERGE (y)-[:T]->(x)",
+                vec![(VId(10), VId(10)), (VId(10), VId(20))],
+            ),
+            (
+                "MATCH (y:Source {p:10}) WITH y UNWIND [10, 20] AS k \
+                 MATCH (n:Source {p:k}) MERGE (n)<-[:T]-(y)",
+                vec![(VId(10), VId(10)), (VId(10), VId(20))],
+            ),
+        ] {
+            let mut db = fresh(&commit, true).await;
+            // A second run matches the first run's relationships.
+            for _ in 0..2 {
+                write(&mut db, text).await.unwrap();
+                assert_eq!(merged(&db), expected, "{text}");
+            }
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+        let mut db = fresh(&commit, true).await;
+        let before = (db.frontier().unwrap(), db.edges().unwrap());
+        let text =
+            "MATCH (n:Source {p:10}) WITH n OPTIONAL MATCH (n)-[:T]->(m) MERGE (n)-[:T]->(m)";
+        assert!(write(&mut db, text).await.is_err(), "{text}");
+        assert_eq!((db.frontier().unwrap(), db.edges().unwrap()), before);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

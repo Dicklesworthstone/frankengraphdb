@@ -206,6 +206,7 @@ fn classify(
         return Ok(match kind {
             ReadWriteKind::Insert => Kind::Insert,
             ReadWriteKind::Mutation => Kind::Mutation,
+            ReadWriteKind::EdgeMerge => Kind::EdgeMerge,
         });
     }
     let mut parser = Parser::new_with_parameter_types(text, declarations)?;

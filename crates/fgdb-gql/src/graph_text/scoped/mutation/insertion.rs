@@ -1024,7 +1024,24 @@ impl PreparedGraphInsertText {
                         ) && punct(index + 2, b'=')
                             && punct(index + 3, b'('));
                     if name.eq_ignore_ascii_case("MERGE") && pattern {
-                        return Ok(None);
+                        // A relationship MERGE between row vertices over a
+                        // multipart read takes that read's relation as its
+                        // endpoint rows; a vertex MERGE keeps its own owners.
+                        let start = if punct(index + 1, b'(') {
+                            index + 1
+                        } else {
+                            index + 3
+                        };
+                        let relationship = matches!(
+                            tokens.get(start + 1).map(|token| token.kind),
+                            Some(TextKind::Word(_))
+                        ) && punct(start + 2, b')')
+                            && (punct(start + 3, b'-') || punct(start + 3, b'<'));
+                        let multipart =
+                            crate::set_text::multipart::has_continuation(&tokens[..index])
+                                || word(0, "OPTIONAL")
+                                || word(0, "CALL");
+                        return Ok((relationship && multipart).then_some(ReadWriteKind::EdgeMerge));
                     }
                     let kind = if (name.eq_ignore_ascii_case("CREATE")
                         || name.eq_ignore_ascii_case("INSERT"))

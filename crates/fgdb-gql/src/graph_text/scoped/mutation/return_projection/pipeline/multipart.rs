@@ -2416,7 +2416,7 @@ impl<'a> Parser<'a> {
             if !parser.at_multipart_write() {
                 return Err(expected(
                     parser.current.at,
-                    "CREATE, INSERT, SET, REMOVE or DELETE after the complete read",
+                    "CREATE, INSERT, MERGE, SET, REMOVE or DELETE after the complete read",
                 ));
             }
             parser.write_prefix = false;
@@ -2466,11 +2466,14 @@ impl<'a> Parser<'a> {
     }
 
     fn at_multipart_write(&self) -> bool {
+        // A relationship MERGE between row vertices ends a read as the other
+        // writes do (ReadWriteKind::EdgeMerge); a vertex MERGE does not.
         self.write_prefix
             && !self.call_body
-            && ["CREATE", "INSERT", "SET", "REMOVE", "DELETE", "DETACH"]
+            && (["CREATE", "INSERT", "SET", "REMOVE", "DELETE", "DETACH"]
                 .iter()
                 .any(|write| self.is_word(write))
+                || self.at_relationship_merge().unwrap_or(false))
     }
 
     fn multipart_parts(
