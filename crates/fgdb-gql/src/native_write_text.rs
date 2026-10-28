@@ -250,21 +250,31 @@ fn restored(
     error
 }
 
-/// A function resolver keeps no reverse catalog, and the one its text yields
-/// probes only labels and relations, so a computed whole-map write (`SET n
-/// += row`) could name none of its argument maps' keys (UnmappedProperty).
-/// This resolves every key a list or map argument holds, once, as a property
-/// through the resolver, beside that text catalog. Every other method is the
-/// resolver's own.
-struct ArgumentCatalog<R> {
+/// A resolver for a statement prepared with its arguments in hand. A function
+/// resolver keeps no reverse catalog, and the one its text yields probes only
+/// labels and relations, so a computed whole-map write (`SET n += row` over
+/// rows with differing keys) could name none of its argument maps' keys
+/// (UnmappedProperty), whichever write compiler takes the statement. This
+/// resolves every key a list or map argument holds, once, as a property
+/// through the resolver, beside that text catalog. A resolver with its own
+/// reverse catalog, or arguments holding no map, pass through unchanged, and
+/// every other method is the resolver's own.
+pub struct ArgumentCatalog<R> {
     inner: R,
-    catalog: crate::ReverseSymbolCatalog,
+    catalog: Option<crate::ReverseSymbolCatalog>,
 }
 
 impl<R: crate::GraphSymbolResolver> ArgumentCatalog<R> {
-    fn new(mut inner: R, text: &str, arguments: &GqlParameters) -> Self {
-        let mut catalog = crate::ReverseSymbolCatalog::from_resolver(&mut inner, text);
+    /// `inner`, naming the keys of the map values `arguments` hold.
+    pub fn new(mut inner: R, text: &str, arguments: &GqlParameters) -> Self {
+        if inner.reverse_catalog().is_some() {
+            return Self {
+                inner,
+                catalog: None,
+            };
+        }
         let mut named = std::collections::BTreeSet::new();
+        let mut properties = Vec::new();
         let mut pending: Vec<&crate::algebra::GraphValue> = arguments.collection_values().collect();
         while let Some(value) = pending.pop() {
             if let Some(values) = value.as_list() {
@@ -275,12 +285,19 @@ impl<R: crate::GraphSymbolResolver> ArgumentCatalog<R> {
                         && let Some(GraphSymbol::Property(id)) =
                             inner.resolve_symbol(GraphSymbolKind::Property, key)
                     {
-                        catalog.insert_property(id, &**key);
+                        properties.push((id, &**key));
                     }
                 }
                 pending.extend(values);
             }
         }
+        let catalog = (!named.is_empty()).then(|| {
+            let mut catalog = crate::ReverseSymbolCatalog::from_resolver(&mut inner, text);
+            for (id, key) in properties {
+                catalog.insert_property(id, key);
+            }
+            catalog
+        });
         Self { inner, catalog }
     }
 }
@@ -295,7 +312,9 @@ impl<R: crate::GraphSymbolResolver> crate::GraphSymbolResolver for ArgumentCatal
     }
 
     fn reverse_catalog(&self) -> Option<crate::ReverseSymbolCatalog> {
-        Some(self.catalog.clone())
+        self.catalog
+            .clone()
+            .or_else(|| self.inner.reverse_catalog())
     }
 
     fn reverse_label(&self, id: fgdb_delta_types::LabelId) -> Option<String> {

@@ -572,6 +572,9 @@ impl<V: Vfs + Clone> Database<V> {
                 (lowered.text(), derived)
             });
         let lowered = lowered.as_ref().map(|(lowered, _)| lowered);
+        // A computed whole-map write names its argument maps' keys even
+        // through a function resolver, whichever compiler takes it.
+        let resolver = fgdb_gql::ArgumentCatalog::new(resolver, text, params);
         self.query_write_text(
             txcx, cx, commit_cx, text, params, resolver, relation, budget, allocate,
         )
@@ -793,6 +796,8 @@ impl WriteTxn {
                 (lowered.text(), derived)
             });
         let lowered = lowered.as_ref().map(|(lowered, _)| lowered);
+        // As Database::query_write: argument map keys name computed maps.
+        let resolver = fgdb_gql::ArgumentCatalog::new(resolver, text, params);
         self.query_write_text(
             database, cx, text, params, resolver, relation, budget, allocate,
         )

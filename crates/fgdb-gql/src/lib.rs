@@ -215,7 +215,7 @@ pub use mutation_text::{
     PreparedGraphEdgeMergeQueryText, PreparedGraphEdgeMergeText, PreparedGraphMutationQueryText,
     PreparedGraphMutationText, PreparedGraphVertexMergeText,
 };
-pub use native_write_text::{BoundNativeGraphWrite, NativeGraphWriteBindError};
+pub use native_write_text::{ArgumentCatalog, BoundNativeGraphWrite, NativeGraphWriteBindError};
 pub use overlay_evidence::GqlOverlayResultCertificate;
 pub use parameters::{
     GqlListParameter, GqlMapParameter, GqlParameterError, GqlParameterSpec, GqlParameterType,
