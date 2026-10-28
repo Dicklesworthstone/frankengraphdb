@@ -361,18 +361,26 @@ fn introsort<T, K: Ord, C>(
             return heap_sort(values, key, checkpoint);
         }
         depth -= 1;
-        // The median of the first, middle and last keys becomes the pivot,
-        // parked in the last slot. Lomuto partition: keys below it move left.
-        poll(checkpoint)?;
+        // Use a deterministic median of three medians on large partitions.
+        // This keeps reverse, organ-pipe and skewed graph-ID runs away from
+        // repeatedly unbalanced partitions without entropy or extra storage.
+        // Every sampled comparison remains interruptible.
         let (middle, last) = (n / 2, n - 1);
-        if key(&values[middle]) < key(&values[0]) {
-            values.swap(0, middle);
-        }
-        if key(&values[last]) < key(&values[0]) {
-            values.swap(0, last);
-        }
-        if key(&values[last]) < key(&values[middle]) {
-            values.swap(middle, last);
+        if n >= 128 {
+            let step = n / 8;
+            order_three(values, key, 0, step, 2 * step, checkpoint)?;
+            order_three(
+                values,
+                key,
+                middle - step,
+                middle,
+                middle + step,
+                checkpoint,
+            )?;
+            order_three(values, key, last - 2 * step, last - step, last, checkpoint)?;
+            order_three(values, key, step, middle, last - step, checkpoint)?;
+        } else {
+            order_three(values, key, 0, middle, last, checkpoint)?;
         }
         values.swap(middle, last);
         let pivot = key(&values[last]);
@@ -396,6 +404,29 @@ fn introsort<T, K: Ord, C>(
             values = left;
         }
     }
+}
+
+fn order_three<T, K: Ord, C>(
+    values: &mut [T],
+    key: &impl Fn(&T) -> K,
+    first: usize,
+    middle: usize,
+    last: usize,
+    checkpoint: &mut impl FnMut() -> Result<(), C>,
+) -> Result<(), ProjectionBuildError<C>> {
+    poll(checkpoint)?;
+    if key(&values[middle]) < key(&values[first]) {
+        values.swap(first, middle);
+    }
+    poll(checkpoint)?;
+    if key(&values[last]) < key(&values[first]) {
+        values.swap(first, last);
+    }
+    poll(checkpoint)?;
+    if key(&values[last]) < key(&values[middle]) {
+        values.swap(middle, last);
+    }
+    Ok(())
 }
 
 /// The depth-limit fallback: O(n log n) in place for any key order.
