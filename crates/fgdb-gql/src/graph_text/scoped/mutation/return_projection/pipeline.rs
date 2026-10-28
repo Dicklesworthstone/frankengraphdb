@@ -423,6 +423,27 @@ fn carries_own(head: &GraphProjectionHead<'_>, offset: usize, name: &str) -> boo
     })
 }
 
+/// The outputs that carry a MATCH element whole under another name
+/// (`WITH n AS x`). The head's graph scope has no binding by that name, so a
+/// pattern over the alias gathered there would bind it afresh, uncorrelated
+/// with the row's element.
+fn renamed_elements<'a>(head: &GraphProjectionHead<'a>, offset: usize) -> Vec<&'a str> {
+    (head.outputs.iter())
+        .filter(|(output, value)| {
+            matches!(value, ReadValueTemplate::Column(column)
+            if column.checked_sub(offset)
+                .and_then(|input| head.inputs.get(input))
+                .is_some_and(|input| {
+                    input.variable.text != output.text
+                        && input.property.is_none()
+                        && input.path.is_none()
+                        && input.collect.is_none()
+                }))
+        })
+        .map(|(output, _)| output.text)
+        .collect()
+}
+
 /// A hidden output of the boundary under the next free private name.
 fn hidden_boundary_value<'a>(
     head: &mut GraphProjectionHead<'a>,
@@ -710,13 +731,19 @@ impl<'a> Parser<'a> {
         let mut comprehensions = Vec::new();
         let mut skip_until = 0_usize;
         let mut locals: Vec<&'a str> = Vec::new();
-        let uncarried: Vec<&'a str> = (self.visible_graph_bindings())
+        let mut uncarried: Vec<&'a str> = (self.visible_graph_bindings())
             .map(|binding| binding.text)
             .filter(|name| !carries_own(head, offset, name))
             .collect();
-        let shadowed: Vec<&'a str> = (uncarried.iter().copied())
+        let mut shadowed: Vec<&'a str> = (uncarried.iter().copied())
             .filter(|name| head.outputs.iter().any(|(output, _)| output.text == *name))
             .collect();
+        // An element carried under another name (`WITH n AS x`) is no binding
+        // of this graph scope: a pattern over `x` stays with its row's
+        // identity-correlated owner, as a shadowing alias does.
+        let renamed = renamed_elements(head, offset);
+        uncarried.extend(&renamed);
+        shadowed.extend(&renamed);
         let mut lexer = self.lexer.clone();
         // The three tokens before the current one, oldest first.
         let mut window: [Option<TokenKind<'a>>; 3] = [None; 3];
@@ -1273,8 +1300,12 @@ impl<'a> Parser<'a> {
                 .any(|variable| variable.text == name.text)
                 || self.syntax.visible_edge(name.text).is_some()
         };
-        let read = self.syntax.scopes[scope]
-            .find_name(&|name| outer(name) && !carries_own(head, offset, name.text));
+        // A renamed element's new alias (`WITH n AS x`) is no binding of this
+        // graph scope either: the predicate would bind it afresh.
+        let renamed = renamed_elements(head, offset);
+        let read = self.syntax.scopes[scope].find_name(&|name| {
+            (outer(name) && !carries_own(head, offset, name.text)) || renamed.contains(&name.text)
+        });
         match read {
             Some(name) => Err(expected(
                 name.at.max(at),
@@ -1477,6 +1508,21 @@ impl<'a> Parser<'a> {
             && self.existence_reads.as_ref().is_some_and(|(_, spans)| {
                 spans.iter().any(|&(start, _, _)| start == self.current.at)
             })
+    }
+
+    /// The first operand of a row WHERE or a list predicate is a Boolean
+    /// position for a bare pattern the gather hoisted there
+    /// (`[x IN xs WHERE (x)-[:R]->() | x.p]`, `ANY(x IN xs WHERE (x)-->())`).
+    /// Only a recorded span marks it, so `(x) - -1` stays arithmetic.
+    #[inline(never)]
+    pub(in crate::graph_text) fn mark_hoisted_boolean_operand(&mut self) {
+        if self.is_punct(b'(')
+            && self.existence_reads.as_ref().is_some_and(|(_, spans)| {
+                spans.iter().any(|&(start, _, _)| start == self.current.at)
+            })
+        {
+            self.boolean_operand_at = self.current.at;
+        }
     }
 
     /// The hidden list column of the pattern comprehension that starts at the

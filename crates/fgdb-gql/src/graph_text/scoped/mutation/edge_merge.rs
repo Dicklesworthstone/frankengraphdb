@@ -1327,11 +1327,17 @@ impl<'a> ReturnLeaves<'a> for EdgeMergeLeaves<'_, 'a> {
         parser: &mut Parser<'a>,
         source: Name<'a>,
     ) -> Result<Option<usize>, GraphPatternTextError> {
-        if self.row.is_none()
-            && matches!(
-                parser.insertion_match_kind(source.text),
-                Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
-            )
+        // A named MERGE path is never an element: its own leaf refuses
+        // labels(p)/type(p) before catalog access (fgdb-at06q).
+        if self
+            .returning
+            .path
+            .is_some_and(|(path, _)| path.text == source.text)
+            || (self.row.is_none()
+                && matches!(
+                    parser.insertion_match_kind(source.text),
+                    Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+                ))
         {
             self.leaf(parser)
         } else {
@@ -1568,11 +1574,20 @@ impl<'a> Parser<'a> {
             tail: None,
             output: Vec::new(),
         };
+        // Length's scalar dispatcher must see a named MERGE path as a path
+        // value, as for a named CREATE path; the hint ends with these items
+        // and a WITH tail has its own typed row (fgdb-at06q).
+        let paths = core::mem::replace(
+            &mut self.write_paths,
+            path.map(|(path, _)| path.text).into_iter().collect(),
+        );
         let items = self.write_return_items(&mut EdgeMergeLeaves {
             returning: &mut returning,
             columns: &mut *columns,
             row,
-        })?;
+        });
+        self.write_paths = paths;
+        let items = items?;
         returning.projection = items.projection;
         returning.grouping = items.grouping;
         if let Some(ReadStageTemplate::Page {

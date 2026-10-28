@@ -370,6 +370,9 @@ impl PreparedGraphPipelineAggregateText {
                     kind: Kind::Having(kind),
                 })?;
         }
+        if let Some(expression) = &self.having_expression {
+            query = expression.attach_relation(query, &values)?;
+        }
         Ok(query)
     }
 }

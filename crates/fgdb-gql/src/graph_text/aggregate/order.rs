@@ -90,6 +90,25 @@ impl<'a> Parser<'a> {
                 && !matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
                 && !parser.aggregate_order_repeats_group_property(groups)?
                 && let Some(index) = returned.iter().position(|item| item.alias.text == word)
+                // HAVING has no element reader (ExpressionElementRead): a
+                // property of a returned grouped element stays a source leaf,
+                // admitted only as a grouping key and refused before the
+                // catalog, exactly as when the element is not returned.
+                && (whole
+                    || !matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
+                    || !matches!(
+                        returned[index],
+                        ReturnItem {
+                            output: None,
+                            function: None,
+                            expression: Some(Expression {
+                                property: None,
+                                computed: None,
+                                ..
+                            }),
+                            ..
+                        }
+                    ))
             {
                 let item = &returned[index];
                 // Consume only the alias: the shared value reader owns

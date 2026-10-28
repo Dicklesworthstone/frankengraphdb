@@ -380,6 +380,16 @@ impl GqlParameters {
             .map(|(name, value)| (name.as_str(), value.parameter_type()))
     }
 
+    /// The value of every list and map argument, for a host that names the
+    /// property keys they carry (native_write_text's ArgumentCatalog).
+    pub(crate) fn collection_values(&self) -> impl Iterator<Item = &crate::algebra::GraphValue> {
+        self.values.values().filter_map(|value| match value {
+            GqlParameterValue::List(list) => Some(list.value()),
+            GqlParameterValue::Map(map) => Some(map.value()),
+            _ => None,
+        })
+    }
+
     /// Size of the complete admitted transcript without allocating or encoding.
     #[must_use]
     pub fn canonical_byte_len(&self) -> usize {

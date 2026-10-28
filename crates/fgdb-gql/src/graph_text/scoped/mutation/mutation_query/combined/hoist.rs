@@ -15,7 +15,8 @@ fn columns_fit(value: &ReadValueTemplate, width: usize) -> bool {
             MutationIntegerTemplateOp::Bound(
                 GraphIntegerOp::Column(column)
                 | GraphIntegerOp::ScalarColumn(column)
-                | GraphIntegerOp::IdentityColumn { column, .. },
+                | GraphIntegerOp::IdentityColumn { column, .. }
+                | GraphIntegerOp::PresenceColumn(column),
             ) => *column < width,
             _ => true,
         }),

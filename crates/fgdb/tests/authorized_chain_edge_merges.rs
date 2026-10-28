@@ -112,100 +112,34 @@ fn int(value: i64) -> GraphValue {
     GraphValue::Scalar(CanonicalScalar::Int(value))
 }
 
+/// A named relationship MERGE path with ON actions whose WITH tail reads to
+/// the statement's end, with no further write, refuses before any catalog or
+/// execution: the chain hosts run no read tail for a relationship MERGE step
+/// (fgdb-at06q; vertex MERGE steps gained one in 60d60df1). The positive law
+/// this replaces, action results and authorized masking of `edge.secret` in
+/// both hosts, is recorded on fgdb-at06q for when the tail is built.
 #[test]
-fn named_relationship_paths_keep_action_results_and_authorized_property_masking() {
-    lab(0xc4a1_3190, |contexts| async move {
-        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
-        let issuer = authority();
-        let token = issuer.issue_at(&grant(Rights::ReadWrite, 1), NOW).unwrap();
-        let program = chain(
-            "MATCH (a:Visible {p:1}),(b:Visible {p:2}) MERGE route=(a)<-[r:R]-(b) \
-             ON CREATE SET r.q=7 ON MATCH SET r.q=r.q+1 \
-             WITH route AS saved UNWIND relationships(saved) AS edge \
-             RETURN saved,edge.q AS value,edge.secret AS masked,length(saved) AS hops",
-        );
-        for authorized in [false, true] {
-            for existing in [false, true] {
-                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-                let mut seed = WriteBatch::new(R);
-                for id in 1..=2 {
-                    seed.create_vertex(
-                        VId(id as u128),
-                        vec![L],
-                        vec![(P, CanonicalScalar::Int(id))],
-                    );
-                }
-                if existing {
-                    seed.add_edge(
-                        EId(71),
-                        VId(2),
-                        VId(1),
-                        vec![
-                            (Q, CanonicalScalar::Int(7)),
-                            (SECRET, CanonicalScalar::Int(42)),
-                        ],
-                    );
-                }
-                db.write(&commit, seed).await.unwrap();
-                let (stats, result) = if authorized {
-                    let (stats, result, _) = db
-                        .execute_graph_write_chain_authorized(
-                            &txn,
-                            &query,
-                            &commit,
-                            &issuer,
-                            &token,
-                            "main",
-                            &program,
-                            policy(1).with_mutation_limit(2),
-                            || NOW,
-                        )
-                        .await
-                        .unwrap();
-                    (stats, result)
-                } else {
-                    let mut transaction = db.begin(&txn).unwrap();
-                    let (stats, result, _) = transaction
-                        .execute_graph_write_chain_engine_governed(
-                            &mut db,
-                            &query,
-                            &program,
-                            policy(1).with_mutation_limit(2),
-                        )
-                        .unwrap();
-                    transaction.finish(&mut db, &commit).await.unwrap();
-                    (stats, result)
-                };
-                assert_eq!(stats.created_edges, u64::from(!existing));
-                let edges = db.edges().unwrap();
-                assert_eq!(edges.len(), 1);
-                let edge = &edges[0].entry;
-                assert_eq!((edge.src, edge.dst), (VId(2), VId(1)));
-                if existing {
-                    assert_eq!(edge.eid, EId(71));
-                }
-                assert_eq!(result.value.len(), 1);
-                assert_eq!(
-                    result.value[0].values(),
-                    [
-                        GraphValue::Path(fgdb_gql::algebra::GraphPath::new(
-                            VId(1),
-                            Box::new([(edge.eid, VId(2))])
-                        )),
-                        int(if existing { 8 } else { 7 }),
-                        if existing && !authorized {
-                            int(42)
-                        } else {
-                            GraphValue::Scalar(CanonicalScalar::Null)
-                        },
-                        int(1),
-                    ],
-                    "a carried path uses the final overlay and the host's property authority"
-                );
-                assert_eq!(txn.outstanding_obligations(), 0);
-            }
-        }
-    });
+fn named_relationship_path_read_tails_refuse_until_the_chain_runs_them() {
+    let text = "MATCH (a:Visible {p:1}),(b:Visible {p:2}) MERGE route=(a)<-[r:R]-(b) \
+                ON CREATE SET r.q=7 ON MATCH SET r.q=r.q+1 \
+                WITH route AS saved UNWIND relationships(saved) AS edge \
+                RETURN saved,edge.q AS value,edge.secret AS masked,length(saved) AS hops";
+    assert!(PreparedGraphWriteChainText::is_chain(text).unwrap());
+    let refused = PreparedGraphWriteChainText::prepare(text, R, symbols).unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            fgdb_gql::GraphWriteChainTextError::EdgeMerge(fgdb_gql::GraphEdgeMergeTextError {
+                offset,
+                kind: fgdb_gql::GraphEdgeMergeTextErrorKind::Query(
+                    fgdb_gql::GraphPatternTextErrorKind::Expected(
+                        "a CREATE or MERGE after the WITH of a MERGE step"
+                    )
+                ),
+            }) if offset == text.len()
+        ),
+        "{refused:?}"
+    );
 }
 
 #[test]

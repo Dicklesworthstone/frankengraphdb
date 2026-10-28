@@ -183,6 +183,27 @@ impl HavingTemplate {
         aggregate: PreparedGraphAggregate,
         values: &[GqlParameterValue],
     ) -> Result<PreparedGraphAggregate, GraphPatternTextError> {
+        aggregate
+            .with_having_expression(&self.bound(values)?)
+            .map_err(|_| self.invalid())
+    }
+
+    /// The same bound program on a relational (source-free or multipart)
+    /// pipeline owner: binding it never drops the HAVING.
+    pub(in crate::graph_text) fn attach_relation(
+        &self,
+        aggregate: crate::PreparedGraphSetAggregate,
+        values: &[GqlParameterValue],
+    ) -> Result<crate::PreparedGraphSetAggregate, GraphPatternTextError> {
+        aggregate
+            .with_having_expression(&self.bound(values)?)
+            .map_err(|_| self.invalid())
+    }
+
+    fn bound(
+        &self,
+        values: &[GqlParameterValue],
+    ) -> Result<GraphHavingExpression, GraphPatternTextError> {
         let program = self
             .program
             .iter()
@@ -208,16 +229,14 @@ impl HavingTemplate {
                 })
             })
             .collect::<Result<Vec<_>, GraphPatternTextError>>()?;
-        let failure = |_| {
-            error(
-                self.at,
-                GraphPatternTextErrorKind::Expected("valid bounded HAVING expression"),
-            )
-        };
-        let expression = GraphHavingExpression::prepare(&program).map_err(failure)?;
-        aggregate
-            .with_having_expression(&expression)
-            .map_err(failure)
+        GraphHavingExpression::prepare(&program).map_err(|_| self.invalid())
+    }
+
+    fn invalid(&self) -> GraphPatternTextError {
+        error(
+            self.at,
+            GraphPatternTextErrorKind::Expected("valid bounded HAVING expression"),
+        )
     }
 
     /// Resolved unbound HAVING program: column identities, comparisons,
@@ -768,7 +787,8 @@ fn inline_scalar_aliases(
             Template::Bound(
                 GraphIntegerOp::Column(index)
                 | GraphIntegerOp::ScalarColumn(index)
-                | GraphIntegerOp::IdentityColumn { column: index, .. },
+                | GraphIntegerOp::IdentityColumn { column: index, .. }
+                | GraphIntegerOp::PresenceColumn(index),
             ) => Some(*index),
             _ => None,
         };
@@ -786,7 +806,13 @@ fn inline_scalar_aliases(
                 if let ReadValueTemplate::Column(index) = alias {
                     Some(index)
                 } else {
-                    if matches!(op, Template::Bound(GraphIntegerOp::IdentityColumn { .. })) {
+                    if matches!(
+                        op,
+                        Template::Bound(
+                            GraphIntegerOp::IdentityColumn { .. }
+                                | GraphIntegerOp::PresenceColumn(_)
+                        )
+                    ) {
                         return Ok(false);
                     }
                     match alias {
@@ -817,6 +843,9 @@ fn inline_scalar_aliases(
                         column,
                         text: *text,
                     }
+                }
+                Template::Bound(GraphIntegerOp::PresenceColumn(_)) => {
+                    GraphIntegerOp::PresenceColumn(column)
                 }
                 _ => unreachable!("column instruction checked above"),
             }));

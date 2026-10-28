@@ -59,8 +59,20 @@ impl PreparedGraphWriteChainText {
         // Whether that MERGE was a vertex MERGE: only one returns rows as a
         // chain; a relationship MERGE stays the batch writer's.
         let mut merged_vertex = false;
-        let multipart_mutation = PreparedGraphInsertText::multipart_source_kind(statement, &[])?
-            == Some(ReadWriteKind::Mutation);
+        // The read/write framing lexes one statement: a `;` ends its scan
+        // exactly as it ends the loop below.
+        let first_statement = {
+            let mut scan = lexer.clone();
+            loop {
+                let token = script::next_script_token(&mut scan)?;
+                if matches!(token.kind, TokenKind::End | TokenKind::Punct(b';')) {
+                    break &statement[..token.at];
+                }
+            }
+        };
+        let multipart_mutation =
+            PreparedGraphInsertText::multipart_source_kind(first_statement, &[])?
+                == Some(ReadWriteKind::Mutation);
         let (mut unwound, mut matched) = (false, multipart_mutation);
         // `UNWIND $rows`: one MERGE after it is the batch writer's, but a
         // vertex MERGE another write follows heads a chain (fgdb-0s2pq).

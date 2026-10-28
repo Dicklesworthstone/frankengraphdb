@@ -598,8 +598,13 @@ fn opencypher_left_right_replace_length_and_two_argument_substring() {
     ] {
         assert_eq!(scalar(expression, &input), expected, "{expression}");
     }
-    // length(text) is the CHAR_LENGTH program.
+    // length(text) answers CHAR_LENGTH's count through its own opcode, the
+    // text-or-path overload (d12855da), so the two programs stay distinct.
     assert_eq!(
+        scalar("length(n.text)", &input),
+        scalar("CHAR_LENGTH(n.text)", &input)
+    );
+    assert_ne!(
         prepare("MATCH (n) RETURN length(n.text) AS value").canonical_bytes(),
         prepare("MATCH (n) RETURN CHAR_LENGTH(n.text) AS value").canonical_bytes()
     );

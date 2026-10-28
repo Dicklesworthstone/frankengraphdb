@@ -1390,10 +1390,15 @@ fn nested_existence_audits_imported_and_element_names_at_every_depth() {
                 "imported vertices in the comprehension's positive pattern",
             ),
         ),
+        // A quantifier's graph predicate (0352660c) is a row-scope EXISTS,
+        // whose body reads no WHERE (only COUNT's does), so it refuses at that
+        // WHERE, still before any rebinding.
         (
             "MATCH (a) RETURN any(v IN [a] WHERE EXISTS { MATCH (x) \
              WHERE EXISTS { MATCH (v)-[:R]->(x) } }) AS n",
-            GraphSetTextErrorKind::Expected("imported vertices in the root MATCH"),
+            GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::Expected(
+                "} after an identity-correlated graph pattern",
+            )),
         ),
         (
             "MATCH (a), (z) WITH z WHERE EXISTS { MATCH (x) \
@@ -1736,10 +1741,34 @@ mod tuple_comprehensions {
                 list(vec![int(132), int(133)])
             ])])]
         );
+        // A list-local graph comprehension (68812ac2) reads each member's
+        // witness tuples as the direct comprehension does, wrapped once per
+        // member, parallel edges and their order kept.
+        let wrapped: Vec<_> = vertices
+            .iter()
+            .map(|&a| {
+                row(vec![
+                    GraphValue::Vertex(a),
+                    list(vec![list(
+                        neighbors(&edges, R, a, 0)
+                            .into_iter()
+                            .map(|(b, r)| list(vec![GraphValue::Edge(r), GraphValue::Vertex(b)]))
+                            .collect(),
+                    )]),
+                ])
+            })
+            .collect();
+        assert_eq!(
+            execute(
+                "MATCH (a) RETURN a,[x IN [a] | [(x)-[r:R]->(b) | [r,b]]] AS v ORDER BY a",
+                &vertices,
+                &edges
+            ),
+            wrapped
+        );
         for text in [
             "MATCH (a) RETURN [(a)-[r:R]->(b) | [r,b]] AS v,b",
             "MATCH (a) RETURN [(a)-[r:R]->(b) | [r,b]] AS v,r",
-            "MATCH (a) RETURN [x IN [a] | [(x)-[r:R]->(b) | [r,b]]] AS v",
         ] {
             assert!(
                 PreparedGraphSetText::prepare(text, symbols).is_err(),

@@ -888,14 +888,44 @@ impl WriteTxn {
                 merge,
                 policy,
                 |allowance| {
-                    merge.select_governed(
-                        owned,
-                        allowance,
-                        |pattern, allowance| {
-                            self.execute_graph_pattern_governed(database, cx, pattern, allowance)
-                        },
-                        || cx.checkpoint(),
-                    )
+                    // A MATCH input may read a carried element it does not
+                    // rematch (`a.p` of a WITH vertex), as the vertex MERGE
+                    // input does: both callbacks borrow this entry overlay.
+                    let failure = std::cell::RefCell::new(None);
+                    let selected = {
+                        let mut source = fgdb_gql::with_element_metadata(
+                            fgdb_gql::WithElementReads {
+                                source: |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
+                                    fgdb_gql::algebra::GraphValueRow,
+                                >,
+                                         allowance| {
+                                    self.execute_graph_pattern_governed(
+                                        database, cx, pattern, allowance,
+                                    )
+                                },
+                                elements: |element, key| {
+                                    self.element_property_with_checkpoint(
+                                        database, cx, &failure, element, key,
+                                    )
+                                },
+                            },
+                            |element, kind, catalog, control| {
+                                self.element_metadata_with_checkpoint(
+                                    database, cx, &failure, element, kind, catalog, control,
+                                )
+                            },
+                        );
+                        merge.select_governed_with_source(owned, allowance, &mut source, || {
+                            match failure.borrow_mut().take() {
+                                Some(error) => Err(error),
+                                None => cx.checkpoint(),
+                            }
+                        })
+                    };
+                    match failure.into_inner() {
+                        Some(error) => Err(fgdb_gql::GqlQueryError::Interrupted(error)),
+                        None => selected,
+                    }
                 },
                 |source, destination| {
                     self.merge_candidate_edges(database, merge, source, destination, || {

@@ -618,6 +618,23 @@ impl PreparedGraphEdgeMerge {
         crate::GqlQueryExecution<GraphValueRow>,
         crate::GqlQueryError<GraphEdgeMergeError<E, A>, C>,
     > {
+        self.select_governed_with_source(owned, policy, &mut patterns, checkpoint)
+    }
+
+    /// As [`Self::select_governed`], through a whole source: a row relation
+    /// reading a carried element's property (`a.p` of a WITH vertex in the
+    /// MATCH input) needs the host's element reader, which a bare pattern
+    /// closure lacks, as the vertex MERGE input does.
+    pub fn select_governed_with_source<E, A, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GqlQueryPolicy,
+        source: &mut dyn crate::GraphSetSource<E, C>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<
+        crate::GqlQueryExecution<GraphValueRow>,
+        crate::GqlQueryError<GraphEdgeMergeError<E, A>, C>,
+    > {
         match &self.input {
             Input::Pattern(pattern) => {
                 if owned.is_some() {
@@ -627,21 +644,20 @@ impl PreparedGraphEdgeMerge {
                         ),
                     ));
                 }
-                patterns(pattern, policy)
+                source
+                    .pattern(pattern, policy)
                     .map_err(|error| error.map_source(GraphEdgeMergeError::Source))
             }
-            Input::Relation(relation) => match owned {
-                None => relation.execute_governed(policy, patterns, checkpoint),
-                Some(rows) => relation.execute_with_source(
+            Input::Relation(relation) => relation
+                .execute_with_source(
                     policy,
                     &mut crate::set_ops::WithOwnedRows {
-                        source: &mut patterns,
-                        rows: Some(rows),
+                        source,
+                        rows: owned,
                     },
                     checkpoint,
-                ),
-            }
-            .map_err(|error| error.map_source(GraphEdgeMergeError::InputRelation)),
+                )
+                .map_err(|error| error.map_source(GraphEdgeMergeError::InputRelation)),
         }
     }
     #[must_use]

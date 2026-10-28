@@ -753,15 +753,17 @@ mod source_catalogs {
         catalog
     }
 
+    // A computed output (`7 AS value`) needs the set entrypoint, which also
+    // keeps the leaf's reverse catalog for the write's input_catalog.
     fn leaf(catalog: ReverseSymbolCatalog) -> PreparedGraphSet {
-        PreparedGraphText::prepare_with_resolver(
+        PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
             "MATCH (n) RETURN n AS target,properties(n) AS current,labels(n) AS labels,7 AS value",
-            Catalog(catalog),
+            &[],
+            &mut Catalog(catalog),
         )
         .unwrap()
         .bind_parameters(&GqlParameters::new())
         .unwrap()
-        .into()
     }
 
     #[test]

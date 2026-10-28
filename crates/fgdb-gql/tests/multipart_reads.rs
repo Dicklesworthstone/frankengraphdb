@@ -3,8 +3,8 @@
 use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{
-    GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphSetExecutionError,
-    GraphSymbol, GraphSymbolKind, PreparedGraphSet, PreparedGraphSetText,
+    GqlParameterType, GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
+    GraphSetExecutionError, GraphSymbol, GraphSymbolKind, PreparedGraphSet, PreparedGraphSetText,
 };
 use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::cell::RefCell;
@@ -34,6 +34,17 @@ fn prepare(text: &str) -> PreparedGraphSet {
         .unwrap()
         .bind_parameters(&GqlParameters::new())
         .unwrap()
+}
+/// A template whose `$items` binds a list. `WITH $items AS xs` is no use
+/// that types it, and an undeclared parameter defaults to Int64 there, so
+/// these laws declare it, as the native engine declares every argument.
+fn prepare_items(text: &str) -> PreparedGraphSetText {
+    PreparedGraphSetText::prepare_with_parameter_types(
+        text,
+        &[("items", GqlParameterType::List)],
+        symbols,
+    )
+    .unwrap()
 }
 fn run(
     query: &PreparedGraphSet,
@@ -90,6 +101,45 @@ fn run_reading(
 }
 fn execute(text: &str) -> Vec<GraphValueRow> {
     run(&prepare(text), wide(), &mut || Ok(())).unwrap().value
+}
+/// `execute` with each edge occurrence's identity, for a DIFFERENT EDGES plan
+/// over more than one overlapping fixed atom.
+fn execute_identified(text: &str) -> Vec<GraphValueRow> {
+    let values = [1, 2, 2, 3].map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)));
+    prepare(text)
+        .execute_governed_with_elements(
+            wide(),
+            |pattern, remaining| {
+                pattern.plan().execute_governed_with_identified_properties(
+                    (values.len() + EDGES.len()) as u64,
+                    (1..=4).map(VId),
+                    EDGES
+                        .iter()
+                        .enumerate()
+                        .map(|(at, &(source, relation, target))| {
+                            (fgdb_types::EId(at as u128 + 1), source, relation, target)
+                        }),
+                    |vid, tests| {
+                        Ok::<_, &'static str>(tests.iter().all(|test| {
+                            test.matches(&[], &[(P, values[vid.0 as usize - 1].clone())])
+                        }))
+                    },
+                    |vid, key| Ok((key == P).then(|| &values[vid.0 as usize - 1])),
+                    remaining,
+                    || Ok::<_, usize>(()),
+                )
+            },
+            |_, _, _| panic!("this fixture has no CALL source"),
+            |element, key| {
+                Ok(match element {
+                    ElementId::Vertex(vid) if key == P => Some(values[vid.0 as usize - 1].clone()),
+                    _ => None,
+                })
+            },
+            || Ok::<_, usize>(()),
+        )
+        .unwrap()
+        .value
 }
 fn vertices(values: &[u128]) -> GraphValueRow {
     GraphValueRow::from_owned_values(
@@ -1914,9 +1964,20 @@ fn pattern_counts_read_witness_list_sizes() {
                 .collect()
         )
     );
+    // An enclosing element local reads through its list-local graph owner
+    // (68812ac2): one count per member, parallel witnesses included.
+    assert_eq!(
+        sorted(execute(
+            "MATCH (n) WITH n RETURN n, [x IN [n] | COUNT { (x)-->() }] AS l"
+        )),
+        (1..=4)
+            .map(|n| GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(n)),
+                GraphValue::List(vec![int(out(n))].into()),
+            ]))
+            .collect::<Vec<_>>()
+    );
     for text in [
-        // An enclosing element local still needs a per-element graph owner.
-        "MATCH (n) WITH n RETURN [x IN [n] | COUNT { (x)-->() }] AS l",
         // A pattern expression inside size() (openCypher TCK List6 [6]).
         "MATCH (n) RETURN n, size((n)-->()) AS d",
         "MATCH (n) WHERE size((n)-->()) > 1 RETURN n",
@@ -2521,7 +2582,8 @@ fn compound_row_graph_predicates_preserve_boolean_truth_bags_and_local_pages() {
         "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS __fg_boundary_0 \
          WHERE __fg_boundary_0.p = 2 AND EXISTS((__fg_boundary_0)-[:R]->()) RETURN *",
     );
-    assert_eq!(query.columns(), ["nodes", "__fg_boundary_0"]);
+    // RETURN * lists its columns in name order (fgdb-7jja3).
+    assert_eq!(query.columns(), ["__fg_boundary_0", "nodes"]);
     assert_eq!(run(&query, wide(), &mut || Ok(())).unwrap().value.len(), 2);
     for boundary in ["WITH DISTINCT x", "WITH x AS y"] {
         let name = if boundary.ends_with('y') { "y" } else { "x" };
@@ -3519,6 +3581,28 @@ fn row_scope_pattern_lists_keep_paths_multiple_locals_and_row_boundaries() {
             ]))
             .collect::<Vec<_>>()
     );
+    // A renamed element is no binding of the head's graph scope: a count over
+    // it stays with its row, and an existence predicate there refuses rather
+    // than bind it afresh (each once read every edge for every row).
+    assert_eq!(
+        execute("MATCH (n) WITH n AS x RETURN x,COUNT { (x)-[:R]->() } AS c ORDER BY x"),
+        [(1, 3), (2, 1), (3, 1), (4, 0)]
+            .into_iter()
+            .map(|(id, count)| GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(id)),
+                GraphValue::Scalar(CanonicalScalar::Int(count)),
+            ]))
+            .collect::<Vec<_>>()
+    );
+    for text in [
+        "MATCH (n) WITH n AS x WHERE EXISTS { MATCH (x)-[:R]->() } RETURN x",
+        "MATCH (n) WITH n AS x RETURN x,EXISTS { (x)-[:R]->() } AS e",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(text, symbols).is_err(),
+            "{text}"
+        );
+    }
     assert_eq!(
         execute(&format!(
             "{prefix} UNWIND nodes AS y RETURN x,y,[(x)-[:R]->(y) | x.p+y.p] AS values \
@@ -4163,7 +4247,8 @@ fn carried_pattern_comprehensions_preserve_source_failures_budgets_and_empty_app
 
 #[test]
 fn carried_pattern_comprehension_tuple_locals_keep_the_outer_row_namespace() {
-    let rows = execute(
+    // Two overlapping :R atoms are DIFFERENT EDGES, which needs identities.
+    let rows = execute_identified(
         "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x WITH x,10 AS bias \
          CALL (x,bias) { \
            RETURN [(x)-[:R]->(middle)-[:R]->(target) | [middle.p+bias,target.p]] AS pairs \
@@ -4229,7 +4314,7 @@ fn list_local_graph_expressions_preserve_order_multiplicity_and_null_maps() {
          [x IN items | CASE WHEN (x)-[:R]->() THEN null ELSE 9 END] AS holes, \
          [x IN items | [(x)-[:R]->(t) | t]] AS targets",
     ];
-    let templates = statements.map(|text| PreparedGraphSetText::prepare(text, symbols).unwrap());
+    let templates = statements.map(prepare_items);
     let frozen = templates
         .each_ref()
         .map(|template| template.canonical_template_bytes());
@@ -4336,14 +4421,18 @@ fn list_local_graph_predicates_correlate_both_local_and_outer_identities() {
     let posts = [4, 2, 3, 2, 1]
         .map(|id| GraphValue::Vertex(VId(id)))
         .to_vec();
-    let query = PreparedGraphSetText::prepare(text, symbols)
-        .unwrap()
-        .bind_parameters(
-            &GqlParameters::new()
-                .with_list("posts", posts.clone())
-                .unwrap(),
-        )
-        .unwrap();
+    let query = PreparedGraphSetText::prepare_with_parameter_types(
+        text,
+        &[("posts", GqlParameterType::List)],
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(
+        &GqlParameters::new()
+            .with_list("posts", posts.clone())
+            .unwrap(),
+    )
+    .unwrap();
     let expected: Vec<_> = (1..=4)
         .map(|id| {
             let shared: Vec<_> = posts
@@ -4430,8 +4519,7 @@ fn list_local_graph_scopes_restore_outer_names_and_compose_with_calls() {
          CALL (xs,bias) { RETURN [x IN xs WHERE (x)-[:R]->() | x.p+bias] AS values } \
          RETURN x,values",
     ] {
-        let query = PreparedGraphSetText::prepare(statement, symbols)
-            .unwrap()
+        let query = prepare_items(statement)
             .bind_parameters(&parameters)
             .unwrap();
         assert_eq!(
@@ -4441,12 +4529,10 @@ fn list_local_graph_scopes_restore_outer_names_and_compose_with_calls() {
         );
     }
 
-    let with_only = PreparedGraphSetText::prepare(
+    let with_only = prepare_items(
         "UNWIND [$items,[]] AS xs \
          WITH [x IN xs WHERE (x)-[:R]->() | x] AS kept RETURN kept",
-        symbols,
     )
-    .unwrap()
     .bind_parameters(&parameters)
     .unwrap();
     assert_eq!(
@@ -4459,11 +4545,9 @@ fn list_local_graph_scopes_restore_outer_names_and_compose_with_calls() {
         ]
     );
 
-    let skipped = PreparedGraphSetText::prepare(
+    let skipped = prepare_items(
         "WITH $items AS xs RETURN [x IN xs WHERE false | [(x)-[:R]->() | 1/0]] AS values",
-        symbols,
     )
-    .unwrap()
     .bind_parameters(&parameters)
     .unwrap();
     let mut calls = 0;
@@ -4516,14 +4600,10 @@ fn list_local_graph_evaluation_preserves_late_errors_and_cumulative_limits() {
         )
         .unwrap();
     let bind = |suffix: &str| {
-        PreparedGraphSetText::prepare(
-            &format!(
-                "WITH $items AS xs RETURN \
-                 [x IN xs WHERE (x)-[:R]->() | x.p] AS values{suffix}"
-            ),
-            symbols,
-        )
-        .unwrap()
+        prepare_items(&format!(
+            "WITH $items AS xs RETURN \
+             [x IN xs WHERE (x)-[:R]->() | x.p] AS values{suffix}"
+        ))
         .bind_parameters(&parameters)
         .unwrap()
     };
@@ -4683,17 +4763,21 @@ fn list_local_graph_map_fields_are_admitted_before_chained_writes() {
 mod local_path_length_values {
     use fgdb_gql::algebra::{GraphPath, GraphValue, GraphValueRow};
     use fgdb_gql::{
-        GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphIntegerErrorKind,
-        GraphIntegerExpression, GraphIntegerOp, GraphSetExecutionError, PreparedGraphSet,
-        PreparedGraphSetText,
+        GqlParameterType, GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
+        GraphIntegerErrorKind, GraphIntegerExpression, GraphIntegerOp, GraphSetExecutionError,
+        PreparedGraphSet, PreparedGraphSetText,
     };
     use fgdb_types::{CanonicalScalar, EId, VId};
 
     fn prepare(text: &str, items: Vec<GraphValue>) -> PreparedGraphSet {
-        PreparedGraphSetText::prepare(text, |_: fgdb_gql::GraphSymbolKind, _: &str| None)
-            .unwrap()
-            .bind_parameters(&GqlParameters::new().with_list("items", items).unwrap())
-            .unwrap()
+        PreparedGraphSetText::prepare_with_parameter_types(
+            text,
+            &[("items", GqlParameterType::List)],
+            |_: fgdb_gql::GraphSymbolKind, _: &str| None,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new().with_list("items", items).unwrap())
+        .unwrap()
     }
 
     fn run(
@@ -4862,24 +4946,17 @@ mod graph_reading_quantifiers {
     }
 
     fn bind(text: &str, parameters: &GqlParameters) -> PreparedGraphSet {
-        PreparedGraphSetText::prepare(text, symbols)
-            .unwrap()
-            .bind_parameters(parameters)
-            .unwrap()
+        prepare_items(text).bind_parameters(parameters).unwrap()
     }
 
     #[test]
     fn graph_quantifiers_keep_three_valued_truth_and_duplicate_members_on_rebind() {
         let templates = ["ANY", "ALL", "NONE", "SINGLE"].map(|kind| {
-            PreparedGraphSetText::prepare(
-                &format!(
-                    "WITH $items AS xs,17 AS marker RETURN marker,\
-                     {kind}(x IN xs WHERE CASE WHEN x IS NULL THEN NULL \
-                     ELSE EXISTS((x)-[:R]->()) END) AS present"
-                ),
-                symbols,
-            )
-            .unwrap()
+            prepare_items(&format!(
+                "WITH $items AS xs,17 AS marker RETURN marker,\
+                 {kind}(x IN xs WHERE CASE WHEN x IS NULL THEN NULL \
+                 ELSE EXISTS((x)-[:R]->()) END) AS present"
+            ))
         });
         let frozen = templates
             .each_ref()
@@ -4943,7 +5020,7 @@ mod graph_reading_quantifiers {
         ] {
             let statement =
                 format!("WITH $items AS xs RETURN SINGLE(x IN xs WHERE {predicate}) AS present");
-            let template = PreparedGraphSetText::prepare(&statement, symbols).unwrap();
+            let template = prepare_items(&statement);
             for (items, expected) in [
                 (vec![Some(1), Some(4)], true),
                 (vec![Some(1), Some(1)], false),
@@ -5108,20 +5185,16 @@ mod graph_reading_quantifiers {
             );
             assert_eq!(resolutions, 0, "{statement}");
         }
-        let template = PreparedGraphSetText::prepare(
+        let template = prepare_items(
             "UNWIND $results AS result WITH result,$items AS xs \
              RETURN ANY(x IN xs WHERE CASE WHEN EXISTS((x)-[:R]->()) \
              THEN result ELSE false END) AS present LIMIT 0",
-            symbols,
-        )
-        .unwrap();
-        let scalar = PreparedGraphSetText::prepare(
+        );
+        let scalar = prepare_items(
             "UNWIND $results AS result WITH result,$items AS xs \
              RETURN ANY(x IN xs WHERE CASE WHEN true THEN result ELSE false END) \
              AS present LIMIT 0",
-            symbols,
-        )
-        .unwrap();
+        );
         for result in [
             GraphValue::Scalar(CanonicalScalar::Int(1)),
             GraphValue::List(vec![].into()),
@@ -5373,10 +5446,7 @@ mod graph_reading_list_sources {
     }
 
     fn bind(statement: &str, arguments: &GqlParameters) -> PreparedGraphSet {
-        PreparedGraphSetText::prepare(statement, symbols)
-            .unwrap()
-            .bind_parameters(arguments)
-            .unwrap()
+        prepare_items(statement).bind_parameters(arguments).unwrap()
     }
 
     fn counted(query: &PreparedGraphSet, fail_at: Option<usize>) -> (Outcome, usize) {
@@ -5425,8 +5495,7 @@ mod graph_reading_list_sources {
              [x IN [(root)-[:R]->(target) | target] WHERE (x)-[:R]->() | \
               [(x)-[:R]->(last) | last]]] AS values",
         ];
-        let templates =
-            statements.map(|text| PreparedGraphSetText::prepare(text, symbols).unwrap());
+        let templates = statements.map(prepare_items);
         for roots in [
             vec![Some(3), Some(1), Some(4), None, Some(1), Some(2)],
             vec![Some(2), Some(3)],

@@ -36,11 +36,32 @@ impl PreparedGraphSet {
                 | SetNode::Binary { left, right, .. } => {
                     visit(left, columns, types, found) && visit(right, columns, types, found)
                 }
-                // A correlated body executes repeatedly. It cannot borrow the
-                // single-use owned write result until that lifecycle has its
-                // own admission and execution contract.
-                SetNode::Arguments | SetNode::Apply { .. } => false,
+                // An Apply's outer input executes exactly once, so it may carry
+                // the single-use owned write result. A correlated body executes
+                // once per outer row and must never borrow it.
+                SetNode::Apply { left, right, .. } => {
+                    visit(left, columns, types, found) && !owns_rows(right)
+                }
+                SetNode::Arguments => false,
                 SetNode::Pattern(_) | SetNode::Values | SetNode::ProcedureCall(_) => true,
+            }
+        }
+        fn owns_rows(plan: &PreparedGraphSet) -> bool {
+            match &plan.node {
+                SetNode::Owned { .. } => true,
+                SetNode::Arguments
+                | SetNode::Pattern(_)
+                | SetNode::Values
+                | SetNode::ProcedureCall(_) => false,
+                SetNode::Aggregate(summary) => owns_rows(summary.input()),
+                SetNode::Scope(input)
+                | SetNode::Unwind { input, .. }
+                | SetNode::Filter { input, .. }
+                | SetNode::Project { input, .. } => owns_rows(input),
+                SetNode::CrossJoin { left, right }
+                | SetNode::Join { left, right, .. }
+                | SetNode::Apply { left, right, .. }
+                | SetNode::Binary { left, right, .. } => owns_rows(left) || owns_rows(right),
             }
         }
         let mut found = false;

@@ -122,21 +122,49 @@ fn constant_page_expressions_use_the_native_value_kernel_on_every_read_shape() {
     }
 
     // The direct graph-pattern preparation API uses the same page compiler.
-    let native: PreparedGraphSet =
-        PreparedGraphText::prepare("MATCH (n) RETURN n SKIP 1 + 1 LIMIT (2 * 1)", symbols)
+    // Compare within that API: a set-text page is a set-level page over the
+    // unpaged pattern, whose evaluator accounting differs by plan shape.
+    let native = |text: &str| -> PreparedGraphSet {
+        PreparedGraphText::prepare(text, symbols)
             .unwrap()
             .bind_parameters(&GqlParameters::new())
             .unwrap()
-            .into();
+            .into()
+    };
     assert_eq!(
-        run(&native, &vertices, &[], &props).unwrap(),
+        run(
+            &native("MATCH (n) RETURN n SKIP 1 + 1 LIMIT (2 * 1)"),
+            &vertices,
+            &[],
+            &props
+        )
+        .unwrap(),
+        run(
+            &native("MATCH (n) RETURN n SKIP 2 LIMIT 2"),
+            &vertices,
+            &[],
+            &props
+        )
+        .unwrap(),
+    );
+    // Both APIs still answer the same page.
+    assert_eq!(
+        run(
+            &native("MATCH (n) RETURN n SKIP 1 + 1 LIMIT (2 * 1)"),
+            &vertices,
+            &[],
+            &props
+        )
+        .unwrap()
+        .value,
         run(
             &prepare("MATCH (n) RETURN n SKIP 2 LIMIT 2"),
             &vertices,
             &[],
             &props
         )
-        .unwrap(),
+        .unwrap()
+        .value,
     );
 }
 

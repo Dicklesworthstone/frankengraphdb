@@ -75,6 +75,7 @@ fn admit_literal_template(
                     GraphIntegerOp::Column(_)
                     | GraphIntegerOp::ScalarColumn(_)
                     | GraphIntegerOp::IdentityColumn { .. }
+                    | GraphIntegerOp::PresenceColumn(_)
                     | GraphIntegerOp::Local(_),
                 ) => false,
                 Integer::Bound(GraphIntegerOp::Scalar(value)) => {

@@ -1420,12 +1420,26 @@ fn vertex_merge_steps_apply_on_and_set_clauses_per_row() {
         .await
         .unwrap();
         assert_eq!(rows(same), [vec![int(3)]]);
-        // A carried element's metadata after the clauses, an anonymous MERGE
-        // with clauses, and a SET of a row element refuse and publish nothing.
-        let frontier = db.frontier().unwrap();
-        for refused in [
+        // A carried element's labels after the clauses read its final state
+        // (fgdb-a1bx3): one row per matched person, the two born 5.
+        let labelled = write(
+            &mut db,
             "MATCH (person:Person {born: 5}) MERGE (c:Copy {p: 4}) SET c.q = 9 \
              RETURN labels(person) AS l",
+        )
+        .await
+        .unwrap();
+        let person = QueryValue::Value(GraphValue::List(
+            vec![GraphValue::Scalar(
+                CanonicalScalar::ucs_basic_text("Person").unwrap(),
+            )]
+            .into_boxed_slice(),
+        ));
+        assert_eq!(rows(labelled), [vec![person.clone()], vec![person]]);
+        // An anonymous MERGE with clauses and a SET of a row element refuse
+        // and publish nothing.
+        let frontier = db.frontier().unwrap();
+        for refused in [
             "MATCH (person:Person) MERGE (:Copy {p: 4}) ON CREATE SET person.q = 1",
             "MATCH (person:Person) MERGE (c:Copy {p: 4}) SET person.q = 1",
         ] {
@@ -1694,15 +1708,30 @@ fn merge_steps_take_a_with_head() {
         .await
         .unwrap();
         assert_eq!(db.edges().unwrap().len(), edges + 1);
-        // A head no write follows and a WHERE after it refuse and publish
-        // nothing.
-        let frontier = db.frontier().unwrap();
-        for refused in [
-            "MERGE (a:Person {p: 60}) WITH a",
+        // A WHERE after the head filters the merged rows before the next
+        // write (fgdb-vy1rf, 60d60df1): it holds once, then never.
+        let vertices = db.vertices().unwrap().len();
+        write(
+            &mut db,
             "MERGE (a:Person {p: 60}) WITH a WHERE a.p > 1 CREATE (b)",
-        ] {
-            assert!(write(&mut db, refused).await.is_err(), "{refused}");
-        }
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.vertices().unwrap().len(), vertices + 1);
+        write(
+            &mut db,
+            "MERGE (a:Person {p: 60}) WITH a WHERE a.p > 100 CREATE (b)",
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.vertices().unwrap().len(), vertices + 1);
+        // A head no write follows refuses and publishes nothing.
+        let frontier = db.frontier().unwrap();
+        assert!(
+            write(&mut db, "MERGE (a:Person {p: 60}) WITH a")
+                .await
+                .is_err()
+        );
         assert_eq!(db.frontier().unwrap(), frontier);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });

@@ -64,8 +64,14 @@ impl<'a> Parser<'a> {
         at: usize,
     ) -> Result<(), GraphSetTextError> {
         let visible = self.visible_width(schema);
+        self.mark_hoisted_boolean_operand();
+        // The resolver addresses this typed row, so routing (and a NULL test
+        // over an open column) sees each column's domain as in a row scope.
+        let previous = self.resolved_row.replace(schema[..visible].to_vec());
         let value =
-            self.read_resolved_item(&mut |parser| parser.selection_leaf(schema, visible), 0)?;
+            self.read_resolved_item(&mut |parser| parser.selection_leaf(schema, visible), 0);
+        self.resolved_row = previous;
+        let value = value?;
         // Match the ordinary WHERE Boolean-domain contract. An unchecked
         // comparison to TRUE would silently discard numeric or list results.
         let value = match value {

@@ -928,13 +928,38 @@ fn distinct_key_vertex_upserts_freeze_and_every_other_upsert_batch_stays_sequent
             "{tail}"
         );
     }
+    // Arithmetic that reads and writes only its own target's non-key fields
+    // (36508905): distinct keys keep the rows' targets disjoint, so the batch
+    // stages once; one key twice stays sequential, so the second row reads
+    // the first's increment.
+    let arithmetic = "MERGE (n:Entity {id: row.id}) SET n.p = n.p + 1";
+    assert!(
+        bind(arithmetic, &distinct)
+            .program()
+            .freezes_vertex_upsert_input()
+    );
+    assert!(
+        !bind(arithmetic, &distinct)
+            .program()
+            .freezes_vertex_update_input()
+    );
+    assert!(
+        !bind(arithmetic, &duplicate)
+            .program()
+            .freezes_vertex_upsert_input()
+    );
+    assert!(
+        !bind(arithmetic, &single)
+            .program()
+            .freezes_vertex_upsert_input()
+    );
     for tail in [
         // Writes a key property, so a later row's MERGE could match it.
         "MERGE (n:Entity {id: row.id}) SET n.id = row.p",
         // Writes a key label.
         "MERGE (n:Entity {id: row.id}) SET n:Entity",
-        // Reads the target's own state.
-        "MERGE (n:Entity {id: row.id}) SET n.p = n.p + 1",
+        // Arithmetic over a key property.
+        "MERGE (n:Entity {id: row.id}) SET n.id = n.id + 1",
     ] {
         assert!(
             !bind(tail, &distinct)

@@ -504,3 +504,104 @@ fn ordinary_numeric_queries_keep_pinned_history_and_refuse_late_errors_without_r
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// A stored List reads on the numeric cursor as the general evaluator reads
+/// it (TCK Return5 [5]): it groups, counts, orders as an extremum and counts
+/// as a DISTINCT value. Only a scalar-only aggregate refuses it, with that
+/// aggregate's own typed error (fgdb-k3nub).
+#[test]
+fn stored_collections_group_and_aggregate_on_the_numeric_cursor() {
+    use fgdb_gql::PreparedGraphAggregateText;
+
+    let ((), report) = run_async_under_lab(0xa66e_2201, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let text =
+            |value: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(value).unwrap());
+        let red = GraphValue::List(vec![text("red")].into());
+        let blue = GraphValue::List(vec![text("blue")].into());
+        // A stored property is never a map (its ruling is pending), so the
+        // fourth collection is a longer list.
+        let pair = GraphValue::List(vec![text("blue"), text("red")].into());
+        let mut batch = WriteBatch::new(RelationId(1));
+        for (id, tag) in [(1_u128, &red), (2, &blue), (3, &red), (4, &pair)] {
+            batch.create_vertex_values(
+                VId(id),
+                vec![LABEL],
+                vec![
+                    (SCORE, CanonicalScalar::Int(id as i64).into()),
+                    (TAG, tag.to_written_property().unwrap()),
+                ],
+            );
+        }
+        batch.create_vertex(VId(5), vec![LABEL], vec![(SCORE, CanonicalScalar::Int(5))]);
+        db.write(&commit, batch).await.unwrap();
+        let args = GqlParameters::new();
+        let value = |value: &GraphValue| GraphAggregateValue::Value(value.clone());
+        let null = GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null));
+        // Cells redact their Debug text, so compare the bags directly.
+        let same_rows = |result: QueryResult, expected: &[Vec<GraphAggregateValue>]| {
+            let QueryResult::Rows { rows, .. } = result else {
+                panic!("expected rows");
+            };
+            rows.len() == expected.len() && expected.iter().all(|row| rows.contains(row))
+        };
+        let grouped = "MATCH (n:L) RETURN n.tag AS tag, count(*) AS rows, sum(n.score) AS total, \
+                       count(n.tag) AS tags, min(n.tag) AS least";
+        let global = "MATCH (n:L) WHERE n.score < 4 \
+                      RETURN min(n.tag) AS least, max(n.tag) AS most, count(DISTINCT n.tag) AS kinds";
+        for statement in [grouped, global] {
+            // The law is about the numeric cursor: it must be the path taken.
+            let prepared = PreparedGraphAggregateText::prepare(statement, |kind, name| {
+                fgdb_gql::GraphSymbolResolver::resolve_symbol(&mut symbols(), kind, name)
+            })
+            .unwrap();
+            let definition = prepared.bind_parameters(&args).unwrap();
+            assert!(
+                fgdb_gql::scan_stream::AggregateScanPlan::compile_numeric(&definition).is_some(),
+                "{statement}"
+            );
+        }
+        let group = |tag: GraphAggregateValue, rows: u64, total: i128, tags: u64| {
+            vec![
+                tag.clone(),
+                GraphAggregateValue::Count(rows),
+                GraphAggregateValue::Integer(total),
+                GraphAggregateValue::Count(tags),
+                tag,
+            ]
+        };
+        assert!(same_rows(
+            db.query(&cx, grouped, &args, symbols(), wide()).unwrap(),
+            &[
+                group(value(&red), 2, 4, 2),
+                group(value(&blue), 1, 2, 1),
+                group(value(&pair), 1, 4, 1),
+                group(null, 1, 5, 0),
+            ]
+        ));
+        assert!(same_rows(
+            db.query(&cx, global, &args, symbols(), wide()).unwrap(),
+            &[vec![
+                value(&blue),
+                value(&red),
+                GraphAggregateValue::Count(2)
+            ]]
+        ));
+        assert!(matches!(
+            db.query(
+                &cx,
+                "MATCH (n:L) RETURN sum(n.tag) AS s",
+                &args,
+                symbols(),
+                wide()
+            ),
+            Err(QueryError::Aggregate(GqlQueryError::Source(
+                GraphAggregateError::NonIntegerSum { aggregate: 0 }
+            )))
+        ));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

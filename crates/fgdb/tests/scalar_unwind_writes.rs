@@ -625,8 +625,23 @@ fn relationship_rekey_batches_match_entry_edge_oracle_and_preserve_rollback_and_
             .unwrap(),
             2,
         );
-        let expected = txn.edges(&db).unwrap();
-        txn.finish(&mut db, &commit).await.unwrap();
+        // The staged view keeps each rekeyed edge's creation and stamps the
+        // created one at the basis; the commit retires every updated version
+        // and creates its successor at the commit sequence, so the committed
+        // records are the staged ones restamped.
+        let mut expected = txn.edges(&db).unwrap();
+        let EmbeddedTxnCompletion::WriteCommitted { commit_seq } =
+            txn.finish(&mut db, &commit).await.unwrap()
+        else {
+            panic!("a write completion");
+        };
+        assert_eq!(commit_seq, CommitSeq(2));
+        // EId(4) created; EId(1), EId(2^100+1) and EId(3) rekeyed.
+        assert_eq!(expected.len(), 4);
+        for record in &mut expected {
+            assert_eq!(record.entry.created_at, CommitSeq(1));
+            record.entry.created_at = commit_seq;
+        }
         assert_eq!(db.edges().unwrap(), expected);
         let seq = db.frontier().unwrap();
         db.compact(&commit).await.unwrap();

@@ -391,6 +391,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                     let mut key = Vec::new();
                     for &column in self.plan.aggregate.group_key_columns() {
                         meter.event(VertexScanEvent::Work).map_err(lift)?;
+                        let mut stored = None;
                         let value = match projected_argument(
                             column,
                             computed.as_ref(),
@@ -398,6 +399,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                             vid,
                             row,
                             meter,
+                            &mut stored,
                         )? {
                             Input::Vertex(vid) => GraphValue::Vertex(vid),
                             Input::Identity => unreachable!("a key has a checked input column"),
@@ -472,11 +474,18 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                     .enumerate()
                 {
                     meter.event(VertexScanEvent::Work).map_err(lift)?;
+                    let mut stored = None;
                     let input = match spec.argument_column() {
                         None => Input::Identity,
-                        Some(column) => {
-                            projected_argument(column, computed.as_ref(), columns, vid, row, meter)?
-                        }
+                        Some(column) => projected_argument(
+                            column,
+                            computed.as_ref(),
+                            columns,
+                            vid,
+                            row,
+                            meter,
+                            &mut stored,
+                        )?,
                     };
                     state.update_governed(input, aggregate, &mut |event| {
                         meter.event(event).map_err(lift)
@@ -566,10 +575,16 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
             || self.plan.pipeline.is_some()
             || self.plan.aggregate.has_streamed_output_stage()
             || self.plan.collects
+            || keys
+                .iter()
+                .chain(values.iter().filter_map(GraphAggregateValue::as_value))
+                .any(|value| matches!(value, GraphValue::List(_) | GraphValue::Map { .. }))
         {
             // The projection compiler checked every column and the shared
             // exact cells checked every consumed value. Preserve native key
-            // domains without weakening public maintained-row admission.
+            // domains without weakening public maintained-row admission. A
+            // stored List or Map key or extremum was admitted when it was
+            // read; the maintained-row schema types a property column Scalar.
             GraphAggregateRow::from_group_values(keys, values)
         } else {
             self.plan
@@ -681,13 +696,14 @@ fn projected_argument<'a, F, E, C>(
     vid: VId,
     row: VertexScanRow<'a>,
     meter: &mut Meter<F>,
+    stored: &'a mut Option<GraphValue>,
 ) -> Result<Input<'a>, VertexAggregateError<E, C>>
 where
     F: FnMut() -> Result<(), C>,
 {
     match computed {
         Some(values) => Ok(Input::from_value(&values.values()[column])),
-        None => argument(&columns[column], vid, row, meter),
+        None => argument(&columns[column], vid, row, meter, stored),
     }
 }
 
@@ -702,11 +718,16 @@ fn scalar_payload_units(value: &CanonicalScalar) -> usize {
     };
     bytes.div_ceil(crate::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
 }
+/// A stored List or Map reads as the native value the general evaluator reads
+/// (fgdb-k3nub, TCK Return5 [5]): it groups, counts, orders as an extremum and
+/// is collected, admitted into `stored` before the copy. A scalar-only
+/// aggregate still refuses it with that aggregate's own typed error.
 fn argument<'a, F, E, C>(
     column: &ValueProjection,
     vid: VId,
     row: VertexScanRow<'a>,
     meter: &mut Meter<F>,
+    stored: &'a mut Option<GraphValue>,
 ) -> Result<Input<'a>, VertexAggregateError<E, C>>
 where
     F: FnMut() -> Result<(), C>,
@@ -718,11 +739,14 @@ where
                 meter.event(event)
             })
             .map_err(lift)?;
-            // A stored List or Map refuses rather than read as NULL
-            // (fgdb-k3nub).
-            let value = crate::integer_expression::stored_scalar(found.map(|(_, value)| value))
-                .map_err(GqlQueryError::from)?;
-            Ok(Input::Scalar(value))
+            Ok(match found.map(|(_, value)| value) {
+                Some(value) if value.is_collection() => Input::Value(stored.insert(
+                    GraphValue::admit_property_value(value, &mut |event| {
+                        meter.event(input_event(event)).map_err(lift)
+                    })?,
+                )),
+                value => Input::Scalar(value.and_then(CanonicalPropertyValue::as_scalar)),
+            })
         }
         _ => unreachable!("projection profile checked before source access"),
     }

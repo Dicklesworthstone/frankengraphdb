@@ -210,6 +210,41 @@ fn vertex_and_edge_maps_merge_all_final_assignments_and_keep_occurrences() {
 }
 
 #[test]
+fn parameter_right_sides_merge_as_computed_maps_and_non_maps_refuse() {
+    // `SET n += $patch` is a computed property map (fgdb-0s2pq, fcee3758):
+    // every target gains the parameter's entries, the rest kept.
+    let template = PreparedGraphMutationQueryText::prepare(
+        "MATCH (n) SET n += $patch RETURN n.p AS p,properties(n) AS m ORDER BY p",
+        R,
+        Catalog(Some("q")),
+    )
+    .unwrap();
+    let patch = GqlParameters::new()
+        .with_map("patch", vec![("q".into(), int(1))])
+        .unwrap();
+    let batch = Fixture::new()
+        .execute(&template.bind_parameters(&patch).unwrap(), policy())
+        .unwrap();
+    assert_eq!(
+        rows(&batch),
+        vec![
+            vec![
+                int(10),
+                map(vec![
+                    ("p", int(10)),
+                    ("old", int(3)),
+                    ("keep", int(7)),
+                    ("q", int(1))
+                ]),
+            ],
+            vec![int(20), map(vec![("p", int(20)), ("q", int(1))])],
+        ]
+    );
+    let scalar = GqlParameters::new().with_int64("patch", 5).unwrap();
+    assert!(template.bind_parameters(&scalar).is_err());
+}
+
+#[test]
 fn aliases_of_one_element_and_aggregates_read_the_same_final_map() {
     let mut source = Fixture::new();
     source.edges = vec![(EId(11), VId(1), R, VId(1)), (EId(12), VId(1), R, VId(1))];

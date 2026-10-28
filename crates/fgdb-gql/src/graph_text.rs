@@ -919,6 +919,12 @@ struct Parser<'a> {
     /// Created path names only while compiling a write's RETURN/WITH items.
     /// Scalar routing sees their domain; MATCH never gains source bindings.
     write_paths: Vec<&'a str>,
+    /// Set while a write owner's leaves compile a scalar expression through
+    /// the shared compiler; its composite operands still reach that owner.
+    write_leaves: bool,
+    /// A bare labels()/type() argument the write owner answers through its
+    /// metadata gate (ValueResolver::leaf), never through an ordinary leaf.
+    metadata_probe: Option<Name<'a>>,
     boundary_reads: Option<BoundaryReads<'a>>,
     /// A resolved leaf followed by `.key` reads that entry (an imported
     /// map's `row.key` beside MATCH reads, fgdb-0s2pq). Read scopes enable it
@@ -1129,6 +1135,8 @@ impl<'a> Parser<'a> {
             read_comparisons: None,
             resolved_row: None,
             write_paths: Vec::new(),
+            write_leaves: false,
+            metadata_probe: None,
             boundary_reads: None,
             resolved_entries: false,
             call_element_reads: false,

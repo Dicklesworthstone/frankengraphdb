@@ -325,6 +325,7 @@ impl ReadValueTemplate {
                         GraphIntegerOp::Column(_)
                             | GraphIntegerOp::ScalarColumn(_)
                             | GraphIntegerOp::IdentityColumn { .. }
+                            | GraphIntegerOp::PresenceColumn(_)
                     )
                 )
             }),

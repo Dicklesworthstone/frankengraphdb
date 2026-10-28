@@ -114,8 +114,6 @@ fn named_paths_are_routed_through_direct_return_with_and_write_continuations() {
         "CREATE (a),(b) MERGE walk=(a)-[:R]->(b) RETURN walk,length(walk) AS hops",
         "MATCH (a),(b) MERGE walk=(a)-[r:R]->(b) ON CREATE SET r.p=7 RETURN walk",
         "MATCH (a),(b) MERGE walk=(a)-[:R]->(b) CREATE (marker {p:length(walk)}) RETURN walk",
-        "MATCH (a),(b) MERGE walk=(a)-[:R]->(b) WITH walk UNWIND nodes(walk) AS n \
-         SET n.p=3 RETURN walk,length(walk) AS hops",
     ] {
         assert!(
             PreparedGraphWriteChainText::is_chain(text).unwrap(),
@@ -126,6 +124,18 @@ fn named_paths_are_routed_through_direct_return_with_and_write_continuations() {
             .bind_parameters(&GqlParameters::new())
             .expect(text);
     }
+    // A SET after carrying the path through WITH and UNWIND is no write chain
+    // yet (fgdb-at06q stays open for it): it refuses rather than run.
+    let text = "MATCH (a),(b) MERGE walk=(a)-[:R]->(b) WITH walk UNWIND nodes(walk) AS n \
+                SET n.p=3 RETURN walk,length(walk) AS hops";
+    assert!(
+        !PreparedGraphWriteChainText::is_chain(text).unwrap(),
+        "{text}"
+    );
+    assert!(
+        PreparedGraphEdgeMergeQueryText::prepare(text, R, symbols).is_err(),
+        "{text}"
+    );
 }
 
 #[test]
