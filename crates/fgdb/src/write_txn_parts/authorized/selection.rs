@@ -425,6 +425,57 @@ pub(super) fn returning_element_metadata<V: Vfs + Clone, Clock: FnMut() -> u64>(
     )
 }
 
+/// A MERGE input relation's whole source: `patterns` serves its pattern
+/// leaves, and a carried identity it does not rematch (`a.p` of a WITH
+/// vertex) is read as a MATCH projection reads it. A named hidden field keeps
+/// the explicit refusal; an imported identity confers no authority, so Read
+/// and the same signed permit are charged before each point lookup.
+pub(super) fn scoped_input<'a, V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &'a WriteTxn,
+    database: &'a Database<V>,
+    cx: &'a QueryCx,
+    scope: &'a PlannerPredicates,
+    execution: &'a RefCell<&mut Execution<'_, '_, Clock>>,
+    patterns: impl FnMut(
+        &PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
+        GqlQueryPolicy,
+    ) -> Selected<fgdb_gql::algebra::GraphValueRow>
+    + 'a,
+) -> impl fgdb_gql::GraphSetSource<WriteTxnError, WriteTxnError> + 'a {
+    fgdb_gql::with_element_metadata(
+        fgdb_gql::WithElementReads {
+            source: patterns,
+            elements: move |element, key| {
+                if !scope.allows_property(key) {
+                    return Err(WriteTxnError::Authorization(Error::ScopeDenied));
+                }
+                returning_element_property(
+                    transaction,
+                    database,
+                    cx,
+                    element,
+                    key,
+                    scope,
+                    execution,
+                )
+            },
+        },
+        move |element, kind, catalog, control| {
+            returning_element_metadata(
+                transaction,
+                database,
+                cx,
+                element,
+                kind,
+                catalog,
+                scope,
+                execution,
+                control,
+            )
+        },
+    )
+}
+
 pub(super) fn returning_element_reader<'a, V: Vfs + Clone, Clock: FnMut() -> u64>(
     transaction: &'a WriteTxn,
     database: &'a Database<V>,

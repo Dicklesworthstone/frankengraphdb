@@ -208,6 +208,142 @@ fn implicit_named_merge_path_rows_feed_the_next_write_in_both_hosts() {
     });
 }
 
+/// Runs `text` once in one host over a fresh `(1 {p:1, secret:7})`,
+/// `(2 {p:2})` graph: the statement's rows, or its authorization refusal.
+async fn carried_merge(
+    commit: &CommitCx,
+    txn: &TxnCx,
+    query: &QueryCx,
+    authorized: bool,
+    text: &str,
+) -> (
+    Database<MemVfs>,
+    Result<(GraphInsertStats, Vec<GraphValueRow>), Option<Error>>,
+) {
+    let mut db = Database::open_memory(commit, keys()).await.unwrap();
+    let mut seed = WriteBatch::new(R);
+    seed.create_vertex(
+        VId(1),
+        vec![L],
+        vec![
+            (P, CanonicalScalar::Int(1)),
+            (SECRET, CanonicalScalar::Int(7)),
+        ],
+    );
+    seed.create_vertex(VId(2), vec![L], vec![(P, CanonicalScalar::Int(2))]);
+    db.write(commit, seed).await.unwrap();
+    let program = chain(text);
+    let result = if authorized {
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 1), NOW).unwrap();
+        db.execute_graph_write_chain_authorized(
+            txn,
+            query,
+            commit,
+            &issuer,
+            &token,
+            "main",
+            &program,
+            policy(1),
+            || NOW,
+        )
+        .await
+        .map(|(stats, result, _)| (stats, result.value))
+        .map_err(|error| authorization(&error))
+    } else {
+        let mut transaction = db.begin(txn).unwrap();
+        let (stats, result, _) = transaction
+            .execute_graph_write_chain_engine_governed(&mut db, query, &program, policy(1))
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        transaction.finish(&mut db, commit).await.unwrap();
+        Ok((stats, result.value))
+    };
+    assert_eq!(txn.outstanding_obligations(), 0, "{text}");
+    (db, result)
+}
+
+/// A relationship MERGE input reads a carried vertex it does not rematch
+/// (`a.p` of a vertex the statement created or merged) through the host's
+/// element reader, with or without ON actions, in both hosts (fgdb-v1rbj).
+/// The authorized reader keeps the explicit refusal for a field the grant
+/// hides; the unauthorized host reads the same field.
+#[test]
+fn relationship_merge_inputs_read_carried_vertices_in_both_hosts() {
+    lab(0xc4a1_3192, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        for authorized in [false, true] {
+            for (text, row, weight) in [
+                (
+                    "CREATE (a:Visible {p:5}) WITH a MATCH (b:Visible {p:2}) \
+                     MERGE (a)<-[r:R]-(b) RETURN a.p AS source,b.p AS target",
+                    [int(5), int(2)],
+                    None,
+                ),
+                (
+                    "CREATE (a:Visible {p:5}) WITH a MATCH (b:Visible {p:2}) \
+                     MERGE (a)<-[r:R]-(b) ON CREATE SET r.q=a.p+b.p \
+                     RETURN a.p AS source,r.q AS weight",
+                    [int(5), int(7)],
+                    Some(7),
+                ),
+            ] {
+                let (db, result) = carried_merge(&commit, &txn, &query, authorized, text).await;
+                let (stats, rows) =
+                    result.unwrap_or_else(|error| panic!("{authorized} {text}: {error:?}"));
+                assert_eq!(
+                    (stats.created_vertices, stats.created_edges),
+                    (1, 1),
+                    "{text}"
+                );
+                assert_eq!(rows.len(), 1, "{text}");
+                assert_eq!(rows[0].values(), row, "{authorized} {text}");
+                let created = db
+                    .vertices()
+                    .unwrap()
+                    .into_iter()
+                    .find(|vertex| vertex.vid != VId(1) && vertex.vid != VId(2))
+                    .unwrap()
+                    .vid;
+                let edges = db.edges().unwrap();
+                assert_eq!(edges.len(), 1, "{text}");
+                assert_eq!(
+                    (
+                        edges[0].entry.src,
+                        edges[0].entry.relation,
+                        edges[0].entry.dst
+                    ),
+                    (VId(2), R, created),
+                    "{text}"
+                );
+                let expected: Vec<(PropertyKeyId, CanonicalPropertyValue)> = weight
+                    .into_iter()
+                    .map(|q| (Q, CanonicalPropertyValue::from(CanonicalScalar::Int(q))))
+                    .collect();
+                assert_eq!(edges[0].props, expected, "{authorized} {text}");
+            }
+            let text = "MERGE (a:Visible {p:1}) WITH a MATCH (b:Visible {p:2}) \
+                        MERGE (a)-[r:R]->(b) ON CREATE SET r.q=a.secret RETURN r.q AS weight";
+            let (db, result) = carried_merge(&commit, &txn, &query, authorized, text).await;
+            if authorized {
+                assert_eq!(result.err(), Some(Some(Error::ScopeDenied)), "{text}");
+                assert!(db.edges().unwrap().is_empty(), "{text}");
+                assert_eq!(db.vertices().unwrap().len(), 2, "{text}");
+            } else {
+                let (stats, rows) = result.unwrap();
+                assert_eq!((stats.created_vertices, stats.created_edges), (0, 1));
+                assert_eq!(rows.len(), 1, "{text}");
+                assert_eq!(rows[0].values(), [int(7)], "{text}");
+                let edges = db.edges().unwrap();
+                assert_eq!(edges.len(), 1, "{text}");
+                assert_eq!(
+                    edges[0].props,
+                    [(Q, CanonicalPropertyValue::from(CanonicalScalar::Int(7)))]
+                );
+            }
+        }
+    });
+}
+
 #[test]
 fn relationship_action_imports_bind_weights_retry_without_creation_and_reopen() {
     lab(0xc4a1_3114, |contexts| async move {

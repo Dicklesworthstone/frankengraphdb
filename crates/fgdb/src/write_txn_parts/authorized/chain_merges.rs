@@ -348,22 +348,32 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
     cx.with_restriction(|| {
         let selected = {
             let controls = RefCell::new(&mut *execution);
+            // A MATCH input may read a carried element it does not rematch
+            // (`a.p` of a WITH vertex), as the vertex MERGE input does.
+            let mut source = selection::scoped_input(
+                transaction,
+                database,
+                cx,
+                scope,
+                &controls,
+                |pattern, allowance| {
+                    admit_pattern(pattern, scope).map_err(GqlQueryError::Source)?;
+                    selection::select_overlay(
+                        transaction,
+                        database,
+                        cx,
+                        pattern,
+                        scope,
+                        allowance,
+                        &controls,
+                    )
+                },
+            );
             merge
-                .select_governed::<WriteTxnError, WriteTxnError, WriteTxnError>(
+                .select_governed_with_source::<WriteTxnError, WriteTxnError, WriteTxnError>(
                     owned,
                     allowance.query,
-                    |pattern, allowance| {
-                        admit_pattern(pattern, scope).map_err(GqlQueryError::Source)?;
-                        selection::select_overlay(
-                            transaction,
-                            database,
-                            cx,
-                            pattern,
-                            scope,
-                            allowance,
-                            &controls,
-                        )
-                    },
+                    &mut source,
                     || {
                         cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                         controls.borrow_mut().checkpoint()
@@ -534,22 +544,30 @@ pub(super) fn execute_actions<V: Vfs + Clone, Clock: FnMut() -> u64>(
     cx.with_restriction(|| {
         let selected = {
             let controls = RefCell::new(&mut *execution);
+            let mut source = selection::scoped_input(
+                transaction,
+                database,
+                cx,
+                scope,
+                &controls,
+                |pattern, allowance| {
+                    admit_pattern(pattern, scope).map_err(GqlQueryError::Source)?;
+                    selection::select_overlay(
+                        transaction,
+                        database,
+                        cx,
+                        pattern,
+                        scope,
+                        allowance,
+                        &controls,
+                    )
+                },
+            );
             merge
-                .select_governed::<WriteTxnError, WriteTxnError, WriteTxnError>(
+                .select_governed_with_source::<WriteTxnError, WriteTxnError, WriteTxnError>(
                     owned,
                     private,
-                    |pattern, allowance| {
-                        admit_pattern(pattern, scope).map_err(GqlQueryError::Source)?;
-                        selection::select_overlay(
-                            transaction,
-                            database,
-                            cx,
-                            pattern,
-                            scope,
-                            allowance,
-                            &controls,
-                        )
-                    },
+                    &mut source,
                     || {
                         cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                         controls.borrow_mut().checkpoint()

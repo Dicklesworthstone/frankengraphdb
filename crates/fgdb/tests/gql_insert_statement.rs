@@ -3009,3 +3009,130 @@ fn created_named_paths_keep_traversal_overlay_reads_and_committed_graph_state() 
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// A CREATE field reads `x.key` of an element its row carries in a value,
+/// not a projected column (fgdb-v1rbj): an UNWIND member of a list, a
+/// collected list, a path's nodes or relationships, and the relationship of
+/// a MERGE path in a chained CREATE. The insertion evaluator had no element
+/// reader, so each of these failed at run time with IncompatibleOperands.
+#[test]
+fn created_fields_read_elements_carried_in_values() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4b0, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let stored = |value| CanonicalPropertyValue::from(CanonicalScalar::Int(value));
+        for (text, expected) in [
+            (
+                "MATCH (a:Source) UNWIND [a] AS x CREATE (:Copy {p:x.p})",
+                vec![10, 20],
+            ),
+            (
+                "MATCH (a:Source) WITH collect(a) AS xs UNWIND xs AS x CREATE (:Copy {p:x.p})",
+                vec![10, 20],
+            ),
+            (
+                "MATCH path=(:Source)-[:R]->(:Source) UNWIND nodes(path) AS n \
+                 CREATE (:Copy {p:n.p})",
+                vec![10, 20],
+            ),
+            (
+                "MATCH ()-[r:R]->() WITH r UNWIND [r] AS e CREATE (:Copy {p:e.q})",
+                vec![30],
+            ),
+            (
+                "MATCH (a:Source) UNWIND [a] AS x CREATE (:Copy {p:x.p+1})",
+                vec![11, 21],
+            ),
+            (
+                "MATCH (a:Source {p:10}) UNWIND [a] AS x CREATE (:Copy {p:size(labels(x))})",
+                vec![1],
+            ),
+            (
+                "MATCH (a:Source {p:10}),(b:Source {p:20}) MERGE route=(a)<-[r:T]-(b) \
+                 ON CREATE SET r.q=7 WITH route AS saved \
+                 UNWIND relationships(saved) AS edge CREATE (:Copy {p:edge.q})",
+                vec![7],
+            ),
+        ] {
+            let mut db = fresh(&commit, true).await;
+            let (mut vertices, mut edges) = reserve(&mut db, &cx, 4, 4);
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => vertices.pop_front().unwrap(),
+                        GraphInsertRequest::Edge { .. } => edges.pop_front().unwrap(),
+                    })
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{text}: {error}"));
+            let copied: Vec<_> = db
+                .vertices()
+                .unwrap()
+                .into_iter()
+                .filter(|vertex| vertex.labels == [COPY])
+                .map(|vertex| vertex.props)
+                .collect();
+            assert_eq!(copied.len(), expected.len(), "{text}: {copied:?}");
+            for value in expected {
+                assert!(
+                    copied.contains(&vec![(P, stored(value))]),
+                    "{text}: {value} in {copied:?}"
+                );
+            }
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+
+        // A chained CREATE with a RETURN reads the carried element's field the
+        // same way, after an earlier CREATE of the same statement.
+        let mut db = fresh(&commit, true).await;
+        let (mut vertices, mut edges) = reserve(&mut db, &cx, 4, 4);
+        let returned = db
+            .query_write(
+                &txcx,
+                &cx,
+                &commit,
+                "CREATE (a:Copy {p:9}) WITH a UNWIND [a] AS x \
+                 CREATE (c:Copy {p:x.p}) RETURN c.p AS copied",
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => vertices.pop_front().unwrap(),
+                        GraphInsertRequest::Edge { .. } => edges.pop_front().unwrap(),
+                    })
+                },
+            )
+            .await
+            .unwrap();
+        let QueryResult::Rows { columns, rows } = returned else {
+            panic!("a chained CREATE with RETURN returns rows")
+        };
+        assert_eq!(columns, ["copied"]);
+        assert_eq!(
+            rows,
+            [vec![QueryValue::Value(GraphValue::Scalar(
+                CanonicalScalar::Int(9)
+            ))]]
+        );
+        let copies: Vec<_> = db
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .filter(|vertex| vertex.labels == [COPY])
+            .map(|vertex| vertex.props)
+            .collect();
+        assert_eq!(copies, [vec![(P, stored(9))], vec![(P, stored(9))]]);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

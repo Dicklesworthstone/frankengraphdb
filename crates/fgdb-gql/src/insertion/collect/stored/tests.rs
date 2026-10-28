@@ -141,10 +141,17 @@ fn column_and_bound_lists_keep_the_same_charges_without_changing_scalar_paths() 
     ] {
         let row = GraphValueRow::from_owned_values(vec![value.clone()]);
         let mut events = Vec::new();
-        let result = fields(&properties(expression), &row, 7, 0, &mut |event| {
-            events.push(event);
-            Ok::<_, Fault>(())
-        })
+        let result = fields(
+            &properties(expression),
+            &row,
+            7,
+            0,
+            &mut |event| {
+                events.push(event);
+                Ok::<_, Fault>(())
+            },
+            &mut crate::set_ops::no_element_reads::<Fault>,
+        )
         .unwrap();
         let mut expected = vec![GlaExecutionEvent::Work];
         expected.extend(reservations(&value));
@@ -161,6 +168,7 @@ fn column_and_bound_lists_keep_the_same_charges_without_changing_scalar_paths() 
             events.push(event);
             Ok::<_, Fault>(())
         },
+        &mut crate::set_ops::no_element_reads::<Fault>,
     )
     .unwrap();
     assert_eq!(result, vec![(P, CanonicalScalar::Int(7).into())]);
@@ -184,10 +192,17 @@ fn computed_lists_charge_the_storage_copy_in_addition_to_the_expression_result()
     })
     .unwrap();
     let mut observed = Vec::new();
-    let result = fields(&properties(expression), &row, 7, 0, &mut |event| {
-        observed.push(event);
-        Ok::<_, Fault>(())
-    })
+    let result = fields(
+        &properties(expression),
+        &row,
+        7,
+        0,
+        &mut |event| {
+            observed.push(event);
+            Ok::<_, Fault>(())
+        },
+        &mut crate::set_ops::no_element_reads::<Fault>,
+    )
     .unwrap();
     let mut expected = vec![GlaExecutionEvent::Work];
     expected.extend(evaluation);
