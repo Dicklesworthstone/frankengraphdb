@@ -1229,7 +1229,8 @@ pub(in crate::graph_text) fn remap_output_columns(
                 if let crate::mutation_text::MutationIntegerTemplateOp::Bound(
                     crate::GraphIntegerOp::Column(index)
                     | crate::GraphIntegerOp::ScalarColumn(index)
-                    | crate::GraphIntegerOp::IdentityColumn { column: index, .. },
+                    | crate::GraphIntegerOp::IdentityColumn { column: index, .. }
+                    | crate::GraphIntegerOp::PresenceColumn(index),
                 ) = op
                 {
                     *index = columns[*index];

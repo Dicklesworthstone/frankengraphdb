@@ -112,100 +112,34 @@ fn int(value: i64) -> GraphValue {
     GraphValue::Scalar(CanonicalScalar::Int(value))
 }
 
+/// A named relationship MERGE path with ON actions whose WITH tail reads to
+/// the statement's end, with no further write, refuses before any catalog or
+/// execution: the chain hosts run no read tail for a relationship MERGE step
+/// (fgdb-at06q; vertex MERGE steps gained one in 60d60df1). The positive law
+/// this replaces, action results and authorized masking of `edge.secret` in
+/// both hosts, is recorded on fgdb-at06q for when the tail is built.
 #[test]
-fn named_relationship_paths_keep_action_results_and_authorized_property_masking() {
-    lab(0xc4a1_3190, |contexts| async move {
-        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
-        let issuer = authority();
-        let token = issuer.issue_at(&grant(Rights::ReadWrite, 1), NOW).unwrap();
-        let program = chain(
-            "MATCH (a:Visible {p:1}),(b:Visible {p:2}) MERGE route=(a)<-[r:R]-(b) \
-             ON CREATE SET r.q=7 ON MATCH SET r.q=r.q+1 \
-             WITH route AS saved UNWIND relationships(saved) AS edge \
-             RETURN saved,edge.q AS value,edge.secret AS masked,length(saved) AS hops",
-        );
-        for authorized in [false, true] {
-            for existing in [false, true] {
-                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-                let mut seed = WriteBatch::new(R);
-                for id in 1..=2 {
-                    seed.create_vertex(
-                        VId(id as u128),
-                        vec![L],
-                        vec![(P, CanonicalScalar::Int(id))],
-                    );
-                }
-                if existing {
-                    seed.add_edge(
-                        EId(71),
-                        VId(2),
-                        VId(1),
-                        vec![
-                            (Q, CanonicalScalar::Int(7)),
-                            (SECRET, CanonicalScalar::Int(42)),
-                        ],
-                    );
-                }
-                db.write(&commit, seed).await.unwrap();
-                let (stats, result) = if authorized {
-                    let (stats, result, _) = db
-                        .execute_graph_write_chain_authorized(
-                            &txn,
-                            &query,
-                            &commit,
-                            &issuer,
-                            &token,
-                            "main",
-                            &program,
-                            policy(1).with_mutation_limit(2),
-                            || NOW,
-                        )
-                        .await
-                        .unwrap();
-                    (stats, result)
-                } else {
-                    let mut transaction = db.begin(&txn).unwrap();
-                    let (stats, result, _) = transaction
-                        .execute_graph_write_chain_engine_governed(
-                            &mut db,
-                            &query,
-                            &program,
-                            policy(1).with_mutation_limit(2),
-                        )
-                        .unwrap();
-                    transaction.finish(&mut db, &commit).await.unwrap();
-                    (stats, result)
-                };
-                assert_eq!(stats.created_edges, u64::from(!existing));
-                let edges = db.edges().unwrap();
-                assert_eq!(edges.len(), 1);
-                let edge = &edges[0].entry;
-                assert_eq!((edge.src, edge.dst), (VId(2), VId(1)));
-                if existing {
-                    assert_eq!(edge.eid, EId(71));
-                }
-                assert_eq!(result.value.len(), 1);
-                assert_eq!(
-                    result.value[0].values(),
-                    [
-                        GraphValue::Path(fgdb_gql::algebra::GraphPath::new(
-                            VId(1),
-                            Box::new([(edge.eid, VId(2))])
-                        )),
-                        int(if existing { 8 } else { 7 }),
-                        if existing && !authorized {
-                            int(42)
-                        } else {
-                            GraphValue::Scalar(CanonicalScalar::Null)
-                        },
-                        int(1),
-                    ],
-                    "a carried path uses the final overlay and the host's property authority"
-                );
-                assert_eq!(txn.outstanding_obligations(), 0);
-            }
-        }
-    });
+fn named_relationship_path_read_tails_refuse_until_the_chain_runs_them() {
+    let text = "MATCH (a:Visible {p:1}),(b:Visible {p:2}) MERGE route=(a)<-[r:R]-(b) \
+                ON CREATE SET r.q=7 ON MATCH SET r.q=r.q+1 \
+                WITH route AS saved UNWIND relationships(saved) AS edge \
+                RETURN saved,edge.q AS value,edge.secret AS masked,length(saved) AS hops";
+    assert!(PreparedGraphWriteChainText::is_chain(text).unwrap());
+    let refused = PreparedGraphWriteChainText::prepare(text, R, symbols).unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            fgdb_gql::GraphWriteChainTextError::EdgeMerge(fgdb_gql::GraphEdgeMergeTextError {
+                offset,
+                kind: fgdb_gql::GraphEdgeMergeTextErrorKind::Query(
+                    fgdb_gql::GraphPatternTextErrorKind::Expected(
+                        "a CREATE or MERGE after the WITH of a MERGE step"
+                    )
+                ),
+            }) if offset == text.len()
+        ),
+        "{refused:?}"
+    );
 }
 
 #[test]
@@ -270,6 +204,142 @@ fn implicit_named_merge_path_rows_feed_the_next_write_in_both_hosts() {
             );
             assert_eq!(db.frontier().unwrap().0, before.0 + 1);
             assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+/// Runs `text` once in one host over a fresh `(1 {p:1, secret:7})`,
+/// `(2 {p:2})` graph: the statement's rows, or its authorization refusal.
+async fn carried_merge(
+    commit: &CommitCx,
+    txn: &TxnCx,
+    query: &QueryCx,
+    authorized: bool,
+    text: &str,
+) -> (
+    Database<MemVfs>,
+    Result<(GraphInsertStats, Vec<GraphValueRow>), Option<Error>>,
+) {
+    let mut db = Database::open_memory(commit, keys()).await.unwrap();
+    let mut seed = WriteBatch::new(R);
+    seed.create_vertex(
+        VId(1),
+        vec![L],
+        vec![
+            (P, CanonicalScalar::Int(1)),
+            (SECRET, CanonicalScalar::Int(7)),
+        ],
+    );
+    seed.create_vertex(VId(2), vec![L], vec![(P, CanonicalScalar::Int(2))]);
+    db.write(commit, seed).await.unwrap();
+    let program = chain(text);
+    let result = if authorized {
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 1), NOW).unwrap();
+        db.execute_graph_write_chain_authorized(
+            txn,
+            query,
+            commit,
+            &issuer,
+            &token,
+            "main",
+            &program,
+            policy(1),
+            || NOW,
+        )
+        .await
+        .map(|(stats, result, _)| (stats, result.value))
+        .map_err(|error| authorization(&error))
+    } else {
+        let mut transaction = db.begin(txn).unwrap();
+        let (stats, result, _) = transaction
+            .execute_graph_write_chain_engine_governed(&mut db, query, &program, policy(1))
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        transaction.finish(&mut db, commit).await.unwrap();
+        Ok((stats, result.value))
+    };
+    assert_eq!(txn.outstanding_obligations(), 0, "{text}");
+    (db, result)
+}
+
+/// A relationship MERGE input reads a carried vertex it does not rematch
+/// (`a.p` of a vertex the statement created or merged) through the host's
+/// element reader, with or without ON actions, in both hosts (fgdb-v1rbj).
+/// The authorized reader keeps the explicit refusal for a field the grant
+/// hides; the unauthorized host reads the same field.
+#[test]
+fn relationship_merge_inputs_read_carried_vertices_in_both_hosts() {
+    lab(0xc4a1_3192, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        for authorized in [false, true] {
+            for (text, row, weight) in [
+                (
+                    "CREATE (a:Visible {p:5}) WITH a MATCH (b:Visible {p:2}) \
+                     MERGE (a)<-[r:R]-(b) RETURN a.p AS source,b.p AS target",
+                    [int(5), int(2)],
+                    None,
+                ),
+                (
+                    "CREATE (a:Visible {p:5}) WITH a MATCH (b:Visible {p:2}) \
+                     MERGE (a)<-[r:R]-(b) ON CREATE SET r.q=a.p+b.p \
+                     RETURN a.p AS source,r.q AS weight",
+                    [int(5), int(7)],
+                    Some(7),
+                ),
+            ] {
+                let (db, result) = carried_merge(&commit, &txn, &query, authorized, text).await;
+                let (stats, rows) =
+                    result.unwrap_or_else(|error| panic!("{authorized} {text}: {error:?}"));
+                assert_eq!(
+                    (stats.created_vertices, stats.created_edges),
+                    (1, 1),
+                    "{text}"
+                );
+                assert_eq!(rows.len(), 1, "{text}");
+                assert_eq!(rows[0].values(), row, "{authorized} {text}");
+                let created = db
+                    .vertices()
+                    .unwrap()
+                    .into_iter()
+                    .find(|vertex| vertex.vid != VId(1) && vertex.vid != VId(2))
+                    .unwrap()
+                    .vid;
+                let edges = db.edges().unwrap();
+                assert_eq!(edges.len(), 1, "{text}");
+                assert_eq!(
+                    (
+                        edges[0].entry.src,
+                        edges[0].entry.relation,
+                        edges[0].entry.dst
+                    ),
+                    (VId(2), R, created),
+                    "{text}"
+                );
+                let expected: Vec<(PropertyKeyId, CanonicalPropertyValue)> = weight
+                    .into_iter()
+                    .map(|q| (Q, CanonicalPropertyValue::from(CanonicalScalar::Int(q))))
+                    .collect();
+                assert_eq!(edges[0].props, expected, "{authorized} {text}");
+            }
+            let text = "MERGE (a:Visible {p:1}) WITH a MATCH (b:Visible {p:2}) \
+                        MERGE (a)-[r:R]->(b) ON CREATE SET r.q=a.secret RETURN r.q AS weight";
+            let (db, result) = carried_merge(&commit, &txn, &query, authorized, text).await;
+            if authorized {
+                assert_eq!(result.err(), Some(Some(Error::ScopeDenied)), "{text}");
+                assert!(db.edges().unwrap().is_empty(), "{text}");
+                assert_eq!(db.vertices().unwrap().len(), 2, "{text}");
+            } else {
+                let (stats, rows) = result.unwrap();
+                assert_eq!((stats.created_vertices, stats.created_edges), (0, 1));
+                assert_eq!(rows.len(), 1, "{text}");
+                assert_eq!(rows[0].values(), [int(7)], "{text}");
+                let edges = db.edges().unwrap();
+                assert_eq!(edges.len(), 1, "{text}");
+                assert_eq!(
+                    edges[0].props,
+                    [(Q, CanonicalPropertyValue::from(CanonicalScalar::Int(7)))]
+                );
+            }
         }
     });
 }
@@ -1201,6 +1271,17 @@ fn explicit_hidden_bindings_and_write_only_merge_refuse_the_entire_chain() {
             ),
             (
                 "MERGE (a)-[:R {secret:7}]->(b)",
+                Rights::ReadWrite,
+                Error::ScopeDenied,
+            ),
+            // A hidden key whose value the row computes (fgdb-at06q).
+            (
+                "WITH a, b, 7 AS s MERGE (a)-[:R {secret: s}]->(b)",
+                Rights::ReadWrite,
+                Error::ScopeDenied,
+            ),
+            (
+                "WITH a, b, 7 AS s MERGE (a)-[:R {p: s, secret: s + 1}]->(b)",
                 Rights::ReadWrite,
                 Error::ScopeDenied,
             ),

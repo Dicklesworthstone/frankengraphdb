@@ -528,6 +528,10 @@ impl<'a> Parser<'a> {
         };
         let mut arms = Vec::new();
         while self.take_word("WHEN")? {
+            // A searched WHEN is a Boolean position, as in the scalar CASE.
+            if subject.is_none() {
+                self.boolean_operand_at = self.current.at;
+            }
             let mut condition = self.case_result(columns, nesting, at)?;
             if let Some(subject) = &subject {
                 condition = ReadValueTemplate::Equal {
@@ -655,9 +659,13 @@ impl<'a> Parser<'a> {
         let row = self.routing_row(columns);
         // Two bare graph elements compared (element_compared). A resolved
         // scope's WITH WHERE keeps its own element filter.
+        // A comprehension element against an element is no WITH element
+        // filter, so it routes in a resolved scope too.
         Ok(self.list_column_compared(row)?
             || self.any_column_ordered(row)?
             || self.local_ordered(row)?
+            || self.local_element_compared(self.route(columns))?
+            || self.open_element_compared(self.route(columns))?
             || (!matches!(columns, ExpressionColumns::Resolved(_))
                 && self.element_compared(self.route(columns))?))
     }
@@ -780,7 +788,10 @@ impl<'a> Parser<'a> {
         nesting: usize,
         at: usize,
     ) -> Result<ReadValueTemplate, GraphMutationTextError> {
-        if self.list_operand_here(self.route(columns))? {
+        // A parenthesized value with a postfix read (`(m{v}).v`, `(l)[0]`)
+        // is one value-language operand: the scalar program would read the
+        // group and leave its postfix unread, ending the chain there.
+        if self.list_operand_here(self.route(columns))? || self.parenthesized_postfix_value()? {
             return self.list_operand_value(columns, nesting, at);
         }
         let base = core::mem::replace(&mut self.let_base, nesting);
@@ -2133,19 +2144,8 @@ impl<'a> Parser<'a> {
         }
         // A composite operand evaluates as a let slot of this expression
         // (fgdb-o5o9t), read like a list element.
-        if self.lets.is_some() {
-            let collected = matches!(columns, ExpressionColumns::Resolved(_))
-                && self.collected_aggregate_call()?;
-            let metadata = self
-                .value_metadata_call(
-                    matches!(columns, ExpressionColumns::Graph(_)),
-                    self.routing_row(columns).unwrap_or(&[]),
-                )?
-                .is_some();
-            if self.let_operand_here()? || collected || metadata {
-                self.composite_slot(columns, depth, program, at)?;
-                return Ok(());
-            }
+        if self.lets.is_some() && self.composite_let_operand_here(columns)? {
+            return self.composite_slot(columns, depth, program, at);
         }
         if self.row_entry_slot(columns, program, at)? {
             return Ok(());
@@ -2163,254 +2163,56 @@ impl<'a> Parser<'a> {
         if self.row_path_length_slot(columns, program, at)? {
             return Ok(());
         }
-        let function = if (crate::graph_text::SCALAR_FUNCTIONS
-            .iter()
-            .any(|name| self.is_word(name))
-            || self.text_length_call(columns)?)
-            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
-        {
-            let TokenKind::Word(name) = self.current.kind else {
-                unreachable!("checked function word")
-            };
-            Some(name)
-        } else {
-            None
-        };
-        if let Some(function) = function {
-            let start = self.collected_scalar_calls;
-            self.advance()?;
-            self.punct(b'(', "(")?;
-            if self.constant_function(function, program, at)? {
-                return Ok(());
-            }
-            // An argument is a whole expression, comparisons and Boolean
-            // operators included (`toString(1 < 0)`, TCK TypeConversion4 [3]),
-            // exactly as inside parentheses.
-            self.scalar_boolean(columns, depth + 1, program)?;
-            let spelled =
-                |names: [&str; 2]| names.iter().any(|name| function.eq_ignore_ascii_case(name));
-            let text_op = if spelled(["UPPER", "TOUPPER"]) {
-                Some(GraphIntegerOp::Upper)
-            } else if spelled(["LOWER", "TOLOWER"]) {
-                Some(GraphIntegerOp::Lower)
-            } else if function.eq_ignore_ascii_case("TRIM") {
-                Some(GraphIntegerOp::Trim)
-            } else if function.eq_ignore_ascii_case("TOSTRING") {
-                Some(GraphIntegerOp::ToText)
-            } else if function.eq_ignore_ascii_case("TOINTEGER") {
-                Some(GraphIntegerOp::ToInteger)
-            } else if function.eq_ignore_ascii_case("TOBOOLEAN") {
-                Some(GraphIntegerOp::ToBoolean)
-            } else if function.eq_ignore_ascii_case("SIZE") {
-                Some(GraphIntegerOp::Size)
-            } else if function.eq_ignore_ascii_case("CHAR_LENGTH") {
-                Some(GraphIntegerOp::CharLength)
-            } else if function.eq_ignore_ascii_case("LENGTH") {
-                Some(GraphIntegerOp::Length)
-            } else {
-                None
-            };
-            if let Some(op) = text_op {
-                self.punct(b')', ")")?;
-                return emit(program, ParsedOp::Bound(op), at);
-            }
-            if let Some(numeric) = GraphNumericFunction::named(function) {
-                self.punct(b')', ")")?;
-                return emit(
-                    program,
-                    ParsedOp::Bound(GraphIntegerOp::Numeric(numeric)),
-                    at,
-                );
-            }
-            // GQL/SQL SUBSTRING(s FROM start [FOR length]) counts from 1;
-            // the openCypher comma form substring(s, start [, length]) counts
-            // from 0 (fgdb-qkeq2). Without a length, the rest of the text.
-            if function.eq_ignore_ascii_case("SUBSTRING") {
-                let sql = self.take_word("FROM")?;
-                if !sql {
-                    self.punct(b',', ", or FROM")?;
-                }
-                self.scalar_boolean(columns, depth + 1, program)?;
-                if self.take(b')')? {
-                    let op = if sql {
-                        GraphIntegerOp::SubstringFrom
-                    } else {
-                        GraphIntegerOp::CypherSubstringToEnd
-                    };
-                    return emit(program, ParsedOp::Bound(op), at);
-                }
-                if sql {
-                    self.word("FOR")?;
-                } else {
-                    self.punct(b',', ",")?;
-                }
-                self.scalar_boolean(columns, depth + 1, program)?;
-                self.punct(b')', ")")?;
-                let op = if sql {
-                    GraphIntegerOp::Substring
-                } else {
-                    GraphIntegerOp::CypherSubstring
-                };
-                return emit(program, ParsedOp::Bound(op), at);
-            }
-            if function.eq_ignore_ascii_case("ABS") {
-                self.punct(b')', ")")?;
-                return emit(program, ParsedOp::Unary(GraphIntegerUnary::Abs), at);
-            }
-            self.punct(b',', ",")?;
-            self.scalar_boolean(columns, depth + 1, program)?;
-            if function.eq_ignore_ascii_case("NULLIF") {
-                self.punct(b')', ")")?;
-                return emit(program, ParsedOp::Binary(GraphIntegerBinary::NullIf), at);
-            }
-            if function.eq_ignore_ascii_case("ATAN2") {
-                self.punct(b')', ")")?;
-                return emit(program, ParsedOp::Bound(GraphIntegerOp::Atan2), at);
-            }
-            // openCypher left/right(text, length), replace(text, search,
-            // replacement) (fgdb-20foe).
-            if spelled(["LEFT", "RIGHT"]) {
-                self.punct(b')', ")")?;
-                let op = if function.eq_ignore_ascii_case("LEFT") {
-                    GraphIntegerOp::Left
-                } else {
-                    GraphIntegerOp::Right
-                };
-                return emit(program, ParsedOp::Bound(op), at);
-            }
-            if function.eq_ignore_ascii_case("REPLACE") {
-                self.punct(b',', ",")?;
-                self.scalar_boolean(columns, depth + 1, program)?;
-                self.punct(b')', ")")?;
-                return emit(program, ParsedOp::Bound(GraphIntegerOp::Replace), at);
-            }
-            emit(program, ParsedOp::Coalesce, at)?;
-            while self.take(b',')? {
-                self.scalar_boolean(columns, depth + 1, program)?;
-                emit(program, ParsedOp::Coalesce, at)?;
-            }
-            self.punct(b')', ")")?;
-            self.admit_lazy_collected_calls(start, at)?;
+        if self.scalar_function_call(columns, depth, program, at)? {
             return Ok(());
         }
-        // `$doc.key` reads a map argument's field; `$from..` is a slice bound
-        // before the range dots (TCK List2 [10]), not a field read.
-        if let TokenKind::Parameter(name) = self.current.kind
-            && self.property_dot_follows()?
-        {
-            self.parameter_types
-                .entry(name.to_owned())
-                .or_insert(GqlParameterType::Map);
-            let Number::Parameter(index) = self.number(GqlParameterType::Map)? else {
-                unreachable!("the current native token is a parameter");
-            };
-            let mut keys = Vec::new();
-            while self.take(b'.')? {
-                if keys.len() == MAX_INTEGER_NESTING {
-                    return Err(failure(
-                        at,
-                        GraphMutationTextErrorKind::IntegerNesting {
-                            limit: MAX_INTEGER_NESTING,
-                        },
-                    ));
-                }
-                keys.push(self.schema_name()?.text.into());
-            }
-            return emit(
-                program,
-                ParsedOp::ParameterField {
-                    index,
-                    keys: keys.into_boxed_slice(),
-                    at,
-                },
-                at,
-            );
+        if self.parameter_field_operand(program, at)? {
+            return Ok(());
         }
-        // A list-comprehension element (fgdb-20foe) shadows every row and graph
-        // name. Reading a vertex element's property would need storage access
-        // inside the element scope, so `x.p` never falls through to a
-        // same-named pattern variable. With a let sink, `x.key` reads a map
-        // element's entry as a let slot (fgdb-o5o9t); any other element is
-        // the evaluator's typed non-map failure. Without one it refuses.
-        if let TokenKind::Word(word) = self.current.kind
-            && let Some(binding) = self.elements.iter().rposition(|name| *name == word)
-        {
-            match self.lexer.clone().next()?.kind {
-                TokenKind::Punct(b'.') if self.lets.is_some() => {
-                    let element = ReadValueTemplate::Local(self.elements.len() - 1 - binding);
-                    self.advance()?;
-                    let value = self.map_entries(element)?;
-                    return self.let_slot(program, value, at);
-                }
-                TokenKind::Punct(b'.') => {
-                    return Err(failure(
-                        at,
-                        GraphMutationTextErrorKind::Query(GraphPatternTextErrorKind::Expected(
-                            "a list element used as a value, not a property read",
-                        )),
-                    ));
-                }
-                TokenKind::Punct(b'(') => {}
-                _ => {
-                    self.advance()?;
-                    let offset = self.elements.len() - 1 - binding;
-                    return emit(program, ParsedOp::Bound(GraphIntegerOp::Local(offset)), at);
-                }
-            }
+        if self.list_element_operand(program, at)? {
+            return Ok(());
         }
-        // openCypher id(x)/elementId(x) (fgdb-j687q): the column naming the
-        // vertex or edge x holds the element itself, and IdentityColumn reads
-        // its identity, so no element value ever enters the scalar stack.
-        if (self.is_word("ID") || self.is_word("ELEMENTID"))
-            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
-        {
-            let text = self.is_word("ELEMENTID");
-            self.advance()?;
-            self.punct(b'(', "(")?;
-            let element = self.current.at;
-            let not_element = || {
-                failure(
-                    element,
-                    GraphMutationTextErrorKind::Query(GraphPatternTextErrorKind::Expected(
-                        "a vertex or edge for id()/elementId()",
-                    )),
-                )
-            };
-            let column = match columns {
-                ExpressionColumns::Graph(columns) => {
-                    let variable = self.any_variable()?;
-                    self.mutation_projection(columns, variable, None)?
-                }
-                ExpressionColumns::Row(schema) => {
-                    let name = self.name()?;
-                    schema
-                        .iter()
-                        .position(|(column, kind)| {
-                            column.text == name.text
-                                && matches!(
-                                    kind,
-                                    crate::GraphSetColumnType::Vertex
-                                        | crate::GraphSetColumnType::Edge
-                                        | crate::GraphSetColumnType::Any
-                                )
-                        })
-                        .ok_or_else(not_element)?
-                }
-                ExpressionColumns::Resolved(resolve) => resolve(self)?.ok_or_else(not_element)?,
-            };
-            self.punct(b')', ")")?;
-            return emit(
-                program,
-                ParsedOp::Bound(GraphIntegerOp::IdentityColumn { column, text }),
-                at,
-            );
+        if self.identity_operand(columns, program, at)? {
+            return Ok(());
         }
-        if self.element_null_operand(columns, program, at)? {
+        if self.element_null_operand(columns, program, at, depth)? {
             return Ok(());
         }
         if self.label_test_operand(columns, program, at)? {
             return Ok(());
         }
+        self.plain_operand(columns, program, at)
+    }
+
+    /// Whether the operand here is a composite read through a let slot
+    /// (fgdb-o5o9t): a let operand, a collected aggregate in a resolved
+    /// scope, or a labels()/type()/keys()/properties() call over a value.
+    /// Nothing is consumed.
+    #[inline(never)]
+    fn composite_let_operand_here(
+        &self,
+        columns: &ExpressionColumns<'_, 'a>,
+    ) -> Result<bool, GraphPatternTextError> {
+        let collected =
+            matches!(columns, ExpressionColumns::Resolved(_)) && self.collected_aggregate_call()?;
+        let metadata = self
+            .value_metadata_call(
+                matches!(columns, ExpressionColumns::Graph(_)),
+                self.routing_row(columns).unwrap_or(&[]),
+            )?
+            .is_some();
+        Ok(self.let_operand_here()? || collected || metadata)
+    }
+
+    /// The operand every other form leaves: a property, column or row
+    /// value read through the scope's own operand rules.
+    #[inline(never)]
+    fn plain_operand(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        program: &mut Vec<ParsedOp>,
+        at: usize,
+    ) -> Result<(), GraphMutationTextError> {
         let operand = match columns {
             ExpressionColumns::Graph(columns) => self.mutation_operand(columns)?,
             ExpressionColumns::Row(schema) => self.row_operand(schema)?,
@@ -2432,6 +2234,314 @@ impl<'a> Parser<'a> {
         emit(program, ParsedOp::Atom(operand, at), at)
     }
 
+    /// A scalar function call at the current token (`upper(x)`,
+    /// `substring(s, 1)`, `coalesce(a, b)`), consumed whole. False, with
+    /// nothing consumed, when no such call starts here. Out of line, like the
+    /// other operand forms below: integer_unary repeats once per nested
+    /// parenthesis or CASE, and every operand form it held inline cost each
+    /// level its temporaries (a 65-deep CASE overflowed the 2 MiB test stack
+    /// at 17.5 KiB per integer_unary frame).
+    #[inline(never)]
+    fn scalar_function_call(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        depth: usize,
+        program: &mut Vec<ParsedOp>,
+        at: usize,
+    ) -> Result<bool, GraphMutationTextError> {
+        let function = if (crate::graph_text::SCALAR_FUNCTIONS
+            .iter()
+            .any(|name| self.is_word(name))
+            || self.text_length_call(columns)?)
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+        {
+            let TokenKind::Word(name) = self.current.kind else {
+                unreachable!("checked function word")
+            };
+            name
+        } else {
+            return Ok(false);
+        };
+        self.scalar_function_arguments(columns, depth, program, function, at)?;
+        Ok(true)
+    }
+
+    /// The parenthesized arguments of the scalar function `function`, whose
+    /// name is the current token, and the instruction that applies it.
+    #[inline(never)]
+    fn scalar_function_arguments(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        depth: usize,
+        program: &mut Vec<ParsedOp>,
+        function: &'a str,
+        at: usize,
+    ) -> Result<(), GraphMutationTextError> {
+        let start = self.collected_scalar_calls;
+        self.advance()?;
+        self.punct(b'(', "(")?;
+        if self.constant_function(function, program, at)? {
+            return Ok(());
+        }
+        // An argument is a whole expression, comparisons and Boolean
+        // operators included (`toString(1 < 0)`, TCK TypeConversion4 [3]),
+        // exactly as inside parentheses.
+        self.scalar_boolean(columns, depth + 1, program)?;
+        let spelled =
+            |names: [&str; 2]| names.iter().any(|name| function.eq_ignore_ascii_case(name));
+        let text_op = if spelled(["UPPER", "TOUPPER"]) {
+            Some(GraphIntegerOp::Upper)
+        } else if spelled(["LOWER", "TOLOWER"]) {
+            Some(GraphIntegerOp::Lower)
+        } else if function.eq_ignore_ascii_case("TRIM") {
+            Some(GraphIntegerOp::Trim)
+        } else if function.eq_ignore_ascii_case("TOSTRING") {
+            Some(GraphIntegerOp::ToText)
+        } else if function.eq_ignore_ascii_case("TOINTEGER") {
+            Some(GraphIntegerOp::ToInteger)
+        } else if function.eq_ignore_ascii_case("TOBOOLEAN") {
+            Some(GraphIntegerOp::ToBoolean)
+        } else if function.eq_ignore_ascii_case("SIZE") {
+            Some(GraphIntegerOp::Size)
+        } else if function.eq_ignore_ascii_case("CHAR_LENGTH") {
+            Some(GraphIntegerOp::CharLength)
+        } else if function.eq_ignore_ascii_case("LENGTH") {
+            Some(GraphIntegerOp::Length)
+        } else {
+            None
+        };
+        if let Some(op) = text_op {
+            self.punct(b')', ")")?;
+            return emit(program, ParsedOp::Bound(op), at);
+        }
+        if let Some(numeric) = GraphNumericFunction::named(function) {
+            self.punct(b')', ")")?;
+            return emit(
+                program,
+                ParsedOp::Bound(GraphIntegerOp::Numeric(numeric)),
+                at,
+            );
+        }
+        // GQL/SQL SUBSTRING(s FROM start [FOR length]) counts from 1;
+        // the openCypher comma form substring(s, start [, length]) counts
+        // from 0 (fgdb-qkeq2). Without a length, the rest of the text.
+        if function.eq_ignore_ascii_case("SUBSTRING") {
+            let sql = self.take_word("FROM")?;
+            if !sql {
+                self.punct(b',', ", or FROM")?;
+            }
+            self.scalar_boolean(columns, depth + 1, program)?;
+            if self.take(b')')? {
+                let op = if sql {
+                    GraphIntegerOp::SubstringFrom
+                } else {
+                    GraphIntegerOp::CypherSubstringToEnd
+                };
+                return emit(program, ParsedOp::Bound(op), at);
+            }
+            if sql {
+                self.word("FOR")?;
+            } else {
+                self.punct(b',', ",")?;
+            }
+            self.scalar_boolean(columns, depth + 1, program)?;
+            self.punct(b')', ")")?;
+            let op = if sql {
+                GraphIntegerOp::Substring
+            } else {
+                GraphIntegerOp::CypherSubstring
+            };
+            return emit(program, ParsedOp::Bound(op), at);
+        }
+        if function.eq_ignore_ascii_case("ABS") {
+            self.punct(b')', ")")?;
+            return emit(program, ParsedOp::Unary(GraphIntegerUnary::Abs), at);
+        }
+        self.punct(b',', ",")?;
+        self.scalar_boolean(columns, depth + 1, program)?;
+        if function.eq_ignore_ascii_case("NULLIF") {
+            self.punct(b')', ")")?;
+            return emit(program, ParsedOp::Binary(GraphIntegerBinary::NullIf), at);
+        }
+        if function.eq_ignore_ascii_case("ATAN2") {
+            self.punct(b')', ")")?;
+            return emit(program, ParsedOp::Bound(GraphIntegerOp::Atan2), at);
+        }
+        // openCypher left/right(text, length), replace(text, search,
+        // replacement) (fgdb-20foe).
+        if spelled(["LEFT", "RIGHT"]) {
+            self.punct(b')', ")")?;
+            let op = if function.eq_ignore_ascii_case("LEFT") {
+                GraphIntegerOp::Left
+            } else {
+                GraphIntegerOp::Right
+            };
+            return emit(program, ParsedOp::Bound(op), at);
+        }
+        if function.eq_ignore_ascii_case("REPLACE") {
+            self.punct(b',', ",")?;
+            self.scalar_boolean(columns, depth + 1, program)?;
+            self.punct(b')', ")")?;
+            return emit(program, ParsedOp::Bound(GraphIntegerOp::Replace), at);
+        }
+        emit(program, ParsedOp::Coalesce, at)?;
+        while self.take(b',')? {
+            self.scalar_boolean(columns, depth + 1, program)?;
+            emit(program, ParsedOp::Coalesce, at)?;
+        }
+        self.punct(b')', ")")?;
+        self.admit_lazy_collected_calls(start, at)
+    }
+
+    /// `$doc.key` reads a map argument's field; `$from..` is a slice bound
+    /// before the range dots (TCK List2 [10]), not a field read. False, with
+    /// nothing consumed, for any other operand.
+    #[inline(never)]
+    fn parameter_field_operand(
+        &mut self,
+        program: &mut Vec<ParsedOp>,
+        at: usize,
+    ) -> Result<bool, GraphMutationTextError> {
+        let TokenKind::Parameter(name) = self.current.kind else {
+            return Ok(false);
+        };
+        if !self.property_dot_follows()? {
+            return Ok(false);
+        }
+        self.parameter_types
+            .entry(name.to_owned())
+            .or_insert(GqlParameterType::Map);
+        let Number::Parameter(index) = self.number(GqlParameterType::Map)? else {
+            unreachable!("the current native token is a parameter");
+        };
+        let mut keys = Vec::new();
+        while self.take(b'.')? {
+            if keys.len() == MAX_INTEGER_NESTING {
+                return Err(failure(
+                    at,
+                    GraphMutationTextErrorKind::IntegerNesting {
+                        limit: MAX_INTEGER_NESTING,
+                    },
+                ));
+            }
+            keys.push(self.schema_name()?.text.into());
+        }
+        emit(
+            program,
+            ParsedOp::ParameterField {
+                index,
+                keys: keys.into_boxed_slice(),
+                at,
+            },
+            at,
+        )?;
+        Ok(true)
+    }
+
+    /// A list-comprehension element (fgdb-20foe) shadows every row and graph
+    /// name. Reading a vertex element's property would need storage access
+    /// inside the element scope, so `x.p` never falls through to a
+    /// same-named pattern variable. With a let sink, `x.key` reads a map
+    /// element's entry as a let slot (fgdb-o5o9t); any other element is
+    /// the evaluator's typed non-map failure. Without one it refuses. False,
+    /// with nothing consumed, when the current word names no element or is
+    /// called as a function.
+    #[inline(never)]
+    fn list_element_operand(
+        &mut self,
+        program: &mut Vec<ParsedOp>,
+        at: usize,
+    ) -> Result<bool, GraphMutationTextError> {
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(false);
+        };
+        let Some(binding) = self.elements.iter().rposition(|name| *name == word) else {
+            return Ok(false);
+        };
+        match self.lexer.clone().next()?.kind {
+            TokenKind::Punct(b'.') if self.lets.is_some() => {
+                let element = ReadValueTemplate::Local(self.elements.len() - 1 - binding);
+                self.advance()?;
+                let value = self.map_entries(element)?;
+                self.let_slot(program, value, at)?;
+            }
+            TokenKind::Punct(b'.') => {
+                return Err(failure(
+                    at,
+                    GraphMutationTextErrorKind::Query(GraphPatternTextErrorKind::Expected(
+                        "a list element used as a value, not a property read",
+                    )),
+                ));
+            }
+            TokenKind::Punct(b'(') => return Ok(false),
+            _ => {
+                self.advance()?;
+                let offset = self.elements.len() - 1 - binding;
+                emit(program, ParsedOp::Bound(GraphIntegerOp::Local(offset)), at)?;
+            }
+        }
+        Ok(true)
+    }
+
+    /// openCypher id(x)/elementId(x) (fgdb-j687q): the column naming the
+    /// vertex or edge x holds the element itself, and IdentityColumn reads
+    /// its identity, so no element value ever enters the scalar stack. False,
+    /// with nothing consumed, when no such call starts here.
+    #[inline(never)]
+    fn identity_operand(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        program: &mut Vec<ParsedOp>,
+        at: usize,
+    ) -> Result<bool, GraphMutationTextError> {
+        if !(self.is_word("ID") || self.is_word("ELEMENTID"))
+            || !matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+        {
+            return Ok(false);
+        }
+        let text = self.is_word("ELEMENTID");
+        self.advance()?;
+        self.punct(b'(', "(")?;
+        let element = self.current.at;
+        let not_element = || {
+            failure(
+                element,
+                GraphMutationTextErrorKind::Query(GraphPatternTextErrorKind::Expected(
+                    "a vertex or edge for id()/elementId()",
+                )),
+            )
+        };
+        let column = match columns {
+            ExpressionColumns::Graph(columns) => {
+                let variable = self.any_variable()?;
+                self.mutation_projection(columns, variable, None)?
+            }
+            ExpressionColumns::Row(schema) => {
+                let name = self.name()?;
+                schema
+                    .iter()
+                    .position(|(column, kind)| {
+                        column.text == name.text
+                            && matches!(
+                                kind,
+                                crate::GraphSetColumnType::Vertex
+                                    | crate::GraphSetColumnType::Edge
+                                    | crate::GraphSetColumnType::Any
+                            )
+                    })
+                    .ok_or_else(not_element)?
+            }
+            ExpressionColumns::Resolved(resolve) => resolve(self)?.ok_or_else(not_element)?,
+        };
+        self.punct(b')', ")")?;
+        emit(
+            program,
+            ParsedOp::Bound(GraphIntegerOp::IdentityColumn { column, text }),
+            at,
+        )?;
+        Ok(true)
+    }
+
     /// The operand of `x IS [NOT] NULL` when `x` names a vertex or edge
     /// (openCypher `RETURN a IS NOT NULL`, `s IS NULL` for an OPTIONAL edge).
     /// The element itself never enters the scalar stack: its identity column
@@ -2446,11 +2556,17 @@ impl<'a> Parser<'a> {
         columns: &mut ExpressionColumns<'_, 'a>,
         program: &mut Vec<ParsedOp>,
         at: usize,
+        depth: usize,
     ) -> Result<bool, GraphMutationTextError> {
         let TokenKind::Word(word) = self.current.kind else {
             return Ok(false);
         };
-        if self.elements.contains(&word)
+        // A top-level HAVING operand's IS [NOT] NULL is HAVING's own test
+        // (having_operand): its resolver reads the grouping key as itself,
+        // keeping the direct column and flat lowering. Nested predicates
+        // still test an element's NULL-ness through its identity.
+        if (self.having_operand && self.let_base + depth == 0)
+            || self.elements.contains(&word)
             || !matches!(self.lexer.clone().next()?.kind,
                 TokenKind::Word(next) if next.eq_ignore_ascii_case("IS"))
         {
@@ -2458,6 +2574,17 @@ impl<'a> Parser<'a> {
         }
         let graph = self.syntax.variables.iter().any(|name| name.text == word)
             || self.syntax.visible_edge(word).is_some();
+        // Exactly IS [NOT] NULL (not IS TRUE): only then may an operand read
+        // its NULL-ness alone (PresenceColumn).
+        let null_test = {
+            let mut lexer = self.lexer.clone();
+            lexer.next()?;
+            let mut test = lexer.next()?.kind;
+            if matches!(test, TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT")) {
+                test = lexer.next()?.kind;
+            }
+            matches!(test, TokenKind::Word(word) if word.eq_ignore_ascii_case("NULL"))
+        };
         let column = match columns {
             ExpressionColumns::Graph(columns) if graph => {
                 let variable = self.any_variable()?;
@@ -2481,16 +2608,29 @@ impl<'a> Parser<'a> {
                 return Ok(true);
             }
             ExpressionColumns::Row(schema) => {
+                use crate::GraphSetColumnType::{Any, Edge, Edges, Path, Vertex, Vertices};
                 let visible = self.visible_width(schema);
                 let Some(column) = schema[..visible].iter().position(|(name, kind)| {
                     name.text == word
-                        && matches!(
-                            kind,
-                            crate::GraphSetColumnType::Vertex | crate::GraphSetColumnType::Edge
-                        )
+                        && matches!(kind, Vertex | Edge | Any | Path | Vertices | Edges)
                 }) else {
                     return Ok(false);
                 };
+                // An open column (an UNWIND of mixed values) or a path may
+                // hold what a scalar load refuses; only its NULL-ness is read,
+                // so only IS [NOT] NULL takes this operand (IS TRUE does not).
+                if !matches!(schema[column].1, Vertex | Edge) {
+                    if !null_test {
+                        return Ok(false);
+                    }
+                    self.advance()?;
+                    emit(
+                        program,
+                        ParsedOp::Bound(GraphIntegerOp::PresenceColumn(column)),
+                        at,
+                    )?;
+                    return Ok(true);
+                }
                 self.advance()?;
                 column
             }
@@ -2498,6 +2638,29 @@ impl<'a> Parser<'a> {
                 Some(column) => column,
                 None => return Ok(false),
             },
+            // A resolved name the typed row (resolved_row) types as an open,
+            // path or element-list column, which may hold what a scalar load
+            // refuses, reads only its NULL-ness.
+            ExpressionColumns::Resolved(resolve)
+                if null_test
+                    && self.resolved_row.as_ref().is_some_and(|row| {
+                        use crate::GraphSetColumnType::{Any, Edges, Path, Vertices};
+                        row.iter()
+                            .rev()
+                            .find(|(name, _)| name.text == word)
+                            .is_some_and(|(_, kind)| matches!(kind, Any | Path | Vertices | Edges))
+                    }) =>
+            {
+                let Some(column) = resolve(self)? else {
+                    return Ok(false);
+                };
+                emit(
+                    program,
+                    ParsedOp::Bound(GraphIntegerOp::PresenceColumn(column)),
+                    at,
+                )?;
+                return Ok(true);
+            }
             _ => return Ok(false),
         };
         emit(

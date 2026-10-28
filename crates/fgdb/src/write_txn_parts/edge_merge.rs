@@ -28,6 +28,10 @@ trait EdgeMergeOutput: Sized {
     /// singular primitive refuses them as ambiguous; a program keeps each.
     const PARALLEL: bool;
     fn for_pairs(pairs: usize) -> Option<Self>;
+    /// Row-valued map keys (fgdb-at06q): each input row's representative,
+    /// the first row of its endpoint pair with query-equal values, whose
+    /// occurrence it shares. Only an owner that reads back per row keeps it.
+    fn group_rows(&mut self, _representatives: Vec<usize>) {}
     fn record<C>(
         &mut self,
         outcome: fgdb_gql::GraphEdgeMergeOutcome,
@@ -49,6 +53,8 @@ type ResolvedPairEdges = std::collections::BTreeMap<(VId, VId), ResolvedEdges>;
 struct EdgeMergeRows {
     edges: ResolvedPairEdges,
     occurrences: std::collections::BTreeMap<usize, ResolvedEdges>,
+    /// Each row's representative occurrence, with row-valued map keys.
+    representatives: Vec<usize>,
     resolved: u64,
     /// Every resolved edge's outcome and the created edges, in canonical
     /// pair and identity order: a chain step's receipt (fgdb-cpny9).
@@ -69,7 +75,10 @@ type EdgeMergeOutputResult<Output, A> = Result<
 
 impl EdgeMergeRows {
     fn edges_for(&self, pair: (VId, VId), row: usize) -> Option<&Vec<(EId, (VId, VId))>> {
-        self.occurrences.get(&row).or_else(|| self.edges.get(&pair))
+        let occurrence = self.representatives.get(row).copied().unwrap_or(row);
+        self.occurrences
+            .get(&occurrence)
+            .or_else(|| self.edges.get(&pair))
     }
 }
 
@@ -78,6 +87,10 @@ impl EdgeMergeOutput for EdgeMergeRows {
 
     fn for_pairs(_pairs: usize) -> Option<Self> {
         Some(Self::default())
+    }
+
+    fn group_rows(&mut self, representatives: Vec<usize>) {
+        self.representatives = representatives;
     }
 
     fn record<C>(
@@ -416,6 +429,15 @@ fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
     let destination_column = merge.destination_column();
     let mut pairs = std::collections::BTreeSet::new();
     let occurrences = Output::PARALLEL && !merge.shares_pair_outcomes();
+    // Map values each row computes (fgdb-at06q): a row resolves with the
+    // first row of its endpoint pair whose values are query-equal, whose
+    // created edge it would match, and that row's values are the ones
+    // matched and created. A value that does not equal itself resolves
+    // alone, as does every row of a non-reflexive constant list.
+    let row_keyed = merge.has_row_properties();
+    let mut groups = std::collections::BTreeMap::new();
+    let mut row_values = std::collections::BTreeMap::new();
+    let mut representatives = Vec::new();
     for (row_at, row) in selected.value.iter().enumerate() {
         event(Some(GlaExecutionEvent::Work))?;
         if row.len() != width {
@@ -439,10 +461,29 @@ fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
                 })
             })
         };
-        let pair = (
-            (endpoint(source_column)?, endpoint(destination_column)?),
-            occurrences.then_some(row_at),
-        );
+        let endpoints = (endpoint(source_column)?, endpoint(destination_column)?);
+        let occurrence = if row_keyed {
+            let (values, key) = merge.row_values(row_at, row, &mut |kind| event(Some(kind)))?;
+            let representative = match key {
+                Some(key) if !occurrences => match groups.entry((endpoints, key)) {
+                    std::collections::btree_map::Entry::Occupied(group) => *group.get(),
+                    std::collections::btree_map::Entry::Vacant(group) => {
+                        event(Some(GlaExecutionEvent::ScratchEntry))?;
+                        *group.insert(row_at)
+                    }
+                },
+                _ => row_at,
+            };
+            if representative == row_at {
+                row_values.insert(row_at, values);
+            }
+            event(Some(GlaExecutionEvent::ScratchEntry))?;
+            representatives.push(representative);
+            Some(representative)
+        } else {
+            occurrences.then_some(row_at)
+        };
+        let pair = (endpoints, occurrence);
         if !pairs.contains(&pair) {
             event(Some(GlaExecutionEvent::ScratchEntry))?;
             pairs.insert(pair);
@@ -454,10 +495,17 @@ fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
             observed: pairs.len() as u64,
         })
     })?;
+    if row_keyed {
+        outcome.group_rows(representatives);
+    }
     let mut overlay_edges = 0u64;
     let mut created_edges = 0u64;
     let mut creation: Option<WriteBatch> = None;
     for (pair_at, ((source, destination), occurrence)) in pairs.into_iter().enumerate() {
+        // This occurrence's row-valued map keys, if the map has any.
+        let values = occurrence
+            .and_then(|row| row_values.get(&row))
+            .map_or(&[][..], Vec::as_slice);
         // A scoped host admits candidates BEFORE they reach these counters or
         // the uniqueness reducer. Repeated physical scans spend the SAME cap.
         let edges = edge_source(source, destination)
@@ -499,7 +547,9 @@ fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
                     .ok()
                     .map(|at| &edge.props[at].1)
             };
-            if !merge.matches_stored_properties(stored, &mut |kind| event(Some(kind)))? {
+            if !merge.matches_stored_properties(stored, &mut |kind| event(Some(kind)))?
+                || !merge.matches_row_values(stored, values, &mut |kind| event(Some(kind)))?
+            {
                 continue;
             }
             if !Output::PARALLEL && !matching.is_empty() {
@@ -535,7 +585,8 @@ fn collect_edge_merge_output<Output: EdgeMergeOutput, E, A, C>(
                 observed,
             }));
         }
-        let properties = merge.creation_properties_with_control(&mut |kind| event(Some(kind)))?;
+        let properties =
+            merge.creation_properties_with_row(values, &mut |kind| event(Some(kind)))?;
         event(None)?;
         let identity = allocate(pair_at)
             .map_err(|error| GqlQueryError::Source(GraphEdgeMergeError::IdentitySource(error)))?;
@@ -888,14 +939,44 @@ impl WriteTxn {
                 merge,
                 policy,
                 |allowance| {
-                    merge.select_governed(
-                        owned,
-                        allowance,
-                        |pattern, allowance| {
-                            self.execute_graph_pattern_governed(database, cx, pattern, allowance)
-                        },
-                        || cx.checkpoint(),
-                    )
+                    // A MATCH input may read a carried element it does not
+                    // rematch (`a.p` of a WITH vertex), as the vertex MERGE
+                    // input does: both callbacks borrow this entry overlay.
+                    let failure = std::cell::RefCell::new(None);
+                    let selected = {
+                        let mut source = fgdb_gql::with_element_metadata(
+                            fgdb_gql::WithElementReads {
+                                source: |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
+                                    fgdb_gql::algebra::GraphValueRow,
+                                >,
+                                         allowance| {
+                                    self.execute_graph_pattern_governed(
+                                        database, cx, pattern, allowance,
+                                    )
+                                },
+                                elements: |element, key| {
+                                    self.element_property_with_checkpoint(
+                                        database, cx, &failure, element, key,
+                                    )
+                                },
+                            },
+                            |element, kind, catalog, control| {
+                                self.element_metadata_with_checkpoint(
+                                    database, cx, &failure, element, kind, catalog, control,
+                                )
+                            },
+                        );
+                        merge.select_governed_with_source(owned, allowance, &mut source, || {
+                            match failure.borrow_mut().take() {
+                                Some(error) => Err(error),
+                                None => cx.checkpoint(),
+                            }
+                        })
+                    };
+                    match failure.into_inner() {
+                        Some(error) => Err(fgdb_gql::GqlQueryError::Interrupted(error)),
+                        None => selected,
+                    }
                 },
                 |source, destination| {
                     self.merge_candidate_edges(database, merge, source, destination, || {

@@ -479,13 +479,19 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
                 if let Some((selected, _)) = selected {
                     return Ok(selected);
                 }
-                merge.select_governed(
-                    None,
-                    allowance,
+                // A MATCH input may read an element it does not project, as
+                // the chain hosts' inputs do; both reads share this borrow.
+                let database = database.borrow();
+                let mut source = selection::scoped_input(
+                    transaction,
+                    &database,
+                    cx,
+                    scope,
+                    &controls,
                     |pattern, allowance| {
                         selection::select_overlay(
                             transaction,
-                            &database.borrow(),
+                            &database,
                             cx,
                             pattern,
                             scope,
@@ -493,6 +499,11 @@ fn apply_with_input<Output: EdgeMergeOutput, V: Vfs + Clone, Clock: FnMut() -> u
                             &controls,
                         )
                     },
+                );
+                merge.select_governed_with_source::<WriteTxnError, _, WriteTxnError>(
+                    None,
+                    allowance,
+                    &mut source,
                     || {
                         cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                         controls.borrow_mut().checkpoint()

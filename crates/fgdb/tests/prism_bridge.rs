@@ -447,14 +447,23 @@ fn selected_relation_calls_bound_winner_scratch_without_skipping_raw_source_work
     runtime.block_on(async {
         let commit = contexts.commit();
         let query = contexts.query();
-        let mut db = Database::<MemVfs>::open_memory(&commit, keys())
-            .await
-            .unwrap();
-        let mut oracle = Database::<MemVfs>::open_memory(&commit, keys())
-            .await
-            .unwrap();
-        for database in [&mut db, &mut oracle] {
-            database.write(&commit, fixture()).await.unwrap();
+        // Creation builds the adjacency index for publication, and every later
+        // commit would extend it. Reopening the written checkpoint leaves it
+        // unbuilt, as a cold reader sees it, so this stays the raw-source
+        // control rather than the indexed path.
+        let mut opened = Vec::new();
+        for _ in 0..2 {
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut created = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            created.write(&commit, fixture()).await.unwrap();
+            drop(created);
+            let database = Database::open_with_vfs(&commit, vfs, &path, keys())
+                .await
+                .unwrap();
+            assert_eq!(database.index_maintenance_work().unwrap().0, 0);
             database
                 .set_read_cache_limits(
                     &query,
@@ -464,7 +473,10 @@ fn selected_relation_calls_bound_winner_scratch_without_skipping_raw_source_work
                     },
                 )
                 .unwrap();
+            opened.push(database);
         }
+        let mut oracle = opened.pop().unwrap();
+        let mut db = opened.pop().unwrap();
         // Same vertices, many unrelated edges: their properties would fail
         // numeric binding if the target relation were not selected first.
         let mut other = WriteBatch::new(RelationId(2));
@@ -605,6 +617,13 @@ fn retained_adjacency_projections_equal_cold_reads_across_history_and_reductions
             vec![(PropertyKeyId(1), CanonicalScalar::Int(8))],
         );
         let first = db.write(&commit, other).await.unwrap();
+        // Creation built the index empty and each commit extended it; reopen
+        // so the ordinary read below builds it in full, as the comment needs.
+        drop(db);
+        let mut db = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(db.frontier().unwrap(), first);
         assert_eq!(db.index_maintenance_work().unwrap().0, 0);
         // An ordinary graph read retains the flat adjacency index. Subsequent
         // updates extend it, exercising the persistent overlay as well.

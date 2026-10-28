@@ -439,6 +439,57 @@ fn relation_roots_preserve_complete_histories_and_reduce_payload_faults() {
 }
 
 #[test]
+fn absent_relation_root_needs_no_head_reservation_and_fuses_without_payloads() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path, false).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        let before = view.stats();
+        // Leave no room for even a fixed root-head reservation. An absent
+        // relation still performs its controlled directory seek and reaches EOF.
+        let held = pool.reserve(&cx, pool.available()).unwrap();
+        let occupied = pool.used();
+        let mut scan = view
+            .edge_scan_relation(&cx, CommitSeq(5), RelationId(u64::MAX))
+            .unwrap();
+        assert_eq!(scan.state.as_ref().unwrap().heads.capacity(), 0);
+        assert!(scan.state.as_ref().unwrap()._head_charge.is_none());
+        assert!(
+            scan.next_candidate_with(&cx, &mut |event| {
+                assert_eq!(event, BufferedEdgeScanEvent::Work);
+                assert_eq!(pool.used(), occupied);
+                Ok::<_, ()>(())
+            })
+            .await
+            .unwrap()
+            .is_none()
+        );
+        assert!(scan.work_used() > 0);
+        assert!(scan.is_finished());
+        assert!(
+            scan.next_candidate_with(&cx, &mut |_| -> Result<(), ()> {
+                panic!("fused absent relation scan")
+            })
+            .await
+            .unwrap()
+            .is_none()
+        );
+        drop(scan);
+        assert_eq!(view.stats().misses, before.misses);
+        assert_eq!(pool.used(), occupied);
+        drop(held);
+        assert_eq!(pool.used(), baseline);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
 fn relation_head_admission_reclaims_cached_extents_before_refusing_memory() {
     run(|contexts, path| async move {
         let (store, id) = fixture(&contexts, &path, false).await;
@@ -1443,10 +1494,10 @@ fn one_row_blocks_are_read_once_and_the_source_budget_is_cumulative() {
         let root_bytes_len = root_bytes.len();
         drop(root_bytes);
         assert!(root_bytes_len > bounds.max_root_bytes);
-        // Open admission now also builds the charged descriptor directory
-        // (68bf6b14): 6,925 units for these 160 blocks, measured. The scan
-        // keeps its own linear allowance, asserted below.
-        bounds.max_work = count * 50;
+        // Open admission builds four charged descriptor directories, including
+        // the relation/publication index. Allow their controlled sorts here;
+        // restore the scan's previous linear allowance after authenticated open.
+        bounds.max_work = count * (12 * count.ilog2() as usize + 16);
         let pool = MemoryPool::new(4 * 1024 * 1024, 0).unwrap();
         assert!(matches!(
             store
@@ -1476,6 +1527,7 @@ fn one_row_blocks_are_read_once_and_the_source_budget_is_cumulative() {
             .unwrap();
         let baseline = pool.used();
         let mut scan = view.edge_scan(&cx, CommitSeq(1)).unwrap();
+        scan.work.limit = count * 50;
         for expected in 1..=count {
             let found = scan.next(&cx).await.unwrap().unwrap();
             assert_eq!(found.entry.eid, EId(expected as u128));

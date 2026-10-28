@@ -166,9 +166,15 @@ impl BoundNativeGraphWrite {
                 (lowered.text(), derived)
             });
         let lowered = lowered.as_ref().map(|(lowered, _)| lowered);
-        let script = Self::prepare_script(text, arguments, relation, resolve).map_err(|error| {
-            NativeGraphWriteBindError::ScriptPreparation(restored(lowered, error))
-        })?;
+        // A computed whole map names its keys through the reverse catalog,
+        // which a function resolver lacks: add the argument maps' keys.
+        let script = if computed_maps && resolve.reverse_catalog().is_none() {
+            let resolve = ArgumentCatalog::new(resolve, text, arguments);
+            Self::prepare_script(text, arguments, relation, resolve)
+        } else {
+            Self::prepare_script(text, arguments, relation, resolve)
+        }
+        .map_err(|error| NativeGraphWriteBindError::ScriptPreparation(restored(lowered, error)))?;
         let program = script
             .bind_parameters(arguments)
             .map_err(|error| NativeGraphWriteBindError::ScriptBinding(restored(lowered, error)))?;
@@ -242,6 +248,97 @@ fn restored(
         lowered.restore(&mut error);
     }
     error
+}
+
+/// A resolver for a statement prepared with its arguments in hand. A function
+/// resolver keeps no reverse catalog, and the one its text yields probes only
+/// labels and relations, so a computed whole-map write (`SET n += row` over
+/// rows with differing keys) could name none of its argument maps' keys
+/// (UnmappedProperty), whichever write compiler takes the statement. This
+/// resolves every key a list or map argument holds, once, as a property
+/// through the resolver, beside that text catalog. A resolver with its own
+/// reverse catalog, or arguments holding no map, pass through unchanged, and
+/// every other method is the resolver's own.
+///
+/// Nothing is resolved until a compiler first asks for the reverse catalog,
+/// so arguments that admission refuses never reach the resolver.
+pub struct ArgumentCatalog<'a, R> {
+    inner: core::cell::RefCell<R>,
+    text: &'a str,
+    arguments: &'a GqlParameters,
+    catalog: core::cell::OnceCell<Option<crate::ReverseSymbolCatalog>>,
+}
+
+impl<'a, R: crate::GraphSymbolResolver> ArgumentCatalog<'a, R> {
+    /// `inner`, naming the keys of the map values `arguments` hold.
+    pub fn new(inner: R, text: &'a str, arguments: &'a GqlParameters) -> Self {
+        Self {
+            inner: core::cell::RefCell::new(inner),
+            text,
+            arguments,
+            catalog: core::cell::OnceCell::new(),
+        }
+    }
+
+    /// The text catalog plus every argument map key, or None when the
+    /// resolver keeps its own catalog or no argument holds a map.
+    fn argument_catalog(&self) -> Option<crate::ReverseSymbolCatalog> {
+        let inner = &mut *self.inner.borrow_mut();
+        if inner.reverse_catalog().is_some() {
+            return None;
+        }
+        let mut named = std::collections::BTreeSet::new();
+        let mut properties = Vec::new();
+        let mut pending: Vec<&crate::algebra::GraphValue> =
+            self.arguments.collection_values().collect();
+        while let Some(value) = pending.pop() {
+            if let Some(values) = value.as_list() {
+                pending.extend(values);
+            } else if let Some((keys, values)) = value.as_map() {
+                for key in keys {
+                    if named.insert(&**key)
+                        && let Some(GraphSymbol::Property(id)) =
+                            inner.resolve_symbol(GraphSymbolKind::Property, key)
+                    {
+                        properties.push((id, &**key));
+                    }
+                }
+                pending.extend(values);
+            }
+        }
+        (!named.is_empty()).then(|| {
+            let mut catalog = crate::ReverseSymbolCatalog::from_resolver(inner, self.text);
+            for (id, key) in properties {
+                catalog.insert_property(id, key);
+            }
+            catalog
+        })
+    }
+}
+
+impl<R: crate::GraphSymbolResolver> crate::GraphSymbolResolver for ArgumentCatalog<'_, R> {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        self.inner.get_mut().resolve_symbol(kind, name)
+    }
+
+    fn time_zones(&self) -> Option<crate::GqlTimeZones> {
+        self.inner.borrow().time_zones()
+    }
+
+    fn reverse_catalog(&self) -> Option<crate::ReverseSymbolCatalog> {
+        self.catalog
+            .get_or_init(|| self.argument_catalog())
+            .clone()
+            .or_else(|| self.inner.borrow().reverse_catalog())
+    }
+
+    fn reverse_label(&self, id: fgdb_delta_types::LabelId) -> Option<String> {
+        self.inner.borrow().reverse_label(id)
+    }
+
+    fn reverse_relation(&self, id: RelationId) -> Option<String> {
+        self.inner.borrow().reverse_relation(id)
+    }
 }
 
 #[cfg(test)]

@@ -311,18 +311,43 @@ impl WriteTxn {
             Some(limit) => fgdb_gql::GqlExecutionBudget::snapshot_records(limit),
             None => fgdb_gql::GqlExecutionBudget::UNLIMITED,
         };
-        let selected = merge
-            .select_governed::<WriteTxnError, A, _>(
+        // A MATCH input may read a carried element it does not rematch (`a.p`
+        // of a WITH vertex), as the vertex MERGE input does.
+        let failure = std::cell::RefCell::new(None);
+        let selected = {
+            let mut source = fgdb_gql::with_element_metadata(
+                fgdb_gql::WithElementReads {
+                    source: |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
+                        fgdb_gql::algebra::GraphValueRow,
+                    >,
+                             allowance| {
+                        self.execute_graph_pattern_governed(database, cx, pattern, allowance)
+                    },
+                    elements: |element, key| {
+                        self.element_property_with_checkpoint(database, cx, &failure, element, key)
+                    },
+                },
+                |element, kind, catalog, control| {
+                    self.element_metadata_with_checkpoint(
+                        database, cx, &failure, element, kind, catalog, control,
+                    )
+                },
+            );
+            merge.select_governed_with_source::<WriteTxnError, A, _>(
                 owned,
                 private,
-                |pattern, allowance| {
-                    self.execute_graph_pattern_governed(database, cx, pattern, allowance)
+                &mut source,
+                || match failure.borrow_mut().take() {
+                    Some(error) => Err(error),
+                    None => cx.checkpoint(),
                 },
-                || cx.checkpoint(),
             )
-            .map_err(|error| {
-                error.map_source(|error| chained(GraphEdgeUpsertError::Merge(error)))
-            })?;
+        };
+        let selected = match failure.into_inner() {
+            Some(error) => Err(GqlQueryError::Interrupted(error)),
+            None => selected,
+        }
+        .map_err(|error| error.map_source(|error| chained(GraphEdgeUpsertError::Merge(error))))?;
         if u64::try_from(selected.value.len()).ok() != Some(selected.rows.result_rows) {
             return Err(invalid());
         }
@@ -391,6 +416,16 @@ impl WriteTxn {
                         GraphEdgeMergeError::NullEndpoint { column, .. } => {
                             GraphEdgeMergeError::NullEndpoint { row: at, column }
                         }
+                        GraphEdgeMergeError::RowValue { property, .. } => {
+                            GraphEdgeMergeError::RowValue { row: at, property }
+                        }
+                        GraphEdgeMergeError::RowExpression {
+                            property, source, ..
+                        } => GraphEdgeMergeError::RowExpression {
+                            row: at,
+                            property,
+                            source,
+                        },
                         error => error,
                     }))
                 })

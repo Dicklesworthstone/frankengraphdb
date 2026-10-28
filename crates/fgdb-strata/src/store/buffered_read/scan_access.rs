@@ -11,6 +11,7 @@ mod retained;
 mod sealed;
 
 pub(crate) use super::block_directory::Candidates as BufferedIncidenceBlocks;
+use super::block_directory::RelationBlocks;
 
 pub(crate) type BufferedBlockImage = (Vec<AdjacencyEntry>, Option<BlockProps>);
 type BufferedBlockKeys = (Vec<AdjacencyEntry>, Option<Vec<u8>>);
@@ -37,10 +38,11 @@ impl<V: Vfs> BufferedPartition<V> {
     /// The admitted block summaries therefore select complete EId histories;
     /// filtering never substitutes for admission or the selected-row decoders.
     ///
-    /// Opening allocates and reserves no root workspace. First demand counts
-    /// matching blocks, reserves their heads through cache-aware admission, and
-    /// seeds the merge. Every metadata visit consumes the ordinary work limit.
-    /// Payloads remain lazy, including empty results.
+    /// Opening allocates and reserves no root workspace. First demand seeks
+    /// the relation's admitted descriptor range, reserves its exact head count
+    /// through cache-aware admission, and seeds only matching blocks. Every
+    /// seek comparison and selected descriptor consumes the ordinary work limit.
+    /// Unrelated histories add logarithmic lookup work, never payload faults.
     pub fn edge_scan_relation(
         &mut self,
         cx: &QueryCx,
@@ -62,6 +64,28 @@ impl<V: Vfs> BufferedPartition<V> {
             .summary
             .filter(|summary| relation.is_none_or(|relation| summary.relation == relation))
             .map(|summary| summary.first_edge)
+    }
+
+    pub(crate) fn edge_scan_relation_blocks<C>(
+        &self,
+        relation: RelationId,
+        cx: &QueryCx,
+        work: &mut EdgeScanWork,
+        observe: &mut impl FnMut(BufferedEdgeScanEvent) -> Result<(), C>,
+    ) -> Result<RelationBlocks, BufferedScanError<C>> {
+        self.block_directory
+            .relation_blocks(relation, &mut || work.step(cx, observe))
+    }
+
+    pub(crate) fn edge_scan_next_relation_block<C>(
+        &self,
+        blocks: &mut RelationBlocks,
+        cx: &QueryCx,
+        work: &mut EdgeScanWork,
+        observe: &mut impl FnMut(BufferedEdgeScanEvent) -> Result<(), C>,
+    ) -> Result<Option<usize>, BufferedScanError<C>> {
+        self.block_directory
+            .next_relation(blocks, &mut || work.step(cx, observe))
     }
 
     pub(crate) fn edge_scan_incidence_blocks(

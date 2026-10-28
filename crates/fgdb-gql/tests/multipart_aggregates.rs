@@ -1008,7 +1008,6 @@ fn carried_existence_aggregate_scopes_refuse_private_and_local_bindings_before_c
         "RETURN EXISTS((x)-[:R]->()) AS linked,count(*) AS rows ORDER BY count(__fg_boundary_0)",
         "RETURN EXISTS((x)-[:R]->(inside)) AS linked,count(inside) AS leaked",
         "RETURN count(EXISTS((fresh)-[:R]->())) AS unanchored",
-        "RETURN count(ANY(local IN nodes WHERE EXISTS((local)-[:R]->()))) AS nested",
         "RETURN count(*) AS rows GROUP BY EXISTS((x)-[:R]->())",
         "RETURN count(*) AS rows HAVING EXISTS((x)-[:R]->())",
     ] {
@@ -1024,6 +1023,17 @@ fn carried_existence_aggregate_scopes_refuse_private_and_local_bindings_before_c
         );
         assert_eq!(calls, 0, "{text}");
     }
+    // A quantifier over a list local reads its graph predicate through the
+    // list-local owner (0352660c): ANY holds on every row, since `nodes`
+    // holds vertex 1, and three of the four `x` have an outgoing edge.
+    let rows = execute(&format!(
+        "{prefix} RETURN count(ANY(local IN nodes WHERE EXISTS((local)-[:R]->()))) AS nested, \
+         sum(CASE WHEN ANY(local IN [x] WHERE EXISTS((local)-[:R]->())) THEN 1 ELSE 0 END) \
+         AS linked"
+    ));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values()[0].as_count(), Some(4));
+    assert_eq!(rows[0].values()[1].as_integer(), Some(3));
 }
 
 #[test]
@@ -1139,6 +1149,17 @@ fn carried_pattern_comprehensions_keep_null_witnesses_through_aggregate_argument
         assert_eq!(row.keys(), &[GraphValue::Vertex(VId(id))]);
         assert_eq!(row.values()[0].as_integer(), Some(degree));
     }
+
+    // Rebinding replaces the MATCH target: each of the five edge rows reads
+    // its SOURCE's out-degree (3,3,3,1,1 = 11), never its target's (1,1,1,1,0
+    // = 4), which the former refusal guarded against.
+    let rows = execute(
+        "MATCH (n)-->(k) WITH n AS k \
+         RETURN count([(k)-->() | 1]) AS lists, sum(size([(k)-->() | 1])) AS degrees",
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values()[0].as_count(), Some(5));
+    assert_eq!(rows[0].values()[1].as_integer(), Some(11));
 }
 
 #[test]
@@ -1163,4 +1184,24 @@ fn list_local_graph_expressions_feed_exact_aggregates_and_inline_calls() {
     assert!(rows[0].keys().is_empty());
     assert_eq!(rows[0].values()[0].as_count(), Some(2));
     assert_eq!(rows[0].values()[1].as_integer(), Some(8));
+
+    // A terminal aggregate over a list-local pattern comprehension: one list
+    // per vertex, and as a grouping key out-degrees [3], [1] twice and [0].
+    let rows = execute("MATCH (n) RETURN count([x IN [n] | size([(x)-->() | 1])]) AS c");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values()[0].as_count(), Some(4));
+    let grouped: Vec<_> =
+        execute("MATCH (n) RETURN [x IN [n] | size([(x)-->() | 1])] AS degrees, count(*) AS c")
+            .into_iter()
+            .map(|row| (row.keys().to_vec(), row.values()[0].as_count()))
+            .collect();
+    let degrees = |n: i64| vec![GraphValue::List(vec![scalar(n)].into())];
+    assert_eq!(grouped.len(), 3);
+    for expected in [
+        (degrees(3), Some(1)),
+        (degrees(1), Some(2)),
+        (degrees(0), Some(1)),
+    ] {
+        assert!(grouped.contains(&expected), "{grouped:?}");
+    }
 }

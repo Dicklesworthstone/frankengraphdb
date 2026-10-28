@@ -1450,17 +1450,54 @@ fn an_unwind_batch_creates_each_row_as_its_properties() {
                 (ID, CanonicalScalar::Int(2).into())
             ]
         );
+        // Rows with different keys are each their own computed property map
+        // (fcee3758): `+=` assigns only the keys a row holds.
+        let allocate = |request: GraphWriteIdentityRequest| {
+            let GraphInsertRequest::Vertex { row, .. } = request.request else {
+                panic!("the batch creates only vertices");
+            };
+            Ok::<_, Infallible>(ElementId::Vertex(VId(200 + u128::try_from(row).unwrap())))
+        };
+        let mixed = db
+            .query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &batch(vec![row(&[("id", 3)]), row(&[("p", 30)])]),
+                symbols,
+                R,
+                policy(10, 10, 10),
+                allocate,
+            )
+            .await
+            .unwrap();
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        assert_eq!(
+            rows(mixed, &["id", "p"]),
+            vec![vec![int(3), null.clone()], vec![null, int(30)]]
+        );
+        assert_eq!(
+            db.vertex(VId(200)).unwrap().unwrap().props,
+            vec![(ID, CanonicalScalar::Int(3).into())]
+        );
+        assert_eq!(
+            db.vertex(VId(201)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(30).into())]
+        );
+        // A row that is no map refuses the whole batch after an earlier row
+        // allocated, and nothing is published.
         let before = (db.frontier().unwrap(), db.vertices().unwrap());
         db.query_write(
             &txcx,
             &cx,
             &commit,
             text,
-            &batch(vec![row(&[("id", 3)]), row(&[("p", 30)])]),
+            &batch(vec![row(&[("id", 4)]), int(5)]),
             symbols,
             R,
             policy(10, 10, 10),
-            no_allocate,
+            allocate,
         )
         .await
         .unwrap_err();

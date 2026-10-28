@@ -150,6 +150,11 @@ pub enum GraphIntegerOp {
         column: usize,
         text: bool,
     },
+    /// The operand of IS [NOT] NULL over a column of any domain, such as an
+    /// open UNWIND column that may hold an element: NULL for NULL, TRUE for
+    /// any other value. Only the NULL-ness the test reads is observed, so no
+    /// element value ever enters the scalar stack (fgdb-j687q).
+    PresenceColumn(usize),
     /// A list-comprehension element (fgdb-20foe): the scalar `k` positions
     /// before the END of the input row. An element scope evaluates over its
     /// row followed by one value per enclosing element binding, innermost
@@ -349,6 +354,10 @@ impl GraphIntegerOp {
                 bytes.extend_from_slice(&[35, u8::from(*text)]);
                 bytes.extend_from_slice(&(*column as u64).to_be_bytes());
             }
+            Self::PresenceColumn(column) => {
+                bytes.push(48);
+                bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+            }
         }
     }
 }
@@ -364,6 +373,7 @@ impl core::fmt::Debug for GraphIntegerOp {
                 .field("column", &"[REDACTED]")
                 .field("text", text)
                 .finish(),
+            Self::PresenceColumn(_) => f.write_str("PresenceColumn([REDACTED])"),
             Self::Local(_) => f.write_str("Local([REDACTED])"),
             Self::Upper => f.write_str("Upper"),
             Self::Lower => f.write_str("Lower"),
@@ -484,7 +494,7 @@ pub enum GraphIntegerErrorKind {
     /// query value can hold it (fgdb-k3nub). It is never truncated.
     StoredValueBounds,
     /// A stored List or Map property reached an operator that reads only
-    /// scalars, such as a numeric aggregate or a path weight (fgdb-k3nub).
+    /// scalars, such as a MERGE action operand (fgdb-k3nub).
     /// Refused, never read as NULL: NULL would silently change the answer.
     StoredCollection,
     /// An argument outside its function's domain: a percentile outside
@@ -521,20 +531,6 @@ impl GraphIntegerErrorKind {
     }
 }
 
-/// The scalar a scalar-only operator reads from a stored property value
-/// (fgdb-k3nub): absent stays absent, a scalar is itself, and a List or Map
-/// raises `StoredCollection` instead of reading as NULL.
-pub(crate) fn stored_scalar(
-    value: Option<&fgdb_types::CanonicalPropertyValue>,
-) -> Result<Option<&CanonicalScalar>, GraphIntegerError> {
-    match value {
-        None => Ok(None),
-        Some(value) => value.as_scalar().map(Some).ok_or(GraphIntegerError {
-            instruction: 0,
-            kind: GraphIntegerErrorKind::StoredCollection,
-        }),
-    }
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphIntegerError {
     pub instruction: usize,
@@ -694,6 +690,7 @@ enum Instruction {
     Scalar(ScalarPredicate),
     ScalarColumn(usize),
     IdentityColumn { column: usize, text: bool },
+    PresenceColumn(usize),
     Local(usize),
     Upper,
     Lower,
@@ -839,7 +836,8 @@ impl GraphIntegerExpression {
         self.code.iter().filter_map(|op| match op {
             Instruction::Column(column)
             | Instruction::ScalarColumn(column)
-            | Instruction::IdentityColumn { column, .. } => Some(*column),
+            | Instruction::IdentityColumn { column, .. }
+            | Instruction::PresenceColumn(column) => Some(*column),
             _ => None,
         })
     }
@@ -1045,6 +1043,23 @@ impl GraphIntegerExpression {
                         ),
                     };
                     stack.push(value.into());
+                }
+                Instruction::PresenceColumn(column) => {
+                    // An element or path a scalar loader refuses is present;
+                    // only its NULL-ness reaches the stack.
+                    let present = match load(*column) {
+                        Ok(value) => !value.is_null(),
+                        Err(GraphIntegerErrorKind::NonScalar) => true,
+                        Err(kind) => return Err(failure(kind)),
+                    };
+                    stack.push(
+                        if present {
+                            CanonicalScalar::Bool(true)
+                        } else {
+                            CanonicalScalar::Null
+                        }
+                        .into(),
+                    );
                 }
                 Instruction::Scalar(value) => {
                     stack.push(ExpressionCell::Scalar(Cow::Borrowed(value.value())));
@@ -1678,6 +1693,10 @@ impl GraphIntegerExpression {
                 }
                 Instruction::IdentityColumn { column, text } => {
                     bytes.extend_from_slice(&[35, u8::from(*text)]);
+                    bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+                }
+                Instruction::PresenceColumn(column) => {
+                    bytes.push(48);
                     bytes.extend_from_slice(&(*column as u64).to_be_bytes());
                 }
             }

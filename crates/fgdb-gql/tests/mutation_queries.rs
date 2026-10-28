@@ -83,6 +83,43 @@ fn run(
         || Ok::<_, ()>(()),
     )
 }
+/// As `run`, through a reusable source: a multipart input (an OPTIONAL
+/// root and a later MATCH) selects each leaf from the same frozen graph.
+fn run_reusable(
+    plan: &PreparedGraphMutation,
+    vertices: &[VId],
+    props: &Props,
+    policy: GraphMutationPolicy,
+) -> MutationResult {
+    plan.execute_governed_over_reading_with_source(
+        None,
+        policy,
+        |selection, budget| {
+            selection.plan().execute_governed_with_properties(
+                vertices.len() as u64,
+                vertices.iter().copied(),
+                core::iter::empty::<Triple>(),
+                |vid, predicates| {
+                    Ok::<_, ()>(predicates.iter().all(|predicate| {
+                        predicate.matches_borrowed(
+                            [],
+                            props.iter().filter_map(|(&(owner, key), value)| {
+                                (owner == vid).then_some((key, value))
+                            }),
+                        )
+                    }))
+                },
+                |vid, key| Ok(props.get(&(vid, key))),
+                budget,
+                || Ok::<_, ()>(()),
+            )
+        },
+        |_: fgdb_delta_types::ElementId, _: PropertyKeyId| {
+            Ok::<Option<CanonicalPropertyValue>, ()>(None)
+        },
+        || Ok::<_, ()>(()),
+    )
+}
 fn props() -> Props {
     BTreeMap::from(
         [
@@ -321,15 +358,29 @@ fn literal_map_parameters_nulls_and_explicit_removals_keep_the_existing_contract
 fn literal_maps_refuse_malformed_and_unsupported_shapes_before_catalog_access() {
     // `SET n = {map}` replaces every property of n (7761ea35, TCK Set4), and a
     // list field is a stored List (fgdb-k3nub, TCK Set1 [5]).
-    for text in ["MATCH (a) SET a = {p: 1}", "MATCH (a) SET a += {p: [1, 2]}"] {
+    // A non-literal right side is a computed property map (fgdb-0s2pq,
+    // fcee3758); its execution laws live in mutation_property_maps.rs.
+    for text in [
+        "MATCH (a) SET a = {p: 1}",
+        "MATCH (a) SET a += {p: [1, 2]}",
+        "MATCH (a) SET a += $map",
+    ] {
         assert!(
             PreparedGraphMutationText::prepare(text, R, symbols).is_ok(),
             "{text}"
         );
     }
+    // A stored property is never a map, so binding refuses one as a computed
+    // map by its column type.
+    let scalar = PreparedGraphMutationText::prepare("MATCH (a) SET a += a.p", R, symbols).unwrap();
+    assert!(matches!(
+        scalar
+            .bind_parameters(&GqlParameters::new())
+            .unwrap_err()
+            .kind,
+        GraphMutationTextErrorKind::Build(GraphMutationBuildError::ValueExpression { .. })
+    ));
     for text in [
-        "MATCH (a) SET a += $map",
-        "MATCH (a) SET a += a.p",
         // SET a = {...} replaces (fgdb-6vm3o); a malformed replace map still
         // refuses before any catalog access.
         "MATCH (a) SET a = {p: 1, p: 2}",
@@ -638,10 +689,29 @@ fn a_leading_optional_match_is_a_left_joined_write_source() {
         one.intents(),
         &[GraphMutationIntent::Delete { vertex: VId(2) }]
     );
-    // Only OPTIONAL scopes may follow an optional root.
-    assert!(
-        PreparedGraphMutationText::prepare("OPTIONAL MATCH (a) MATCH (b) DELETE b", R, symbols)
-            .is_err()
+    // A required MATCH after the optional root inner-joins its rows
+    // (openCypher; fgdb-cpny9): a NULL `a` row pairs with every `b`, and no
+    // `b` leaves no row.
+    // Two leaves select from the graph, so these run through a reusable source.
+    let plan = prepare("OPTIONAL MATCH (a) WHERE a.p = 99 MATCH (b) WHERE b.p = 20 DELETE b");
+    let only = run_reusable(&plan, &[VId(1), VId(2), VId(3)], &props(), policy()).unwrap();
+    assert_eq!(
+        only.intents(),
+        &[GraphMutationIntent::Delete { vertex: VId(2) }]
+    );
+    let plan = prepare("OPTIONAL MATCH (a) WHERE a.p = 99 MATCH (b) DELETE a");
+    let null = run_reusable(&plan, &[VId(1), VId(2)], &props(), policy()).unwrap();
+    assert!(null.intents().is_empty());
+    let plan = prepare("OPTIONAL MATCH (a) MATCH (b) DELETE b");
+    let empty = run_reusable(&plan, &[], &props(), policy()).unwrap();
+    assert!(empty.intents().is_empty());
+    let both = run_reusable(&plan, &[VId(1), VId(2)], &props(), policy()).unwrap();
+    assert_eq!(
+        both.intents(),
+        &[
+            GraphMutationIntent::Delete { vertex: VId(1) },
+            GraphMutationIntent::Delete { vertex: VId(2) },
+        ]
     );
     assert!(
         PreparedGraphMutationText::prepare(

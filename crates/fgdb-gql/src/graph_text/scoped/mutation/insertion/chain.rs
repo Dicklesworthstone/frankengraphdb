@@ -59,23 +59,20 @@ impl PreparedGraphWriteChainText {
         // Whether that MERGE was a vertex MERGE: only one returns rows as a
         // chain; a relationship MERGE stays the batch writer's.
         let mut merged_vertex = false;
-        let multipart_mutation =
-            match PreparedGraphInsertText::multipart_source_kind(statement, &[]) {
-                Ok(kind) => kind == Some(ReadWriteKind::Mutation),
-                // Composition accepts one statement. Probe only the first
-                // native-token-framed statement; the scan below still decides
-                // whether that statement is a chain before its separator.
-                Err(source)
-                    if source.kind == GraphPatternTextErrorKind::InvalidToken
-                        && statement.as_bytes().get(source.offset) == Some(&b';') =>
-                {
-                    PreparedGraphInsertText::multipart_source_kind(
-                        &statement[..source.offset],
-                        &[],
-                    )? == Some(ReadWriteKind::Mutation)
+        // The read/write framing lexes one statement: a `;` ends its scan
+        // exactly as it ends the loop below.
+        let first_statement = {
+            let mut scan = lexer.clone();
+            loop {
+                let token = script::next_script_token(&mut scan)?;
+                if matches!(token.kind, TokenKind::End | TokenKind::Punct(b';')) {
+                    break &statement[..token.at];
                 }
-                Err(source) => return Err(source.into()),
-            };
+            }
+        };
+        let multipart_mutation =
+            PreparedGraphInsertText::multipart_source_kind(first_statement, &[])?
+                == Some(ReadWriteKind::Mutation);
         let (mut unwound, mut matched) = (false, multipart_mutation);
         // `UNWIND $rows`: one MERGE after it is the batch writer's, but a
         // vertex MERGE another write follows heads a chain (fgdb-0s2pq).
@@ -83,9 +80,16 @@ impl PreparedGraphWriteChainText {
         // A MATCH after `UNWIND $rows`: the batch writer lowers no vertex
         // MERGE over its bindings, so one heads a chain.
         let mut parameter_matched = false;
+        // A MATCH after a leading UNWIND of a non-parameter source: it binds
+        // a relationship MERGE's endpoints, which the chain reads per row.
+        let mut unwound_matched = false;
         // A SET, REMOVE or DELETE after a leading MATCH: a chain once a
         // CREATE or MERGE follows it.
         let mut mutated = false;
+        // A WITH or UNWIND stage after the leading MATCH, before any write:
+        // the unique upsert reads a MATCH only, so a relationship MERGE's
+        // ON/SET clauses there are the chain's row actions.
+        let mut staged = false;
         let mut depth = 0_usize;
         let mut previous: Option<TokenKind<'_>> = None;
         loop {
@@ -153,6 +157,13 @@ impl PreparedGraphWriteChainText {
                         return Ok(true);
                     } else if clause && matched && mutation()? {
                         mutated = true;
+                    } else if clause
+                        && matched
+                        && !written
+                        && (word.eq_ignore_ascii_case("WITH")
+                            || word.eq_ignore_ascii_case("UNWIND"))
+                    {
+                        staged = true;
                     } else if previous.is_none() && word.eq_ignore_ascii_case("UNWIND") {
                         parameter_unwound = matches!(
                             script::next_script_token(&mut lexer.clone())?.kind,
@@ -167,6 +178,8 @@ impl PreparedGraphWriteChainText {
                         matched = true;
                     } else if clause && parameter_unwound && word.eq_ignore_ascii_case("MATCH") {
                         parameter_matched = true;
+                    } else if clause && unwound && word.eq_ignore_ascii_case("MATCH") {
+                        unwound_matched = true;
                     } else if clause
                         && word.eq_ignore_ascii_case("MERGE")
                         && (pattern()? || Self::named_merge_pattern(lexer.clone())?)
@@ -206,15 +219,18 @@ impl PreparedGraphWriteChainText {
                                 && Self::edge_actions_need_rows(
                                     lookahead.clone(),
                                     Self::named_merge_pattern(lexer.clone())?,
+                                    staged,
                                 )?
                             {
                                 return Ok(true);
                             }
                             if previous.is_some() && !parameter_unwound && (vertex || !matched) {
                                 // A vertex MERGE after the leading UNWIND or
-                                // MATCH; a relationship MERGE after UNWIND is
-                                // its own statement.
-                                return Ok(vertex);
+                                // MATCH. A relationship MERGE after UNWIND is
+                                // its own statement, unless a MATCH after the
+                                // UNWIND binds its endpoints: the chain reads
+                                // those rows (fgdb-at06q).
+                                return Ok(vertex || unwound_matched);
                             }
                             // A first vertex MERGE, a vertex MERGE after
                             // `UNWIND $rows`, or a relationship MERGE after a
@@ -225,12 +241,14 @@ impl PreparedGraphWriteChainText {
                         }
                     } else if clause
                         && parameter_unwound
-                        && merged_vertex
+                        && (merged_vertex || (merged && parameter_matched))
                         && word.eq_ignore_ascii_case("RETURN")
                     {
                         // The batch writer has no RETURN: a vertex MERGE over
                         // `UNWIND $rows` that returns rows is the chain's, as
-                        // over a literal UNWIND (fgdb-0s2pq).
+                        // over a literal UNWIND (fgdb-0s2pq), and so is a
+                        // relationship MERGE between the MATCH's vertices
+                        // there (fgdb-at06q).
                         return Ok(true);
                     }
                     // A first MERGE's ON/SET clauses stay with it: a lone
@@ -248,9 +266,12 @@ impl PreparedGraphWriteChainText {
     /// anonymous, or an assignment writes or reads (`a.key`) an element
     /// other than it. The unique upsert writes only its named relationship.
     /// `lexer` is just past the `-` or `<` after the first node pattern.
+    /// `any`: every ON/SET action needs the chain's rows, as after a WITH or
+    /// UNWIND stage, which the unique MATCH-only upsert cannot read.
     fn edge_actions_need_rows(
         mut lexer: Lexer<'_>,
         named_path: bool,
+        any: bool,
     ) -> Result<bool, GraphPatternTextError> {
         const ENDS: [&str; 12] = [
             "RETURN", "WITH", "CREATE", "INSERT", "MERGE", "MATCH", "OPTIONAL", "UNWIND", "DELETE",
@@ -290,7 +311,7 @@ impl PreparedGraphWriteChainText {
                         && (word.eq_ignore_ascii_case("ON")
                             || word.eq_ignore_ascii_case("SET")) =>
                 {
-                    if named_path || relationship.is_none() {
+                    if named_path || relationship.is_none() || any {
                         return Ok(true);
                     }
                     actions = true;
@@ -1276,6 +1297,14 @@ mod tests {
              MERGE (e:Event {id: event.id}) MERGE (y)<-[:IN]-(e) RETURN e.id AS x ORDER BY x",
             "UNWIND $events AS event MATCH (y:Year {year: event.year}) MERGE (e:Event {id: event.id})",
             "UNWIND [1, 2] AS v MATCH (y:Year {year: v}) MERGE (e:Event {id: v})",
+            // A relationship MERGE between the vertices of a MATCH after a
+            // literal UNWIND, and one over `UNWIND $pairs` that returns rows:
+            // the batch writer has no RETURN, and refused it at RETURN
+            // (fgdb-at06q).
+            "UNWIND [1, 2] AS i MATCH (n {id: i}), (y {id: 9}) MERGE (n)-[:R]->(y)",
+            "UNWIND [1, 2] AS x MATCH (a:A), (b:B) MERGE (a)-[r:R {k: x}]->(b) RETURN r.k",
+            "UNWIND $pairs AS row MATCH (a {id: row.a}), (b {id: row.b}) MERGE (a)-[:R]->(b) \
+             RETURN count(*) AS c",
             // A SET, REMOVE or DELETE after a CREATE writes its rows.
             "CREATE (n) SET n.p = 1",
             "CREATE (n:P {p: 1}) SET n.p = n.p + 1 RETURN n.p",
@@ -1324,12 +1353,11 @@ mod tests {
             "MATCH (a), (b) MERGE (a)-[r:R]->(b) SET r += {p: 1, q: 'a.b'} RETURN a.p, r.p",
             "MATCH (a), (b) MERGE (a)-[r:R]->(b) ON CREATE SET r.p = $x.p",
             // An UNWIND of a parameter before one MERGE is the batch writer's,
-            // its ON/SET clauses and a relationship MERGE after MATCH included.
+            // its ON/SET clauses and a relationship MERGE after MATCH included,
+            // unless a RETURN follows.
             "UNWIND $rows AS row MERGE (n:Entity {id: row.id})",
             "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n.name = row.name",
             "UNWIND $pairs AS row MATCH (a {id: row.a}), (b {id: row.b}) MERGE (a)-[:R]->(b)",
-            "UNWIND $pairs AS row MATCH (a {id: row.a}), (b {id: row.b}) MERGE (a)-[:R]->(b) \
-             RETURN count(*) AS c",
             "UNWIND $rows AS row MERGE (n:Entity {p: 'RETURN'})",
             "UNWIND [1] AS x MERGE (a)-[:R]->(b)",
             "MERGE (a:A) ON CREATE SET a.p = 1",

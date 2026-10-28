@@ -22,6 +22,10 @@ const T: RelationId = RelationId(2);
 const PERSON: LabelId = LabelId(1);
 const SOURCE: LabelId = LabelId(2);
 const COPY: LabelId = LabelId(3);
+/// Labels and a type spelled like the COUNT and EXISTS subqueries.
+const COUNT: LabelId = LabelId(4);
+const EXISTS: LabelId = LabelId(5);
+const COUNTED: RelationId = RelationId(3);
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 const NAME: PropertyKeyId = PropertyKeyId(3);
@@ -44,6 +48,9 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         (GraphSymbolKind::Label, "Person") => Some(GraphSymbol::Label(PERSON)),
         (GraphSymbolKind::Label, "Source") => Some(GraphSymbol::Label(SOURCE)),
         (GraphSymbolKind::Label, "Copy") => Some(GraphSymbol::Label(COPY)),
+        (GraphSymbolKind::Label, "Count") => Some(GraphSymbol::Label(COUNT)),
+        (GraphSymbolKind::Label, "Exists") => Some(GraphSymbol::Label(EXISTS)),
+        (GraphSymbolKind::Relation, "COUNT") => Some(GraphSymbol::Relation(COUNTED)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
         (GraphSymbolKind::Property, "name") => Some(GraphSymbol::Property(NAME)),
@@ -1420,12 +1427,26 @@ fn vertex_merge_steps_apply_on_and_set_clauses_per_row() {
         .await
         .unwrap();
         assert_eq!(rows(same), [vec![int(3)]]);
-        // A carried element's metadata after the clauses, an anonymous MERGE
-        // with clauses, and a SET of a row element refuse and publish nothing.
-        let frontier = db.frontier().unwrap();
-        for refused in [
+        // A carried element's labels after the clauses read its final state
+        // (fgdb-a1bx3): one row per matched person, the two born 5.
+        let labelled = write(
+            &mut db,
             "MATCH (person:Person {born: 5}) MERGE (c:Copy {p: 4}) SET c.q = 9 \
              RETURN labels(person) AS l",
+        )
+        .await
+        .unwrap();
+        let person = QueryValue::Value(GraphValue::List(
+            vec![GraphValue::Scalar(
+                CanonicalScalar::ucs_basic_text("Person").unwrap(),
+            )]
+            .into_boxed_slice(),
+        ));
+        assert_eq!(rows(labelled), [vec![person.clone()], vec![person]]);
+        // An anonymous MERGE with clauses and a SET of a row element refuse
+        // and publish nothing.
+        let frontier = db.frontier().unwrap();
+        for refused in [
             "MATCH (person:Person) MERGE (:Copy {p: 4}) ON CREATE SET person.q = 1",
             "MATCH (person:Person) MERGE (c:Copy {p: 4}) SET person.q = 1",
         ] {
@@ -1694,15 +1715,30 @@ fn merge_steps_take_a_with_head() {
         .await
         .unwrap();
         assert_eq!(db.edges().unwrap().len(), edges + 1);
-        // A head no write follows and a WHERE after it refuse and publish
-        // nothing.
-        let frontier = db.frontier().unwrap();
-        for refused in [
-            "MERGE (a:Person {p: 60}) WITH a",
+        // A WHERE after the head filters the merged rows before the next
+        // write (fgdb-vy1rf, 60d60df1): it holds once, then never.
+        let vertices = db.vertices().unwrap().len();
+        write(
+            &mut db,
             "MERGE (a:Person {p: 60}) WITH a WHERE a.p > 1 CREATE (b)",
-        ] {
-            assert!(write(&mut db, refused).await.is_err(), "{refused}");
-        }
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.vertices().unwrap().len(), vertices + 1);
+        write(
+            &mut db,
+            "MERGE (a:Person {p: 60}) WITH a WHERE a.p > 100 CREATE (b)",
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.vertices().unwrap().len(), vertices + 1);
+        // A head no write follows refuses and publishes nothing.
+        let frontier = db.frontier().unwrap();
+        assert!(
+            write(&mut db, "MERGE (a:Person {p: 60}) WITH a")
+                .await
+                .is_err()
+        );
         assert_eq!(db.frontier().unwrap(), frontier);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
@@ -2976,6 +3012,769 @@ fn created_named_paths_keep_traversal_overlay_reads_and_committed_graph_state() 
             ),
             expected,
             "the successful path writes survive reopen"
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// A CREATE field reads `x.key` of an element its row carries in a value,
+/// not a projected column (fgdb-v1rbj): an UNWIND member of a list, a
+/// collected list, a path's nodes or relationships, and the relationship of
+/// a MERGE path in a chained CREATE. The insertion evaluator had no element
+/// reader, so each of these failed at run time with IncompatibleOperands.
+#[test]
+fn created_fields_read_elements_carried_in_values() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4b0, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let stored = |value| CanonicalPropertyValue::from(CanonicalScalar::Int(value));
+        for (text, expected) in [
+            (
+                "MATCH (a:Source) UNWIND [a] AS x CREATE (:Copy {p:x.p})",
+                vec![10, 20],
+            ),
+            (
+                "MATCH (a:Source) WITH collect(a) AS xs UNWIND xs AS x CREATE (:Copy {p:x.p})",
+                vec![10, 20],
+            ),
+            (
+                "MATCH path=(:Source)-[:R]->(:Source) UNWIND nodes(path) AS n \
+                 CREATE (:Copy {p:n.p})",
+                vec![10, 20],
+            ),
+            (
+                "MATCH ()-[r:R]->() WITH r UNWIND [r] AS e CREATE (:Copy {p:e.q})",
+                vec![30],
+            ),
+            (
+                "MATCH (a:Source) UNWIND [a] AS x CREATE (:Copy {p:x.p+1})",
+                vec![11, 21],
+            ),
+            (
+                "MATCH (a:Source {p:10}) UNWIND [a] AS x CREATE (:Copy {p:size(labels(x))})",
+                vec![1],
+            ),
+            (
+                "MATCH (a:Source {p:10}),(b:Source {p:20}) MERGE route=(a)<-[r:T]-(b) \
+                 ON CREATE SET r.q=7 WITH route AS saved \
+                 UNWIND relationships(saved) AS edge CREATE (:Copy {p:edge.q})",
+                vec![7],
+            ),
+        ] {
+            let mut db = fresh(&commit, true).await;
+            let (mut vertices, mut edges) = reserve(&mut db, &cx, 4, 4);
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => vertices.pop_front().unwrap(),
+                        GraphInsertRequest::Edge { .. } => edges.pop_front().unwrap(),
+                    })
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{text}: {error}"));
+            let copied: Vec<_> = db
+                .vertices()
+                .unwrap()
+                .into_iter()
+                .filter(|vertex| vertex.labels == [COPY])
+                .map(|vertex| vertex.props)
+                .collect();
+            assert_eq!(copied.len(), expected.len(), "{text}: {copied:?}");
+            for value in expected {
+                assert!(
+                    copied.contains(&vec![(P, stored(value))]),
+                    "{text}: {value} in {copied:?}"
+                );
+            }
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+
+        // A chained CREATE with a RETURN reads the carried element's field the
+        // same way, after an earlier CREATE of the same statement.
+        let mut db = fresh(&commit, true).await;
+        let (mut vertices, mut edges) = reserve(&mut db, &cx, 4, 4);
+        let returned = db
+            .query_write(
+                &txcx,
+                &cx,
+                &commit,
+                "CREATE (a:Copy {p:9}) WITH a UNWIND [a] AS x \
+                 CREATE (c:Copy {p:x.p}) RETURN c.p AS copied",
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => vertices.pop_front().unwrap(),
+                        GraphInsertRequest::Edge { .. } => edges.pop_front().unwrap(),
+                    })
+                },
+            )
+            .await
+            .unwrap();
+        let QueryResult::Rows { columns, rows } = returned else {
+            panic!("a chained CREATE with RETURN returns rows")
+        };
+        assert_eq!(columns, ["copied"]);
+        assert_eq!(
+            rows,
+            [vec![QueryValue::Value(GraphValue::Scalar(
+                CanonicalScalar::Int(9)
+            ))]]
+        );
+        let copies: Vec<_> = db
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .filter(|vertex| vertex.labels == [COPY])
+            .map(|vertex| vertex.props)
+            .collect();
+        assert_eq!(copies, [vec![(P, stored(9))], vec![(P, stored(9))]]);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// A SET or CREATE right side reads an element's identity (`id()`,
+/// `elementId()`) or its NULL-ness (`x IS NULL` over an OPTIONAL MATCH
+/// element) as a projection does (fgdb-j687q). The write binders refused
+/// every element column such an expression named, though only the identity
+/// or presence reaches the property. Each stored value equals the same
+/// expression's projected value in the statement's own RETURN.
+#[test]
+fn write_right_sides_read_element_identity_and_presence() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4b1, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let write = async |db: &mut Database<MemVfs>, text: &str| {
+            let (mut vertices, mut edges) = reserve(db, &cx, 4, 4);
+            let result = db
+                .query_write(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    text,
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    policy(),
+                    |request| {
+                        Ok::<_, &'static str>(match request.request {
+                            GraphInsertRequest::Vertex { .. } => vertices.pop_front().unwrap(),
+                            GraphInsertRequest::Edge { .. } => edges.pop_front().unwrap(),
+                        })
+                    },
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error}"));
+            match result {
+                QueryResult::Rows { rows, .. } => rows,
+                QueryResult::Write { .. } => Vec::new(),
+            }
+        };
+        let null = QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null));
+        let boolean = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Bool(value)));
+
+        let mut db = fresh(&commit, true).await;
+        for text in [
+            "MATCH (a:Source {p:10}) CREATE (c:Copy {p:id(a),name:elementId(a)}) \
+             RETURN id(a) AS i,elementId(a) AS e,c.p AS p,c.name AS name",
+            "MATCH (a:Source {p:10}),(b:Source {p:20}) SET a.q=id(b),a.name=elementId(b) \
+             RETURN id(b) AS i,elementId(b) AS e,a.q AS p,a.name AS name",
+            "MATCH ()-[r:R]->(b:Source) SET b.q=id(r),b.name=elementId(r) \
+             RETURN id(r) AS i,elementId(r) AS e,b.q AS p,b.name AS name",
+        ] {
+            let rows = write(&mut db, text).await;
+            assert_eq!(rows.len(), 1, "{text}");
+            let row = &rows[0];
+            assert_ne!(row[0], null, "{text}");
+            assert_ne!(row[1], null, "{text}");
+            assert_eq!((&row[2], &row[3]), (&row[0], &row[1]), "{text}");
+        }
+
+        let rows = write(
+            &mut db,
+            "MATCH (a:Source {p:10}) OPTIONAL MATCH (a)-[:T]->(x) \
+             SET a.q=x IS NULL,a.name=x IS NOT NULL RETURN a.q AS missing,a.name AS found",
+        )
+        .await;
+        assert_eq!(rows, [vec![boolean(true), boolean(false)]]);
+        write(
+            &mut db,
+            "MATCH (a:Source {p:10}) OPTIONAL MATCH (a)-[r:R]->(x) \
+             CREATE (:Copy {p:1,q:r IS NOT NULL,name:x IS NULL})",
+        )
+        .await;
+        let flagged = db
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .find(|vertex| {
+                vertex.labels == [COPY]
+                    && vertex
+                        .props
+                        .contains(&(P, CanonicalPropertyValue::from(CanonicalScalar::Int(1))))
+            })
+            .unwrap();
+        assert!(
+            flagged
+                .props
+                .contains(&(Q, CanonicalPropertyValue::from(CanonicalScalar::Bool(true))))
+        );
+        assert!(flagged.props.contains(&(
+            NAME,
+            CanonicalPropertyValue::from(CanonicalScalar::Bool(false))
+        )));
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// A relationship MERGE takes endpoints the WITH row computes, not only
+/// carried MATCH vertices: list subscripts, head()/last() and UNWIND members
+/// of collected vertices (the linked-list idiom `UNWIND range(0, size(ns)-2)
+/// AS i WITH ns[i] AS x, ns[i+1] AS y MERGE (x)-[:NEXT]->(y)`). It was refused
+/// at prepare ("a vertex the WITH row carries"), though CREATE and SET
+/// admitted the same open-typed columns. A NULL endpoint refuses as for a
+/// carried vertex, and a value that is not a vertex refuses the statement.
+#[test]
+fn relationship_merge_takes_endpoints_the_row_computes() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4b2, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let write = async |db: &mut Database<MemVfs>, text: &str| {
+            let (mut vertices, mut edges) = reserve(db, &cx, 4, 4);
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => vertices.pop_front().unwrap(),
+                        GraphInsertRequest::Edge { .. } => edges.pop_front().unwrap(),
+                    })
+                },
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        let merged = |db: &Database<MemVfs>| {
+            let mut pairs: Vec<_> = db
+                .edges()
+                .unwrap()
+                .into_iter()
+                .filter(|edge| edge.entry.relation == T)
+                .map(|edge| (edge.entry.src, edge.entry.dst))
+                .collect();
+            pairs.sort();
+            pairs
+        };
+        for (text, expected) in [
+            (
+                "MATCH (n:Source) WITH n ORDER BY n.p WITH collect(n) AS ns \
+                 UNWIND range(0, size(ns)-2) AS i WITH ns[i] AS x, ns[i+1] AS y \
+                 MERGE (x)-[:T]->(y)",
+                vec![(VId(10), VId(20))],
+            ),
+            (
+                "MATCH (n:Source) WITH n ORDER BY n.p WITH collect(n) AS ns \
+                 WITH head(ns) AS x, last(ns) AS y MERGE (y)-[:T]->(x)",
+                vec![(VId(20), VId(10))],
+            ),
+            (
+                "MATCH (n:Source) WITH collect(n) AS ns UNWIND ns AS x MERGE (x)-[:T]->(x)",
+                vec![(VId(10), VId(10)), (VId(20), VId(20))],
+            ),
+        ] {
+            let mut db = fresh(&commit, true).await;
+            // A second run matches the first run's relationships.
+            for _ in 0..2 {
+                write(&mut db, text).await.unwrap();
+                assert_eq!(merged(&db), expected, "{text}");
+            }
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+        // An out-of-range subscript is a NULL endpoint, and an unwound value
+        // that is not a vertex is no endpoint: each refuses with no effect.
+        let mut db = fresh(&commit, true).await;
+        let before = (db.frontier().unwrap(), db.edges().unwrap());
+        for text in [
+            "MATCH (n:Source) WITH collect(n) AS ns WITH ns[0] AS x, ns[5] AS y \
+             MERGE (x)-[:T]->(y)",
+            "MATCH (n:Source {p:10}) WITH [n, 1] AS xs UNWIND xs AS x MERGE (x)-[:T]->(x)",
+        ] {
+            assert!(write(&mut db, text).await.is_err(), "{text}");
+            assert_eq!(
+                (db.frontier().unwrap(), db.edges().unwrap()),
+                before,
+                "{text}"
+            );
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// A relationship MERGE map value the row computes (fgdb-at06q): a WITH
+/// alias, a value over MATCH bindings, a literal or parameter UNWIND member,
+/// a list (TCK Merge5 [14]). Each row's values filter existing edges and
+/// fill a created one. Rows of one endpoint pair with query-equal values
+/// share one edge (1 and 1.0 included), and different values make
+/// different edges. A rerun matches every edge. NULL or a map refuses with
+/// no effect.
+#[test]
+fn relationship_merge_maps_read_the_row() {
+    fn render(value: &CanonicalPropertyValue) -> String {
+        match value {
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)) => format!("{value}"),
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Float(value)) => {
+                format!("{:?}", value.get())
+            }
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Text(value)) => {
+                format!("'{}'", value.as_str())
+            }
+            CanonicalPropertyValue::List(list) => format!(
+                "[{}]",
+                list.values().iter().map(render).collect::<Vec<_>>().join(",")
+            ),
+            _ => "?".to_owned(),
+        }
+    }
+    let ((), report) = run_async_under_lab(0x1a5e_a706, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let write = async |db: &mut Database<MemVfs>, text: &str, params: &GqlParameters| {
+            let (mut vertices, mut edges) = reserve(db, &cx, 4, 4);
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                params,
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => vertices.pop_front().unwrap(),
+                        GraphInsertRequest::Edge { .. } => edges.pop_front().unwrap(),
+                    })
+                },
+            )
+            .await
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        // Every T edge: its endpoints and properties, in a stable order.
+        let merged = |db: &Database<MemVfs>| {
+            let mut edges: Vec<_> = db
+                .edges()
+                .unwrap()
+                .into_iter()
+                .filter(|edge| edge.entry.relation == T)
+                .map(|edge| {
+                    let props = edge
+                        .props
+                        .iter()
+                        .map(|(key, value)| format!("{}={}", key.0, render(value)))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    (edge.entry.src, edge.entry.dst, props)
+                })
+                .collect();
+            edges.sort();
+            edges
+        };
+        let none = GqlParameters::new();
+        let pair = |props: &str| (VId(10), VId(20), props.to_owned());
+        for (text, expected) in [
+            (
+                "MATCH (a:Source {p: 10}), (b:Source {p: 20}) WITH a, b, 'x' AS s \
+                 MERGE (a)-[r:T {name: s}]->(b)",
+                vec![pair("3='x'")],
+            ),
+            // A value over MATCH bindings reads the MATCH rows as WITH * does.
+            (
+                "MATCH (a:Source {p: 10}), (b:Source {p: 20}) \
+                 MERGE (a)-[:T {since: a.p + b.p}]->(b)",
+                vec![pair("5=30")],
+            ),
+            // Rows with query-equal values share one edge, made from the
+            // first of them; a different value makes another edge.
+            (
+                "UNWIND [1, 2, 1.0] AS x MATCH (a:Source {p: 10}), (b:Source {p: 20}) \
+                 MERGE (a)-[:T {since: x}]->(b)",
+                vec![pair("5=1"), pair("5=2")],
+            ),
+            // A computed list and a constant beside a row column.
+            (
+                "MATCH (a:Source {p: 10}), (b:Source {p: 20}) \
+                 WITH a, b, split('a,b', ',') AS roles, 7 AS s \
+                 MERGE (a)-[:T {name: roles, since: s, q: 'k'}]->(b)",
+                vec![pair("2='k' 3=['a','b'] 5=7")],
+            ),
+        ] {
+            let mut db = fresh(&commit, true).await;
+            for _ in 0..2 {
+                write(&mut db, text, &none).await.unwrap();
+                assert_eq!(merged(&db), expected, "{text}");
+            }
+            assert_eq!(db.edges().unwrap().len(), expected.len() + 1, "{text}");
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+
+        // An existing edge whose stored value equals the row's matches; the
+        // seeded edge 30 carries q = 30 and gains no sibling.
+        let mut db = fresh(&commit, true).await;
+        write(
+            &mut db,
+            "MATCH (a:Source {p: 10}), (b:Source {p: 20}) WITH a, b, 30 AS s \
+             MERGE (a)-[:R {q: s}]->(b)",
+            &none,
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.edges().unwrap().len(), 1);
+
+        // RETURN reads the merged relationship's value, over a WITH row and
+        // over `UNWIND $rows` (which the batch writer refused at RETURN).
+        let returned = write(
+            &mut db,
+            "MATCH (a:Source {p: 10}), (b:Source {p: 20}) WITH a, b, 'x' AS s \
+             MERGE (a)-[r:T {name: s}]->(b) RETURN r.name AS n",
+            &none,
+        )
+        .await
+        .unwrap();
+        let QueryResult::Rows { columns, rows } = returned else {
+            unreachable!("MERGE ... RETURN answers rows")
+        };
+        assert_eq!(columns, ["n"]);
+        assert_eq!(
+            rows,
+            vec![vec![QueryValue::Value(GraphValue::Scalar(
+                CanonicalScalar::Text(fgdb_types::CanonicalText::new_ucs_basic("x").unwrap())
+            ))]]
+        );
+        let row = |a: i64, b: i64, since: i64| {
+            let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+            GraphValue::map(vec![
+                ("a".into(), int(a)),
+                ("b".into(), int(b)),
+                ("s".into(), int(since)),
+            ])
+            .unwrap()
+        };
+        let rows_parameter = GqlParameters::new()
+            .with_list("rows", vec![row(10, 20, 2020), row(10, 20, 2020), row(20, 10, 1)])
+            .unwrap();
+        for _ in 0..2 {
+            let returned = write(
+                &mut db,
+                "UNWIND $rows AS row MATCH (a:Source {p: row.a}), (b:Source {p: row.b}) \
+                 MERGE (a)-[r:T {since: row.s}]->(b) RETURN r.since AS s",
+                &rows_parameter,
+            )
+            .await
+            .unwrap();
+            let QueryResult::Rows { rows, .. } = returned else {
+                unreachable!("MERGE ... RETURN answers rows")
+            };
+            let int = |value| vec![QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)))];
+            assert_eq!(rows, vec![int(2020), int(2020), int(1)]);
+        }
+        assert_eq!(
+            merged(&db),
+            vec![
+                pair("3='x'"),
+                pair("5=2020"),
+                (VId(20), VId(10), "5=1".to_owned()),
+            ]
+        );
+
+        // NULL (a missing property) and a map can neither match nor be
+        // created: each refuses with no effect.
+        let before = (db.frontier().unwrap(), db.edges().unwrap());
+        for text in [
+            "MATCH (a:Source {p: 10}), (b:Source {p: 20}) MERGE (a)-[:T {since: a.name}]->(b)",
+            "MATCH (a:Source {p: 10}), (b:Source {p: 20}) WITH a, b, {k: 1} AS m \
+             MERGE (a)-[:T {since: m}]->(b)",
+        ] {
+            assert!(write(&mut db, text, &none).await.is_err(), "{text}");
+            assert_eq!(
+                (db.frontier().unwrap(), db.edges().unwrap()),
+                before,
+                "{text}"
+            );
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// A label or relationship type spelled like the COUNT or EXISTS subquery
+/// takes its property map in a write after a WITH. The WITH head's hoist scan
+/// read `Count {` there as `COUNT {` and refused the statement ("expected
+/// MATCH"), with or without an aggregate. A real subquery still hoists,
+/// bare or as a map value.
+#[test]
+fn labels_spelled_like_subqueries_take_property_maps_after_with() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4b3, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = fresh(&commit, true).await;
+        for text in [
+            "MATCH (n:Source) WITH count(n) AS total CREATE (:Count {p:total})",
+            "MATCH (n:Source) WITH sum(n.p) AS total CREATE (:Exists {p:total})",
+            "MATCH (n:Source) WITH n CREATE (:Copy:Count {p:n.p})",
+            "MATCH (a:Source {p:10}),(b:Source {p:20}) WITH a,b CREATE (a)-[:COUNT {q:1}]->(b)",
+            "MATCH (n:Source) WITH n MERGE (:Count {p:7})",
+            "MATCH (n:Source) WITH n, COUNT { (n)-->() } AS c CREATE (:Copy {q:c})",
+            "MATCH (n:Source) WITH n, {c: COUNT { (n)-->() }} AS m CREATE (:Copy {name:m.c})",
+        ] {
+            let (mut vertices, mut edges) = reserve(&mut db, &cx, 4, 4);
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => vertices.pop_front().unwrap(),
+                        GraphInsertRequest::Edge { .. } => edges.pop_front().unwrap(),
+                    })
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{text}: {error}"));
+        }
+        let int = |value| CanonicalPropertyValue::from(CanonicalScalar::Int(value));
+        let mut labelled: Vec<_> = db
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .filter(|vertex| vertex.labels != [SOURCE])
+            .map(|vertex| (vertex.labels, vertex.props))
+            .collect();
+        labelled.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+        let mut expected = vec![
+            (vec![COUNT], vec![(P, int(2))]),
+            (vec![EXISTS], vec![(P, int(30))]),
+            (vec![COPY, COUNT], vec![(P, int(10))]),
+            (vec![COPY, COUNT], vec![(P, int(20))]),
+            (vec![COUNT], vec![(P, int(7))]),
+            // Vertex 10 has two outgoing relationships by then: the seeded R
+            // and the COUNT one created above; vertex 20 has none.
+            (vec![COPY], vec![(Q, int(2))]),
+            (vec![COPY], vec![(Q, int(0))]),
+            (vec![COPY], vec![(NAME, int(2))]),
+            (vec![COPY], vec![(NAME, int(0))]),
+        ];
+        expected.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+        assert_eq!(labelled, expected);
+        assert!(db.edges().unwrap().iter().any(|edge| {
+            (edge.entry.src, edge.entry.relation, edge.entry.dst) == (VId(10), COUNTED, VId(20))
+                && edge.props == [(Q, int(1))]
+        }));
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// A relationship MERGE after a multipart read (`MATCH ... WITH ... MATCH
+/// ... MERGE (a)-[:R]->(b)`) reads that read's complete relation, as CREATE
+/// and SET do there. It refused at the second MATCH ("expected CREATE, SET,
+/// REMOVE, DELETE or a relationship MERGE after MATCH ... WITH"). Endpoints
+/// may be carried vertices or open columns (an UNWIND member); a NULL from
+/// an OPTIONAL MATCH refuses the statement with no effect.
+#[test]
+fn relationship_merge_reads_a_multipart_read() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4b4, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let write = async |db: &mut Database<MemVfs>, text: &str| {
+            let (mut vertices, mut edges) = reserve(db, &cx, 4, 4);
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => vertices.pop_front().unwrap(),
+                        GraphInsertRequest::Edge { .. } => edges.pop_front().unwrap(),
+                    })
+                },
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        let merged = |db: &Database<MemVfs>| {
+            let mut pairs: Vec<_> = db
+                .edges()
+                .unwrap()
+                .into_iter()
+                .filter(|edge| edge.entry.relation == T)
+                .map(|edge| (edge.entry.src, edge.entry.dst))
+                .collect();
+            pairs.sort();
+            pairs
+        };
+        for (text, expected) in [
+            (
+                "MATCH (n:Source) WITH n MATCH (m:Source {p:20}) MERGE (n)-[:T]->(m)",
+                vec![(VId(10), VId(20)), (VId(20), VId(20))],
+            ),
+            (
+                "MATCH (n:Source) WITH collect(n) AS ns UNWIND ns AS x \
+                 MATCH (y:Source {p:10}) MERGE (y)-[:T]->(x)",
+                vec![(VId(10), VId(10)), (VId(10), VId(20))],
+            ),
+            (
+                "MATCH (y:Source {p:10}) WITH y UNWIND [10, 20] AS k \
+                 MATCH (n:Source {p:k}) MERGE (n)<-[:T]-(y)",
+                vec![(VId(10), VId(10)), (VId(10), VId(20))],
+            ),
+        ] {
+            let mut db = fresh(&commit, true).await;
+            // A second run matches the first run's relationships.
+            for _ in 0..2 {
+                write(&mut db, text).await.unwrap();
+                assert_eq!(merged(&db), expected, "{text}");
+            }
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+        let mut db = fresh(&commit, true).await;
+        let before = (db.frontier().unwrap(), db.edges().unwrap());
+        let text =
+            "MATCH (n:Source {p:10}) WITH n OPTIONAL MATCH (n)-[:T]->(m) MERGE (n)-[:T]->(m)";
+        assert!(write(&mut db, text).await.is_err(), "{text}");
+        assert_eq!((db.frontier().unwrap(), db.edges().unwrap()), before);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// A relationship MERGE after a WITH or UNWIND stage, or after a multipart
+/// read, runs its ON CREATE / ON MATCH / SET clauses as the chain's row
+/// actions. Only actions reading another element reached the chain before;
+/// a relationship-only action after a stage was left to the unique upsert,
+/// which reads a MATCH only, and refused ("expected CREATE, SET, REMOVE,
+/// DELETE or a relationship MERGE after MATCH ... WITH").
+#[test]
+fn staged_relationship_merges_run_their_on_and_set_clauses() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4b5, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let write = async |db: &mut Database<MemVfs>, text: &str| {
+            let (mut vertices, mut edges) = reserve(db, &cx, 4, 4);
+            let result = db
+                .query_write(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    text,
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    policy(),
+                    |request| {
+                        Ok::<_, &'static str>(match request.request {
+                            GraphInsertRequest::Vertex { .. } => vertices.pop_front().unwrap(),
+                            GraphInsertRequest::Edge { .. } => edges.pop_front().unwrap(),
+                        })
+                    },
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error}"));
+            match result {
+                QueryResult::Rows { rows, .. } => rows,
+                QueryResult::Write { .. } => Vec::new(),
+            }
+        };
+        let int = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        let weights = |db: &Database<MemVfs>| -> Vec<_> {
+            db.edges()
+                .unwrap()
+                .into_iter()
+                .filter(|edge| edge.entry.relation == T)
+                .map(|edge| (edge.entry.src, edge.entry.dst, edge.props))
+                .collect()
+        };
+        for (text, first, second) in [
+            (
+                "MATCH (a:Source {p:10}), (b:Source {p:20}) WITH a, b MERGE (a)-[r:T]->(b) \
+                 ON CREATE SET r.q = 1 ON MATCH SET r.q = r.q + 1 RETURN r.q AS q",
+                1,
+                2,
+            ),
+            (
+                "MATCH (a:Source {p:10}) WITH a MATCH (b:Source {p:20}) MERGE (a)-[r:T]->(b) \
+                 ON CREATE SET r.q = 5 ON MATCH SET r.q = r.q * 2 RETURN r.q AS q",
+                5,
+                10,
+            ),
+            (
+                "MATCH (a:Source {p:10}), (b:Source {p:20}) UNWIND [3] AS k \
+                 MERGE (a)-[r:T]->(b) ON CREATE SET r.q = k ON MATCH SET r.q = r.q + k \
+                 RETURN r.q AS q",
+                3,
+                6,
+            ),
+        ] {
+            let mut db = fresh(&commit, true).await;
+            // The first run creates and takes ON CREATE; the second matches.
+            for expected in [first, second] {
+                assert_eq!(write(&mut db, text).await, [vec![int(expected)]], "{text}");
+            }
+            assert_eq!(
+                weights(&db),
+                [(
+                    VId(10),
+                    VId(20),
+                    vec![(
+                        Q,
+                        CanonicalPropertyValue::from(CanonicalScalar::Int(second))
+                    )]
+                )],
+                "{text}"
+            );
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+        let mut db = fresh(&commit, true).await;
+        let text = "MATCH (a:Source {p:10}), (b:Source {p:20}) WITH a, b \
+                    MERGE (a)-[r:T]->(b) SET r.q = 7";
+        assert!(write(&mut db, text).await.is_empty());
+        assert_eq!(
+            weights(&db),
+            [(
+                VId(10),
+                VId(20),
+                vec![(Q, CanonicalPropertyValue::from(CanonicalScalar::Int(7)))]
+            )]
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");

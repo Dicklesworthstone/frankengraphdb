@@ -804,8 +804,36 @@ impl PreparedGraphMutation {
                         }
                     }
                     GraphMutationValue::Expression(expression) => {
-                        for column in expression.referenced_columns() {
+                        for column in expression.scalar_columns() {
                             check(column)?;
+                        }
+                        // As a projection admits them: id()/elementId() and an
+                        // element's IS [NOT] NULL read its identity, and a
+                        // presence test its NULL-ness alone, so no element
+                        // value reaches the property (fgdb-j687q).
+                        for column in expression.element_columns() {
+                            if !matches!(
+                                columns.get(column),
+                                Some(
+                                    GraphSetColumnType::Vertex
+                                        | GraphSetColumnType::Edge
+                                        | GraphSetColumnType::Any
+                                )
+                            ) {
+                                return Err(GraphMutationBuildError::ValueColumn {
+                                    action: at,
+                                    column,
+                                });
+                            }
+                        }
+                        if let Some(column) = expression
+                            .referenced_columns()
+                            .find(|column| *column >= columns.len())
+                        {
+                            return Err(GraphMutationBuildError::ValueColumn {
+                                action: at,
+                                column,
+                            });
                         }
                     }
                     GraphMutationValue::Literal(_) => {}

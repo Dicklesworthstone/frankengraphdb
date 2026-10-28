@@ -1647,15 +1647,14 @@ fn a_terminal_aggregate_return_reads_pattern_comprehensions() {
             .iter()
             .all(|row| row.values()[0].as_count() == Some(1))
     );
-    for text in [
-        "MATCH (n) RETURN count([x IN [n] | size([(x)-->() | 1])]) AS c",
-        "MATCH (n)-->(k) WITH n AS k RETURN count([(k)-->() | 1]) AS c",
-    ] {
-        assert!(
-            PreparedGraphPipelineAggregateText::prepare(text, symbols).is_err(),
-            "{text}"
-        );
-    }
+    // A list-local graph comprehension is a second graph source (68812ac2),
+    // so it binds as a relation: its value law is in multipart_aggregates.rs,
+    // beside the rebound `WITH n AS k` form (fgdb-2ht8c).
+    let text = "MATCH (n) RETURN count([x IN [n] | size([(x)-->() | 1])]) AS c";
+    assert!(
+        PreparedGraphPipelineAggregateText::prepare(text, symbols).is_ok(),
+        "{text}"
+    );
 }
 
 /// A terminal aggregate RETURN over collected paths (TCK List12 [4]):

@@ -419,7 +419,10 @@ fn carried_pattern_lists_preserve_native_order_nulls_and_snapshot_authority() {
         db.write(&commit, extra).await.unwrap();
         let basis = db.frontier().unwrap();
         let pinned = db.read_session().unwrap();
-        let tail = "RETURN x,[(x)-[:S]->(target) | target.n] AS amounts, \
+        // A named edge makes every comprehension enumerate in edge identity
+        // order: unnamed, a plan reads the neighbour index (vertex order),
+        // and the direct oracle's sibling `p=` would switch its whole program.
+        let tail = "RETURN x,[(x)-[s:S]->(target) | target.n] AS amounts, \
                     [(x)-[:S]->() | null] AS missing, \
                     [p=(x)-[:S]->(target) | size(relationships(p))] AS lengths ORDER BY x";
         let text = format!("MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x {tail}");
@@ -1418,10 +1421,11 @@ fn carried_pattern_counts_keep_multiplicity_snapshot_and_authorization() {
         let mut txn = db.begin(&txcx).unwrap();
         let mut staged_r = WriteBatch::new(R);
         staged_r.delete_edge(EId(10));
-        txn.write(&mut db, staged_r).unwrap();
         let mut staged_s = WriteBatch::new(S);
         staged_s.add_edge(EId(23), VId(5), VId(3), vec![]);
-        txn.write(&mut db, staged_s).unwrap();
+        // One transaction stages a second relation only as an ordered write.
+        txn.write_ordered(&mut db, vec![staged_r, staged_s])
+            .unwrap();
         let after = vec![
             (VId(1), 1, 1),
             (VId(2), 0, 2),
@@ -1857,13 +1861,15 @@ fn graph_quantifiers_count_elements_and_keep_snapshot_and_capability_boundaries(
         let basis = db.frontier().unwrap();
         let pinned = db.read_session().unwrap();
         // Each native plan stays within the existing bounded operator depth.
+        // A CASE result is no Boolean position, so the existence test is
+        // spelled EXISTS there, as in the fgdb-gql twin of this law.
         let texts = [
             "WITH $items AS items RETURN \
-             any(x IN items WHERE CASE WHEN x IS NULL THEN NULL ELSE (x)-[:S]->() END) AS any_s, \
-             all(x IN items WHERE CASE WHEN x IS NULL THEN NULL ELSE (x)-[:S]->() END) AS all_s",
+             any(x IN items WHERE CASE WHEN x IS NULL THEN NULL ELSE EXISTS((x)-[:S]->()) END) AS any_s, \
+             all(x IN items WHERE CASE WHEN x IS NULL THEN NULL ELSE EXISTS((x)-[:S]->()) END) AS all_s",
             "WITH $items AS items RETURN \
-             none(x IN items WHERE CASE WHEN x IS NULL THEN NULL ELSE (x)-[:S]->() END) AS none_s, \
-             single(x IN items WHERE CASE WHEN x IS NULL THEN NULL ELSE (x)-[:S]->() END) AS single_s",
+             none(x IN items WHERE CASE WHEN x IS NULL THEN NULL ELSE EXISTS((x)-[:S]->()) END) AS none_s, \
+             single(x IN items WHERE CASE WHEN x IS NULL THEN NULL ELSE EXISTS((x)-[:S]->()) END) AS single_s",
         ];
         let parameters = |items: &[Option<u128>]| {
             GqlParameters::new()
@@ -2256,15 +2262,16 @@ fn nested_graph_list_sources_keep_order_metadata_and_native_read_boundaries() {
             }
         }
         let mut txn = db.begin(&txcx).unwrap();
-        let mut staged = WriteBatch::new(R);
-        staged.delete_edge(EId(12));
-        staged.delete_edge(EId(13));
-        staged.add_edge(EId(15), VId(3), VId(2), vec![]);
-        staged.set_vertex_property(VId(2), N, Some(CanonicalScalar::Int(12)));
-        txn.write(&mut db, staged).unwrap();
-        let mut staged = WriteBatch::new(S);
-        staged.add_edge(EId(30), VId(5), VId(3), vec![]);
-        txn.write(&mut db, staged).unwrap();
+        let mut staged_r = WriteBatch::new(R);
+        staged_r.delete_edge(EId(12));
+        staged_r.delete_edge(EId(13));
+        staged_r.add_edge(EId(15), VId(3), VId(2), vec![]);
+        staged_r.set_vertex_property(VId(2), N, Some(CanonicalScalar::Int(12)));
+        let mut staged_s = WriteBatch::new(S);
+        staged_s.add_edge(EId(30), VId(5), VId(3), vec![]);
+        // One transaction stages a second relation only as an ordered write.
+        txn.write_ordered(&mut db, vec![staged_r, staged_s])
+            .unwrap();
         let edges_after = [(1, 2), (3, 3), (3, 2), (5, 5)];
         let after = Oracle {
             edges: &edges_after,

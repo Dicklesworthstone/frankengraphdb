@@ -935,8 +935,10 @@ fn after_row_pattern<'a>(
     while matches!(token.kind, TokenKind::Punct(b'-' | b'<')) {
         loop {
             token = match token.kind {
-                TokenKind::Punct(b'-') => lexer.next()?,
-                TokenKind::Punct(b'<' | b'>') => {
+                // `<--` also spells `< - -`, a comparison with a double
+                // negation; `>` never starts an operand, so it is explicit.
+                TokenKind::Punct(b'-' | b'<') => lexer.next()?,
+                TokenKind::Punct(b'>') => {
                     explicit_relationship = true;
                     lexer.next()?
                 }
@@ -1765,6 +1767,7 @@ impl<'a> Parser<'a> {
                     &schema,
                     call_depth + 1,
                 )?;
+                self.mark_hoisted_boolean_operand();
                 let predicate = self.read_scalar_value(None, &expanded, predicate_at, 0, false)?;
                 // Keep UNKNOWN. CASE validates Boolean/NULL without coercion, and the
                 // let slot evaluates the original predicate exactly once.
@@ -2413,7 +2416,7 @@ impl<'a> Parser<'a> {
             if !parser.at_multipart_write() {
                 return Err(expected(
                     parser.current.at,
-                    "CREATE, INSERT, SET, REMOVE or DELETE after the complete read",
+                    "CREATE, INSERT, MERGE, SET, REMOVE or DELETE after the complete read",
                 ));
             }
             parser.write_prefix = false;
@@ -2463,11 +2466,14 @@ impl<'a> Parser<'a> {
     }
 
     fn at_multipart_write(&self) -> bool {
+        // A relationship MERGE between row vertices ends a read as the other
+        // writes do (ReadWriteKind::EdgeMerge); a vertex MERGE does not.
         self.write_prefix
             && !self.call_body
-            && ["CREATE", "INSERT", "SET", "REMOVE", "DELETE", "DETACH"]
+            && (["CREATE", "INSERT", "SET", "REMOVE", "DELETE", "DETACH"]
                 .iter()
                 .any(|write| self.is_word(write))
+                || self.at_relationship_merge().unwrap_or(false))
     }
 
     fn multipart_parts(
@@ -2813,15 +2819,33 @@ impl<'a> Parser<'a> {
             )?;
             combined.push((name, kind));
         }
-        let projection = combined
-            .iter()
-            .enumerate()
-            .map(|(column, (name, _))| ReadProjectionTemplate {
+        let types: Vec<GraphSetColumnType> = combined.iter().map(|(_, kind)| *kind).collect();
+        let mut head = GraphProjectionHead {
+            with: true,
+            plain: false,
+            inputs: Vec::new(),
+            outputs: (combined.iter().enumerate())
+                .map(|(column, &(name, _))| (name, ReadValueTemplate::Column(column)))
+                .collect(),
+        };
+        // A write after the CALL reads its carried identities' preimages
+        // (fgdb-cpny9), as a continuation head's write does: row reads only,
+        // never a graph input in this unit part.
+        if self.write_prefix && !self.call_body {
+            self.hoist_boundary_reads_with_imports(&mut head, combined.len(), &combined)?;
+            if !head.inputs.is_empty() {
+                return Err(expected(at, "carried row reads after an inline CALL"));
+            }
+            combined = (head.outputs.iter())
+                .map(|(name, value)| (*name, value.column_type(&types, &self.syntax.parameters)))
+                .collect();
+        }
+        let projection = (head.outputs.into_iter())
+            .map(|(name, value)| ReadProjectionTemplate {
                 name: name.text.to_owned(),
-                value: ReadValueTemplate::Column(column),
+                value,
             })
             .collect();
-        let types = combined.iter().map(|(_, kind)| *kind).collect();
         // A returning CALL exports real typed identities, not graph slots.
         // Its caller's WHERE/RETURN/aggregate reads them through the same
         // governed element reader as the body; dropped names remain absent.
@@ -3325,7 +3349,15 @@ impl<'a> Parser<'a> {
         // The `WITH *` columns, before any hidden read.
         let visible = head.outputs.len();
         if !implicit_star {
-            self.hoist_boundary_reads(&mut head, offset)?;
+            // A write after this part reads its carried row identities'
+            // preimages, as the leading-row heads do (fgdb-cpny9); a read
+            // keeps its own templates.
+            let imports: &[_] = if self.write_prefix && !self.call_body {
+                incoming
+            } else {
+                &[]
+            };
+            self.hoist_boundary_reads_with_imports(&mut head, offset, imports)?;
         }
         let graph_page = if head.with {
             None

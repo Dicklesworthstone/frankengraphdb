@@ -252,7 +252,8 @@ fn range_streams_keep_pinned_winners_and_candidate_budgets_across_both_routes() 
             .stream_graph_vertices_governed(&cx, &zero, GqlQueryPolicy::new(0, 0, 1, 0))
             .unwrap();
         assert!(empty.next().is_none());
-        assert_eq!(empty.evaluator_stats().work_units, 1);
+        // A zero page drives no work (30b917aa).
+        assert_eq!(empty.evaluator_stats().work_units, 0);
         assert_eq!(empty.evaluator_stats().scratch_entries, 0);
         assert_eq!(empty.row_stats().snapshot_records, 0);
         let mut closed = db

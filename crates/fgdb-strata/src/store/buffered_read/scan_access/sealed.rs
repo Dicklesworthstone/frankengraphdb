@@ -32,23 +32,21 @@ impl<V: Vfs> BufferedPartition<V> {
         self.begin(cx, floor)?;
         let maximum = self.limits.max_work;
         let mut work = 0;
-        let mut count = 0usize;
-        let mut incidences = 0usize;
-        for descriptor in &self.blocks {
+        let selected = self.block_directory.relation_blocks(relation, &mut || {
             cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-            advance(&mut work, 1, maximum)?;
-            if descriptor
-                .summary
-                .is_some_and(|summary| summary.relation == relation)
-            {
-                count = count
-                    .checked_add(1)
-                    .ok_or(BufferedReadError::SizeOverflow)?;
-                incidences = incidences
-                    .checked_add(descriptor.rows)
-                    .ok_or(BufferedReadError::SizeOverflow)?;
-                limit("sealed source incidences", incidences, max_incidences)?;
-            }
+            advance(&mut work, 1, maximum)
+        })?;
+        let count = selected.len();
+        let mut incidences = 0usize;
+        let mut counting = selected;
+        while let Some(at) = self.block_directory.next_relation(&mut counting, &mut || {
+            cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+            advance(&mut work, 1, maximum)
+        })? {
+            incidences = incidences
+                .checked_add(self.blocks[at].rows)
+                .ok_or(BufferedReadError::SizeOverflow)?;
+            limit("sealed source incidences", incidences, max_incidences)?;
         }
         // Count and reserve the three owner vectors before any allocation or
         // payload fault. Decoded images keep their own per-block reservations.
@@ -103,16 +101,12 @@ impl<V: Vfs> BufferedPartition<V> {
         limit("sealed source owner bytes", allocated, bytes)?;
         source._charges.push(charge);
 
-        for at in 0..self.blocks.len() {
+        let mut selected = selected;
+        while let Some(at) = self.block_directory.next_relation(&mut selected, &mut || {
             cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-            advance(&mut work, 1, maximum)?;
+            advance(&mut work, 1, maximum)
+        })? {
             let descriptor = self.blocks[at];
-            if !descriptor
-                .summary
-                .is_some_and(|summary| summary.relation == relation)
-            {
-                continue;
-            }
             advance(&mut work, descriptor.rows, maximum)?;
             let charge = self.reserve_scan_workspace(cx)?;
             let mut observe = || -> Result<(), BufferedScanError<Infallible>> {

@@ -1998,15 +1998,43 @@ fn matched_vertex_merge_framing_keeps_aliases_and_relationship_ownership() {
             );
             transaction.abort();
         }
-        // A relationship pattern must never be admitted as a vertex MERGE
-        // merely because both start with a parenthesized node pattern.
+        // A relationship pattern is never admitted as a vertex MERGE merely
+        // because both start with a parenthesized node pattern: it is the
+        // chain's relationship MERGE step (bb0cb735). `n` matches only the
+        // created vertex, so either direction merges one self-loop and
+        // creates no vertex.
         for pattern in ["(a)-[r:R]->(n)", "(a)<-[r:R]-(n)"] {
             let text =
                 format!("CREATE (a {{p:1}}) WITH a MATCH (n {{p:1}}) MERGE {pattern} RETURN r",);
-            assert!(
-                PreparedGraphWriteChainText::prepare(&text, R, symbols).is_err(),
+            let chain = prepare(&text);
+            let mut database = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
+            let next = AtomicU64::new(1_000);
+            let mut transaction = database.begin(&contexts.txn()).unwrap();
+            let (_, result, _) = transaction
+                .execute_graph_write_chain_governed(
+                    &mut database,
+                    &contexts.query(),
+                    &chain,
+                    policy(1, HIGH, HIGH),
+                    |request| allocate(&next, request),
+                )
+                .unwrap();
+            let edges = transaction.edges(&database).unwrap();
+            assert_eq!(
+                (edges.len(), transaction.vertices(&database).unwrap().len()),
+                (1, 1),
                 "{text}"
             );
+            assert_eq!(edges[0].entry.src, edges[0].entry.dst, "{text}");
+            assert_eq!(result.value.len(), 1, "{text}");
+            assert_eq!(
+                result.value[0].values(),
+                &[GraphValue::Edge(edges[0].entry.eid)],
+                "{text}"
+            );
+            transaction.abort();
         }
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });

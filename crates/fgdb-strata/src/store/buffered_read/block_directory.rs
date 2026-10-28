@@ -3,8 +3,10 @@
 //! A block has one exact source/relation and a canonical destination range.
 //! Outgoing seeks use the exact descriptor key; incoming seeks use a balanced
 //! interval directory. A separate EId interval family covers point reads because
-//! adjacency order does not imply EId order. Ranges are only exclusion evidence:
-//! selected blocks are decoded and complete matching histories resolved normally.
+//! adjacency order does not imply EId order. Relation roots and seals seek their
+//! publication-ordered block range without visiting unrelated histories. Ranges
+//! are only exclusion evidence: selected blocks are decoded and complete matching
+//! histories resolved normally.
 
 use super::{
     BlockDescriptor, BufferedReadCx, BufferedReadError, MemoryCharge, MemoryError, MemoryPool,
@@ -38,10 +40,17 @@ struct EdgeRange {
     maximum: EId,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct RelationBlock {
+    relation: RelationId,
+    block: usize,
+}
+
 pub(super) struct BlockDirectory {
     outgoing: Vec<Outgoing>,
     incoming: Vec<Incoming>,
     edges: Vec<EdgeRange>,
+    relations: Vec<RelationBlock>,
     // All descriptor vectors drop before their shared reservation.
     _charge: MemoryCharge,
 }
@@ -55,12 +64,18 @@ impl BlockDirectory {
     ) -> Result<Self, BufferedReadError> {
         let bytes = blocks
             .len()
-            .checked_mul(size_of::<Outgoing>() + size_of::<Incoming>() + size_of::<EdgeRange>())
+            .checked_mul(
+                size_of::<Outgoing>()
+                    + size_of::<Incoming>()
+                    + size_of::<EdgeRange>()
+                    + size_of::<RelationBlock>(),
+            )
             .ok_or(BufferedReadError::SizeOverflow)?;
         let charge = pool.reserve(cx, bytes)?;
         let mut outgoing = Vec::new();
         let mut incoming = Vec::new();
         let mut edges = Vec::new();
+        let mut relations = Vec::new();
         outgoing
             .try_reserve_exact(blocks.len())
             .map_err(|_| MemoryError::AllocationFailed { requested: bytes })?;
@@ -68,6 +83,9 @@ impl BlockDirectory {
             .try_reserve_exact(blocks.len())
             .map_err(|_| MemoryError::AllocationFailed { requested: bytes })?;
         edges
+            .try_reserve_exact(blocks.len())
+            .map_err(|_| MemoryError::AllocationFailed { requested: bytes })?;
+        relations
             .try_reserve_exact(blocks.len())
             .map_err(|_| MemoryError::AllocationFailed { requested: bytes })?;
         if outgoing
@@ -84,6 +102,12 @@ impl BlockDirectory {
                     .capacity()
                     .checked_mul(size_of::<EdgeRange>())
                     .and_then(|edges| allocated.checked_add(edges))
+            })
+            .and_then(|allocated| {
+                relations
+                    .capacity()
+                    .checked_mul(size_of::<RelationBlock>())
+                    .and_then(|relations| allocated.checked_add(relations))
             })
             .is_none_or(|allocated| allocated > bytes)
         {
@@ -111,17 +135,23 @@ impl BlockDirectory {
                     block,
                     maximum: summary.last_edge,
                 });
+                relations.push(RelationBlock {
+                    relation: summary.relation,
+                    block,
+                });
             }
         }
         crate::tiered::edge_scan::sort(&mut outgoing, control)?;
         crate::tiered::edge_scan::sort(&mut incoming, control)?;
         crate::tiered::edge_scan::sort(&mut edges, control)?;
+        crate::tiered::edge_scan::sort(&mut relations, control)?;
         augment(&mut incoming, control)?;
         augment_edges(&mut edges, control)?;
         Ok(Self {
             outgoing,
             incoming,
             edges,
+            relations,
             _charge: charge,
         })
     }
@@ -153,6 +183,79 @@ impl BlockDirectory {
         control: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<Option<usize>, E> {
         candidates.next(&self.edges, control)
+    }
+
+    pub(super) fn relation_blocks<E>(
+        &self,
+        relation: RelationId,
+        control: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<RelationBlocks, E> {
+        RelationBlocks::new(&self.relations, relation, control)
+    }
+
+    pub(super) fn next_relation<E>(
+        &self,
+        blocks: &mut RelationBlocks,
+        control: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<usize>, E> {
+        blocks.next(&self.relations, control)
+    }
+}
+
+/// An allocation-free range in one admitted directory. Original publication
+/// ordinals stay ascending within each relation, including retirement restatements.
+#[derive(Clone, Copy)]
+pub(crate) struct RelationBlocks {
+    next: usize,
+    end: usize,
+}
+
+impl RelationBlocks {
+    fn new<E>(
+        blocks: &[RelationBlock],
+        relation: RelationId,
+        control: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Self, E> {
+        let (mut first, mut end) = (0, blocks.len());
+        while first < end {
+            control()?;
+            let middle = first + (end - first) / 2;
+            if blocks[middle].relation < relation {
+                first = middle + 1;
+            } else {
+                end = middle;
+            }
+        }
+        let next = first;
+        end = blocks.len();
+        while first < end {
+            control()?;
+            let middle = first + (end - first) / 2;
+            if blocks[middle].relation <= relation {
+                first = middle + 1;
+            } else {
+                end = middle;
+            }
+        }
+        Ok(Self { next, end })
+    }
+
+    pub(crate) const fn len(&self) -> usize {
+        self.end - self.next
+    }
+
+    fn next<E>(
+        &mut self,
+        blocks: &[RelationBlock],
+        control: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<usize>, E> {
+        if self.next == self.end {
+            return Ok(None);
+        }
+        control()?;
+        let block = blocks[self.next].block;
+        self.next += 1;
+        Ok(Some(block))
     }
 }
 

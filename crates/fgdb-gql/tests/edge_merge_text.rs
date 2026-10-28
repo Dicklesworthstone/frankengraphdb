@@ -123,6 +123,36 @@ fn relationship_variables_property_maps_and_undirected_merges_compile() {
     );
 }
 
+/// A map value over a MATCH binding (`{p: a.p}`, fgdb-at06q) is computed per
+/// row: the MERGE reads the MATCH rows as `WITH *` carries them, and the key
+/// is read by the existence predicate, so hosts authorize it. A different
+/// value is a different definition. Engine semantics:
+/// fgdb/tests/gql_insert_statement.rs relationship_merge_maps_read_the_row.
+#[test]
+fn relationship_merge_map_values_may_read_match_bindings() {
+    let none = GqlParameters::new();
+    let bind = |text: &str| {
+        PreparedGraphEdgeMergeText::prepare(text, R, symbols)
+            .expect(text)
+            .bind_parameters(&none)
+            .expect(text)
+    };
+    let source = bind("MATCH (a),(b) MERGE (a)-[:R {p: a.p}]->(b)");
+    assert!(source.input_relation().is_some());
+    assert!(source.selection().is_none());
+    assert!(source.has_row_properties());
+    assert!(source.properties().is_empty());
+    assert_eq!(source.property_keys().collect::<Vec<_>>(), vec![P]);
+    let destination = bind("MATCH (a),(b) MERGE (a)-[:R {p: b.p}]->(b)");
+    assert!(destination.has_row_properties());
+    assert_ne!(source.canonical_bytes(), destination.canonical_bytes());
+    // A map reading no binding keeps the MATCH pattern input and constants.
+    let constant = bind("MATCH (a),(b) MERGE (a)-[:R {p: 1}]->(b)");
+    assert!(constant.selection().is_some());
+    assert!(!constant.has_row_properties());
+    assert_eq!(constant.properties().len(), 1);
+}
+
 #[test]
 fn malformed_relationship_forms_refuse_before_catalog() {
     for text in [
@@ -131,7 +161,9 @@ fn malformed_relationship_forms_refuse_before_catalog() {
         "MATCH (a),(b) MERGE (a)-[:R {}]->(b)",
         "MATCH (a),(b) MERGE (a)-[:R {p: null}]->(b)",
         "MATCH (a),(b) MERGE (a)-[:R {p: 1, p: 2}]->(b)",
-        "MATCH (a),(b) MERGE (a)-[:R {p: a.p}]->(b)",
+        // A graph element is no property value; `{p: a.p}` is one
+        // (relationship_merge_map_values_may_read_match_bindings).
+        "MATCH (a),(b) MERGE (a)-[:R {p: a}]->(b)",
         "MATCH (a),(b) MERGE (a:Label)-[:R]->(b)",
         "MATCH (a) MERGE (a)-[:R]->(missing)",
         "MATCH (a),(b) MERGE (a)-[:R]->(b) ON CREATE SET a.p=1",

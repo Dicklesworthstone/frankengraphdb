@@ -310,6 +310,9 @@ impl<S: AsyncVertexScanSource, F, Row: VertexScanOutput> AsyncVertexScanCursor<S
     {
         let meter = &mut self.meter;
         if self.plan.inner.empty || self.plan.inner.count == Some(0) {
+            // As the synchronous cursor (30b917aa): an empty page drives no
+            // source/evaluator work, but a pending cancellation still wins
+            // before successful exhaustion.
             (meter.checkpoint)().map_err(GqlQueryError::Interrupted)?;
             return Ok(None);
         }

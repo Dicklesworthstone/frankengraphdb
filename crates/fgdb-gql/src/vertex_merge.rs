@@ -395,6 +395,37 @@ impl PreparedGraphVertexMerge {
     }
 }
 
+/// The property a MERGE over input rows writes for one row value: a scalar,
+/// or a bounded List whose payload is charged before it is copied. `None`
+/// is NULL, a map, a graph element or a list beyond the stored bounds,
+/// which no MERGE key may hold. Vertex and relationship MERGE share it.
+pub(crate) fn written_merge_value<C>(
+    value: &crate::algebra::GraphValue,
+    control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), C>,
+) -> Result<Option<fgdb_types::CanonicalPropertyValue>, C> {
+    use crate::algebra::GraphValue;
+    if value.is_null() {
+        return Ok(None);
+    }
+    if matches!(value, GraphValue::Scalar(_)) {
+        return Ok(value.to_written_property());
+    }
+    if !matches!(value, GraphValue::List(_))
+        || !value.validate_bounds()
+        || value
+            .canonical_byte_len()
+            .ok()
+            .is_none_or(|bytes| bytes > crate::algebra::MAX_SCALAR_PREDICATE_BYTES)
+    {
+        return Ok(None);
+    }
+    for _ in 0..value.payload_units() {
+        control(crate::GlaExecutionEvent::Work)?;
+        control(crate::GlaExecutionEvent::ScratchEntry)?;
+    }
+    Ok(value.to_written_property())
+}
+
 /// One property value of a vertex MERGE over input rows (fgdb-cpny9).
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum GraphVertexMergeRowValue {
@@ -714,33 +745,6 @@ impl PreparedGraphVertexMergeRows {
         Vec<fgdb_types::CanonicalPropertyValue>,
         crate::GqlQueryError<GraphVertexMergeError<E, A>, C>,
     > {
-        fn written<C>(
-            value: &crate::algebra::GraphValue,
-            control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), C>,
-        ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, C> {
-            use crate::algebra::GraphValue;
-            if value.is_null() {
-                return Ok(None);
-            }
-            if matches!(value, GraphValue::Scalar(_)) {
-                return Ok(value.to_written_property());
-            }
-            if !matches!(value, GraphValue::List(_))
-                || !value.validate_bounds()
-                || value
-                    .canonical_byte_len()
-                    .ok()
-                    .is_none_or(|bytes| bytes > crate::algebra::MAX_SCALAR_PREDICATE_BYTES)
-            {
-                return Ok(None);
-            }
-            for _ in 0..value.payload_units() {
-                control(crate::GlaExecutionEvent::Work)?;
-                control(crate::GlaExecutionEvent::ScratchEntry)?;
-            }
-            Ok(value.to_written_property())
-        }
-
         let mut tuple = Vec::with_capacity(self.properties.len());
         for (property, (_, value)) in self.properties.iter().enumerate() {
             let value = match value {
@@ -755,7 +759,7 @@ impl PreparedGraphVertexMergeRows {
                         })
                     };
                     let value = row.values().get(*column).ok_or_else(invalid)?;
-                    written(value, control)?.ok_or_else(invalid)?
+                    written_merge_value(value, control)?.ok_or_else(invalid)?
                 }
                 GraphVertexMergeRowValue::Computed(value) => {
                     let value = crate::set_ops::evaluate_value(value, row, property, control)
@@ -769,7 +773,7 @@ impl PreparedGraphVertexMergeRows {
                                 })
                             }
                         })?;
-                    written(&value, control)?.ok_or(crate::GqlQueryError::Source(
+                    written_merge_value(&value, control)?.ok_or(crate::GqlQueryError::Source(
                         GraphVertexMergeError::RowExpressionValue { row: at, property },
                     ))?
                 }

@@ -1514,6 +1514,8 @@ mod transaction_dynamic_metadata {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let basis = seed(&mut db, &commit, false).await;
             let pinned = db.read_session().unwrap();
+            // The native engine declares every argument it is handed, and an
+            // unused declaration refuses: each statement gets only its own.
             let params = GqlParameters::new()
                 .with_list(
                     "nodes",
@@ -1522,12 +1524,14 @@ mod transaction_dynamic_metadata {
                         GraphValue::Vertex(VId(u128::MAX)),
                     ],
                 )
-                .unwrap()
+                .unwrap();
+            let edge_params = GqlParameters::new()
                 .with_list(
                     "edges",
                     vec![GraphValue::Edge(EId(1)), GraphValue::Edge(EId(u128::MAX))],
                 )
                 .unwrap();
+            let no_params = GqlParameters::new();
             let nodes = "UNWIND $nodes AS x RETURN labels(x) AS labels, properties(x) AS props, keys(x) AS names";
             let edges = "UNWIND $edges AS x RETURN type(x) AS relation, properties(x) AS props, keys(x) AS names";
             let before = cells(
@@ -1576,25 +1580,48 @@ mod transaction_dynamic_metadata {
                 ],
                 vec![text("R"), map(&[("name", int(8))]), list(&["name"])],
             ]);
-            for (statement, expected) in [(nodes, &expected_nodes), (edges, &expected_edges)] {
+            for (statement, statement_params, expected) in [
+                (nodes, &params, &expected_nodes),
+                (edges, &edge_params, &expected_edges),
+            ] {
                 assert_eq!(
                     sorted(cells(
-                        txn.query(&db, &cx, statement, &params, Catalog::Full, policy())
-                            .unwrap()
+                        txn.query(
+                            &db,
+                            &cx,
+                            statement,
+                            statement_params,
+                            Catalog::Full,
+                            policy()
+                        )
+                        .unwrap()
                     )),
                     *expected
                 );
             }
             // Exercise the direct pattern aggregate and the relational aggregate
             // independently; both evaluate carried identities after grouping.
-            for statement in [
-                "MATCH (n:Foo) RETURN labels(collect(n)[0]) AS labels, properties(collect(n)[0]) AS props, keys(collect(n)[0]) AS names",
-                "UNWIND $nodes AS x RETURN labels(collect(x)[0]) AS labels, properties(collect(x)[0]) AS props, keys(collect(x)[0]) AS names",
+            for (statement, statement_params) in [
+                (
+                    "MATCH (n:Foo) RETURN labels(collect(n)[0]) AS labels, properties(collect(n)[0]) AS props, keys(collect(n)[0]) AS names",
+                    &no_params,
+                ),
+                (
+                    "UNWIND $nodes AS x RETURN labels(collect(x)[0]) AS labels, properties(collect(x)[0]) AS props, keys(collect(x)[0]) AS names",
+                    &params,
+                ),
             ] {
                 assert_eq!(
                     cells(
-                        txn.query(&db, &cx, statement, &params, Catalog::Full, policy())
-                            .unwrap()
+                        txn.query(
+                            &db,
+                            &cx,
+                            statement,
+                            statement_params,
+                            Catalog::Full,
+                            policy()
+                        )
+                        .unwrap()
                     ),
                     vec![vec![
                         list(&["Foo"]),
@@ -1649,7 +1676,9 @@ mod transaction_dynamic_metadata {
                         null(),
                     ],
                 )
-                .unwrap()
+                .unwrap();
+            // An unused declared argument refuses: each statement gets its own.
+            let edge_params = GqlParameters::new()
                 .with_list(
                     "edges",
                     vec![GraphValue::Edge(EId(1)), GraphValue::Edge(EId(99)), null()],
@@ -1663,18 +1692,25 @@ mod transaction_dynamic_metadata {
                     .unwrap(),
             );
             let before_edges = cells(
-                txn.query(&db, &cx, edges, &params, Catalog::Full, policy())
+                txn.query(&db, &cx, edges, &edge_params, Catalog::Full, policy())
                     .unwrap(),
             );
             txn.savepoint(&db, "before_cascade").unwrap();
             let mut deletion = WriteBatch::new(R);
             deletion.delete_vertex(VId(2));
             txn.write(&mut db, deletion).unwrap();
-            for statement in [nodes, edges] {
+            for (statement, statement_params) in [(nodes, &params), (edges, &edge_params)] {
                 assert_eq!(
                     cells(
-                        txn.query(&db, &cx, statement, &params, Catalog::Full, policy())
-                            .unwrap()
+                        txn.query(
+                            &db,
+                            &cx,
+                            statement,
+                            statement_params,
+                            Catalog::Full,
+                            policy()
+                        )
+                        .unwrap()
                     ),
                     vec![vec![null(), null(), null()]; 3]
                 );
@@ -1689,7 +1725,7 @@ mod transaction_dynamic_metadata {
             );
             assert_eq!(
                 cells(
-                    txn.query(&db, &cx, edges, &params, Catalog::Full, policy())
+                    txn.query(&db, &cx, edges, &edge_params, Catalog::Full, policy())
                         .unwrap()
                 ),
                 before_edges
@@ -1937,11 +1973,12 @@ mod write_tail_dynamic_metadata {
                     ]],
                 ),
                 (
-                    "CREATE (a:Foo)-[r:R {score:50}]->(b:Bar) RETURN type([r][0]) AS kind, properties([r][0]) AS props, keys([r][0]) AS names",
+                    "CREATE (a:Foo)-[r:R {score:50}]->(b:Bar) RETURN type([r][0]) AS kind, properties([r][0]) AS props, keys([r][0]) AS names, type(r) AS bare",
                     vec![vec![
                         text("R"),
                         map(&[("score", int(50))]),
                         list(&["score"]),
+                        text("R"),
                     ]],
                 ),
                 (
@@ -3752,7 +3789,7 @@ fn authorized_merge_labels_omit_hidden_labels_and_preserve_them_in_storage() {
 #[test]
 fn authorized_write_metadata_spends_node_quota_before_any_result_or_commit() {
     use fgdb::WriteTxnError;
-    use fgdb_gql::{GraphMutationQueryError, GraphSetExecutionError};
+    use fgdb_gql::{GqlParameterType, GraphMutationQueryError, GraphSetExecutionError};
     use fgdb_warden::{Error as AuthorizationError, LimitDimension};
 
     let ((), report) = run_async_under_lab(0x6d61_0054, |root| async move {
@@ -3829,10 +3866,17 @@ fn authorized_write_metadata_spends_node_quota_before_any_result_or_commit() {
                 let params = GqlParameters::new()
                     .with_list("refs", vec![identity; copies])
                     .unwrap();
-                let query = PreparedGraphMutationQueryText::prepare(&statement, R, Catalog::Full)
-                    .unwrap()
-                    .bind_parameters(&params)
-                    .unwrap();
+                // The native engine declares every argument's type, as here: an
+                // undeclared `$refs` would default to Int64.
+                let query = PreparedGraphMutationQueryText::prepare_with_parameter_types(
+                    &statement,
+                    R,
+                    &[("refs", GqlParameterType::List)],
+                    Catalog::Full,
+                )
+                .unwrap()
+                .bind_parameters(&params)
+                .unwrap();
                 let error = db
                     .execute_graph_mutation_query_authorized(
                         &txcx,
@@ -3872,10 +3916,11 @@ fn authorized_write_metadata_spends_node_quota_before_any_result_or_commit() {
             let params = GqlParameters::new()
                 .with_list("refs", vec![GraphValue::Vertex(VId(1)); 64])
                 .unwrap();
-            let query = PreparedGraphMutationQueryText::prepare(
+            let query = PreparedGraphMutationQueryText::prepare_with_parameter_types(
                 "MATCH (n:Thing {score:11}) SET n.score=12 \
                  RETURN [x IN $refs | properties(x)] AS values LIMIT 0",
                 R,
+                &[("refs", GqlParameterType::List)],
                 Catalog::Full,
             )
             .unwrap()
@@ -3915,10 +3960,11 @@ fn authorized_write_metadata_spends_node_quota_before_any_result_or_commit() {
                 })
                 .collect();
             let params = GqlParameters::new().with_list("refs", refs).unwrap();
-            let query = PreparedGraphMutationQueryText::prepare(
+            let query = PreparedGraphMutationQueryText::prepare_with_parameter_types(
                 "MATCH (n:Thing {score:12}) SET n.score=13 \
                  RETURN [x IN $refs | properties(x)] AS values",
                 R,
+                &[("refs", GqlParameterType::List)],
                 Catalog::Full,
             )
             .unwrap()

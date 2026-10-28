@@ -665,6 +665,12 @@ pub(crate) enum EdgeMergeTextInput {
         statement: String,
         input: Box<crate::set_text::BoundSetTextInput>,
     },
+    /// A complete multipart read (`MATCH ... WITH ... MATCH ... MERGE`):
+    /// its relation's vertex or open columns are the endpoints.
+    Multipart {
+        statement: String,
+        input: Box<crate::set_text::multipart::BoundReadInput>,
+    },
 }
 
 /// Native `MATCH ... MERGE (a)-[r:R {k: v}]->(b)` over already-bound
@@ -678,6 +684,9 @@ pub struct PreparedGraphEdgeMergeText {
     pub(crate) source: usize,
     pub(crate) destination: usize,
     pub(crate) properties: Vec<(PropertyKeyId, VertexMergeValueTemplate)>,
+    /// Map values the input row computes (fgdb-at06q): a row column or a
+    /// value over the row. Only a row relation input has them.
+    pub(crate) row_properties: Vec<(PropertyKeyId, VertexMergeRowValueTemplate)>,
     pub(crate) undirected: bool,
     /// Chain-only ON/SET templates, compiled by the shared row-action grammar.
     pub(crate) row_actions: Option<VertexMergeRowActionTemplates>,

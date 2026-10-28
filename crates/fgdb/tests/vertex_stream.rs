@@ -221,7 +221,9 @@ fn equality_streams_keep_historical_candidates_lazy_and_recheck_the_pinned_winne
             .unwrap();
         assert!(empty.next().is_none());
         assert_eq!(empty.row_stats().snapshot_records, 0);
-        assert_eq!(empty.evaluator_stats().work_units, 1);
+        // A zero page drives no source or evaluator work (30b917aa); it only
+        // observes cancellation before exhausting.
+        assert_eq!(empty.evaluator_stats().work_units, 0);
         // Each pull consumes only its selected candidate; close never drains.
         let one = equality(CanonicalScalar::Int(7), 0, Some(1));
         let mut limited = db
@@ -1027,7 +1029,8 @@ fn prefix_streams_keep_unicode_boundaries_and_the_pinned_historical_winner() {
             .unwrap();
         assert!(stream.next().is_none());
         assert_eq!(stream.row_stats().snapshot_records, 0);
-        assert_eq!(stream.evaluator_stats().work_units, 1);
+        // A zero page drives no work (30b917aa).
+        assert_eq!(stream.evaluator_stats().work_units, 0);
         drop(db);
         assert_eq!(
             pinned.collect::<Result<Vec<_>, _>>().unwrap(),

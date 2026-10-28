@@ -35,7 +35,10 @@ impl<'a> ValueResolver<'_, 'a> {
     fn leaf(&mut self, parser: &mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError> {
         match self {
             Self::Columns(resolve) | Self::Items(resolve) => resolve(parser),
-            Self::Write(leaves) => leaves.leaf(parser),
+            Self::Write(leaves) => match parser.metadata_probe.take() {
+                Some(source) => leaves.metadata_leaf(parser, source),
+                None => leaves.leaf(parser),
+            },
         }
     }
 
@@ -557,7 +560,7 @@ impl<'a> Parser<'a> {
     /// anything else, which keeps its scalar reading (`(x) + 1`, `(n.p)`).
     /// A parenthesized group that is not a lone name (parenthesized_name owns
     /// those), directly followed by `.key` or `[`. Lookahead only.
-    fn parenthesized_postfix_value(&self) -> Result<bool, GraphPatternTextError> {
+    pub(super) fn parenthesized_postfix_value(&self) -> Result<bool, GraphPatternTextError> {
         if !self.is_punct(b'(') {
             return Ok(false);
         }
@@ -1867,11 +1870,14 @@ impl<'a> Parser<'a> {
         at: usize,
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
         let base = core::mem::replace(&mut self.let_base, depth);
+        let write = self.write_leaves;
+        self.write_leaves |= matches!(resolve, ValueResolver::Write(_));
         let parsed = if resolve.whole() {
             self.resolved_predicate_with_lets(&mut |parser| resolve.leaf(parser))
         } else {
             self.resolved_expression(&mut |parser| resolve.leaf(parser))
         };
+        self.write_leaves = write;
         self.let_base = base;
         let (operand, slots) = parsed.map_err(expression_error)?;
         self.scalar_let_value(operand, slots, at)
@@ -2231,6 +2237,117 @@ impl<'a> Parser<'a> {
         }
         let right = lexer.next()?;
         Ok(element(right, &lexer)? && !tighter_than_comparison(&mut lexer)?)
+    }
+
+    /// Whether an open (Any) row column and an element-typed row column are
+    /// compared here with `=`, `<>` or `!=`, in either order. A list-local
+    /// predicate's correlated Apply binds `p` of `[p IN posts WHERE NOT p =
+    /// person AND (p)-->()]` as such a column (68812ac2), and it may hold an
+    /// element the scalar program cannot read, so the comparison is the
+    /// value language's. This is no WITH element filter, so it routes in a
+    /// resolved scope too. Nothing is consumed.
+    pub(super) fn open_element_compared(
+        &self,
+        route: Route<'_, 'a>,
+    ) -> Result<bool, GraphPatternTextError> {
+        let bare = |token: Token<'a>,
+                    lexer: &Lexer<'a>|
+         -> Result<Option<&'a str>, GraphPatternTextError> {
+            let TokenKind::Word(word) = token.kind else {
+                return Ok(None);
+            };
+            if self.elements.contains(&word)
+                || matches!(
+                    lexer.clone().next()?.kind,
+                    TokenKind::Punct(b'(' | b'.' | b'[' | b':')
+                )
+            {
+                return Ok(None);
+            }
+            Ok(Some(word))
+        };
+        let kind = |word: &str| {
+            route.row.and_then(|schema| {
+                schema
+                    .iter()
+                    .find(|(name, _)| name.text == word)
+                    .map(|(_, kind)| *kind)
+            })
+        };
+        let Some(left) = bare(self.current, &self.lexer)? else {
+            return Ok(false);
+        };
+        let mut lexer = self.lexer.clone();
+        let follows = match lexer.next()?.kind {
+            TokenKind::Punct(b'=') => true,
+            TokenKind::Punct(b'<') => matches!(lexer.next()?.kind, TokenKind::Punct(b'>')),
+            TokenKind::Punct(b'!') => matches!(lexer.next()?.kind, TokenKind::Punct(b'=')),
+            _ => false,
+        };
+        if !follows {
+            return Ok(false);
+        }
+        let right = lexer.next()?;
+        let Some(right) = bare(right, &lexer)? else {
+            return Ok(false);
+        };
+        let (left, right) = (kind(left), kind(right));
+        let open_element = |open: Option<GraphSetColumnType>, other: Option<GraphSetColumnType>| {
+            open == Some(GraphSetColumnType::Any) && other.is_some_and(is_element_column)
+        };
+        Ok((open_element(left, right) || open_element(right, left))
+            && !tighter_than_comparison(&mut lexer)?)
+    }
+
+    /// Whether a bare list-comprehension element (fgdb-20foe) and a bare
+    /// graph element or element-typed row column are compared here with `=`,
+    /// `<>` or `!=`, in either order: `[p IN posts WHERE NOT p = person]`
+    /// (LDBC SNB IC10). The local may hold a vertex, which the scalar program
+    /// cannot read, so the comparison is the value language's, as two
+    /// elements' is (element_compared). Nothing is consumed.
+    pub(super) fn local_element_compared(
+        &self,
+        route: Route<'_, 'a>,
+    ) -> Result<bool, GraphPatternTextError> {
+        let local = |token: Token<'a>, lexer: &Lexer<'a>| -> Result<bool, GraphPatternTextError> {
+            Ok(
+                matches!(token.kind, TokenKind::Word(word) if self.elements.contains(&word))
+                    && !matches!(
+                        lexer.clone().next()?.kind,
+                        TokenKind::Punct(b'(' | b'.' | b'[' | b':')
+                    ),
+            )
+        };
+        let element =
+            |token: Token<'a>, lexer: &Lexer<'a>| -> Result<bool, GraphPatternTextError> {
+                if matches!(token.kind, TokenKind::Word(word) if self.elements.contains(&word))
+                    || matches!(lexer.clone().next()?.kind, TokenKind::Punct(b':'))
+                {
+                    return Ok(false);
+                }
+                element_column_at(token, lexer, route)
+            };
+        let left_local = local(self.current, &self.lexer)?;
+        if !left_local && !element(self.current, &self.lexer)? {
+            return Ok(false);
+        }
+        let mut lexer = self.lexer.clone();
+        let follows = match lexer.next()?.kind {
+            TokenKind::Punct(b'=') => true,
+            TokenKind::Punct(b'<') => matches!(lexer.next()?.kind, TokenKind::Punct(b'>')),
+            TokenKind::Punct(b'!') => matches!(lexer.next()?.kind, TokenKind::Punct(b'=')),
+            _ => false,
+        };
+        if !follows {
+            return Ok(false);
+        }
+        let right = lexer.next()?;
+        let other = if left_local {
+            element(right, &lexer)?
+        } else {
+            local(right, &lexer)?
+        };
+        Ok(other && !tighter_than_comparison(&mut lexer)?)
     }
 
     /// Whether a list-typed row column (row_list_column) is compared here
@@ -2724,19 +2841,8 @@ impl<'a> Parser<'a> {
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
         {
             let keys = self.is_word("KEYS");
-            let mut argument = self.lexer.clone();
-            argument.next()?;
-            let graph_argument = matches!(argument.next()?.kind, TokenKind::Word(word)
-                if !self.elements.contains(&word) && self.graph_element(word))
-                && matches!(argument.next()?.kind, TokenKind::Punct(b')'));
-            let resolved = if inputs.is_none() && schema.is_empty() && graph_argument {
-                match resolve.as_mut() {
-                    Some(resolve) => resolve.leaf(self)?,
-                    None => None,
-                }
-            } else {
-                None
-            };
+            let resolved =
+                self.resolved_map_leaf(inputs.is_none() && schema.is_empty(), resolve)?;
             let (map, graph) = if let Some(column) = resolved {
                 (ReadValueTemplate::Column(column), true)
             } else {
@@ -3218,7 +3324,49 @@ impl<'a> Parser<'a> {
         Ok((!carried && schema.iter().any(|(column, _)| column.text == name)).then_some(function))
     }
 
-    /// Preserve native final metadata cells owned by CREATE/MERGE/SET. The
+    /// The native column of a complete `keys(x)`/`properties(x)` in a
+    /// resolved scope: a graph binding's resolver column, or the map a write
+    /// owner holds for an element it created or merged (carried values are
+    /// declined and take the dynamic read). A created or merged path is never
+    /// an element and refuses before catalog access, as a MATCH path's graph
+    /// route does. Out of line: read_value_inner recurses once per nested
+    /// value, so its frame stays small.
+    #[inline(never)]
+    fn resolved_map_leaf(
+        &mut self,
+        scoped: bool,
+        resolve: &mut Option<ValueResolver<'_, 'a>>,
+    ) -> Result<Option<usize>, GraphSetTextError> {
+        let map_source = match self.current.kind {
+            TokenKind::Word(word) => {
+                pipeline::property_map_source(word, self.current.at, &self.lexer)?
+                    .filter(|source| !self.elements.contains(&source.text))
+            }
+            _ => None,
+        };
+        if let Some(source) = map_source
+            && self.write_paths.contains(&source.text)
+        {
+            return Err(GraphSetTextError {
+                offset: source.at,
+                kind: GraphSetTextErrorKind::Expected("a vertex or edge for keys()/properties()"),
+            });
+        }
+        if !scoped {
+            return Ok(None);
+        }
+        let graph_argument = map_source.is_some_and(|source| self.graph_element(source.text));
+        Ok(match (resolve.as_mut(), map_source) {
+            (Some(resolve), _) if graph_argument => resolve.leaf(self)?,
+            (Some(ValueResolver::Write(leaves)), Some(source)) => {
+                leaves.metadata_leaf(self, source)?
+            }
+            _ => None,
+        })
+    }
+
+    /// Preserve native final metadata cells owned by CREATE/MERGE/SET, and a
+    /// resolved scope's native labels()/type() column of a graph binding. The
     /// owner explicitly declines carried values that need a dynamic read.
     fn resolved_write_metadata(
         &mut self,
@@ -3239,6 +3387,18 @@ impl<'a> Parser<'a> {
         }
         match resolve.as_mut() {
             Some(ValueResolver::Write(leaves)) => leaves.metadata_leaf(self, source),
+            // The write owner behind the scalar compiler's closure (a list
+            // CASE result, a let slot) answers through the same gate.
+            Some(resolve) if self.write_leaves => {
+                self.metadata_probe = Some(source);
+                let column = resolve.leaf(self);
+                self.metadata_probe = None;
+                column
+            }
+            // A graph binding keeps its resolver's native column, as
+            // keys()/properties() do; a declining resolver leaves the
+            // dynamic read.
+            Some(resolve) if self.graph_element(source.text) => resolve.leaf(self),
             _ => Ok(None),
         }
     }
@@ -3269,6 +3429,25 @@ impl<'a> Parser<'a> {
             && matches!(lexer.next()?.kind, TokenKind::Punct(b')'))
             && !self.elements.contains(&name)
         {
+            // A path is never an element. A created or merged path, a path
+            // column, or (outside a graph scope, unshadowed by a row column)
+            // a MATCH path refuses before catalog access.
+            let row = schema
+                .iter()
+                .rev()
+                .find(|(column, _)| column.text == name)
+                .map(|&(_, kind)| kind);
+            if self.write_paths.contains(&name)
+                || row == Some(GraphSetColumnType::Path)
+                || (!graph && row.is_none() && self.syntax.names_path(name))
+            {
+                return Err(error(
+                    self.current.at,
+                    GraphPatternTextErrorKind::Expected("a vertex or edge for labels()/type()"),
+                ));
+            }
+            // Its graph route refuses labels(p) and type(p) of a MATCH path
+            // before catalog access, as nodes() routes it.
             if graph
                 && (self
                     .syntax
@@ -3634,8 +3813,22 @@ impl<'a> Parser<'a> {
         &self,
     ) -> Result<bool, GraphPatternTextError> {
         let mut lexer = self.lexer.clone();
+        // A label or type spelled COUNT or EXISTS before its property map
+        // (`CREATE (:Count {c: 1})` after a WITH) is no subquery: braces that
+        // hold `key:` or nothing are a map, which no subquery body starts as.
+        let subquery_body = |mut lexer: Lexer<'a>| -> Result<bool, GraphPatternTextError> {
+            Ok(match lexer.next()?.kind {
+                TokenKind::Punct(b'}') => false,
+                TokenKind::Word(_) | TokenKind::DelimitedKeyword(_) => {
+                    !matches!(lexer.next()?.kind, TokenKind::Punct(b':'))
+                }
+                _ => true,
+            })
+        };
         if self.is_word("COUNT") {
-            return Ok(matches!(lexer.next()?.kind, TokenKind::Punct(b'{')));
+            return Ok(
+                matches!(lexer.next()?.kind, TokenKind::Punct(b'{')) && subquery_body(lexer)?
+            );
         }
         // A bare pattern in a Boolean position (boolean_operand_at).
         if self.boolean_operand_at == self.current.at && self.is_punct(b'(') {
@@ -3648,7 +3841,7 @@ impl<'a> Parser<'a> {
             return Ok(false);
         }
         match lexer.next()?.kind {
-            TokenKind::Punct(b'{') => Ok(true),
+            TokenKind::Punct(b'{') => subquery_body(lexer),
             TokenKind::Punct(b'(') => {
                 let first = lexer.next()?;
                 crate::graph_text::scoped::pattern_predicate_follows(first.kind, &mut lexer)

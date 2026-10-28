@@ -205,6 +205,7 @@ fn fields<E, A, C>(
     row_at: usize,
     declaration: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> ResultOf<(), E, A, C>,
+    elements: &mut crate::set_ops::ElementRead<'_, GqlQueryError<GraphInsertError<E, A>, C>>,
 ) -> ResultOf<Fields, E, A, C> {
     let mut result = Vec::new();
     for (property, (key, expression)) in properties
@@ -268,18 +269,20 @@ fn fields<E, A, C>(
             | GraphSetValue::Keys(_)
             | GraphSetValue::ElementMetadata { .. }
             | GraphSetValue::Let { .. }) => {
-                let value = crate::set_ops::evaluate_value(composite, row, property, control)
-                    .map_err(|failure| match failure {
-                        crate::set_ops::ProjectionFailure::Control(error) => error,
-                        crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
-                            GqlQueryError::Source(GraphInsertError::Arithmetic {
-                                row: row_at,
-                                declaration,
-                                property,
-                                error,
-                            })
-                        }
-                    })?;
+                let value = crate::set_ops::evaluate_value_reading(
+                    composite, row, property, control, elements,
+                )
+                .map_err(|failure| match failure {
+                    crate::set_ops::ProjectionFailure::Control(error) => error,
+                    crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
+                        GqlQueryError::Source(GraphInsertError::Arithmetic {
+                            row: row_at,
+                            declaration,
+                            property,
+                            error,
+                        })
+                    }
+                })?;
                 let value = match value {
                     GraphValue::Scalar(value) => CanonicalPropertyValue::Scalar(value),
                     value => written(&value, row_at, property, control)?,
@@ -546,7 +549,7 @@ fn execute_erased<E, A, C>(
                 Some(rows) => relation.execute_with_source(
                     policy.query,
                     &mut crate::set_ops::WithOwnedRows {
-                        source,
+                        source: &mut *source,
                         rows: Some(rows),
                     },
                     &mut checkpoint,
@@ -625,6 +628,16 @@ fn execute_erased<E, A, C>(
         checkpoint,
     };
     meter.event(GlaExecutionEvent::Work)?;
+    // A field may read `x.key` of an element its row carries in a value (an
+    // UNWIND member, a collected list or path), not a projected column. The
+    // host source's reader serves it; a host without one keeps the typed error.
+    let mut source_elements = crate::set_ops::projection::SourceElements::new(source);
+    let mut elements = crate::set_ops::projection::MappedElements {
+        read: &mut source_elements,
+        error: |error: E| -> GqlQueryError<GraphInsertError<E, A>, C> {
+            GqlQueryError::Source(GraphInsertError::Source(error))
+        },
+    };
     let columns = &insertion.column_types;
     let mut drafts = Vec::new();
     // No per-draft field or retained-row allocation on ordinary insertion.
@@ -663,6 +676,7 @@ fn execute_erased<E, A, C>(
                 row_at,
                 declaration,
                 &mut |event| meter.event(event),
+                &mut elements,
             )?);
         }
         let mut edges = Vec::new();
@@ -676,6 +690,7 @@ fn execute_erased<E, A, C>(
                 row_at,
                 insertion.vertices.len() + edge_at,
                 &mut |event| meter.event(event),
+                &mut elements,
             )?;
             edges.push(EdgeDraft {
                 relation: edge.relation,

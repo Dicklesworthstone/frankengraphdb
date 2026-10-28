@@ -83,17 +83,25 @@ impl<'a> ReturnLeaves<'a> for InsertLeaves<'_, 'a> {
         parser: &mut Parser<'a>,
         source: Name<'a>,
     ) -> Result<Option<usize>, GraphPatternTextError> {
-        let created_labels = parser.is_word("LABELS")
-            && self
-                .syntax
-                .vertices
-                .iter()
-                .any(|vertex| vertex.name.is_some_and(|name| name.text == source.text));
+        let created_vertex = self
+            .syntax
+            .vertices
+            .iter()
+            .any(|vertex| vertex.name.is_some_and(|name| name.text == source.text));
+        let created_labels = parser.is_word("LABELS") && created_vertex;
+        // A created element's complete map is its frozen CREATE map.
+        let created_map = (parser.is_word("PROPERTIES") || parser.is_word("KEYS"))
+            && (created_vertex
+                || self
+                    .syntax
+                    .edges
+                    .iter()
+                    .any(|edge| edge.name.is_some_and(|name| name.text == source.text)));
         let matched = matches!(
             parser.insertion_match_kind(source.text),
             Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
         );
-        if created_labels || matched {
+        if created_labels || created_map || matched {
             self.leaf(parser)
         } else {
             Ok(None)
