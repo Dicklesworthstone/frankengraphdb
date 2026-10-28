@@ -294,7 +294,7 @@ impl PreparedGraphMutationQuery {
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<E>, C>> {
-        self.execute_with(owned, policy, source, None, checkpoint)
+        self.execute_with(owned, policy, source, None, None, checkpoint)
     }
 
     /// [`Self::execute_governed`] with the host's element property reader
@@ -332,6 +332,49 @@ impl PreparedGraphMutationQuery {
             policy,
             source,
             Some(&mut crate::set_ops::projection::HostElements(&mut elements)),
+            None,
+            checkpoint,
+        )
+    }
+
+    /// Execute a returning mutation with admission of every actual computed
+    /// map field before proposal reduction and final-value assembly.
+    pub fn execute_governed_reading_with_field_admission<E, C>(
+        &self,
+        policy: GraphMutationPolicy,
+        source: impl FnOnce(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        elements: impl crate::GraphElementReader<E>,
+        admit: impl FnMut(PropertyKeyId) -> Result<(), GqlQueryError<E, C>>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<E>, C>> {
+        self.execute_governed_over_reading_with_field_admission(
+            None, policy, source, elements, admit, checkpoint,
+        )
+    }
+
+    /// As the admitted returning mutation above, over a chain's owned rows.
+    /// A denied dynamic key cannot reach bindings, grouping, or a WITH tail.
+    pub fn execute_governed_over_reading_with_field_admission<E, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GraphMutationPolicy,
+        source: impl FnOnce(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut elements: impl crate::GraphElementReader<E>,
+        mut admit: impl FnMut(PropertyKeyId) -> Result<(), GqlQueryError<E, C>>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<E>, C>> {
+        self.execute_with(
+            owned,
+            policy,
+            source,
+            Some(&mut crate::set_ops::projection::HostElements(&mut elements)),
+            Some(&mut admit),
             checkpoint,
         )
     }
@@ -345,6 +388,7 @@ impl PreparedGraphMutationQuery {
             GqlQueryPolicy,
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         mut elements: Option<&mut super::collect::MutationElementReader<'_, E>>,
+        field_admission: Option<&mut super::collect::MutationFieldAdmission<'_, E, C>>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<E>, C>> {
         // Every engine below (selection, aggregate, ordering, tail) sees one
@@ -364,6 +408,7 @@ impl PreparedGraphMutationQuery {
             owned,
             source,
             elements.as_deref_mut(),
+            field_admission,
             &mut checkpoint,
         )
         .map_err(|error| error.map_source(GraphMutationQueryError::Mutation))?;

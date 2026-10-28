@@ -757,7 +757,13 @@ impl<V: Vfs + Clone> Database<V> {
                         })?;
                         (stats, returning, 0)
                     } else {
-                        let (proposal, mut returning) = query_cx.with_restriction(|| {
+                        // Element-reader traits carry only a source error. Keep
+                        // native cancellation separately, as the standalone
+                        // mutation reader does, so a replacement-map read cannot
+                        // turn an interruption into an ordinary source failure.
+                        let element_failure: RefCell<Option<Box<asupersync::error::Error>>> =
+                            RefCell::new(None);
+                        let collected = query_cx.with_restriction(|| {
                             let controls = RefCell::new(&mut execution);
                             let database = RefCell::new(&mut *self);
                             let mut graph = ChainSource {
@@ -770,6 +776,9 @@ impl<V: Vfs + Clone> Database<V> {
                             let transaction = graph.transaction;
                             let elements = fgdb_gql::with_element_metadata(
                                 |element, key| {
+                                    if let Some(error) = element_failure.borrow().as_ref() {
+                                        return Err(WriteTxnError::Interrupted(error.clone()));
+                                    }
                                     // A named hidden field retains the chain's
                                     // explicit-refusal contract. Allowed keys still
                                     // admit arbitrary carried identities and both
@@ -779,7 +788,7 @@ impl<V: Vfs + Clone> Database<V> {
                                             Error::ScopeDenied,
                                         ));
                                     }
-                                    selection::mutation_element_property(
+                                    match selection::mutation_element_property(
                                         transaction,
                                         &database.borrow(),
                                         query_cx,
@@ -787,10 +796,22 @@ impl<V: Vfs + Clone> Database<V> {
                                         key,
                                         scope,
                                         &controls,
-                                    )
+                                    ) {
+                                        Err(WriteTxnError::Interrupted(error)) => {
+                                            element_failure.borrow_mut().get_or_insert(error);
+                                            Ok(None)
+                                        }
+                                        result => result,
+                                    }
                                 },
                                 |element, kind, catalog, control| {
-                                    selection::returning_element_metadata(
+                                    use fgdb_gql::GraphElementMetadataError;
+                                    if let Some(error) = element_failure.borrow().as_ref() {
+                                        return Err(GraphElementMetadataError::Source(
+                                            WriteTxnError::Interrupted(error.clone()),
+                                        ));
+                                    }
+                                    let result = selection::returning_element_metadata(
                                         transaction,
                                         &database.borrow(),
                                         query_cx,
@@ -800,13 +821,25 @@ impl<V: Vfs + Clone> Database<V> {
                                         scope,
                                         &controls,
                                         control,
-                                    )
+                                    );
+                                    if let Err(GraphElementMetadataError::Source(
+                                        WriteTxnError::Interrupted(error),
+                                    )) = &result
+                                    {
+                                        element_failure
+                                            .borrow_mut()
+                                            .get_or_insert_with(|| error.clone());
+                                    }
+                                    result
                                 },
                             );
                             let allocate = |request| {
                                 database.borrow_mut().allocate_identity(query_cx, request)
                             };
                             let checkpoint = || {
+                                if let Some(error) = element_failure.borrow_mut().take() {
+                                    return Err(WriteTxnError::Interrupted(error));
+                                }
                                 query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                                 controls.borrow_mut().checkpoint()
                             };
@@ -844,11 +877,16 @@ impl<V: Vfs + Clone> Database<V> {
                                         allowance.max_mutation_effects,
                                     );
                                     let proposal = mutation
-                                        .execute_governed_over_reading(
+                                        .execute_governed_over_reading_with_field_admission(
                                             rows.take(),
                                             policy,
                                             |pattern, budget| graph.pattern(pattern, budget),
                                             elements,
+                                            |key| {
+                                                mutation::admit_computed_property(
+                                                    query_cx, key, &controls,
+                                                )
+                                            },
                                             checkpoint,
                                         )
                                         .map_err(|error| error.map_source(mutation_error))?;
@@ -869,11 +907,16 @@ impl<V: Vfs + Clone> Database<V> {
                                         allowance.max_mutation_effects,
                                     );
                                     let proposal = query
-                                        .execute_governed_over_reading(
+                                        .execute_governed_over_reading_with_field_admission(
                                             rows.take(),
                                             policy,
                                             |pattern, budget| graph.pattern(pattern, budget),
                                             elements,
+                                            |key| {
+                                                mutation::admit_computed_property(
+                                                    query_cx, key, &controls,
+                                                )
+                                            },
                                             checkpoint,
                                         )
                                         .map_err(|error| {
@@ -889,7 +932,13 @@ impl<V: Vfs + Clone> Database<V> {
                                     step: at,
                                 })),
                             }
-                        })?;
+                        });
+                        let (proposal, mut returning) = match element_failure.into_inner() {
+                            Some(error) => Err(GqlQueryError::Interrupted(
+                                WriteTxnError::Interrupted(error),
+                            )),
+                            None => collected,
+                        }?;
                         let (stats, effects) = match proposal {
                             Proposal::Insert(insertion, proposal) => {
                                 let (stats, _, _) = insert::stage_proposal(

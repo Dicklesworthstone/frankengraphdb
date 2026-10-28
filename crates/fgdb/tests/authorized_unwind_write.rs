@@ -707,6 +707,215 @@ fn binding_exhaustion_does_not_refresh_the_execution_permit() {
     });
 }
 
+mod computed_map_input {
+    use super::*;
+    use fgdb_gql::{GraphSymbolResolver, ReverseSymbolCatalog};
+
+    struct Catalog;
+    impl GraphSymbolResolver for Catalog {
+        fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            symbols(kind, name)
+        }
+
+        fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+            let mut catalog = ReverseSymbolCatalog::default();
+            catalog.insert_label(L, "Visible");
+            catalog.insert_relation(R, "R");
+            catalog.insert_property(P, "p");
+            catalog.insert_property(Q, "q");
+            catalog.insert_property(SECRET, "secret");
+            Some(catalog)
+        }
+    }
+
+    const UPDATE: &str = "UNWIND $rows AS row MATCH (n:Visible {p:row.p}) SET n += row.props";
+
+    fn map(entries: Vec<(&str, GraphValue)>) -> GraphValue {
+        GraphValue::map(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.into(), value))
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    fn int(value: i64) -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Int(value))
+    }
+
+    fn patches(rows: Vec<(i64, GraphValue)>) -> GqlParameters {
+        GqlParameters::new()
+            .with_list(
+                "rows",
+                rows.into_iter()
+                    .map(|(p, props)| map(vec![("p", int(p)), ("props", props)]))
+                    .collect(),
+            )
+            .unwrap()
+    }
+
+    async fn fixture(commit: &fgdb_types::CommitCx) -> Database<MemVfs> {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(
+            VId(1),
+            vec![L],
+            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(10))],
+        );
+        seed.create_vertex(
+            VId(2),
+            vec![L],
+            vec![(P, CanonicalScalar::Int(2)), (Q, CanonicalScalar::Int(20))],
+        );
+        db.write(commit, seed).await.unwrap();
+        db
+    }
+
+    #[test]
+    fn heterogeneous_computed_maps_freeze_the_complete_match_bag_and_commit_once() {
+        lab(0xa611_0401, |contexts| async move {
+            let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+            let mut db = fixture(&commit).await;
+            let before = db.frontier().unwrap();
+            let pinned = db.read_session().unwrap();
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(), NOW).unwrap();
+            let arguments = patches(vec![
+                (1, map(vec![("p", int(2))])),
+                (2, map(vec![("q", int(77))])),
+            ]);
+            let (result, completion) = receipt(
+                db.query_write_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    UPDATE,
+                    &arguments,
+                    Catalog,
+                    R,
+                    policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap(),
+            );
+            assert_eq!(result.stats().completed_statements, 1);
+            assert_eq!(result.stats().mutation_effects, 2);
+            // The first map changes the second row's MATCH key. Its newly
+            // matching vertex must not enter that row's frozen selection, and
+            // the missing q key in its map must retain the original value.
+            assert_eq!(
+                db.vertex(VId(1)).unwrap().unwrap().props,
+                vec![
+                    (P, CanonicalScalar::Int(2).into()),
+                    (Q, CanonicalScalar::Int(10).into()),
+                ],
+            );
+            assert_eq!(
+                db.vertex(VId(2)).unwrap().unwrap().props,
+                vec![
+                    (P, CanonicalScalar::Int(2).into()),
+                    (Q, CanonicalScalar::Int(77).into()),
+                ],
+            );
+            assert_eq!(
+                pinned.vertex(VId(1)).unwrap().unwrap().props,
+                vec![
+                    (P, CanonicalScalar::Int(1).into()),
+                    (Q, CanonicalScalar::Int(10).into()),
+                ],
+            );
+            let after = db.frontier().unwrap();
+            assert_eq!(after.0, before.0 + 1);
+            assert_eq!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted { commit_seq: after },
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        });
+    }
+
+    #[test]
+    fn late_invalid_or_denied_map_discards_all_earlier_map_effects() {
+        lab(0xa611_0402, |contexts| async move {
+            let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+            let mut db = fixture(&commit).await;
+            let before = db.frontier().unwrap();
+            let vertices = db.vertices().unwrap();
+            let issuer = authority();
+            let token = issuer.issue_at(&grant(), NOW).unwrap();
+            for (invalid, denied) in [
+                (GraphValue::Scalar(CanonicalScalar::Null), false),
+                (map(vec![("q", map(vec![("bad", int(1))]))]), false),
+                (map(vec![("secret", int(1))]), true),
+            ] {
+                let arguments = patches(vec![(1, map(vec![("q", int(99))])), (2, invalid)]);
+                let error = db
+                    .query_write_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        UPDATE,
+                        &arguments,
+                        Catalog,
+                        R,
+                        policy(),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(matches!(error, Fault::Program(_)), "{error:?}");
+                if denied {
+                    assert_eq!(authorization(&error), Some(Error::ScopeDenied));
+                }
+                assert_eq!(db.frontier().unwrap(), before);
+                assert_eq!(db.vertices().unwrap(), vertices);
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        });
+    }
+
+    #[test]
+    fn computed_map_read_rights_precede_arguments_and_catalog() {
+        lab(0xa611_0403, |contexts| async move {
+            let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+            let mut db = fixture(&commit).await;
+            let before = db.frontier().unwrap();
+            let issuer = authority();
+            let mut write_only = grant();
+            write_only.rights = Rights::Write;
+            let token = issuer.issue_at(&write_only, NOW).unwrap();
+            let error = db
+                .query_write_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    UPDATE,
+                    &GqlParameters::new(),
+                    |_: GraphSymbolKind, _: &str| panic!("read admission precedes the catalog"),
+                    R,
+                    policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(authorization(&error), Some(Error::PermissionDenied));
+            assert_eq!(db.frontier().unwrap(), before);
+            assert_eq!(txn.outstanding_obligations(), 0);
+        });
+    }
+}
+
 mod frozen_updates {
     use super::*;
     use fgdb::VertexRow;

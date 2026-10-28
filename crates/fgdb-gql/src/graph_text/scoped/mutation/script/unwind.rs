@@ -271,7 +271,149 @@ fn mutating_tail(tokens: &[(Token<'_>, usize)]) -> bool {
     false
 }
 
+#[cfg(test)]
+mod computed_map_routing_tests {
+    use super::GraphUnwindWriteText;
+
+    #[test]
+    fn routes_computed_maps_with_native_tokens_and_preserves_other_write_families() {
+        for tail in [
+            "MATCH (n) SET n += row.props",
+            "MATCH (n) SET n=row.props",
+            "MATCH (n) SET n.q=1,n += row.props",
+            "MATCH (n) SET n += CASE WHEN row.p=1 THEN row.props ELSE {} END",
+            "MATCH (n) SET // assignment follows\n n += row.props",
+        ] {
+            assert!(
+                GraphUnwindWriteText::requires_computed_map_input(&format!(
+                    "UNWIND $rows AS row {tail}"
+                ))
+                .unwrap(),
+                "{tail}",
+            );
+        }
+        for tail in [
+            "MATCH (n) SET n.q=row.q",
+            "MATCH (n) SET n += {q:row.q}",
+            "MATCH (n) SET n={q:row.q}",
+            "MATCH (n) SET n.q='SET n += row.props'",
+            "MATCH (n) SET n.q=row.props.SET // SET n += row.props\n",
+            "MERGE (n {p:row.p}) SET n += row.props",
+            "MATCH (n) MERGE (m {p:row.p}) SET m += row.props",
+            "MATCH (n) CREATE (m {p:row.p}) SET m += row.props",
+        ] {
+            assert!(
+                !GraphUnwindWriteText::requires_computed_map_input(&format!(
+                    "UNWIND $rows AS row {tail}"
+                ))
+                .unwrap(),
+                "{tail}",
+            );
+        }
+    }
+}
+
 impl GraphUnwindWriteText {
+    /// Whether native ingress must keep a computed whole-map MATCH update as
+    /// one relational statement. Row expansion cannot preserve heterogeneous
+    /// map keys or freeze map expressions across the complete input bag.
+    /// This is lexical routing only: the ordinary mutation compiler validates
+    /// the statement, and explicit bounded-batch preparation is unchanged.
+    /// Scalar assignments, literal maps and MERGE/CREATE keep their own route.
+    pub fn requires_computed_map_input(text: &str) -> Result<bool, GraphUnwindWriteError> {
+        let mut lexer = Lexer {
+            text,
+            at: 0,
+            tokens: 0,
+        };
+        if !is_word(&token(&mut lexer)?.0, "UNWIND") {
+            return Ok(false);
+        }
+        let source = token(&mut lexer)?;
+        if !matches!(source.0.kind, TokenKind::Parameter(_)) {
+            return Ok(false);
+        }
+        if scan(text).map_err(GraphUnwindWriteError::Syntax)?.len() != 1 {
+            return Ok(false);
+        }
+        let mut tokens = vec![source];
+        loop {
+            let next = token(&mut lexer)?;
+            if matches!(next.0.kind, TokenKind::End | TokenKind::Punct(b';')) {
+                break;
+            }
+            tokens.push(next);
+        }
+        let mut depth = 0usize;
+        let mut matched = false;
+        let mut setting = false;
+        let mut item = false;
+        let mut computed = false;
+        for (index, (token, _)) in tokens.iter().enumerate() {
+            if depth == 0 {
+                let previous = index.checked_sub(1).and_then(|at| tokens.get(at));
+                let next = tokens.get(index + 1);
+                let keyword = !is_punct(previous, b'.')
+                    && !is_punct(next, b'.')
+                    && !previous.is_some_and(|(token, _)| is_word(token, "AS"));
+                // These write families retain their sequential/native owners,
+                // even when a later SET contains a computed map.
+                if keyword
+                    && ["MERGE", "CREATE", "INSERT"]
+                        .iter()
+                        .any(|word| is_word(token, word))
+                    && (is_punct(next, b'(')
+                        || (next
+                            .is_some_and(|(token, _)| matches!(token.kind, TokenKind::Word(_)))
+                            && is_punct(tokens.get(index + 2), b'=')))
+                {
+                    return Ok(false);
+                }
+                if keyword && is_word(token, "MATCH") && is_punct(next, b'(') {
+                    matched = true;
+                    setting = false;
+                    item = false;
+                } else if keyword
+                    && is_word(token, "SET")
+                    && next.is_some_and(|(token, _)| matches!(token.kind, TokenKind::Word(_)))
+                {
+                    setting = matched;
+                    item = setting;
+                } else if setting && matches!(token.kind, TokenKind::Punct(b',')) {
+                    item = true;
+                } else if setting && item {
+                    if matches!(token.kind, TokenKind::Word(_)) {
+                        let rhs = if is_punct(next, b'=') {
+                            tokens.get(index + 2)
+                        } else if is_punct(next, b'+') && is_punct(tokens.get(index + 2), b'=') {
+                            tokens.get(index + 3)
+                        } else {
+                            None
+                        };
+                        computed |= rhs.is_some() && !is_punct(rhs, b'{');
+                    }
+                    item = false;
+                }
+                if keyword
+                    && [
+                        "WITH", "RETURN", "REMOVE", "DELETE", "DETACH", "UNWIND", "OPTIONAL",
+                    ]
+                    .iter()
+                    .any(|word| is_word(token, word))
+                {
+                    setting = false;
+                    item = false;
+                }
+            }
+            match token.kind {
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        Ok(computed)
+    }
+
     /// Parse the bounded `UNWIND $rows AS row MERGE ...` or `UNWIND $rows AS row
     /// MATCH ... SET/REMOVE/DELETE/MERGE ...` adapter, optionally with chained
     /// `UNWIND earlier[.static.path] AS alias` clauses before the mutation.

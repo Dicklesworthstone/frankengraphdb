@@ -98,6 +98,248 @@ fn expected(rows: &[[i64; 2]]) -> QueryResult {
     }
 }
 
+#[derive(Clone, Copy)]
+struct DocumentCatalog;
+
+impl fgdb_gql::GraphSymbolResolver for DocumentCatalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        if kind == GraphSymbolKind::Property && name == "tag" {
+            Some(GraphSymbol::Property(PropertyKeyId(3)))
+        } else {
+            symbols(kind, name)
+        }
+    }
+
+    fn reverse_catalog(&self) -> Option<fgdb_gql::ReverseSymbolCatalog> {
+        let mut catalog = fgdb_gql::ReverseSymbolCatalog::new();
+        catalog.insert_label(LabelId(1), "Entity");
+        catalog.insert_relation(R, "R");
+        for (key, name) in [(1, "id"), (2, "score"), (3, "tag")] {
+            catalog.insert_property(PropertyKeyId(key), name);
+        }
+        Some(catalog)
+    }
+}
+
+fn property_rows(columns: &[&str], rows: Vec<Vec<GraphValue>>) -> QueryResult {
+    QueryResult::Rows {
+        columns: columns.iter().map(|name| (*name).to_owned()).collect(),
+        rows: rows
+            .into_iter()
+            .map(|row| row.into_iter().map(GraphAggregateValue::Value).collect())
+            .collect(),
+    }
+}
+
+#[test]
+fn heterogeneous_document_map_updates_and_carried_replacement_survive_reopen() {
+    let ((), report) = run_async_under_lab(0x646f_6304, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (cx, commit, txcx) = (contexts.query(), contexts.commit(), contexts.txn());
+        let vfs = MemVfs::new().unwrap();
+        let dir = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &dir, keys())
+            .await
+            .unwrap();
+        let mut next = 100_u128;
+        db.query_write(
+            &txcx,
+            &cx,
+            &commit,
+            UPSERT,
+            &arguments(vec![row(1, 10), row(2, 20), row(3, 30)]),
+            DocumentCatalog,
+            R,
+            writes(),
+            |_| {
+                next += 1;
+                Ok::<_, Infallible>(ElementId::Vertex(VId(next)))
+            },
+        )
+        .await
+        .unwrap();
+        let mut txn = db.begin(&txcx).unwrap();
+        let patches = arguments(vec![
+            object(vec![
+                ("id", int(1)),
+                ("props", object(vec![("score", int(11))])),
+            ]),
+            object(vec![
+                ("id", int(2)),
+                ("props", object(vec![("tag", int(200))])),
+            ]),
+            object(vec![("id", int(3)), ("props", object(vec![]))]),
+        ]);
+        let frozen = patches.canonical_bytes();
+        let result = txn
+            .query_write(
+                &mut db,
+                &cx,
+                "UNWIND $payload.groups[-1].members AS row \
+                 MATCH (n:Entity {id:row.id}) SET n += row.props \
+                 RETURN n.id AS id, properties(n) AS props ORDER BY id",
+                &patches,
+                DocumentCatalog,
+                R,
+                writes(),
+                |_| -> Result<ElementId, Infallible> { panic!("map updates allocate no identity") },
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            property_rows(
+                &["id", "props"],
+                vec![
+                    vec![int(1), object(vec![("id", int(1)), ("score", int(11))])],
+                    vec![
+                        int(2),
+                        object(vec![("id", int(2)), ("score", int(20)), ("tag", int(200))]),
+                    ],
+                    vec![int(3), object(vec![("id", int(3)), ("score", int(30))])],
+                ],
+            ),
+        );
+        assert_eq!(patches.canonical_bytes(), frozen);
+        assert_eq!(db.frontier().unwrap(), CommitSeq(1));
+        assert_eq!(
+            db.query(&cx, READ, &GqlParameters::new(), DocumentCatalog, reads())
+                .unwrap(),
+            expected(&[[1, 10], [2, 20], [3, 30]]),
+        );
+        let mut replacement = GqlParameters::new();
+        replacement
+            .insert(
+                "replacement".into(),
+                GqlParameterValue::Map(
+                    GqlMapParameter::new(vec![("id".into(), int(2)), ("score".into(), int(22))])
+                        .unwrap(),
+                ),
+            )
+            .unwrap();
+        let replaced = property_rows(
+            &["props"],
+            vec![vec![object(vec![("id", int(2)), ("score", int(22))])]],
+        );
+        assert_eq!(
+            txn.query_write(
+                &mut db,
+                &cx,
+                "MATCH (n:Entity {id:2}) WITH n, $replacement AS patch \
+                 SET n = patch RETURN properties(n) AS props",
+                &replacement,
+                DocumentCatalog,
+                R,
+                writes(),
+                |_| -> Result<ElementId, Infallible> {
+                    panic!("map replacement allocates no identity")
+                },
+            )
+            .unwrap(),
+            replaced,
+        );
+        assert!(matches!(
+            txn.finish(&mut db, &commit).await.unwrap(),
+            EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: CommitSeq(2)
+            },
+        ));
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &dir, keys())
+            .await
+            .unwrap();
+        assert_eq!(
+            db.query(&cx, READ, &GqlParameters::new(), DocumentCatalog, reads())
+                .unwrap(),
+            expected(&[[1, 11], [2, 22], [3, 30]]),
+        );
+        assert_eq!(
+            db.query(
+                &cx,
+                "MATCH (n:Entity {id:2}) RETURN properties(n) AS props",
+                &GqlParameters::new(),
+                DocumentCatalog,
+                reads(),
+            )
+            .unwrap(),
+            replaced,
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn late_computed_map_type_failure_preserves_the_outer_transaction_prefix() {
+    let ((), report) = run_async_under_lab(0x646f_6305, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (cx, commit, txcx) = (contexts.query(), contexts.commit(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut next = 100_u128;
+        txn.query_write(
+            &mut db,
+            &cx,
+            UPSERT,
+            &arguments(vec![row(1, 9), row(2, 9)]),
+            DocumentCatalog,
+            R,
+            writes(),
+            |_| {
+                next += 1;
+                Ok::<_, Infallible>(ElementId::Vertex(VId(next)))
+            },
+        )
+        .unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        let invalid = arguments(vec![
+            object(vec![
+                ("id", int(1)),
+                ("props", object(vec![("score", int(17))])),
+            ]),
+            object(vec![("id", int(2)), ("props", list(vec![int(7)]))]),
+        ]);
+        let error = txn
+            .query_write(
+                &mut db,
+                &cx,
+                "UNWIND $payload.groups[-1].members AS row \
+             MATCH (n:Entity {id:row.id}) SET n += row.props \
+             RETURN properties(n) AS props",
+                &invalid,
+                DocumentCatalog,
+                R,
+                writes(),
+                |_| -> Result<ElementId, Infallible> { panic!("map updates allocate no identity") },
+            )
+            .unwrap_err();
+        assert!(matches!(error, QueryWriteError::Mutation(_)), "{error:?}");
+        assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        assert_eq!(
+            txn.query(
+                &db,
+                &cx,
+                READ,
+                &GqlParameters::new(),
+                DocumentCatalog,
+                reads()
+            )
+            .unwrap(),
+            expected(&[[1, 9], [2, 9]]),
+        );
+        assert_eq!(db.frontier().unwrap(), CommitSeq(0));
+        assert!(db.vertices_at(CommitSeq(0)).unwrap().is_empty());
+        assert!(matches!(
+            txn.finish(&mut db, &commit).await.unwrap(),
+            EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: CommitSeq(1)
+            },
+        ));
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn selected_document_rows_upsert_in_order_and_survive_compaction_and_reopen() {
     let ((), report) = run_async_under_lab(0x646f_6301, |root| async move {

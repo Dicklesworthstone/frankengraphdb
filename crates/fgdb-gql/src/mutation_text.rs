@@ -94,6 +94,15 @@ pub(crate) enum MutationActionTemplate {
         value: crate::set_text::ReadValueTemplate,
         at: usize,
     },
+    /// A computed whole-map merge or replacement. The catalog request
+    /// shares the statement's frozen resolution slot with metadata reads.
+    SetProperties {
+        target: usize,
+        value: crate::set_text::ReadValueTemplate,
+        current: Option<crate::set_text::ReadValueTemplate>,
+        catalog: crate::set_text::ElementCatalogSlot,
+        at: usize,
+    },
     /// DELETE or DETACH DELETE of a value the WITH row computes (TCK
     /// Delete5): `friends[$i]`, `map.key`.
     DeleteValue {

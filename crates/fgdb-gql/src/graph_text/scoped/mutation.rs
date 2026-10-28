@@ -56,6 +56,13 @@ enum ActionKind<'a> {
         value: crate::set_text::ReadValueTemplate,
         at: usize,
     },
+    /// A value-language map over the same frozen input row.
+    SetProperties {
+        value: ReadValueTemplate,
+        current: Option<ReadValueTemplate>,
+        catalog: crate::set_text::ElementCatalogSlot,
+        at: usize,
+    },
     /// `SET n = {...}`: unset every property of n the map does not name.
     /// `current` is n's property-map column.
     Clear {
@@ -115,6 +122,18 @@ fn action_templates<'a>(
                 target,
                 key: property_key(symbol, key)?,
                 value,
+                at,
+            },
+            ActionKind::SetProperties {
+                value,
+                current,
+                catalog,
+                at,
+            } => MutationActionTemplate::SetProperties {
+                target,
+                value,
+                current,
+                catalog,
                 at,
             },
             ActionKind::Clear { keep, current } => {
@@ -555,15 +574,39 @@ impl<'a> Parser<'a> {
                     self.punct(b')', ")")?;
                 }
                 if setting && self.take(b'+')? {
-                    self.mutation_literal_map(&mut columns, &mut actions, target, row)?;
+                    if self.literal_map_assignment()? {
+                        self.mutation_literal_map(&mut columns, &mut actions, target, row)?;
+                    } else {
+                        self.mutation_computed_map(
+                            &mut columns,
+                            &mut actions,
+                            target,
+                            variable,
+                            row,
+                            false,
+                        )?;
+                    }
                     if !self.take(b',')? {
                         break;
                     }
                     continue;
                 }
-                // openCypher `SET n = {...}` replaces n's properties (Set4).
-                if setting && row.is_none() && self.is_punct(b'=') {
-                    self.mutation_replace_map(&mut columns, &mut actions, target, variable)?;
+                // A literal MATCH replacement keeps its existing compact
+                // actions. A computed map or carried target uses the same
+                // frozen evaluator and per-field proposal reduction.
+                if setting && self.is_punct(b'=') {
+                    if row.is_none() && self.literal_map_assignment()? {
+                        self.mutation_replace_map(&mut columns, &mut actions, target, variable)?;
+                    } else {
+                        self.mutation_computed_map(
+                            &mut columns,
+                            &mut actions,
+                            target,
+                            variable,
+                            row,
+                            true,
+                        )?;
+                    }
                     if !self.take(b',')? {
                         break;
                     }
@@ -675,6 +718,64 @@ impl<'a> Parser<'a> {
         }
         Ok(self.list_operand_here(return_projection::Route::NONE)?
             || self.list_chain_follows(return_projection::Route::NONE)?)
+    }
+
+    fn literal_map_assignment(&self) -> Result<bool, GraphPatternTextError> {
+        Ok(
+            self.is_punct(b'=')
+                && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'{')),
+        )
+    }
+
+    /// Compute one map through the ordinary value language. Replacement also
+    /// reads the target's complete frozen map: a MATCH projection when
+    /// possible, or the admitted element reader for a carried identity.
+    #[allow(clippy::too_many_arguments)]
+    fn mutation_computed_map(
+        &mut self,
+        columns: &mut Vec<Projection<'a>>,
+        actions: &mut Vec<Action<'a>>,
+        target: usize,
+        variable: Name<'a>,
+        row: Option<&[(Name<'a>, crate::GraphSetColumnType)]>,
+        replace: bool,
+    ) -> Result<(), GraphMutationTextError> {
+        self.punct(b'=', "=")?;
+        let at = self.current.at;
+        let catalog = self.syntax.element_catalog.request();
+        let value = match row {
+            Some(row) => self.insertion_source_value(columns, row)?,
+            None => self.mutation_assignment(columns)?,
+        };
+        let current = if !replace {
+            None
+        } else if row.is_some() {
+            Some(ReadValueTemplate::ElementMetadata {
+                kind: crate::GraphElementMetadata::Properties,
+                value: Box::new(ReadValueTemplate::Column(target)),
+                catalog: catalog.clone(),
+            })
+        } else {
+            Some(ReadValueTemplate::Column(self.projection_slot(
+                columns,
+                Projection {
+                    variable,
+                    property: None,
+                    path: Some(GraphPathFunction::Properties),
+                    collect: None,
+                },
+            )?))
+        };
+        actions.push(Action {
+            target,
+            kind: ActionKind::SetProperties {
+                value,
+                current,
+                catalog,
+                at,
+            },
+        });
+        Ok(())
     }
 
     /// `SET n = {k: v, ...}` (openCypher replace, Set4): the listed
@@ -955,6 +1056,7 @@ impl PreparedGraphMutationText {
                         action.kind,
                         ActionKind::Property { .. }
                             | ActionKind::RowProperty { .. }
+                            | ActionKind::SetProperties { .. }
                             | ActionKind::Clear { .. }
                     )
                 }),
@@ -1226,9 +1328,11 @@ impl PreparedGraphMutationText {
                 MutationActionTemplate::Bound(
                     GraphMutationAction::DetachDelete { .. }
                     | GraphMutationAction::Delete { .. }
-                    | GraphMutationAction::DeleteValue { .. },
+                    | GraphMutationAction::DeleteValue { .. }
+                    | GraphMutationAction::SetProperties { .. },
                 )
-                | MutationActionTemplate::DeleteValue { .. } => return false,
+                | MutationActionTemplate::DeleteValue { .. }
+                | MutationActionTemplate::SetProperties { .. } => return false,
             };
             self.selection
                 .columns
@@ -1310,12 +1414,13 @@ impl PreparedGraphMutationText {
                         GraphMutationAction::SetProperty { target, key, .. }
                         | GraphMutationAction::RemoveProperty { target, key },
                     ) => (*target, *key),
-                    // SET n = {map} clears every property it does not list,
-                    // so it conservatively writes whatever key is read.
-                    MutationActionTemplate::Bound(GraphMutationAction::ClearProperties {
-                        target,
-                        ..
-                    }) => (*target, read),
+                    // A computed map may name any property, and replacement
+                    // clears any omitted field. Neither proves disjointness.
+                    MutationActionTemplate::SetProperties { target, .. }
+                    | MutationActionTemplate::Bound(
+                        GraphMutationAction::SetProperties { target, .. }
+                        | GraphMutationAction::ClearProperties { target, .. },
+                    ) => (*target, read),
                     MutationActionTemplate::Bound(
                         GraphMutationAction::SetLabel { .. }
                         | GraphMutationAction::DetachDelete { .. }
@@ -1482,6 +1587,28 @@ impl PreparedGraphMutationText {
                         })?,
                     ),
                 },
+                MutationActionTemplate::SetProperties {
+                    target,
+                    value,
+                    current,
+                    catalog,
+                    at,
+                } => GraphMutationAction::SetProperties {
+                    target: *target,
+                    value: return_projection::bind_read_value(value, values)?,
+                    current: current
+                        .as_ref()
+                        .map(|current| return_projection::bind_read_value(current, values))
+                        .transpose()?,
+                    catalog: catalog.bind().ok_or_else(|| {
+                        build_error(
+                            *at,
+                            GraphMutationBuildError::PropertyMapCatalog {
+                                action: actions.len(),
+                            },
+                        )
+                    })?,
+                },
                 MutationActionTemplate::DeleteValue { value, detach, at } => {
                     GraphMutationAction::DeleteValue {
                         value: return_projection::bind_read_value(value, values).map_err(
@@ -1546,6 +1673,7 @@ impl<'a> Parser<'a> {
                             action.kind,
                             ActionKind::Property { .. }
                                 | ActionKind::RowProperty { .. }
+                                | ActionKind::SetProperties { .. }
                                 | ActionKind::Clear { .. }
                         )
                     }),

@@ -99,6 +99,11 @@ fn propose<'a, E, C, F: FnMut() -> Result<(), C>>(
 /// Optional capabilities and the metadata control survive source-error mapping.
 pub(crate) type MutationElementReader<'r, E> = crate::set_ops::ElementRead<'r, E>;
 
+/// A host's admission of one actual computed property key. Source and
+/// interruption errors retain their channels through the mutation wrapper.
+pub(super) type MutationFieldAdmission<'r, E, C> =
+    dyn FnMut(PropertyKeyId) -> Result<(), GqlQueryError<E, C>> + 'r;
+
 fn evaluate_composite<E, C, F: FnMut() -> Result<(), C>>(
     value: &crate::GraphSetValue,
     row: &GraphValueRow,
@@ -279,6 +284,102 @@ fn cleared_fields<E, C, F: FnMut() -> Result<(), C>>(
         }
     }
     Ok(fields)
+}
+
+/// Expand a computed map into the same canonical proposals as ordinary
+/// property assignments. The name index is borrowed from the pinned catalog
+/// and shared by all occurrences of this action, never rebuilt per row.
+#[allow(clippy::too_many_arguments)]
+fn propose_map<'a, E, C, F: FnMut() -> Result<(), C>>(
+    value: crate::algebra::GraphValue,
+    current: Option<crate::algebra::GraphValue>,
+    names: &BTreeMap<&str, PropertyKeyId>,
+    target: ElementId,
+    row: usize,
+    action: usize,
+    proposals: &mut BTreeMap<(ElementId, Field), Proposal<'a>>,
+    field_admission: &mut Option<&mut MutationFieldAdmission<'_, E, C>>,
+    meter: &mut Meter<F>,
+) -> ResultOf<(), E, C> {
+    use crate::algebra::GraphValue;
+    let invalid = || {
+        GqlQueryError::Source(GraphMutationError::InvalidPropertyMap {
+            row,
+            binding: action,
+        })
+    };
+    let unmapped = || {
+        GqlQueryError::Source(GraphMutationError::UnmappedProperty {
+            row,
+            binding: action,
+        })
+    };
+    let GraphValue::Map { keys, values } = value else {
+        return Err(invalid());
+    };
+    if keys.len() != values.len() || keys.len() >= GraphValue::MAX_LIST_NODES {
+        return Err(invalid());
+    }
+    for (at, name) in keys.iter().enumerate() {
+        meter.event(GlaExecutionEvent::Work)?;
+        if at != 0 && keys[at - 1].as_bytes() >= name.as_bytes() {
+            return Err(invalid());
+        }
+        let key = *names.get(name.as_ref()).ok_or_else(unmapped)?;
+        if let Some(admit) = field_admission.as_deref_mut() {
+            admit(key).map_err(|error| error.map_source(GraphMutationError::Source))?;
+        }
+    }
+    if let Some(current) = current {
+        let (old_keys, old_values) = current.as_map().ok_or_else(invalid)?;
+        if old_keys.len() != old_values.len() || old_keys.len() >= GraphValue::MAX_LIST_NODES {
+            return Err(invalid());
+        }
+        for (at, name) in old_keys.iter().enumerate() {
+            meter.event(GlaExecutionEvent::Work)?;
+            if at != 0 && old_keys[at - 1].as_bytes() >= name.as_bytes() {
+                return Err(invalid());
+            }
+            let key = *names.get(name.as_ref()).ok_or_else(unmapped)?;
+            if keys
+                .binary_search_by(|key| key.as_bytes().cmp(name.as_bytes()))
+                .is_err()
+            {
+                if let Some(admit) = field_admission.as_deref_mut() {
+                    admit(key).map_err(|error| error.map_source(GraphMutationError::Source))?;
+                }
+                propose(
+                    proposals,
+                    meter,
+                    target,
+                    Field::Property(key),
+                    Value::Property(None),
+                    row,
+                    action,
+                )?;
+            }
+        }
+    }
+    for (name, value) in keys.into_vec().into_iter().zip(values.into_vec()) {
+        meter.event(GlaExecutionEvent::Work)?;
+        let key = *names.get(name.as_ref()).ok_or_else(unmapped)?;
+        let value = match value {
+            GraphValue::Scalar(value) => Value::Computed(value),
+            value => Value::Stored(stored::written(&value, row, action, &mut |event| {
+                meter.event(event)
+            })?),
+        };
+        propose(
+            proposals,
+            meter,
+            target,
+            Field::Property(key),
+            value,
+            row,
+            action,
+        )?;
+    }
+    Ok(())
 }
 
 enum MapField<'a> {
@@ -618,6 +719,7 @@ pub(super) fn execute<'a, E, C>(
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>
     + 'a,
     elements: Option<&mut MutationElementReader<'_, E>>,
+    field_admission: Option<&mut MutationFieldAdmission<'_, E, C>>,
     mut checkpoint: impl FnMut() -> Result<(), C>,
 ) -> ResultOf<(GraphMutationBatch, Vec<GraphValueRow>), E, C> {
     // The mutation engine is compiled once per error-type pair, not once per
@@ -630,6 +732,7 @@ pub(super) fn execute<'a, E, C>(
         owned,
         Box::new(source),
         elements,
+        field_admission,
         &mut checkpoint,
     )
 }
@@ -642,6 +745,7 @@ fn execute_erased<E, C>(
     owned: Option<Vec<GraphValueRow>>,
     source: ErasedSource<'_, E, C>,
     mut elements: Option<&mut MutationElementReader<'_, E>>,
+    mut field_admission: Option<&mut MutationFieldAdmission<'_, E, C>>,
     mut checkpoint: &mut dyn FnMut() -> Result<(), C>,
 ) -> ResultOf<(GraphMutationBatch, Vec<GraphValueRow>), E, C> {
     checkpoint().map_err(GqlQueryError::Interrupted)?;
@@ -698,6 +802,10 @@ fn execute_erased<E, C>(
     meter.event(GlaExecutionEvent::Work)?;
     let columns = &mutation.columns;
     let mut proposals = BTreeMap::<(ElementId, Field), Proposal<'_>>::new();
+    // Build each computed-map name index only when a non-NULL target reaches
+    // it. Its keys borrow the immutable plan; entries are precharged and
+    // reused across the whole input bag.
+    let mut map_catalogs = BTreeMap::<usize, BTreeMap<&str, PropertyKeyId>>::new();
     for (row_at, row) in selected.value.iter().enumerate() {
         meter.event(GlaExecutionEvent::Work)?;
         if row.len() != columns.len() {
@@ -750,7 +858,11 @@ fn execute_erased<E, C>(
             // DELETE p / DETACH DELETE p (TCK Delete3): every node of the
             // path, and for a plain DELETE every relationship too, each its
             // own delete proposal. DETACH removes the rest of their edges.
-            if let crate::algebra::GraphValue::Path(path) = target_value {
+            // A dynamically typed SET/REMOVE target may also hold a path;
+            // it must fail the element check below, never become a deletion.
+            if action.deletes()
+                && let crate::algebra::GraphValue::Path(path) = target_value
+            {
                 let detach = action.detaches();
                 let edges = path
                     .steps()
@@ -798,6 +910,62 @@ fn execute_erased<E, C>(
                     ));
                 }
             };
+            if let GraphMutationAction::SetProperties {
+                value,
+                current,
+                catalog,
+                ..
+            } = action
+            {
+                let value =
+                    evaluate_composite(value, row, row_at, action_at, &mut meter, &mut elements)?;
+                if value.as_map().is_none() {
+                    return Err(GqlQueryError::Source(
+                        GraphMutationError::InvalidPropertyMap {
+                            row: row_at,
+                            binding: action_at,
+                        },
+                    ));
+                }
+                let current = current
+                    .as_ref()
+                    .map(|current| {
+                        evaluate_composite(
+                            current,
+                            row,
+                            row_at,
+                            action_at,
+                            &mut meter,
+                            &mut elements,
+                        )
+                    })
+                    .transpose()?;
+                let names = match map_catalogs.entry(action_at) {
+                    std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        let mut names = BTreeMap::new();
+                        for (key, name) in &catalog.properties {
+                            meter.event(GlaExecutionEvent::Work)?;
+                            meter.event(GlaExecutionEvent::ScratchEntry)?;
+                            names.insert(name.as_str(), *key);
+                        }
+                        meter.event(GlaExecutionEvent::ScratchEntry)?;
+                        entry.insert(names)
+                    }
+                };
+                propose_map(
+                    value,
+                    current,
+                    names,
+                    target,
+                    row_at,
+                    action_at,
+                    &mut proposals,
+                    &mut field_admission,
+                    &mut meter,
+                )?;
+                continue;
+            }
             let proposed = match action {
                 GraphMutationAction::ClearProperties { current, keep, .. } => cleared_fields(
                     &row.values()[*current],
@@ -814,6 +982,9 @@ fn execute_erased<E, C>(
             };
             let single = match action {
                 GraphMutationAction::ClearProperties { .. } => None,
+                GraphMutationAction::SetProperties { .. } => {
+                    unreachable!("computed maps were reduced above")
+                }
                 GraphMutationAction::SetProperty { key, value, .. } => {
                     let value = match value {
                         GraphMutationValue::Column(column) => {

@@ -63,6 +63,21 @@ pub enum GraphMutationAction {
         target: usize,
         key: PropertyKeyId,
     },
+    /// Apply a computed property map to one element. Every value reads the
+    /// same frozen selection as ordinary SET; maps expand to ordinary field
+    /// proposals, with the same duplicate/conflict and storage-value rules.
+    /// `None` merges only the supplied keys (`+=`). `Some(current)`
+    /// replaces all properties (`=`): `current` reads the target's complete
+    /// admitted property map at that frozen cut. Missing keys are removed;
+    /// explicit NULL remains a stored NULL, as for SetProperty.
+    /// The pinned catalog must name every supplied/current key injectively.
+    /// An absent OPTIONAL target skips both expressions.
+    SetProperties {
+        target: usize,
+        value: crate::GraphSetValue,
+        current: Option<crate::GraphSetValue>,
+        catalog: std::sync::Arc<crate::ReverseSymbolCatalog>,
+    },
     /// openCypher `SET n = {...}`: unset every property `target` carries
     /// that `keep` does not name. `current` is the target's frozen property
     /// map (a Properties column), whose names resolve through the selection's
@@ -109,6 +124,7 @@ impl GraphMutationAction {
         match self {
             Self::SetProperty { target, .. }
             | Self::RemoveProperty { target, .. }
+            | Self::SetProperties { target, .. }
             | Self::ClearProperties { target, .. }
             | Self::SetLabel { target, .. }
             | Self::DetachDelete { target }
@@ -194,6 +210,10 @@ pub enum GraphMutationBuildError {
         action: usize,
         kind: Option<crate::GraphSetProjectionError>,
     },
+    /// A computed property map needs one unambiguous name per property ID.
+    PropertyMapCatalog {
+        action: usize,
+    },
     MixedDeletionAndUpdates,
     /// DELETE and DETACH DELETE in one statement: a cascade would have to
     /// be part of the plain delete's incidence proof.
@@ -227,6 +247,10 @@ impl core::fmt::Display for GraphMutationBuildError {
                     None => Ok(()),
                 }
             }
+            Self::PropertyMapCatalog { action } => write!(
+                f,
+                "mutation action {action} requires an injective property catalog"
+            ),
             Self::MixedDeletionAndUpdates => {
                 f.write_str("one statement cannot both delete and update")
             }
@@ -502,6 +526,7 @@ impl PreparedGraphMutation {
     pub(crate) fn is_vertex_update_only(&self) -> bool {
         self.actions.iter().all(|action| {
             !action.deletes()
+                && !matches!(action, GraphMutationAction::SetProperties { .. })
                 && action.target().and_then(|target| self.columns.get(target))
                     == Some(&GraphSetColumnType::Vertex)
         })
@@ -530,7 +555,7 @@ impl PreparedGraphMutation {
         let mut vertex = false;
         let mut edge = false;
         for action in &self.actions {
-            if action.deletes() {
+            if action.deletes() || matches!(action, GraphMutationAction::SetProperties { .. }) {
                 return false;
             }
             match action.target().and_then(|target| self.columns.get(target)) {
@@ -587,6 +612,9 @@ impl PreparedGraphMutation {
                             .filter(|key| !keep.contains(key))
                             .count() as u128
                     }),
+                GraphMutationAction::SetProperties { catalog, .. } => {
+                    catalog.properties.len() as u128
+                }
                 GraphMutationAction::DeleteValue { .. } => MAX_GRAPH_PATH_ELEMENTS,
                 GraphMutationAction::Delete { .. } | GraphMutationAction::DetachDelete { .. }
                     if action.target().and_then(|target| self.columns.get(target))
@@ -665,7 +693,8 @@ impl PreparedGraphMutation {
                 (GraphMutationAction::DeleteValue { .. }, _) => true,
                 (
                     GraphMutationAction::SetProperty { .. }
-                    | GraphMutationAction::RemoveProperty { .. },
+                    | GraphMutationAction::RemoveProperty { .. }
+                    | GraphMutationAction::SetProperties { .. },
                     Some(kind),
                 ) => matches!(
                     kind,
@@ -719,6 +748,27 @@ impl PreparedGraphMutation {
                         action: at,
                         column: *current,
                     });
+                }
+            }
+            if let GraphMutationAction::SetProperties {
+                value,
+                current,
+                catalog,
+                ..
+            } = action
+            {
+                let mut names = std::collections::BTreeSet::new();
+                if !catalog.properties.values().all(|name| names.insert(name)) {
+                    return Err(GraphMutationBuildError::PropertyMapCatalog { action: at });
+                }
+                for value in core::iter::once(value).chain(current.iter()) {
+                    let refused =
+                        |kind| GraphMutationBuildError::ValueExpression { action: at, kind };
+                    let kind = crate::GraphSetProjection::admit_output(value, &columns, at)
+                        .map_err(|kind| refused(Some(kind)))?;
+                    if kind != GraphSetColumnType::Any {
+                        return Err(refused(None));
+                    }
                 }
             }
             if let GraphMutationAction::SetProperty { value, .. } = action {
@@ -828,7 +878,7 @@ impl PreparedGraphMutation {
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
-        collect::execute(self, policy, None, owned, source, None, checkpoint)
+        collect::execute(self, policy, None, owned, source, None, None, checkpoint)
             .map(|(batch, _)| batch)
     }
 
@@ -876,6 +926,54 @@ impl PreparedGraphMutation {
             owned,
             source,
             Some(&mut crate::set_ops::projection::HostElements(&mut elements)),
+            None,
+            checkpoint,
+        )
+        .map(|(batch, _)| batch)
+    }
+
+    /// Execute with per-field admission for computed property maps. Each
+    /// actual assigned or removed key is admitted before its proposal and
+    /// before any RETURN can observe it, including equal-to-current writes.
+    /// Static field admission remains the host's existing preparation check.
+    pub fn execute_governed_reading_with_field_admission<E, C>(
+        &self,
+        policy: GraphMutationPolicy,
+        source: impl FnOnce(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        elements: impl crate::GraphElementReader<E>,
+        admit: impl FnMut(PropertyKeyId) -> Result<(), GqlQueryError<E, C>>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
+        self.execute_governed_over_reading_with_field_admission(
+            None, policy, source, elements, admit, checkpoint,
+        )
+    }
+
+    /// Per-field admission over an owned chain input. The same callback
+    /// applies to every dynamic field occurrence before conflict reduction.
+    pub fn execute_governed_over_reading_with_field_admission<E, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GraphMutationPolicy,
+        source: impl FnOnce(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut elements: impl crate::GraphElementReader<E>,
+        mut admit: impl FnMut(PropertyKeyId) -> Result<(), GqlQueryError<E, C>>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
+        collect::execute(
+            self,
+            policy,
+            None,
+            owned,
+            source,
+            Some(&mut crate::set_ops::projection::HostElements(&mut elements)),
+            Some(&mut admit),
             checkpoint,
         )
         .map(|(batch, _)| batch)
@@ -930,6 +1028,24 @@ impl PreparedGraphMutation {
                             bytes.extend_from_slice(&encoded);
                         }
                     }
+                }
+                GraphMutationAction::SetProperties {
+                    value,
+                    current,
+                    catalog,
+                    ..
+                } => {
+                    bytes.push(7);
+                    value.append_canonical_bytes(&mut bytes);
+                    bytes.push(u8::from(current.is_some()));
+                    if let Some(current) = current {
+                        current.append_canonical_bytes(&mut bytes);
+                    }
+                    crate::set_ops::projection::append_metadata_catalog(
+                        crate::GraphElementMetadata::Properties,
+                        Some(catalog),
+                        &mut bytes,
+                    );
                 }
                 GraphMutationAction::RemoveProperty { key, .. } => {
                     bytes.push(1);

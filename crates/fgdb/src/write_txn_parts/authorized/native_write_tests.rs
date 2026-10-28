@@ -991,3 +991,174 @@ fn native_text_and_prepared_sessions_preserve_metadata_catalogs() {
         assert_eq!(txn.outstanding_obligations(), 0);
     });
 }
+
+#[test]
+fn computed_property_maps_preserve_authority_and_prepared_session_catalogs() {
+    lab(0xaaf4, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let authority = authority();
+        let mut scope = grant();
+        scope.labels = Scope::only([L]);
+        scope.properties = Scope::only([P, Q]);
+        let token = authority.issue_at(&scope, NOW).unwrap();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut seed = crate::WriteBatch::new(R);
+        seed.create_vertex(
+            VId(10),
+            vec![L],
+            vec![
+                (P, CanonicalScalar::Int(1)),
+                (Q, CanonicalScalar::Int(9)),
+                (SECRET, CanonicalScalar::Int(7)),
+            ],
+        );
+        seed.create_vertex(
+            VId(20),
+            vec![L],
+            vec![
+                (P, CanonicalScalar::Int(2)),
+                (SECRET, CanonicalScalar::Int(8)),
+            ],
+        );
+        seed.create_vertex(VId(30), vec![HIDDEN], vec![(P, CanonicalScalar::Int(1))]);
+        db.write(&commit, seed).await.unwrap();
+
+        let rows = |values: &[(i64, Vec<(&str, i64)>)]| {
+            GqlParameters::new()
+                .with_list(
+                    "rows",
+                    values
+                        .iter()
+                        .map(|(key, fields)| {
+                            let properties = GraphValue::map(
+                                fields
+                                    .iter()
+                                    .map(|(name, value)| {
+                                        (
+                                            (*name).to_owned(),
+                                            GraphValue::Scalar(CanonicalScalar::Int(*value)),
+                                        )
+                                    })
+                                    .collect(),
+                            )
+                            .unwrap();
+                            GraphValue::map(vec![
+                                ("key".into(), GraphValue::Scalar(CanonicalScalar::Int(*key))),
+                                ("props".into(), properties),
+                            ])
+                            .unwrap()
+                        })
+                        .collect(),
+                )
+                .unwrap()
+        };
+        let text = "UNWIND $rows AS row MATCH (n:Visible {p:row.key}) SET n += row.props";
+        let result = db
+            .query_write_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                text,
+                &rows(&[(1, vec![("q", 40)]), (2, vec![])]),
+                PropertyMapCatalog,
+                R,
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        let QueryResult::Write { receipt, .. } = result else {
+            panic!("write receipt")
+        };
+        assert_eq!(receipt.stats().completed_statements, 1);
+        assert_eq!(
+            db.vertex(VId(10)).unwrap().unwrap().props,
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(40).into()),
+                (SECRET, CanonicalScalar::Int(7).into()),
+            ]
+        );
+
+        // Replacing from the authorized view must keep hidden fields. The
+        // prepared handle must retain q's catalog name even though no q token
+        // occurs in this text and execution cannot call the resolver again.
+        let before = db.vertices().unwrap();
+        {
+            let mut session = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    PropertyMapCatalog,
+                    R,
+                    policy(),
+                    64,
+                    || NOW,
+                )
+                .unwrap();
+            let prepared = session
+                .prepare(
+                    &query,
+                    "MATCH (n:Visible) SET n = properties(n)",
+                    &GqlParameters::new(),
+                )
+                .unwrap();
+            session
+                .execute(&query, &prepared, &GqlParameters::new())
+                .await
+                .unwrap();
+            let empty_maps = rows(&[(1, vec![]), (2, vec![])]);
+            let prepared = session.prepare(&query, text, &empty_maps).unwrap();
+            session
+                .execute(&query, &prepared, &empty_maps)
+                .await
+                .unwrap();
+        }
+        assert_eq!(db.vertices().unwrap(), before);
+
+        // An attempted forbidden field is refused even when its value already
+        // equals the hidden stored value, and rolls back the earlier input row.
+        let before = (db.frontier().unwrap(), db.vertices().unwrap());
+        let error = db
+            .query_write_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                text,
+                &rows(&[(1, vec![("q", 99)]), (2, vec![("secret", 8)])]),
+                PropertyMapCatalog,
+                R,
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(authorization(&error), Some(Error::ScopeDenied));
+        assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(
+            (reopened.frontier().unwrap(), reopened.vertices().unwrap()),
+            before
+        );
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}

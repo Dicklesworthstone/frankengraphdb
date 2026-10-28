@@ -34,6 +34,23 @@ fn source(error: WriteTxnError) -> Fault {
     GqlQueryError::Source(GraphMutationError::Source(error))
 }
 
+/// Admit one actual field of a computed map before it becomes a proposal.
+/// The catalog is a name dictionary, never a request to write all its fields.
+/// Preserve native cancellation in the query's interruption channel.
+pub(super) fn admit_computed_property<Clock: FnMut() -> u64>(
+    cx: &QueryCx,
+    key: fgdb_delta_types::PropertyKeyId,
+    execution: &RefCell<&mut Execution<'_, '_, Clock>>,
+) -> Result<(), GqlQueryError<WriteTxnError, WriteTxnError>> {
+    cx.checkpoint()
+        .map_err(|error| GqlQueryError::Interrupted(WriteTxnError::Interrupted(error)))?;
+    match execution.borrow_mut().fields([], [key]) {
+        Ok(_) => Ok(()),
+        Err(error @ WriteTxnError::Interrupted(_)) => Err(GqlQueryError::Interrupted(error)),
+        Err(error) => Err(GqlQueryError::Source(error)),
+    }
+}
+
 /// Admit declared writes before the generic RETURN overlay combines their
 /// intents with masked base metadata. This runs even for empty selections or
 /// NULL targets, so an ungranted name cannot first produce a metadata or
@@ -55,6 +72,12 @@ pub(super) fn admit_declared_mutation_fields<Clock: FnMut() -> u64>(
             }
             GraphMutationAction::ClearProperties { keep, .. } => {
                 execution.fields([], keep.iter().copied())?;
+            }
+            GraphMutationAction::SetProperties { .. } => {
+                // These keys come from each reached row, not the catalog.
+                // Every authorized collector below supplies
+                // admit_computed_property before value conversion, proposal
+                // deduplication, and any RETURN binding or metadata.
             }
             GraphMutationAction::SetLabel { label, .. } => {
                 execution.fields([*label], [])?;
@@ -191,7 +214,7 @@ impl<V: Vfs + Clone> Database<V> {
                     let controls = RefCell::new(&mut execution);
                     let transaction: &WriteTxn = workspace.transaction();
                     let element_failure = RefCell::new(None);
-                    let result = query.execute_governed_reading(
+                    let result = query.execute_governed_reading_with_field_admission(
                         policy,
                         |pattern, allowance| {
                             selection::select_overlay(
@@ -212,6 +235,7 @@ impl<V: Vfs + Clone> Database<V> {
                             &element_failure,
                             &controls,
                         ),
+                        |key| admit_computed_property(query_cx, key, &controls),
                         || {
                             if let Some(error) = element_failure.borrow_mut().take() {
                                 return Err(WriteTxnError::Interrupted(error));
@@ -468,7 +492,7 @@ fn select_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
         // before any await. No RefCell or query result escapes.
         let execution = RefCell::new(&mut *execution);
         let element_failure = RefCell::new(None);
-        let result = mutation.execute_governed_reading(
+        let result = mutation.execute_governed_reading_with_field_admission(
             policy,
             |pattern, allowance| {
                 selection::select_overlay(
@@ -489,6 +513,7 @@ fn select_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 &element_failure,
                 &execution,
             ),
+            |key| admit_computed_property(cx, key, &execution),
             || {
                 if let Some(error) = element_failure.borrow_mut().take() {
                     return Err(WriteTxnError::Interrupted(error));

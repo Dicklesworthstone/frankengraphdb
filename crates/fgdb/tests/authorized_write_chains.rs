@@ -257,6 +257,207 @@ fn multipart_reads_between_writes_mask_hidden_witnesses_and_commit_atomically() 
     });
 }
 
+#[test]
+fn computed_replacement_metadata_interruptions_keep_their_channel_and_discard_create() {
+    use fgdb_gql::{
+        GqlQueryError, GraphSymbolResolver, GraphWriteChainError, GraphWriteChainStep,
+        ReverseSymbolCatalog,
+    };
+    use fgdb_types::context::SimulationCheckpointProbe;
+    use std::sync::Arc;
+
+    struct Catalog;
+    impl GraphSymbolResolver for Catalog {
+        fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            symbols(kind, name)
+        }
+        fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+            let mut catalog = ReverseSymbolCatalog::new();
+            catalog.insert_label(L, "Visible");
+            catalog.insert_property(P, "p");
+            catalog.insert_property(SECRET, "secret");
+            Some(catalog)
+        }
+    }
+
+    fn interrupted_source(error: &(dyn core::error::Error + 'static)) -> bool {
+        let mut cause = Some(error);
+        while let Some(error) = cause {
+            if matches!(
+                error.downcast_ref::<WriteTxnError>(),
+                Some(WriteTxnError::Interrupted(_))
+            ) {
+                return true;
+            }
+            cause = error.source();
+        }
+        false
+    }
+
+    lab(0xc4a1_20e1, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 10), NOW).unwrap();
+
+        // A carried nonempty map also updates a just-created owned target,
+        // and RETURN observes the replacement in the same native commit.
+        let nonempty = PreparedGraphWriteChainText::prepare(
+            "CREATE (n:Visible {p:7}) WITH n,{p:n.p+1} AS patch \
+             SET n=patch RETURN n.p AS value",
+            R,
+            Catalog,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let mut success = Database::open_memory(&commit, keys()).await.unwrap();
+        let before = success.frontier().unwrap();
+        let (stats, rows, completion) = success
+            .execute_graph_write_chain_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &nonempty,
+                policy(10),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(stats.created_vertices, 1);
+        assert_eq!(rows.value.len(), 1);
+        assert_eq!(
+            rows.value[0].values(),
+            &[GraphValue::Scalar(CanonicalScalar::Int(8))]
+        );
+        assert!(matches!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted { commit_seq } if commit_seq.0 == before.0 + 1
+        ));
+
+        for returning in [false, true] {
+            let text = format!(
+                "CREATE (n:Visible) WITH n,{{}} AS patch SET n=patch{}",
+                if returning { " RETURN 1 AS done" } else { "" },
+            );
+            let program = PreparedGraphWriteChainText::prepare(&text, R, Catalog)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            let mutation = match program.steps().last().unwrap() {
+                GraphWriteChainStep::Mutation(mutation) if !returning => mutation.as_ref(),
+                GraphWriteChainStep::MutationQuery(query) if returning => query.mutation(),
+                _ => panic!("the carried replacement must use its native mutation collector"),
+            };
+            assert!(mutation.actions().iter().any(|action| matches!(
+                action,
+                fgdb_gql::GraphMutationAction::SetProperties {
+                    current: Some(_),
+                    ..
+                }
+            )));
+
+            // Measure the preflight prefix without hard-coding a checkpoint
+            // ordinal. Zero evaluator work refuses before CREATE can run,
+            // so no replacement metadata has been read at this boundary.
+            let mut refused = Database::open_memory(&commit, keys()).await.unwrap();
+            let prefix = Arc::new(SimulationCheckpointProbe::new(None));
+            let controlled = query.with_checkpoint_probe(Arc::clone(&prefix));
+            let mut no_work = policy(10);
+            no_work.query.evaluator.max_work_units = 0;
+            let error = refused
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &controlled,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    no_work,
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(error, GqlQueryError::Evaluator(_)), "{error:?}");
+            assert!(refused.vertices().unwrap().is_empty());
+            let preflight_calls = prefix.calls();
+
+            // This replacement must read the newly created target's frozen
+            // properties, but an empty target/map produces no field intents.
+            // Thus this law isolates mutation-reader cancellation from native
+            // property-staging failures while exercising both chain collectors.
+            let mut baseline = Database::open_memory(&commit, keys()).await.unwrap();
+            let observed = Arc::new(SimulationCheckpointProbe::new(None));
+            let controlled = query.with_checkpoint_probe(Arc::clone(&observed));
+            let (_, rows, _) = baseline
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &controlled,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    policy(10),
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!(baseline.vertices().unwrap().len(), 1);
+            assert_eq!(rows.value.len(), usize::from(returning));
+            let calls = observed.calls();
+            assert!(calls > preflight_calls);
+
+            for stop in 1..=calls {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let before = db.frontier().unwrap();
+                let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                let controlled = query.with_checkpoint_probe(Arc::clone(&probe));
+                let error = db
+                    .execute_graph_write_chain_authorized(
+                        &txn,
+                        &controlled,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        &program,
+                        policy(10),
+                        || NOW,
+                    )
+                    .await
+                    .expect_err("every observed checkpoint must remain interruptible");
+                match &error {
+                    GqlQueryError::Interrupted(WriteTxnError::Interrupted(_)) => {}
+                    // Existing CREATE/commit wrappers retain their source
+                    // channel. The empty replacement has no property staging:
+                    // its reader must never return a Mutation source error.
+                    GqlQueryError::Source(GraphWriteChainError::Insert(_)) => {
+                        assert!(interrupted_source(&error), "{text}, stop={stop}: {error:?}");
+                    }
+                    // Whole-program static admission also predates this
+                    // reader. Its measured prefix is the only allowed
+                    // Mutation source wrapper for this zero-intent update.
+                    GqlQueryError::Source(GraphWriteChainError::Mutation(_))
+                        if stop <= preflight_calls =>
+                    {
+                        assert!(interrupted_source(&error), "{text}, stop={stop}: {error:?}");
+                    }
+                    _ => panic!("{text}, stop={stop}: {error:?}"),
+                }
+                assert_eq!(probe.calls(), stop, "{text}, stop={stop}");
+                assert_eq!(db.frontier().unwrap(), before);
+                assert!(db.vertices().unwrap().is_empty());
+                assert!(db.edges().unwrap().is_empty());
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+    });
+}
+
 fn chain(text: &str) -> PreparedGraphWriteChain {
     assert!(
         PreparedGraphWriteChainText::is_chain(text).unwrap(),

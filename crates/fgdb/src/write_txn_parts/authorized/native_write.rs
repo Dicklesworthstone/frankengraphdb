@@ -268,7 +268,15 @@ fn bind_native<Clock: FnMut() -> u64>(
 ) -> Result<super::Bound<'static>, Fault> {
     cx.with_restriction(|| {
         reserve_text(cx, execution, text)?;
-        let parsed = match GraphUnwindWriteText::parse_if_supported(text) {
+        let classified =
+            GraphUnwindWriteText::requires_computed_map_input(text).and_then(|computed_maps| {
+                if computed_maps {
+                    Ok((None, true))
+                } else {
+                    GraphUnwindWriteText::parse_if_supported(text).map(|parsed| (parsed, false))
+                }
+            });
+        let (parsed, computed_maps) = match classified {
             Ok(parsed) => parsed,
             Err(error) => {
                 checkpoint(cx, execution).map_err(admission)?;
@@ -278,6 +286,17 @@ fn bind_native<Clock: FnMut() -> u64>(
                 });
             }
         };
+        if computed_maps {
+            // Like bounded MATCH ingress, admit reading before arguments or
+            // catalog callbacks. The full mutation then freezes one relation;
+            // it never retries a refused row binder or weakens its profiles.
+            checkpoint(cx, execution).map_err(admission)?;
+            if !scope.rights().can_read() {
+                return Err(admission(WriteTxnError::Authorization(
+                    Error::PermissionDenied,
+                )));
+            }
+        }
         let Some(parsed) = parsed else {
             // CREATE/INSERT UNWIND and ordinary scripts keep their original
             // compiler, preflight and binding protocol, with no second byte bill.
@@ -285,7 +304,13 @@ fn bind_native<Clock: FnMut() -> u64>(
             // binds as the literal map of its keys (fgdb-0s2pq), and its
             // diagnostics keep the caller's bytes. Each spliced key is one more
             // declaration, charged as every declaration is.
-            let lowered = GqlMapArgumentText::lower(text, params);
+            let lowered = if computed_maps {
+                // Keep whole-map values in the row language. Pattern fields
+                // retain their usual argument lowering and source coordinates.
+                GqlMapArgumentText::lower_fields(text, params)
+            } else {
+                GqlMapArgumentText::lower(text, params)
+            };
             let (text, params) = lowered
                 .as_ref()
                 .map_or((text, params), |(lowered, derived)| {
@@ -438,6 +463,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// batch. Repeated identity receipts consume repeated signed rows.
     /// CREATE/INSERT forms keep their existing compiler. Explicit larger bound
     /// batches and the prepared-session API retain their existing contracts.
+    /// Computed whole-map MATCH updates use one complete relational mutation:
+    /// row-specific keys and all RHS values are frozen before any staging.
+    /// Their one statement shares the ordinary query/effect limits and signed
+    /// permit, and every actual map key passes native field admission.
     ///
     /// The existing typed program checks ReadWrite requirements, relation scope,
     /// masked selection, original attempted fields and before/after images.
