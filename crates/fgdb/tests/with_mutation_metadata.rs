@@ -464,6 +464,8 @@ fn metadata_respects_scope_and_map_locals_instead_of_reviving_graph_names() {
         "MATCH (n) WITH n SET n.p=1 RETURN properties(__fg_boundary_0)",
         "MATCH (a)-[r:R]->(b) WITH a,r DETACH DELETE a RETURN properties(r)",
         "MATCH (n) WITH n SET n.p=1 WITH 0 AS n RETURN labels(n)",
+        "MATCH (n) WITH n SET n.p=1 WITH [0] AS n RETURN labels(n)",
+        "MATCH (a)-[r:R]->(b) WITH a,r SET a.p=1 WITH 0 AS r RETURN type(r)",
     ] {
         let mut calls = 0;
         let result = PreparedGraphMutationQueryText::prepare(statement, R, |kind, name: &str| {
@@ -496,6 +498,19 @@ fn metadata_respects_scope_and_map_locals_instead_of_reviving_graph_names() {
                 vec![int(12), local, names(&["z"])],
             ]
         );
+        let result = apply(
+            &mut db,
+            commit,
+            cx,
+            txcx,
+            "MATCH (n:Item) WITH n SET n.p=n.p+1 \
+             WITH NULL AS n RETURN labels(n) AS l,type(n) AS t",
+            2,
+        )
+        .await
+        .unwrap();
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        assert_eq!(rows(result, &["l", "t"]), vec![vec![null.clone(), null]; 2]);
     });
 }
 
