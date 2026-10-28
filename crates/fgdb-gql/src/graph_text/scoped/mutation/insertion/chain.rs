@@ -83,6 +83,10 @@ impl PreparedGraphWriteChainText {
         // A SET, REMOVE or DELETE after a leading MATCH: a chain once a
         // CREATE or MERGE follows it.
         let mut mutated = false;
+        // A WITH or UNWIND stage after the leading MATCH, before any write:
+        // the unique upsert reads a MATCH only, so a relationship MERGE's
+        // ON/SET clauses there are the chain's row actions.
+        let mut staged = false;
         let mut depth = 0_usize;
         let mut previous: Option<TokenKind<'_>> = None;
         loop {
@@ -150,6 +154,13 @@ impl PreparedGraphWriteChainText {
                         return Ok(true);
                     } else if clause && matched && mutation()? {
                         mutated = true;
+                    } else if clause
+                        && matched
+                        && !written
+                        && (word.eq_ignore_ascii_case("WITH")
+                            || word.eq_ignore_ascii_case("UNWIND"))
+                    {
+                        staged = true;
                     } else if previous.is_none() && word.eq_ignore_ascii_case("UNWIND") {
                         parameter_unwound = matches!(
                             script::next_script_token(&mut lexer.clone())?.kind,
@@ -203,6 +214,7 @@ impl PreparedGraphWriteChainText {
                                 && Self::edge_actions_need_rows(
                                     lookahead.clone(),
                                     Self::named_merge_pattern(lexer.clone())?,
+                                    staged,
                                 )?
                             {
                                 return Ok(true);
@@ -245,9 +257,12 @@ impl PreparedGraphWriteChainText {
     /// anonymous, or an assignment writes or reads (`a.key`) an element
     /// other than it. The unique upsert writes only its named relationship.
     /// `lexer` is just past the `-` or `<` after the first node pattern.
+    /// `any`: every ON/SET action needs the chain's rows, as after a WITH or
+    /// UNWIND stage, which the unique MATCH-only upsert cannot read.
     fn edge_actions_need_rows(
         mut lexer: Lexer<'_>,
         named_path: bool,
+        any: bool,
     ) -> Result<bool, GraphPatternTextError> {
         const ENDS: [&str; 12] = [
             "RETURN", "WITH", "CREATE", "INSERT", "MERGE", "MATCH", "OPTIONAL", "UNWIND", "DELETE",
@@ -287,7 +302,7 @@ impl PreparedGraphWriteChainText {
                         && (word.eq_ignore_ascii_case("ON")
                             || word.eq_ignore_ascii_case("SET")) =>
                 {
-                    if named_path || relationship.is_none() {
+                    if named_path || relationship.is_none() || any {
                         return Ok(true);
                     }
                     actions = true;

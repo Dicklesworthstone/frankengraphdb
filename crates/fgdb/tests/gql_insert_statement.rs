@@ -3481,3 +3481,105 @@ fn relationship_merge_reads_a_multipart_read() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// A relationship MERGE after a WITH or UNWIND stage, or after a multipart
+/// read, runs its ON CREATE / ON MATCH / SET clauses as the chain's row
+/// actions. Only actions reading another element reached the chain before;
+/// a relationship-only action after a stage was left to the unique upsert,
+/// which reads a MATCH only, and refused ("expected CREATE, SET, REMOVE,
+/// DELETE or a relationship MERGE after MATCH ... WITH").
+#[test]
+fn staged_relationship_merges_run_their_on_and_set_clauses() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4b5, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let write = async |db: &mut Database<MemVfs>, text: &str| {
+            let (mut vertices, mut edges) = reserve(db, &cx, 4, 4);
+            let result = db
+                .query_write(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    text,
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    policy(),
+                    |request| {
+                        Ok::<_, &'static str>(match request.request {
+                            GraphInsertRequest::Vertex { .. } => vertices.pop_front().unwrap(),
+                            GraphInsertRequest::Edge { .. } => edges.pop_front().unwrap(),
+                        })
+                    },
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error}"));
+            match result {
+                QueryResult::Rows { rows, .. } => rows,
+                QueryResult::Write { .. } => Vec::new(),
+            }
+        };
+        let int = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        let weights = |db: &Database<MemVfs>| -> Vec<_> {
+            db.edges()
+                .unwrap()
+                .into_iter()
+                .filter(|edge| edge.entry.relation == T)
+                .map(|edge| (edge.entry.src, edge.entry.dst, edge.props))
+                .collect()
+        };
+        for (text, first, second) in [
+            (
+                "MATCH (a:Source {p:10}), (b:Source {p:20}) WITH a, b MERGE (a)-[r:T]->(b) \
+                 ON CREATE SET r.q = 1 ON MATCH SET r.q = r.q + 1 RETURN r.q AS q",
+                1,
+                2,
+            ),
+            (
+                "MATCH (a:Source {p:10}) WITH a MATCH (b:Source {p:20}) MERGE (a)-[r:T]->(b) \
+                 ON CREATE SET r.q = 5 ON MATCH SET r.q = r.q * 2 RETURN r.q AS q",
+                5,
+                10,
+            ),
+            (
+                "MATCH (a:Source {p:10}), (b:Source {p:20}) UNWIND [3] AS k \
+                 MERGE (a)-[r:T]->(b) ON CREATE SET r.q = k ON MATCH SET r.q = r.q + k \
+                 RETURN r.q AS q",
+                3,
+                6,
+            ),
+        ] {
+            let mut db = fresh(&commit, true).await;
+            // The first run creates and takes ON CREATE; the second matches.
+            for expected in [first, second] {
+                assert_eq!(write(&mut db, text).await, [vec![int(expected)]], "{text}");
+            }
+            assert_eq!(
+                weights(&db),
+                [(
+                    VId(10),
+                    VId(20),
+                    vec![(
+                        Q,
+                        CanonicalPropertyValue::from(CanonicalScalar::Int(second))
+                    )]
+                )],
+                "{text}"
+            );
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+        let mut db = fresh(&commit, true).await;
+        let text = "MATCH (a:Source {p:10}), (b:Source {p:20}) WITH a, b \
+                    MERGE (a)-[r:T]->(b) SET r.q = 7";
+        assert!(write(&mut db, text).await.is_empty());
+        assert_eq!(
+            weights(&db),
+            [(
+                VId(10),
+                VId(20),
+                vec![(Q, CanonicalPropertyValue::from(CanonicalScalar::Int(7)))]
+            )]
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

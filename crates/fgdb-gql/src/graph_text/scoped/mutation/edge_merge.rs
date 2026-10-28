@@ -651,6 +651,36 @@ impl PreparedGraphEdgeMergeText {
     {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones());
+        // A multipart read before the MERGE (`MATCH (a) WITH a MATCH (b)
+        // MERGE (a)-[r:R]->(b) ON CREATE SET ...`): its complete relation,
+        // as prepare_after_multipart reads it, with the chain's row actions.
+        if crate::PreparedGraphInsertText::multipart_source_kind(statement, declarations)?
+            == Some(ReadWriteKind::EdgeMerge)
+        {
+            parser.chain_write = true;
+            let (mut source, schema) =
+                parser.multipart_write_prefix(statement, declarations, None)?;
+            let keep = parser.visible_width(&schema);
+            let (merged, continues) = Self::row_merge(&mut parser, &schema, None)?;
+            let continuation =
+                Self::chain_continuation(&mut parser, &schema, keep, &merged, continues)?;
+            parser
+                .syntax
+                .element_catalog
+                .resolve(&mut *resolve, statement);
+            source.share_parameters(&parser.syntax.parameters, &parser.syntax.parameter_offsets);
+            source.append_element_keys(&mut parser.syntax.element_keys);
+            let input = source.resolve(resolve)?;
+            let (merge, returning) = Self::resolve_merge(
+                resolve,
+                merged,
+                EdgeMergeTextInput::Multipart {
+                    statement: statement.to_owned(),
+                    input: Box::new(input),
+                },
+            )?;
+            return Ok((merge, returning, continuation));
+        }
         let (matched, source, schema) = if parser.is_word("UNWIND") || parser.is_word("WITH") {
             let (source, schema) =
                 parser.write_graph_row_prefix(statement, declarations, resolve.time_zones())?;
