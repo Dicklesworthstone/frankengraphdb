@@ -309,10 +309,11 @@ impl<S: AsyncVertexScanSource, F, Row: VertexScanOutput> AsyncVertexScanCursor<S
         C: Send,
     {
         let meter = &mut self.meter;
-        meter.event(VertexScanEvent::Work)?;
         if self.plan.inner.empty || self.plan.inner.count == Some(0) {
+            (meter.checkpoint)().map_err(GqlQueryError::Interrupted)?;
             return Ok(None);
         }
+        meter.event(VertexScanEvent::Work)?;
         loop {
             let mut admitted = None;
             let candidate = flatten(

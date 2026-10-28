@@ -59,8 +59,20 @@ impl PreparedGraphWriteChainText {
         // Whether that MERGE was a vertex MERGE: only one returns rows as a
         // chain; a relationship MERGE stays the batch writer's.
         let mut merged_vertex = false;
-        let multipart_mutation = PreparedGraphInsertText::multipart_source_kind(statement, &[])?
-            == Some(ReadWriteKind::Mutation);
+        let multipart_mutation =
+            match PreparedGraphInsertText::multipart_source_kind(statement, &[]) {
+                Ok(kind) => kind == Some(ReadWriteKind::Mutation),
+                // Composition accepts one statement; the script owner admits
+                // separators with the same lexer. A classifier must leave an
+                // actual separator to that owner, including after RETURN.
+                Err(source)
+                    if source.kind == GraphPatternTextErrorKind::InvalidToken
+                        && statement.as_bytes().get(source.offset) == Some(&b';') =>
+                {
+                    return Ok(false);
+                }
+                Err(source) => return Err(source.into()),
+            };
         let (mut unwound, mut matched) = (false, multipart_mutation);
         // `UNWIND $rows`: one MERGE after it is the batch writer's, but a
         // vertex MERGE another write follows heads a chain (fgdb-0s2pq).
@@ -1293,6 +1305,7 @@ mod tests {
             "MATCH (n) WHERE n.name STARTS WITH 'x' CREATE (m) RETURN m",
             "CREATE (n {p: 'WITH CREATE (x)'}) WITH n RETURN n",
             "CREATE (a); MATCH (n) WITH n CREATE (b)",
+            "MATCH (a) SET a.p = 1; MATCH (b) CREATE (c)",
             "RETURN 1",
             // A lone MATCH-led or UNWIND-led relationship MERGE, a first
             // relationship MERGE, and a lone first MERGE with ON or SET

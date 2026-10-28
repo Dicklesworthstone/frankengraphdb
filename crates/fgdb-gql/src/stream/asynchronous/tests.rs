@@ -363,6 +363,41 @@ fn async_rows_share_native_semantics_counters_and_windows_with_the_sync_operator
 }
 
 #[test]
+fn zero_page_needs_no_work_allowance_but_still_observes_cancellation() {
+    for cancelled in [false, true] {
+        let input = source(vec![sample(1, Some(CanonicalScalar::Int(1)), true)]);
+        let signals = Arc::clone(&input.signals);
+        let calls = Counter::default();
+        let compiled = AsyncVertexScanPlan::compile(&plan("MATCH (n) RETURN n LIMIT 0")).unwrap();
+        let mut cursor =
+            AsyncVertexScanCursor::new(input, compiled, GqlQueryPolicy::new(0, 0, 0, 0), || {
+                calls.set(calls.get() + 1);
+                if cancelled { Err("cancelled") } else { Ok(()) }
+            });
+        assert_eq!(calls.get(), 0, "construction is lazy");
+        let result = ready(cursor.next());
+        if cancelled {
+            assert!(matches!(
+                result,
+                Some(Err(GqlQueryError::Interrupted("cancelled")))
+            ));
+            assert_eq!(cursor.state(), VertexScanState::Failed);
+        } else {
+            assert!(result.is_none());
+            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        }
+        assert_eq!(calls.get(), 1);
+        assert_eq!(signals.reads.get(), 0);
+        assert_eq!(signals.reservations.get(), 0);
+        assert_eq!(cursor.row_stats(), GqlExecutionStats::default());
+        assert_eq!(cursor.evaluator_stats(), GlaExecutionStats::default());
+        assert!(signals.dropped.get(), "terminal pull releases the source");
+        assert!(ready(cursor.next()).is_none());
+        assert_eq!(calls.get(), 1, "terminal pulls are inert");
+    }
+}
+
+#[test]
 fn outputs_keep_their_guard_after_cursor_drop_and_limit_never_prefetches() {
     let mut input = source(vec![
         sample(1, Some(CanonicalScalar::Int(7)), true),

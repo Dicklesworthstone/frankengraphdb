@@ -401,7 +401,7 @@ fn map_fields_keep_buffered_and_spilled_reads_equal_to_literal_patterns() {
                 11,
                 2,
                 1,
-                true,
+                false,
             ),
             (
                 "MATCH (n:L {p:$payload.key.value}) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n.p AS p",
@@ -409,7 +409,7 @@ fn map_fields_keep_buffered_and_spilled_reads_equal_to_literal_patterns() {
                 1,
                 1,
                 1,
-                true,
+                false,
             ),
             (
                 "MATCH (a)-[r:R {p:$payload.key.value}]->(b) RETURN r.p AS p",
@@ -417,11 +417,46 @@ fn map_fields_keep_buffered_and_spilled_reads_equal_to_literal_patterns() {
                 17,
                 2,
                 1,
-                true,
+                false,
             ),
             (
                 "MATCH (n:L {p:$payload.absent}) RETURN n.p AS p",
                 "MATCH (n:L {p:null}) RETURN n.p AS p",
+                11,
+                2,
+                0,
+                false,
+            ),
+            // Plain buffered streams require the leading identity (README
+            // query --buffered). Retain every original property-only spill
+            // positive above and exercise the supported source profile too.
+            (
+                "MATCH (n:L {p:$payload.key.value}) RETURN n,n.p AS p",
+                "MATCH (n:L {p:11}) RETURN n,n.p AS p",
+                11,
+                2,
+                1,
+                true,
+            ),
+            (
+                "MATCH (n:L {p:$payload.key.value}) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n,n.p AS p",
+                "MATCH (n:L {p:1}) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n,n.p AS p",
+                1,
+                1,
+                1,
+                true,
+            ),
+            (
+                "MATCH (a)-[r:R {p:$payload.key.value}]->(b) RETURN r,r.p AS p",
+                "MATCH (a)-[r:R {p:17}]->(b) RETURN r,r.p AS p",
+                17,
+                2,
+                1,
+                true,
+            ),
+            (
+                "MATCH (n:L {p:$payload.absent}) RETURN n,n.p AS p",
+                "MATCH (n:L {p:null}) RETURN n,n.p AS p",
                 11,
                 2,
                 0,
@@ -445,9 +480,6 @@ fn map_fields_keep_buffered_and_spilled_reads_equal_to_literal_patterns() {
             ),
         ] {
             for spilling in [false, true] {
-                if !spilling && !streaming {
-                    continue;
-                }
                 let mut options = if spilling {
                     spill_options(&directory, text)
                 } else {
@@ -473,6 +505,16 @@ fn map_fields_keep_buffered_and_spilled_reads_equal_to_literal_patterns() {
                     )
                     .unwrap();
                 let original = options.params.canonical_bytes();
+                if !spilling && !streaming {
+                    let error = prepare_query(&options)
+                        .err()
+                        .expect("nonidentity projections need the explicit spill profile");
+                    assert_eq!(error.code, 3, "{text}: {}", error.message);
+                    assert_eq!(error.class, "query", "{text}: {}", error.message);
+                    assert_eq!(options.params.canonical_bytes(), original);
+                    no_scratch(&directory);
+                    continue;
+                }
                 let prepared = okay(prepare_query(&options));
                 let expected = resident
                     .query(

@@ -2363,6 +2363,7 @@ mod graph_function_tests {
             "edges(a)",
             "path_length(a)",
             "labels(p)",
+            "type(p)",
             "type(a)",
             "nodes(missing)",
             "path_length(p, p)",

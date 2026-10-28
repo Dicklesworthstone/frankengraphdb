@@ -886,8 +886,9 @@ fn scalar_aliases_cannot_capture_graph_bindings_or_intercept_native_create_pipel
 #[test]
 fn distinct_key_vertex_upserts_freeze_and_every_other_upsert_batch_stays_sequential() {
     // fgdb-2l3pt: a batch whose rows MERGE pairwise distinct keys and write
-    // only key-free constants is staged once; anything a later row's MERGE
-    // could observe keeps the sequential program.
+    // key-free assignments is staged once; anything a later row's MERGE
+    // could observe keeps the sequential program. 365089054 also admits
+    // target-local arithmetic: unchanged distinct keys make targets disjoint.
     let distinct = rows(vec![
         object(vec![("id", int(1)), ("p", int(10))]),
         object(vec![("id", int(2)), ("p", int(20))]),
@@ -908,6 +909,7 @@ fn distinct_key_vertex_upserts_freeze_and_every_other_upsert_batch_stays_sequent
         "MERGE (n:Entity {id: row.id}) SET n.p = row.p",
         "MERGE (n:Entity {id: row.id}) ON CREATE SET n.p = row.p ON MATCH SET n.name = 'seen'",
         "MERGE (n:Entity {id: row.id}) SET n:Other",
+        "MERGE (n:Entity {id: row.id}) SET n.p = n.p + 1",
         // The row map rewrites the key with its own value.
         "MERGE (n:Entity {id: row.id}) SET n += row",
         // A plain MERGE has no actions at all.
@@ -933,8 +935,6 @@ fn distinct_key_vertex_upserts_freeze_and_every_other_upsert_batch_stays_sequent
         "MERGE (n:Entity {id: row.id}) SET n.id = row.p",
         // Writes a key label.
         "MERGE (n:Entity {id: row.id}) SET n:Entity",
-        // Reads the target's own state.
-        "MERGE (n:Entity {id: row.id}) SET n.p = n.p + 1",
     ] {
         assert!(
             !bind(tail, &distinct)

@@ -3275,6 +3275,7 @@ impl<'a> Parser<'a> {
                     .variables
                     .iter()
                     .any(|variable| variable.text == name)
+                    || self.syntax.names_path(name)
                     || self.syntax.visible_edge(name).is_some())
             {
                 return Ok(None);
