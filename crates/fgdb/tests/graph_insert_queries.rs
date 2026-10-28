@@ -9,7 +9,7 @@ use fgdb_gql::insertion::{
 };
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind,
-    PreparedGraphInsertText, PreparedGraphText,
+    PreparedGraphInsertQueryText, PreparedGraphInsertText, PreparedGraphText,
 };
 use fgdb_types::{
     CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
@@ -538,6 +538,225 @@ fn owner_basis_relation_and_exact_query_budgets_guard_the_public_creation_entryp
             )))
         ));
         assert_eq!(calls.get(), 0);
+        txn.abort();
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn multipart_creation_freezes_the_complete_correlated_bag_before_allocating() {
+    let ((), report) = run_async_under_lab(0xc8ea_0011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let basis = seed(&mut db, &commit).await;
+        let pinned = db.read_session().unwrap();
+        let original = pinned.vertices().unwrap();
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut prior = WriteBatch::new(R);
+        prior.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(11)));
+        txn.write(&mut db, prior).unwrap();
+
+        let resolutions = Cell::new(0);
+        let template = PreparedGraphInsertText::prepare(
+            "MATCH (a:Source) WITH a,a.p AS key UNWIND [0,1] AS occurrence \
+             MATCH (a)-[:R]->(b) WITH a,key,occurrence,b.p AS target \
+             CREATE (copy:Copy {p:key+occurrence+$offset,q:target}), (a)-[:R]->(copy)",
+            R,
+            |kind, name: &str| {
+                resolutions.set(resolutions.get() + 1);
+                symbols(kind, name)
+            },
+        )
+        .unwrap();
+        let resolved = resolutions.get();
+        let arguments = GqlParameters::new().with_int64("offset", 0).unwrap();
+        let insertion = template.bind_parameters(&arguments).unwrap();
+        assert_ne!(
+            insertion.canonical_bytes(),
+            template
+                .bind_parameters(&GqlParameters::new().with_int64("offset", 100).unwrap())
+                .unwrap()
+                .canonical_bytes()
+        );
+        let stats = txn
+            .execute_graph_insert_governed(&mut db, &cx, &insertion, policy(), allocator)
+            .unwrap();
+        // Two parallel a=1 -> b=2 relationships each survive both UNWIND
+        // occurrences; a=2 -> b=3 contributes the other two creations. New
+        // a -> copy edges cannot feed the still-running input MATCH again.
+        assert_eq!((stats.created_vertices, stats.created_edges), (6, 6));
+        assert_eq!(txn.edges(&db).unwrap().len(), 9);
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert_eq!(db.vertices().unwrap(), original);
+        assert_eq!(pinned.vertices().unwrap(), original);
+        assert_eq!(resolutions.get(), resolved);
+        assert_eq!(
+            txn.commit(&mut db, &commit).await.unwrap(),
+            CommitSeq(basis.0 + 1)
+        );
+
+        let verify = |db: &Database<MemVfs>| {
+            let copies: Vec<_> = db
+                .vertices()
+                .unwrap()
+                .into_iter()
+                .filter(|vertex| vertex.labels == [COPY])
+                .collect();
+            assert_eq!(copies.len(), 6);
+            let edges = db.edges().unwrap();
+            for (p, q, count) in [
+                (11, Some(20), 2),
+                (12, Some(20), 2),
+                (20, None, 1),
+                (21, None, 1),
+            ] {
+                let properties = vec![
+                    (P, CanonicalScalar::Int(p).into()),
+                    (
+                        Q,
+                        q.map_or(CanonicalScalar::Null, CanonicalScalar::Int).into(),
+                    ),
+                ];
+                assert_eq!(
+                    copies
+                        .iter()
+                        .filter(|vertex| vertex.props == properties)
+                        .count(),
+                    count
+                );
+                for copy in copies.iter().filter(|vertex| vertex.props == properties) {
+                    let incoming: Vec<_> = edges
+                        .iter()
+                        .filter(|edge| edge.entry.dst == copy.vid)
+                        .collect();
+                    assert_eq!(incoming.len(), 1);
+                    assert_eq!(incoming[0].entry.src, if p < 20 { VId(1) } else { VId(2) });
+                    assert_eq!(incoming[0].entry.relation, R);
+                }
+            }
+            assert_eq!(edges.len(), 9);
+        };
+        verify(&db);
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        verify(&db);
+        assert_eq!(pinned.vertices().unwrap(), original);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn optional_and_call_read_parts_feed_creation_with_their_native_cardinality() {
+    let ((), report) = run_async_under_lab(0xc8ea_0012, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        for (text, expected) in [
+            (
+                "MATCH (a:Source) WITH a,a.p AS key \
+                 OPTIONAL MATCH (a)-[:R]->(b) WHERE b.p >= 20 \
+                 WITH key,b.p AS target CREATE (copy:Copy {p:key,q:coalesce(target,-1)})",
+                vec![(10, 20), (10, 20), (20, -1)],
+            ),
+            (
+                "MATCH (a:Source) WITH a,a.p AS key \
+                 CALL { WITH a MATCH (a)-[:R]->(b) RETURN count(*) AS degree } \
+                 CREATE (copy:Copy {p:key,q:degree})",
+                vec![(10, 2), (20, 1)],
+            ),
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let basis = seed(&mut db, &commit).await;
+            let insertion = query(text);
+            let mut txn = db.begin(&txcx).unwrap();
+            let stats = txn
+                .execute_graph_insert_governed(&mut db, &cx, &insertion, policy(), allocator)
+                .unwrap();
+            assert_eq!(stats.created_vertices as usize, expected.len(), "{text}");
+            assert_eq!(stats.created_edges, 0);
+            txn.commit(&mut db, &commit).await.unwrap();
+            let mut actual = Vec::new();
+            for vertex in db
+                .vertices()
+                .unwrap()
+                .into_iter()
+                .filter(|v| v.labels == [COPY])
+            {
+                let pair = expected.iter().copied().find(|(p, q)| {
+                    vertex.props
+                        == vec![
+                            (P, CanonicalScalar::Int(*p).into()),
+                            (Q, CanonicalScalar::Int(*q).into()),
+                        ]
+                });
+                actual
+                    .push(pair.expect("every created property pair is in the independent oracle"));
+            }
+            actual.sort_unstable();
+            let mut expected = expected;
+            expected.sort_unstable();
+            assert_eq!(actual, expected, "{text}");
+            assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 1));
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn failing_multipart_input_allocates_nothing_even_with_a_zero_output_limit() {
+    let ((), report) = run_async_under_lab(0xc8ea_0013, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let basis = seed(&mut db, &commit).await;
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut prior = WriteBatch::new(R);
+        prior.create_vertex(VId(777), vec![], vec![]);
+        txn.write(&mut db, prior).unwrap();
+        let before = txn.staged_effect_digest().unwrap();
+        let requests = Cell::new(0);
+        let definition = PreparedGraphInsertQueryText::prepare(
+            "MATCH (a:Source) WITH a MATCH (a)-[:R]->(b) \
+             WITH 1/(20-a.p) AS value CREATE (copy:Copy {p:value}) RETURN copy.p LIMIT 0",
+            R,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        assert!(
+            txn.execute_graph_insert_query_governed(
+                &mut db,
+                &cx,
+                &definition,
+                policy(),
+                |request| {
+                    requests.set(requests.get() + 1);
+                    allocator(request)
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(requests.get(), 0);
+        assert_eq!(txn.staged_effect_digest().unwrap(), before);
+        assert!(txn.vertex(&db, VId(777)).unwrap().is_some());
+        assert_eq!(db.frontier().unwrap(), basis);
         txn.abort();
         assert_eq!(txcx.outstanding_obligations(), 0);
     });

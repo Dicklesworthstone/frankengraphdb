@@ -71,6 +71,93 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     }
 }
 
+#[test]
+fn multipart_read_before_create_masks_hidden_matches_and_freezes_optional_rows() {
+    lab(0xc4a1_2031, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        for (id, label, value) in [(1, L, 10), (2, L, 20), (3, L, 30), (4, HIDDEN, 40)] {
+            seed.create_vertex(VId(id), vec![label], vec![(P, CanonicalScalar::Int(value))]);
+        }
+        for (id, source, destination) in
+            [(11, 1, 2), (12, 1, 2), (13, 1, 4), (14, 4, 2), (15, 2, 3)]
+        {
+            seed.add_edge(EId(id), VId(source), VId(destination), vec![]);
+        }
+        db.write(&commit, seed).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let hidden = db.vertex(VId(4)).unwrap().unwrap();
+        let original_edges = db.edges().unwrap();
+        let issuer = authority();
+        let token = issuer
+            .issue_at(&grant(Rights::ReadWrite, 100), NOW)
+            .unwrap();
+        let definition = PreparedGraphInsertQueryText::prepare(
+            "MATCH (a:Visible) WITH a OPTIONAL MATCH (a)-[:R]->(b) \
+             WITH coalesce(b.p,-1) AS value CREATE (copy:Visible {p:value}) \
+             RETURN copy.p AS p ORDER BY p",
+            R,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let (stats, rows, completion) = db
+            .execute_graph_insert_query_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &definition,
+                policy(100),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        // The hidden endpoint and its incoming/outgoing matches contribute
+        // no row. The two visible parallel relationships remain two rows,
+        // and a=3 contributes exactly one NULL-extended optional row.
+        assert_eq!((stats.created_vertices, stats.created_edges), (4, 0));
+        assert_eq!(rows.value.len(), 4);
+        for (row, value) in rows.value.iter().zip([-1, 20, 20, 30]) {
+            assert_eq!(
+                row.values(),
+                &[GraphValue::Scalar(CanonicalScalar::Int(value))]
+            );
+        }
+        assert!(matches!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted { commit_seq } if commit_seq.0 == basis.0 + 1
+        ));
+        assert_eq!(db.vertex(VId(4)).unwrap().unwrap(), hidden);
+        assert_eq!(db.edges().unwrap(), original_edges);
+        assert_eq!(db.vertices().unwrap().len(), 8);
+
+        let before = (db.frontier().unwrap(), db.vertices().unwrap());
+        let write_only = issuer.issue_at(&grant(Rights::Write, 100), NOW).unwrap();
+        assert!(
+            db.execute_graph_insert_query_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &write_only,
+                "main",
+                &definition,
+                policy(100),
+                || NOW,
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
 fn chain(text: &str) -> PreparedGraphWriteChain {
     assert!(
         PreparedGraphWriteChainText::is_chain(text).unwrap(),

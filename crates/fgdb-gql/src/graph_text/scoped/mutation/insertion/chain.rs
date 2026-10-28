@@ -987,7 +987,9 @@ impl PreparedGraphWriteChainText {
                     }
                     let selection = match &insertion.input {
                         InsertTextInput::Match(selection) => Some(selection.bind_values(&values)?),
-                        InsertTextInput::Relation { .. } | InsertTextInput::Unit { .. } => None,
+                        InsertTextInput::Relation { .. }
+                        | InsertTextInput::Multipart { .. }
+                        | InsertTextInput::Unit { .. } => None,
                     };
                     let bound = insertion.instantiate(selection, Some(&values))?;
                     steps.push(match returning {

@@ -15,7 +15,7 @@ use crate::insertion_text::{
     InsertVertexTemplate, PreparedGraphInsertText,
 };
 use crate::set_text::{BoundSetTextInput, ReadStageTemplate, ReadValueTemplate};
-use crate::{GraphIntegerExpression, GraphIntegerOp, GraphSetColumnType, PreparedGraphSet};
+use crate::{GraphIntegerExpression, GraphIntegerOp, GraphSetColumnType};
 
 type ParsedFields<'a> = Vec<(Name<'a>, ReadValueTemplate)>;
 struct NewVertex<'a> {
@@ -965,6 +965,67 @@ pub(super) fn shape_arguments(parameters: &[GqlParameterSpec]) -> Vec<GqlParamet
 }
 
 impl PreparedGraphInsertText {
+    /// Framing only: the first write must be CREATE/INSERT and its preceding
+    /// read must contain a real multipart boundary. The native multipart and
+    /// insertion parsers still validate every token before catalog access.
+    pub(in crate::graph_text::scoped::mutation) fn has_multipart_source(
+        statement: &str,
+        declarations: &[(&str, GqlParameterType)],
+    ) -> Result<bool, GraphPatternTextError> {
+        use crate::set_text::TextKind;
+        let tokens = PreparedGraphText::composition_tokens(statement, declarations)?;
+        let word = |index: usize, expected: &str| {
+            tokens.get(index).is_some_and(|token| {
+                matches!(token.kind, TextKind::Word(word) if word.eq_ignore_ascii_case(expected))
+            })
+        };
+        let punct = |index: usize, byte: u8| {
+            tokens
+                .get(index)
+                .is_some_and(|token| matches!(token.kind, TextKind::Punct(found) if found == byte))
+        };
+        let mut depth = 0_usize;
+        for (index, token) in tokens.iter().enumerate() {
+            match token.kind {
+                TextKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TextKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                TextKind::Word(name) if depth == 0 => {
+                    if index.checked_sub(1).is_some_and(|previous| {
+                        punct(previous, b'.')
+                            || punct(previous, b':')
+                            || ["AS", "ON", "STARTS", "ENDS"]
+                                .iter()
+                                .any(|name| word(previous, name))
+                    }) {
+                        continue;
+                    }
+                    if ["MERGE", "SET", "REMOVE", "DELETE", "DETACH"]
+                        .iter()
+                        .any(|write| name.eq_ignore_ascii_case(write))
+                    {
+                        return Ok(false);
+                    }
+                    if (name.eq_ignore_ascii_case("CREATE") || name.eq_ignore_ascii_case("INSERT"))
+                        && (punct(index + 1, b'(')
+                            || (matches!(
+                                tokens.get(index + 1).map(|token| token.kind),
+                                Some(TextKind::Word(_))
+                            ) && punct(index + 2, b'=')
+                                && punct(index + 3, b'(')))
+                    {
+                        return Ok(
+                            crate::set_text::multipart::has_continuation(&tokens[..index])
+                                || word(0, "OPTIONAL")
+                                || word(0, "CALL"),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(false)
+    }
+
     /// Prepare INSERT (a:Label {p:$value})-[:R]->(b), optionally after MATCH.
     /// The openCypher CREATE spelling lowers to the identical insertion program.
     /// Names are declared on first occurrence and bare repetitions share their
@@ -1029,6 +1090,16 @@ impl PreparedGraphInsertText {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones());
         parser.chain_write = chain;
+        if Self::has_multipart_source(statement, declarations)? {
+            return Self::prepare_after_multipart(
+                parser,
+                statement,
+                relation,
+                declarations,
+                resolve,
+                returning,
+            );
+        }
         let (leading, mut row_schema) = parser.insertion_unwind_prefix()?;
         let mut matched = parser.insertion_match_prefix(&row_schema)?;
         // MATCH ... WITH ... CREATE reads the WITH row through the write-row
@@ -1409,7 +1480,7 @@ impl PreparedGraphInsertText {
         let selection = match &mut input {
             InsertTextInput::Match(selection) => Some(selection),
             InsertTextInput::Relation { input, .. } => input.selection.as_mut(),
-            InsertTextInput::Unit { .. } => None,
+            InsertTextInput::Multipart { .. } | InsertTextInput::Unit { .. } => None,
         };
         let source_metadata = selection.as_ref().is_some_and(|selection| {
             selection.columns.iter().any(|column| {
@@ -1478,7 +1549,101 @@ impl PreparedGraphInsertText {
             at,
             parsed,
             returning,
-            input,
+            InsertTextInput::Relation {
+                statement: statement.to_owned(),
+                input,
+            },
+        )?;
+        Ok((template, returning, continuation))
+    }
+
+    /// Complete read parts feed one insertion occurrence bag. Freeze computed
+    /// property values in that relation too: the insertion collector has no
+    /// ambient graph reader, and must never re-read a partially written graph.
+    fn prepare_after_multipart<'a>(
+        mut parser: Parser<'a>,
+        statement: &'a str,
+        relation: RelationId,
+        declarations: &[(&str, GqlParameterType)],
+        mut resolve: impl GraphSymbolResolver,
+        returning: bool,
+    ) -> Result<InsertStep<'a>, GraphInsertTextError> {
+        let (mut source, schema) = parser.multipart_write_prefix(statement, declarations)?;
+        let at = parser.current.at;
+        let (mut parsed, returning, continuation) =
+            parser.insertion_over_row(&schema, returning)?;
+        let mut projection: Vec<_> = schema
+            .iter()
+            .enumerate()
+            .map(
+                |(column, (name, _))| crate::set_text::ReadProjectionTemplate {
+                    name: name.text.to_owned(),
+                    value: ReadValueTemplate::Column(column),
+                },
+            )
+            .collect();
+        for (_, value) in parsed
+            .vertices
+            .iter_mut()
+            .flat_map(|vertex| &mut vertex.properties)
+            .chain(
+                parsed
+                    .edges
+                    .iter_mut()
+                    .flat_map(|edge| &mut edge.properties),
+            )
+        {
+            if matches!(
+                value,
+                ReadValueTemplate::MapLiteral { .. } | ReadValueTemplate::MapOverlay { .. }
+            ) {
+                return Err(GraphInsertTextError {
+                    offset: at,
+                    kind: GraphInsertTextErrorKind::Expression(
+                        GraphMutationTextErrorKind::IntegerOperand,
+                    ),
+                });
+            }
+            parser.capacity(
+                projection.len(),
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
+            let column = projection.len();
+            let mut suffix = column;
+            let name = loop {
+                let name = format!("__fg_insert_value_{suffix}");
+                if projection.iter().all(|input| input.name != name) {
+                    break name;
+                }
+                suffix += 1;
+            };
+            projection.push(crate::set_text::ReadProjectionTemplate {
+                name,
+                value: core::mem::replace(value, ReadValueTemplate::Column(column)),
+            });
+        }
+        if projection.len() != schema.len() {
+            source.append_stages(vec![ReadStageTemplate::Project {
+                at,
+                projection,
+                quantifier: crate::GraphSetQuantifier::All,
+            }]);
+        }
+        source.share_parameters(&parser.syntax.parameters, &parser.syntax.parameter_offsets);
+        source.append_element_keys(&mut parser.syntax.element_keys);
+        let input = source.resolve(&mut resolve)?;
+        let (template, returning) = Self::finish_over_row(
+            statement,
+            relation,
+            &mut resolve,
+            at,
+            parsed,
+            returning,
+            InsertTextInput::Multipart {
+                statement: statement.to_owned(),
+                input,
+            },
         )?;
         Ok((template, returning, continuation))
     }
@@ -1563,7 +1728,10 @@ impl PreparedGraphInsertText {
             at,
             parsed,
             returning,
-            input,
+            InsertTextInput::Relation {
+                statement: statement.to_owned(),
+                input,
+            },
         )?;
         Ok((template, returning, continuation))
     }
@@ -1577,7 +1745,7 @@ impl PreparedGraphInsertText {
         at: usize,
         parsed: InsertionSyntax<'_>,
         returning: Option<query::ParsedReturn<'_>>,
-        mut input: BoundSetTextInput,
+        mut input: InsertTextInput,
     ) -> Result<
         (
             Self,
@@ -1646,7 +1814,13 @@ impl PreparedGraphInsertText {
                 )
             })
         });
-        let source_metadata = input.selection.as_ref().is_some_and(|selection| {
+        let selection = match &mut input {
+            InsertTextInput::Relation { input, .. } => input.selection.as_mut(),
+            // Every multipart graph leaf already resolved its own metadata.
+            InsertTextInput::Multipart { .. } => None,
+            _ => unreachable!("a row insertion owns a relational input"),
+        };
+        let source_metadata = selection.as_ref().is_some_and(|selection| {
             selection.columns.iter().any(|column| {
                 matches!(
                     column.path,
@@ -1663,7 +1837,7 @@ impl PreparedGraphInsertText {
                 &mut *resolve,
                 statement,
             ));
-            if let Some(selection) = input.selection.as_mut() {
+            if let Some(selection) = selection {
                 selection.reverse_catalog = Some(std::sync::Arc::clone(&catalog));
             }
             if created_maps {
@@ -1674,10 +1848,7 @@ impl PreparedGraphInsertText {
             }
         }
         let template = Self {
-            input: InsertTextInput::Relation {
-                statement: statement.to_owned(),
-                input,
-            },
+            input,
             relation,
             vertices,
             edges,
@@ -1696,7 +1867,8 @@ impl PreparedGraphInsertText {
     pub fn statement(&self) -> &str {
         match &self.input {
             InsertTextInput::Match(selection) => selection.statement(),
-            InsertTextInput::Relation { statement, .. } => statement,
+            InsertTextInput::Relation { statement, .. }
+            | InsertTextInput::Multipart { statement, .. } => statement,
             InsertTextInput::Unit { statement, .. } => statement,
         }
     }
@@ -1705,6 +1877,7 @@ impl PreparedGraphInsertText {
         match &self.input {
             InsertTextInput::Match(selection) => selection.parameter_schema(),
             InsertTextInput::Relation { input, .. } => input.parameter_schema(),
+            InsertTextInput::Multipart { input, .. } => input.parameter_schema(),
             InsertTextInput::Unit { parameters, .. } => parameters,
         }
     }
@@ -1716,7 +1889,9 @@ impl PreparedGraphInsertText {
         let values = self.checked_arguments(arguments)?;
         let selection = match &self.input {
             InsertTextInput::Match(selection) => Some(selection.bind_values(&values)?),
-            InsertTextInput::Relation { .. } | InsertTextInput::Unit { .. } => None,
+            InsertTextInput::Relation { .. }
+            | InsertTextInput::Multipart { .. }
+            | InsertTextInput::Unit { .. } => None,
         };
         self.instantiate(selection, Some(&values))
     }
@@ -1728,6 +1903,7 @@ impl PreparedGraphInsertText {
         match &self.input {
             InsertTextInput::Match(selection) => Ok(selection.checked_arguments(arguments)?),
             InsertTextInput::Relation { input, .. } => Ok(input.checked_arguments(arguments)?),
+            InsertTextInput::Multipart { input, .. } => Ok(input.checked_arguments(arguments)?),
             InsertTextInput::Unit {
                 statement,
                 parameters,
@@ -1793,16 +1969,16 @@ impl PreparedGraphInsertText {
                 properties: bind_fields(&edge.properties, values, &shape)?,
             });
         }
-        if let InsertTextInput::Relation { input, .. } = &self.input {
-            let shape;
-            let values = match values {
-                Some(values) => values,
-                None => {
-                    shape = shape_arguments(input.parameter_schema());
-                    &shape
-                }
-            };
-            let relation: PreparedGraphSet = input.bind_values(values)?;
+        let relation = match &self.input {
+            InsertTextInput::Relation { input, .. } => {
+                Some(input.bind_values(values.unwrap_or(&shape))?)
+            }
+            InsertTextInput::Multipart { input, .. } => {
+                Some(input.bind_values(values.unwrap_or(&shape))?)
+            }
+            _ => None,
+        };
+        if let Some(relation) = relation {
             return PreparedGraphInsert::prepare_relation(relation, self.relation, vertices, edges)
                 .map_err(|kind| insertion_build(self.create_at, kind));
         }

@@ -1574,6 +1574,83 @@ impl<'a> Parser<'a> {
         Ok((result, schema, depth))
     }
 
+    /// A first CREATE/INSERT reads the complete native relation before any
+    /// identities or effects exist. Leave the write token and the statement's
+    /// live parameter table with its owner; no manufactured RETURN is needed.
+    pub(in crate::graph_text::scoped::mutation) fn multipart_write_prefix(
+        &mut self,
+        statement: &'a str,
+        declarations: &[(&str, GqlParameterType)],
+    ) -> Result<(UnresolvedReadInput<'a>, RowSchema<'a>), GraphSetTextError> {
+        let tokens = PreparedGraphText::composition_tokens(statement, declarations)?;
+        let zones = self.zones.clone();
+        let chain_write = self.chain_write;
+        let parse = |deferred: &[usize], implicit: &[usize]| -> Result<_, GraphSetTextError> {
+            let mut parser =
+                Self::new_with_parameter_types(statement, declarations)?.with_zones(zones.clone());
+            parser.deferred_wheres = deferred.to_vec();
+            parser.implicit_withs = implicit.to_vec();
+            parser.chain_write = chain_write;
+            parser.read_elements = true;
+            parser.call_element_reads = true;
+            parser.write_prefix = true;
+            let (input, schema) = parser.multipart_parts(statement, true)?;
+            parser.write_prefix = false;
+            if !parser.is_word("CREATE") && !parser.is_word("INSERT") {
+                return Err(expected(
+                    parser.current.at,
+                    "CREATE or INSERT after the complete read",
+                ));
+            }
+            parser.admit_multipart_size(&input)?;
+            Ok((parser, input, schema))
+        };
+        // The same unresolved normalization as an ordinary multipart read:
+        // computed/imported WHERE values get their real row boundary, while
+        // an OPTIONAL predicate remains inside the optional Apply. Re-reading
+        // here resolves no catalog symbol and cannot issue a graph access.
+        let (parser, input, schema) = match parse(&[], &[]) {
+            Ok(input) => input,
+            Err(original) => {
+                let (mut deferred, mut implicit) = (Vec::new(), Vec::new());
+                let mut offset = original.offset;
+                loop {
+                    if let Some(at) =
+                        crate::set_text::multipart::continuation_where_at(&tokens, offset)
+                            .or_else(|| {
+                                crate::set_text::multipart::existence_where_at(&tokens, offset)
+                            })
+                            .filter(|at| !deferred.contains(at))
+                    {
+                        deferred.push(at);
+                    } else if let Some(at) =
+                        crate::set_text::multipart::implicit_with_at(&tokens, offset)
+                            .filter(|at| !implicit.contains(at))
+                    {
+                        implicit.push(at);
+                    } else if let Some(at) =
+                        crate::set_text::multipart::optional_where_at(&tokens, offset)
+                            .filter(|at| !deferred.contains(at))
+                    {
+                        deferred.push(at);
+                    } else {
+                        return Err(original);
+                    }
+                    match parse(&deferred, &implicit) {
+                        Ok(input) => break input,
+                        Err(error) => offset = error.offset,
+                    }
+                }
+            }
+        };
+        *self = parser;
+        Ok((input, schema))
+    }
+
+    fn at_multipart_write(&self) -> bool {
+        self.write_prefix && !self.call_body && (self.is_word("CREATE") || self.is_word("INSERT"))
+    }
+
     fn multipart_parts(
         &mut self,
         statement: &'a str,
@@ -1797,6 +1874,9 @@ impl<'a> Parser<'a> {
         aggregate: bool,
     ) -> Result<(Vec<ReadStageTemplate>, RowSchema<'a>, bool), GraphSetTextError> {
         let (mut stages, mut schema, _) = self.row_pipeline_prefix(schema)?;
+        if self.at_multipart_write() {
+            return Ok((stages, schema, true));
+        }
         if !self.is_word("RETURN") || self.row_existence_projection(schema.len())? {
             return Ok((stages, schema, false));
         }
@@ -2363,6 +2443,7 @@ impl<'a> Parser<'a> {
         // Graph8 [4]: `OPTIONAL MATCH (n) UNWIND keys(n) AS x RETURN ...`).
         let before_call = self.inline_call()?;
         let before_existence = self.returning_existence_projection()?;
+        let before_write = self.at_multipart_write();
         // An inline CALL body's aggregating RETURN reads every binding at an
         // implicit `WITH *` and aggregates those rows, once per outer row.
         let body_aggregate = self.call_body && self.return_has_aggregate()?;
@@ -2377,6 +2458,7 @@ impl<'a> Parser<'a> {
             && deferred.is_none()
             && !self.is_word("WITH")
             && !before_call
+            && !before_write
             && !(kind.is_none() && self.is_word("UNWIND"))
             && !self.implicit_withs.contains(&self.current.at)
         {
@@ -2404,7 +2486,7 @@ impl<'a> Parser<'a> {
             self.current = at_where;
             head
         } else if kind.is_none() {
-            if before_call || body_aggregate || before_existence {
+            if before_call || body_aggregate || before_existence || before_write {
                 self.implicit_with_head()?
             } else {
                 self.graph_projection_head()?
@@ -2541,6 +2623,7 @@ impl<'a> Parser<'a> {
         if aggregate && self.is_word("RETURN") && !self.row_existence_projection(next.len())? {
             terminal = true;
         }
+        terminal |= self.at_multipart_write();
         if !row_fields.is_empty() {
             self.capacity(
                 incoming.len() + head.inputs.len() + row_fields.len() - 1,
@@ -2598,7 +2681,8 @@ impl<'a> Parser<'a> {
         // An OPTIONAL part that stopped at the next clause, or any part that
         // stopped at an implicit boundary (implicit_withs): `WITH *`.
         let implicit = (optional && (self.is_word("OPTIONAL") || self.is_word("MATCH")))
-            || self.implicit_withs.contains(&self.current.at);
+            || self.implicit_withs.contains(&self.current.at)
+            || self.at_multipart_write();
         if !implicit && self.with_has_aggregate()? {
             return self.with_graph_head(incoming, inputs, optional);
         }

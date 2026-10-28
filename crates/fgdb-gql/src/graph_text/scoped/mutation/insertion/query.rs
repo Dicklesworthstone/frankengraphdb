@@ -341,10 +341,14 @@ impl<'a> ParsedReturn<'a> {
                 }
                 // An imported map's `row.key` reads that entry through a let
                 // slot after this leaf, as CREATE's insertion_source_value
-                // does (fgdb-0s2pq). A scalar, list or element import keeps
-                // its refusal below.
+                // does (fgdb-0s2pq). A multipart read's carried element has
+                // the same governed identity reader as its CALL output.
+                // Other scalar/list imports keep their refusal below.
                 let kind = source[imported].1;
-                if matches!(kind, GraphSetColumnType::Any | GraphSetColumnType::Stored) {
+                if matches!(kind, GraphSetColumnType::Any | GraphSetColumnType::Stored)
+                    || (parser.call_element_reads
+                        && matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge))
+                {
                     let name = parser.name()?;
                     parser.resolved_entries = true;
                     return self.column(Binding::Input(imported), name, kind).map(Some);
@@ -942,7 +946,7 @@ impl PreparedGraphInsertQueryText {
             tokens: 0,
         };
         let first = script::next_script_token(&mut lexer)?;
-        if !matches!(first.kind, TokenKind::Word(word) if ["CREATE", "INSERT", "UNWIND", "WITH", "MATCH"].iter().any(|kind| word.eq_ignore_ascii_case(kind)))
+        if !matches!(first.kind, TokenKind::Word(word) if ["CREATE", "INSERT", "UNWIND", "WITH", "MATCH", "OPTIONAL", "CALL"].iter().any(|kind| word.eq_ignore_ascii_case(kind)))
         {
             return Ok(false);
         }
@@ -971,10 +975,18 @@ impl PreparedGraphInsertQueryText {
                         // a node pattern. Peek without consuming the original
                         // stream or changing its token-budget accounting.
                         let mut lookahead = lexer.clone();
-                        if matches!(
-                            script::next_script_token(&mut lookahead)?.kind,
-                            TokenKind::Punct(b'(')
-                        ) {
+                        let first = script::next_script_token(&mut lookahead)?.kind;
+                        if matches!(first, TokenKind::Punct(b'('))
+                            || (matches!(first, TokenKind::Word(_))
+                                && matches!(
+                                    script::next_script_token(&mut lookahead)?.kind,
+                                    TokenKind::Punct(b'=')
+                                )
+                                && matches!(
+                                    script::next_script_token(&mut lookahead)?.kind,
+                                    TokenKind::Punct(b'(')
+                                ))
+                        {
                             created = true;
                         }
                     }
@@ -1035,7 +1047,9 @@ impl PreparedGraphInsertQueryText {
         let values = self.insertion.checked_arguments(arguments)?;
         let selection = match &self.insertion.input {
             InsertTextInput::Match(selection) => Some(selection.bind_values(&values)?),
-            InsertTextInput::Relation { .. } | InsertTextInput::Unit { .. } => None,
+            InsertTextInput::Relation { .. }
+            | InsertTextInput::Multipart { .. }
+            | InsertTextInput::Unit { .. } => None,
         };
         let insertion = self.insertion.instantiate(selection, Some(&values))?;
         self.returning.bind(insertion, &values)

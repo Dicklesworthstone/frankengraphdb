@@ -595,6 +595,282 @@ fn run_matched(
     )
 }
 
+struct MultipartInsertSource<'a> {
+    vertices: &'a [VId],
+    edges: &'a [Triple],
+    properties: &'a Props,
+}
+
+impl fgdb_gql::GraphSetSource<(), ()> for MultipartInsertSource<'_> {
+    fn pattern(
+        &mut self,
+        selection: &fgdb_gql::algebra::PreparedGraphPattern<GraphValueRow>,
+        allowance: GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<(), ()>> {
+        selection.plan().execute_governed_with_properties(
+            (self.vertices.len() + self.edges.len()) as u64,
+            self.vertices.iter().copied(),
+            self.edges.iter().copied(),
+            |vid, predicates| {
+                Ok(predicates.iter().all(|predicate| {
+                    predicate.matches_borrowed(
+                        [],
+                        self.properties.iter().filter_map(|(&(owner, key), value)| {
+                            (owner == vid).then_some((key, value))
+                        }),
+                    )
+                }))
+            },
+            |vid, key| Ok(self.properties.get(&(vid, key))),
+            allowance,
+            || Ok(()),
+        )
+    }
+
+    fn element_property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<CanonicalPropertyValue>, ()>> {
+        Some(Ok(match element {
+            ElementId::Vertex(vertex) => self.properties.get(&(vertex, key)).cloned(),
+            ElementId::Edge(_) => None,
+        }))
+    }
+}
+
+#[test]
+fn multipart_read_bag_is_frozen_before_first_creation_and_rebinds_without_catalog_calls() {
+    let text = "MATCH (a) WHERE a.p < $ceiling WITH a,a.p AS key \
+        UNWIND [0,1] AS occurrence MATCH (a)-[:R]->(b) \
+        WITH a,key,occurrence,b.p AS target \
+        CREATE (copy:Copy {p:key+occurrence+$step,q:target}),(a)-[:R]->(copy) \
+        RETURN copy.p AS copied,copy.q AS target ORDER BY copied,target";
+    let calls = Cell::new(0);
+    let template = PreparedGraphInsertQueryText::prepare(text, R, |kind, name: &str| {
+        calls.set(calls.get() + 1);
+        symbols(kind, name)
+    })
+    .unwrap();
+    let resolved = calls.get();
+    let vertices = [VId(1), VId(2), VId(3)];
+    let edges = [
+        (VId(1), R, VId(2)),
+        (VId(1), R, VId(2)),
+        (VId(2), R, VId(3)),
+    ];
+    let properties = Props::from([
+        ((VId(1), P), CanonicalScalar::Int(10).into()),
+        ((VId(2), P), CanonicalScalar::Int(20).into()),
+        ((VId(3), P), CanonicalScalar::Int(30).into()),
+    ]);
+    for (ceiling, step, expected) in [
+        (
+            30,
+            1,
+            vec![(11, 20), (11, 20), (12, 20), (12, 20), (21, 30), (22, 30)],
+        ),
+        (20, 4, vec![(14, 20), (14, 20), (15, 20), (15, 20)]),
+        (0, 9, vec![]),
+    ] {
+        let arguments = GqlParameters::new()
+            .with_int64("ceiling", ceiling)
+            .unwrap()
+            .with_int64("step", step)
+            .unwrap();
+        let query = template.bind_parameters(&arguments).unwrap();
+        assert_eq!(calls.get(), resolved);
+        assert_eq!(
+            query.canonical_bytes(),
+            template
+                .bind_parameters(&arguments)
+                .unwrap()
+                .canonical_bytes()
+        );
+        let mut allowance = policy();
+        allowance.query = GqlQueryPolicy::new(1_000, 1_000, 2_000_000, 1_000_000);
+        let batch = query
+            .execute_governed_with_source(
+                allowance,
+                MultipartInsertSource {
+                    vertices: &vertices,
+                    edges: &edges,
+                    properties: &properties,
+                },
+                identity,
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(
+            values(&batch),
+            expected
+                .iter()
+                .map(|&(a, b)| vec![int(a), int(b)])
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            batch.insertion().stats().created_vertices as usize,
+            expected.len()
+        );
+        assert_eq!(
+            batch.insertion().stats().created_edges as usize,
+            expected.len()
+        );
+        assert_eq!(batch.insertion().intents().len(), expected.len() * 2);
+    }
+}
+
+#[test]
+fn optional_and_read_call_parts_feed_first_create_with_their_own_cardinality() {
+    let vertices = [VId(1), VId(2), VId(3)];
+    let edges = [
+        (VId(1), R, VId(2)),
+        (VId(1), R, VId(2)),
+        (VId(2), R, VId(3)),
+    ];
+    let properties = Props::from([
+        ((VId(1), P), CanonicalScalar::Int(10).into()),
+        ((VId(2), P), CanonicalScalar::Int(20).into()),
+        ((VId(3), P), CanonicalScalar::Int(30).into()),
+    ]);
+    for (text, expected) in [
+        (
+            "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) \
+          WITH coalesce(b.p,-1) AS value CREATE (copy:Copy {p:value}) RETURN copy.p ORDER BY copy.p",
+            vec![-1, 20, 20, 30],
+        ),
+        (
+            "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) WHERE b.p>=30 \
+          WITH coalesce(b.p,-1) AS value CREATE (copy:Copy {p:value}) RETURN copy.p ORDER BY copy.p",
+            vec![-1, -1, 30],
+        ),
+        (
+            "MATCH (a) WITH a,30 AS floor OPTIONAL MATCH (a)-[:R]->(b) WHERE b.p+1>floor \
+          CREATE (copy:Copy {p:coalesce(b.p,-1)}) RETURN copy.p ORDER BY copy.p",
+            vec![-1, -1, 30],
+        ),
+        (
+            "MATCH (a) WITH a CALL { WITH a MATCH (a)-[:R]->(b) RETURN count(*) AS degree } \
+          CREATE (copy:Copy {p:degree}) RETURN copy.p ORDER BY copy.p",
+            vec![0, 1, 2],
+        ),
+        (
+            "UNWIND [{key:20},{key:10}] AS row MATCH (a {p:row.key}) \
+          CREATE (copy:Copy {p:a.p}) RETURN copy.p ORDER BY copy.p",
+            vec![10, 20],
+        ),
+        (
+            "UNWIND [{key:20},{key:10}] AS row MATCH (a {p:row.key}) WITH a \
+          MATCH (a)-[:R]->(b) CREATE (copy:Copy {p:a.p+b.p}) RETURN copy.p ORDER BY copy.p",
+            vec![30, 30, 50],
+        ),
+        (
+            "CALL { RETURN 7 AS value } INSERT (copy:Copy {p:value}) RETURN copy.p",
+            vec![7],
+        ),
+    ] {
+        assert!(
+            PreparedGraphInsertQueryText::has_return_clause(text).unwrap(),
+            "{text}"
+        );
+        let query = prepare(text);
+        let mut allowance = policy();
+        allowance.query = GqlQueryPolicy::new(1_000, 1_000, 2_000_000, 1_000_000);
+        let batch = query
+            .execute_governed_with_source(
+                allowance,
+                MultipartInsertSource {
+                    vertices: &vertices,
+                    edges: &edges,
+                    properties: &properties,
+                },
+                identity,
+                || Ok(()),
+            )
+            .expect(text);
+        assert_eq!(
+            values(&batch),
+            expected
+                .into_iter()
+                .map(|value| vec![int(value)])
+                .collect::<Vec<_>>(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn multipart_source_and_late_field_errors_precede_allocation_even_with_limit_zero() {
+    let query = prepare(
+        "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) \
+        WITH a.p AS value CREATE (copy:Copy {p:1/(20-value)}) RETURN copy.p LIMIT 0",
+    );
+    let vertices = [VId(1), VId(2)];
+    let properties = Props::from([
+        ((VId(1), P), CanonicalScalar::Int(10).into()),
+        ((VId(2), P), CanonicalScalar::Int(20).into()),
+    ]);
+    let allocated = Cell::new(0);
+    let mut allowance = policy();
+    allowance.query = GqlQueryPolicy::new(1_000, 1_000, 2_000_000, 1_000_000);
+    let result = query.execute_governed_with_source(
+        allowance,
+        MultipartInsertSource {
+            vertices: &vertices,
+            edges: &[],
+            properties: &properties,
+        },
+        |request| {
+            allocated.set(allocated.get() + 1);
+            identity(request)
+        },
+        || Ok(()),
+    );
+    assert!(result.is_err());
+    assert_eq!(allocated.get(), 0);
+    let result = query.execute_governed(
+        allowance,
+        |_, _| Err(GqlQueryError::<(), ()>::Source(())),
+        |request| {
+            allocated.set(allocated.get() + 1);
+            identity(request)
+        },
+        || Ok(()),
+    );
+    assert!(result.is_err());
+    assert_eq!(allocated.get(), 0);
+}
+
+#[test]
+fn multipart_insert_scope_and_read_only_call_errors_precede_catalog_resolution() {
+    for text in [
+        "MATCH (a) WITH a.p AS value MATCH (b) CREATE (copy {p:a.p}) RETURN copy",
+        "MATCH (a) WITH a CALL { WITH a CREATE (b) RETURN b } CREATE (copy) RETURN copy",
+        "MATCH (a) WITH a MATCH (b) RETURN b CREATE (copy) RETURN copy",
+        "MATCH (a) WITH a MATCH (b) CREATE (copy {p:missing}) RETURN copy",
+    ] {
+        let calls = Cell::new(0);
+        assert!(
+            PreparedGraphInsertQueryText::prepare(text, R, |kind, name: &str| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(calls.get(), 0, "{text}");
+    }
+    for text in [
+        "MATCH (a) WITH a MATCH (b) CREATE (a)-[:R]->(b)",
+        "MATCH (a) WITH a OPTIONAL MATCH (a)-[:R]->(b) WITH coalesce(b.p,0) AS value CREATE (copy {p:value})",
+        "CALL { MATCH (a) RETURN count(*) AS total } CREATE (copy {p:total})",
+    ] {
+        let script = fgdb_gql::PreparedGraphWriteScript::prepare(text, R, symbols).expect(text);
+        assert!(script.requires_read(), "{text}");
+        script.bind_parameters(&GqlParameters::new()).expect(text);
+    }
+}
+
 #[test]
 fn matched_creation_returns_original_and_created_bindings_for_every_occurrence() {
     let calls = Cell::new(0);

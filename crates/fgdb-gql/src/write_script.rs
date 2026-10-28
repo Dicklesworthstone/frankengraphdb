@@ -280,6 +280,9 @@ impl PreparedGraphWriteScript {
                     // source spelling or an assumed empty occurrence bag.
                     input.selection.is_some()
                 }
+                crate::insertion_text::InsertTextInput::Multipart { input, .. } => {
+                    input.graph_source_count() != 0
+                }
                 crate::insertion_text::InsertTextInput::Unit { .. } => false,
             },
             GraphWriteTemplateStatement::Mutation(_)

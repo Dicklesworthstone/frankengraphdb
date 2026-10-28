@@ -112,6 +112,12 @@ pub(crate) enum InsertTextInput {
         statement: String,
         input: crate::set_text::BoundSetTextInput,
     },
+    /// A complete read pipeline, including correlated MATCH, OPTIONAL MATCH
+    /// and read-only CALL parts, frozen before the first insertion.
+    Multipart {
+        statement: String,
+        input: crate::set_text::multipart::BoundReadInput,
+    },
     Unit {
         statement: String,
         parameters: Vec<GqlParameterSpec>,
