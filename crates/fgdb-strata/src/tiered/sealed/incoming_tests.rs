@@ -1197,3 +1197,390 @@ fn benchmark_sealed_incoming_stream_against_positional() {
         );
     }
 }
+
+// Sort laws exercise the shared immediate/cooperative implementation. Checkpoint
+// counts follow the chosen algorithm; refusal handling and permutation safety
+// must hold at every checkpoint, including after genuine suspension.
+fn drive_sort_future<F: std::future::Future>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    loop {
+        if let std::task::Poll::Ready(result) = future.as_mut().poll(&mut cx) {
+            return result;
+        }
+    }
+}
+#[test]
+fn exhaustive_duplicate_inputs_preserve_complete_order() {
+    for n in 0..=9_u32 {
+        for encoded in 0..3_usize.pow(n) {
+            let mut code = encoded;
+            let mut values: Vec<_> = (0..n)
+                .map(|_| {
+                    let value = code % 3;
+                    code /= 3;
+                    value
+                })
+                .collect();
+            let mut expected = values.clone();
+            expected.sort_unstable();
+            construction::sort_sync(&mut values, &mut || Ok(())).unwrap();
+            assert_eq!(values, expected);
+        }
+    }
+}
+#[test]
+fn full_width_tuples_and_forced_heap_fallback_match_std() {
+    for n in [
+        0_usize, 1, 2, 15, 16, 17, 31, 32, 33, 83, 127, 128, 129, 257, 4097,
+    ] {
+        for shape in 0..5 {
+            let input: Vec<_> = (0..n)
+                .map(|i| {
+                    let key = match shape {
+                        0 => (i.wrapping_mul(19997) % (n + 1)) as u128,
+                        1 => (n - i) as u128,
+                        2 => i.min(n - i) as u128,
+                        3 => (i % 5) as u128,
+                        _ => {
+                            if i == 0 {
+                                u64::MAX as u128
+                            } else {
+                                i as u128
+                            }
+                        }
+                    };
+                    ((key << 64) | (i % 3) as u128, (i % 7) as u64, i as u64)
+                })
+                .collect();
+            let mut expected = input.clone();
+            expected.sort_unstable();
+            let mut values = input.clone();
+            construction::sort_sync(&mut values, &mut || Ok(())).unwrap();
+            assert_eq!(values, expected);
+            let mut incumbent = input.clone();
+            construction::heap_sort_sync(&mut incumbent, &mut || Ok(())).unwrap();
+            assert_eq!(incumbent, expected);
+            for depth in [0, 1, 2] {
+                let mut values = input.clone();
+                construction::sort_at_depth_sync(&mut values, depth, &mut || Ok(())).unwrap();
+                assert_eq!(values, expected);
+            }
+        }
+    }
+}
+#[test]
+fn every_refusal_keeps_each_item_exactly_once() {
+    let input: Vec<_> = (0..191).map(|i| (i * 73) % 191).collect();
+    let mut expected = input.clone();
+    expected.sort_unstable();
+    let mut successful = input.clone();
+    let mut total = 0;
+    construction::sort_sync(&mut successful, &mut || {
+        total += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(successful, expected);
+    for stop in 1..=total {
+        let mut values = input.clone();
+        let mut calls = 0;
+        let result = construction::sort_sync(&mut values, &mut || {
+            calls += 1;
+            if calls == stop {
+                Err(SealedError::NonCanonical)
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(result, Err(SealedError::NonCanonical));
+        assert_eq!(calls, stop);
+        values.sort_unstable();
+        assert_eq!(values, expected);
+    }
+}
+struct Yielding {
+    calls: usize,
+    quantum: usize,
+    yields: usize,
+    stop: Option<usize>,
+}
+impl construction::Checkpoint for Yielding {
+    type Error = SealedError;
+    async fn check(&mut self) -> Result<(), Self::Error> {
+        self.calls += 1;
+        if self.stop == Some(self.calls) {
+            return Err(SealedError::NonCanonical);
+        }
+        if self.calls.is_multiple_of(self.quantum) {
+            self.yields += 1;
+            let mut pending = true;
+            std::future::poll_fn(|cx| {
+                if pending {
+                    pending = false;
+                    cx.waker().wake_by_ref();
+                    std::task::Poll::Pending
+                } else {
+                    std::task::Poll::Ready(())
+                }
+            })
+            .await;
+        }
+        Ok(())
+    }
+}
+#[test]
+fn real_pending_futures_preserve_results_and_exact_refusals() {
+    let input: Vec<_> = (0..257).map(|i| (i * 139) % 257).collect();
+    let mut expected = input.clone();
+    expected.sort_unstable();
+    for quantum in [1, 2, 7, 64, 256] {
+        let mut values = input.clone();
+        let mut control = Yielding {
+            calls: 0,
+            quantum,
+            yields: 0,
+            stop: None,
+        };
+        drive_sort_future(construction::sort(&mut values, &mut control)).unwrap();
+        assert_eq!(values, expected);
+        assert_eq!(control.yields, control.calls / quantum);
+        for stop in [1, 2, 16, 257, control.calls / 2, control.calls] {
+            let mut values = input.clone();
+            let mut control = Yielding {
+                calls: 0,
+                quantum,
+                yields: 0,
+                stop: Some(stop),
+            };
+            assert_eq!(
+                drive_sort_future(construction::sort(&mut values, &mut control)),
+                Err(SealedError::NonCanonical)
+            );
+            assert_eq!(control.calls, stop);
+            values.sort_unstable();
+            assert_eq!(values, expected);
+        }
+    }
+}
+
+#[test]
+fn ninther_duplicate_heavy_samples_match_std_at_thresholds() {
+    for n in [127_usize, 128, 129, 257, 4096] {
+        for seed in 0..16 {
+            let mut values: Vec<_> = (0..n).map(|i| (i * 17 + seed * 13) % 31).collect();
+            let mut expected = values.clone();
+            expected.sort_unstable();
+            construction::sort_sync(&mut values, &mut || Ok(())).unwrap();
+            assert_eq!(values, expected, "length={n} seed={seed}");
+        }
+    }
+}
+
+mod incumbent {
+    use super::SealedError;
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+    pub(super) trait Checkpoint {
+        type Error: From<SealedError>;
+        async fn check(&mut self) -> Result<(), Self::Error>;
+    }
+
+    struct Immediate<G>(G);
+    impl<E, G> Checkpoint for Immediate<G>
+    where
+        E: From<SealedError>,
+        G: FnMut() -> Result<(), E>,
+    {
+        type Error = E;
+        async fn check(&mut self) -> Result<(), E> {
+            (self.0)()
+        }
+    }
+
+    fn immediate<T, E: From<SealedError>>(
+        future: impl Future<Output = Result<T, E>>,
+    ) -> Result<T, E> {
+        let mut future = std::pin::pin!(future);
+        match future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(result) => result,
+            Poll::Pending => Err(SealedError::NonCanonical.into()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn sort_sync<T: Ord>(
+        values: &mut [T],
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+    ) -> Result<(), SealedError> {
+        immediate(sort(values, &mut Immediate(checkpoint)))
+    }
+
+    // Constant-scratch heapsort. No allocation or uninterruptible whole-population
+    // sort hides between the surrounding checkpoints. Input keys are total/unique.
+    async fn sort<T: Ord, C: Checkpoint>(
+        values: &mut [T],
+        control: &mut C,
+    ) -> Result<(), C::Error> {
+        let mut ordered = true;
+        for pair in values.windows(2) {
+            control.check().await?;
+            if pair[0] > pair[1] {
+                ordered = false;
+            }
+        }
+        if ordered {
+            return Ok(());
+        }
+        for root in (0..values.len() / 2).rev() {
+            sift(values, root, control).await?;
+        }
+        for end in (1..values.len()).rev() {
+            control.check().await?;
+            values.swap(0, end);
+            sift(&mut values[..end], 0, control).await?;
+        }
+        Ok(())
+    }
+
+    async fn sift<T: Ord, C: Checkpoint>(
+        values: &mut [T],
+        mut root: usize,
+        control: &mut C,
+    ) -> Result<(), C::Error> {
+        while root < values.len() / 2 {
+            control.check().await?;
+            let left = 2 * root + 1;
+            let right = left + 1;
+            let child = if right < values.len() && values[right] > values[left] {
+                right
+            } else {
+                left
+            };
+            if values[root] >= values[child] {
+                break;
+            }
+            values.swap(root, child);
+            root = child;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+#[ignore = "paired retained-incidence sort-stage measurement"]
+fn paired_sort_stage_measurement() {
+    use std::hint::black_box;
+    use std::time::{Duration, Instant};
+    type Ref = (u128, u64, u64);
+    fn mix(mut x: u64) -> u64 {
+        x ^= x >> 30;
+        x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        x ^= x >> 27;
+        x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
+        x ^ (x >> 31)
+    }
+    fn id(vertex: u64) -> u128 {
+        (u128::from(mix(vertex.wrapping_add(0x9e37_79b9_7f4a_7c15))) << 64)
+            | u128::from(mix(vertex ^ 0xa076_1d64_78bd_642f))
+    }
+    fn measure(input: &[Ref], expected: &[Ref], old: bool) -> (Duration, usize) {
+        let mut values = input.to_vec();
+        let mut polls = 0usize;
+        let start = Instant::now();
+        if old {
+            incumbent::sort_sync(black_box(&mut values), &mut || {
+                polls += 1;
+                Ok(())
+            })
+            .unwrap();
+        } else {
+            construction::sort_sync(black_box(&mut values), &mut || {
+                polls += 1;
+                Ok(())
+            })
+            .unwrap();
+        }
+        let elapsed = start.elapsed();
+        assert_eq!(values, expected);
+        black_box(&values);
+        (elapsed, polls)
+    }
+    for n in [100_000usize, 250_000] {
+        for shape in 0..6 {
+            let name = [
+                "uniform",
+                "powerlaw",
+                "single_hub_ordered",
+                "ordered",
+                "reverse",
+                "organ_pipe",
+            ][shape];
+            let vertices = n / 16;
+            let mut input: Vec<Ref> = (0..n)
+                .map(|position| {
+                    let vertex = match shape {
+                        0 => mix(position as u64) as usize % vertices,
+                        1 if position % 5 != 0 => {
+                            mix(position as u64) as usize % (vertices / 100).max(1)
+                        }
+                        1 => mix(position as u64) as usize % vertices,
+                        2 => 0,
+                        _ => position,
+                    };
+                    let key = if shape >= 3 {
+                        (vertex as u128) << 64
+                    } else {
+                        id(vertex as u64)
+                    };
+                    (
+                        key,
+                        if shape == 2 { 0 } else { (position % 4) as u64 },
+                        position as u64,
+                    )
+                })
+                .collect();
+            if shape == 4 {
+                input.reverse();
+            }
+            if shape == 5 {
+                for (i, value) in input.iter_mut().enumerate() {
+                    value.0 = ((i.min(n - i)) as u128) << 64;
+                }
+            }
+            let mut expected = input.clone();
+            expected.sort_unstable();
+            measure(&input, &expected, true);
+            measure(&input, &expected, false);
+            let mut old = [Duration::ZERO; 5];
+            let mut new = [Duration::ZERO; 5];
+            let mut old_polls = 0;
+            let mut new_polls = 0;
+            for round in 0..5 {
+                if round % 2 == 0 {
+                    (old[round], old_polls) = measure(&input, &expected, true);
+                    (new[round], new_polls) = measure(&input, &expected, false);
+                } else {
+                    (new[round], new_polls) = measure(&input, &expected, false);
+                    (old[round], old_polls) = measure(&input, &expected, true);
+                }
+            }
+            old.sort_unstable();
+            new.sort_unstable();
+            println!(
+                "shape={name} n={n} bytes_per_ref={} old_ms={:.3} old_min={:.3} old_max={:.3} new_ms={:.3} new_min={:.3} new_max={:.3} ratio={:.3} old_polls={old_polls} new_polls={new_polls}",
+                std::mem::size_of::<Ref>(),
+                old[2].as_secs_f64() * 1000.0,
+                old[0].as_secs_f64() * 1000.0,
+                old[4].as_secs_f64() * 1000.0,
+                new[2].as_secs_f64() * 1000.0,
+                new[0].as_secs_f64() * 1000.0,
+                new[4].as_secs_f64() * 1000.0,
+                old[2].as_secs_f64() / new[2].as_secs_f64()
+            );
+        }
+    }
+}

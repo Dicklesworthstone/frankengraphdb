@@ -190,7 +190,7 @@ impl SealedPartition {
 
     /// Keep QueryCx-first typed live checks across every build stage and both
     /// sides of each suspension. The future exclusively owns temporary refs,
-    /// heap-sort progress and unexposed output; cancel/refusal/drop releases it
+    /// sort progress and unexposed output; cancel/refusal/drop releases it
     /// without changing the original image or publishing a partial index.
     pub async fn incoming_index_cooperative_with_checkpoint<E, Y, F>(
         &self,
@@ -706,6 +706,29 @@ mod construction {
         immediate(sort(values, &mut Immediate(checkpoint)))
     }
 
+    #[cfg(test)]
+    pub(super) fn heap_sort_sync<T: Ord>(
+        values: &mut [T],
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+    ) -> Result<(), SealedError> {
+        let mut control = Immediate(checkpoint);
+        immediate(async {
+            if !ordered(values, &mut control).await? {
+                heap_sort(values, &mut control).await?;
+            }
+            Ok(())
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn sort_at_depth_sync<T: Ord>(
+        values: &mut [T],
+        depth: u32,
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+    ) -> Result<(), SealedError> {
+        immediate(introsort(values, depth, &mut Immediate(checkpoint)))
+    }
+
     pub(super) async fn build<C: Checkpoint>(
         source: &SealedPartition,
         limits: IncomingIndexLimits,
@@ -853,12 +876,12 @@ mod construction {
         Ok(end)
     }
 
-    // Constant-scratch heapsort. No allocation or uninterruptible whole-population
-    // sort hides between the surrounding checkpoints. Input keys are total/unique.
-    async fn sort<T: Ord, C: Checkpoint>(
+    // Retained source order is often already incoming order, notably for a
+    // single hub. Keep that case linear and preserve the complete guarded walk.
+    async fn ordered<T: Ord, C: Checkpoint>(
         values: &mut [T],
         control: &mut C,
-    ) -> Result<(), C::Error> {
+    ) -> Result<bool, C::Error> {
         let mut ordered = true;
         for pair in values.windows(2) {
             control.check().await?;
@@ -866,9 +889,151 @@ mod construction {
                 ordered = false;
             }
         }
-        if ordered {
+        Ok(ordered)
+    }
+
+    // A sequential partition has much better locality than repeated heap
+    // sifts over graph-sized incidence arrays. Share one resumable sorter
+    // between immediate and cooperative construction; no comparison sort is
+    // hidden between yields and no second incidence array is allocated.
+    pub(super) async fn sort<T: Ord, C: Checkpoint>(
+        values: &mut [T],
+        control: &mut C,
+    ) -> Result<(), C::Error> {
+        if ordered(values, control).await? {
             return Ok(());
         }
+        let depth = 2 * (usize::BITS - values.len().leading_zeros());
+        introsort(values, depth, control).await
+    }
+
+    #[derive(Clone, Copy)]
+    struct SortSpan {
+        start: usize,
+        end: usize,
+        depth: u32,
+    }
+
+    async fn introsort<T: Ord, C: Checkpoint>(
+        values: &mut [T],
+        depth: u32,
+        control: &mut C,
+    ) -> Result<(), C::Error> {
+        let mut current = SortSpan {
+            start: 0,
+            end: values.len(),
+            depth,
+        };
+        // Visit the smaller partition immediately and retain the larger one.
+        // Every additional pending span therefore halves the current length;
+        // usize::BITS slots suffice even for the largest addressable slice.
+        // This fixed scratch also lives inside the cooperative future. It is
+        // independent of the graph size and adds no heap/resident-index charge.
+        let mut pending = [current; usize::BITS as usize];
+        let mut count = 0;
+        loop {
+            let length = current.end - current.start;
+            if length <= 16 {
+                let row = &mut values[current.start..current.end];
+                for index in 1..row.len() {
+                    let mut at = index;
+                    while at != 0 {
+                        control.check().await?;
+                        if row[at - 1] <= row[at] {
+                            break;
+                        }
+                        row.swap(at - 1, at);
+                        at -= 1;
+                    }
+                }
+            } else if current.depth == 0 {
+                // O(n log n) worst-case work, including duplicate-heavy or
+                // adversarial pivot orders, without an allocation or recursion.
+                heap_sort(&mut values[current.start..current.end], control).await?;
+            } else {
+                let row = &mut values[current.start..current.end];
+                let (middle, last) = (length / 2, length - 1);
+                if length >= 128 {
+                    // A median of three medians resists organ-pipe and
+                    // reverse-order runs without randomization or a new
+                    // allocation. Every sampled comparison remains guarded.
+                    let step = length / 8;
+                    order_three(row, 0, step, 2 * step, control).await?;
+                    order_three(row, middle - step, middle, middle + step, control).await?;
+                    order_three(row, last - 2 * step, last - step, last, control).await?;
+                    order_three(row, step, middle, last - step, control).await?;
+                } else {
+                    order_three(row, 0, middle, last, control).await?;
+                }
+                row.swap(middle, last);
+                let mut below = 0;
+                for index in 0..last {
+                    control.check().await?;
+                    if row[index] < row[last] {
+                        row.swap(index, below);
+                        below += 1;
+                    }
+                }
+                row.swap(below, last);
+                let pivot = current.start + below;
+                let left = SortSpan {
+                    start: current.start,
+                    end: pivot,
+                    depth: current.depth - 1,
+                };
+                let right = SortSpan {
+                    start: pivot + 1,
+                    end: current.end,
+                    depth: current.depth - 1,
+                };
+                let (smaller, larger) = if left.end - left.start < right.end - right.start {
+                    (left, right)
+                } else {
+                    (right, left)
+                };
+                if larger.end - larger.start > 1 {
+                    *pending.get_mut(count).ok_or(SealedError::SizeOverflow)? = larger;
+                    count += 1;
+                }
+                current = smaller;
+                continue;
+            }
+            if count == 0 {
+                return Ok(());
+            }
+            count -= 1;
+            current = pending[count];
+        }
+    }
+
+    async fn order_three<T: Ord, C: Checkpoint>(
+        values: &mut [T],
+        first: usize,
+        middle: usize,
+        last: usize,
+        control: &mut C,
+    ) -> Result<(), C::Error> {
+        control.check().await?;
+        if values[middle] < values[first] {
+            values.swap(first, middle);
+        }
+        control.check().await?;
+        if values[last] < values[first] {
+            values.swap(first, last);
+        }
+        control.check().await?;
+        if values[last] < values[middle] {
+            values.swap(middle, last);
+        }
+        Ok(())
+    }
+
+    // The original constant-scratch sorter remains the introspection fallback
+    // and a test-only incumbent for paired sort-stage measurements.
+    async fn heap_sort<T: Ord, C: Checkpoint>(
+        values: &mut [T],
+        control: &mut C,
+    ) -> Result<(), C::Error> {
         for root in (0..values.len() / 2).rev() {
             sift(values, root, control).await?;
         }

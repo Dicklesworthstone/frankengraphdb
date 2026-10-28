@@ -229,4 +229,37 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn one_inversion_or_one_equal_identity_never_skips_secondary_sorting() {
+        for size in [4_097_usize, 16_384] {
+            for descending in [false, true] {
+                for fault in [0, 1, size / 2, size - 2, size - 1] {
+                    let mut items: Vec<_> = (0..size)
+                        .map(|index| {
+                            let identity = if descending { size - index } else { index };
+                            ((identity as u128) << 64, size - index, index)
+                        })
+                        .collect();
+                    if fault == 0 {
+                        // One group exercises the all-equal fallback.
+                        for item in &mut items {
+                            item.0 = u128::MAX;
+                        }
+                    } else if fault + 1 == size {
+                        items[fault].0 = items[fault - 1].0;
+                    } else {
+                        items.swap(fault, fault + 1);
+                    }
+                    let mut expected = items.clone();
+                    expected.sort();
+                    sort_by_leading_identity(&mut items, |item| item.0, <[_]>::sort);
+                    assert_eq!(
+                        items, expected,
+                        "size={size} descending={descending} fault={fault}"
+                    );
+                }
+            }
+        }
+    }
 }
