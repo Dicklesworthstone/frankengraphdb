@@ -29,7 +29,7 @@ fn named_merge_path_functions_bind_without_catalog_reentry_and_encode_traversal(
          MERGE walk=(a)-[r:R {p:$weight}]->(b) \
          RETURN walk AS path,length(walk) AS hops,nodes(walk) AS nodes,relationships(walk) AS edges",
         R,
-        |kind, name| {
+        |kind: GraphSymbolKind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         },
@@ -139,10 +139,14 @@ fn path_namespace_and_function_errors_refuse_before_catalog_resolution() {
     ] {
         let calls = Cell::new(0);
         assert!(
-            PreparedGraphEdgeMergeQueryText::prepare(text, R, |kind, name| {
-                calls.set(calls.get() + 1);
-                symbols(kind, name)
-            })
+            PreparedGraphEdgeMergeQueryText::prepare(
+                text,
+                R,
+                |kind: GraphSymbolKind, name: &str| {
+                    calls.set(calls.get() + 1);
+                    symbols(kind, name)
+                }
+            )
             .is_err(),
             "{text}"
         );

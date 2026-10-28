@@ -378,8 +378,7 @@ fn live_admission_buffered_open_reads_descriptors_and_faults_only_selected_paylo
             limits,
         )
         .await
-        .err()
-        .expect("a cold source still proves the complete history");
+        .expect_err("a cold source still proves the complete history");
         assert!(
             matches!(
                 cold,

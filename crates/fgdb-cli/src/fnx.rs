@@ -963,7 +963,8 @@ fn cell(value: FnxValue, robot: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::is_call;
+    use super::{Failure, arguments, is_call};
+    use fgdb_prism::{FnxCallSpec, FnxParameters};
 
     fn composed_options(text: &str, flags: &[&str]) -> Result<super::Options, super::Failure> {
         let mut args: Vec<String> = [

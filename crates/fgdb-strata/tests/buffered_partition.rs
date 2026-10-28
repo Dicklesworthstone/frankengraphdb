@@ -1699,7 +1699,8 @@ fn recomputed_v6_identity_cannot_turn_false_descriptors_into_admission() {
         const BLOCK: usize = MEMBERSHIP + 32;
         const PATCH: usize = BLOCK + 205;
         assert_eq!(genuine.len(), PATCH + 80);
-        let lies: [(&str, fn(&mut Vec<u8>)); 6] = [
+        type Corruption = fn(&mut Vec<u8>);
+        let lies: [(&str, Corruption); 6] = [
             ("edge identity fence", |bytes| {
                 bytes[BLOCK + 40..BLOCK + 56].copy_from_slice(&10u128.to_be_bytes());
                 bytes[BLOCK + 64..BLOCK + 80].copy_from_slice(&10u128.to_be_bytes());

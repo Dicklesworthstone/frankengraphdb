@@ -253,7 +253,7 @@ fn carried_pattern_lists_preserve_native_order_nulls_and_snapshot_authority() {
             assert_eq!(columns, &["x", "amounts", "missing", "lengths"]);
             rows.iter()
                 .map(|row| {
-                    let Some(fgdb_gql::GraphValue::Vertex(id)) = row[0].as_value() else {
+                    let Some(fgdb_gql::algebra::GraphValue::Vertex(id)) = row[0].as_value() else {
                         panic!("expected the carried vertex");
                     };
                     let amounts = row[1].as_value().unwrap().as_list().unwrap();

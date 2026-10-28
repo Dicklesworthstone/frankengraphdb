@@ -2617,7 +2617,12 @@ impl<'a> Parser<'a> {
             _ => unreachable!("UInt64 page parser returns its declared domain"),
         })
     }
+}
 
+// Production row filters use selection's expression compiler. Keep the older
+// scalar-only grammar for its independent plain-filter IR differential test.
+#[cfg(test)]
+impl<'a> Parser<'a> {
     pub(super) fn row_disjunction(
         &mut self,
         schema: &[(Name<'a>, GraphSetColumnType)],
