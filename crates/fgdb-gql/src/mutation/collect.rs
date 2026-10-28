@@ -34,7 +34,7 @@ enum Field {
 }
 enum Value<'a> {
     Property(Option<&'a CanonicalScalar>),
-    /// Canonical NULL is stored, never a property-removal intention.
+    /// A computed scalar. [`propose`] records NULL as a removal instead.
     Computed(CanonicalScalar),
     /// A checked list assignment, frozen under the same cumulative meter.
     Stored(CanonicalPropertyValue),
@@ -57,6 +57,10 @@ struct Meter<F> {
 /// Record one element-field proposal: an equal repeat is one effect, a
 /// different value for the same field is a conflict, and every new field
 /// counts against the statement's effect limit.
+///
+/// A property set to null is absent (fgdb-e26tv): its assignment is the
+/// same removal REMOVE proposes, so this statement's own reads, conflict
+/// checks and intents all see an unset field, never a stored NULL.
 #[allow(clippy::too_many_arguments)]
 fn propose<'a, E, C, F: FnMut() -> Result<(), C>>(
     proposals: &mut BTreeMap<(ElementId, Field), Proposal<'a>>,
@@ -67,6 +71,12 @@ fn propose<'a, E, C, F: FnMut() -> Result<(), C>>(
     row: usize,
     action: usize,
 ) -> ResultOf<(), E, C> {
+    let value = match value {
+        Value::Property(Some(CanonicalScalar::Null)) | Value::Computed(CanonicalScalar::Null) => {
+            Value::Property(None)
+        }
+        value => value,
+    };
     if let Some(previous) = proposals.get(&(target, field)) {
         if !equal(&previous.value, &value, &mut |event| meter.event(event))? {
             return Err(GqlQueryError::Source(

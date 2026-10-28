@@ -179,6 +179,8 @@ pub(crate) fn relation_type<E>(
 /// Enumerate effective source properties, never the catalog's known-key set.
 /// Each retained cell and variable payload is reserved before copying. The
 /// map constructor owns canonical key ordering and refuses duplicate names.
+/// A NULL an earlier binary stored is an absent property (fgdb-e26tv): it is
+/// skipped before any charge, exactly as if it had been removed.
 pub(crate) fn collect<'a, E>(
     properties: impl IntoIterator<Item = (PropertyKeyId, &'a CanonicalPropertyValue)>,
     catalog: Option<&ReverseSymbolCatalog>,
@@ -192,7 +194,7 @@ pub(crate) fn collect<'a, E>(
     for (key, value) in properties {
         // Hidden keys may be unmapped and have arbitrarily large payloads.
         // Neither fact may affect this execution's errors or resource charges.
-        if !visible(key) {
+        if !visible(key) || crate::is_null_property(value) {
             continue;
         }
         control(SourceEvent::Work)?;
@@ -419,7 +421,7 @@ mod tests {
     fn masked_unknown_properties_match_physical_removal_in_values_and_charges() {
         let visible: [(PropertyKeyId, CanonicalPropertyValue); 2] = [
             (PropertyKeyId(1), CanonicalScalar::Int(7).into()),
-            (PropertyKeyId(2), CanonicalScalar::Null.into()),
+            (PropertyKeyId(2), CanonicalScalar::Bool(false).into()),
         ];
         let mut with_hidden = visible.to_vec();
         with_hidden.push((
@@ -451,7 +453,7 @@ mod tests {
         assert_eq!(
             value,
             GraphValue::map(vec![
-                ("alpha".into(), GraphValue::Scalar(CanonicalScalar::Null)),
+                ("alpha".into(), GraphValue::Scalar(CanonicalScalar::Bool(false))),
                 ("zeta".into(), GraphValue::Scalar(CanonicalScalar::Int(7))),
             ])
             .unwrap()
@@ -466,6 +468,46 @@ mod tests {
             ),
             Err(ReadError::UnmappedProperty(PropertyKeyId(99)))
         ));
+    }
+
+    /// A NULL stored before fgdb-e26tv is an absent property: the map, its
+    /// keys and every charge equal those of the same row without that field,
+    /// and its name need not even be in the catalog.
+    #[test]
+    fn stored_null_reads_as_physical_removal_in_values_and_charges() {
+        let present: [(PropertyKeyId, CanonicalPropertyValue); 1] =
+            [(PropertyKeyId(1), CanonicalScalar::Int(7).into())];
+        let mut legacy = present.to_vec();
+        legacy.push((PropertyKeyId(2), CanonicalScalar::Null.into()));
+        legacy.push((PropertyKeyId(3), CanonicalScalar::Null.into()));
+        let mut catalog = ReverseSymbolCatalog::new();
+        catalog.insert_property(PropertyKeyId(1), "zeta");
+        catalog.insert_property(PropertyKeyId(2), "alpha");
+        let run = |properties: &[(PropertyKeyId, CanonicalPropertyValue)]| {
+            let mut events = Vec::new();
+            let value = collect(
+                properties.iter().map(|(key, value)| (*key, value)),
+                Some(&catalog),
+                |_| true,
+                &mut |event| {
+                    events.push(event);
+                    Ok::<_, ReadError>(())
+                },
+                &core::convert::identity,
+            )
+            .unwrap();
+            (value, events)
+        };
+        let (value, events) = run(&legacy);
+        assert_eq!((value.clone(), events), run(&present));
+        assert_eq!(
+            value,
+            GraphValue::map(vec![(
+                "zeta".into(),
+                GraphValue::Scalar(CanonicalScalar::Int(7))
+            )])
+            .unwrap()
+        );
     }
 
     #[test]

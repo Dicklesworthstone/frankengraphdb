@@ -1306,6 +1306,12 @@ impl core::fmt::Debug for CompareAndSetMismatch {
 /// what keeps the two derivations honest without sharing code). The
 /// provenance envelopes and `NetEffectNormalForm` canonicalization stay with
 /// `fgdb-w5-effects-normal-form-819`, which absorbs this surface.
+///
+/// **A property is never stored holding null** (fgdb-e26tv): openCypher and
+/// ISO GQL agree that a property set to null is absent. Every builder below
+/// is where a property assignment becomes a staged row, so each one drops a
+/// top-level null from a create's properties and turns an assignment of null
+/// into an unset. A List or Map value keeps its own null elements.
 #[derive(Clone)]
 pub struct WriteBatch {
     relation: RelationId,
@@ -1448,7 +1454,8 @@ enum PendingRow {
         elem: ElementId,
         key: PropertyKeyId,
         expected: Option<Box<CanonicalPropertyValue>>,
-        value: Box<CanonicalPropertyValue>,
+        /// `None` unsets the property, as an assignment of null does.
+        value: Option<Box<CanonicalPropertyValue>>,
         mismatch: WriteMismatchPolicy,
     },
 }
@@ -1470,6 +1477,25 @@ fn for_each_stored_scalar<E>(
             .iter()
             .try_for_each(|entry| for_each_stored_scalar(entry.value(), &mut *visit)),
     }
+}
+
+/// Whether a value is the null value itself, which no property holds
+/// (fgdb-e26tv). Reads treat a NULL stored by an earlier binary as absent.
+fn is_null_property(value: &CanonicalPropertyValue) -> bool {
+    matches!(value, CanonicalPropertyValue::Scalar(CanonicalScalar::Null))
+}
+
+/// An assignment as the row it stages: null unsets the property.
+fn assigned_property(value: Option<CanonicalPropertyValue>) -> Option<CanonicalPropertyValue> {
+    value.filter(|value| !is_null_property(value))
+}
+
+/// A create's properties as it stores them: a null-valued key is absent.
+fn created_properties(
+    mut props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
+) -> Vec<(PropertyKeyId, CanonicalPropertyValue)> {
+    props.retain(|(_, value)| !is_null_property(value));
+    props
 }
 
 /// Scalar properties as stored values, preserving their order.
@@ -1530,7 +1556,7 @@ impl WriteBatch {
         self.rows.push(PendingRow::Vertex {
             vid,
             labels,
-            props,
+            props: created_properties(props),
             ensure: false,
         });
         self
@@ -1559,7 +1585,7 @@ impl WriteBatch {
         self.rows.push(PendingRow::Vertex {
             vid,
             labels,
-            props,
+            props: created_properties(props),
             ensure: true,
         });
         self
@@ -1590,7 +1616,7 @@ impl WriteBatch {
             eid,
             src,
             dst,
-            props,
+            props: created_properties(props),
             ensure: false,
         });
         self
@@ -1623,7 +1649,7 @@ impl WriteBatch {
             eid,
             src,
             dst,
-            props,
+            props: created_properties(props),
             ensure: true,
         });
         self
@@ -1698,7 +1724,11 @@ impl WriteBatch {
         key: PropertyKeyId,
         value: Option<CanonicalPropertyValue>,
     ) -> &mut Self {
-        self.rows.push(PendingRow::SetProperty { vid, key, value });
+        self.rows.push(PendingRow::SetProperty {
+            vid,
+            key,
+            value: assigned_property(value),
+        });
         self
     }
 
@@ -1722,8 +1752,11 @@ impl WriteBatch {
         key: PropertyKeyId,
         value: Option<CanonicalPropertyValue>,
     ) -> &mut Self {
-        self.rows
-            .push(PendingRow::SetEdgeProperty { eid, key, value });
+        self.rows.push(PendingRow::SetEdgeProperty {
+            eid,
+            key,
+            value: assigned_property(value),
+        });
         self
     }
 
@@ -1746,8 +1779,9 @@ impl WriteBatch {
         self.rows.push(PendingRow::CompareAndSet {
             elem: ElementId::Vertex(vid),
             key,
-            expected: expected.map(|value| Box::new(CanonicalPropertyValue::Scalar(value))),
-            value: Box::new(CanonicalPropertyValue::Scalar(value)),
+            // Expecting null expects the property absent; null unsets it.
+            expected: assigned_property(expected.map(CanonicalPropertyValue::Scalar)).map(Box::new),
+            value: assigned_property(Some(CanonicalPropertyValue::Scalar(value))).map(Box::new),
             mismatch,
         });
         self
@@ -1765,8 +1799,9 @@ impl WriteBatch {
         self.rows.push(PendingRow::CompareAndSet {
             elem: ElementId::Edge(eid),
             key,
-            expected: expected.map(|value| Box::new(CanonicalPropertyValue::Scalar(value))),
-            value: Box::new(CanonicalPropertyValue::Scalar(value)),
+            // Expecting null expects the property absent; null unsets it.
+            expected: assigned_property(expected.map(CanonicalPropertyValue::Scalar)).map(Box::new),
+            value: assigned_property(Some(CanonicalPropertyValue::Scalar(value))).map(Box::new),
             mismatch,
         });
         self
@@ -3741,10 +3776,9 @@ impl<V: Vfs + Clone> Database<V> {
                 PendingRow::CompareAndSet {
                     expected, value, ..
                 } => {
-                    if let Some(expected) = expected {
-                        admit(expected)?;
+                    for value in [expected, value].into_iter().flatten() {
+                        admit(value)?;
                     }
-                    admit(value)?;
                 }
                 PendingRow::DeleteEdge { .. }
                 | PendingRow::DeleteVertex { .. }
@@ -4145,8 +4179,12 @@ impl<V: Vfs + Clone> Database<V> {
                         // (fgdb-q6zj). expected=None matches, then set-Some
                         // on a gone element is Unknown* — NoOp is not a
                         // license to invent the element (fgdb-pmj7).
-                        // AbortWrite still names the missing id.
-                        if expected.is_some() && matches!(mismatch, WriteMismatchPolicy::NoOp) {
+                        // AbortWrite still names the missing id. A matched
+                        // unset (a null value) of a gone element's property
+                        // is Nothing, as RemoveProp is (fgdb-vsgw).
+                        if expected.is_some() && matches!(mismatch, WriteMismatchPolicy::NoOp)
+                            || expected.is_none() && value.is_none()
+                        {
                             continue;
                         }
                         return Err(match elem {
@@ -4169,7 +4207,11 @@ impl<V: Vfs + Clone> Database<V> {
                             position.ok().map(|at| props[at].1.clone())
                         }
                     };
-                    if actual.as_ref() != expected.as_deref() {
+                    // A NULL an earlier binary stored reads as absent, so it
+                    // compares as absent (fgdb-e26tv); the before-image below
+                    // stays the stored value.
+                    let observed = actual.as_ref().filter(|value| !is_null_property(value));
+                    if observed != expected.as_deref() {
                         match mismatch {
                             WriteMismatchPolicy::NoOp => continue,
                             WriteMismatchPolicy::AbortWrite => {
@@ -4184,34 +4226,31 @@ impl<V: Vfs + Clone> Database<V> {
                             }
                         }
                     }
-                    if actual.as_ref() == Some(value.as_ref()) {
+                    let after = value.map(|value| *value);
+                    if actual == after {
                         continue;
                     }
-                    let after = (*value).clone();
                     let row = DeltaRow::Property {
                         elem,
                         property: key,
                         before: actual,
-                        after: Some(after.clone()),
+                        after: after.clone(),
                     };
-                    match elem {
+                    let props = match elem {
                         ElementId::Vertex(vid) => {
-                            let (_, props) =
-                                vertex_content_entry(&mut prefix_content, &self.snapshot, vid);
-                            match props.binary_search_by_key(&key, |(k, _)| *k) {
-                                Ok(at) => props[at].1 = after,
-                                Err(at) => props.insert(at, (key, after)),
-                            }
+                            &mut vertex_content_entry(&mut prefix_content, &self.snapshot, vid).1
                         }
-                        ElementId::Edge(eid) => {
-                            let props = prefix_edge_rows.entry(eid).or_insert_with(|| {
-                                self.writer.live_edge_row(eid).unwrap_or_default()
-                            });
-                            match props.binary_search_by_key(&key, |(k, _)| *k) {
-                                Ok(at) => props[at].1 = after,
-                                Err(at) => props.insert(at, (key, after)),
-                            }
+                        ElementId::Edge(eid) => prefix_edge_rows.entry(eid).or_insert_with(|| {
+                            self.writer.live_edge_row(eid).unwrap_or_default()
+                        }),
+                    };
+                    match (props.binary_search_by_key(&key, |(k, _)| *k), after) {
+                        (Ok(at), Some(after)) => props[at].1 = after,
+                        (Err(at), Some(after)) => props.insert(at, (key, after)),
+                        (Ok(at), None) => {
+                            props.remove(at);
                         }
+                        (Err(_), None) => {}
                     }
                     row
                 }

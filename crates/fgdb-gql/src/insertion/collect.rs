@@ -316,6 +316,14 @@ fn fields<E, A, C>(
             CanonicalPropertyValue::Scalar(copy_scalar(value, control)?),
         ));
     }
+    // A property set to null is absent (fgdb-e26tv): CREATE stores no null
+    // field, and its own RETURN reads these same fields.
+    result.retain(|(_, value)| {
+        !matches!(
+            value,
+            CanonicalPropertyValue::Scalar(CanonicalScalar::Null)
+        )
+    });
     Ok(result)
 }
 

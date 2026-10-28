@@ -287,7 +287,11 @@ pub(super) fn template_len(ordinal: usize, row: &BulkRow) -> Result<usize, BulkL
         fgdb_delta_types::PropertyKeyId,
         fgdb_types::CanonicalPropertyValue,
     )]| {
-        props.iter().try_fold(4_usize, |len, (_, value)| {
+        // The writer drops a null-valued property (fgdb-e26tv).
+        props
+            .iter()
+            .filter(|(_, value)| !crate::is_null_property(value))
+            .try_fold(4_usize, |len, (_, value)| {
             let encoded = value
                 .encode()
                 .map_err(|source| BulkLoadErrorKind::SourceEncoding {
@@ -387,8 +391,9 @@ mod template_len_tests {
     /// Each row's template bytes are exactly the canonical create row the
     /// writer's template carries for it, labels deduplicated and both
     /// collections sorted as the writer sorts them, over random rows with
-    /// every common scalar kind. A row whose labels repeat is bounded from
-    /// above: the writer drops the repeat.
+    /// every common scalar kind. A null-valued property is not in that row:
+    /// the writer stores no null (fgdb-e26tv). A row whose labels repeat is
+    /// bounded from above: the writer drops the repeat.
     #[test]
     fn template_len_is_each_rows_canonical_create_bytes() {
         let mut state = 0x7e3a_11e0_0000_0001_u64;
@@ -424,6 +429,7 @@ mod template_len_tests {
                 });
                 labels.sort_unstable();
                 props.sort_by_key(|(key, _)| *key);
+                props.retain(|(_, value)| !crate::is_null_property(value));
                 let canonical = DeltaRow::CreateVertex {
                     vid: VId(u128::MAX),
                     birth_ordinal: u64::MAX,
@@ -441,6 +447,7 @@ mod template_len_tests {
                     props: props.clone(),
                 });
                 props.sort_by_key(|(key, _)| *key);
+                props.retain(|(_, value)| !crate::is_null_property(value));
                 let BulkRow::Edge(edge) = &row else {
                     unreachable!()
                 };

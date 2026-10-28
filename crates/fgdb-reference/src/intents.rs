@@ -42,7 +42,7 @@
 
 use crate::{ApplyError, ConflictKey, ReferenceGraph};
 use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalPropertyValue, EId, VId};
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::collections::BTreeSet;
 
 /// What a failed `CompareAndSet` precondition means (Appendix B, verbatim
@@ -78,6 +78,9 @@ pub enum Intent {
         dst: VId,
         props: Vec<(PropertyKeyId, CanonicalPropertyValue)>,
     },
+    /// Set a property. A property is never stored holding null (fgdb-e26tv:
+    /// openCypher and ISO GQL agree), so setting the null value reduces
+    /// exactly as `RemoveProp` does.
     SetProp {
         elem: ElementId,
         name: PropertyKeyId,
@@ -134,10 +137,10 @@ pub enum Intent {
     DeleteEdge { eid: EId },
     /// Remove a property, if it is there.
     ///
-    /// Distinct from `SetProp` with a null value: an absent property and a
-    /// property holding null are different states, and Appendix B's before/after
-    /// images spell the difference as `None` versus `Some(Null)`. Collapsing them
-    /// would make removal unexpressible.
+    /// Appendix B's before/after images spell an absent property as `None`.
+    /// `SetProp` with the null value is the same removal (fgdb-e26tv): no
+    /// intent stores `Some(Null)`, though a history written before that
+    /// ruling may hold one, and removal still retires it.
     RemoveProp {
         elem: ElementId,
         name: PropertyKeyId,
@@ -552,6 +555,9 @@ fn reduce(state: &ReferenceGraph, intent: &Intent, ordinal: u64) -> Reduction {
             },
             valid_time: None,
         }]),
+        Intent::SetProp { elem, name, value } if is_null(value) => {
+            remove_prop(state, *elem, *name)
+        }
         Intent::SetProp { elem, name, value } => {
             // The before image comes from the STATE, not the caller. That is the
             // difference between an intent and an effect: an effect declares its
@@ -624,18 +630,7 @@ fn reduce(state: &ReferenceGraph, intent: &Intent, ordinal: u64) -> Reduction {
                 before_version: edge.version,
             }])
         }
-        Intent::RemoveProp { elem, name } => {
-            let before = property_of(state, *elem, *name);
-            if before.is_none() {
-                return Reduction::Nothing;
-            }
-            Reduction::Effects(vec![DeltaRow::Property {
-                elem: *elem,
-                property: *name,
-                before,
-                after: None,
-            }])
-        }
+        Intent::RemoveProp { elem, name } => remove_prop(state, *elem, *name),
         Intent::EnsureVertex { vid, labels, props } => {
             if state.vertex(*vid).is_some() {
                 return Reduction::Nothing;
@@ -659,7 +654,11 @@ fn reduce(state: &ReferenceGraph, intent: &Intent, ordinal: u64) -> Reduction {
             mismatch,
         } => {
             let actual = property_of(state, *elem, *name);
-            if actual != *expected {
+            // A property holding null is absent (fgdb-e26tv): expecting null
+            // expects absence, and a NULL stored before the ruling compares
+            // as absent while the before image below stays the stored value.
+            let observed = actual.clone().filter(|value| !is_null(value));
+            if observed != expected.clone().filter(|value| !is_null(value)) {
                 let failure = StatementFailure::Mismatch {
                     elem: *elem,
                     name: *name,
@@ -672,6 +671,9 @@ fn reduce(state: &ReferenceGraph, intent: &Intent, ordinal: u64) -> Reduction {
                     MismatchPolicy::TxnAbort => Reduction::Abort(failure),
                 };
             }
+            if is_null(value) {
+                return remove_prop(state, *elem, *name);
+            }
             if actual.as_ref() == Some(value) {
                 return Reduction::Nothing;
             }
@@ -683,6 +685,25 @@ fn reduce(state: &ReferenceGraph, intent: &Intent, ordinal: u64) -> Reduction {
             }])
         }
     }
+}
+
+/// Whether `value` is the null value itself, which no property holds.
+fn is_null(value: &CanonicalPropertyValue) -> bool {
+    matches!(value, CanonicalPropertyValue::Scalar(CanonicalScalar::Null))
+}
+
+/// Remove a property if it is there; removing an absent one emits nothing.
+fn remove_prop(state: &ReferenceGraph, elem: ElementId, name: PropertyKeyId) -> Reduction {
+    let before = property_of(state, elem, name);
+    if before.is_none() {
+        return Reduction::Nothing;
+    }
+    Reduction::Effects(vec![DeltaRow::Property {
+        elem,
+        property: name,
+        before,
+        after: None,
+    }])
 }
 
 fn property_of(
@@ -727,7 +748,12 @@ fn sorted_labels(labels: &[LabelId]) -> Vec<LabelId> {
 fn canonical_props(
     props: &[(PropertyKeyId, CanonicalPropertyValue)],
 ) -> Result<Vec<(PropertyKeyId, CanonicalPropertyValue)>, StatementFailure> {
-    let mut out = props.to_vec();
+    // A null-valued property is absent, never stored (fgdb-e26tv).
+    let mut out: Vec<_> = props
+        .iter()
+        .filter(|(_, value)| !is_null(value))
+        .cloned()
+        .collect();
     out.sort();
     let mut deduped: Vec<(PropertyKeyId, CanonicalPropertyValue)> = Vec::with_capacity(out.len());
     for (key, value) in out {

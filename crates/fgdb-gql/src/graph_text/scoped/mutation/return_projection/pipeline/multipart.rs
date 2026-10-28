@@ -3225,7 +3225,11 @@ impl<'a> Parser<'a> {
                 if right >= self.syntax.root_variables {
                     return Err(expected(name.at, "imported vertices in the root MATCH"));
                 }
-                if !matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Any) {
+                // A map literal's open `Any` type is still a map: openCypher
+                // refuses it as a node (VariableTypeConflict, Match1 [11]).
+                if !matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Any)
+                    || self.map_aliases.contains(&name.at)
+                {
                     return Err(expected(name.at, "a vertex-valued imported binding"));
                 }
                 let right =
@@ -3647,6 +3651,9 @@ impl<'a> Parser<'a> {
                         GraphPatternTextErrorKind::Build(PatternBuildError::DuplicateProjection),
                     )
                     .into());
+                }
+                if value.is_map_constructor() {
+                    self.map_aliases.push(alias.at);
                 }
                 outputs.push((alias, value));
                 if !self.take(b',')? {

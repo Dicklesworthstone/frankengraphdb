@@ -53,7 +53,8 @@ impl core::fmt::Debug for GraphMutationValue {
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum GraphMutationAction {
-    /// SET retains canonical NULL as a stored value. REMOVE unsets the field.
+    /// SET of a value that is NULL when it runs unsets the field, exactly as
+    /// REMOVE does: a property set to null is absent (fgdb-e26tv).
     SetProperty {
         target: usize,
         key: PropertyKeyId,
@@ -168,8 +169,8 @@ pub enum GraphMutationBinding {
     },
     /// The target's complete post-statement property map. `current` holds
     /// the frozen admitted map, and the selection plan's reverse catalog
-    /// names every final assignment merged into it. REMOVE omits a field;
-    /// SET retains its scalar or list, including canonical NULL. A NULL OPTIONAL
+    /// names every final assignment merged into it. REMOVE and a SET to NULL
+    /// omit a field; SET retains its scalar or list. A NULL OPTIONAL
     /// target returns NULL; a deleted target or unmapped assignment refuses.
     /// Edge maps with DETACH DELETE are refused at preparation because an
     /// incident edge can disappear through a vertex's cascade.

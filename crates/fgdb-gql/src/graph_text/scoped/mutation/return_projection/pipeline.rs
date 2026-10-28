@@ -2302,6 +2302,9 @@ impl<'a> Parser<'a> {
                 }
                 let types: Vec<_> = schema.iter().map(|(_, kind)| *kind).collect();
                 let kind = value.column_type(&types, &self.syntax.parameters);
+                if value.is_map_constructor() {
+                    self.map_aliases.push(alias.at);
+                }
                 projection.push(ReadProjectionTemplate {
                     name: alias.text.to_owned(),
                     value,

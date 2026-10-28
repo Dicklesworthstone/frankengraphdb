@@ -970,8 +970,9 @@ impl PreparedGraphText {
 
 impl PreparedGraphMutationText {
     /// Prepare simultaneous SET/REMOVE, plain DELETE or explicit DETACH DELETE
-    /// after the existing MATCH/WALK/WHERE/OPTIONAL grammar. SET stores
-    /// canonical NULL; REMOVE unsets a property. A plain DELETE stays
+    /// after the existing MATCH/WALK/WHERE/OPTIONAL grammar. REMOVE unsets a
+    /// property, and so does SET to a value that is NULL when it runs: a
+    /// property set to null is absent (fgdb-e26tv). A plain DELETE stays
     /// non-detaching: the write host proves its vertices isolated. CREATE,
     /// RETURN and mixed deletion/update or DELETE/DETACH DELETE statements are
     /// not silently reinterpreted.
@@ -979,7 +980,7 @@ impl PreparedGraphMutationText {
     /// `SET n += {p: expression, q: $value}` updates the named vertex or edge
     /// properties through the same simultaneous assignments as `SET n.p = ...`.
     /// All RHS values read the pre-statement graph; omitted properties remain
-    /// unchanged and NULL remains a stored scalar, with REMOVE used for absence.
+    /// unchanged and a NULL value unsets its property, as REMOVE does.
     /// Each field counts toward the statement's ordinary action limit. Keys are
     /// property identifiers and must be distinct within each literal map. Empty
     /// maps, dynamic map arguments and map replacement are refused. RHS values

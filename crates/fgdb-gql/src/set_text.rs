@@ -466,6 +466,12 @@ impl ReadValueTemplate {
             _ => GraphSetColumnType::Scalar,
         }
     }
+
+    /// A map literal or map projection: a map or NULL, never a graph element,
+    /// although its column type is the open `Any`.
+    pub(crate) fn is_map_constructor(&self) -> bool {
+        matches!(self, Self::MapLiteral { .. } | Self::MapOverlay { .. })
+    }
 }
 #[derive(Clone)]
 pub(crate) struct ReadProjectionTemplate {
