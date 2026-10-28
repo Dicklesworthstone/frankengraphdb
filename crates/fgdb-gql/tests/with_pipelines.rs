@@ -2312,6 +2312,129 @@ fn ordering_dynamically_typed_values_is_null_across_kinds() {
     );
 }
 
+/// Both UNWIND columns have the open domain. Equality must read their values,
+/// including graph identities, without trying to push an element on the scalar
+/// stack (fgdb-hj2nw). The matrix is independent of the executor's comparator.
+#[test]
+fn equality_of_open_columns_preserves_identity_and_three_valued_results() {
+    use fgdb_gql::algebra::GraphValue;
+
+    let values = [1, 2].map(CanonicalScalar::Int);
+    let text = "MATCH (n {p:1}) WITH [n, 1, NULL, [1], {k:1}] AS values \
+                UNWIND range(0, 4) AS i UNWIND range(0, 4) AS j \
+                WITH i, j, values[i] AS lhs, values[j] AS rhs \
+                RETURN i, j, lhs = rhs AS same, lhs <> rhs AS different, \
+                lhs != rhs AS also_different ORDER BY i, j";
+    let query = prepare(text);
+    let execution = run(&query, &values, wide(), &mut || Ok(())).unwrap();
+    assert_eq!(execution.value.len(), 25);
+    for (at, row) in execution.value.iter().enumerate() {
+        let (i, j) = (at / 5, at % 5);
+        let truth = if i == 2 || j == 2 { None } else { Some(i == j) };
+        let boolean = |value: Option<bool>| {
+            GraphValue::Scalar(value.map_or(CanonicalScalar::Null, CanonicalScalar::Bool))
+        };
+        assert_eq!(
+            row.values(),
+            &[
+                GraphValue::Scalar(CanonicalScalar::Int(i as i64)),
+                GraphValue::Scalar(CanonicalScalar::Int(j as i64)),
+                boolean(truth),
+                boolean(truth.map(|same| !same)),
+                boolean(truth.map(|same| !same)),
+            ],
+            "pair ({i}, {j})"
+        );
+    }
+    // A WHERE's Boolean expression takes the same value path. Duplicates
+    // remain occurrences: both copies of the first vertex match themselves.
+    let query = prepare(
+        "MATCH (n) WITH collect(n) AS ns \
+         UNWIND [ns[0],ns[0],ns[1],NULL] AS lhs \
+         UNWIND [ns[0],ns[1],NULL] AS rhs \
+         WITH lhs,rhs WHERE NOT lhs <> rhs RETURN lhs,rhs",
+    );
+    let rows = run(&query, &values, wide(), &mut || Ok(())).unwrap().value;
+    assert_eq!(
+        rows,
+        [VId(0), VId(0), VId(1)].map(|id| GraphValueRow::from_owned_values(vec![
+            GraphValue::Vertex(id),
+            GraphValue::Vertex(id),
+        ]))
+    );
+    let refused = GqlQueryPolicy::new(u64::MAX, u64::MAX, 1, u64::MAX);
+    assert!(run(&query, &values, refused, &mut || Ok(())).is_err());
+    assert!(matches!(
+        run(&query, &values, wide(), &mut || Err(79)),
+        Err(GqlQueryError::Interrupted(79))
+    ));
+}
+
+/// The later MATCH owns q, while the comprehension owns x and reads ps from
+/// the incoming row. Neither comparison operand is a scalar projection.
+#[test]
+fn comprehension_compares_elements_bound_by_a_later_match() {
+    use fgdb_gql::algebra::GraphValue;
+
+    let values = [1, 2, 3].map(CanonicalScalar::Int);
+    for predicate in ["NOT x = q", "x <> q", "x != q", "NOT q = x"] {
+        let text = format!(
+            "MATCH (p) WITH collect(p) AS ps MATCH (q {{p:1}}) \
+             RETURN [x IN ps WHERE {predicate} | x.p] AS values"
+        );
+        let prepared = PreparedGraphSetText::prepare(&text, symbols).expect(&text);
+        let query = prepared
+            .bind_parameters(&GqlParameters::new())
+            .expect(&text);
+        let rows = run_reading(&query, &values, wide(), &mut || Ok(()), true)
+            .unwrap()
+            .value;
+        assert_eq!(
+            rows,
+            vec![GraphValueRow::from_owned_values(vec![GraphValue::List(
+                [2, 3]
+                    .map(|value| GraphValue::Scalar(CanonicalScalar::Int(value)))
+                    .to_vec()
+            )])],
+            "{text}"
+        );
+    }
+    // Scalar aliases still own their names, and the mixed MATCH resolver
+    // does not leave graph-name visibility enabled in later row-only stages.
+    let query = prepare(
+        "MATCH (q {p:1}) WITH 7 AS q MATCH (r {p:2}) \
+         RETURN CASE WHEN TRUE THEN q ELSE r END AS result",
+    );
+    assert_eq!(
+        ints(
+            &run(&query, &values, wide(), &mut || Ok(())).unwrap().value,
+            0
+        ),
+        [Some(7)]
+    );
+    for text in [
+        "MATCH (p) WITH collect(p) AS ps MATCH (q) WITH ps \
+         RETURN [x IN ps WHERE x = q | x] AS values",
+        "MATCH (p) WITH collect(p) AS ps MATCH (q) \
+         RETURN [x IN ps WHERE x = missing | x] AS values",
+    ] {
+        let calls = Cell::new(0);
+        assert!(
+            PreparedGraphSetText::prepare(text, |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "out-of-scope name must refuse before resolution"
+        );
+    }
+}
+
 /// A DISTINCT WITH's WHERE may repeat one of its items' expressions token
 /// for token (TCK WithWhere1 [2]). The repeat is that item's value on every
 /// row, so the template and rows equal the alias spelling's. A dropped

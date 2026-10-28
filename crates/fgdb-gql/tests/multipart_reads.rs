@@ -1702,17 +1702,22 @@ fn existence_predicates_combine_with_any_predicate_in_a_where() {
             format!("MATCH (n) WHERE {predicate} OPTIONAL MATCH (n)-[:R]->(m) RETURN DISTINCT n");
         assert_eq!(ids(execute(&optional)), singles(keep), "{optional}");
     }
-    // A predicate correlates by name: a binding the WITH renames or drops
-    // would read the wrong element, so it is refused.
-    for text in [
-        "MATCH (a)-[:R]->(b) WITH b AS a WHERE (a)-[:R]->() OR a.p = 1 RETURN a",
-        "MATCH (a)-[:R]->(b) WITH a WHERE (b)-[:R]->() OR a.p = 1 RETURN a",
-    ] {
-        assert!(
-            PreparedGraphSetText::prepare(text, symbols).is_err(),
-            "{text}"
-        );
-    }
+    // A shadowing alias is correlated after the WITH projects its identity.
+    // The two parallel 1->2 edges still contribute two outer occurrences.
+    assert_eq!(
+        ids(execute(
+            "MATCH (a)-[:R]->(b) WITH b AS a WHERE (a)-[:R]->() OR a.p = 1 RETURN a"
+        )),
+        vec![vec![2], vec![2], vec![3], vec![3]]
+    );
+    // A dropped binding has no carried identity and remains a typed refusal.
+    assert!(
+        PreparedGraphSetText::prepare(
+            "MATCH (a)-[:R]->(b) WITH a WHERE (b)-[:R]->() OR a.p = 1 RETURN a",
+            symbols,
+        )
+        .is_err()
+    );
 }
 
 /// A pattern comprehension among a grouping WITH's items (fgdb-1f8f7, TCK
@@ -3431,6 +3436,219 @@ fn row_scope_pattern_lists_rebind_anchors_and_keep_null_witnesses() {
 }
 
 #[test]
+fn renamed_exists_preserves_occurrences_nulls_and_body_scope() {
+    let expected = vec![vertices(&[1]), vertices(&[2]), vertices(&[3])];
+    for expression in [
+        "EXISTS { MATCH (x)-[:R]->() }",
+        "EXISTS { (x)-[:R]->() }",
+        "EXISTS((x)-[:R]->())",
+        "NOT NOT EXISTS { MATCH (x)-[:R]->() }",
+        "size([(x)-[:R]->(y) | y]) > 0",
+    ] {
+        let text = format!("MATCH (n) WITH n AS x WHERE {expression} RETURN * ORDER BY x");
+        let query = prepare(&text);
+        assert_eq!(query.columns(), ["x"]);
+        assert_eq!(
+            run(&query, wide(), &mut || Ok(())).unwrap().value,
+            expected,
+            "{text}"
+        );
+    }
+
+    // The two EXISTS inputs have different physical owners: `a` can be
+    // gathered at the graph head, while `x` must use the projected identity.
+    assert_eq!(
+        execute(
+            "MATCH (a), (b) WITH a,b AS x \
+             WHERE EXISTS { MATCH (a)-[:R]->() } AND EXISTS { (x)-[:R]->() } \
+             RETURN a,x ORDER BY a,x"
+        ),
+        (1..=3)
+            .flat_map(|a| (1..=3).map(move |x| vertices(&[a, x])))
+            .collect::<Vec<_>>()
+    );
+
+    let template = PreparedGraphSetText::prepare(
+        "MATCH (n) WITH n AS x \
+         WHERE EXISTS { (x)-[:R]->(m) WHERE m.p = $wanted } RETURN x ORDER BY x",
+        symbols,
+    )
+    .unwrap();
+    let definition = template.canonical_template_bytes();
+    for (wanted, ids) in [(2, vec![1, 2]), (3, vec![3]), (99, vec![])] {
+        let arguments = GqlParameters::new().with_int64("wanted", wanted).unwrap();
+        let query = template.bind_parameters(&arguments).unwrap();
+        assert_eq!(
+            run(&query, wide(), &mut || Ok(())).unwrap().value,
+            ids.into_iter()
+                .map(|id| vertices(&[id]))
+                .collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(template.canonical_template_bytes(), definition);
+
+    // Relationship identities need the same deferral. Binding `edge` afresh
+    // at the old graph head would make every row see relationship 5's match.
+    assert_eq!(
+        execute_identified(
+            "MATCH ()-[r:R]->() WITH r AS edge \
+             RETURN edge,EXISTS { ()-[edge:R]->(end) WHERE end.p=3 } AS present ORDER BY edge"
+        ),
+        (1..=5)
+            .map(|id| GraphValueRow::from_owned_values(vec![
+                GraphValue::Edge(fgdb_types::EId(id)),
+                GraphValue::Scalar(CanonicalScalar::Bool(id == 5)),
+            ]))
+            .collect::<Vec<_>>()
+    );
+
+    // An OPTIONAL NULL anchor is not rebound to any vertex. Parallel outer
+    // witnesses remain separate, but inner witnesses never multiply a row.
+    let expected = [
+        (1, Some(2), true),
+        (1, Some(2), true),
+        (1, Some(3), true),
+        (2, Some(3), true),
+        (3, Some(4), false),
+        (4, None, false),
+    ]
+    .into_iter()
+    .map(|(n, x, exists)| {
+        GraphValueRow::from_owned_values(vec![
+            GraphValue::Vertex(VId(n)),
+            x.map_or(GraphValue::Scalar(CanonicalScalar::Null), |x| {
+                GraphValue::Vertex(VId(x))
+            }),
+            GraphValue::Scalar(CanonicalScalar::Bool(exists)),
+        ])
+    })
+    .collect::<Vec<_>>();
+    assert_eq!(
+        execute(
+            "MATCH (n) OPTIONAL MATCH (n)-[:R]->(m) WITH n,m AS x \
+             RETURN n,x,EXISTS { (x)-[:R]->() } AS present ORDER BY n,x"
+        ),
+        expected
+    );
+
+    for text in [
+        "MATCH (n) WITH n AS x WHERE EXISTS { (x)-[:R]->(m) } RETURN m",
+        "MATCH (n) WITH n AS x RETURN EXISTS { (x)-[:R]->(m) } AS present,m",
+    ] {
+        let calls = std::cell::Cell::new(0);
+        assert!(
+            PreparedGraphSetText::prepare(text, |kind, name: &str| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(calls.get(), 0, "existential locals cannot escape: {text}");
+    }
+}
+
+#[test]
+fn renamed_exists_admits_each_definition_atom_once() {
+    use fgdb_gql::algebra::{MAX_PATTERN_EDGES, MAX_PATTERN_IDENTITIES, MAX_PATTERN_PREDICATES};
+
+    // Each body is above half of its statement-wide cap. Charging the
+    // speculative graph-head parse as well as its real row-owner parse would
+    // reject these otherwise admitted definitions.
+    let bodies = [
+        (
+            format!(
+                "MATCH REPEATABLE ELEMENTS (x){}",
+                "-[:R]->()".repeat(MAX_PATTERN_EDGES / 2 + 1)
+            ),
+            false,
+        ),
+        (
+            format!(
+                "MATCH (x)-[:R]->(m) WHERE {}",
+                vec!["m.p >= $wanted"; MAX_PATTERN_PREDICATES / 2 + 1].join(" AND ")
+            ),
+            true,
+        ),
+        (
+            format!(
+                "MATCH (x)-[:R]->(m) WHERE {}",
+                vec!["m <> x"; MAX_PATTERN_IDENTITIES / 2 + 1].join(" AND ")
+            ),
+            false,
+        ),
+    ];
+    for (body, parameterized) in bodies {
+        let statement = format!("MATCH (n) WITH n AS x WHERE EXISTS {{ {body} }} RETURN x");
+        let template = PreparedGraphSetText::prepare(&statement, symbols)
+            .unwrap_or_else(|error| panic!("one admitted body: {error}; {statement}"));
+        assert_eq!(
+            template.parameter_schema().len(),
+            usize::from(parameterized)
+        );
+        let args = if parameterized {
+            GqlParameters::new().with_int64("wanted", 2).unwrap()
+        } else {
+            GqlParameters::new()
+        };
+        template.bind_parameters(&args).unwrap();
+    }
+    let oversized = format!(
+        "MATCH (n) WITH n AS x WHERE EXISTS {{ MATCH REPEATABLE ELEMENTS (x){} }} RETURN x",
+        "-[:R]->()".repeat(MAX_PATTERN_EDGES + 1)
+    );
+    let catalog_calls = std::cell::Cell::new(0);
+    assert!(
+        PreparedGraphSetText::prepare(&oversized, |kind, name: &str| {
+            catalog_calls.set(catalog_calls.get() + 1);
+            symbols(kind, name)
+        })
+        .is_err()
+    );
+    assert_eq!(catalog_calls.get(), 0);
+}
+
+#[test]
+fn renamed_exists_keeps_shared_work_row_and_cancellation_admission() {
+    let query =
+        prepare("MATCH (n) WITH n AS x RETURN x,EXISTS { (x)-[:R]->() } AS present ORDER BY x");
+    let mut checkpoints = 0;
+    let execution = run(&query, wide(), &mut || {
+        checkpoints += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(execution.value.len(), 4);
+    assert!(execution.evaluator.work_units > 1);
+    assert!(checkpoints > 2);
+    for policy in [
+        GqlQueryPolicy::new(u64::MAX, 3, u64::MAX, u64::MAX),
+        GqlQueryPolicy::new(
+            u64::MAX,
+            u64::MAX,
+            execution.evaluator.work_units - 1,
+            u64::MAX,
+        ),
+    ] {
+        assert!(run(&query, policy, &mut || Ok(())).is_err());
+    }
+    for stop in [0, checkpoints / 2, checkpoints - 1] {
+        let mut observed = 0;
+        assert!(matches!(
+            run(&query, wide(), &mut || {
+                if observed == stop {
+                    Err(stop)
+                } else {
+                    observed += 1;
+                    Ok(())
+                }
+            }),
+            Err(GqlQueryError::Interrupted(at)) if at == stop
+        ));
+    }
+}
+
+#[test]
 fn row_scope_pattern_lists_evaluate_only_the_selected_anchor_projection() {
     // Vertex 3 has p=2 and reaches p=3. Either the anchor or its target can
     // make the projection divide by zero. That root must not affect valid
@@ -3585,9 +3803,8 @@ fn row_scope_pattern_lists_keep_paths_multiple_locals_and_row_boundaries() {
             ]))
             .collect::<Vec<_>>()
     );
-    // A renamed element is no binding of the head's graph scope: a count over
-    // it stays with its row, and an existence predicate there refuses rather
-    // than bind it afresh (each once read every edge for every row).
+    // A renamed element is no binding of the head's graph scope: both a count
+    // and an existence predicate stay with the completed row's identity.
     assert_eq!(
         execute("MATCH (n) WITH n AS x RETURN x,COUNT { (x)-[:R]->() } AS c ORDER BY x"),
         [(1, 3), (2, 1), (3, 1), (4, 0)]
@@ -3598,15 +3815,20 @@ fn row_scope_pattern_lists_keep_paths_multiple_locals_and_row_boundaries() {
             ]))
             .collect::<Vec<_>>()
     );
-    for text in [
-        "MATCH (n) WITH n AS x WHERE EXISTS { MATCH (x)-[:R]->() } RETURN x",
-        "MATCH (n) WITH n AS x RETURN x,EXISTS { (x)-[:R]->() } AS e",
-    ] {
-        assert!(
-            PreparedGraphSetText::prepare(text, symbols).is_err(),
-            "{text}"
-        );
-    }
+    assert_eq!(
+        execute("MATCH (n) WITH n AS x WHERE EXISTS { MATCH (x)-[:R]->() } RETURN x"),
+        vec![vertices(&[1]), vertices(&[2]), vertices(&[3])]
+    );
+    assert_eq!(
+        execute("MATCH (n) WITH n AS x RETURN x,EXISTS { (x)-[:R]->() } AS e ORDER BY x"),
+        [(1, true), (2, true), (3, true), (4, false)]
+            .into_iter()
+            .map(|(id, exists)| GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(id)),
+                GraphValue::Scalar(CanonicalScalar::Bool(exists)),
+            ]))
+            .collect::<Vec<_>>()
+    );
     assert_eq!(
         execute(&format!(
             "{prefix} UNWIND nodes AS y RETURN x,y,[(x)-[:R]->(y) | x.p+y.p] AS values \

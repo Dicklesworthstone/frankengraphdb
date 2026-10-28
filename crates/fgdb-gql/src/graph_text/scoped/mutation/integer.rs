@@ -466,7 +466,9 @@ impl<'a> Parser<'a> {
     fn route<'s>(&'s self, columns: &'s ExpressionColumns<'_, 'a>) -> Route<'s, 'a> {
         Route {
             row: self.routing_row(columns),
-            graph: matches!(columns, ExpressionColumns::Graph(_)).then_some(self),
+            graph: (matches!(columns, ExpressionColumns::Graph(_))
+                || (matches!(columns, ExpressionColumns::Resolved(_)) && self.resolved_graph))
+                .then_some(self),
         }
     }
 
@@ -666,7 +668,7 @@ impl<'a> Parser<'a> {
             || self.local_ordered(row)?
             || self.local_element_compared(self.route(columns))?
             || self.open_element_compared(self.route(columns))?
-            || (!matches!(columns, ExpressionColumns::Resolved(_))
+            || ((!matches!(columns, ExpressionColumns::Resolved(_)) || self.resolved_graph)
                 && self.element_compared(self.route(columns))?))
     }
 

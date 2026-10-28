@@ -916,6 +916,10 @@ struct Parser<'a> {
     /// routed by its type as in a row scope. `None` keeps resolved columns
     /// untyped.
     resolved_row: Option<Vec<(Name<'a>, crate::GraphSetColumnType)>>,
+    /// A multipart projection resolver also reads this part's visible MATCH
+    /// elements. Only that owner enables graph-name routing; an ordinary row
+    /// resolver must not consult an earlier part's ambient graph names.
+    resolved_graph: bool,
     /// Created path names only while compiling a write's RETURN/WITH items.
     /// Scalar routing sees their domain; MATCH never gains source bindings.
     write_paths: Vec<&'a str>,
@@ -1134,6 +1138,7 @@ impl<'a> Parser<'a> {
             read_row_fields: Vec::new(),
             read_comparisons: None,
             resolved_row: None,
+            resolved_graph: false,
             write_paths: Vec::new(),
             write_leaves: false,
             metadata_probe: None,

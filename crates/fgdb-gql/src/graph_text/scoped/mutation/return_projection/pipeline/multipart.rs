@@ -2199,7 +2199,9 @@ impl<'a> Parser<'a> {
             return Err(expected(at, "{ before a row-scope pattern count"));
         }
         if braces {
-            if !count || !self.is_punct(b'(') {
+            // Both COUNT and EXISTS permit a positive pattern without the
+            // optional MATCH introducer, as the graph-head scope does.
+            if !self.is_punct(b'(') {
                 self.word("MATCH")?;
             }
             self.syntax.match_mode = self.match_mode()?;
@@ -2208,10 +2210,10 @@ impl<'a> Parser<'a> {
         }
         self.positive_pattern()?;
         self.syntax.root_variables = self.syntax.variables.len();
-        // The count's WHERE belongs to its positive graph body. Its own
+        // A braced body's WHERE belongs to its positive graph pattern. Its own
         // graph variables and native parameters resolve before correlation;
         // computed reads of the containing row still refuse below.
-        if count && self.take_word("WHERE")? {
+        if braces && self.take_word("WHERE")? {
             self.scoped_predicates(true)?;
         }
         if explicit {
@@ -3571,7 +3573,7 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                let value = self.read_resolved_item(&mut |parser| {
+                let value = self.read_multipart_item(incoming, &mut |parser| {
                     let TokenKind::Word(word) = parser.current.kind else { return Ok(None); };
                     let next = parser.lexer.clone().next()?;
                     if (word.eq_ignore_ascii_case("properties") || word.eq_ignore_ascii_case("keys"))

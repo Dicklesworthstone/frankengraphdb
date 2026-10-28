@@ -384,11 +384,16 @@ fn element_column_at(
     ) {
         return Ok(false);
     }
-    Ok(route.row.is_some_and(|schema| {
-        schema
-            .iter()
-            .any(|(name, kind)| name.text == word && is_element_column(*kind))
-    }) || route.graph.is_some_and(|parser| parser.graph_element(word)))
+    // The incoming row owns a reused name, including a scalar alias which
+    // shadows an earlier graph element. Only an absent row name can resolve
+    // to a MATCH binding in a mixed multipart projection.
+    if let Some((_, kind)) = route
+        .row
+        .and_then(|schema| schema.iter().find(|(name, _)| name.text == word))
+    {
+        return Ok(is_element_column(*kind));
+    }
+    Ok(route.graph.is_some_and(|parser| parser.graph_element(word)))
 }
 
 fn is_element_column(kind: GraphSetColumnType) -> bool {
@@ -1792,6 +1797,25 @@ impl<'a> Parser<'a> {
         value
     }
 
+    /// A continuation's WITH/RETURN reads the typed incoming prefix and this
+    /// MATCH part's elements through one resolver (fgdb-hj2nw). Give expression
+    /// routing those same domains, while the resolver remains the sole owner
+    /// of actual column positions and name admission. Restore the scope even
+    /// when parsing refuses; later row stages cannot inherit graph names.
+    pub(in crate::graph_text::scoped::mutation::return_projection) fn read_multipart_item(
+        &mut self,
+        incoming: &[(Name<'a>, GraphSetColumnType)],
+        resolve: &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
+        depth: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        let row = self.resolved_row.replace(incoming.to_vec());
+        let graph = core::mem::replace(&mut self.resolved_graph, true);
+        let value = self.read_resolved_item(resolve, depth);
+        self.resolved_graph = graph;
+        self.resolved_row = row;
+        value
+    }
+
     pub(super) fn read_write_value(
         &mut self,
         leaves: &mut impl ReturnLeaves<'a>,
@@ -2239,8 +2263,11 @@ impl<'a> Parser<'a> {
         Ok(element(right, &lexer)? && !tighter_than_comparison(&mut lexer)?)
     }
 
-    /// Whether an open (Any) row column and an element-typed row column are
-    /// compared here with `=`, `<>` or `!=`, in either order. A list-local
+    /// Whether two open (Any) row columns, or an open column and an
+    /// element-typed row column, are compared here with `=`, `<>` or `!=`, in
+    /// either order. Both open values may hold graph identities, lists or
+    /// maps, so their equality must use the value language (fgdb-hj2nw).
+    /// A list-local
     /// predicate's correlated Apply binds `p` of `[p IN posts WHERE NOT p =
     /// person AND (p)-->()]` as such a column (68812ac2), and it may hold an
     /// element the scalar program cannot read, so the comparison is the
@@ -2293,7 +2320,9 @@ impl<'a> Parser<'a> {
         };
         let (left, right) = (kind(left), kind(right));
         let open_element = |open: Option<GraphSetColumnType>, other: Option<GraphSetColumnType>| {
-            open == Some(GraphSetColumnType::Any) && other.is_some_and(is_element_column)
+            open == Some(GraphSetColumnType::Any)
+                && other
+                    .is_some_and(|kind| kind == GraphSetColumnType::Any || is_element_column(kind))
         };
         Ok((open_element(left, right) || open_element(right, left))
             && !tighter_than_comparison(&mut lexer)?)
