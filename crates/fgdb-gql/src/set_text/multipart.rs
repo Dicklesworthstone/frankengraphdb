@@ -69,7 +69,7 @@ pub(crate) struct BoundReadInput {
 // second lexer or a fallback after a failed parse. Nested EXISTS/MATCH bodies,
 // strings, property names and STARTS/ENDS WITH do not start a query part.
 pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
-    if has_returning_exists(tokens) {
+    if has_relational_exists(tokens) {
         return true;
     }
     let mut depth = 0_usize;
@@ -144,10 +144,11 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
     false
 }
 
-/// A returning EXISTS body needs the relational owner even when its enclosing
-/// query has only one MATCH. This lookahead does not parse its expressions:
-/// the shared graph lexer and multipart compiler still admit the whole body.
-fn has_returning_exists(tokens: &[TextToken<'_>]) -> bool {
+/// A multi-clause EXISTS body needs the relational owner even when its
+/// enclosing query has only one MATCH and the body has no RETURN. This
+/// lookahead does not parse expressions: the shared graph lexer and
+/// multipart compiler still admit the whole body.
+fn has_relational_exists(tokens: &[TextToken<'_>]) -> bool {
     for (index, token) in tokens.iter().enumerate() {
         if !token.word("EXISTS")
             || !tokens.get(index + 1).is_some_and(|next| next.punct(b'{'))
@@ -158,6 +159,7 @@ fn has_returning_exists(tokens: &[TextToken<'_>]) -> bool {
             continue;
         }
         let mut depth = 0_usize;
+        let mut matched = false;
         for (relative, body) in tokens[index + 2..].iter().enumerate() {
             match body.kind {
                 TextKind::Punct(b'(' | b'[' | b'{') => depth += 1,
@@ -167,14 +169,23 @@ fn has_returning_exists(tokens: &[TextToken<'_>]) -> bool {
                     };
                     depth = outer;
                 }
-                _ if depth == 0 && (body.word("WITH") || body.word("RETURN")) => {
+                _ if depth == 0 => {
                     let previous = &tokens[index + 1 + relative];
-                    if !previous.punct(b'.')
-                        && !previous.word("AS")
-                        && !(body.word("WITH")
-                            && (previous.word("STARTS") || previous.word("ENDS")))
-                    {
-                        return true;
+                    if !previous.punct(b'.') && !previous.punct(b':') && !previous.word("AS") {
+                        if body.word("MATCH") {
+                            if matched {
+                                return true;
+                            }
+                            matched = true;
+                        } else if ["RETURN", "OPTIONAL", "UNWIND", "CALL"]
+                            .iter()
+                            .any(|clause| body.word(clause))
+                            || (body.word("WITH")
+                                && !previous.word("STARTS")
+                                && !previous.word("ENDS"))
+                        {
+                            return true;
+                        }
                     }
                 }
                 _ => {}

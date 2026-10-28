@@ -332,6 +332,222 @@ fn inline_call_bodies_aggregate_once_per_outer_row() {
 }
 
 #[test]
+fn implicit_exists_bodies_keep_clause_boundaries_and_outer_occurrences() {
+    let row = |id, present| {
+        GraphValueRow::from_owned_values(vec![
+            GraphValue::Vertex(VId(id)),
+            GraphValue::Scalar(CanonicalScalar::Bool(present)),
+        ])
+    };
+    for (body, present) in [
+        // The two MATCH clauses require a two-hop walk. Parallel first-hop
+        // witnesses never multiply an outer occurrence.
+        (
+            "MATCH (n)-[:R]->(m) MATCH (m)-[:R]->(end)",
+            [true, true, false, false],
+        ),
+        // A failed OPTIONAL MATCH supplies a NULL-extended row, so it is
+        // still a witness. The mandatory first hop must nevertheless exist.
+        (
+            "MATCH (n)-[:R]->(m) OPTIONAL MATCH (m)-[:R]->(end)",
+            [true, true, true, false],
+        ),
+        // A required clause after the optional one consumes its NULL row
+        // and eliminates it. Moving that clause inside the optional scope
+        // would give the wrong presence result for n=2 and n=3.
+        (
+            "MATCH (n)-[:R]->(m) OPTIONAL MATCH (m)-[:R]->(end) MATCH (end)-[:R]->()",
+            [true, false, false, false],
+        ),
+        // A leading optional body has one witness even for isolated n=4.
+        ("OPTIONAL MATCH (n)-[:R]->(m)", [true; 4]),
+    ] {
+        let statement = format!("MATCH (n) RETURN n,EXISTS {{ {body} }} AS present ORDER BY n");
+        assert_eq!(
+            execute_identified(&statement),
+            present
+                .into_iter()
+                .enumerate()
+                .map(|(index, present)| row(index as u128 + 1, present))
+                .collect::<Vec<_>>(),
+            "{statement}"
+        );
+    }
+    assert_eq!(
+        execute_identified(
+            "MATCH (n) WITH n,EXISTS { MATCH (n)-[:R]->(m) MATCH (m)-[:R]->() } AS present \
+             WHERE present RETURN n ORDER BY n"
+        ),
+        vec![vertices(&[1]), vertices(&[2])]
+    );
+    let query = prepare_items(
+        "UNWIND $items AS x WHERE EXISTS { MATCH (x)-[:R]->(m) MATCH (m)-[:R]->() } \
+         RETURN x",
+    )
+    .bind_parameters(
+        &GqlParameters::new()
+            .with_list(
+                "items",
+                vec![
+                    GraphValue::Vertex(VId(1)),
+                    GraphValue::Vertex(VId(1)),
+                    GraphValue::Vertex(VId(2)),
+                    GraphValue::Vertex(VId(3)),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                ],
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let mut rows = run_identified(&query);
+    rows.sort();
+    assert_eq!(rows, vec![vertices(&[1]), vertices(&[1]), vertices(&[2])]);
+}
+
+#[test]
+fn implicit_exists_with_stages_apply_grouping_pages_and_name_scope() {
+    let query = prepare(
+        "MATCH (n) RETURN n,EXISTS { MATCH (n)-[:R]->(m) \
+         WITH n,count(*) AS degree WHERE degree = 1 } AS present ORDER BY n",
+    );
+    assert_eq!(
+        run(&query, wide(), &mut || Ok(())).unwrap().value,
+        (1..=4)
+            .map(|id| GraphValueRow::from_owned_values(vec![
+                GraphValue::Vertex(VId(id)),
+                GraphValue::Scalar(CanonicalScalar::Bool(id == 2 || id == 3)),
+            ]))
+            .collect::<Vec<_>>()
+    );
+    // WITH drops n. The later MATCH (n) binds a fresh body-local vertex,
+    // rather than recapturing the outer one. Only the first-hop existence
+    // depends on the outer n, and the final n.p=1 is satisfied independently.
+    assert_eq!(
+        execute(
+            "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) \
+             WITH m MATCH (n) WHERE n.p = 1 } RETURN n ORDER BY n"
+        ),
+        vec![vertices(&[1]), vertices(&[2]), vertices(&[3])]
+    );
+    // A keyless aggregate emits an empty-input group for n=4. The following
+    // WHERE retains precisely that group, even without an explicit RETURN.
+    assert_eq!(
+        execute(
+            "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) \
+             WITH count(*) AS degree WHERE degree = 0 } RETURN n"
+        ),
+        vec![vertices(&[4])]
+    );
+    assert_eq!(
+        execute(
+            "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) \
+             WITH DISTINCT m ORDER BY m SKIP 1 LIMIT 1 } RETURN n"
+        ),
+        vec![vertices(&[1])]
+    );
+    // A scalar-only body is evaluated per outer occurrence; FALSE/NULL
+    // projected values are rows and do not change existential truth.
+    assert_eq!(
+        execute(
+            "UNWIND [1,2,2] AS x RETURN x,\
+             EXISTS { WITH x AS y WHERE y = 2 WITH null AS ignored } AS present ORDER BY x"
+        ),
+        [1, 2, 2]
+            .into_iter()
+            .map(|value| GraphValueRow::from_owned_values(vec![
+                GraphValue::Scalar(CanonicalScalar::Int(value)),
+                GraphValue::Scalar(CanonicalScalar::Bool(value == 2)),
+            ]))
+            .collect::<Vec<_>>()
+    );
+    for statement in [
+        "MATCH (n) WHERE EXISTS { MATCH (n) WITH 1 AS value WITH value WHERE n.p = 1 } RETURN n",
+        "MATCH (n) WHERE EXISTS { MATCH (n) MATCH (m) } RETURN m",
+        "MATCH (n) WHERE EXISTS { MATCH (n) WITH n CREATE () } RETURN n",
+        "MATCH (n) WHERE EXISTS { MATCH (n) MATCH } RETURN n",
+        "RETURN EXISTS { WITH 1 AS n CALL { MATCH (m) } } AS present",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(statement, |_, _: &str| {
+                panic!("scope and syntax refusals precede catalog: {statement}")
+            })
+            .is_err(),
+            "{statement}"
+        );
+    }
+}
+
+#[test]
+fn implicit_exists_preserves_late_refusals_and_cumulative_admission() {
+    for statement in [
+        "WITH 0 AS x WHERE EXISTS { WITH 1 / x AS bad } RETURN x LIMIT 0",
+        "WITH 0 AS x WHERE EXISTS { WITH 1 / x AS bad LIMIT 0 } RETURN x",
+        "WITH 1 AS x WHERE EXISTS { UNWIND [1,0] AS d WITH 1 / d AS bad } RETURN x",
+    ] {
+        assert!(
+            run(&prepare(statement), wide(), &mut || Ok(())).is_err(),
+            "{statement}"
+        );
+    }
+    let query = prepare(
+        "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) \
+         WITH count(*) AS degree WHERE degree >= 0 } RETURN n",
+    );
+    let mut checkpoints = 0;
+    let measured = run(&query, wide(), &mut || {
+        checkpoints += 1;
+        Ok(())
+    })
+    .unwrap();
+    let caps = [
+        measured.rows.snapshot_records,
+        measured.rows.result_rows,
+        measured.evaluator.work_units,
+        measured.evaluator.scratch_entries,
+    ];
+    assert_eq!(
+        caps[1], 4,
+        "only the outer result spends result-row allowance"
+    );
+    assert_eq!(
+        run(
+            &query,
+            GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+            &mut || Ok(())
+        )
+        .unwrap(),
+        measured
+    );
+    for dimension in 0..4 {
+        let mut limited = caps;
+        assert!(limited[dimension] > 0);
+        limited[dimension] -= 1;
+        assert!(
+            run(
+                &query,
+                GqlQueryPolicy::new(limited[0], limited[1], limited[2], limited[3]),
+                &mut || Ok(())
+            )
+            .is_err(),
+            "dimension {dimension}"
+        );
+    }
+    for stop in 0..checkpoints {
+        let mut seen = 0;
+        assert!(
+            run(&query, wide(), &mut || {
+                let current = seen;
+                seen += 1;
+                if current == stop { Err(stop) } else { Ok(()) }
+            })
+            .is_err(),
+            "checkpoint {stop}"
+        );
+    }
+    assert_eq!(run(&query, wide(), &mut || Ok(())).unwrap(), measured);
+}
+
+#[test]
 fn returning_exists_groups_and_filters_each_correlated_body_before_testing_presence() {
     let template = PreparedGraphSetText::prepare(
         "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) \
