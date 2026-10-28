@@ -980,16 +980,31 @@ impl GraphIntegerExpression {
         mut load_element: impl FnMut(usize) -> Result<Option<u128>, GraphIntegerErrorKind>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<ExpressionCell<'a>, GraphIntegerEvaluationError<E>> {
-        self.evaluate_loaded_dyn(width, &mut load, &mut load_element, control)
+        // Keep the caller's error outside the VM, so its complete instruction
+        // body and payload helpers are shared across control-error types too.
+        // No error is cloned, boxed, or given a stronger lifetime bound.
+        let mut refusal = None;
+        let result = self.evaluate_loaded_dyn(width, &mut load, &mut load_element, &mut |event| {
+            control(event).map_err(|source| {
+                refusal = Some(source);
+            })
+        });
+        result.map_err(|error| match error {
+            GraphIntegerEvaluationError::Value(error) => GraphIntegerEvaluationError::Value(error),
+            GraphIntegerEvaluationError::Control(()) => GraphIntegerEvaluationError::Control(
+                refusal.expect("VM control errors originate in the caller's control"),
+            ),
+        })
     }
 
-    fn evaluate_loaded_dyn<'a, E>(
+    #[inline(never)]
+    fn evaluate_loaded_dyn<'a>(
         &'a self,
         width: usize,
         load: &mut dyn FnMut(usize) -> Result<ExpressionCell<'a>, GraphIntegerErrorKind>,
         load_element: &mut dyn FnMut(usize) -> Result<Option<u128>, GraphIntegerErrorKind>,
-        mut control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), E>,
-    ) -> Result<ExpressionCell<'a>, GraphIntegerEvaluationError<E>> {
+        mut control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Result<ExpressionCell<'a>, GraphIntegerEvaluationError<()>> {
         let control = &mut control;
         for _ in 0..self.stack_entries {
             control(GlaExecutionEvent::ScratchEntry)
@@ -2492,6 +2507,60 @@ mod tests {
                 GraphIntegerEvaluationError::Value(error) => error,
                 GraphIntegerEvaluationError::Control(()) => unreachable!("infallible test control"),
             })
+    }
+
+    #[test]
+    fn control_refusals_keep_borrowed_nonclone_payloads_and_drop_once() {
+        struct Refusal<'a> {
+            reason: &'a String,
+            drops: &'a std::cell::Cell<usize>,
+        }
+        impl Drop for Refusal<'_> {
+            fn drop(&mut self) {
+                self.drops.set(self.drops.get() + 1);
+            }
+        }
+        let expression = GraphIntegerExpression::prepare(&[
+            Literal(Some(1)),
+            Literal(Some(2)),
+            Binary(GraphIntegerBinary::Add),
+        ])
+        .unwrap();
+        let mut events = 0;
+        assert_eq!(
+            expression
+                .evaluate_scalar_with_control(&[], &mut |_| {
+                    events += 1;
+                    Ok::<_, ()>(())
+                })
+                .unwrap(),
+            CanonicalScalar::Int(3)
+        );
+        assert!(events > 3, "both frame and instruction events execute");
+        let reason = String::from("caller-owned control refusal");
+        for stop in 1..=events {
+            let drops = std::cell::Cell::new(0);
+            let mut calls = 0;
+            let result = expression.evaluate_scalar_with_control(&[], &mut |_| {
+                calls += 1;
+                if calls == stop {
+                    Err(Refusal {
+                        reason: &reason,
+                        drops: &drops,
+                    })
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(calls, stop, "a refused event is terminal");
+            let Err(GraphIntegerEvaluationError::Control(source)) = result else {
+                panic!("the caller's exact control refusal must be returned");
+            };
+            assert!(core::ptr::eq(source.reason, &reason));
+            assert_eq!(drops.get(), 0, "the caller still owns the error");
+            drop(source);
+            assert_eq!(drops.get(), 1);
+        }
     }
 
     #[test]
