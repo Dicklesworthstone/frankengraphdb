@@ -442,13 +442,33 @@ impl PreparedGraphMutationQuery {
         owned: Option<Vec<GraphValueRow>>,
         policy: GraphMutationPolicy,
         source: collect::ErasedSource<'_, E, C>,
-        mut elements: Option<&mut super::collect::MutationElementReader<'_, E>>,
+        elements: Option<&mut super::collect::MutationElementReader<'_, E>>,
         field_admission: Option<&mut super::collect::MutationFieldAdmission<'_, E, C>>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<E>, C>> {
-        // Every engine below (selection, aggregate, ordering, tail) sees one
-        // checkpoint type per error-type pair, not one per caller (fgdb-2goz).
-        let mut checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
+        self.execute_with_checkpoint(
+            owned,
+            policy,
+            source,
+            elements,
+            field_admission,
+            &mut checkpoint,
+        )
+    }
+
+    // Erase the callback before entering the body that creates selection,
+    // aggregate and continuation closures. A cast inside the generic body
+    // would leave that body's caller-specific type parameter (fgdb-2goz).
+    #[inline(never)]
+    fn execute_with_checkpoint<E, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GraphMutationPolicy,
+        source: collect::ErasedSource<'_, E, C>,
+        mut elements: Option<&mut super::collect::MutationElementReader<'_, E>>,
+        field_admission: Option<&mut super::collect::MutationFieldAdmission<'_, E, C>>,
+        mut checkpoint: &mut dyn FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<E>, C>> {
         let mut selection = policy;
         selection.query = GqlQueryPolicy::new(
             policy.query.rows.max_snapshot_records().unwrap_or(u64::MAX),

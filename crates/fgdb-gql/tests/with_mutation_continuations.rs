@@ -653,6 +653,76 @@ fn removed_properties_and_empty_sources_keep_their_distinct_native_meanings() {
 }
 
 #[test]
+fn continuation_checkpoints_return_borrowed_nonclone_errors_without_a_batch() {
+    struct Refusal<'a> {
+        reason: &'a String,
+        drops: &'a Cell<usize>,
+    }
+    impl Drop for Refusal<'_> {
+        fn drop(&mut self) {
+            self.drops.set(self.drops.get() + 1);
+        }
+    }
+
+    fn run<C>(
+        query: &PreparedGraphMutationQuery,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<()>, C>> {
+        query.execute_governed(
+            policy(1),
+            |selection, budget| {
+                selection.plan().execute_governed_with_properties(
+                    1,
+                    [VId(BASE + 1)],
+                    std::iter::empty::<(VId, RelationId, VId)>(),
+                    |_, _| Ok::<_, ()>(true),
+                    |_, _| Ok(None),
+                    budget,
+                    || Ok::<_, C>(()),
+                )
+            },
+            checkpoint,
+        )
+    }
+
+    let query = prepare("MATCH (n) WITH n SET n.p=2 WITH n AS kept RETURN kept.p AS p");
+    let mut events = 0;
+    let complete = run(&query, || {
+        events += 1;
+        Ok::<_, ()>(())
+    })
+    .unwrap();
+    assert_eq!(rows(&complete), vec![vec![int(2)]]);
+    assert_eq!(complete.mutation().stats().effects, 1);
+    assert_ne!(events, 0);
+
+    let reason = String::from("caller-owned continuation refusal");
+    for stop in 1..=events {
+        let drops = Cell::new(0);
+        let mut calls = 0;
+        let result = run(&query, || {
+            calls += 1;
+            if calls == stop {
+                Err(Refusal {
+                    reason: &reason,
+                    drops: &drops,
+                })
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(calls, stop, "a refused checkpoint must be terminal");
+        let Err(GqlQueryError::Interrupted(source)) = result else {
+            panic!("interruption must return the caller's error, without a proposal batch");
+        };
+        assert!(core::ptr::eq(source.reason, &reason));
+        assert_eq!(drops.get(), 0);
+        drop(source);
+        assert_eq!(drops.get(), 1);
+    }
+}
+
+#[test]
 fn row_mutation_continuations_keep_final_row_limits_late_errors_and_cancellation() {
     let query = prepare(
         "MATCH (n) WITH n SET n.p=n.p+10 WITH n AS kept \
