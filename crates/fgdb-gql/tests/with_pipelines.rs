@@ -2395,6 +2395,7 @@ fn comprehension_compares_elements_bound_by_a_later_match() {
                 [2, 3]
                     .map(|value| GraphValue::Scalar(CanonicalScalar::Int(value)))
                     .to_vec()
+                    .into_boxed_slice()
             )])],
             "{text}"
         );
