@@ -452,7 +452,10 @@ impl QueryCx {
     }
 
     /// Observes cancellation on every call; evaluates deadline and budget
-    /// exhaustion once per [`FULL_CHECKPOINT_INTERVAL`] calls.
+    /// exhaustion once per [`FULL_CHECKPOINT_INTERVAL`] calls. Inline: a
+    /// governed walk polls once per record it reads, and the call was most of
+    /// what a poll cost.
+    #[inline]
     pub fn checkpoint(&self) -> Result<(), Box<asupersync::error::Error>> {
         paced_checkpoint(&self.inner, &self.pacer)?;
         #[cfg(feature = "simulation-checkpoints")]
@@ -575,7 +578,10 @@ impl TxnCx {
     }
 
     /// Observes cancellation on every call; evaluates deadline and budget
-    /// exhaustion once per [`FULL_CHECKPOINT_INTERVAL`] calls.
+    /// exhaustion once per [`FULL_CHECKPOINT_INTERVAL`] calls. Inline: a
+    /// governed walk polls once per record it reads, and the call was most of
+    /// what a poll cost.
+    #[inline]
     pub fn checkpoint(&self) -> Result<(), Box<asupersync::error::Error>> {
         paced_checkpoint(&self.inner, &self.pacer)
     }
