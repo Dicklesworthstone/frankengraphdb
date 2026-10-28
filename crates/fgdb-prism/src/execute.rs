@@ -1406,7 +1406,7 @@ impl FnxCallSpec {
                 self.outputs().len(),
             )?),
             FnxAlgorithm::Foundation(algorithm) => {
-                crate::foundation::estimated_work(algorithm, n, arcs)
+                crate::foundation::estimated_work(algorithm, n, arcs, graph.is_directed())
             }
             FnxAlgorithm::Cdlp { max_iter } => {
                 crate::traversal::cdlp_estimated_work(n, arcs, max_iter, graph.is_directed())

@@ -107,7 +107,7 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 
 #[test]
 fn registry_describes_only_the_implemented_in_core_signatures() {
-    assert_eq!(FnxSignatureRegistry::version(), 20);
+    assert_eq!(FnxSignatureRegistry::version(), 21);
     assert_eq!(FnxSignatureRegistry::signatures().len(), 20);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
@@ -148,14 +148,14 @@ fn registry_describes_only_the_implemented_in_core_signatures() {
         signature.implementation,
         FnxImplementationClass::InCoreDecodedCache
     );
-    // A native foundation row keeps its undirected law and identifies its
-    // own CSR kernel, with pinned fnx serving as the semantics oracle.
+    // Directional betweenness retains its unqualified undirected default and
+    // identifies its CSR kernel, with pinned fnx serving as the semantics oracle.
     let foundation = FnxSignatureRegistry::lookup("fnx.betweenness_centrality").unwrap();
-    assert_eq!(foundation.graph_kind, FnxGraphKind::Undirected);
+    assert_eq!(foundation.graph_kind, FnxGraphKind::Any);
     assert!(foundation.parameters.is_empty());
     assert_eq!(
         foundation.execution_kernel,
-        "fgdb-prism/brandes-csr-source-order-v3"
+        "fgdb-prism/brandes-csr-source-order-v4"
     );
     // Katz stays unregistered: its checked foundation entry drops the result
     // and witness on non-convergence, so a refusal would have to invent one.
@@ -1611,4 +1611,30 @@ fn evidence_binds_snapshot_call_projection_result_and_upstream_witness() {
     assert_ne!(cert.result_digest, changed.certificate.result_digest);
     let aliased = execute(&bind("CALL fnx.pagerank() YIELD score AS r,vertex"), &view);
     assert_ne!(cert.digest, aliased.certificate.digest);
+}
+
+#[test]
+fn betweenness_preserves_undirected_default_and_admits_explicit_directions() {
+    let call = bind("CALL fnx.betweenness_centrality()");
+    assert_eq!(call.signature().graph_kind, FnxGraphKind::Any);
+    let options = FnxReadOptions::whole_graph_for(&call, Some(CommitSeq(7)));
+    assert_eq!(options.as_of, Some(CommitSeq(7)));
+    assert_eq!(options.projection.directedness, Directedness::Undirected);
+    assert_eq!(
+        options.projection.parallel_edges,
+        ParallelEdgePolicy::Reject
+    );
+    for direction in [
+        Directedness::Directed,
+        Directedness::Reversed,
+        Directedness::Undirected,
+    ] {
+        call.validate_sealed_projection(direction).unwrap();
+    }
+    assert_eq!(
+        FnxReadOptions::whole_graph_for(&bind("CALL fnx.pagerank()"), None)
+            .projection
+            .directedness,
+        Directedness::Directed,
+    );
 }

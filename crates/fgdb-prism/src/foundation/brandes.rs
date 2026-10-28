@@ -1,8 +1,8 @@
-//! Exact, source-ordered Brandes betweenness over the admitted undirected CSR.
+//! Exact, source-ordered Brandes betweenness over the admitted CSR.
 //!
-//! A BFS queue is also its reverse dependency order. Predecessors need no
-//! second adjacency structure: they are the neighbors one level nearer the
-//! source. Their order within a row updates distinct accumulators; each
+//! A BFS queue is also its reverse dependency order. Predecessors use the
+//! incoming CSR face, shared with the outgoing face for undirected inputs,
+//! and are one level nearer the source. Their row order updates distinct accumulators; each
 //! accumulator still receives contributions in the pinned reverse BFS order.
 //! Parallel sources own disjoint scratch and source-ordered component deltas,
 //! then the caller reduces those deltas in source order. Component membership
@@ -118,7 +118,7 @@ fn filled<T: Copy, C>(
 
 /// One membership directory, shared by every source and worker. This is an
 /// exact decomposition, not a sampled policy choice. A source's nonzero
-/// dependencies cannot leave its undirected component, so its retained row
+/// dependencies cannot leave its weak component, so its retained row
 /// needs only that component's scalar slots; no target ID is copied per source.
 struct Components {
     ordinals: Vec<usize>,
@@ -158,10 +158,20 @@ impl Components {
                 arithmetic.step()?;
                 let vertex = vertices[head];
                 head += 1;
-                for &neighbor in graph
+                let outgoing = graph
                     .neighbors_indices(vertex)
-                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?
-                {
+                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                let incoming = if graph.is_directed() {
+                    let (offsets, sources) = graph.incoming_face();
+                    sources
+                        .get(offsets[vertex]..offsets[vertex + 1])
+                        .ok_or(FnxExecutionError::InvalidUpstreamResult)?
+                } else {
+                    &[]
+                };
+                // Directed reachability is not a partition. Union both faces
+                // so source windows share one exact weak-component directory.
+                for &neighbor in outgoing.iter().chain(incoming) {
                     arithmetic.step()?;
                     let ordinal = ordinals
                         .get_mut(neighbor)
@@ -331,8 +341,9 @@ impl Worker {
                 }
             };
             if CONNECTED {
-                // Every vertex is reachable. Preserve the incumbent's streaming
-                // initialization and keep these stores out of the BFS hot loop.
+                // The weak component spans the population. Preserve the
+                // incumbent's streaming initialization and keep these stores
+                // out of the BFS hot loop, even for a partial directed reach.
                 fill(&mut self.sigma, 0.0, &mut live)?;
                 fill(&mut self.distance, usize::MAX, &mut live)?;
                 fill(delta, 0.0, &mut live)?;
@@ -414,8 +425,9 @@ impl Worker {
                 let delta_vertex = delta[delta_index(vertex)];
                 if sigma_vertex > 0.0 {
                     let previous_distance = self.distance[vertex] - 1;
-                    let mut row = graph
-                        .neighbors_indices(vertex)
+                    let (offsets, sources) = graph.incoming_face();
+                    let mut row = sources
+                        .get(offsets[vertex]..offsets[vertex + 1])
                         .ok_or(WorkerError::InvalidProjection)?;
                     while !row.is_empty() {
                         let count = live.take(row.len())?;

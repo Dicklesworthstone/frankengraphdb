@@ -38,6 +38,7 @@ pub(crate) fn estimated_work(
     algorithm: FoundationAlgorithm,
     n: usize,
     arcs: usize,
+    directed: bool,
 ) -> Option<usize> {
     let step = n.checked_add(arcs)?;
     match algorithm {
@@ -47,16 +48,16 @@ pub(crate) fn estimated_work(
         }
         FoundationAlgorithm::LoadCentrality => native::load_work(n, arcs),
         FoundationAlgorithm::BetweennessCentrality => {
-            // Every source visits only its undirected connected component.
-            // Reached-only resets and sparse source-ordered reduction avoid
-            // a V-wide pass per source. A component of c vertices requires
-            // at least c-1 edges; no vertex/arc is visited by more than C
-            // sources, where C <= min(V,E+1). Price the component-discovery
-            // pass as well: (C+1)*(V+arcs). The pinned witness still describes
-            // the Brandes source traversals, excluding this preparation pass.
-            n.min((arcs / 2).checked_add(1)?)
+            // Every source stays within its weak component. A component of
+            // c vertices needs at least c-1 edges: directed arcs count once,
+            // undirected arcs twice. Keep the undirected admission unchanged.
+            // Directed component discovery also reads the incoming CSR face.
+            // The pinned witness describes source BFS passes only.
+            let edges = if directed { arcs } else { arcs / 2 };
+            n.min(edges.checked_add(1)?)
                 .checked_add(1)?
-                .checked_mul(step)
+                .checked_mul(step)?
+                .checked_add(if directed { arcs } else { 0 })
         }
         FoundationAlgorithm::EigenvectorCentrality => {
             step.checked_mul(EIGENVECTOR_MAX_ITERATIONS + 1)

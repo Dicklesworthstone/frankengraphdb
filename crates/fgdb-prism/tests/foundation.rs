@@ -470,7 +470,7 @@ fn native_betweenness_is_certified_with_its_kernel_and_the_foundation_witness() 
     let certificate = &result.certificate;
     assert_eq!(
         certificate.execution_kernel,
-        "fgdb-prism/brandes-csr-source-order-v3"
+        "fgdb-prism/brandes-csr-source-order-v4"
     );
     assert_eq!(certificate.registry_version, FNX_SIGNATURE_REGISTRY_VERSION);
     assert_eq!(certificate.vertices, 4);
@@ -1601,6 +1601,93 @@ fn native_foundation_certifies_vertex_workspace_and_keeps_preflight_limits() {
             ));
             assert_eq!(control.units, 1);
             assert!(control.polls.is_empty());
+        }
+    }
+}
+
+#[test]
+fn directed_and_reversed_betweenness_match_pinned_bits_witness_and_exact_work() {
+    // Low-ordinal sinks must stay in their weak component. Incoming rows also
+    // contain predecessors unreachable from a source and can have a different
+    // degree than the outgoing row. The sparse 513-node case crosses the native
+    // parallel-source threshold without turning isolates into quadratic work.
+    let cases: &[(usize, &[(usize, usize)])] = &[
+        (0, &[]),
+        (1, &[]),
+        (6, &[(0, 1), (1, 2), (3, 2), (2, 4), (4, 1)]),
+        (7, &[(2, 0), (2, 1), (3, 1), (4, 5)]),
+        (6, &[(0, 1), (0, 2), (1, 3), (2, 3), (3, 4)]),
+        (
+            513,
+            &[(4, 1), (4, 2), (2, 3), (3, 1), (6, 7), (9, 8), (20, 21)],
+        ),
+    ];
+    let procedure = call("betweenness_centrality");
+    for &(n, pairs) in cases {
+        let id = |at: usize| (1u128 << 110) + ((at as u128) << 64) + 17;
+        let vertices: Vec<_> = (0..n).rev().map(id).collect();
+        let edges: Vec<_> = pairs
+            .iter()
+            .map(|&(source, target)| (id(source), id(target)))
+            .collect();
+        for direction in [Directedness::Directed, Directedness::Reversed] {
+            let graph = view_direction(&vertices, &edges, SelfLoopPolicy::Keep, direction);
+            let names = graph.nodes_ordered();
+            let mut oracle = DiGraph::strict();
+            for &name in &names {
+                oracle.add_node(name);
+            }
+            for source in 0..n {
+                for &target in graph.neighbors_indices(source).unwrap() {
+                    oracle.add_edge(names[source], names[target]).unwrap();
+                }
+            }
+            let expected = fnx_algorithms::betweenness_centrality_directed(&oracle);
+            let expected_bits: BTreeMap<_, _> = expected
+                .scores
+                .iter()
+                .map(|score| {
+                    (
+                        VId(u128::from_str_radix(&score.node, 16).unwrap()),
+                        score.score.to_bits(),
+                    )
+                })
+                .collect();
+            // Directed weak-component discovery reads both CSR faces; a
+            // component needs at least c-1 arcs, rather than 2*(c-1).
+            let work = (n.min(edges.len() + 1) + 1) * (n + edges.len()) + edges.len();
+            let allowed = FnxExecutionLimits {
+                max_iterations: 0,
+                max_result_rows: n,
+                max_estimated_work: work,
+            };
+            let actual = procedure
+                .execute(&graph, allowed, || Ok::<(), Infallible>(()))
+                .unwrap();
+            assert_eq!(actual.rows.len(), n);
+            assert_eq!(degree_bits(&actual), expected_bits, "{direction:?}, n={n}");
+            assert_eq!(
+                actual.certificate.witness, expected.witness,
+                "{direction:?}, n={n}"
+            );
+            assert_eq!(actual.certificate.estimated_work, work);
+            if work != 0 {
+                assert!(
+                    matches!(
+                        procedure.execute(
+                            &graph,
+                            FnxExecutionLimits { max_estimated_work: work - 1, ..allowed },
+                            || Ok::<(), Infallible>(()),
+                        ),
+                        Err(FnxExecutionError::LimitExceeded {
+                            resource: "estimated work",
+                            limit,
+                            requested,
+                        }) if limit == work - 1 && requested == work
+                    ),
+                    "{direction:?}, n={n}"
+                );
+            }
         }
     }
 }

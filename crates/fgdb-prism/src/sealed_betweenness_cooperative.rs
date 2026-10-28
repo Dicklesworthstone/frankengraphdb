@@ -8,9 +8,9 @@
 
 use super::betweenness::{prepare, witness, workspace};
 use super::{
-    ComplexityWitness, Delivery, ExecutionError, Finished, FnxCallSpec, FnxExecutionLimits,
-    FnxMemoryLimits, KernelOutput, KernelValues, Result, ResultAdmission, SealedGraphView, add,
-    admit, checkpoint, finish_encoded, mul, reserve,
+    ComplexityWitness, Delivery, Directedness, ExecutionError, Finished, FnxCallSpec,
+    FnxExecutionLimits, FnxMemoryLimits, KernelOutput, KernelValues, Result, ResultAdmission,
+    SealedGraphView, add, admit, checkpoint, finish_encoded, mul, reserve,
 };
 #[cfg(test)]
 use super::{Cursor, Rows, betweenness::work};
@@ -264,22 +264,32 @@ impl Brandes {
 }
 
 #[cfg(test)]
-fn run(
-    graph: &impl Rows,
+fn run<G: Rows>(
+    graph: &G,
+    reverse: Option<&G>,
     limit: usize,
     control: &mut impl FnMut() -> Result<()>,
 ) -> Result<(KernelOutput, usize)> {
     control()?;
+    let incoming = reverse.unwrap_or(graph);
+    if incoming.node_count() != graph.node_count() {
+        return Err(ExecutionError::InvalidUpstreamResult.into());
+    }
     let mut state = Brandes::new(graph.node_count(), limit, control)?;
     while !state.complete() {
         control()?;
         if let Some(vertex) = state.row() {
-            let mut row = graph.open(vertex)?;
+            let face = if matches!(state.phase, Phase::Dependencies { .. }) {
+                incoming
+            } else {
+                graph
+            };
+            let mut row = face.open(vertex)?;
             while let Some((neighbor, _)) = row.next()? {
                 control()?;
                 state.visit(neighbor)?;
             }
-            state.end_row(graph.degree(vertex))?;
+            state.end_row(face.degree(vertex))?;
         } else {
             state.scalar_step()?;
         }
@@ -307,21 +317,43 @@ where
     let mut state = Brandes::new(n, memory.max_kernel_workspace_bytes, &mut || {
         checkpoint(control.cx)
     })?;
+    let reverse = if n != 0 && graph.spec().directedness != Directedness::Undirected {
+        let remaining = memory
+            .max_kernel_workspace_bytes
+            .checked_sub(state.peak)
+            .ok_or(ExecutionError::SizeOverflow)?;
+        let reverse = control.reverse_projection(graph, remaining).await?;
+        state.peak = add(state.peak, reverse.charged_workspace_bytes())?;
+        admit(
+            "kernel workspace bytes",
+            state.peak,
+            memory.max_kernel_workspace_bytes,
+        )?;
+        Some(reverse)
+    } else {
+        None
+    };
     while !state.complete() {
         control.tick().await?;
         if let Some(vertex) = state.row() {
-            let mut row = graph.neighbor_cursor_controlled(control.cx, vertex, None)?;
+            let face = if matches!(state.phase, Phase::Dependencies { .. }) {
+                reverse.as_ref().unwrap_or(graph)
+            } else {
+                graph
+            };
+            let mut row = face.neighbor_cursor_controlled(control.cx, vertex, None)?;
             while let Some((neighbor, _)) = control.next(&mut row).await? {
                 control.tick().await?;
                 state.visit(neighbor)?;
             }
-            state.end_row(graph.degree(vertex))?;
+            state.end_row(face.degree(vertex))?;
         } else {
             state.scalar_step()?;
         }
     }
     control.tick().await?;
     let (output, peak) = state.finish()?;
+    drop(reverse);
     let mut encoded = super::EncodedRows::new(call, n, &admission)?;
     for vertex in 0..n {
         control.tick().await?;
@@ -336,7 +368,7 @@ where
         encoded,
         output.values,
         output.witness,
-        "fgdb-prism/sealed-brandes-source-ordered-cooperative-v1",
+        "fgdb-prism/sealed-brandes-source-ordered-cooperative-v2",
         estimated,
         peak,
         &mut || checkpoint(control.cx),

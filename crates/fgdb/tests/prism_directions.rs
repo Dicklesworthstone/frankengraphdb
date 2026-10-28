@@ -705,7 +705,7 @@ fn sealed_betweenness_matches_decoded_history_reductions_and_exact_limits() {
                 assert_eq!(actual.certificate.snapshot.as_of, at);
                 assert_eq!(
                     actual.certificate.execution_kernel,
-                    "fgdb-prism/sealed-betweenness-brandes-v1"
+                    "fgdb-prism/sealed-betweenness-brandes-v2"
                 );
                 exact_sealed_limits(&procedure, &query, &graph, opt.execution_limits, &actual);
                 let hosted = db
@@ -834,39 +834,112 @@ fn sealed_betweenness_matches_decoded_history_reductions_and_exact_limits() {
         assert_eq!(hosted.analytics, empty);
 
         for direction in [Directedness::Directed, Directedness::Reversed] {
-            let mut invalid = options(direction);
-            invalid.projection.self_loops = SelfLoopPolicy::Drop;
-            let graph = project(&db, &query, invalid).await;
-            invalid.source_limits.max_work_units = 0;
-            invalid.projection_limits.max_workspace_bytes = 0;
-            invalid.execution_limits.max_estimated_work = 0;
-            invalid.execution_limits.max_result_rows = 0;
-            let no_memory = FnxMemoryLimits {
-                max_kernel_workspace_bytes: 0,
-                max_result_bytes: 0,
-            };
-            assert!(matches!(
-                procedure.execute_sealed(&query, &graph, invalid.execution_limits, no_memory),
-                Err(FnxSealedExecutionError::Execution(
-                    FnxExecutionError::GraphKind {
-                        required: FnxGraphKind::Undirected
-                    }
-                ))
-            ));
+            let mut opt = options(direction);
+            opt.projection.self_loops = SelfLoopPolicy::Drop;
+            let graph = project(&db, &query, opt).await;
+            let decoded = view.execute_fnx(&query, &procedure, opt).unwrap();
+            let actual = procedure
+                .execute_sealed(&query, &graph, opt.execution_limits, memory())
+                .unwrap();
+            assert_eq!(actual.columns, decoded.analytics.columns);
+            assert_eq!(actual.rows, decoded.analytics.rows);
+            assert_eq!(
+                actual.certificate.result_digest,
+                decoded.analytics.certificate.result_digest
+            );
+            assert_eq!(actual.certificate.adapter, AdapterPath::CompressedCursor);
+            assert_eq!(actual.certificate.snapshot, graph.binding());
+            exact_sealed_limits(&procedure, &query, &graph, opt.execution_limits, &actual);
+            let hosted = db
+                .call_fnx_sealed(
+                    &query,
+                    BETWEENNESS,
+                    &FnxParameters::new(),
+                    opt,
+                    memory(),
+                    SealedLimits::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(hosted.analytics, actual);
+
+            // These directions are admitted. Tight execution grants must now
+            // fail for their own resource on both reusable and hosted images.
+            for resource in [
+                "estimated work",
+                "result rows",
+                "kernel workspace bytes",
+                "result bytes",
+            ] {
+                let mut limited = opt;
+                let mut limited_memory = memory();
+                match resource {
+                    "estimated work" => limited.execution_limits.max_estimated_work = 0,
+                    "result rows" => limited.execution_limits.max_result_rows = 0,
+                    "kernel workspace bytes" => limited_memory.max_kernel_workspace_bytes = 0,
+                    "result bytes" => limited_memory.max_result_bytes = 0,
+                    _ => unreachable!(),
+                }
+                assert!(matches!(
+                    procedure.execute_sealed(
+                        &query,
+                        &graph,
+                        limited.execution_limits,
+                        limited_memory,
+                    ),
+                    Err(FnxSealedExecutionError::Execution(
+                        FnxExecutionError::LimitExceeded { resource: actual, .. }
+                    )) if actual == resource
+                ));
+                assert!(matches!(
+                    db.call_fnx_sealed(
+                        &query,
+                        BETWEENNESS,
+                        &FnxParameters::new(),
+                        limited,
+                        limited_memory,
+                        SealedLimits::default(),
+                    )
+                    .await,
+                    Err(FnxSealedReadError::Execution(
+                        FnxSealedExecutionError::Execution(
+                            FnxExecutionError::LimitExceeded { resource: actual, .. }
+                        )
+                    )) if actual == resource
+                ));
+            }
+
+            let mut limited = opt;
+            limited.source_limits.max_work_units = 0;
             assert!(matches!(
                 db.call_fnx_sealed(
                     &query,
                     BETWEENNESS,
                     &FnxParameters::new(),
-                    invalid,
-                    no_memory,
+                    limited,
+                    memory(),
                     SealedLimits::default(),
                 )
                 .await,
-                Err(FnxSealedReadError::Execution(
-                    FnxSealedExecutionError::Execution(FnxExecutionError::GraphKind {
-                        required: FnxGraphKind::Undirected
-                    })
+                Err(FnxSealedReadError::Input(FnxReadError::SourceLimit {
+                    resource: "work units",
+                    ..
+                }))
+            ));
+            let mut limited = opt;
+            limited.projection_limits.max_workspace_bytes = 0;
+            assert!(matches!(
+                db.call_fnx_sealed(
+                    &query,
+                    BETWEENNESS,
+                    &FnxParameters::new(),
+                    limited,
+                    memory(),
+                    SealedLimits::default(),
+                )
+                .await,
+                Err(FnxSealedReadError::Projection(
+                    SealedProjectionError::Projection(ProjectionError::LimitExceeded { .. })
                 ))
             ));
         }

@@ -1,7 +1,7 @@
 //! Exact Brandes through authenticated historical compressed projections.
 
 use super::*;
-use fgdb_prism::{AdapterPath, FnxGraphKind, FnxValue};
+use fgdb_prism::{AdapterPath, FnxValue};
 
 fn call() -> FnxCallSpec {
     FnxCallSpec::bind(
@@ -64,7 +64,7 @@ fn compressed_betweenness_preserves_native_bits_history_reductions_and_full_widt
                 assert_eq!(expected.certificate.adapter, AdapterPath::CompressedCursor);
                 assert_eq!(
                     expected.certificate.execution_kernel,
-                    "fgdb-prism/sealed-betweenness-brandes-v1"
+                    "fgdb-prism/sealed-betweenness-brandes-v2"
                 );
                 assert_eq!(
                     expected.certificate.kernel_workspace_bytes,
@@ -111,7 +111,7 @@ fn compressed_betweenness_preserves_native_bits_history_reductions_and_full_widt
                     compare_execution(&actual, &expected);
                     assert_eq!(
                         actual.certificate.execution_kernel,
-                        "fgdb-prism/sealed-brandes-source-ordered-cooperative-v1"
+                        "fgdb-prism/sealed-brandes-source-ordered-cooperative-v2"
                     );
                     if q == 1 {
                         assert!(
@@ -156,7 +156,8 @@ fn compressed_betweenness_preserves_native_bits_history_reductions_and_full_widt
 }
 
 #[test]
-fn compressed_betweenness_admits_exact_limits_and_refuses_incompatible_graphs_before_yield() {
+fn compressed_betweenness_admits_exact_limits_and_preserves_undirected_admission_and_accepts_directions()
+ {
     let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -206,14 +207,30 @@ fn compressed_betweenness_admits_exact_limits_and_refuses_incompatible_graphs_be
             } else { call.execute_sealed(&cx, &graph, opt.execution_limits, memory()) };
             assert!(matches!(result, Err(FnxSealedExecutionError::Execution(FnxExecutionError::SelfLoopRefused))));
             for direction in [Directedness::Directed, Directedness::Reversed] {
-                let mut invalid = opt;
-                invalid.projection.directedness = direction;
-                let sealing = SealedLimits { max_image_bytes: 0, ..SealedLimits::default() };
+                let directed = options(direction);
+                let graph = projection(&db, &cx, directed).await;
                 let result = if cooperative {
-                    db.execute_fnx_sealed_cooperative(&cx, &call, invalid, memory(), sealing, quantum(1)).await
-                } else { db.execute_fnx_sealed(&cx, &call, invalid, memory(), sealing).await };
-                assert!(matches!(result, Err(FnxSealedReadError::Execution(FnxSealedExecutionError::Execution(
-                    FnxExecutionError::GraphKind { required: FnxGraphKind::Undirected })))));
+                    call.execute_sealed_cooperative(
+                        &cx,
+                        &graph,
+                        directed.execution_limits,
+                        memory(),
+                        quantum(1),
+                        yield_now,
+                    )
+                    .await
+                } else {
+                    call.execute_sealed(&cx, &graph, directed.execution_limits, memory())
+                }
+                .unwrap();
+                let native = db
+                    .read_session()
+                    .unwrap()
+                    .execute_fnx(&cx, &call, directed)
+                    .unwrap()
+                    .analytics;
+                assert_eq!(result.rows, native.rows);
+                assert_eq!(result.certificate.result_digest, native.certificate.result_digest);
             }
         }
         assert_eq!(contexts.outstanding_obligations(), 0);
@@ -383,5 +400,123 @@ fn compressed_betweenness_cancels_or_drops_at_every_checkpoint_and_suspend() {
             .unwrap(),
             expected
         );
+    });
+}
+
+#[test]
+fn directed_betweenness_charges_reverse_workspace_and_preserves_cooperative_results() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let mut db = small_database(&contexts.commit(), 7, false).await;
+        let mut batch = WriteBatch::new(RelationId(1));
+        for (at, (source, target)) in [(0, 1), (0, 5), (1, 2), (3, 2), (2, 4), (4, 1), (5, 2)]
+            .into_iter()
+            .enumerate()
+        {
+            batch.add_edge(
+                EId(at as u128 + 1),
+                VId(source),
+                VId(target),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(-3))],
+            );
+        }
+        db.write(&contexts.commit(), batch).await.unwrap();
+        let call = call();
+        for direction in [Directedness::Directed, Directedness::Reversed] {
+            let opt = options(direction);
+            let graph = projection(&db, &cx, opt).await;
+            let expected = call
+                .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                .unwrap();
+            let native = db
+                .read_session()
+                .unwrap()
+                .execute_fnx(&cx, &call, opt)
+                .unwrap()
+                .analytics;
+            assert_eq!(expected.rows, native.rows);
+            assert_eq!(
+                expected.certificate.result_digest,
+                native.certificate.result_digest
+            );
+            let scalar = graph.node_count() * (2 * size_of::<usize>() + 3 * size_of::<f64>());
+            assert!(expected.certificate.kernel_workspace_bytes > scalar);
+            let exact = FnxMemoryLimits {
+                max_kernel_workspace_bytes: expected.certificate.kernel_workspace_bytes,
+                ..memory()
+            };
+            assert_eq!(
+                call.execute_sealed(&cx, &graph, opt.execution_limits, exact)
+                    .unwrap(),
+                expected
+            );
+            for q in [1, 7, 257] {
+                let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                let (actual, pending) = drive(
+                    call.execute_sealed_cooperative(
+                        &controlled,
+                        &graph,
+                        opt.execution_limits,
+                        exact,
+                        quantum(q),
+                        yield_now,
+                    ),
+                    &probe,
+                    q,
+                );
+                compare_execution(&actual.unwrap(), &expected);
+                assert!(pending > 0);
+            }
+            let scalar_only = FnxMemoryLimits {
+                max_kernel_workspace_bytes: scalar,
+                ..memory()
+            };
+            assert!(
+                call.execute_sealed(&cx, &graph, opt.execution_limits, scalar_only)
+                    .is_err()
+            );
+            assert!(
+                call.execute_sealed_cooperative(
+                    &cx,
+                    &graph,
+                    opt.execution_limits,
+                    scalar_only,
+                    quantum(1),
+                    yield_now
+                )
+                .await
+                .is_err()
+            );
+            let low_work = FnxExecutionLimits {
+                max_estimated_work: expected.certificate.estimated_work - 1,
+                ..opt.execution_limits
+            };
+            let refused = call
+                .execute_sealed_cooperative(
+                    &cx,
+                    &graph,
+                    low_work,
+                    memory(),
+                    quantum(1),
+                    || -> std::future::Ready<()> {
+                        panic!("work refusal precedes reverse construction")
+                    },
+                )
+                .await;
+            assert!(matches!(
+                refused,
+                Err(FnxSealedExecutionError::Execution(
+                    FnxExecutionError::LimitExceeded {
+                        resource: "estimated work",
+                        ..
+                    }
+                ))
+            ));
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
     });
 }

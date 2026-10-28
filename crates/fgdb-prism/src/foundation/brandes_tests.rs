@@ -628,3 +628,99 @@ fn serial_brandes_propagates_every_live_refusal_without_another_control_call() {
         assert_eq!(cut.calls, stop);
     }
 }
+
+#[test]
+fn directed_and_reversed_brandes_match_pinned_bits_and_weak_source_windows() {
+    let cases: &[(usize, &[(usize, usize)])] = &[
+        (0, &[]),
+        (1, &[]),
+        (6, &[(0, 1), (1, 2), (3, 2), (2, 4), (4, 1)]),
+        (7, &[(2, 0), (2, 1), (3, 1), (4, 5)]),
+        (6, &[(0, 1), (0, 2), (1, 3), (2, 3), (3, 4)]),
+        (
+            513,
+            &[(4, 1), (4, 2), (2, 3), (3, 1), (6, 7), (9, 8), (20, 21)],
+        ),
+    ];
+    for &(n, pairs) in cases {
+        for direction in [Directedness::Directed, Directedness::Reversed] {
+            let id = |at: usize| VId((1u128 << 110) + ((at as u128) << 64) + 17);
+            let vertices: Vec<_> = (0..n).rev().map(id).collect();
+            let edges: Vec<_> = pairs
+                .iter()
+                .enumerate()
+                .map(|(at, &(s, t))| ProjectionEdge {
+                    eid: EId(at as u128 + 1),
+                    source: id(s),
+                    target: id(t),
+                    weight: if at % 2 == 0 { -3.0 } else { 11.0 },
+                })
+                .collect();
+            let graph = SnapshotGraphView::build(
+                SnapshotBinding {
+                    root: ObjectId([19; 32]),
+                    as_of: CommitSeq(31),
+                },
+                &vertices,
+                &edges,
+                ProjectionSpec {
+                    directedness: direction,
+                    parallel_edges: ParallelEdgePolicy::Reject,
+                    self_loops: SelfLoopPolicy::Keep,
+                },
+                ProjectionLimits {
+                    max_vertices: n,
+                    max_input_edges: edges.len(),
+                    max_adjacency_entries: edges.len(),
+                    max_workspace_bytes: 1 << 28,
+                },
+            )
+            .unwrap();
+            let names = graph.nodes_ordered();
+            let mut oracle = fnx_classes::digraph::DiGraph::strict();
+            for &name in &names {
+                oracle.add_node(name);
+            }
+            for source in 0..n {
+                for &target in graph.neighbors_indices(source).unwrap() {
+                    oracle.add_edge(names[source], names[target]).unwrap();
+                }
+            }
+            let expected = fnx_algorithms::betweenness_centrality_directed(&oracle);
+            let expected_bits: Vec<_> = expected
+                .scores
+                .iter()
+                .map(|score| score.score.to_bits())
+                .collect();
+            for (threads, window) in [(1, 1), (1, 7), (2, 7), (4, 17)] {
+                let (actual, _) =
+                    run_with_schedule(&graph, &mut Unstoppable, threads, window).unwrap();
+                assert_eq!(
+                    bits(&actual),
+                    expected_bits,
+                    "{direction:?}, n={n}, threads={threads}, window={window}"
+                );
+                assert_eq!(actual.witness, expected.witness);
+            }
+            let work = (n.min(edges.len() + 1) + 1) * (n + edges.len()) + edges.len();
+            let limits = FnxExecutionLimits {
+                max_iterations: 0,
+                max_result_rows: n,
+                max_estimated_work: work,
+            };
+            let call =
+                FnxCallSpec::bind("CALL fnx.betweenness_centrality()", &FnxParameters::new())
+                    .unwrap();
+            let result = call
+                .execute(&graph, limits, || Ok::<(), Infallible>(()))
+                .unwrap();
+            assert_eq!(result.certificate.estimated_work, work);
+            if work != 0 {
+                assert!(matches!(
+                    call.execute(&graph, FnxExecutionLimits { max_estimated_work: work - 1, ..limits }, || Ok::<(), Infallible>(())),
+                    Err(FnxExecutionError::LimitExceeded { resource: "estimated work", requested, .. }) if requested == work
+                ));
+            }
+        }
+    }
+}

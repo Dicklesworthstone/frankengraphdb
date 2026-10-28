@@ -1,7 +1,7 @@
-//! Exact, source-ordered Brandes betweenness over compressed undirected rows.
+//! Exact, source-ordered Brandes betweenness over compressed projected rows.
 //!
 //! Keep one FIFO, distances, path counts, dependencies and scores. Predecessors
-//! are the neighbors one level nearer the source, so neither adjacency nor
+//! are incoming neighbors one level nearer the source, so neither adjacency nor
 //! predecessor lists are copied. Sources and reverse FIFO dependencies retain
 //! the decoded kernel's arithmetic order. Reset only reached vertices: an
 //! isolated population does not perform a quadratic clear or zero reduction.
@@ -10,9 +10,9 @@
 //! when every final score remained finite.
 
 use super::{
-    ComplexityWitness, Cursor, ExecutionError, Finished, FnxCallSpec, FnxExecutionLimits,
-    FnxMemoryLimits, KernelOutput, KernelValues, Result, ResultAdmission, Rows, SealedGraphView,
-    SealedRows, add, admit, checkpoint, directional_pass_work, finish, mul,
+    ComplexityWitness, Cursor, Directedness, ExecutionError, Finished, FnxCallSpec,
+    FnxExecutionLimits, FnxMemoryLimits, KernelOutput, KernelValues, Result, ResultAdmission, Rows,
+    SealedGraphView, SealedRows, add, admit, checkpoint, directional_pass_work, finish, mul,
     require_loop_free_degree, reserve,
 };
 use crate::sealed_control::Control;
@@ -22,18 +22,25 @@ pub(super) fn workspace(n: usize) -> Result<usize> {
     mul(n, 2 * size_of::<usize>() + 3 * size_of::<f64>())
 }
 
-pub(super) fn work(n: usize, arcs: usize, pass: usize, columns: usize) -> Result<usize> {
+pub(super) fn work(
+    n: usize,
+    arcs: usize,
+    pass: usize,
+    columns: usize,
+    directed: bool,
+) -> Result<usize> {
     if n == 0 {
         return Ok(0);
     }
-    // A connected component with r vertices needs at least r-1 distinct
-    // undirected edges. Each row is therefore revisited from at most this
-    // many sources. This also bounds reached-only resets and score additions;
-    // isolated populations admit linear work rather than a fictitious V^2.
-    // `pass` includes BOTH compressed faces, retained history and excluded
-    // endpoint searches, not merely the reduced simple graph's arcs.
-    let component = n.min(add(arcs / 2, 1)?);
-    let per_component = add(mul(pass, 2)?, add(mul(arcs, 2)?, mul(n, 8)?)?)?;
+    // A weak component with r vertices needs at least r-1 edges. Directed
+    // arcs count once, undirected arcs twice. This bounds reached-only resets
+    // and score additions as well as row revisits. Preserve the undirected
+    // bound exactly; directed `pass` already sums outgoing and incoming work.
+    // Both forms include retained history and excluded endpoint searches.
+    let edges = if directed { arcs } else { arcs / 2 };
+    let component = n.min(add(edges, 1)?);
+    let passes = if directed { pass } else { mul(pass, 2)? };
+    let per_component = add(passes, add(mul(arcs, 2)?, mul(n, 8)?)?)?;
     add(
         mul(component, per_component)?,
         add(mul(n, add(columns, 24)?)?, add(columns, 16)?)?,
@@ -43,7 +50,7 @@ pub(super) fn work(n: usize, arcs: usize, pass: usize, columns: usize) -> Result
 pub(super) fn witness() -> ComplexityWitness {
     ComplexityWitness {
         algorithm: "brandes_betweenness_compressed_fifo".to_owned(),
-        complexity_claim: "O(V + C*(V*(1+log(1+H)) + H*(1+log(1+H)+log(1+V)))); C <= min(V,E+1) bounds component size, E is projected undirected edges and H is retained incidence count; O(V) kernel workspace".to_owned(),
+        complexity_claim: "O(V + C*(V*(1+log(1+H)) + H*(1+log(1+H)+log(1+V)))); C <= min(V,E+1) bounds component size, E is projected edges and H is retained incidence count; O(V) scalar workspace plus a bounded compressed reverse index for directed input".to_owned(),
         nodes_touched: 0,
         edges_scanned: 0,
         queue_peak: 0,
@@ -101,13 +108,18 @@ fn check_degree(graph: &impl Rows, source: usize, seen: usize) -> Result<()> {
     Ok(())
 }
 
-fn run(
-    graph: &impl Rows,
+fn run<G: Rows>(
+    graph: &G,
+    reverse: Option<&G>,
     limit: usize,
     control: &mut impl FnMut() -> Result<()>,
 ) -> Result<(KernelOutput, usize)> {
     control()?;
     let n = graph.node_count();
+    let incoming = reverse.unwrap_or(graph);
+    if incoming.node_count() != n {
+        return Err(ExecutionError::InvalidUpstreamResult.into());
+    }
     admit("kernel workspace bytes", workspace(n)?, limit)?;
     let mut live = 0;
     let mut distances = reserved(n, &mut live, limit, control)?;
@@ -180,7 +192,7 @@ fn run(
             let delta_vertex = delta[vertex];
             if sigma_vertex > 0.0 {
                 let previous_distance = distances[vertex] - 1;
-                let mut row = graph.open(vertex)?;
+                let mut row = incoming.open(vertex)?;
                 let (mut previous, mut seen) = (None, 0);
                 while let Some(predecessor) =
                     next(&mut row, vertex, n, &mut previous, &mut seen, control)?
@@ -193,7 +205,7 @@ fn run(
                             (sigma[predecessor] / sigma_vertex) * (1.0 + delta_vertex);
                     }
                 }
-                check_degree(graph, vertex, seen)?;
+                check_degree(incoming, vertex, seen)?;
                 witness.edges_scanned = add(witness.edges_scanned, seen)?;
             }
         }
@@ -248,15 +260,45 @@ pub(super) fn prepare(
 ) -> Result<usize> {
     let n = graph.node_count();
     admission.rows(n)?;
-    let pass = directional_pass_work(n, graph.scan_incidence_bound(), graph.spec().directedness)?;
-    let estimated = work(n, graph.adjacency_entry_count(), pass, call.outputs().len())?;
+    let direction = graph.spec().directedness;
+    let directed = direction != Directedness::Undirected;
+    let retained = graph.scan_incidence_bound();
+    let forward = directional_pass_work(n, retained, direction)?;
+    let (pass, setup) = if directed && n != 0 {
+        let opposite = if direction == Directedness::Directed {
+            Directedness::Reversed
+        } else {
+            Directedness::Directed
+        };
+        let incoming = directional_pass_work(n, retained, opposite)?;
+        // Admit reverse-directory authentication and retained-locator
+        // collection, sorting and encoding before construction can allocate.
+        let height = (usize::BITS - retained.leading_zeros()) as usize;
+        let index = mul(retained, add(32, mul(height, 4)?)?)?;
+        let setup = add(mul(incoming, 2)?, add(index, mul(n, 8)?)?)?;
+        (add(forward, incoming)?, setup)
+    } else {
+        (forward, 0)
+    };
+    let estimated = add(
+        work(
+            n,
+            graph.adjacency_entry_count(),
+            pass,
+            call.outputs().len(),
+            directed,
+        )?,
+        setup,
+    )?;
     admit("estimated work", estimated, limits.max_estimated_work)?;
     admit(
         "kernel workspace bytes",
         workspace(n)?,
         memory.max_kernel_workspace_bytes,
     )?;
-    require_loop_free_degree(graph.edge_count(), graph.adjacency_entry_count())?;
+    if !directed {
+        require_loop_free_degree(graph.edge_count(), graph.adjacency_entry_count())?;
+    }
     Ok(estimated)
 }
 
@@ -271,12 +313,32 @@ pub(super) fn execute(
     let estimated = prepare(call, graph, limits, memory, admission)?;
     let rows = SealedRows { cx, graph };
     let mut control = || checkpoint(cx);
-    let (output, peak) = run(&rows, memory.max_kernel_workspace_bytes, &mut control)?;
+    let reverse =
+        if graph.node_count() != 0 && graph.spec().directedness != Directedness::Undirected {
+            let remaining = memory
+                .max_kernel_workspace_bytes
+                .checked_sub(workspace(graph.node_count())?)
+                .ok_or(ExecutionError::SizeOverflow)?;
+            Some(graph.reverse_projection_controlled(cx, remaining)?)
+        } else {
+            None
+        };
+    let auxiliary = reverse
+        .as_ref()
+        .map_or(0, SealedGraphView::charged_workspace_bytes);
+    let remaining = memory
+        .max_kernel_workspace_bytes
+        .checked_sub(auxiliary)
+        .ok_or(ExecutionError::SizeOverflow)?;
+    let reverse_rows = reverse.as_ref().map(|graph| SealedRows { cx, graph });
+    let (output, peak) = run(&rows, reverse_rows.as_ref(), remaining, &mut control)?;
+    let peak = add(peak, auxiliary)?;
+    drop(reverse);
     finish(
         call,
         graph,
         output,
-        "fgdb-prism/sealed-betweenness-brandes-v1",
+        "fgdb-prism/sealed-betweenness-brandes-v2",
         estimated,
         peak,
         admission,
@@ -593,7 +655,8 @@ mod tests {
                     .collect();
                 let graph = projection(n, &edges);
                 let fixture = Fixture::new(rows(n, &edges));
-                let (actual, peak) = run(&fixture, workspace(n).unwrap(), &mut || Ok(())).unwrap();
+                let (actual, peak) =
+                    run(&fixture, None, workspace(n).unwrap(), &mut || Ok(())).unwrap();
                 assert_eq!(actual.row_count, n);
                 assert_eq!(peak, workspace(n).unwrap());
                 let actual = scores(actual);
@@ -629,7 +692,7 @@ mod tests {
         }
         let graph = projection(n, &edges);
         let fixture = Fixture::new(rows(n, &edges));
-        let (actual, peak) = run(&fixture, workspace(n).unwrap(), &mut || Ok(())).unwrap();
+        let (actual, peak) = run(&fixture, None, workspace(n).unwrap(), &mut || Ok(())).unwrap();
         let actual = scores(actual);
         assert_eq!(bits(&actual), bits(&decoded(&graph)));
         for (value, expected) in actual.iter().zip(level_successor_oracle(&fixture.rows)) {
@@ -657,7 +720,7 @@ mod tests {
         let graph = projection(n, &edges);
         let fixture = Fixture::new(rows(n, &edges));
         let actual = scores(
-            run(&fixture, workspace(n).unwrap(), &mut || Ok(()))
+            run(&fixture, None, workspace(n).unwrap(), &mut || Ok(()))
                 .unwrap()
                 .0,
         );
@@ -670,7 +733,7 @@ mod tests {
         let fixture = Fixture::new(rows(6, &edges));
         let mut ticks = 0;
         let expected = scores(
-            run(&fixture, usize::MAX, &mut || {
+            run(&fixture, None, usize::MAX, &mut || {
                 ticks += 1;
                 Ok(())
             })
@@ -680,14 +743,14 @@ mod tests {
         for stop in 1..=fixture.steps.get() {
             let mut failed = Fixture::new(rows(6, &edges));
             failed.fail_at = stop;
-            assert!(run(&failed, usize::MAX, &mut || Ok(())).is_err());
+            assert!(run(&failed, None, usize::MAX, &mut || Ok(())).is_err());
             assert_eq!(failed.steps.get(), stop);
         }
         for stop in 1..=ticks {
             let fixture = Fixture::new(rows(6, &edges));
             let mut calls = 0;
             assert!(
-                run(&fixture, usize::MAX, &mut || {
+                run(&fixture, None, usize::MAX, &mut || {
                     calls += 1;
                     if calls == stop {
                         Err(stopped())
@@ -701,7 +764,7 @@ mod tests {
         }
         assert_eq!(
             bits(&scores(
-                run(&fixture, usize::MAX, &mut || Ok(())).unwrap().0
+                run(&fixture, None, usize::MAX, &mut || Ok(())).unwrap().0
             )),
             bits(&expected)
         );
@@ -715,14 +778,16 @@ mod tests {
             vec![vec![2, 1], vec![0], vec![0]],
         ] {
             assert!(matches!(
-                run(&Fixture::new(values), usize::MAX, &mut || Ok(())),
+                run(&Fixture::new(values), None, usize::MAX, &mut || Ok(())),
                 Err(super::super::Error::Execution(
                     ExecutionError::InvalidUpstreamResult
                 ))
             ));
         }
         assert!(matches!(
-            run(&Fixture::new(vec![vec![0]]), usize::MAX, &mut || Ok(())),
+            run(&Fixture::new(vec![vec![0]]), None, usize::MAX, &mut || Ok(
+                ()
+            )),
             Err(super::super::Error::Execution(
                 ExecutionError::SelfLoopRefused
             ))
@@ -730,20 +795,20 @@ mod tests {
         for degree in [0, 2] {
             let mut fixture = Fixture::new(vec![vec![1], vec![0]]);
             fixture.degrees = Some(vec![degree, 1]);
-            assert!(run(&fixture, usize::MAX, &mut || Ok(())).is_err());
+            assert!(run(&fixture, None, usize::MAX, &mut || Ok(())).is_err());
         }
         let fixture = Fixture::new(rows(7, &[(0, 1), (1, 2), (3, 4)]));
         let limit = workspace(7).unwrap();
-        assert!(run(&fixture, limit, &mut || Ok(())).is_ok());
+        assert!(run(&fixture, None, limit, &mut || Ok(())).is_ok());
         let untouched = Fixture::new(fixture.rows.clone());
-        assert!(run(&untouched, limit - 1, &mut || Ok(())).is_err());
+        assert!(run(&untouched, None, limit - 1, &mut || Ok(())).is_err());
         assert_eq!(untouched.steps.get(), 0);
         assert!(workspace(usize::MAX).is_err());
-        assert!(work(usize::MAX, 2, 1, 2).is_err());
-        assert!(work(3, 2, usize::MAX, 2).is_err());
-        assert!(work(3, usize::MAX, 1, 2).is_err());
+        assert!(work(usize::MAX, 2, 1, 2, false).is_err());
+        assert!(work(3, 2, usize::MAX, 2, false).is_err());
+        assert!(work(3, usize::MAX, 1, 2, false).is_err());
         let pass = directional_pass_work(7, 1000, Directedness::Undirected).unwrap();
-        let estimate = work(7, 6, pass, 2).unwrap();
+        let estimate = work(7, 6, pass, 2, false).unwrap();
         assert!(admit("estimated work", estimate, estimate).is_ok());
         assert!(admit("estimated work", estimate, estimate - 1).is_err());
         assert!(
@@ -752,7 +817,8 @@ mod tests {
                     7,
                     6,
                     directional_pass_work(7, 6, Directedness::Undirected).unwrap(),
-                    2
+                    2,
+                    false
                 )
                 .unwrap()
         );
@@ -763,7 +829,7 @@ mod tests {
         let n = 8193;
         let fixture = Fixture::new(vec![Vec::new(); n]);
         let mut ticks = 0;
-        let (output, peak) = run(&fixture, workspace(n).unwrap(), &mut || {
+        let (output, peak) = run(&fixture, None, workspace(n).unwrap(), &mut || {
             ticks += 1;
             Ok(())
         })
@@ -776,12 +842,12 @@ mod tests {
         assert!(ticks < 10 * n + 32);
         assert!(scores(output).iter().all(|value| value.to_bits() == 0));
         let pass = directional_pass_work(n, 0, Directedness::Undirected).unwrap();
-        assert!(work(n, 0, pass, 2).unwrap() < 100 * n);
+        assert!(work(n, 0, pass, 2, false).unwrap() < 100 * n);
 
         let leaves = 64;
         let edges: Vec<_> = (1..=leaves).map(|v| (0, v)).collect();
         let fixture = Fixture::new(rows(n, &edges));
-        let (output, peak) = run(&fixture, workspace(n).unwrap(), &mut || Ok(())).unwrap();
+        let (output, peak) = run(&fixture, None, workspace(n).unwrap(), &mut || Ok(())).unwrap();
         assert_eq!(
             output.witness.nodes_touched,
             (leaves + 1) * (leaves + 1) + n - leaves - 1
@@ -820,7 +886,7 @@ mod tests {
             let fixture = Fixture::new(rows(n, &edges));
             assert!(
                 matches!(
-                    run(&fixture, workspace(n).unwrap(), &mut || Ok(())),
+                    run(&fixture, None, workspace(n).unwrap(), &mut || Ok(())),
                     Err(super::super::Error::Execution(
                         ExecutionError::InvalidNumericResult
                     ))
@@ -844,5 +910,83 @@ mod tests {
                 "decoded layers={layers}"
             );
         }
+    }
+
+    #[test]
+    fn directed_incoming_dependencies_match_pinned_oracle_in_both_orientations() {
+        let cases = [
+            Vec::<Vec<usize>>::new(),
+            vec![vec![]],
+            vec![vec![1], vec![2], vec![]],
+            vec![vec![], vec![], vec![0, 1], vec![1], vec![5], vec![], vec![]],
+            vec![
+                vec![1, 5],
+                vec![2],
+                vec![4],
+                vec![2],
+                vec![1],
+                vec![2],
+                vec![],
+            ],
+        ];
+        for rows in cases {
+            let transpose = |rows: &[Vec<usize>]| {
+                let mut incoming = vec![Vec::new(); rows.len()];
+                for (source, row) in rows.iter().enumerate() {
+                    for &target in row {
+                        incoming[target].push(source);
+                    }
+                }
+                incoming
+            };
+            for reversed in [false, true] {
+                let outgoing = if reversed {
+                    transpose(&rows)
+                } else {
+                    rows.clone()
+                };
+                let incoming = transpose(&outgoing);
+                let n = outgoing.len();
+                let mut oracle = fnx_classes::digraph::DiGraph::strict();
+                for vertex in 0..n {
+                    oracle.add_node(format!("{vertex:032x}"));
+                }
+                for (source, row) in outgoing.iter().enumerate() {
+                    for &target in row {
+                        oracle
+                            .add_edge(format!("{source:032x}"), format!("{target:032x}"))
+                            .unwrap();
+                    }
+                }
+                let expected: Vec<_> = fnx_algorithms::betweenness_centrality_directed(&oracle)
+                    .scores
+                    .iter()
+                    .map(|score| score.score.to_bits())
+                    .collect();
+                let graph = Fixture::new(outgoing);
+                let reverse = Fixture::new(incoming);
+                let (output, peak) = run(
+                    &graph,
+                    Some(&reverse),
+                    workspace(n).unwrap(),
+                    &mut || Ok(()),
+                )
+                .unwrap();
+                let KernelValues::Scores(scores) = output.values else {
+                    panic!("scores");
+                };
+                assert_eq!(
+                    scores
+                        .iter()
+                        .map(|score| score.to_bits())
+                        .collect::<Vec<_>>(),
+                    expected,
+                    "n={n}, reversed={reversed}"
+                );
+                assert_eq!(peak, workspace(n).unwrap());
+            }
+        }
+        assert!(work(64, 8, 0, 2, true).unwrap() > work(64, 8, 0, 2, false).unwrap());
+        assert!(work(1, usize::MAX, 0, 2, true).is_err());
     }
 }

@@ -195,7 +195,7 @@ fn all_small_compressed_betweenness_matches_fnx_bits_and_independent_path_fracti
         let (distances, expected) = independent(&rows);
         let graph = Fixture::new(rows.clone());
         let mut ticks = 0;
-        let (output, peak) = run(&graph, workspace(n).unwrap(), &mut || {
+        let (output, peak) = run(&graph, None, workspace(n).unwrap(), &mut || {
             ticks += 1;
             Ok(())
         })
@@ -228,7 +228,7 @@ fn all_small_compressed_betweenness_matches_fnx_bits_and_independent_path_fracti
         assert_eq!(output.witness.edges_scanned, arcs);
         // The shared admission counts graph-size-dependent work; the empty
         // graph retains only fixed checkpoint overhead and admits zero work.
-        assert!(n == 0 || ticks <= work(n, rows.iter().map(Vec::len).sum(), 0, 2).unwrap());
+        assert!(n == 0 || ticks <= work(n, rows.iter().map(Vec::len).sum(), 0, 2, false).unwrap());
         cases += 1;
     });
     assert_eq!(cases, 1100);
@@ -307,7 +307,7 @@ fn paths_hubs_many_shortest_paths_and_disconnected_graphs_keep_reference_bits() 
     for edges in [path, hub, layered] {
         let rows = rows(75, &edges);
         let graph = Fixture::new(rows.clone());
-        let (output, peak) = run(&graph, usize::MAX, &mut || Ok(())).unwrap();
+        let (output, peak) = run(&graph, None, usize::MAX, &mut || Ok(())).unwrap();
         assert_eq!(bits(&output), reference(&rows));
         assert_eq!(peak, workspace(rows.len()).unwrap());
         assert!(output.witness.queue_peak <= rows.len());
@@ -319,7 +319,7 @@ fn isolates_use_linear_scalar_work_and_one_row_open_each() {
     let n = 4096;
     let graph = Fixture::new(vec![Vec::new(); n]);
     let mut ticks = 0;
-    let (output, peak) = run(&graph, usize::MAX, &mut || {
+    let (output, peak) = run(&graph, None, usize::MAX, &mut || {
         ticks += 1;
         Ok(())
     })
@@ -341,7 +341,7 @@ fn every_scalar_and_compressed_source_failure_discards_partial_dependencies() {
     let rows = rows(6, &[(0, 1), (0, 2), (1, 3), (2, 3), (3, 4)]);
     let graph = Fixture::new(rows.clone());
     let mut total = 0;
-    run(&graph, usize::MAX, &mut || {
+    run(&graph, None, usize::MAX, &mut || {
         total += 1;
         Ok(())
     })
@@ -350,7 +350,7 @@ fn every_scalar_and_compressed_source_failure_discards_partial_dependencies() {
     for stop in 1..=total {
         let graph = Fixture::new(rows.clone());
         let mut seen = 0;
-        let error = run(&graph, usize::MAX, &mut || {
+        let error = run(&graph, None, usize::MAX, &mut || {
             seen += 1;
             if seen == stop {
                 Err(super::super::Error::Cancelled(
@@ -368,7 +368,7 @@ fn every_scalar_and_compressed_source_failure_discards_partial_dependencies() {
     for stop in 1..=source_total {
         let mut graph = Fixture::new(rows.clone());
         graph.fail_at = stop;
-        let error = run(&graph, usize::MAX, &mut || Ok(()))
+        let error = run(&graph, None, usize::MAX, &mut || Ok(()))
             .err()
             .expect("source refusal");
         assert!(matches!(error, super::super::Error::Source(
@@ -382,7 +382,7 @@ fn limits_overflow_and_invalid_numeric_or_source_values_fail_closed() {
     let graph = Fixture::new(rows(3, &[(0, 1)]));
     let exact = workspace(3).unwrap();
     assert!(matches!(
-        run(&graph, exact - 1, &mut || Ok(())),
+        run(&graph, None, exact - 1, &mut || Ok(())),
         Err(super::super::Error::Execution(
             ExecutionError::LimitExceeded {
                 resource: "kernel workspace bytes",
@@ -391,15 +391,19 @@ fn limits_overflow_and_invalid_numeric_or_source_values_fail_closed() {
         ))
     ));
     assert_eq!(graph.source_steps.get(), 0);
-    run(&graph, exact, &mut || Ok(())).unwrap();
+    run(&graph, None, exact, &mut || Ok(())).unwrap();
     assert!(matches!(
-        run(&Fixture::new(vec![vec![1]]), usize::MAX, &mut || Ok(())),
+        run(&Fixture::new(vec![vec![1]]), None, usize::MAX, &mut || Ok(
+            ()
+        )),
         Err(super::super::Error::Execution(
             ExecutionError::InvalidUpstreamResult
         ))
     ));
     assert!(matches!(
-        run(&Fixture::new(vec![vec![0]]), usize::MAX, &mut || Ok(())),
+        run(&Fixture::new(vec![vec![0]]), None, usize::MAX, &mut || Ok(
+            ()
+        )),
         Err(super::super::Error::Execution(
             ExecutionError::SelfLoopRefused
         ))
@@ -409,7 +413,7 @@ fn limits_overflow_and_invalid_numeric_or_source_values_fail_closed() {
         vec![vec![2, 1], vec![0], vec![0]],
     ] {
         assert!(matches!(
-            run(&Fixture::new(rows), usize::MAX, &mut || Ok(())),
+            run(&Fixture::new(rows), None, usize::MAX, &mut || Ok(())),
             Err(super::super::Error::Execution(
                 ExecutionError::InvalidUpstreamResult
             ))
@@ -419,7 +423,7 @@ fn limits_overflow_and_invalid_numeric_or_source_values_fail_closed() {
         let mut graph = Fixture::new(vec![vec![1], vec![0]]);
         graph.degrees = Some(vec![degree, 1]);
         assert!(matches!(
-            run(&graph, usize::MAX, &mut || Ok(())),
+            run(&graph, None, usize::MAX, &mut || Ok(())),
             Err(super::super::Error::Execution(
                 ExecutionError::InvalidUpstreamResult
             ))
@@ -438,6 +442,7 @@ fn limits_overflow_and_invalid_numeric_or_source_values_fail_closed() {
     assert!(matches!(
         run(
             &Fixture::new(rows(2051, &edges)),
+            None,
             usize::MAX,
             &mut || Ok(())
         ),
@@ -446,8 +451,86 @@ fn limits_overflow_and_invalid_numeric_or_source_values_fail_closed() {
         ))
     ));
     assert!(workspace(usize::MAX).is_err());
-    assert!(work(usize::MAX, 0, 0, 2).is_err());
-    assert!(work(2, 0, usize::MAX, 2).is_err());
-    assert!(work(1, usize::MAX, 0, 2).is_err());
-    assert!(work(1, 0, 0, usize::MAX).is_err());
+    assert!(work(usize::MAX, 0, 0, 2, false).is_err());
+    assert!(work(2, 0, usize::MAX, 2, false).is_err());
+    assert!(work(1, usize::MAX, 0, 2, false).is_err());
+    assert!(work(1, 0, 0, usize::MAX, false).is_err());
+}
+
+#[test]
+fn directed_incoming_dependencies_match_pinned_oracle_in_both_orientations() {
+    let cases = [
+        Vec::<Vec<usize>>::new(),
+        vec![vec![]],
+        vec![vec![1], vec![2], vec![]],
+        vec![vec![], vec![], vec![0, 1], vec![1], vec![5], vec![], vec![]],
+        vec![
+            vec![1, 5],
+            vec![2],
+            vec![4],
+            vec![2],
+            vec![1],
+            vec![2],
+            vec![],
+        ],
+    ];
+    for rows in cases {
+        let transpose = |rows: &[Vec<usize>]| {
+            let mut incoming = vec![Vec::new(); rows.len()];
+            for (source, row) in rows.iter().enumerate() {
+                for &target in row {
+                    incoming[target].push(source);
+                }
+            }
+            incoming
+        };
+        for reversed in [false, true] {
+            let outgoing = if reversed {
+                transpose(&rows)
+            } else {
+                rows.clone()
+            };
+            let incoming = transpose(&outgoing);
+            let n = outgoing.len();
+            let mut oracle = fnx_classes::digraph::DiGraph::strict();
+            for vertex in 0..n {
+                oracle.add_node(format!("{vertex:032x}"));
+            }
+            for (source, row) in outgoing.iter().enumerate() {
+                for &target in row {
+                    oracle
+                        .add_edge(format!("{source:032x}"), format!("{target:032x}"))
+                        .unwrap();
+                }
+            }
+            let expected: Vec<_> = fnx_algorithms::betweenness_centrality_directed(&oracle)
+                .scores
+                .iter()
+                .map(|score| score.score.to_bits())
+                .collect();
+            let graph = Fixture::new(outgoing);
+            let reverse = Fixture::new(incoming);
+            let (output, peak) = run(
+                &graph,
+                Some(&reverse),
+                workspace(n).unwrap(),
+                &mut || Ok(()),
+            )
+            .unwrap();
+            let KernelValues::Scores(scores) = output.values else {
+                panic!("scores");
+            };
+            assert_eq!(
+                scores
+                    .iter()
+                    .map(|score| score.to_bits())
+                    .collect::<Vec<_>>(),
+                expected,
+                "n={n}, reversed={reversed}"
+            );
+            assert_eq!(peak, workspace(n).unwrap());
+        }
+    }
+    assert!(work(64, 8, 0, 2, true).unwrap() > work(64, 8, 0, 2, false).unwrap());
+    assert!(work(1, usize::MAX, 0, 2, true).is_err());
 }

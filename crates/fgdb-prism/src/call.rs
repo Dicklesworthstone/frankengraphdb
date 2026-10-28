@@ -6,7 +6,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 20;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 21;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -315,13 +315,19 @@ const SIGNATURES: &[FnxSignature] = &[
         "O(|V| * (|V| + |E|))",
         "fgdb-prism/harmonic-csr-batched-policy-v2",
     ),
-    foundation(
-        "fnx.betweenness_centrality",
-        FnxOutput::Score,
-        "explicit undirected simple projection; unweighted; self-loops refused; Brandes shortest-path betweenness, normalized by (|V|-1)(|V|-2)/2",
-        "O(|V| * |E|)",
-        "fgdb-prism/brandes-csr-source-order-v3",
-    ),
+    FnxSignature {
+        name: "fnx.betweenness_centrality",
+        graph_input_arity: 1,
+        parameters: &[],
+        outputs: &[FnxOutput::Vertex, FnxOutput::Score],
+        implementation: FnxImplementationClass::InCoreDecodedCache,
+        graph_kind: FnxGraphKind::Any,
+        numeric_profile: FNX_NUMERIC_PROFILE,
+        rng_policy: "none",
+        graph_laws: "unqualified whole-graph input defaults to undirected; explicit directed, reversed or undirected simple projection; unweighted; self-loops refused; exact Brandes shortest-path betweenness without endpoints; directed ordered-pair normalization by (|V|-1)(|V|-2), undirected unordered-pair normalization by (|V|-1)(|V|-2)/2; isolates retained",
+        complexity: "O(|V| * |E|)",
+        execution_kernel: "fgdb-prism/brandes-csr-source-order-v4",
+    },
     foundation(
         "fnx.eigenvector_centrality",
         FnxOutput::Score,

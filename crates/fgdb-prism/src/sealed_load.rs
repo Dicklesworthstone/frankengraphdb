@@ -32,6 +32,7 @@ fn prepare(
         crate::FoundationAlgorithm::LoadCentrality,
         n,
         graph.adjacency_entry_count(),
+        false,
     )
     .ok_or(ExecutionError::SizeOverflow)?;
     // Each row is opened only by sources in its visible component. Its

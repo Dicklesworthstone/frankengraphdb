@@ -2,9 +2,9 @@
 //! recipes, not secure-view constructors or capabilities.
 
 use crate::{
-    Directedness, FnxBindError, FnxCallSpec, FnxExecutionError, FnxExecutionLimits, FnxGraphKind,
-    FnxResult, ParallelEdgePolicy, ProjectionError, ProjectionLimits, ProjectionSpec,
-    SelfLoopPolicy,
+    Directedness, FnxAlgorithm, FnxBindError, FnxCallSpec, FnxExecutionError, FnxExecutionLimits,
+    FnxGraphKind, FnxResult, FoundationAlgorithm, ParallelEdgePolicy, ProjectionError,
+    ProjectionLimits, ProjectionSpec, SelfLoopPolicy,
 };
 use fgdb_crypto::{Digest, Hasher};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
@@ -186,13 +186,20 @@ impl FnxReadOptions {
 
     /// [`Self::whole_graph`] read in the direction `call`'s signature law
     /// requires: an undirected-law procedure (connected components,
-    /// triangles, clustering) reads every edge undirected, every other one
-    /// reads it directed. A reciprocal pair then projects to a parallel
-    /// edge, which is refused, not collapsed.
+    /// triangles, clustering) reads every edge undirected. Betweenness keeps
+    /// its undirected whole-graph default while admitting explicit directed
+    /// and reversed projections. Every other procedure reads directed edges.
+    /// A reciprocal pair in an undirected input projects to a parallel edge,
+    /// which is refused, not collapsed.
     #[must_use]
     pub fn whole_graph_for(call: &FnxCallSpec, as_of: Option<CommitSeq>) -> Self {
         let mut options = Self::whole_graph(as_of);
-        if call.signature().graph_kind == FnxGraphKind::Undirected {
+        if call.signature().graph_kind == FnxGraphKind::Undirected
+            || matches!(
+                call.algorithm(),
+                FnxAlgorithm::Foundation(FoundationAlgorithm::BetweennessCentrality)
+            )
+        {
             options.projection.directedness = Directedness::Undirected;
         }
         options
