@@ -1946,14 +1946,11 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Whether an openCypher `length(...)` call at the current token counts
-    /// the characters of text, as CHAR_LENGTH (fgdb-20foe). Any argument but
-    /// one lone name does, and so does a list element. Any other lone name
-    /// does unless it names a path: a MATCH path, a path a WITH carried for
-    /// a length read, or a row column of paths. Those stay with the
-    /// graph-function readers, which answer the path's hop count. Nothing is
-    /// consumed. Out of line: integer_unary repeats once per nested
-    /// parenthesis.
+    /// Whether length(...) uses the scalar program's dynamic value overload.
+    /// A list element or a row of unknown type may hold either text or a path.
+    /// A statically known MATCH path, carried path read or Path row column
+    /// stays with its graph-function reader. Nothing is consumed. Out of line:
+    /// integer_unary repeats once per nested parenthesis.
     #[inline(never)]
     fn text_length_call(
         &self,
@@ -2206,8 +2203,10 @@ impl<'a> Parser<'a> {
                 Some(GraphIntegerOp::ToBoolean)
             } else if function.eq_ignore_ascii_case("SIZE") {
                 Some(GraphIntegerOp::Size)
-            } else if spelled(["CHAR_LENGTH", "LENGTH"]) {
+            } else if function.eq_ignore_ascii_case("CHAR_LENGTH") {
                 Some(GraphIntegerOp::CharLength)
+            } else if function.eq_ignore_ascii_case("LENGTH") {
+                Some(GraphIntegerOp::Length)
             } else {
                 None
             };

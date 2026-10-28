@@ -159,6 +159,9 @@ pub enum GraphIntegerOp {
     Lower,
     Trim,
     CharLength,
+    /// LENGTH of a dynamic value: hop count for a Path, Unicode scalar
+    /// count for text, and NULL for NULL. CHAR_LENGTH stays text-only.
+    Length,
     /// openCypher size: Unicode scalar count for text, top-level member
     /// count for a List, and NULL for NULL. CHAR_LENGTH remains text-only.
     Size,
@@ -303,6 +306,7 @@ impl GraphIntegerOp {
             Self::Lower => bytes.push(18),
             Self::Trim => bytes.push(19),
             Self::CharLength => bytes.push(20),
+            Self::Length => bytes.push(47),
             Self::Size => bytes.push(46),
             Self::ToText => bytes.push(30),
             Self::ToInteger => bytes.push(31),
@@ -365,6 +369,7 @@ impl core::fmt::Debug for GraphIntegerOp {
             Self::Lower => f.write_str("Lower"),
             Self::Trim => f.write_str("Trim"),
             Self::CharLength => f.write_str("CharLength"),
+            Self::Length => f.write_str("Length"),
             Self::Size => f.write_str("Size"),
             Self::ToText => f.write_str("ToText"),
             Self::ToInteger => f.write_str("ToInteger"),
@@ -694,6 +699,7 @@ enum Instruction {
     Lower,
     Trim,
     CharLength,
+    Length,
     Size,
     ToText,
     ToInteger,
@@ -914,7 +920,8 @@ impl GraphIntegerExpression {
 
     /// As evaluate_scalar_with_control, except that a List input may meet
     /// `+` or SIZE: openCypher concatenates two lists and appends or prepends
-    /// any other value, while SIZE counts top-level members. Comparisons
+    /// any other value, while SIZE counts top-level members. A Path input
+    /// may meet LENGTH, which counts hops without copying the path. Comparisons
     /// preserve the value language's three-valued collection semantics. A
     /// text predicate over a List or Map input is NULL, as over any non-text
     /// value. Unsupported operations still refuse the collection.
@@ -927,9 +934,9 @@ impl GraphIntegerExpression {
             values.len(),
             |column| match values.get(column) {
                 Some(GraphValue::Scalar(value)) => Ok(ExpressionCell::Scalar(Cow::Borrowed(value))),
-                Some(value @ (GraphValue::List(_) | GraphValue::Map { .. })) => {
-                    Ok(ExpressionCell::Composite(Cow::Borrowed(value)))
-                }
+                Some(
+                    value @ (GraphValue::List(_) | GraphValue::Map { .. } | GraphValue::Path(_)),
+                ) => Ok(ExpressionCell::Composite(Cow::Borrowed(value))),
                 Some(_) => Err(GraphIntegerErrorKind::NonScalar),
                 None => Err(GraphIntegerErrorKind::MissingColumn),
             },
@@ -943,8 +950,8 @@ impl GraphIntegerExpression {
                 }
                 Ok(GraphValue::Scalar(value.into_owned()))
             }
-            // Only a join (list_plus) makes a composite result. A List or Map
-            // an input only passes through (coalesce, CASE) still refuses, as
+            // Only a join (list_plus) makes a composite result. A List, Map
+            // or Path an input only passes through (coalesce, CASE) still refuses, as
             // the scalar loader does, so only a joining program, which
             // value_type admits as Stored, ever answers a List.
             ExpressionCell::Composite(Cow::Owned(value)) => Ok(value),
@@ -1247,8 +1254,21 @@ impl GraphIntegerExpression {
                 | Instruction::Lower
                 | Instruction::Trim
                 | Instruction::CharLength
+                | Instruction::Length
                 | Instruction::Size => {
                     let value = stack.last_mut().expect("validated text operand");
+                    if matches!(op, Instruction::Length)
+                        && let ExpressionCell::Composite(path) = value
+                        && let GraphValue::Path(path) = path.as_ref()
+                    {
+                        *value = CanonicalScalar::Int(
+                            i64::try_from(path.len())
+                                .map_err(|_| failure(GraphIntegerErrorKind::Overflow))?,
+                        )
+                        .into();
+                        at += 1;
+                        continue;
+                    }
                     if matches!(op, Instruction::Size)
                         && let ExpressionCell::Composite(collection) = value
                     {
@@ -1267,10 +1287,12 @@ impl GraphIntegerExpression {
                     let result = if let Some(text) = value.text().map_err(failure)? {
                         charge_payload(text.len(), false, control)?;
                         match op {
-                            Instruction::CharLength | Instruction::Size => CanonicalScalar::Int(
-                                i64::try_from(text.chars().count())
-                                    .map_err(|_| failure(GraphIntegerErrorKind::Overflow))?,
-                            ),
+                            Instruction::CharLength | Instruction::Length | Instruction::Size => {
+                                CanonicalScalar::Int(
+                                    i64::try_from(text.chars().count())
+                                        .map_err(|_| failure(GraphIntegerErrorKind::Overflow))?,
+                                )
+                            }
                             Instruction::Trim => make_text(text.trim(), at, control)?,
                             _ => {
                                 // Unicode case mapping expands a scalar by at most three
@@ -1621,6 +1643,7 @@ impl GraphIntegerExpression {
                 Instruction::Lower => bytes.push(18),
                 Instruction::Trim => bytes.push(19),
                 Instruction::CharLength => bytes.push(20),
+                Instruction::Length => bytes.push(47),
                 Instruction::Size => bytes.push(46),
                 Instruction::ToText => bytes.push(27),
                 Instruction::ToInteger => bytes.push(28),
@@ -2263,7 +2286,7 @@ fn compare_cells<E>(
     if let (ExpressionCell::Scalar(left), ExpressionCell::Scalar(right)) = (left, right) {
         return compare_scalars(comparison, left, right, instruction, control);
     }
-    // A List or Map compares as the value language compares it: two of them
+    // A List, Map or Path compares as the value language compares it: two of them
     // element by element, and either against any other non-null value is
     // unequal (fgdb-v6ku6) and unordered.
     if let (ExpressionCell::Composite(left), ExpressionCell::Composite(right)) = (left, right) {

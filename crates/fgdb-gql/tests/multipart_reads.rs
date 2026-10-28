@@ -3427,6 +3427,51 @@ fn row_scope_pattern_lists_evaluate_only_the_selected_anchor_projection() {
 
 #[test]
 fn row_scope_pattern_lists_keep_paths_multiple_locals_and_row_boundaries() {
+    // Named paths retain real relationship identities, including parallel
+    // witnesses; the ordinary anonymous-edge fixture cannot supply them.
+    let execute = |text: &str| {
+        let values =
+            [1, 2, 2, 3].map(|value| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value)));
+        prepare(text)
+            .execute_governed_with_elements(
+                wide(),
+                |pattern, remaining| {
+                    pattern.plan().execute_governed_with_element_accessors(
+                        (values.len() + EDGES.len()) as u64,
+                        (1..=4).map(VId),
+                        EDGES
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, (from, relation, to))| {
+                                (fgdb_types::EId(index as u128 + 1), from, relation, to)
+                            }),
+                        |vid, tests| {
+                            Ok::<_, &'static str>(tests.iter().all(|test| {
+                                test.matches(&[], &[(P, values[vid.0 as usize - 1].clone())])
+                            }))
+                        },
+                        |vid, key| Ok((key == P).then(|| &values[vid.0 as usize - 1])),
+                        |_, _| Ok(None),
+                        |_| Ok(None),
+                        |_| Ok(None),
+                        remaining,
+                        || Ok::<_, usize>(()),
+                    )
+                },
+                |_, _, _| panic!("this fixture has no CALL source"),
+                |element, key| {
+                    Ok(match element {
+                        ElementId::Vertex(vid) if key == P => {
+                            Some(values[vid.0 as usize - 1].clone())
+                        }
+                        _ => None,
+                    })
+                },
+                || Ok::<_, usize>(()),
+            )
+            .unwrap()
+            .value
+    };
     let prefix = "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x";
     let list = |values: &[i64]| {
         GraphValue::List(
@@ -4636,5 +4681,166 @@ fn list_local_graph_map_fields_are_admitted_before_chained_writes() {
             .bind_parameters(&GqlParameters::new())
             .unwrap();
         assert_eq!(chain.read_element_keys(), &[P], "{statement}");
+    }
+}
+
+mod local_path_length_values {
+    use fgdb_gql::algebra::{GraphPath, GraphValue, GraphValueRow};
+    use fgdb_gql::{
+        GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphIntegerErrorKind,
+        GraphIntegerExpression, GraphIntegerOp, GraphSetExecutionError, PreparedGraphSet,
+        PreparedGraphSetText,
+    };
+    use fgdb_types::{CanonicalScalar, EId, VId};
+
+    fn prepare(text: &str, items: Vec<GraphValue>) -> PreparedGraphSet {
+        PreparedGraphSetText::prepare(text, |_: fgdb_gql::GraphSymbolKind, _: &str| None)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new().with_list("items", items).unwrap())
+            .unwrap()
+    }
+
+    fn run(
+        query: &PreparedGraphSet,
+    ) -> Result<
+        GqlQueryExecution<GraphValueRow>,
+        GqlQueryError<GraphSetExecutionError<&'static str>, usize>,
+    > {
+        query.execute_governed(
+            GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX),
+            |_, _| Err(GqlQueryError::Source("unexpected graph read")),
+            || Ok::<_, usize>(()),
+        )
+    }
+
+    fn integer(value: i64) -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Int(value))
+    }
+
+    fn null() -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Null)
+    }
+
+    fn path() -> GraphValue {
+        GraphValue::Path(GraphPath::new(
+            VId(u128::MAX),
+            vec![
+                (EId(u128::MAX), VId(2)),
+                (EId(u128::MAX - 1), VId(u128::MAX)),
+            ]
+            .into_boxed_slice(),
+        ))
+    }
+
+    #[test]
+    fn dynamic_length_counts_path_hops_text_characters_and_nulls_in_both_row_scopes() {
+        let items = vec![
+            path(),
+            GraphValue::Path(GraphPath::new(VId(u128::MAX), vec![].into_boxed_slice())),
+            GraphValue::Scalar(CanonicalScalar::ucs_basic_text("é🙂").unwrap()),
+            null(),
+        ];
+        let lengths = vec![integer(2), integer(0), integer(2), null()];
+        let incremented = vec![integer(3), integer(1), integer(3), null()];
+        let local = prepare(
+            "WITH $items AS xs RETURN [p IN xs | length(p)] AS lengths, \
+             [p IN xs | length(p)+1] AS incremented",
+            items.clone(),
+        );
+        assert_eq!(
+            run(&local).unwrap().value,
+            vec![GraphValueRow::from_owned_values(vec![
+                GraphValue::List(lengths.clone().into_boxed_slice()),
+                GraphValue::List(incremented.clone().into_boxed_slice()),
+            ])]
+        );
+        let row = prepare(
+            "UNWIND $items AS p RETURN length(p) AS length,length(p)+1 AS incremented",
+            items,
+        );
+        assert_eq!(
+            run(&row).unwrap().value,
+            lengths
+                .into_iter()
+                .zip(incremented)
+                .map(|(length, incremented)| {
+                    GraphValueRow::from_owned_values(vec![length, incremented])
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn dynamic_length_keeps_wrong_types_lazy_and_char_length_text_only() {
+        let wrong = vec![
+            integer(17),
+            GraphValue::Vertex(VId(u128::MAX)),
+            GraphValue::Edge(EId(u128::MAX)),
+            GraphValue::List(vec![].into_boxed_slice()),
+        ];
+        let local = prepare(
+            "WITH $items AS xs RETURN \
+             [p IN xs | CASE WHEN false THEN length(p) ELSE 7 END] AS chosen, \
+             [p IN xs | coalesce(9,length(p))] AS present",
+            wrong.clone(),
+        );
+        assert_eq!(
+            run(&local).unwrap().value,
+            vec![GraphValueRow::from_owned_values(vec![
+                GraphValue::List(vec![integer(7); wrong.len()].into_boxed_slice()),
+                GraphValue::List(vec![integer(9); wrong.len()].into_boxed_slice()),
+            ])]
+        );
+        let row = prepare(
+            "UNWIND $items AS p RETURN \
+             CASE WHEN false THEN length(p) ELSE 7 END AS chosen,coalesce(9,length(p)) AS present",
+            wrong.clone(),
+        );
+        assert_eq!(
+            run(&row).unwrap().value,
+            vec![GraphValueRow::from_owned_values(vec![integer(7), integer(9)]); wrong.len()]
+        );
+        for (value, kind) in [
+            (integer(17), GraphIntegerErrorKind::NonText),
+            (GraphValue::Vertex(VId(1)), GraphIntegerErrorKind::NonScalar),
+            (GraphValue::Edge(EId(1)), GraphIntegerErrorKind::NonScalar),
+            (
+                GraphValue::List(vec![].into_boxed_slice()),
+                GraphIntegerErrorKind::NonText,
+            ),
+        ] {
+            for text in [
+                "WITH $items AS xs RETURN [p IN xs | length(p)] AS lengths LIMIT 0",
+                "UNWIND $items AS p RETURN length(p) AS length LIMIT 0",
+            ] {
+                assert!(
+                    matches!(
+                        run(&prepare(text, vec![value.clone()])),
+                        Err(GqlQueryError::Source(GraphSetExecutionError::Projection { error, .. }))
+                            if error.kind == kind
+                    ),
+                    "{text}: {kind:?}"
+                );
+            }
+        }
+        assert!(matches!(
+            run(&prepare(
+                "WITH $items AS xs RETURN [p IN xs | char_length(p)] AS lengths",
+                vec![path()],
+            )),
+            Err(GqlQueryError::Source(GraphSetExecutionError::Projection { error, .. }))
+                if error.kind == GraphIntegerErrorKind::NonText
+        ));
+        let length = GraphIntegerExpression::prepare_scalar(&[
+            GraphIntegerOp::ScalarColumn(0),
+            GraphIntegerOp::Length,
+        ])
+        .unwrap();
+        let char_length = GraphIntegerExpression::prepare_scalar(&[
+            GraphIntegerOp::ScalarColumn(0),
+            GraphIntegerOp::CharLength,
+        ])
+        .unwrap();
+        assert_ne!(length.canonical_bytes(), char_length.canonical_bytes());
     }
 }
