@@ -160,9 +160,10 @@ struct State {
 /// are fused. Close/drop do not scan the unread suffix. Output reservations
 /// survive cursor/view drop. Initial root admission remains separately bounded.
 /// A relation-bound root reserves metadata for matching blocks only on first
-/// demand and never faults another relation. It visits admitted block summaries
-/// to count then seed matching heads; every visit is metered. The history,
-/// property and endpoint resolution laws are unchanged.
+/// demand and never faults another relation. It seeks the admitted relation
+/// directory in logarithmic work, then visits only matching block descriptors;
+/// every comparison and visit is metered. The history, property and endpoint
+/// resolution laws are unchanged.
 pub struct BufferedEdgeScan<'source, V: Vfs> {
     partition: &'source mut BufferedPartition<V>,
     as_of: CommitSeq,
@@ -288,32 +289,23 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<BufferedEdgeCandidate>, BufferedScanError<C>> {
         if !state.initialized {
-            if self.blocks != 0 {
+            let mut selected = self
+                .relation
+                .map(|relation| {
+                    self.partition
+                        .edge_scan_relation_blocks(relation, cx, &mut self.work, observe)
+                })
+                .transpose()?;
+            let capacity = selected.as_ref().map_or(self.blocks, |blocks| blocks.len());
+            if capacity != 0 {
                 // A caller may convert this position into a selective
                 // incidence stream without ever using the global root heap.
                 // Admit its complete backing only on actual root demand,
                 // before allocation or any authenticated head is consumed.
-                // Count selected heads before one cache-aware reservation.
+                // The admitted directory gives the exact selected head count
+                // before one cache-aware reservation.
                 // Growing a MemoryCharge directly would bypass reclamation of
                 // unpinned extent frames and falsely refuse under cache pressure.
-                let capacity = if let Some(relation) = self.relation {
-                    let mut matching = 0_usize;
-                    for block in 0..self.blocks {
-                        self.work.step(cx, observe)?;
-                        if self
-                            .partition
-                            .edge_scan_first(block, Some(relation))
-                            .is_some()
-                        {
-                            matching = matching
-                                .checked_add(1)
-                                .ok_or(BufferedReadError::SizeOverflow)?;
-                        }
-                    }
-                    matching
-                } else {
-                    self.blocks
-                };
                 let bytes = capacity
                     .checked_mul(512)
                     .and_then(|n| n.checked_add(1024))
@@ -333,8 +325,24 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                 state.heads = heads;
                 state._head_charge = Some(charge);
             }
-            for block in 0..self.blocks {
-                self.work.step(cx, observe)?;
+            let mut all = 0..self.blocks;
+            loop {
+                let block = if let Some(selected) = selected.as_mut() {
+                    self.partition.edge_scan_next_relation_block(
+                        selected,
+                        cx,
+                        &mut self.work,
+                        observe,
+                    )?
+                } else if let Some(block) = all.next() {
+                    self.work.step(cx, observe)?;
+                    Some(block)
+                } else {
+                    None
+                };
+                let Some(block) = block else {
+                    break;
+                };
                 if let Some((eid, created)) = self.partition.edge_scan_first(block, self.relation) {
                     // Exclude unrelated relations before heap insertion or any
                     // payload/property refault. Every matching block remains

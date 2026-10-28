@@ -367,6 +367,132 @@ fn every_edge_interval_control_can_refuse_before_inspection() {
     }
 }
 
+fn ordered_relations(relations: &[u64]) -> Vec<RelationBlock> {
+    let mut blocks: Vec<_> = relations
+        .iter()
+        .enumerate()
+        .map(|(block, &relation)| RelationBlock {
+            relation: RelationId(relation),
+            block,
+        })
+        .collect();
+    blocks.sort_unstable();
+    blocks
+}
+
+fn relation_lookup(blocks: &[RelationBlock], relation: u64) -> (Vec<usize>, usize, usize) {
+    let mut seeks = 0;
+    let mut cursor = RelationBlocks::new(blocks, RelationId(relation), &mut || {
+        seeks += 1;
+        Ok::<_, ()>(())
+    })
+    .unwrap();
+    let count = cursor.len();
+    let mut visits = 0;
+    let mut result = Vec::new();
+    while let Some(block) = cursor
+        .next(blocks, &mut || {
+            visits += 1;
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+    {
+        result.push(block);
+    }
+    assert_eq!((result.len(), cursor.len()), (count, 0));
+    (result, seeks, visits)
+}
+
+#[test]
+fn relation_ranges_preserve_publication_order_and_full_width_identities() {
+    let mut relations = vec![u64::MAX, 7, 0, 7, 1, u64::MAX, 7, 0];
+    let mut seed = 0xa17e_968b_3741u64;
+    for at in 0..256 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        relations.push(if at % 3 == 0 { seed % 11 } else { seed });
+    }
+    let blocks = ordered_relations(&relations);
+    let mut probes = vec![0, 1, 2, 7, 8, u64::MAX - 1, u64::MAX];
+    for &relation in &relations {
+        probes.extend([
+            relation.saturating_sub(1),
+            relation,
+            relation.saturating_add(1),
+        ]);
+    }
+    for relation in probes {
+        let expected: Vec<_> = relations
+            .iter()
+            .enumerate()
+            .filter_map(|(block, &candidate)| (candidate == relation).then_some(block))
+            .collect();
+        let (actual, _, visits) = relation_lookup(&blocks, relation);
+        assert_eq!(actual, expected, "{relation}");
+        assert_eq!(visits, expected.len());
+        assert!(actual.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+    for relation in [0, u64::MAX] {
+        assert_eq!(relation_lookup(&[], relation), (vec![], 0, 0));
+    }
+}
+
+#[test]
+fn relation_seek_work_is_logarithmic_in_unrelated_history() {
+    for unrelated in [0, 16, 4096] {
+        let mut relations = vec![7, 7, 7];
+        relations.extend((0..unrelated).map(|at| if at % 2 == 0 { 0 } else { u64::MAX }));
+        let blocks = ordered_relations(&relations);
+        for relation in [6, 7, 8, u64::MAX - 1] {
+            let (actual, seeks, visits) = relation_lookup(&blocks, relation);
+            let expected = if relation == 7 { vec![0, 1, 2] } else { vec![] };
+            assert_eq!(actual, expected);
+            assert_eq!(visits, expected.len());
+            assert!(
+                seeks <= 2 * (blocks.len().ilog2() as usize + 1),
+                "{unrelated} unrelated blocks, relation {relation}: {seeks} seeks"
+            );
+        }
+    }
+    assert_eq!(size_of::<RelationBlocks>(), 2 * size_of::<usize>());
+}
+
+#[test]
+fn every_relation_seek_and_selected_descriptor_can_refuse_before_consumption() {
+    let blocks = ordered_relations(&[u64::MAX, 7, 0, 7, 1, u64::MAX, 7, 0]);
+    for relation in [0, 1, 2, 7, 8, u64::MAX] {
+        let (expected, seeks, _) = relation_lookup(&blocks, relation);
+        for stop in 1..=seeks {
+            let mut calls = 0;
+            let error = RelationBlocks::new(&blocks, RelationId(relation), &mut || {
+                calls += 1;
+                if calls == stop { Err(stop) } else { Ok(()) }
+            })
+            .err()
+            .expect("every seek comparison must observe refusal");
+            assert_eq!((error, calls), (stop, stop));
+        }
+        let mut cursor =
+            RelationBlocks::new(&blocks, RelationId(relation), &mut || Ok::<_, ()>(())).unwrap();
+        for block in expected {
+            let remaining = cursor.len();
+            let mut calls = 0;
+            assert_eq!(
+                cursor.next(&blocks, &mut || {
+                    calls += 1;
+                    Err("refused")
+                }),
+                Err("refused")
+            );
+            assert_eq!((cursor.len(), calls), (remaining, 1));
+            assert_eq!(
+                cursor.next(&blocks, &mut || Ok::<_, ()>(())),
+                Ok(Some(block))
+            );
+        }
+        assert_eq!(cursor.next(&blocks, &mut || Err("unused")), Ok(None));
+    }
+}
+
 #[test]
 fn routing_construction_is_charged_before_allocation_and_every_refusal_refunds() {
     let (_, report) = run_async_under_lab(0xb0_13, |root| async move {
@@ -396,8 +522,11 @@ fn routing_construction_is_charged_before_allocation_and_every_refusal_refunds()
             summary: None,
             rows: 0,
         });
-        let bytes =
-            blocks.len() * (size_of::<Outgoing>() + size_of::<Incoming>() + size_of::<EdgeRange>());
+        let bytes = blocks.len()
+            * (size_of::<Outgoing>()
+                + size_of::<Incoming>()
+                + size_of::<EdgeRange>()
+                + size_of::<RelationBlock>());
         let short = MemoryPool::new(bytes - 1, 0).unwrap();
         let mut calls = 0;
         assert!(matches!(
@@ -421,10 +550,39 @@ fn routing_construction_is_charged_before_allocation_and_every_refusal_refunds()
                 directory.outgoing.len(),
                 directory.incoming.len(),
                 directory.edges.len(),
+                directory.relations.len(),
             ),
-            (17, 17, 17)
+            (17, 17, 17, 17)
         );
         assert_eq!(pool.used(), bytes);
+        for relation in [
+            RelationId(0),
+            RelationId(1),
+            RelationId(2),
+            RelationId(u64::MAX),
+        ] {
+            let mut cursor = directory
+                .relation_blocks(relation, &mut || Ok::<_, ()>(()))
+                .unwrap();
+            let mut actual = Vec::new();
+            while let Some(block) = directory
+                .next_relation(&mut cursor, &mut || Ok::<_, ()>(()))
+                .unwrap()
+            {
+                actual.push(block);
+            }
+            let expected: Vec<_> = blocks
+                .iter()
+                .enumerate()
+                .filter_map(|(block, descriptor)| {
+                    descriptor
+                        .summary
+                        .is_some_and(|summary| summary.relation == relation)
+                        .then_some(block)
+                })
+                .collect();
+            assert_eq!(actual, expected);
+        }
         drop(directory);
         assert_eq!(pool.used(), 0);
         for stop in 1..=calls {

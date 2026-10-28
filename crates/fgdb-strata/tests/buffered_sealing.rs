@@ -90,6 +90,14 @@ fn property(id: u128, created: u64) -> CanonicalPropertyValue {
 }
 
 async fn fixture(contexts: &PurposeContexts, path: &Path) -> (BlockStore, PartitionRootVersion) {
+    fixture_with_unrelated_blocks(contexts, path, 1).await
+}
+
+async fn fixture_with_unrelated_blocks(
+    contexts: &PurposeContexts,
+    path: &Path,
+    unrelated_blocks: usize,
+) -> (BlockStore, PartitionRootVersion) {
     let cx = contexts.commit();
     let store = BlockStore::open(
         &cx,
@@ -102,20 +110,29 @@ async fn fixture(contexts: &PurposeContexts, path: &Path) -> (BlockStore, Partit
     // CSR-sized descriptor, full-width identity, parallel edges and a loop.
     let mut first = vec![edge(u128::MAX, 1, None)];
     first.extend((1..=40).map(|id| edge(id, 1, None)));
-    let unrelated = vec![AdjacencyEntry {
-        src: VId(2),
-        dst: VId(3),
-        relation: OTHER,
-        eid: EId(500),
-        created_at: CommitSeq(1),
-        retired_at: None,
-    }];
-    let definitions = [
-        (first, 1, false),
-        (unrelated, 1, true),
+    let mut definitions = vec![(first, 1, false)];
+    definitions.extend((0..unrelated_blocks).map(|index| {
+        (
+            vec![AdjacencyEntry {
+                src: VId(2),
+                dst: VId(3),
+                relation: match index {
+                    0 => OTHER,
+                    1 => RelationId(0),
+                    _ => RelationId(1_000 + index as u64),
+                },
+                eid: EId(500 + index as u128),
+                created_at: CommitSeq(1),
+                retired_at: None,
+            }],
+            1,
+            true,
+        )
+    }));
+    definitions.extend([
         (vec![edge(1, 1, Some(2)), edge(1, 2, None)], 2, false),
         (vec![edge(2, 1, Some(3))], 3, false),
-    ];
+    ]);
     let mut predecessor = None;
     let mut blocks = Vec::new();
     for (entries, last, unrelated) in definitions {
@@ -233,6 +250,99 @@ fn buffered_sealing_matches_native_bytes_and_independent_history_expectations() 
         }
         drop(view);
         assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn sealing_interleaved_relation_ranges_preserves_retire_precedence_and_selected_faults() {
+    run(|contexts, path| async move {
+        let cx = contexts.query();
+        let mut selected_faults = None;
+        for unrelated in [1, 128] {
+            let path = path.join(unrelated.to_string());
+            std::fs::create_dir(&path).unwrap();
+            let (store, root) = fixture_with_unrelated_blocks(&contexts, &path, unrelated).await;
+            let pool = MemoryPool::new(MEMORY, 0).unwrap();
+            let mut view = store
+                .open_buffered_root(
+                    &cx,
+                    root,
+                    pool.clone(),
+                    BufferedReadLimits {
+                        max_root_bytes: 64 * 1024,
+                        max_source_bytes: 4 * 1024 * 1024,
+                        max_blocks: 256,
+                        max_work: 1_000_000,
+                        ..limits()
+                    },
+                )
+                .await
+                .unwrap();
+            let baseline = pool.used();
+            let before = view.stats();
+            assert!(matches!(
+                view.seal_relation(&cx, CommitSeq(1), R, SealedLimits::default(), RAW - 1)
+                    .await,
+                Err(SealedError::Limit {
+                    resource: "sealed source incidences",
+                    ..
+                })
+            ));
+            assert_eq!(
+                view.stats(),
+                before,
+                "raw admission precedes payload faults"
+            );
+            assert_eq!(pool.used(), baseline);
+            let image = view
+                .seal_relation(&cx, CommitSeq(1), R, SealedLimits::default(), RAW)
+                .await
+                .unwrap();
+            let faults = view.stats().misses - before.misses;
+            assert!(faults > 0);
+            if let Some(first) = selected_faults {
+                assert_eq!(faults, first, "foreign relation payloads stay unfaulted");
+            } else {
+                selected_faults = Some(faults);
+            }
+            let resident = store
+                .seal_relation(&cx, root, CommitSeq(1), R, SealedLimits::default())
+                .await
+                .unwrap();
+            assert_eq!(
+                image.encode(&cx, SealedLimits::default()).unwrap(),
+                resident.encode(&cx, SealedLimits::default()).unwrap()
+            );
+            for cut in 1..=3 {
+                let mut expected = vec![(EId(u128::MAX), vec![(P, property(u128::MAX, 1))])];
+                expected.extend((1..=40).filter(|&id| id != 2 || cut < 3).map(|id| {
+                    (
+                        EId(id),
+                        vec![(P, property(id, if id == 1 && cut >= 2 { 2 } else { 1 }))],
+                    )
+                }));
+                // EId(2)'s later block has the SAME creation sequence as its
+                // original row. Publication order must retain its retirement.
+                // EId(3)'s nested NULL property also survives source transfer.
+                assert_eq!(collect(&image, &cx, cut), expected);
+            }
+            let before = view.stats();
+            let absent = view
+                .seal_relation(
+                    &cx,
+                    CommitSeq(1),
+                    RelationId(u64::MAX),
+                    SealedLimits::default(),
+                    0,
+                )
+                .await
+                .unwrap();
+            assert_eq!(absent.stats().incidences, 0);
+            assert_eq!(view.stats(), before);
+            assert!(pool.used() <= baseline);
+            drop(view);
+            assert_eq!(pool.used(), 0);
+        }
     });
 }
 

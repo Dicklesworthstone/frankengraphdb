@@ -1494,9 +1494,9 @@ mod tests {
                 max_source_bytes: COUNT * 4096,
                 max_blocks: COUNT,
                 max_vertex_patches: 0,
-                // Full object/row admission, three controlled heap sorts,
+                // Full object/row admission, four controlled heap sorts,
                 // descriptor insertion and two interval augmentations.
-                max_work: COUNT * (9 * COUNT.ilog2() as usize + 16),
+                max_work: COUNT * (12 * COUNT.ilog2() as usize + 16),
                 buffer: BufferLimits {
                     max_frames: 1,
                     max_ghost_entries: 1,

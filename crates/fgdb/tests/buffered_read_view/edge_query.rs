@@ -248,6 +248,124 @@ fn typed_roots_spend_only_selected_history_while_alternations_keep_every_member(
 }
 
 #[test]
+fn typed_query_work_and_payload_faults_stay_bounded_as_unrelated_blocks_grow() {
+    let ((), report) = run_async_under_lab(0x6275_e006, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, _) = history(&commit).await;
+        let path = vfs.database_dir();
+        let mut writer = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let pattern = query("MATCH (a)-[r:R]->(b) RETURN r, r.p AS p");
+        let missing = PreparedGraphText::prepare(
+            "MATCH (a)-[r:Missing]->(b) RETURN r",
+            |kind, name| match (kind, name) {
+                (GraphSymbolKind::Relation, "Missing") => {
+                    Some(GraphSymbol::Relation(RelationId(u64::MAX)))
+                }
+                _ => None,
+            },
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let expected: Vec<_> = [(101, 17), (103, 9), (104, 10)]
+            .into_iter()
+            .map(|(id, value)| {
+                vec![
+                    GraphValue::Edge(EId(id)),
+                    GraphValue::Scalar(CanonicalScalar::Int(value)),
+                ]
+            })
+            .collect();
+        let mut published = 0;
+        let mut allowance = 1_000_000;
+        let mut selected_faults = None;
+        for unrelated in [8, 128] {
+            for index in published..unrelated {
+                let mut batch = WriteBatch::new(RelationId(1_000 + index));
+                batch.add_edge(
+                    EId(1_000 + u128::from(index)),
+                    VId(1),
+                    VId(4),
+                    vec![(PROPERTY, CanonicalScalar::Int(1))],
+                );
+                writer.write(&commit, batch).await.unwrap();
+            }
+            published = unrelated;
+            let memory = pool();
+            // Open authenticates the larger generation under its own source
+            // allowance. The already-admitted query gets no such increase.
+            let mut view = Database::open_buffered_read_view_with_vfs(
+                &commit,
+                vfs.clone(),
+                &path,
+                keys(),
+                memory.clone(),
+                limits(),
+            )
+            .await
+            .unwrap();
+            let baseline = memory.used();
+            let before = view.buffer_stats();
+            let mut cursor = view
+                .stream_graph_edges_governed_at(
+                    &cx,
+                    &pattern,
+                    CommitSeq(3),
+                    GqlQueryPolicy::new(4, 3, allowance, 1_000_000),
+                )
+                .unwrap();
+            let mut actual = Vec::new();
+            while let Some(row) = cursor.next().await {
+                actual.push(
+                    row.unwrap_or_else(|error| panic!("{unrelated} unrelated blocks: {error}"))
+                        .values()
+                        .to_vec(),
+                );
+            }
+            assert_eq!(actual, expected);
+            assert_eq!(cursor.row_stats().snapshot_records, 4);
+            assert_eq!(cursor.state(), EdgeScanState::Exhausted);
+            let work = cursor.evaluator_stats().work_units;
+            drop(cursor);
+            let faults = view.buffer_stats().misses - before.misses;
+            assert!(faults > 0);
+            if let Some(first) = selected_faults {
+                assert_eq!(faults, first, "unrelated relation payloads stay unfaulted");
+                assert!(work <= allowance);
+            } else {
+                selected_faults = Some(faults);
+                // Two binary bounds may grow logarithmically. Another 120
+                // unrelated descriptors must not add two full linear walks.
+                allowance = work + 64;
+            }
+            assert_eq!(memory.used(), baseline);
+            let before = view.buffer_stats();
+            let mut empty = view
+                .stream_graph_edges_governed_at(
+                    &cx,
+                    &missing,
+                    CommitSeq(3),
+                    GqlQueryPolicy::new(0, 0, allowance, 1_000_000),
+                )
+                .unwrap();
+            assert!(empty.next().await.is_none());
+            assert_eq!(empty.row_stats().snapshot_records, 0);
+            assert_eq!(empty.state(), EdgeScanState::Exhausted);
+            drop(empty);
+            assert_eq!(view.buffer_stats(), before);
+            assert_eq!(memory.used(), baseline);
+            drop(view);
+            assert_eq!(memory.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn query_rejection_zero_limits_unpolled_pulls_and_early_close_never_drain_input() {
     let ((), report) = run_async_under_lab(0x6275_e002, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
