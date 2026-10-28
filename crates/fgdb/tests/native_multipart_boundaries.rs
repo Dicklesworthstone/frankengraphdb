@@ -251,6 +251,120 @@ fn renamed_exists_uses_the_pinned_staged_and_authorized_identity() {
 }
 
 #[test]
+fn implicit_exists_bodies_keep_pinned_transaction_and_authorized_sources() {
+    use fgdb_gql::algebra::GraphValue;
+
+    let ((), report) = run_async_under_lab(0xa681_0015, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = database(&commit).await;
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let text = "MATCH (n) RETURN n,EXISTS { MATCH (n)-[:R]->(m) \
+                    WITH m MATCH (m)-[:S]->(end) WHERE end.n > $minimum } AS present ORDER BY n";
+        let args = GqlParameters::new().with_int64("minimum", 8).unwrap();
+        let prepared = PreparedNativeRead::prepare(text, &args, symbols).unwrap();
+        let values = |result: QueryResult| {
+            let QueryResult::Rows { columns, rows } = result else {
+                panic!("expected read rows");
+            };
+            assert_eq!(columns, ["n", "present"]);
+            rows.into_iter()
+                .map(|row| {
+                    let Some(GraphValue::Vertex(vertex)) = row[0].as_value() else {
+                        panic!("expected the outer vertex");
+                    };
+                    let Some(GraphValue::Scalar(CanonicalScalar::Bool(present))) =
+                        row[1].as_value()
+                    else {
+                        panic!("expected body presence");
+                    };
+                    (*vertex, *present)
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = vec![
+            (VId(1), true),
+            (VId(2), false),
+            (VId(3), false),
+            (VId(4), false),
+            (VId(5), false),
+        ];
+        assert_eq!(
+            values(db.query(&cx, text, &args, symbols, policy()).unwrap()),
+            before
+        );
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &args, policy()).unwrap()),
+            before
+        );
+        // The only complete matching path reaches hidden vertex 4. A hidden
+        // witness cannot turn EXISTS true or become visible via its property.
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        assert_eq!(
+            values(
+                prepared
+                    .execute_authorized(&db, &cx, &issuer, &token, BRANCH, &args, policy(), || 100)
+                    .unwrap()
+            ),
+            [1, 2, 3, 5].map(|id| (VId(id), false)).to_vec()
+        );
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut staged = WriteBatch::new(R);
+        staged.add_edge(EId(12), VId(3), VId(2), vec![]);
+        staged.set_vertex_property(VId(3), N, Some(CanonicalScalar::Int(9)));
+        txn.write(&mut db, staged).unwrap();
+        let after = vec![
+            (VId(1), true),
+            (VId(2), false),
+            (VId(3), true),
+            (VId(4), false),
+            (VId(5), false),
+        ];
+        assert_eq!(
+            values(
+                prepared
+                    .execute_in_transaction(&txn, &db, &cx, &args, policy())
+                    .unwrap()
+            ),
+            after
+        );
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &args, policy()).unwrap()),
+            before
+        );
+        txn.commit(&mut db, &commit).await.unwrap();
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &args, policy()).unwrap()),
+            after
+        );
+        assert_eq!(
+            values(pinned.query(&cx, text, &args, symbols, policy()).unwrap()),
+            before
+        );
+        // The newly qualifying visible witness is now available through the
+        // signed source, including the newly committed outer vertex-3 path.
+        assert_eq!(
+            values(
+                prepared
+                    .execute_authorized(&db, &cx, &issuer, &token, BRANCH, &args, policy(), || 100)
+                    .unwrap()
+            ),
+            vec![
+                (VId(1), true),
+                (VId(2), false),
+                (VId(3), true),
+                (VId(5), false)
+            ]
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn carried_pattern_lists_preserve_nulls_parallel_witnesses_and_native_read_boundaries() {
     use fgdb_gql::algebra::GraphValue;
 

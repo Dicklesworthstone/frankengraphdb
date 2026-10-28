@@ -7,7 +7,8 @@ use fgdb_gql::algebra::{
 };
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
-    GraphWriteStatement, PreparedGraphAggregateText, PreparedGraphText, PreparedGraphWriteScript,
+    GraphWriteStatement, PreparedGraphAggregateText, PreparedGraphSetText, PreparedGraphText,
+    PreparedGraphWriteScript,
 };
 use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -281,9 +282,6 @@ fn malformed_late_clauses_and_scope_overflow_refuse_before_catalog_calls() {
         "MATCH (a) MATCH (b) WHERE c.p=1 MATCH (c) RETURN c",
         "MATCH (a) MATCH (b) WHERE EXISTS { MATCH (b) RETURN b",
         "MATCH (a) WHERE EXISTS { MATCH (a) MATCH } RETURN a",
-        // A multi-clause existential body is unsupported, as scoped_text's
-        // EXISTS { MATCH .. OPTIONAL MATCH .. } is; it was never parsed.
-        "MATCH (a) WHERE EXISTS { MATCH (a) MATCH (a) } RETURN a",
         "MATCH (a) OPTIONAL MATCH (a) MATCH REPEATABLE ELEMENTS (a)-[:R*]->(b) RETURN b",
         "MATCH (a) MATCH ANY SHORTEST WALK (a)-[:R*1..2]->(b)-[:S]->(c) RETURN c LIMIT 0",
         &too_many,
@@ -331,6 +329,38 @@ fn malformed_late_clauses_and_scope_overflow_refuse_before_catalog_calls() {
     let independent = evaluate("MATCH (a) MATCH () RETURN a", &[VId(1)], &[]);
     assert_eq!(independent.len(), 1);
     assert_eq!(independent[0].values()[0].as_vertex(), Some(VId(1)));
+}
+
+#[test]
+fn multi_clause_existence_is_a_native_read_body_with_one_witness_per_outer_row() {
+    let query = PreparedGraphSetText::prepare(
+        "MATCH (a) WHERE EXISTS { MATCH (a) MATCH (a) } RETURN a ORDER BY a",
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    let rows = query
+        .execute_governed(
+            wide(),
+            |pattern, policy| {
+                pattern.plan().execute_governed_with_properties(
+                    2,
+                    [VId(1), VId(2)],
+                    [],
+                    |_, _| Ok::<_, ()>(true),
+                    |_, _| Ok::<Option<&CanonicalPropertyValue>, ()>(None),
+                    policy,
+                    || Ok::<_, ()>(()),
+                )
+            },
+            || Ok::<_, ()>(()),
+        )
+        .unwrap()
+        .value;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].values()[0].as_vertex(), Some(VId(1)));
+    assert_eq!(rows[1].values()[0].as_vertex(), Some(VId(2)));
 }
 
 #[test]

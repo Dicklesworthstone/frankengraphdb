@@ -942,6 +942,10 @@ struct Parser<'a> {
     /// Inside an inline CALL body. Its terminal RETURN may aggregate the
     /// body's rows, once per outer row, as a row-domain aggregate stage.
     call_body: bool,
+    /// An EXISTS body may finish with its completed read relation instead
+    /// of an explicit RETURN. Only its matching closing brace is terminal;
+    /// a nested ordinary CALL still requires its own RETURN.
+    existence_body: bool,
     /// The next graph part is an optional Apply's body: it ends at its
     /// deferred WHERE and exports only its own bindings
     /// (multipart_optional_apply).
@@ -1150,6 +1154,7 @@ impl<'a> Parser<'a> {
             resolved_entries: false,
             call_element_reads: false,
             call_body: false,
+            existence_body: false,
             optional_body: false,
             read_elements: false,
             elements: Vec::new(),

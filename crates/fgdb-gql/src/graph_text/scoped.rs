@@ -845,9 +845,13 @@ impl<'a> Parser<'a> {
             if !existence && !key && existence_follows(token.kind, &lexer)? {
                 return Ok(true);
             }
+            if !key && Self::relational_existence_body(token.kind, &lexer)? {
+                return Ok(true);
+            }
             let needs = edge_test || (vertex_test && compound) || (existential && compound);
             match token.kind {
                 TokenKind::End => return Ok(needs),
+                TokenKind::Punct(b'}') if depth == 0 && self.call_body => return Ok(needs),
                 TokenKind::Word(word) if depth == 0 && !key && Self::ends_where(word, previous) => {
                     return Ok(needs);
                 }
@@ -1057,6 +1061,7 @@ impl<'a> Parser<'a> {
             let key = matches!(previous, Some(TokenKind::Punct(b'.' | b':')));
             match self.current.kind {
                 TokenKind::End => return Ok(()),
+                TokenKind::Punct(b'}') if depth == 0 && self.call_body => return Ok(()),
                 TokenKind::Word(word) if depth == 0 && !key && Self::ends_where(word, previous) => {
                     return Ok(());
                 }

@@ -980,8 +980,9 @@ fn row_pattern_ends<'a>(
                 .iter().any(|clause| word.eq_ignore_ascii_case(clause))))
 }
 
-/// A brace body containing relational clauses belongs to the returning read
-/// compiler. Pattern-only bodies keep their established native scope owner.
+/// A brace body containing relational clauses belongs to the native read
+/// compiler, with or without RETURN. Pattern-only bodies keep their
+/// established native scope owner.
 pub(super) fn returning_existence_body(
     token: TokenKind<'_>,
     lexer: &Lexer<'_>,
@@ -995,6 +996,7 @@ pub(super) fn returning_existence_body(
     }
     let mut depth = 0_usize;
     let mut previous = None;
+    let mut matched = false;
     loop {
         let token = lexer.next()?;
         match token.kind {
@@ -1010,12 +1012,22 @@ pub(super) fn returning_existence_body(
                 if depth == 0
                     && !matches!(previous, Some(TokenKind::Punct(b'.')))
                     && !matches!(previous, Some(TokenKind::Word(name)) if name.eq_ignore_ascii_case("AS"))
-                    && (word.eq_ignore_ascii_case("RETURN")
-                        || (word.eq_ignore_ascii_case("WITH")
-                            && !matches!(previous, Some(TokenKind::Word(name))
-                                if name.eq_ignore_ascii_case("STARTS") || name.eq_ignore_ascii_case("ENDS")))) =>
+                    && !matches!(previous, Some(TokenKind::Punct(b':'))) =>
             {
-                return Ok(true);
+                if word.eq_ignore_ascii_case("MATCH") {
+                    if matched {
+                        return Ok(true);
+                    }
+                    matched = true;
+                } else if ["RETURN", "OPTIONAL", "UNWIND", "CALL"]
+                    .iter()
+                    .any(|clause| word.eq_ignore_ascii_case(clause))
+                    || (word.eq_ignore_ascii_case("WITH")
+                        && !matches!(previous, Some(TokenKind::Word(name))
+                            if name.eq_ignore_ascii_case("STARTS") || name.eq_ignore_ascii_case("ENDS")))
+                {
+                    return Ok(true);
+                }
             }
             _ => {}
         }
@@ -1024,6 +1036,17 @@ pub(super) fn returning_existence_body(
 }
 
 impl<'a> Parser<'a> {
+    pub(in crate::graph_text::scoped) fn relational_existence_body(
+        token: TokenKind<'_>,
+        lexer: &Lexer<'_>,
+    ) -> Result<bool, GraphPatternTextError> {
+        returning_existence_body(token, lexer)
+    }
+
+    fn at_existence_end(&self) -> bool {
+        self.existence_body && self.is_punct(b'}')
+    }
+
     /// An unhoisted graph test of a completed row belongs to the multipart
     /// graph owner. Existing graph-head reads retain their hidden columns.
     pub(super) fn row_existence_filter(&self, width: usize) -> Result<bool, GraphPatternTextError> {
@@ -1067,7 +1090,9 @@ impl<'a> Parser<'a> {
         let expressions = row_pattern_expressions(&mut self.lexer.clone(), hoisted)?;
         if self.is_word("WITH") {
             for (token, lexer) in expressions {
-                if row_list_graph_expression_follows(token.kind, &lexer, hoisted)? {
+                if returning_existence_body(token.kind, &lexer)?
+                    || row_list_graph_expression_follows(token.kind, &lexer, hoisted)?
+                {
                     return Ok(true);
                 }
             }
@@ -1077,7 +1102,7 @@ impl<'a> Parser<'a> {
     }
 
     fn returning_existence_projection(&self) -> Result<bool, GraphPatternTextError> {
-        if !self.is_word("RETURN") {
+        if !self.is_word("RETURN") && !self.is_word("WITH") {
             return Ok(false);
         }
         for (token, lexer) in row_pattern_expressions(&mut self.lexer.clone(), |_| false)? {
@@ -1969,6 +1994,7 @@ impl<'a> Parser<'a> {
         let comparisons = self.read_comparisons.take();
         let element_reads = core::mem::replace(&mut self.call_element_reads, true);
         let call_body = core::mem::replace(&mut self.call_body, true);
+        let existence_body = core::mem::replace(&mut self.existence_body, true);
         let optional_body = core::mem::take(&mut self.optional_body);
         let parsed = self.multipart_parts_from(
             statement,
@@ -1991,10 +2017,11 @@ impl<'a> Parser<'a> {
         self.read_comparisons = comparisons;
         self.call_element_reads = element_reads;
         self.call_body = call_body;
+        self.existence_body = existence_body;
         self.optional_body = optional_body;
         let (mut body, _) = parsed?;
         body.append_element_keys(&mut remainder.element_keys);
-        self.punct(b'}', "} after a read-only EXISTS body ending in RETURN")?;
+        self.punct(b'}', "} after a read-only EXISTS body")?;
         Ok(UnresolvedContinuationOperation::ExistsBody {
             body: Box::new(body),
             imports: (0..captures).collect(),
@@ -2701,6 +2728,9 @@ impl<'a> Parser<'a> {
         aggregate: bool,
     ) -> Result<(Vec<ReadStageTemplate>, RowSchema<'a>, bool), GraphSetTextError> {
         let (mut stages, mut schema, _) = self.row_pipeline_prefix(schema)?;
+        if self.at_existence_end() {
+            return Ok((stages, schema, true));
+        }
         if self.at_multipart_write() {
             return Ok((stages, schema, true));
         }
@@ -2795,9 +2825,11 @@ impl<'a> Parser<'a> {
         self.projected_sources = None;
         let previous_reads = core::mem::replace(&mut self.call_element_reads, true);
         let previous_body = core::mem::replace(&mut self.call_body, true);
+        let previous_existence = core::mem::take(&mut self.existence_body);
         let body = self.multipart_parts_from(statement, false, schema, call_depth + 1);
         self.call_body = previous_body;
         self.call_element_reads = previous_reads;
+        self.existence_body = previous_existence;
         let (body, exports) = body?;
         self.punct(b'}', "} after a read-only CALL body ending in RETURN")?;
         self.read_row_bindings.clear();
@@ -3294,6 +3326,7 @@ impl<'a> Parser<'a> {
         let before_existence =
             self.returning_existence_projection()? || self.row_list_projection()?;
         let before_write = self.at_multipart_write();
+        let implicit_end = self.at_existence_end();
         // An inline CALL body's aggregating RETURN reads every binding at an
         // implicit `WITH *` and aggregates those rows, once per outer row.
         let body_aggregate = self.call_body && self.return_has_aggregate()?;
@@ -3337,7 +3370,7 @@ impl<'a> Parser<'a> {
             self.current = at_where;
             head
         } else if kind.is_none() {
-            if before_call || body_aggregate || before_existence || before_write {
+            if before_call || body_aggregate || before_existence || before_write || implicit_end {
                 self.implicit_with_head()?
             } else {
                 self.graph_projection_head()?
@@ -3354,7 +3387,7 @@ impl<'a> Parser<'a> {
         let offset = if kind.is_none() { 0 } else { incoming.len() };
         // The `WITH *` columns, before any hidden read.
         let visible = head.outputs.len();
-        if !implicit_star {
+        if !implicit_star && !implicit_end {
             // A write after this part reads its carried row identities'
             // preimages, as the leading-row heads do (fgdb-cpny9); a read
             // keeps its own templates.
@@ -3482,7 +3515,7 @@ impl<'a> Parser<'a> {
         if aggregate && self.is_word("RETURN") && !self.row_existence_projection(next.len())? {
             terminal = true;
         }
-        terminal |= self.at_multipart_write();
+        terminal |= self.at_multipart_write() || self.at_existence_end();
         if !row_fields.is_empty() {
             self.capacity(
                 incoming.len() + head.inputs.len() + row_fields.len() - 1,
@@ -3541,7 +3574,8 @@ impl<'a> Parser<'a> {
         // stopped at an implicit boundary (implicit_withs): `WITH *`.
         let implicit = (optional && (self.is_word("OPTIONAL") || self.is_word("MATCH")))
             || self.implicit_withs.contains(&self.current.at)
-            || self.at_multipart_write();
+            || self.at_multipart_write()
+            || self.at_existence_end();
         if !implicit && self.with_has_aggregate()? {
             return self.with_graph_head(incoming, inputs, optional);
         }
