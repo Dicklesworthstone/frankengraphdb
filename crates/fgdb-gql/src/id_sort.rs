@@ -1,7 +1,7 @@
 //! Sorting by engine identities in about two moves per item.
 //!
 //! Identities are keyed permutations, so their high bits are well spread. A
-//! large array is first distributed into buckets by the (at most 20) most
+//! large unordered array is first distributed into buckets by the (at most 20) most
 //! significant bits in which its leading keys differ, then each bucket is
 //! sorted. Each item moves about twice, not once per quicksort level:
 //! comparison-sorting a closure's 72-byte edges was a seventh of a pokec
@@ -19,6 +19,9 @@ const DIRECT: usize = 1 << 12;
 /// orders by `key` first, ascending (items with equal keys may fall in any
 /// order `sort` leaves them in). Large arrays are bucketed by the bits in
 /// which their keys differ, and each bucket is then sorted by `sort`.
+/// Already monotone identity groups sort only their secondary keys, without
+/// allocating a second item array. Stable sorts retain equal-item order,
+/// including when the identity groups initially arrive in descending order.
 pub fn sort_by_leading_identity<T: Copy>(
     items: &mut Vec<T>,
     key: impl Fn(&T) -> u128,
@@ -27,23 +30,63 @@ pub fn sort_by_leading_identity<T: Copy>(
     let Some(first) = items.first().map(&key) else {
         return;
     };
-    // Every key shares the bits above `top`; only those below order them.
-    let differ = items
-        .iter()
-        .fold(0_u128, |differ, item| differ | (key(item) ^ first));
+    if items.len() <= DIRECT {
+        sort(items);
+        return;
+    }
+    // Recognize canonical history runs during the existing key scan.
+    // Once both monotone directions fail, retain the original OR fold.
+    let mut differ = 0_u128;
+    let (mut ascending, mut descending, mut repeated) = (true, true, false);
+    let mut previous = first;
+    let mut remaining = items.iter().skip(1);
+    while let Some(item) = remaining.next() {
+        let current = key(item);
+        differ |= current ^ first;
+        ascending &= previous <= current;
+        descending &= previous >= current;
+        repeated |= previous == current;
+        previous = current;
+        if !ascending && !descending {
+            differ = remaining.fold(differ, |differ, item| differ | (key(item) ^ first));
+            break;
+        }
+    }
+    if ascending || descending {
+        // One equal-key group still needs the complete secondary sort.
+        if differ == 0 {
+            sort(items);
+        } else {
+            if descending {
+                items.reverse();
+            }
+            if repeated {
+                for group in items.chunk_by_mut(|left, right| key(left) == key(right)) {
+                    if descending {
+                        // Restore each equal-key group's input order before
+                        // invoking a potentially stable secondary sort.
+                        group.reverse();
+                    }
+                    if group.len() > 1 {
+                        sort(group);
+                    }
+                }
+            }
+        }
+        return;
+    }
     let top = u128::BITS - differ.leading_zeros();
     // About sixteen items per bucket, in at most 2^20 buckets.
     let bits = (usize::BITS - items.len().leading_zeros())
         .saturating_sub(4)
         .clamp(8, 20);
-    if items.len() <= DIRECT || top <= bits {
+    if top <= bits {
         sort(items);
         return;
     }
     let shift = top - bits;
     let mask = (1_usize << bits) - 1;
-    // Monotone in the key: the bits above `top` are equal, so a larger key
-    // never lands in an earlier bucket.
+    // The bits above top are equal; bucket order preserves key order.
     let bucket = |item: &T| ((key(item) >> shift) as usize) & mask;
     let mut starts = vec![0_usize; mask + 2];
     for item in items.iter() {
@@ -52,8 +95,6 @@ pub fn sort_by_leading_identity<T: Copy>(
     for at in 1..starts.len() {
         starts[at] += starts[at - 1];
     }
-    // Each item to its bucket's next place: independent writes, whose misses
-    // overlap, where following a permutation's cycles in place waits on each.
     let mut next = starts.clone();
     let mut sorted = items.clone();
     for &item in items.iter() {
@@ -155,5 +196,37 @@ mod tests {
         expected.sort_unstable();
         sort_by_leading_identity(&mut items, |item| item.0, <[_]>::sort_unstable);
         assert_eq!(items, expected);
+    }
+
+    /// Grouped histories must retain secondary order and stable ties.
+    #[test]
+    fn monotone_history_groups_keep_stable_ties_and_the_original_buffer() {
+        for descending in [false, true] {
+            for versions in [1_usize, 2, 7] {
+                let mut items = Vec::with_capacity(70_000);
+                for group in 0..8_193_usize {
+                    let group = if descending { 8_192 - group } else { group };
+                    let identity = (0xcafe_u128 << 112) | ((group as u128) << 64) | 17;
+                    for version in (0..versions).rev() {
+                        items.push((identity, version, 2 * version));
+                        items.push((identity, version, 2 * version + 1));
+                    }
+                }
+                let mut expected = items.clone();
+                expected.sort_by_key(|item| (item.0, item.1));
+                let (buffer, capacity) = (items.as_ptr(), items.capacity());
+                sort_by_leading_identity(
+                    &mut items,
+                    |item| item.0,
+                    |slice| slice.sort_by_key(|item| (item.0, item.1)),
+                );
+                assert_eq!(
+                    items, expected,
+                    "descending={descending} versions={versions}"
+                );
+                assert_eq!(items.as_ptr(), buffer);
+                assert_eq!(items.capacity(), capacity);
+            }
+        }
     }
 }
