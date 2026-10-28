@@ -1312,29 +1312,6 @@ impl PreparedGraphSet {
         execute::execute(self, policy, &mut source, checkpoint)
     }
 
-    /// `execute_governed` plus the host's element property reader
-    /// (fgdb-xnd7x) and no procedure host: a mutation's input relation
-    /// (fgdb-694ga), whose CALL sources stay refused.
-    pub(crate) fn execute_governed_reading<E, C>(
-        &self,
-        policy: GqlQueryPolicy,
-        mut patterns: impl FnMut(
-            &PreparedGraphPattern<GraphValueRow>,
-            GqlQueryPolicy,
-        )
-            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
-        elements: &mut ElementRead<'_, E>,
-        mut checkpoint: impl FnMut() -> Result<(), C>,
-    ) -> SetResult<GqlQueryExecution<GraphValueRow>, E, C> {
-        let patterns: &mut DynPatterns<'_, E, C> = &mut patterns;
-        let mut source = BorrowedSource {
-            source: &mut PatternSource { patterns },
-            elements: Some(elements),
-        };
-        let checkpoint: &mut dyn FnMut() -> Result<(), C> = &mut checkpoint;
-        execute::execute(self, policy, &mut source, checkpoint)
-    }
-
     /// `execute_governed` plus a procedure host for CALL sources. `procedures`
     /// receives each call with its evaluated constant arguments and returns
     /// exactly `call.outputs()` columns per row, under the same allowance and

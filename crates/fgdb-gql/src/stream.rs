@@ -822,10 +822,13 @@ impl<S: VertexScanSource, F, Row: VertexScanOutput> VertexScanCursor<S, F, Row> 
         F: FnMut() -> Result<(), C>,
     {
         let meter = &mut self.meter;
-        meter.event(VertexScanEvent::Work)?;
         if self.plan.empty || self.plan.count == Some(0) {
+            // An empty page drives no source/evaluator work, but a pending
+            // cancellation still wins before successful exhaustion.
+            (meter.checkpoint)().map_err(GqlQueryError::Interrupted)?;
             return Ok(None);
         }
+        meter.event(VertexScanEvent::Work)?;
         let source = self.source.as_mut().expect("open cursor owns its source");
         loop {
             let next = flatten(source.next_vertex(&mut |event| meter.event(event)))?;

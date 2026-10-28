@@ -1058,8 +1058,10 @@ fn membership_postings_recheck_visibility_across_updates_pins_and_reopen() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-/// A nonmatching collection still has to enter the scalar expression's
-/// value conversion. The access path may not hide its admission error.
+/// A nonmatching collection still enters scalar-expression admission. The
+/// access path may not hide its scratch refusal. Oversized query values are
+/// rejected by conversion, and an oversized durable row is rejected earlier
+/// by storage; neither contract is bypassed to seed a query fixture.
 #[test]
 fn membership_keeps_collection_and_arithmetic_error_boundaries() {
     use fgdb_gql::algebra::{
@@ -1081,6 +1083,29 @@ fn membership_keeps_collection_and_arithmetic_error_boundaries() {
             ])
             .unwrap(),
         );
+        let error = GraphValue::admit_property_value::<fgdb_gql::GraphIntegerError>(
+            &oversized,
+            &mut |_| Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.kind,
+            fgdb_gql::GraphIntegerErrorKind::StoredValueBounds
+        );
+        let before = db.frontier().unwrap();
+        let mut rejected = WriteBatch::new(R);
+        rejected.create_vertex_values(VId(99), vec![], vec![(P, oversized)]);
+        let error = db.write(&commit, rejected).await.unwrap_err();
+        assert!(matches!(
+            error,
+            fgdb::WriteError::VertexStorageAdmission { vid: VId(99), source }
+                if matches!(source.as_ref(), fgdb_strata::vertex::VertexPatchError::RowExceedsStorageLimit { bytes, limit } if bytes > limit && *limit == 16_384)
+        ));
+        assert_eq!(db.frontier().unwrap(), before);
+        assert!(db.vertex(VId(99)).unwrap().is_none());
+        let collection = CanonicalPropertyValue::List(
+            CanonicalList::try_new(vec![CanonicalScalar::Null.into(); 1_024]).unwrap(),
+        );
         let membership_key = PropertyKeyId(3);
         let text = CanonicalScalar::ucs_basic_text("prefix").unwrap();
         let mut batch = WriteBatch::new(R);
@@ -1088,7 +1113,7 @@ fn membership_keeps_collection_and_arithmetic_error_boundaries() {
             VId(1),
             vec![],
             vec![
-                (P, oversized),
+                (P, collection),
                 (Q, text.clone().into()),
                 (membership_key, CanonicalScalar::Int(0).into()),
             ],
@@ -1103,7 +1128,7 @@ fn membership_keeps_collection_and_arithmetic_error_boundaries() {
             ],
         );
         let at = db.write(&commit, batch).await.unwrap();
-        let wide = GqlQueryPolicy::new(10, 10, 10_000_000, 10_000_000);
+        let wide = GqlQueryPolicy::new(10, 10, 10_000_000, 128);
         for text in [
             "MATCH (n) WHERE n.p IN $members RETURN n",
             "MATCH (n) WHERE NOT NOT (n.p IN $members) RETURN n",
@@ -1114,8 +1139,10 @@ fn membership_keeps_collection_and_arithmetic_error_boundaries() {
                 .execute_graph_pattern_governed_at(&cx, &query, at, wide)
                 .unwrap_err();
             assert!(
-                format!("{error:?}").contains("StoredValueBounds"),
-                "{text}: {error:?}"
+                matches!(error, fgdb_gql::GqlQueryError::Evaluator(limit)
+                if limit.dimension == fgdb_gql::GlaLimitDimension::ScratchEntries
+                    && limit.limit == 128 && limit.observed == 129),
+                "{text}"
             );
             let error = db
                 .stream_graph_values_governed_at(&cx, &query, at, wide)
@@ -1123,8 +1150,10 @@ fn membership_keeps_collection_and_arithmetic_error_boundaries() {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap_err();
             assert!(
-                format!("{error:?}").contains("StoredValueBounds"),
-                "stream {text}: {error:?}"
+                matches!(error, fgdb_gql::GqlQueryError::Evaluator(limit)
+                if limit.dimension == fgdb_gql::GlaLimitDimension::ScratchEntries
+                    && limit.limit == 128 && limit.observed == 129),
+                "stream {text}"
             );
         }
 
@@ -1192,13 +1221,17 @@ fn membership_keeps_collection_and_arithmetic_error_boundaries() {
         let error = db
             .execute_graph_pattern_governed_at(&cx, &query, at, wide)
             .unwrap_err();
-        assert!(format!("{error:?}").contains("StoredValueBounds"));
+        assert!(matches!(error, fgdb_gql::GqlQueryError::Evaluator(limit)
+            if limit.dimension == fgdb_gql::GlaLimitDimension::ScratchEntries
+                && limit.limit == 128 && limit.observed == 129));
         let error = db
             .stream_graph_values_governed_at(&cx, &query, at, wide)
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap_err();
-        assert!(format!("{error:?}").contains("StoredValueBounds"));
+        assert!(matches!(error, fgdb_gql::GqlQueryError::Evaluator(limit)
+            if limit.dimension == fgdb_gql::GlaLimitDimension::ScratchEntries
+                && limit.limit == 128 && limit.observed == 129));
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

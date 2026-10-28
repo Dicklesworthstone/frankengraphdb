@@ -98,6 +98,41 @@ fn wide() -> GqlQueryPolicy {
 }
 
 #[test]
+fn zero_page_needs_no_work_allowance_but_still_observes_cancellation() {
+    for cancelled in [false, true] {
+        let source = source(vec![sample(1, 1, true)]);
+        let reads = source.reads.clone();
+        let dropped = source.dropped.clone();
+        let calls = Cell::new(0);
+        let plan = VertexScanPlan::compile(pattern(0, Some(0), &[]).plan()).unwrap();
+        let mut cursor =
+            VertexScanCursor::new(source, plan, GqlQueryPolicy::new(0, 0, 0, 0), || {
+                calls.set(calls.get() + 1);
+                if cancelled { Err("cancelled") } else { Ok(()) }
+            });
+        assert_eq!(calls.get(), 0, "construction is lazy");
+        let result = cursor.next();
+        if cancelled {
+            assert!(matches!(
+                result,
+                Some(Err(GqlQueryError::Interrupted("cancelled")))
+            ));
+            assert_eq!(cursor.state(), VertexScanState::Failed);
+        } else {
+            assert!(result.is_none());
+            assert_eq!(cursor.state(), VertexScanState::Exhausted);
+        }
+        assert_eq!(calls.get(), 1);
+        assert_eq!(reads.get(), 0);
+        assert_eq!(cursor.row_stats(), GqlExecutionStats::default());
+        assert_eq!(cursor.evaluator_stats(), GlaExecutionStats::default());
+        assert!(dropped.get(), "terminal pull releases the source");
+        assert!(cursor.next().is_none());
+        assert_eq!(calls.get(), 1, "terminal pulls are inert");
+    }
+}
+
+#[test]
 fn pull_results_equal_ordinary_gla_across_visibility_predicates_offsets_limits_and_quantifiers() {
     let choices = [
         None,
