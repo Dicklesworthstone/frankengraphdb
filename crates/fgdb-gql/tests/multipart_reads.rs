@@ -5333,3 +5333,481 @@ mod graph_reading_quantifiers {
         }
     }
 }
+
+mod graph_reading_list_sources {
+    use super::*;
+    use fgdb_gql::GraphIntegerErrorKind;
+
+    type Outcome = Result<
+        GqlQueryExecution<GraphValueRow>,
+        GqlQueryError<GraphSetExecutionError<&'static str>, usize>,
+    >;
+
+    fn null() -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Null)
+    }
+
+    fn list(values: impl IntoIterator<Item = GraphValue>) -> GraphValue {
+        GraphValue::List(values.into_iter().collect())
+    }
+
+    fn parameters(roots: &[Option<u128>]) -> GqlParameters {
+        GqlParameters::new()
+            .with_list(
+                "items",
+                roots
+                    .iter()
+                    .map(|id| id.map_or_else(null, |id| GraphValue::Vertex(VId(id))))
+                    .collect(),
+            )
+            .unwrap()
+    }
+
+    fn targets(root: Option<u128>) -> Vec<u128> {
+        EDGES
+            .iter()
+            .filter(|&&(from, _, _)| Some(from.0) == root)
+            .map(|&(_, _, to)| to.0)
+            .collect()
+    }
+
+    fn bind(statement: &str, arguments: &GqlParameters) -> PreparedGraphSet {
+        PreparedGraphSetText::prepare(statement, symbols)
+            .unwrap()
+            .bind_parameters(arguments)
+            .unwrap()
+    }
+
+    fn counted(query: &PreparedGraphSet, fail_at: Option<usize>) -> (Outcome, usize) {
+        let values = [1, 2, 2, 3].map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)));
+        let mut calls = 0;
+        let result = query.execute_governed_with_elements(
+            wide(),
+            |pattern, remaining| {
+                calls += 1;
+                if Some(calls) == fail_at {
+                    return Err(GqlQueryError::Source("list-source-error"));
+                }
+                pattern.plan().execute_governed_with_properties(
+                    (values.len() + EDGES.len()) as u64,
+                    (1..=4).map(VId),
+                    EDGES,
+                    |vid, tests| {
+                        Ok::<_, &'static str>(tests.iter().all(|test| {
+                            test.matches(&[], &[(P, values[vid.0 as usize - 1].clone())])
+                        }))
+                    },
+                    |vid, key| Ok((key == P).then(|| &values[vid.0 as usize - 1])),
+                    remaining,
+                    || Ok::<_, usize>(()),
+                )
+            },
+            |_, _, _| panic!("this fixture has no CALL source"),
+            |element, key| {
+                Ok(match element {
+                    ElementId::Vertex(vid) if key == P => Some(values[vid.0 as usize - 1].clone()),
+                    _ => None,
+                })
+            },
+            || Ok::<_, usize>(()),
+        );
+        (result, calls)
+    }
+
+    #[test]
+    fn nested_graph_list_sources_keep_order_duplicates_null_maps_and_filtered_graph_maps() {
+        let statements = [
+            "WITH $items AS roots RETURN [root IN roots | \
+             [x IN [(root)-[:R]->(target) | target] | \
+              CASE WHEN (x)-[:R]->() THEN x ELSE NULL END]] AS values",
+            "WITH $items AS roots RETURN [root IN roots | \
+             [x IN [(root)-[:R]->(target) | target] WHERE (x)-[:R]->() | \
+              [(x)-[:R]->(last) | last]]] AS values",
+        ];
+        let templates =
+            statements.map(|text| PreparedGraphSetText::prepare(text, symbols).unwrap());
+        for roots in [
+            vec![Some(3), Some(1), Some(4), None, Some(1), Some(2)],
+            vec![Some(2), Some(3)],
+            vec![],
+        ] {
+            let holes = list(roots.iter().map(|&root| {
+                list(targets(root).into_iter().map(|id| {
+                    if targets(Some(id)).is_empty() {
+                        null()
+                    } else {
+                        GraphValue::Vertex(VId(id))
+                    }
+                }))
+            }));
+            let mapped = list(roots.iter().map(|&root| {
+                list(
+                    targets(root)
+                        .into_iter()
+                        .filter(|&id| !targets(Some(id)).is_empty())
+                        .map(|id| {
+                            list(
+                                targets(Some(id))
+                                    .into_iter()
+                                    .map(|id| GraphValue::Vertex(VId(id))),
+                            )
+                        }),
+                )
+            }));
+            let arguments = parameters(&roots);
+            for (index, expected) in [holes, mapped].into_iter().enumerate() {
+                let query = templates[index].bind_parameters(&arguments).unwrap();
+                assert_eq!(
+                    run(&query, wide(), &mut || Ok(())).unwrap().value,
+                    vec![GraphValueRow::from_owned_values(vec![expected])],
+                    "{}, roots {roots:?}",
+                    statements[index]
+                );
+            }
+        }
+        // The source reaches vertex 4, but its false graph predicate prevents
+        // the map's graph source and arithmetic from being evaluated.
+        let filtered = bind(
+            "UNWIND $items AS root RETURN \
+             [x IN [(root)-[:R]->(target) | target] WHERE (x)-[:R]->() | \
+              [(x)-[:R]->() | 1/0]] AS values",
+            &parameters(&[Some(3)]),
+        );
+        let (result, calls) = counted(&filtered, Some(3));
+        assert_eq!(calls, 2);
+        assert_eq!(
+            result.unwrap().value,
+            vec![GraphValueRow::from_owned_values(vec![list([])])]
+        );
+    }
+
+    #[test]
+    fn graph_list_sources_resolve_outer_anchors_before_same_named_local_bindings() {
+        let roots = [Some(3), Some(1), Some(1), Some(4), None];
+        let arguments = parameters(&roots);
+        let expected: Vec<_> = roots
+            .iter()
+            .map(|&root| {
+                GraphValueRow::from_owned_values(vec![
+                    root.map_or_else(null, |id| GraphValue::Vertex(VId(id))),
+                    list(
+                        targets(root)
+                            .into_iter()
+                            .map(|id| GraphValue::Vertex(VId(id))),
+                    ),
+                ])
+            })
+            .collect();
+        for statement in [
+            "UNWIND $items AS x RETURN x,\
+             [x IN [(x)-[:R]->(target) | target] | x] AS targets",
+            "UNWIND $items AS x CALL (x) { \
+               RETURN [x IN [(x)-[:R]->(target) | target] | x] AS targets \
+             } RETURN x,targets",
+        ] {
+            assert_eq!(
+                run(&bind(statement, &arguments), wide(), &mut || Ok(()))
+                    .unwrap()
+                    .value,
+                expected,
+                "{statement}"
+            );
+        }
+        let query = bind(
+            "UNWIND $items AS x RETURN x,\
+             ANY(x IN [(x)-[:R]->(target) | target] WHERE (x)-[:R]->()) AS present",
+            &arguments,
+        );
+        assert_eq!(
+            run(&query, wide(), &mut || Ok(())).unwrap().value,
+            roots
+                .iter()
+                .map(|&root| GraphValueRow::from_owned_values(vec![
+                    root.map_or_else(null, |id| GraphValue::Vertex(VId(id))),
+                    GraphValue::Scalar(CanonicalScalar::Bool(
+                        targets(root)
+                            .into_iter()
+                            .any(|id| !targets(Some(id)).is_empty())
+                    )),
+                ]))
+                .collect::<Vec<_>>()
+        );
+
+        let expected: Vec<_> = (1..=4)
+            .map(|id| {
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(id)),
+                    list(
+                        targets(Some(id))
+                            .into_iter()
+                            .map(|id| GraphValue::Vertex(VId(id))),
+                    ),
+                ])
+            })
+            .collect();
+        for statement in [
+            "MATCH (n) RETURN n,[x IN [(n)-[:R]->(target) | target] | x] AS targets ORDER BY n",
+            "MATCH (n) WITH n RETURN n,\
+             [x IN [(n)-[:R]->(target) | target] | x] AS targets ORDER BY n",
+        ] {
+            assert_eq!(execute(statement), expected, "{statement}");
+        }
+        // This ancestor-owned COUNT counts matching x vertices; parallel
+        // edges are only EXISTS witnesses, so vertex 1 contributes two.
+        for statement in [
+            "MATCH (a) RETURN a,[v IN [a] | COUNT { MATCH (x) \
+             WHERE EXISTS { MATCH (a)-[:R]->(x) } }] AS values ORDER BY a",
+            "MATCH (a) WITH a RETURN a,[v IN [a] | COUNT { MATCH (x) \
+             WHERE EXISTS { MATCH (a)-[:R]->(x) } }] AS values ORDER BY a",
+        ] {
+            assert_eq!(
+                execute(statement),
+                [2, 1, 1, 0]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, count)| GraphValueRow::from_owned_values(vec![
+                        GraphValue::Vertex(VId(index as u128 + 1)),
+                        list([GraphValue::Scalar(CanonicalScalar::Int(count))]),
+                    ]))
+                    .collect::<Vec<_>>(),
+                "{statement}"
+            );
+        }
+        let query = bind(
+            "UNWIND $items AS root RETURN EXISTS((root)-[:R]->()) AS present,\
+             [x IN [(root)-[:R]->(target) | target] | x] AS targets",
+            &arguments,
+        );
+        assert_eq!(
+            run(&query, wide(), &mut || Ok(())).unwrap().value,
+            roots
+                .iter()
+                .map(|&root| GraphValueRow::from_owned_values(vec![
+                    GraphValue::Scalar(CanonicalScalar::Bool(!targets(root).is_empty())),
+                    list(
+                        targets(root)
+                            .into_iter()
+                            .map(|id| GraphValue::Vertex(VId(id))),
+                    ),
+                ]))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn graph_list_sources_run_once_per_outer_row_and_rebind_source_parameters() {
+        let template = PreparedGraphSetText::prepare(
+            "UNWIND $items AS anchor RETURN anchor,\
+             [x IN [(anchor)-[:R]->(target) WHERE target.p >= $minimum | target] | x] AS targets",
+            symbols,
+        )
+        .unwrap();
+        let frozen = template.canonical_template_bytes();
+        for roots in [
+            vec![Some(1), Some(1), Some(3)],
+            vec![Some(2), Some(4)],
+            vec![],
+        ] {
+            for minimum in [2_i64, 3] {
+                let arguments = parameters(&roots).with_int64("minimum", minimum).unwrap();
+                let query = template.bind_parameters(&arguments).unwrap();
+                let (result, calls) = counted(&query, None);
+                assert_eq!(calls, roots.len(), "roots {roots:?}, minimum {minimum}");
+                assert_eq!(
+                    result.unwrap().value,
+                    roots
+                        .iter()
+                        .map(|&root| GraphValueRow::from_owned_values(vec![
+                            root.map_or_else(null, |id| GraphValue::Vertex(VId(id))),
+                            list(
+                                targets(root)
+                                    .into_iter()
+                                    .filter(|&id| [1_i64, 2, 2, 3][id as usize - 1] >= minimum)
+                                    .map(|id| GraphValue::Vertex(VId(id))),
+                            ),
+                        ]))
+                        .collect::<Vec<_>>(),
+                    "roots {roots:?}, minimum {minimum}"
+                );
+            }
+        }
+        assert_eq!(template.canonical_template_bytes(), frozen);
+        assert!(template.bind_parameters(&parameters(&[Some(1)])).is_err());
+    }
+
+    #[test]
+    fn graph_derived_list_sources_keep_null_empty_and_nested_literal_semantics() {
+        let arguments = parameters(&[Some(1), Some(4)]);
+        for (statement, expected) in [
+            (
+                "UNWIND $items AS root RETURN \
+                 [x IN CASE WHEN EXISTS((root)-[:R]->()) THEN NULL ELSE [] END | 1/0] AS values",
+                vec![null(), list([])],
+            ),
+            (
+                "UNWIND $items AS root RETURN \
+                 ANY(x IN CASE WHEN EXISTS((root)-[:R]->()) THEN NULL ELSE [] END \
+                     WHERE 1/0=0) AS present",
+                vec![null(), GraphValue::Scalar(CanonicalScalar::Bool(false))],
+            ),
+        ] {
+            let (result, calls) = counted(&bind(statement, &arguments), None);
+            assert_eq!(calls, 2, "{statement}");
+            assert_eq!(
+                result.unwrap().value,
+                expected
+                    .into_iter()
+                    .map(|value| GraphValueRow::from_owned_values(vec![value]))
+                    .collect::<Vec<_>>(),
+                "{statement}"
+            );
+        }
+        for (roots, expected, present) in [
+            (
+                vec![Some(3), Some(1), Some(4), Some(1), None],
+                vec![3, 1, 1],
+                true,
+            ),
+            (vec![], vec![], false),
+        ] {
+            let arguments = parameters(&roots);
+            let query = bind(
+                "WITH $items AS xs RETURN \
+                 [x IN [[y IN xs WHERE (y)-[:R]->() | y]][0] | x] AS values",
+                &arguments,
+            );
+            assert_eq!(
+                run(&query, wide(), &mut || Ok(())).unwrap().value,
+                vec![GraphValueRow::from_owned_values(vec![list(
+                    expected.iter().map(|&id| GraphValue::Vertex(VId(id)))
+                )])]
+            );
+            let query = bind(
+                "WITH $items AS xs RETURN \
+                 [x IN [ANY(y IN xs WHERE (y)-[:R]->()),NULL,false] \
+                  WHERE x IS NOT NULL | x] AS values",
+                &arguments,
+            );
+            assert_eq!(
+                run(&query, wide(), &mut || Ok(())).unwrap().value,
+                vec![GraphValueRow::from_owned_values(vec![list([
+                    GraphValue::Scalar(CanonicalScalar::Bool(present)),
+                    GraphValue::Scalar(CanonicalScalar::Bool(false)),
+                ])])]
+            );
+        }
+    }
+
+    #[test]
+    fn graph_list_source_and_member_failures_survive_filters_and_empty_pages() {
+        for suffix in ["", " LIMIT 0"] {
+            for (statement, roots, fail_at) in [
+                (
+                    "UNWIND $items AS root RETURN \
+                     [x IN [(root)-[:R]->(target) | target] | x] AS values",
+                    vec![Some(1), Some(3)],
+                    2,
+                ),
+                (
+                    "UNWIND $items AS root RETURN \
+                     ANY(x IN [(root)-[:R]->(target) | target] \
+                         WHERE EXISTS((x)-[:R]->())) AS present",
+                    vec![Some(1)],
+                    3,
+                ),
+            ] {
+                let query = bind(&format!("{statement}{suffix}"), &parameters(&roots));
+                let (result, calls) = counted(&query, Some(fail_at));
+                assert_eq!(calls, fail_at, "{statement}{suffix}");
+                assert!(matches!(
+                    result,
+                    Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+                        "list-source-error"
+                    )))
+                ));
+            }
+            let query = bind(
+                &format!(
+                    "UNWIND $items AS root RETURN \
+                     [x IN [(root)-[:R]->(target) | 1/0] WHERE false | x] AS values{suffix}"
+                ),
+                &parameters(&[Some(1)]),
+            );
+            assert!(matches!(
+                run(&query, wide(), &mut || Ok(())),
+                Err(GqlQueryError::Source(GraphSetExecutionError::Projection { error, .. }))
+                    if error.kind == GraphIntegerErrorKind::DivisionByZero
+            ));
+        }
+    }
+
+    #[test]
+    fn graph_list_source_helpers_remain_private_without_reserving_public_aliases() {
+        for statement in [
+            "UNWIND $items AS a WITH a,{} AS m RETURN \
+             [x IN [(a)-[:R]->(b) | b] + __fg_boundary_0 | x] AS values",
+            "UNWIND $items AS a WITH a,{} AS m RETURN \
+             [x IN [(a)-[:R]->(b) | b] + (m{__fg_boundary_0}).__fg_boundary_0 | x] AS values",
+            "UNWIND $items AS a RETURN \
+             [x IN CASE WHEN EXISTS((a)-[:R]->()) \
+                   THEN [__fg_boundary_0{p:1}] ELSE [] END | x] AS values",
+        ] {
+            let mut resolutions = 0;
+            assert!(
+                PreparedGraphSetText::prepare(statement, |kind, name| {
+                    resolutions += 1;
+                    symbols(kind, name)
+                })
+                .is_err(),
+                "{statement}"
+            );
+            assert_eq!(resolutions, 0, "private scope before catalog: {statement}");
+        }
+
+        let roots = [Some(1), Some(4)];
+        let arguments = parameters(&roots);
+        let expected: Vec<_> = roots
+            .iter()
+            .map(|&root| {
+                GraphValueRow::from_owned_values(vec![list(
+                    targets(root)
+                        .into_iter()
+                        .map(|id| GraphValue::Vertex(VId(id)))
+                        .chain([GraphValue::Scalar(CanonicalScalar::Int(9))]),
+                )])
+            })
+            .collect();
+        // A public binding with this spelling is legal. Hidden names must
+        // avoid it, and both bare lookup and map shorthand retain its value.
+        for source in [
+            "[(a)-[:R]->(b) | b] + __fg_boundary_0",
+            "[(a)-[:R]->(b) | b] + (m{__fg_boundary_0,p:__fg_boundary_0}).p",
+        ] {
+            let statement = format!(
+                "WITH $items AS roots,[9] AS __fg_boundary_0,{{}} AS m \
+                 UNWIND roots AS a RETURN [x IN {source} | x] AS values"
+            );
+            let query = bind(&statement, &arguments);
+            assert_eq!(
+                run(&query, wide(), &mut || Ok(())).unwrap().value,
+                expected,
+                "{statement}"
+            );
+        }
+        let query = bind(
+            "WITH $items AS roots,{p:7} AS __fg_boundary_0 UNWIND roots AS a RETURN \
+             [x IN CASE WHEN EXISTS((a)-[:R]->()) \
+                   THEN [__fg_boundary_0{.*}] ELSE [] END | x.p] AS values",
+            &arguments,
+        );
+        assert_eq!(
+            run(&query, wide(), &mut || Ok(())).unwrap().value,
+            vec![
+                GraphValueRow::from_owned_values(vec![list([GraphValue::Scalar(
+                    CanonicalScalar::Int(7)
+                ),])]),
+                GraphValueRow::from_owned_values(vec![list([])]),
+            ]
+        );
+    }
+}

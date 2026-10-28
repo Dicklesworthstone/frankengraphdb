@@ -2029,3 +2029,285 @@ fn graph_quantifiers_count_elements_and_keep_snapshot_and_capability_boundaries(
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn nested_graph_list_sources_keep_order_metadata_and_native_read_boundaries() {
+    use fgdb_gql::algebra::GraphValue;
+
+    #[derive(Clone, Copy)]
+    struct MetadataCatalog;
+    impl fgdb_gql::GraphSymbolResolver for MetadataCatalog {
+        fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            symbols(kind, name)
+        }
+        fn reverse_catalog(&self) -> Option<fgdb_gql::ReverseSymbolCatalog> {
+            let mut catalog = fgdb_gql::ReverseSymbolCatalog::new();
+            catalog.insert_relation(R, "R");
+            catalog.insert_relation(S, "S");
+            catalog.insert_property(N, "n");
+            Some(catalog)
+        }
+    }
+    #[derive(Clone, Copy)]
+    struct Oracle<'a> {
+        roots: &'a [u128],
+        edges: &'a [(u128, u128)],
+        active: &'a [u128],
+        n2: i64,
+        properties: bool,
+    }
+
+    let ((), report) = run_async_under_lab(0xa681_0014, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = database(&commit).await;
+        let mut links = WriteBatch::new(R);
+        links.add_edge(EId(12), VId(1), VId(2), vec![]);
+        links.add_edge(EId(13), VId(1), VId(3), vec![]);
+        links.add_edge(EId(14), VId(3), VId(3), vec![]);
+        let mut hidden_target = WriteBatch::new(S);
+        hidden_target.add_edge(EId(22), VId(3), VId(4), vec![]);
+        db.write_atomic(&commit, vec![links, hidden_target])
+            .await
+            .unwrap();
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let texts = [
+            "MATCH (v) WITH collect(v) AS roots UNWIND roots AS a RETURN a, \
+             [(a)-[:R]->(b) | b] AS source, \
+             [x IN [(a)-[:R]->(b) | b] WHERE (x)-[:S]->() | [x.n,properties(x)]] AS values \
+             ORDER BY a",
+            "MATCH (v) WITH collect(v) AS roots UNWIND roots AS a RETURN a, \
+             single(x IN [(a)-[:R]->(b) | b] WHERE (x)-[:S]->()) AS only \
+             ORDER BY a",
+        ];
+        let params = GqlParameters::new();
+        let prepared = texts
+            .iter()
+            .map(|text| PreparedNativeRead::prepare(text, &params, MetadataCatalog).unwrap())
+            .collect::<Vec<_>>();
+        // A graph-only aggregate keeps its existing graph projection owner.
+        let aggregate = db
+            .query(
+                &cx,
+                "MATCH (a) RETURN count([x IN [(a)-[:R]->(b) | b] | x]) AS c",
+                &params,
+                MetadataCatalog,
+                policy(),
+            )
+            .unwrap();
+        let QueryResult::Rows { columns, rows } = aggregate else {
+            panic!("expected the graph aggregate");
+        };
+        assert_eq!(columns, ["c"]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0].as_count(), Some(5));
+        let edges_before = [(1, 2), (1, 2), (1, 3), (3, 3), (5, 5)];
+        let before = Oracle {
+            roots: &[1, 2, 3, 4, 5],
+            edges: &edges_before,
+            active: &[2, 3],
+            n2: 10,
+            properties: true,
+        };
+        let check = |result: QueryResult, query: usize, oracle: Oracle<'_>| {
+            let QueryResult::Rows { columns, rows } = result else {
+                panic!("expected composed graph-source rows");
+            };
+            if query == 0 {
+                assert_eq!(columns, ["a", "source", "values"]);
+            } else {
+                assert_eq!(columns, ["a", "only"]);
+            }
+            assert_eq!(rows.len(), oracle.roots.len());
+            for (row, &root) in rows.iter().zip(oracle.roots) {
+                assert_eq!(row[0].as_value(), Some(&GraphValue::Vertex(VId(root))));
+                let targets = oracle.edges.iter().filter(|(from, _)| *from == root);
+                if query == 0 {
+                    let source = row[1]
+                        .as_value()
+                        .and_then(GraphValue::as_list)
+                        .unwrap()
+                        .iter()
+                        .map(|value| match value {
+                            GraphValue::Vertex(id) => id.0,
+                            other => panic!("expected a source vertex: {other:?}"),
+                        })
+                        .collect::<Vec<_>>();
+                    let mut actual = source.clone();
+                    let mut expected = targets.map(|(_, to)| *to).collect::<Vec<_>>();
+                    actual.sort();
+                    expected.sort();
+                    assert_eq!(actual, expected, "source bag for {root}");
+                    // Only the source bag above is normalized. The composed
+                    // map must follow the producer's exact order, including
+                    // duplicate vertex2 occurrences (amount10 before amount7).
+                    let mapped = source
+                        .iter()
+                        .filter(|id| oracle.active.contains(id))
+                        .map(|id| {
+                            let amount = if oracle.properties {
+                                match *id {
+                                    2 => Some(oracle.n2),
+                                    3 => Some(7),
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            };
+                            let scalar = GraphValue::Scalar(
+                                amount.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+                            );
+                            let entries = if amount.is_some() {
+                                vec![(Box::<str>::from("n"), scalar.clone())]
+                            } else {
+                                vec![]
+                            };
+                            GraphValue::List(vec![scalar, GraphValue::map(entries).unwrap()].into())
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        row[2].as_value(),
+                        Some(&GraphValue::List(mapped.into())),
+                        "ordered map and metadata for {root}",
+                    );
+                } else {
+                    let matches = targets.filter(|(_, to)| oracle.active.contains(to)).count();
+                    assert_eq!(
+                        row[1].as_value().and_then(GraphValue::as_scalar),
+                        Some(&CanonicalScalar::Bool(matches == 1)),
+                        "SINGLE counts source occurrences for {root}",
+                    );
+                }
+            }
+        };
+        for (query, (text, plan)) in texts.iter().zip(&prepared).enumerate() {
+            check(
+                db.query(&cx, text, &params, MetadataCatalog, policy())
+                    .unwrap(),
+                query,
+                before,
+            );
+            check(
+                plan.execute(&db, &cx, &params, policy()).unwrap(),
+                query,
+                before,
+            );
+        }
+        let visible = Oracle {
+            roots: &[1, 2, 3, 5],
+            active: &[2],
+            ..before
+        };
+        let issuer = authority();
+        for (allowed, expected) in [
+            (grant(), visible),
+            (
+                {
+                    let mut allowed = grant();
+                    allowed.properties = Scope::only([]);
+                    allowed
+                },
+                Oracle {
+                    properties: false,
+                    ..visible
+                },
+            ),
+            (
+                {
+                    let mut allowed = grant();
+                    allowed.relations = Scope::only([R]);
+                    allowed
+                },
+                Oracle {
+                    active: &[],
+                    ..visible
+                },
+            ),
+            (
+                {
+                    let mut allowed = grant();
+                    allowed.relations = Scope::only([S]);
+                    allowed
+                },
+                Oracle {
+                    edges: &[],
+                    ..visible
+                },
+            ),
+        ] {
+            let token = issuer.issue_at(&allowed, 100).unwrap();
+            for (query, plan) in prepared.iter().enumerate() {
+                check(
+                    plan.execute_authorized(
+                        &db,
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        &params,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap(),
+                    query,
+                    expected,
+                );
+            }
+        }
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut staged = WriteBatch::new(R);
+        staged.delete_edge(EId(12));
+        staged.delete_edge(EId(13));
+        staged.add_edge(EId(15), VId(3), VId(2), vec![]);
+        staged.set_vertex_property(VId(2), N, Some(CanonicalScalar::Int(12)));
+        txn.write(&mut db, staged).unwrap();
+        let mut staged = WriteBatch::new(S);
+        staged.add_edge(EId(30), VId(5), VId(3), vec![]);
+        txn.write(&mut db, staged).unwrap();
+        let edges_after = [(1, 2), (3, 3), (3, 2), (5, 5)];
+        let after = Oracle {
+            edges: &edges_after,
+            active: &[2, 3, 5],
+            n2: 12,
+            ..before
+        };
+        for (query, (text, plan)) in texts.iter().zip(&prepared).enumerate() {
+            check(
+                txn.query(&db, &cx, text, &params, MetadataCatalog, policy())
+                    .unwrap(),
+                query,
+                after,
+            );
+            check(
+                plan.execute_in_transaction(&txn, &db, &cx, &params, policy())
+                    .unwrap(),
+                query,
+                after,
+            );
+            check(
+                plan.execute(&db, &cx, &params, policy()).unwrap(),
+                query,
+                before,
+            );
+        }
+        assert_eq!(db.frontier().unwrap(), basis);
+        txn.commit(&mut db, &commit).await.unwrap();
+        for (query, (text, plan)) in texts.iter().zip(&prepared).enumerate() {
+            check(
+                plan.execute(&db, &cx, &params, policy()).unwrap(),
+                query,
+                after,
+            );
+            check(
+                pinned
+                    .query(&cx, text, &params, MetadataCatalog, policy())
+                    .unwrap(),
+                query,
+                before,
+            );
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

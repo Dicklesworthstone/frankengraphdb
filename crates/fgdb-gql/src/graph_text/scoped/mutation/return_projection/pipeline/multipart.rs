@@ -297,14 +297,46 @@ pub(in crate::graph_text) fn has_row_graph_expressions(
         at: 0,
         tokens: 0,
     };
+    // A graph-only projection keeps its stronger graph owner, including
+    // aggregate arguments. Broader list routing begins at a real row boundary.
+    let first = list_probe.clone().next()?;
+    let mut row_scope = !matches!(first.kind, TokenKind::Word(word)
+        if word.eq_ignore_ascii_case("MATCH") || word.eq_ignore_ascii_case("OPTIONAL"));
+    let mut depth = 0_usize;
+    let mut previous = None;
     loop {
         let token = list_probe.next()?;
         if matches!(token.kind, TokenKind::End) {
             break;
         }
-        if list_graph_expression_follows(token.kind, &list_probe)? {
+        let key = matches!(previous, Some(TokenKind::Punct(b'.' | b':')))
+            || matches!(previous, Some(TokenKind::Word(word)) if word.eq_ignore_ascii_case("AS"));
+        if depth == 0
+            && !key
+            && matches!(token.kind, TokenKind::Word(word)
+                if word.eq_ignore_ascii_case("UNWIND")
+                    || word.eq_ignore_ascii_case("CALL")
+                    || (word.eq_ignore_ascii_case("WITH")
+                        && !matches!(previous, Some(TokenKind::Word(word))
+                            if word.eq_ignore_ascii_case("STARTS")
+                                || word.eq_ignore_ascii_case("ENDS"))))
+        {
+            row_scope = true;
+        }
+        let graph_read = if row_scope {
+            row_list_graph_expression_follows(token.kind, &list_probe, |_| false)?
+        } else {
+            list_graph_expression_follows(token.kind, &list_probe)?
+        };
+        if graph_read {
             return Ok(true);
         }
+        match token.kind {
+            TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+            TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        previous = Some(token.kind);
     }
     for at in crate::set_text::multipart::row_existence_offsets(tokens) {
         // Compound leaves borrow a slice of the statement but retain the
@@ -605,12 +637,30 @@ fn row_list_quantifier_follows(
     .then_some(kind))
 }
 
-/// Route a complete enclosing list only when a graph expression reads one
-/// of its active locals. Graph-scope reads independent of those locals retain
-/// their existing owner, including correlations to nested graph ancestors.
+/// A graph head defers only reads of an active list local. Independent
+/// reads retain its existing owner, including nested graph ancestors.
 fn list_graph_expression_follows<'a>(
     token: TokenKind<'a>,
     lexer: &Lexer<'a>,
+) -> Result<bool, GraphPatternTextError> {
+    list_graph_expression_in_scope(token, lexer, false, |_| false)
+}
+
+/// A completed row can own any graph-reading list. An expression already
+/// supplied by the graph head keeps that owner and its exact source span.
+fn row_list_graph_expression_follows<'a>(
+    token: TokenKind<'a>,
+    lexer: &Lexer<'a>,
+    hoisted: impl FnMut(usize) -> bool,
+) -> Result<bool, GraphPatternTextError> {
+    list_graph_expression_in_scope(token, lexer, true, hoisted)
+}
+
+fn list_graph_expression_in_scope<'a>(
+    token: TokenKind<'a>,
+    lexer: &Lexer<'a>,
+    row: bool,
+    mut hoisted: impl FnMut(usize) -> bool,
 ) -> Result<bool, GraphPatternTextError> {
     if !list_comprehension_follows(token, lexer)?
         && row_list_quantifier_follows(token, lexer)?.is_none()
@@ -656,6 +706,15 @@ fn list_graph_expression_follows<'a>(
             None
         };
         if let Some(end) = end {
+            if hoisted(current.at) {
+                lexer = ahead;
+                previous = Some(TokenKind::Punct(b')'));
+                current = end;
+                continue;
+            }
+            if row {
+                return Ok(true);
+            }
             let mut scan = lexer.clone();
             let mut read = current;
             let mut prior = None;
@@ -713,13 +772,14 @@ fn row_pattern_expressions<'a>(
     mut hoisted: impl FnMut(usize) -> bool,
 ) -> Result<Vec<(Token<'a>, Lexer<'a>)>, GraphPatternTextError> {
     let token = lexer.next()?;
-    row_pattern_expressions_from(token, lexer, &mut hoisted)
+    row_pattern_expressions_from(token, lexer, &mut hoisted, false)
 }
 
 fn row_pattern_expressions_from<'a>(
     mut token: Token<'a>,
     lexer: &mut Lexer<'a>,
     mut hoisted: impl FnMut(usize) -> bool,
+    source: bool,
 ) -> Result<Vec<(Token<'a>, Lexer<'a>)>, GraphPatternTextError> {
     let mut expressions = Vec::new();
     let mut previous = None;
@@ -736,6 +796,10 @@ fn row_pattern_expressions_from<'a>(
         if matches!(token.kind, TokenKind::End)
             || (depth == 0 && matches!(token.kind, TokenKind::Punct(b')' | b'}' | b']' | b'|')))
             || group_by
+            || (source
+                && depth == 0
+                && !key
+                && matches!(token.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("WHERE")))
             || matches!(token.kind, TokenKind::Word(word)
                 if depth == 0 && !key && Parser::ends_where(word, previous))
         {
@@ -746,7 +810,7 @@ fn row_pattern_expressions_from<'a>(
             && locals.scopes.is_empty()
             && !hoisted(token.at)
             && row_list_quantifier_follows(token.kind, lexer)?.is_some()
-            && list_graph_expression_follows(token.kind, lexer)?
+            && row_list_graph_expression_follows(token.kind, lexer, &mut hoisted)?
         {
             expressions.push((token, lexer.clone()));
             let mut ahead = lexer.clone();
@@ -763,19 +827,21 @@ fn row_pattern_expressions_from<'a>(
         // stays inside the original native Collect scope. Ordinary lists and
         // per-element list scopes keep their existing owner and are skipped.
         if matches!(token.kind, TokenKind::Punct(b'[')) {
-            if locals.scopes.is_empty()
-                && !hoisted(token.at)
-                && (super::super::pattern_comprehension_follows(token.kind, lexer)?
-                    || list_graph_expression_follows(token.kind, lexer)?)
-            {
+            let graph = super::super::pattern_comprehension_follows(token.kind, lexer)?
+                || row_list_graph_expression_follows(token.kind, lexer, &mut hoisted)?;
+            if locals.scopes.is_empty() && !hoisted(token.at) && graph {
                 expressions.push((token, lexer.clone()));
             }
-            let Some(after) = after_balanced(lexer, b'[')? else {
-                return Ok(expressions);
-            };
-            previous = Some(TokenKind::Punct(b']'));
-            token = after;
-            continue;
+            // A source may wrap its graph value in an ordinary list literal.
+            // Traverse that container; complete graph/list scopes stay private.
+            if !source || graph || list_comprehension_follows(token.kind, lexer)? {
+                let Some(after) = after_balanced(lexer, b'[')? else {
+                    return Ok(expressions);
+                };
+                previous = Some(TokenKind::Punct(b']'));
+                token = after;
+                continue;
+            }
         }
         let mut ahead = lexer.clone();
         let after = if matches!(token.kind, TokenKind::Word(word)
@@ -989,16 +1055,23 @@ impl<'a> Parser<'a> {
         &self,
         width: usize,
     ) -> Result<bool, GraphPatternTextError> {
-        if !self.read_elements
-            || !(self.is_word("RETURN") || (self.is_word("WITH") && self.row_list_projection()?))
-        {
+        if !self.read_elements || !(self.is_word("RETURN") || self.is_word("WITH")) {
             return Ok(false);
         }
-        Ok(!row_pattern_expressions(&mut self.lexer.clone(), |at| {
+        let hoisted = |at| {
             hoisted_span(self.existence_reads.as_ref(), width, at).is_some()
                 || hoisted_span(self.comprehension_reads.as_ref(), width, at).is_some()
-        })?
-        .is_empty())
+        };
+        let expressions = row_pattern_expressions(&mut self.lexer.clone(), hoisted)?;
+        if self.is_word("WITH") {
+            for (token, lexer) in expressions {
+                if row_list_graph_expression_follows(token.kind, &lexer, hoisted)? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+        Ok(!expressions.is_empty())
     }
 
     fn returning_existence_projection(&self) -> Result<bool, GraphPatternTextError> {
@@ -1299,11 +1372,18 @@ impl<'a> Parser<'a> {
             self.lexer = lexer;
             let count = self.is_word("COUNT");
             let quantifier = self.list_quantifier()?;
-            let list = list_graph_expression_follows(self.current.kind, &self.lexer)?;
+            let list =
+                row_list_graph_expression_follows(self.current.kind, &self.lexer, |_| false)?;
             let collected = list || self.starts_pattern_comprehension()?;
             let (operation, mapped, leading) = if list {
-                let (operation, leading) =
-                    self.multipart_list_comprehension(statement, &schema, visible, call_depth)?;
+                let (operation, leading) = self.multipart_list_comprehension(
+                    statement,
+                    &mut schema,
+                    &mut parts,
+                    visible,
+                    incoming.len(),
+                    call_depth,
+                )?;
                 let list = Box::new(ReadValueTemplate::Column(schema.len() + 1));
                 let value = match quantifier {
                     Some(kind) => ReadValueTemplate::Quantifier {
@@ -1423,13 +1503,114 @@ impl<'a> Parser<'a> {
         Ok((parts, schema, spans, counts))
     }
 
+    /// Gather an IN expression before its local exists. Source reads keep the
+    /// incoming namespace and the graph head's existing hidden values; only
+    /// exact spans can address newly appended private source columns.
+    fn read_list_source(
+        &mut self,
+        statement: &'a str,
+        incoming: &mut RowSchema<'a>,
+        parts: &mut Vec<UnresolvedContinuation<'a>>,
+        captures: usize,
+        read_width: usize,
+        call_depth: usize,
+    ) -> Result<ReadValueTemplate, GraphSetTextError> {
+        let width = incoming.len();
+        let boundary = self.boundary_reads.take();
+        let existence = self.existence_reads.take();
+        let comprehensions = self.comprehension_reads.take();
+        let grouped = self.grouped_comprehensions.take();
+        let projected = self.projected_sources.take();
+        let widen = |reads: &Option<HoistedReads>| {
+            reads
+                .as_ref()
+                .filter(|(guard, _)| *guard == read_width)
+                .map(|(_, spans)| (width, spans.clone()))
+        };
+        let mut source_boundary = boundary
+            .as_ref()
+            .filter(|boundary| boundary.width == read_width)
+            .cloned()
+            .unwrap_or_else(|| BoundaryReads {
+                visible: captures,
+                width,
+                reads: Vec::new(),
+                functions: Vec::new(),
+                grouped: Vec::new(),
+                scoped: Vec::new(),
+            });
+        source_boundary.visible = captures;
+        source_boundary.width = width;
+        self.boundary_reads = Some(source_boundary);
+        self.existence_reads = widen(&existence);
+        self.comprehension_reads = widen(&comprehensions);
+        self.grouped_comprehensions = widen(&grouped);
+        self.projected_sources = widen(&projected);
+        let parsed = (|| {
+            let saved = (self.lexer.clone(), self.current);
+            let expressions = row_pattern_expressions_from(
+                self.current,
+                &mut self.lexer.clone(),
+                |at| {
+                    hoisted_span(self.existence_reads.as_ref(), width, at).is_some()
+                        || hoisted_span(self.comprehension_reads.as_ref(), width, at).is_some()
+                },
+                true,
+            )?;
+            let (prefix, expanded, spans, counts) = self.gather_row_expression_sources(
+                statement,
+                incoming,
+                captures,
+                call_depth + 1,
+                expressions,
+            )?;
+            let expanded_width = expanded.len();
+            self.boundary_reads
+                .as_mut()
+                .expect("the source owns its incoming row")
+                .width = expanded_width;
+            for reads in [
+                &mut self.existence_reads,
+                &mut self.comprehension_reads,
+                &mut self.grouped_comprehensions,
+                &mut self.projected_sources,
+            ] {
+                if let Some((guard, _)) = reads {
+                    *guard = expanded_width;
+                }
+            }
+            self.existence_reads
+                .get_or_insert_with(|| (expanded_width, Vec::new()))
+                .1
+                .extend(spans);
+            self.comprehension_reads
+                .get_or_insert_with(|| (expanded_width, Vec::new()))
+                .1
+                .extend(counts);
+            (self.lexer, self.current) = saved;
+            let value = self.read_row_value(&expanded, 0)?;
+            Ok::<_, GraphSetTextError>((prefix, expanded, value))
+        })();
+        self.boundary_reads = boundary;
+        self.existence_reads = existence;
+        self.comprehension_reads = comprehensions;
+        self.grouped_comprehensions = grouped;
+        self.projected_sources = projected;
+        let (prefix, expanded, value) = parsed?;
+        parts.extend(prefix);
+        *incoming = expanded;
+        Ok(value)
+    }
+
     /// Lower each list occurrence through native UNWIND and correlated row stages.
     /// The source evaluates before its local shadows an incoming name.
     fn multipart_list_comprehension(
         &mut self,
         statement: &'a str,
-        incoming: &RowSchema<'a>,
+        incoming: &mut RowSchema<'a>,
+        parts: &mut Vec<UnresolvedContinuation<'a>>,
         captures: usize,
+        read_width: usize,
         call_depth: usize,
     ) -> Result<(UnresolvedContinuationOperation<'a>, Vec<ReadStageTemplate>), GraphSetTextError>
     {
@@ -1449,7 +1630,8 @@ impl<'a> Parser<'a> {
         }
         let element = self.name()?;
         self.word("IN")?;
-        let list = self.read_row_value(incoming, 0)?;
+        let list =
+            self.read_list_source(statement, incoming, parts, captures, read_width, call_depth)?;
         let types: Vec<_> = incoming.iter().map(|(_, kind)| *kind).collect();
         let list_type = list.column_type(&types, &self.syntax.parameters);
         let mut private = BOUNDARY_READ_NAMES.iter().copied().filter(|name| {
@@ -1722,7 +1904,7 @@ impl<'a> Parser<'a> {
     ) -> Result<RowSchema<'a>, GraphSetTextError> {
         let saved = (self.lexer.clone(), self.current);
         let expressions =
-            row_pattern_expressions_from(self.current, &mut self.lexer.clone(), |_| false)?;
+            row_pattern_expressions_from(self.current, &mut self.lexer.clone(), |_| false, false)?;
         let (parts, expanded, existence, collected) = self.gather_row_expression_sources(
             statement,
             schema,

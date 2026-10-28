@@ -1597,10 +1597,12 @@ impl<'a> Parser<'a> {
         let source = self.name()?;
         let carried = if columns.is_none() {
             self.boundary_property_map(schema, source.text).or_else(|| {
-                schema.iter().position(|(name, kind)| {
-                    name.text == source.text
-                        && (kind.is_scalar_like() || *kind == GraphSetColumnType::Any)
-                })
+                schema[..self.visible_width(schema)]
+                    .iter()
+                    .position(|(name, kind)| {
+                        name.text == source.text
+                            && (kind.is_scalar_like() || *kind == GraphSetColumnType::Any)
+                    })
             })
         } else {
             None
@@ -1657,8 +1659,9 @@ impl<'a> Parser<'a> {
                             depth + 1,
                         )?;
                         (key.text.into(), value)
-                    } else if let Some(index) =
-                        schema.iter().position(|(name, _)| name.text == key.text)
+                    } else if let Some(index) = schema[..self.visible_width(schema)]
+                        .iter()
+                        .position(|(name, _)| name.text == key.text)
                     {
                         (key.text.into(), ReadValueTemplate::Column(index))
                     } else if let Some(resolve) = resolve.as_mut() {
