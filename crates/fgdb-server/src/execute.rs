@@ -466,7 +466,6 @@ async fn write_stats_in_guard(
         crate::query_cx(&contexts),
     );
     let generation = guard.generation();
-    let symbols = &db.symbols;
     let mut session = guard
         .authorized_write_session(
             &txn,
@@ -474,7 +473,7 @@ async fn write_stats_in_guard(
             &db.authority,
             token,
             TRUNK,
-            |kind, name| symbols.resolve(kind, name),
+            db.symbols.clone(),
             db.write_relation,
             db.write_policy,
             db.max_statements,
@@ -541,7 +540,7 @@ async fn write_batch_inner(
             &db.authority,
             token,
             TRUNK,
-            |kind, name| db.symbols.resolve(kind, name),
+            db.symbols.clone(),
             db.write_relation,
             db.write_policy,
             db.max_statements,

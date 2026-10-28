@@ -303,7 +303,7 @@ fn authority_and_read_rights_precede_missing_row_arguments_and_catalog() {
                     if mode == 2 { "other" } else { "main" },
                     COUNTER,
                     &GqlParameters::new(),
-                    |kind, name| {
+                    |kind: GraphSymbolKind, name: &str| {
                         calls.fetch_add(1, Ordering::Relaxed);
                         symbols(kind, name)
                     },
@@ -374,7 +374,9 @@ fn malformed_tail_and_row_limit_refuse_before_resolution_or_identity_reservation
                 "main",
                 COUNTER,
                 &args,
-                |_, _| panic!("late type refusal must precede catalog access"),
+                |_: GraphSymbolKind, _: &str| {
+                    panic!("late type refusal must precede catalog access")
+                },
                 R,
                 policy(),
                 || NOW,
@@ -399,7 +401,7 @@ fn malformed_tail_and_row_limit_refuse_before_resolution_or_identity_reservation
                 "main",
                 COUNTER,
                 &arguments(&vec![(1, 1); 65]),
-                |_, _| panic!("row cap precedes catalog"),
+                |_: GraphSymbolKind, _: &str| panic!("row cap precedes catalog"),
                 R,
                 policy(),
                 || NOW,
@@ -514,7 +516,7 @@ fn expiry_after_catalog_is_a_live_refusal_not_an_unknown_symbol_or_partial_write
                 "main",
                 COUNTER,
                 &arguments(&[(1, 2)]),
-                |_, _| {
+                |_: GraphSymbolKind, _: &str| {
                     calls.fetch_add(1, Ordering::Relaxed);
                     now.store(EXPIRES + 1, Ordering::Relaxed);
                     None

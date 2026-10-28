@@ -137,7 +137,7 @@ fn native_session_ingestion_and_existing_prepared_writes_survive_reopen() {
                 &issuer,
                 &token,
                 BRANCH,
-                |kind, name| {
+                |kind: GraphSymbolKind, name: &str| {
                     calls.fetch_add(1, Ordering::Relaxed);
                     symbols(kind, name)
                 },
@@ -296,7 +296,7 @@ fn expanded_host_limits_precede_catalog_and_allocation_and_cannot_be_retried() {
                     &issuer,
                     &token,
                     BRANCH,
-                    |kind, name| {
+                    |kind: GraphSymbolKind, name: &str| {
                         calls.fetch_add(1, Ordering::Relaxed);
                         symbols(kind, name)
                     },
@@ -390,7 +390,7 @@ fn rights_and_row_type_refusals_close_before_catalog_or_graph_work() {
                     &issuer,
                     &token,
                     BRANCH,
-                    |kind, name| {
+                    |kind: GraphSymbolKind, name: &str| {
                         calls.fetch_add(1, Ordering::Relaxed);
                         symbols(kind, name)
                     },
@@ -509,7 +509,7 @@ fn catalog_expiry_is_not_a_syntax_error_and_cannot_be_retried() {
                 &issuer,
                 &token,
                 BRANCH,
-                |kind, name| {
+                |kind: GraphSymbolKind, name: &str| {
                     calls.fetch_add(1, Ordering::Relaxed);
                     time.store(10_000, Ordering::Relaxed);
                     symbols(kind, name)
@@ -563,7 +563,7 @@ fn frozen_unwind_inputs_and_receipts_reuse_without_catalog_or_rebinding() {
                 &issuer,
                 &token,
                 BRANCH,
-                |kind, name| {
+                |kind: GraphSymbolKind, name: &str| {
                     assert!(
                         catalog_open.load(Ordering::Relaxed),
                         "bound execution reentered catalog"
@@ -780,7 +780,7 @@ fn frozen_unwind_handle_cannot_cross_identical_sessions() {
                 &issuer,
                 &token,
                 BRANCH,
-                |kind, name| {
+                |kind: GraphSymbolKind, name: &str| {
                     calls.fetch_add(1, Ordering::Relaxed);
                     symbols(kind, name)
                 },
@@ -951,7 +951,7 @@ fn unwinding_while_preparing_a_frozen_batch_closes_without_escaping_a_prefix() {
                 &issuer,
                 &token,
                 BRANCH,
-                |_, _| {
+                |_: GraphSymbolKind, _: &str| {
                     calls.fetch_add(1, Ordering::Relaxed);
                     panic!("injected preparation callback unwind")
                 },

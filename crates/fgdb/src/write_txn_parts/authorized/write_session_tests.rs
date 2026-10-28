@@ -116,7 +116,7 @@ fn native_and_session_prepared_writes_use_one_commit_and_a_frozen_resolver() {
                 &issuer,
                 &token,
                 "host-branch",
-                |kind, name| {
+                |kind: GraphSymbolKind, name: &str| {
                     calls.fetch_add(1, Ordering::Relaxed);
                     symbols(kind, name)
                 },
@@ -259,7 +259,7 @@ fn constructor_checks_namespace_branch_write_rights_and_expiry_without_catalog_c
                     } else {
                         "host-branch"
                     },
-                    |kind, name| {
+                    |kind: GraphSymbolKind, name: &str| {
                         calls.fetch_add(1, Ordering::Relaxed);
                         symbols(kind, name)
                     },
@@ -377,7 +377,7 @@ fn prepared_handle_cannot_cross_sessions_even_with_identical_database_and_creden
                 &issuer,
                 &token,
                 "host-branch",
-                |kind, name| {
+                |kind: GraphSymbolKind, name: &str| {
                     calls.fetch_add(1, Ordering::Relaxed);
                     symbols(kind, name)
                 },
@@ -591,7 +591,7 @@ fn dropping_unpolled_commands_is_inert_but_callback_unwind_closes_the_session() 
                     &issuer,
                     &token,
                     "host-branch",
-                    |_, _| {
+                    |_: GraphSymbolKind, _: &str| {
                         calls.fetch_add(1, Ordering::Relaxed);
                         panic!("injected resolver unwind")
                     },
@@ -708,7 +708,7 @@ fn bound_ingestion_reuses_graph_and_templates_across_more_than_sixty_four_steps(
                 &issuer,
                 &token,
                 "host-branch",
-                |kind, name| {
+                |kind: GraphSymbolKind, name: &str| {
                     calls.fetch_add(1, Ordering::Relaxed);
                     symbols(kind, name)
                 },

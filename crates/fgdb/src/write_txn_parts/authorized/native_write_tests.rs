@@ -130,7 +130,7 @@ fn native_text_has_one_commit_dependent_receipts_and_reopen() {
              MATCH (a:Visible)-[e:R]->(b:Visible) SET a.q=b.p+1, e.p=9; \
              MATCH (a:Visible)-[e:R]->(b:Visible) DELETE e",
                 &params,
-                |kind, name| {
+                |kind: GraphSymbolKind, name: &str| {
                     *calls.entry((kind, name.to_owned())).or_insert(0) += 1;
                     symbols(kind, name)
                 },
@@ -236,7 +236,7 @@ fn authentication_and_write_rights_precede_syntax_arguments_and_catalog() {
                     if mode == 1 { "other" } else { "main" },
                     "CREATE (n:Visible {p:$missing}); unsupported tail",
                     &GqlParameters::new(),
-                    |kind, name| {
+                    |kind: GraphSymbolKind, name: &str| {
                         calls += 1;
                         symbols(kind, name)
                     },
@@ -282,7 +282,7 @@ fn definition_admission_precedes_catalog_and_cannot_reset_before_execution() {
                     "main",
                     &text,
                     &params,
-                    |kind, name| {
+                    |kind: GraphSymbolKind, name: &str| {
                         calls += 1;
                         symbols(kind, name)
                     },
@@ -344,7 +344,7 @@ fn expiry_in_a_catalog_callback_is_not_misreported_as_unknown_symbol() {
                     "main",
                     "CREATE (n:Visible {p:7, q:9})",
                     &GqlParameters::new(),
-                    |kind, name| {
+                    |kind: GraphSymbolKind, name: &str| {
                         calls += 1;
                         time.store(20_000, Ordering::SeqCst);
                         if found { symbols(kind, name) } else { None }
@@ -829,7 +829,7 @@ fn receipt_refusal_and_unpolled_futures_publish_nothing() {
             "main",
             text,
             &params,
-            |kind, name| {
+            |kind: GraphSymbolKind, name: &str| {
                 calls += 1;
                 symbols(kind, name)
             },
@@ -859,6 +859,135 @@ fn receipt_refusal_and_unpolled_futures_publish_nothing() {
         assert!(authorization(&error).is_some(), "{error:?}");
         assert_eq!(db.frontier().unwrap(), before);
         assert!(db.vertices().unwrap().is_empty());
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+struct PropertyMapCatalog;
+
+impl GraphSymbolResolver for PropertyMapCatalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        if kind == GraphSymbolKind::Property && name == "extra" {
+            Some(GraphSymbol::Property(PropertyKeyId(4)))
+        } else {
+            symbols(kind, name)
+        }
+    }
+
+    fn reverse_catalog(&self) -> Option<fgdb_gql::ReverseSymbolCatalog> {
+        let mut catalog = fgdb_gql::ReverseSymbolCatalog::new();
+        catalog.insert_label(L, "Visible");
+        catalog.insert_label(HIDDEN, "Hidden");
+        catalog.insert_relation(R, "R");
+        for (key, name) in [(P, "p"), (Q, "q"), (SECRET, "secret")] {
+            catalog.insert_property(key, name);
+        }
+        catalog.insert_property(PropertyKeyId(4), "extra");
+        Some(catalog)
+    }
+}
+
+#[test]
+fn native_text_and_prepared_sessions_preserve_metadata_catalogs() {
+    lab(0xaaf5, |contexts| async move {
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txn = contexts.txn();
+        let extra = PropertyKeyId(4);
+        let authority = authority();
+        let mut scope = grant();
+        scope.labels = Scope::only([L]);
+        scope.properties = Scope::only([P, Q, extra]);
+        let token = authority.issue_at(&scope, NOW).unwrap();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = crate::WriteBatch::new(R);
+        seed.create_vertex(
+            VId(10),
+            vec![L],
+            vec![
+                (P, CanonicalScalar::Int(1)),
+                (Q, CanonicalScalar::Int(9)),
+                (SECRET, CanonicalScalar::Int(7)),
+                (extra, CanonicalScalar::Int(5)),
+            ],
+        );
+        seed.create_vertex(VId(20), vec![HIDDEN], vec![(P, CanonicalScalar::Int(1))]);
+        db.write(&commit, seed).await.unwrap();
+        db.query_write_authorized(
+            &txn,
+            &query,
+            &commit,
+            &authority,
+            &token,
+            "main",
+            "MATCH (n:Visible) SET n.q = size(keys(n))",
+            &GqlParameters::new(),
+            PropertyMapCatalog,
+            R,
+            policy(),
+            || NOW,
+        )
+        .await
+        .unwrap();
+        assert!(
+            db.vertex(VId(10))
+                .unwrap()
+                .unwrap()
+                .props
+                .contains(&(Q, CanonicalScalar::Int(3).into()))
+        );
+        {
+            let mut session = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    PropertyMapCatalog,
+                    R,
+                    policy(),
+                    64,
+                    || NOW,
+                )
+                .unwrap();
+            let params = GqlParameters::new().with_int64("delta", 1).unwrap();
+            let prepared = session
+                .prepare(
+                    &query,
+                    "MATCH (n:Visible) SET n.q = size(keys(n)) + $delta",
+                    &params,
+                )
+                .unwrap();
+            session.execute(&query, &prepared, &params).await.unwrap();
+            let bound = session
+                .bind_unwind_batch(
+                    &query,
+                    "UNWIND $rows AS row MATCH (n:Visible {p:row.a}) \
+                     SET n.q = size(keys(n)) + row.b",
+                    &update_rows(&[(1, 5)]),
+                )
+                .unwrap();
+            session
+                .execute_bound_batch_stats(&query, &bound)
+                .await
+                .unwrap();
+        }
+        // "extra" never occurs in any statement. It must still contribute
+        // to keys(n), while the forbidden secret is absent from that metadata.
+        assert_eq!(
+            db.vertex(VId(10)).unwrap().unwrap().props,
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(8).into()),
+                (SECRET, CanonicalScalar::Int(7).into()),
+                (extra, CanonicalScalar::Int(5).into()),
+            ]
+        );
+        assert_eq!(
+            db.vertex(VId(20)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(1).into())]
+        );
         assert_eq!(txn.outstanding_obligations(), 0);
     });
 }

@@ -12,9 +12,95 @@ use fgdb_gql::unwind_write::{
     GraphUnwindBindError, GraphUnwindBindEvent, GraphUnwindWriteError, GraphUnwindWriteText,
 };
 use fgdb_gql::{
-    GqlMapArgumentText, GqlParameterType, GraphSymbol, GraphSymbolKind, GraphWriteTemplateStatement,
+    GqlMapArgumentText, GqlParameterType, GraphSymbol, GraphSymbolKind, GraphSymbolResolver,
+    GraphWriteTemplateStatement,
 };
 use fgdb_warden::PlannerPredicates;
+
+/// Borrow a session's trusted catalog without reducing it to a symbol-only
+/// closure. Computed map keys and metadata need the same pinned reverse names
+/// and time-zone bundle as ordinary native preparation.
+struct BorrowedCatalog<'a, R: ?Sized>(&'a mut R);
+
+impl<R: GraphSymbolResolver + ?Sized> GraphSymbolResolver for BorrowedCatalog<'_, R> {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        self.0.resolve_symbol(kind, name)
+    }
+
+    fn time_zones(&self) -> Option<fgdb_gql::GqlTimeZones> {
+        self.0.time_zones()
+    }
+
+    fn reverse_catalog(&self) -> Option<fgdb_gql::ReverseSymbolCatalog> {
+        self.0.reverse_catalog()
+    }
+
+    fn reverse_label(&self, id: fgdb_delta_types::LabelId) -> Option<String> {
+        self.0.reverse_label(id)
+    }
+
+    fn reverse_relation(&self, id: RelationId) -> Option<String> {
+        self.0.reverse_relation(id)
+    }
+}
+
+/// Preserve the existing before/after lookup controls and first refusal while
+/// forwarding the host's immutable catalog, as the UNWIND metered resolver does.
+struct ControlledCatalog<'a, R, F> {
+    resolver: &'a mut R,
+    control: &'a mut F,
+    failure: &'a mut Option<WriteTxnError>,
+}
+
+impl<R, F> GraphSymbolResolver for ControlledCatalog<'_, R, F>
+where
+    R: GraphSymbolResolver,
+    F: FnMut() -> Result<(), WriteTxnError>,
+{
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        if self.failure.is_some() {
+            return None;
+        }
+        if let Err(error) = (self.control)() {
+            *self.failure = Some(error);
+            return None;
+        }
+        let symbol = self.resolver.resolve_symbol(kind, name);
+        if let Err(error) = (self.control)() {
+            *self.failure = Some(error);
+            return None;
+        }
+        symbol
+    }
+
+    fn time_zones(&self) -> Option<fgdb_gql::GqlTimeZones> {
+        self.failure
+            .is_none()
+            .then(|| self.resolver.time_zones())
+            .flatten()
+    }
+
+    fn reverse_catalog(&self) -> Option<fgdb_gql::ReverseSymbolCatalog> {
+        self.failure
+            .is_none()
+            .then(|| self.resolver.reverse_catalog())
+            .flatten()
+    }
+
+    fn reverse_label(&self, id: fgdb_delta_types::LabelId) -> Option<String> {
+        self.failure
+            .is_none()
+            .then(|| self.resolver.reverse_label(id))
+            .flatten()
+    }
+
+    fn reverse_relation(&self, id: RelationId) -> Option<String> {
+        self.failure
+            .is_none()
+            .then(|| self.resolver.reverse_relation(id))
+            .flatten()
+    }
+}
 
 fn checkpoint<Clock: FnMut() -> u64>(
     cx: &QueryCx,
@@ -68,7 +154,7 @@ fn prepare<Clock: FnMut() -> u64>(
     text: &str,
     params: &GqlParameters,
     relation: RelationId,
-    resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    resolver: impl GraphSymbolResolver,
 ) -> Result<PreparedGraphWriteScript, Fault> {
     cx.with_restriction(|| {
         reserve_text(cx, execution, text)?;
@@ -85,7 +171,7 @@ fn prepare_admitted<Clock: FnMut() -> u64>(
     text: &str,
     params: &GqlParameters,
     relation: RelationId,
-    mut resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    mut resolver: impl GraphSymbolResolver,
 ) -> Result<PreparedGraphWriteScript, Fault> {
     let mut declarations = Vec::new();
     for (name, kind) in params.parameter_types() {
@@ -103,26 +189,19 @@ fn prepare_admitted<Clock: FnMut() -> u64>(
     // Retain a refusal separately: it must not become UnknownSymbol, nor
     // cause later catalog callbacks or a retry through a privileged API.
     let mut failure = None;
-    let prepared = PreparedGraphWriteScript::prepare_with_parameter_types(
-        text,
-        relation,
-        &declarations,
-        |kind, name| {
-            if failure.is_some() {
-                return None;
-            }
-            if let Err(error) = checkpoint(cx, execution) {
-                failure = Some(error);
-                return None;
-            }
-            let symbol = resolver(kind, name);
-            if let Err(error) = checkpoint(cx, execution) {
-                failure = Some(error);
-                return None;
-            }
-            symbol
-        },
-    );
+    let prepared = {
+        let mut control = || checkpoint(cx, execution);
+        PreparedGraphWriteScript::prepare_with_parameter_types(
+            text,
+            relation,
+            &declarations,
+            ControlledCatalog {
+                resolver: &mut resolver,
+                control: &mut control,
+                failure: &mut failure,
+            },
+        )
+    };
     if let Some(error) = failure {
         return Err(admission(error));
     }
@@ -185,7 +264,7 @@ fn bind_native<Clock: FnMut() -> u64>(
     relation: RelationId,
     scope: &PlannerPredicates,
     max_statements: usize,
-    resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    resolver: impl GraphSymbolResolver,
 ) -> Result<super::Bound<'static>, Fault> {
     cx.with_restriction(|| {
         reserve_text(cx, execution, text)?;
@@ -232,7 +311,7 @@ fn bind_native<Clock: FnMut() -> u64>(
                 Error::PermissionDenied,
             )));
         }
-        let batch = parsed.bind_with_limit_controlled(
+        let batch = parsed.bind_with_limit_controlled_resolver(
             params,
             relation,
             max_statements,
@@ -304,7 +383,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         text: &str,
         params: &GqlParameters,
-        resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolver: impl GraphSymbolResolver,
         relation: RelationId,
         max_statements: usize,
         mut clock: impl FnMut() -> u64,
@@ -386,7 +465,7 @@ impl<V: Vfs + Clone> Database<V> {
         branch: &str,
         text: &str,
         params: &GqlParameters,
-        resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolver: impl GraphSymbolResolver,
         relation: RelationId,
         policy: GraphWriteProgramPolicy,
         mut clock: impl FnMut() -> u64,

@@ -4,13 +4,12 @@
 use super::super::Bound;
 use super::{
     Authority, CapabilityToken, CommitCx, Database, Error, Execution, Fault, GqlParameters,
-    GraphSymbol, GraphSymbolKind, GraphWriteProgramPolicy, GraphWriteProgramReceipt, Input,
-    PreparedGraphWriteScript, QueryCx, RelationId, TxnCx, Vfs, WriteTxnError, admission,
-    checkpoint, statement_limit,
+    GraphWriteProgramPolicy, GraphWriteProgramReceipt, Input, PreparedGraphWriteScript, QueryCx,
+    RelationId, TxnCx, Vfs, WriteTxnError, admission, checkpoint, statement_limit,
 };
 use fgdb_gql::{
-    BoundGraphWriteScriptBatch, GraphWriteProgramStats, GraphWriteScriptBatchLocation,
-    GraphWriteStepReceipt,
+    BoundGraphWriteScriptBatch, GraphSymbolResolver, GraphWriteProgramStats,
+    GraphWriteScriptBatchLocation, GraphWriteStepReceipt,
 };
 use fgdb_types::EmbeddedTxnCompletion;
 use fgdb_warden::{ExecutionPermit, VerifiedCapability, WriteAccess};
@@ -18,6 +17,9 @@ use std::sync::Arc;
 
 #[cfg(test)]
 use fgdb_gql::GraphWriteScriptBatchError;
+
+#[cfg(test)]
+use super::{GraphSymbol, GraphSymbolKind};
 
 type Receipt = (GraphWriteProgramReceipt, EmbeddedTxnCompletion);
 
@@ -211,7 +213,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// #            issuer: &Authority, token: &CapabilityToken) {
     /// # let policy = GraphWriteProgramPolicy::new(GqlQueryPolicy::new(10,10,100,100),10,10,10);
     /// let session = db.authorized_write_session(t, c, issuer, token, "main",
-    ///     |_, _| None, RelationId(1), policy, 64, || 100).unwrap();
+    ///     |_: fgdb_gql::GraphSymbolKind, _: &str| None,
+    ///     RelationId(1), policy, 64, || 100).unwrap();
     /// let raw_authority_and_database = session.state;
     /// # }
     /// ```
@@ -231,7 +234,7 @@ impl<V: Vfs + Clone> Database<V> {
         mut clock: C,
     ) -> Result<AuthorizedWriteSession<'db, 'issuer, V, R, C>, Fault>
     where
-        R: FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        R: GraphSymbolResolver,
         C: FnMut() -> u64,
     {
         commit_cx
@@ -277,7 +280,7 @@ enum Request<'a> {
 impl<V, R, C> AuthorizedWriteSession<'_, '_, V, R, C>
 where
     V: Vfs + Clone,
-    R: FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol> + Send,
+    R: GraphSymbolResolver + Send,
     C: FnMut() -> u64 + Send,
 {
     /// Prepare once through this session's fixed resolver, under a live permit.
@@ -310,7 +313,7 @@ where
                 text,
                 params,
                 state.relation,
-                &mut state.resolver,
+                super::BorrowedCatalog(&mut state.resolver),
             )?;
             statement_limit(&script, state.max_statements)?;
             Input::Script(&script, params).bind(
@@ -554,7 +557,7 @@ where
                 state.relation,
                 state.capability.predicates(),
                 state.max_statements,
-                &mut state.resolver,
+                super::BorrowedCatalog(&mut state.resolver),
             )?;
             checkpoint(cx, &mut execution).map_err(admission)?;
             let Bound::Batch(batch) = bound else {
@@ -631,7 +634,7 @@ where
 impl<V, R, C> State<'_, '_, V, R, C>
 where
     V: Vfs + Clone,
-    R: FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol> + Send,
+    R: GraphSymbolResolver + Send,
     C: FnMut() -> u64 + Send,
 {
     #[allow(clippy::result_large_err)]
@@ -678,7 +681,7 @@ where
                         *relation,
                         capability.predicates(),
                         *max_statements,
-                        resolver,
+                        super::BorrowedCatalog(resolver),
                     )?,
                     Request::TextBatch(text, arguments) => {
                         let first = arguments.first().ok_or(Fault::BatchBinding(
@@ -715,7 +718,7 @@ where
                                     statement,
                                     &sets[0],
                                     *relation,
-                                    resolver,
+                                    super::BorrowedCatalog(resolver),
                                 )
                             })
                             .map_err(|fault| super::restored(recipe, fault))?;

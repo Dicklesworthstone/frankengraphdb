@@ -279,6 +279,37 @@ mod tests {
                     WireValue::List(vec![WireValue::Text("name".into())]),
                 ]]
             );
+            // The shared FGP/HTTP/Bolt writer must retain the operator's
+            // reverse catalog for metadata, including property names
+            // absent from the statement. Masked properties never enter the map.
+            let update = Execute {
+                mode: ExecuteMode::Write,
+                statement: "MATCH (a:Person)-[:MENTORS]->(b) SET a.name = properties(b).name"
+                    .into(),
+                parameters: vec![],
+            };
+            crate::execute::write(&root, db, &token, &update)
+                .await
+                .unwrap_or_else(|error| panic!("{}", error.message));
+            let copied = crate::execute::read(&root, db, &token, &statement)
+                .await
+                .unwrap_or_else(|error| panic!("{}", error.message));
+            assert_eq!(copied.rows[0][0], WireValue::Text("Grace".into()));
+            assert_eq!(
+                copied.rows[0][3],
+                WireValue::Map(vec![("name".into(), WireValue::Text("Grace".into()))])
+            );
+            {
+                let guard = db.db.read(&root).await.unwrap();
+                assert!(
+                    guard
+                        .vertex(VId(1))
+                        .unwrap()
+                        .unwrap()
+                        .props
+                        .contains(&(PropertyKeyId(hidden), CanonicalScalar::Int(917).into()))
+                );
+            }
             // This ordinal shares the low 32 bits with `native`. A narrowed
             // catalog or scope must not make it authorize the native symbol.
             let low = u64::from(u32::MAX);

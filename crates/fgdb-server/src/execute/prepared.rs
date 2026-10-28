@@ -271,7 +271,7 @@ async fn prepare_write(
         TRUNK,
         statement,
         parameters,
-        |kind, name| db.symbols.resolve(kind, name),
+        db.symbols.clone(),
         db.write_relation,
         db.max_statements,
         unix_millis,
