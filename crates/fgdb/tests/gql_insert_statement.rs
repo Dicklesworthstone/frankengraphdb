@@ -3136,3 +3136,98 @@ fn created_fields_read_elements_carried_in_values() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// A SET or CREATE right side reads an element's identity (`id()`,
+/// `elementId()`) or its NULL-ness (`x IS NULL` over an OPTIONAL MATCH
+/// element) as a projection does (fgdb-j687q). The write binders refused
+/// every element column such an expression named, though only the identity
+/// or presence reaches the property. Each stored value equals the same
+/// expression's projected value in the statement's own RETURN.
+#[test]
+fn write_right_sides_read_element_identity_and_presence() {
+    let ((), report) = run_async_under_lab(0x1a5e_c4b1, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let write = async |db: &mut Database<MemVfs>, text: &str| {
+            let (mut vertices, mut edges) = reserve(db, &cx, 4, 4);
+            let result = db
+                .query_write(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    text,
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    policy(),
+                    |request| {
+                        Ok::<_, &'static str>(match request.request {
+                            GraphInsertRequest::Vertex { .. } => vertices.pop_front().unwrap(),
+                            GraphInsertRequest::Edge { .. } => edges.pop_front().unwrap(),
+                        })
+                    },
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error}"));
+            match result {
+                QueryResult::Rows { rows, .. } => rows,
+                QueryResult::Write { .. } => Vec::new(),
+            }
+        };
+        let null = QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null));
+        let boolean = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Bool(value)));
+
+        let mut db = fresh(&commit, true).await;
+        for text in [
+            "MATCH (a:Source {p:10}) CREATE (c:Copy {p:id(a),name:elementId(a)}) \
+             RETURN id(a) AS i,elementId(a) AS e,c.p AS p,c.name AS name",
+            "MATCH (a:Source {p:10}),(b:Source {p:20}) SET a.q=id(b),a.name=elementId(b) \
+             RETURN id(b) AS i,elementId(b) AS e,a.q AS p,a.name AS name",
+            "MATCH ()-[r:R]->(b:Source) SET b.q=id(r),b.name=elementId(r) \
+             RETURN id(r) AS i,elementId(r) AS e,b.q AS p,b.name AS name",
+        ] {
+            let rows = write(&mut db, text).await;
+            assert_eq!(rows.len(), 1, "{text}");
+            let row = &rows[0];
+            assert_ne!(row[0], null, "{text}");
+            assert_ne!(row[1], null, "{text}");
+            assert_eq!((&row[2], &row[3]), (&row[0], &row[1]), "{text}");
+        }
+
+        let rows = write(
+            &mut db,
+            "MATCH (a:Source {p:10}) OPTIONAL MATCH (a)-[:T]->(x) \
+             SET a.q=x IS NULL,a.name=x IS NOT NULL RETURN a.q AS missing,a.name AS found",
+        )
+        .await;
+        assert_eq!(rows, [vec![boolean(true), boolean(false)]]);
+        write(
+            &mut db,
+            "MATCH (a:Source {p:10}) OPTIONAL MATCH (a)-[r:R]->(x) \
+             CREATE (:Copy {p:1,q:r IS NOT NULL,name:x IS NULL})",
+        )
+        .await;
+        let flagged = db
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .find(|vertex| {
+                vertex.labels == [COPY]
+                    && vertex
+                        .props
+                        .contains(&(P, CanonicalPropertyValue::from(CanonicalScalar::Int(1))))
+            })
+            .unwrap();
+        assert!(
+            flagged
+                .props
+                .contains(&(Q, CanonicalPropertyValue::from(CanonicalScalar::Bool(true))))
+        );
+        assert!(flagged.props.contains(&(
+            NAME,
+            CanonicalPropertyValue::from(CanonicalScalar::Bool(false))
+        )));
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
