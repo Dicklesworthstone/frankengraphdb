@@ -1719,9 +1719,9 @@ fn a_grouping_with_reads_pattern_comprehensions_its_head_gathers() {
 /// and RETURN, in the first UNWIND after a MATCH, or in a root MATCH's WHERE
 /// at an implicit `WITH *` (fgdb-1f8f7): the head gathers it into a hidden
 /// list column, once per row, which the stage reads where it stands.
-/// List-local graph expressions use their own correlated body; quantifier
-/// and reduce locals retain their existing typed refusal. A binding the
-/// row does not carry under its own name remains unavailable.
+/// List-local graph expressions and quantifier predicates use their own
+/// correlated bodies; reduce locals retain their existing typed refusal.
+/// A binding the row does not carry under its own name remains unavailable.
 #[test]
 fn a_row_scope_reads_pattern_comprehensions_its_head_gathers() {
     let out = |n: u128| EDGES.iter().filter(|&&(from, _, _)| from == VId(n)).count() as i64;
@@ -1803,8 +1803,6 @@ fn a_row_scope_reads_pattern_comprehensions_its_head_gathers() {
     );
     for text in [
         "MATCH (n) WITH reduce(a = 0, x IN [n] | a + size([(x)-->() | 1])) AS l, \
-         count(*) AS c RETURN l, c",
-        "MATCH (n) WITH any(x IN [n] WHERE size([(x)-->() | 1]) > 0) AS l, \
          count(*) AS c RETURN l, c",
         // A binding the row drops.
         "MATCH (n)-->(m) WITH n RETURN [(m)-->() | 1] AS l",
@@ -2571,7 +2569,6 @@ fn compound_row_graph_predicates_keep_lazy_scalar_cases_and_private_scopes() {
         "EXISTS((x)-[:R]->()) AND __fg_boundary_0",
         "EXISTS((x)-[:R]->(z)) OR z.p = 2",
         "true OR EXISTS((fresh)-[:R]->())",
-        "EXISTS((x)-[:R]->()) OR ANY(z IN nodes WHERE EXISTS((z)-[:R]->()))",
         "EXISTS((x)-[:R]->()) OR 1 = (x)-[:R]->()",
         "EXISTS((x)-[:R]->()) OR [(x)-[:R]->()] = [true]",
     ] {
@@ -3039,7 +3036,6 @@ fn row_scope_existence_projection_composes_booleans_and_keeps_private_names_priv
         "EXISTS((fresh)-[:R]->()) AS present",
         "EXISTS((x)-[:R]->(local)) AS present,local.p AS leaked",
         "EXISTS((x)-[:R]->()) AS present,__fg_boundary_0 AS leaked",
-        "EXISTS((x)-[:R]->()) AS present,ANY(local IN nodes WHERE EXISTS((local)-[:R]->())) AS nested",
     ] {
         let statement = format!("{prefix} RETURN {expression}");
         let resolutions = std::cell::Cell::new(0);
@@ -4842,5 +4838,498 @@ mod local_path_length_values {
         ])
         .unwrap();
         assert_ne!(length.canonical_bytes(), char_length.canonical_bytes());
+    }
+}
+
+mod graph_reading_quantifiers {
+    use super::*;
+    use fgdb_gql::GraphIntegerErrorKind;
+
+    fn truth(value: Option<bool>) -> GraphValue {
+        GraphValue::Scalar(value.map_or(CanonicalScalar::Null, CanonicalScalar::Bool))
+    }
+
+    fn arguments(items: &[Option<u128>]) -> GqlParameters {
+        GqlParameters::new()
+            .with_list(
+                "items",
+                items
+                    .iter()
+                    .map(|id| id.map_or_else(|| truth(None), |id| GraphValue::Vertex(VId(id))))
+                    .collect(),
+            )
+            .unwrap()
+    }
+
+    fn bind(text: &str, parameters: &GqlParameters) -> PreparedGraphSet {
+        PreparedGraphSetText::prepare(text, symbols)
+            .unwrap()
+            .bind_parameters(parameters)
+            .unwrap()
+    }
+
+    #[test]
+    fn graph_quantifiers_keep_three_valued_truth_and_duplicate_members_on_rebind() {
+        let templates = ["ANY", "ALL", "NONE", "SINGLE"].map(|kind| {
+            PreparedGraphSetText::prepare(
+                &format!(
+                    "WITH $items AS xs,17 AS marker RETURN marker,\
+                     {kind}(x IN xs WHERE CASE WHEN x IS NULL THEN NULL \
+                     ELSE EXISTS((x)-[:R]->()) END) AS present"
+                ),
+                symbols,
+            )
+            .unwrap()
+        });
+        let frozen = templates
+            .each_ref()
+            .map(|template| template.canonical_template_bytes());
+        // Independent truth-table oracles; vertex 1 has three witnesses,
+        // while vertex 4 has none. Duplicate members remain distinct.
+        let cases: &[(&[Option<u128>], [Option<bool>; 4])] = &[
+            (&[], [Some(false), Some(true), Some(true), Some(false)]),
+            (&[None], [None, None, None, None]),
+            (&[Some(1), None], [Some(true), None, Some(false), None]),
+            (&[Some(4), None], [None, Some(false), None, None]),
+            (
+                &[Some(1), Some(4), None, Some(1)],
+                [Some(true), Some(false), Some(false), Some(false)],
+            ),
+            (
+                &[Some(1), Some(1)],
+                [Some(true), Some(true), Some(false), Some(false)],
+            ),
+            (
+                &[Some(1), Some(4)],
+                [Some(true), Some(false), Some(false), Some(true)],
+            ),
+            (
+                &[Some(4), Some(4)],
+                [Some(false), Some(false), Some(true), Some(false)],
+            ),
+        ];
+        for (items, expected) in cases {
+            let parameters = arguments(items);
+            for (index, template) in templates.iter().enumerate() {
+                let query = template.bind_parameters(&parameters).unwrap();
+                assert_eq!(query.columns(), ["marker", "present"]);
+                assert_eq!(
+                    run(&query, wide(), &mut || Ok(())).unwrap().value,
+                    vec![GraphValueRow::from_owned_values(vec![
+                        GraphValue::Scalar(CanonicalScalar::Int(17)),
+                        truth(expected[index]),
+                    ])],
+                    "quantifier {index}, members {items:?}"
+                );
+            }
+        }
+        assert_eq!(
+            templates
+                .each_ref()
+                .map(|template| template.canonical_template_bytes()),
+            frozen
+        );
+    }
+
+    #[test]
+    fn graph_quantifiers_share_graph_forms_and_skip_empty_or_null_sources() {
+        for predicate in [
+            "(x)-[:R]->()",
+            "EXISTS((x)-[:R]->())",
+            "EXISTS { MATCH (x)-[:R]->() }",
+            "COUNT { (x)-[:R]->() } > 0",
+            "size([(x)-[:R]->(target) | target.p]) > 0",
+        ] {
+            let statement =
+                format!("WITH $items AS xs RETURN SINGLE(x IN xs WHERE {predicate}) AS present");
+            let template = PreparedGraphSetText::prepare(&statement, symbols).unwrap();
+            for (items, expected) in [
+                (vec![Some(1), Some(4)], true),
+                (vec![Some(1), Some(1)], false),
+            ] {
+                let query = template.bind_parameters(&arguments(&items)).unwrap();
+                assert_eq!(
+                    run(&query, wide(), &mut || Ok(())).unwrap().value,
+                    vec![GraphValueRow::from_owned_values(vec![truth(Some(
+                        expected
+                    ))])],
+                    "{statement}, members {items:?}"
+                );
+            }
+        }
+        for (kind, empty) in [
+            ("ANY", false),
+            ("ALL", true),
+            ("NONE", true),
+            ("SINGLE", false),
+        ] {
+            for (source, expected) in [("NULL", None), ("[]", Some(empty))] {
+                let query = prepare(&format!(
+                    "WITH {source} AS xs RETURN {kind}(x IN xs WHERE \
+                     CASE WHEN (x)-[:R]->() THEN 1/0=0 ELSE false END) AS present"
+                ));
+                let mut calls = 0;
+                let result = query
+                    .execute_governed(
+                        wide(),
+                        |_, _| {
+                            calls += 1;
+                            Err(GqlQueryError::Source("empty-quantifier-body"))
+                        },
+                        || Ok::<_, usize>(()),
+                    )
+                    .unwrap();
+                assert_eq!(calls, 0, "{kind}, {source}");
+                assert_eq!(
+                    result.value,
+                    vec![GraphValueRow::from_owned_values(vec![truth(expected)])],
+                    "{kind}, {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn graph_quantifiers_cross_match_with_grouping_and_call_boundaries() {
+        let expected: Vec<_> = (1..=4)
+            .map(|id| {
+                GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(id)),
+                    truth(Some(id != 4)),
+                ])
+            })
+            .collect();
+        for statement in [
+            "MATCH (n) RETURN n,ANY(x IN [n] WHERE (x)-[:R]->()) AS present ORDER BY n",
+            "MATCH (n) WITH n,ANY(x IN [n] WHERE (x)-[:R]->()) AS present \
+             RETURN n,present ORDER BY n",
+        ] {
+            assert_eq!(execute(statement), expected, "{statement}");
+        }
+        assert_eq!(
+            execute(
+                "MATCH (n) WHERE ANY(x IN [n] WHERE EXISTS((x)-[:R]->())) \
+                 RETURN n ORDER BY n"
+            ),
+            [1, 2, 3].map(|id| vertices(&[id])).to_vec()
+        );
+        let mut grouped = execute(
+            "MATCH (n) WITH ANY(x IN [n] WHERE size([(x)-->() | 1]) > 0) AS l,\
+             count(*) AS c RETURN l,c",
+        );
+        grouped.sort();
+        let mut expected = vec![
+            GraphValueRow::from_owned_values(vec![
+                truth(Some(false)),
+                GraphValue::Scalar(CanonicalScalar::Int(1)),
+            ]),
+            GraphValueRow::from_owned_values(vec![
+                truth(Some(true)),
+                GraphValue::Scalar(CanonicalScalar::Int(3)),
+            ]),
+        ];
+        expected.sort();
+        assert_eq!(grouped, expected);
+
+        let parameters = arguments(&[Some(1), Some(4)]);
+        let with_only = bind(
+            "UNWIND [$items,[]] AS xs \
+             WITH ANY(x IN xs WHERE EXISTS((x)-[:R]->())) AS present RETURN present",
+            &parameters,
+        );
+        assert_eq!(
+            run(&with_only, wide(), &mut || Ok(())).unwrap().value,
+            [true, false]
+                .map(|present| GraphValueRow::from_owned_values(vec![truth(Some(present))]))
+                .to_vec()
+        );
+        for statement in [
+            "WITH 7 AS x,$items AS xs,2 AS minimum \
+             RETURN x,SINGLE(x IN xs WHERE COUNT { (x)-[:R]->() } > minimum) AS present",
+            "WITH 7 AS x,$items AS xs,2 AS minimum \
+             CALL (xs,minimum) { \
+               RETURN SINGLE(x IN xs WHERE COUNT { (x)-[:R]->() } > minimum) AS present \
+             } RETURN x,present",
+        ] {
+            let query = bind(statement, &parameters);
+            assert_eq!(
+                run(&query, wide(), &mut || Ok(())).unwrap().value,
+                vec![GraphValueRow::from_owned_values(vec![
+                    GraphValue::Scalar(CanonicalScalar::Int(7)),
+                    truth(Some(true)),
+                ])],
+                "{statement}"
+            );
+        }
+
+        assert_eq!(
+            execute(
+                "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x \
+                 WHERE EXISTS((x)-[:R]->()) OR ANY(z IN nodes WHERE EXISTS((z)-[:R]->())) \
+                 RETURN x ORDER BY x"
+            ),
+            [1, 2, 3, 4].map(|id| vertices(&[id])).to_vec()
+        );
+        assert_eq!(
+            execute(
+                "MATCH (n) WITH collect(n) AS nodes UNWIND nodes AS x \
+                 RETURN x,EXISTS((x)-[:R]->()) AS present,\
+                 ANY(local IN nodes WHERE EXISTS((local)-[:R]->())) AS nested ORDER BY x"
+            ),
+            (1..=4)
+                .map(|id| GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(id)),
+                    truth(Some(id != 4)),
+                    truth(Some(true)),
+                ]))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn graph_quantifiers_keep_element_names_private_and_require_boolean_results() {
+        for statement in [
+            "WITH $items AS xs RETURN ANY(x IN xs WHERE EXISTS((x)-[:R]->())) AS present,x",
+            "WITH $items AS xs RETURN \
+             ANY(x IN xs WHERE EXISTS((x)-[:R]->(inside)) AND inside.p=2) AS present",
+            "WITH $items AS xs RETURN ANY(x IN xs WHERE EXISTS((fresh)-[:R]->())) AS present",
+            "WITH $items AS xs RETURN \
+             ANY(x IN xs WHERE EXISTS((x)-[:R]->())) AS present,__fg_boundary_0",
+        ] {
+            let mut resolutions = 0;
+            assert!(
+                PreparedGraphSetText::prepare(statement, |kind, name| {
+                    resolutions += 1;
+                    symbols(kind, name)
+                })
+                .is_err(),
+                "{statement}"
+            );
+            assert_eq!(resolutions, 0, "{statement}");
+        }
+        let template = PreparedGraphSetText::prepare(
+            "UNWIND $results AS result WITH result,$items AS xs \
+             RETURN ANY(x IN xs WHERE CASE WHEN EXISTS((x)-[:R]->()) \
+             THEN result ELSE false END) AS present LIMIT 0",
+            symbols,
+        )
+        .unwrap();
+        let scalar = PreparedGraphSetText::prepare(
+            "UNWIND $results AS result WITH result,$items AS xs \
+             RETURN ANY(x IN xs WHERE CASE WHEN true THEN result ELSE false END) \
+             AS present LIMIT 0",
+            symbols,
+        )
+        .unwrap();
+        for result in [
+            GraphValue::Scalar(CanonicalScalar::Int(1)),
+            GraphValue::List(vec![].into()),
+            GraphValue::Vertex(VId(4)),
+            GraphValue::Edge(fgdb_types::EId(1)),
+        ] {
+            let parameters = arguments(&[Some(1)])
+                .with_list("results", vec![result.clone()])
+                .unwrap();
+            let reference = scalar.bind_parameters(&parameters).unwrap();
+            let expected = match run(&reference, wide(), &mut || Ok(())) {
+                Err(GqlQueryError::Source(GraphSetExecutionError::Projection {
+                    error, ..
+                })) => error.kind,
+                other => panic!("non-Boolean scalar quantifier accepted {result:?}: {other:?}"),
+            };
+            if matches!(result, GraphValue::Scalar(CanonicalScalar::Int(_))) {
+                assert_eq!(expected, GraphIntegerErrorKind::NonBoolean);
+            }
+            let query = template.bind_parameters(&parameters).unwrap();
+            assert!(
+                matches!(
+                    run(&query, wide(), &mut || Ok(())),
+                    Err(GqlQueryError::Source(GraphSetExecutionError::Projection { error, .. }))
+                        if error.kind == expected
+                ),
+                "{result:?}: {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn graph_quantifiers_keep_late_errors_after_decisive_values_and_before_empty_pages() {
+        for (kind, items, fail_at) in [
+            ("ANY", vec![Some(1), Some(4)], 2),
+            ("NONE", vec![Some(1), Some(4)], 2),
+            ("ALL", vec![Some(4), Some(1)], 2),
+            ("SINGLE", vec![Some(1), Some(1), Some(4)], 3),
+        ] {
+            for suffix in ["", " LIMIT 0"] {
+                let query = bind(
+                    &format!(
+                        "WITH $items AS xs RETURN \
+                         {kind}(x IN xs WHERE EXISTS((x)-[:R]->())) AS present{suffix}"
+                    ),
+                    &arguments(&items),
+                );
+                let mut calls = 0;
+                let result = query.execute_governed(
+                    wide(),
+                    |pattern, remaining| {
+                        calls += 1;
+                        if calls == fail_at {
+                            return Err(GqlQueryError::Source("late-quantifier-source"));
+                        }
+                        pattern.plan().execute_governed_with_properties(
+                            (4 + EDGES.len()) as u64,
+                            (1..=4).map(VId),
+                            EDGES,
+                            |_, _| Ok::<_, &'static str>(true),
+                            |_, _| Ok(None),
+                            remaining,
+                            || Ok::<_, usize>(()),
+                        )
+                    },
+                    || Ok::<_, usize>(()),
+                );
+                assert_eq!(calls, fail_at, "{kind}{suffix}");
+                assert!(matches!(
+                    result,
+                    Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+                        "late-quantifier-source"
+                    )))
+                ));
+
+                let predicate = if kind == "ALL" {
+                    "CASE WHEN EXISTS((x)-[:R]->()) THEN 1/0=0 ELSE false END"
+                } else {
+                    "CASE WHEN EXISTS((x)-[:R]->()) THEN true ELSE 1/0=0 END"
+                };
+                let query = bind(
+                    &format!(
+                        "WITH $items AS xs RETURN \
+                         {kind}(x IN xs WHERE {predicate}) AS present{suffix}"
+                    ),
+                    &arguments(&items),
+                );
+                assert!(matches!(
+                    run(&query, wide(), &mut || Ok(())),
+                    Err(GqlQueryError::Source(GraphSetExecutionError::Projection { error, .. }))
+                        if error.kind == GraphIntegerErrorKind::DivisionByZero
+                ));
+            }
+        }
+        let lazy = bind(
+            "WITH $items AS xs RETURN ANY(x IN xs WHERE \
+             CASE WHEN EXISTS((x)-[:R]->()) THEN true ELSE 1/0=0 END) AS present",
+            &arguments(&[Some(1)]),
+        );
+        assert_eq!(
+            run(&lazy, wide(), &mut || Ok(())).unwrap().value,
+            vec![GraphValueRow::from_owned_values(vec![truth(Some(true))])]
+        );
+    }
+
+    #[test]
+    fn graph_quantifiers_validate_a_member_before_reading_the_next_one() {
+        let query = bind(
+            "WITH $items AS xs UNWIND [17] AS result RETURN \
+             ANY(x IN xs WHERE CASE WHEN EXISTS((x)-[:R]->()) \
+             THEN result ELSE false END) AS present LIMIT 0",
+            &arguments(&[Some(1), Some(4)]),
+        );
+        let mut calls = 0;
+        let result = query.execute_governed(
+            wide(),
+            |pattern, remaining| {
+                calls += 1;
+                if calls > 1 {
+                    return Err(GqlQueryError::Source("later-member-source"));
+                }
+                pattern.plan().execute_governed_with_properties(
+                    (4 + EDGES.len()) as u64,
+                    (1..=4).map(VId),
+                    EDGES,
+                    |_, _| Ok::<_, &'static str>(true),
+                    |_, _| Ok(None),
+                    remaining,
+                    || Ok::<_, usize>(()),
+                )
+            },
+            || Ok::<_, usize>(()),
+        );
+        assert_eq!(calls, 1);
+        assert!(matches!(
+            result,
+            Err(GqlQueryError::Source(GraphSetExecutionError::Projection { error, .. }))
+                if error.kind == GraphIntegerErrorKind::NonBoolean
+        ));
+    }
+
+    #[test]
+    fn graph_quantifiers_keep_one_cumulative_budget_and_restore_frames_after_cancellation() {
+        for suffix in ["", " LIMIT 0"] {
+            let query = bind(
+                &format!(
+                    "WITH $items AS xs RETURN \
+                     ANY(x IN xs WHERE EXISTS((x)-[:R]->())) AS present{suffix}"
+                ),
+                &arguments(&[Some(1), Some(4), Some(1)]),
+            );
+            let mut checkpoints = 0;
+            let measured = run(&query, wide(), &mut || {
+                checkpoints += 1;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(
+                measured.value,
+                if suffix.is_empty() {
+                    vec![GraphValueRow::from_owned_values(vec![truth(Some(true))])]
+                } else {
+                    vec![]
+                }
+            );
+            let caps = [
+                measured.rows.snapshot_records,
+                measured.rows.result_rows,
+                measured.evaluator.work_units,
+                measured.evaluator.scratch_entries,
+            ];
+            assert_eq!(
+                run(
+                    &query,
+                    GqlQueryPolicy::new(caps[0], caps[1], caps[2], caps[3]),
+                    &mut || Ok(())
+                )
+                .unwrap(),
+                measured
+            );
+            for dimension in 0..4 {
+                if caps[dimension] == 0 {
+                    continue;
+                }
+                let mut limited = caps;
+                limited[dimension] -= 1;
+                assert!(
+                    run(
+                        &query,
+                        GqlQueryPolicy::new(limited[0], limited[1], limited[2], limited[3]),
+                        &mut || Ok(())
+                    )
+                    .is_err(),
+                    "{suffix}, dimension {dimension}"
+                );
+            }
+            assert!(checkpoints > 2);
+            for stop in [checkpoints / 2, checkpoints] {
+                let mut seen = 0;
+                assert!(matches!(
+                    run(&query, wide(), &mut || {
+                        seen += 1;
+                        if seen == stop { Err(stop) } else { Ok(()) }
+                    }),
+                    Err(GqlQueryError::Interrupted(at)) if at == stop
+                ));
+                assert_eq!(seen, stop);
+                assert_eq!(run(&query, wide(), &mut || Ok(())).unwrap(), measured);
+            }
+        }
     }
 }

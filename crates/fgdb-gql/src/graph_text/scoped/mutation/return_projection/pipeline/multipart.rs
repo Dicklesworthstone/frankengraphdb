@@ -580,6 +580,31 @@ fn list_comprehension_follows(
         && matches!(lexer.next()?.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("IN")))
 }
 
+fn row_list_quantifier_follows(
+    token: TokenKind<'_>,
+    lexer: &Lexer<'_>,
+) -> Result<Option<crate::GraphListQuantifier>, GraphPatternTextError> {
+    let TokenKind::Word(word) = token else {
+        return Ok(None);
+    };
+    use crate::GraphListQuantifier as Quantifier;
+    let Some(kind) = [
+        ("ANY", Quantifier::Any),
+        ("ALL", Quantifier::All),
+        ("NONE", Quantifier::None),
+        ("SINGLE", Quantifier::Single),
+    ]
+    .into_iter()
+    .find_map(|(name, kind)| word.eq_ignore_ascii_case(name).then_some(kind)) else {
+        return Ok(None);
+    };
+    let mut lexer = lexer.clone();
+    Ok((matches!(lexer.next()?.kind, TokenKind::Punct(b'('))
+        && matches!(lexer.next()?.kind, TokenKind::Word(_))
+        && matches!(lexer.next()?.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("IN")))
+    .then_some(kind))
+}
+
 /// Route a complete enclosing list only when a graph expression reads one
 /// of its active locals. Graph-scope reads independent of those locals retain
 /// their existing owner, including correlations to nested graph ancestors.
@@ -587,7 +612,9 @@ fn list_graph_expression_follows<'a>(
     token: TokenKind<'a>,
     lexer: &Lexer<'a>,
 ) -> Result<bool, GraphPatternTextError> {
-    if !list_comprehension_follows(token, lexer)? {
+    if !list_comprehension_follows(token, lexer)?
+        && row_list_quantifier_follows(token, lexer)?.is_none()
+    {
         return Ok(false);
     }
     let mut lexer = lexer.clone();
@@ -707,12 +734,30 @@ fn row_pattern_expressions_from<'a>(
             && matches!(lexer.clone().next()?.kind,
                 TokenKind::Word(word) if word.eq_ignore_ascii_case("BY"));
         if matches!(token.kind, TokenKind::End)
-            || (depth == 0 && matches!(token.kind, TokenKind::Punct(b'}' | b']' | b'|')))
+            || (depth == 0 && matches!(token.kind, TokenKind::Punct(b')' | b'}' | b']' | b'|')))
             || group_by
             || matches!(token.kind, TokenKind::Word(word)
                 if depth == 0 && !key && Parser::ends_where(word, previous))
         {
             return Ok(expressions);
+        }
+        // Gather the complete quantifier, retaining its local scope and UNKNOWNs.
+        if !key
+            && locals.scopes.is_empty()
+            && !hoisted(token.at)
+            && row_list_quantifier_follows(token.kind, lexer)?.is_some()
+            && list_graph_expression_follows(token.kind, lexer)?
+        {
+            expressions.push((token, lexer.clone()));
+            let mut ahead = lexer.clone();
+            ahead.next()?; // opening parenthesis
+            let Some(after) = after_balanced(&mut ahead, b'(')? else {
+                return Ok(expressions);
+            };
+            *lexer = ahead;
+            previous = Some(TokenKind::Punct(b')'));
+            token = after;
+            continue;
         }
         // A complete graph comprehension belongs to this row. Its own body
         // stays inside the original native Collect scope. Ordinary lists and
@@ -1253,16 +1298,22 @@ impl<'a> Parser<'a> {
             self.current = token;
             self.lexer = lexer;
             let count = self.is_word("COUNT");
+            let quantifier = self.list_quantifier()?;
             let list = list_graph_expression_follows(self.current.kind, &self.lexer)?;
             let collected = list || self.starts_pattern_comprehension()?;
             let (operation, mapped, leading) = if list {
                 let (operation, leading) =
                     self.multipart_list_comprehension(statement, &schema, visible, call_depth)?;
-                (
-                    operation,
-                    Some(ReadValueTemplate::Column(schema.len() + 1)),
-                    leading,
-                )
+                let list = Box::new(ReadValueTemplate::Column(schema.len() + 1));
+                let value = match quantifier {
+                    Some(kind) => ReadValueTemplate::Quantifier {
+                        kind,
+                        list,
+                        predicate: Box::new(ReadValueTemplate::Local(0)),
+                    },
+                    None => *list,
+                };
+                (operation, Some(value), leading)
             } else if collected {
                 let (pattern, join, column, value) =
                     self.multipart_comprehension_pattern(statement, &schema, visible, token.at)?;
@@ -1342,7 +1393,7 @@ impl<'a> Parser<'a> {
                     text: name,
                     at: token.at,
                 },
-                if collected {
+                if collected && quantifier.is_none() {
                     GraphSetColumnType::List
                 } else {
                     GraphSetColumnType::Scalar
@@ -1389,7 +1440,13 @@ impl<'a> Parser<'a> {
                 "at most eight nested correlated list/read bodies",
             ));
         }
-        self.punct(b'[', "[ before a list comprehension")?;
+        let quantifier = self.list_quantifier()?;
+        if quantifier.is_some() {
+            self.advance()?;
+            self.punct(b'(', "( before a list quantifier")?;
+        } else {
+            self.punct(b'[', "[ before a list comprehension")?;
+        }
         let element = self.name()?;
         self.word("IN")?;
         let list = self.read_row_value(incoming, 0)?;
@@ -1497,41 +1554,127 @@ impl<'a> Parser<'a> {
                 row_fields: Vec::new(),
             };
             let mut body = UnresolvedReadInput::from_first(first);
-            if self.take_word("WHERE")? {
+            let map = if quantifier.is_some() {
+                self.word("WHERE")?;
                 let predicate_at = self.current.at;
-                let expanded =
-                    self.gather_list_expression(statement, &mut body, &schema, call_depth + 1)?;
-                let mut stages = Vec::new();
-                let mut depth = body.depth();
-                self.row_expression_selection(&expanded, &mut stages, &mut depth, predicate_at)?;
-                // The map sees only retained elements. Its graph reads are below
-                // this filter, not gathered alongside the predicate's reads.
-                stages.push(ReadStageTemplate::Project {
-                    at: predicate_at,
-                    projection: schema
-                        .iter()
-                        .enumerate()
-                        .map(|(column, (name, _))| ReadProjectionTemplate {
-                            name: name.text.to_owned(),
-                            value: ReadValueTemplate::Column(column),
-                        })
-                        .collect(),
-                    quantifier: GraphSetQuantifier::All,
+                // Finish each complete predicate before visiting the next member.
+                // Eager quantifier member order and first-error precedence are retained.
+                let mut predicate_body = UnresolvedReadInput::from_first(UnresolvedGraphText {
+                    statement,
+                    syntax: self.take_part_syntax()?,
+                    projection: None,
+                    pipeline: vec![ReadStageTemplate::Arguments {
+                        columns: schema
+                            .iter()
+                            .map(|(name, _)| name.text.to_owned())
+                            .collect(),
+                        types: schema.iter().map(|(_, kind)| *kind).collect(),
+                    }],
+                    singleton: true,
+                    leading: Vec::new(),
+                    leading_types: Vec::new(),
+                    correlations: Vec::new(),
+                    row_fields: Vec::new(),
                 });
-                body.append_stages(stages);
-                body.append_element_keys(&mut self.syntax.element_keys);
-                self.boundary_reads = None;
-                self.existence_reads = None;
-                self.comprehension_reads = None;
-            }
-            let map = if self.take(b'|')? {
-                let expanded =
-                    self.gather_list_expression(statement, &mut body, &schema, call_depth + 1)?;
-                self.read_row_value(&expanded, 0)?
+                let expanded = self.gather_list_expression(
+                    statement,
+                    &mut predicate_body,
+                    &schema,
+                    call_depth + 1,
+                )?;
+                let predicate = self.read_scalar_value(None, &expanded, predicate_at, 0, false)?;
+                // Keep UNKNOWN. CASE validates Boolean/NULL without coercion, and the
+                // let slot evaluates the original predicate exactly once.
+                let predicate = ReadValueTemplate::Let {
+                    values: vec![predicate],
+                    body: Box::new(ReadValueTemplate::Case {
+                        arms: vec![(ReadValueTemplate::Local(0), ReadValueTemplate::Local(0))],
+                        otherwise: Some(Box::new(ReadValueTemplate::Local(0))),
+                    }),
+                };
+                predicate_body.append_stages(vec![ReadStageTemplate::Project {
+                    at: predicate_at,
+                    projection: vec![ReadProjectionTemplate {
+                        name: output_name.to_owned(),
+                        value: predicate,
+                    }],
+                    quantifier: GraphSetQuantifier::All,
+                }]);
+                predicate_body.append_element_keys(&mut self.syntax.element_keys);
+                let mut syntax = self.take_part_syntax()?;
+                syntax.return_at = predicate_at;
+                body.continuations.push(UnresolvedContinuation {
+                    input: UnresolvedGraphText {
+                        statement,
+                        syntax,
+                        projection: Some(vec![ReadProjectionTemplate {
+                            name: output_name.to_owned(),
+                            value: ReadValueTemplate::Column(schema.len()),
+                        }]),
+                        pipeline: Vec::new(),
+                        singleton: true,
+                        leading: Vec::new(),
+                        leading_types: schema
+                            .iter()
+                            .map(|(_, kind)| *kind)
+                            .chain([GraphSetColumnType::Any])
+                            .collect(),
+                        correlations: Vec::new(),
+                        row_fields: Vec::new(),
+                    },
+                    operation: UnresolvedContinuationOperation::Apply {
+                        body: Box::new(predicate_body),
+                        imports: (0..schema.len()).collect(),
+                        optional: false,
+                    },
+                });
+                ReadValueTemplate::Column(0)
             } else {
-                ReadValueTemplate::Column(local)
+                if self.take_word("WHERE")? {
+                    let predicate_at = self.current.at;
+                    let expanded =
+                        self.gather_list_expression(statement, &mut body, &schema, call_depth + 1)?;
+                    let mut stages = Vec::new();
+                    let mut depth = body.depth();
+                    self.row_expression_selection(
+                        &expanded,
+                        &mut stages,
+                        &mut depth,
+                        predicate_at,
+                    )?;
+                    // The map sees only retained elements. Its graph reads are below
+                    // this filter, not gathered alongside the predicate's reads.
+                    stages.push(ReadStageTemplate::Project {
+                        at: predicate_at,
+                        projection: schema
+                            .iter()
+                            .enumerate()
+                            .map(|(column, (name, _))| ReadProjectionTemplate {
+                                name: name.text.to_owned(),
+                                value: ReadValueTemplate::Column(column),
+                            })
+                            .collect(),
+                        quantifier: GraphSetQuantifier::All,
+                    });
+                    body.append_stages(stages);
+                    body.append_element_keys(&mut self.syntax.element_keys);
+                    self.boundary_reads = None;
+                    self.existence_reads = None;
+                    self.comprehension_reads = None;
+                }
+                if self.take(b'|')? {
+                    let expanded =
+                        self.gather_list_expression(statement, &mut body, &schema, call_depth + 1)?;
+                    self.read_row_value(&expanded, 0)?
+                } else {
+                    ReadValueTemplate::Column(local)
+                }
             };
-            self.punct(b']', "] after a list comprehension")?;
+            if quantifier.is_some() {
+                self.punct(b')', ") after a list quantifier")?;
+            } else {
+                self.punct(b']', "] after a list comprehension")?;
+            }
             body.append_stages(vec![ReadStageTemplate::Project {
                 at,
                 projection: vec![ReadProjectionTemplate {

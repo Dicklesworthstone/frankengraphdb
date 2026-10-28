@@ -1841,3 +1841,191 @@ fn list_local_graph_reads_keep_snapshot_transaction_and_capability_boundaries() 
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn graph_quantifiers_count_elements_and_keep_snapshot_and_capability_boundaries() {
+    use fgdb_gql::algebra::GraphValue;
+
+    let ((), report) = run_async_under_lab(0xa681_0013, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = database(&commit).await;
+        let mut extra = WriteBatch::new(S);
+        extra.add_edge(EId(22), VId(1), VId(4), vec![]);
+        extra.add_edge(EId(23), VId(2), VId(3), vec![]);
+        db.write(&commit, extra).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        // Each native plan stays within the existing bounded operator depth.
+        let texts = [
+            "WITH $items AS items RETURN \
+             any(x IN items WHERE CASE WHEN x IS NULL THEN NULL ELSE (x)-[:S]->() END) AS any_s, \
+             all(x IN items WHERE CASE WHEN x IS NULL THEN NULL ELSE (x)-[:S]->() END) AS all_s",
+            "WITH $items AS items RETURN \
+             none(x IN items WHERE CASE WHEN x IS NULL THEN NULL ELSE (x)-[:S]->() END) AS none_s, \
+             single(x IN items WHERE CASE WHEN x IS NULL THEN NULL ELSE (x)-[:S]->() END) AS single_s",
+        ];
+        let parameters = |items: &[Option<u128>]| {
+            GqlParameters::new()
+                .with_list(
+                    "items",
+                    items
+                        .iter()
+                        .map(|id| {
+                            id.map_or(GraphValue::Scalar(CanonicalScalar::Null), |id| {
+                                GraphValue::Vertex(VId(id))
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap()
+        };
+        let yes = [Some(true), Some(true), Some(false), Some(true)];
+        let no = [Some(false), Some(false), Some(true), Some(false)];
+        let twice = [Some(true), Some(true), Some(false), Some(false)];
+        let false_unknown = [None, Some(false), None, None];
+        let true_unknown = [Some(true), None, Some(false), None];
+        let twice_unknown = [Some(true), None, Some(false), Some(false)];
+        let unknown = [None; 4];
+        let empty = [Some(false), Some(true), Some(true), Some(false)];
+        // Each oracle counts input occurrences, not relationship witnesses.
+        // Vertex2 has three S witnesses before the staged deletion, two
+        // visible under grant(); vertex1's only witness has a hidden endpoint.
+        let cases = [
+            (vec![Some(2)], yes, yes, no, no),
+            (vec![Some(2), Some(2)], twice, twice, no, no),
+            (vec![Some(1)], yes, no, no, yes),
+            (
+                vec![Some(3), None],
+                false_unknown,
+                false_unknown,
+                false_unknown,
+                true_unknown,
+            ),
+            (
+                vec![Some(2), Some(2), None],
+                twice_unknown,
+                twice_unknown,
+                false_unknown,
+                false_unknown,
+            ),
+            (vec![None], unknown, unknown, unknown, unknown),
+            (vec![], empty, empty, empty, empty),
+        ];
+        let prepared = texts
+            .iter()
+            .map(|text| {
+                PreparedNativeRead::prepare(text, &parameters(&cases[0].0), symbols).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let part = |expected: &[Option<bool>; 4], pair: usize| {
+            [expected[2 * pair], expected[2 * pair + 1]]
+        };
+        let values = |result: QueryResult, pair: usize| -> [Option<bool>; 2] {
+            let QueryResult::Rows { columns, rows } = result else {
+                panic!("expected quantifier rows");
+            };
+            assert_eq!(columns, [["any_s", "all_s"], ["none_s", "single_s"]][pair]);
+            assert_eq!(rows.len(), 1);
+            std::array::from_fn(|column| {
+                match rows[0][column].as_value().and_then(GraphValue::as_scalar) {
+                    Some(CanonicalScalar::Bool(value)) => Some(*value),
+                    Some(CanonicalScalar::Null) => None,
+                    other => panic!("expected a Boolean or unknown: {other:?}"),
+                }
+            })
+        };
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let mut restricted = grant();
+        restricted.relations = Scope::only([R]);
+        let masked = issuer.issue_at(&restricted, 100).unwrap();
+        for (items, before, visible, hidden_relation, _) in &cases {
+            let params = parameters(items);
+            for (pair, (text, plan)) in texts.iter().zip(&prepared).enumerate() {
+                assert_eq!(
+                    values(
+                        db.query(&cx, text, &params, symbols, policy()).unwrap(),
+                        pair
+                    ),
+                    part(before, pair)
+                );
+                assert_eq!(
+                    values(plan.execute(&db, &cx, &params, policy()).unwrap(), pair),
+                    part(before, pair)
+                );
+                for (token, expected) in [(&token, visible), (&masked, hidden_relation)] {
+                    assert_eq!(
+                        values(
+                            plan.execute_authorized(
+                                &db,
+                                &cx,
+                                &issuer,
+                                token,
+                                BRANCH,
+                                &params,
+                                policy(),
+                                || 100,
+                            )
+                            .unwrap(),
+                            pair,
+                        ),
+                        part(expected, pair)
+                    );
+                }
+            }
+        }
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut staged = WriteBatch::new(S);
+        staged.delete_edge(EId(20));
+        staged.delete_edge(EId(21));
+        staged.delete_edge(EId(23));
+        staged.add_edge(EId(30), VId(3), VId(5), vec![]);
+        txn.write(&mut db, staged).unwrap();
+        for (items, before, _, _, after) in &cases {
+            let params = parameters(items);
+            for (pair, (text, plan)) in texts.iter().zip(&prepared).enumerate() {
+                assert_eq!(
+                    values(
+                        txn.query(&db, &cx, text, &params, symbols, policy())
+                            .unwrap(),
+                        pair
+                    ),
+                    part(after, pair)
+                );
+                assert_eq!(
+                    values(
+                        plan.execute_in_transaction(&txn, &db, &cx, &params, policy())
+                            .unwrap(),
+                        pair,
+                    ),
+                    part(after, pair)
+                );
+                assert_eq!(
+                    values(plan.execute(&db, &cx, &params, policy()).unwrap(), pair),
+                    part(before, pair)
+                );
+            }
+        }
+        assert_eq!(db.frontier().unwrap(), basis);
+        txn.commit(&mut db, &commit).await.unwrap();
+        for (items, before, _, _, after) in &cases {
+            let params = parameters(items);
+            for (pair, (text, plan)) in texts.iter().zip(&prepared).enumerate() {
+                assert_eq!(
+                    values(plan.execute(&db, &cx, &params, policy()).unwrap(), pair),
+                    part(after, pair)
+                );
+                assert_eq!(
+                    values(
+                        pinned.query(&cx, text, &params, symbols, policy()).unwrap(),
+                        pair
+                    ),
+                    part(before, pair)
+                );
+            }
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

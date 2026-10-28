@@ -1393,9 +1393,7 @@ fn nested_existence_audits_imported_and_element_names_at_every_depth() {
         (
             "MATCH (a) RETURN any(v IN [a] WHERE EXISTS { MATCH (x) \
              WHERE EXISTS { MATCH (v)-[:R]->(x) } }) AS n",
-            GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::Expected(
-                "a pattern count that reads no enclosing comprehension local",
-            )),
+            GraphSetTextErrorKind::Expected("imported vertices in the root MATCH"),
         ),
         (
             "MATCH (a), (z) WITH z WHERE EXISTS { MATCH (x) \
