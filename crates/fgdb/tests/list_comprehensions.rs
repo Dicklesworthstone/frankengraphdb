@@ -504,15 +504,23 @@ fn pattern_comprehensions_collect_each_rows_witnesses() {
             panic!("aggregate read must return rows");
         };
         assert_eq!(counted, vec![vec![QueryValue::Count(4)]]);
-        // A scalar row scope and a pattern over an enclosing list-comprehension local
-        // (gathered once per row, so it could not follow the local; TCK
-        // Pattern2 [7]) refuse typed.
-        for text in [
-            "WITH 1 AS x RETURN [(x)-[:R]->() | 1] AS v",
+        // TCK Pattern2 [7]: each path member is a correlated graph anchor.
+        // The paths are 10->20, 10->30 and 20->30; their degrees are
+        // [2,1], [2,0] and [1,0]. Only the outer result bag is normalized.
+        let mut actual = rows(
             "MATCH p = (n:Person)-[:R]->() RETURN [x IN nodes(p) | size([(x)-[:R]->() | 1])] AS v",
-        ] {
-            let result = db.query(cx, text, &params, symbols, policy());
-            assert!(result.is_err(), "{text}: {result:?}");
-        }
+        );
+        actual.sort();
+        assert_eq!(
+            actual,
+            vec![
+                vec![ints(&[1, 0])],
+                vec![ints(&[2, 0])],
+                vec![ints(&[2, 1])]
+            ]
+        );
+        let text = "WITH 1 AS x RETURN [(x)-[:R]->() | 1] AS v";
+        let result = db.query(cx, text, &params, symbols, policy());
+        assert!(result.is_err(), "{text}: {result:?}");
     });
 }

@@ -1140,3 +1140,27 @@ fn carried_pattern_comprehensions_keep_null_witnesses_through_aggregate_argument
         assert_eq!(row.values()[0].as_integer(), Some(degree));
     }
 }
+
+#[test]
+fn list_local_graph_expressions_feed_exact_aggregates_and_inline_calls() {
+    let rows = execute(
+        "MATCH (n) WITH collect(n) AS nodes UNWIND [0,0] AS occurrence \
+         RETURN sum(size([x IN nodes WHERE (x)-[:R]->() | NULL])) AS active, \
+         count([x IN nodes | CASE WHEN (x)-[:R]->() THEN null ELSE 9 END]) AS lists",
+    );
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].keys().is_empty());
+    assert_eq!(rows[0].values()[0].as_integer(), Some(6));
+    assert_eq!(rows[0].values()[1].as_count(), Some(2));
+
+    let rows = execute(
+        "MATCH (n) WITH collect(n) AS nodes UNWIND [0,0] AS occurrence \
+         CALL (nodes) { \
+           RETURN [x IN nodes | [(x)-[:R]->(t) | NULL]] AS nested \
+         } RETURN count(nested) AS lists,sum(size(nested)) AS groups",
+    );
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].keys().is_empty());
+    assert_eq!(rows[0].values()[0].as_count(), Some(2));
+    assert_eq!(rows[0].values()[1].as_integer(), Some(8));
+}

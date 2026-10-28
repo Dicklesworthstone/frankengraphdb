@@ -1978,6 +1978,9 @@ impl<'a> Parser<'a> {
                 }
                 break;
             }
+            if self.row_existence_projection(schema.len())? {
+                break;
+            }
             if self.with_has_aggregate()? {
                 let (stage, next_schema) = self.with_aggregate_stage(&schema)?;
                 append_stage(&mut stages, stage, &mut depth)?;

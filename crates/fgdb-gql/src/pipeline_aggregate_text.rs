@@ -395,6 +395,11 @@ impl PreparedGraphPipelineAggregateText {
                             operators.push("Select");
                         }
                     }
+                    BoundContinuationOperation::List { body, .. } => {
+                        stages(operators, &part.input.leading);
+                        input_operators(operators, body);
+                        operators.push("Apply");
+                    }
                     BoundContinuationOperation::Match(join) => {
                         let selection = part
                             .input

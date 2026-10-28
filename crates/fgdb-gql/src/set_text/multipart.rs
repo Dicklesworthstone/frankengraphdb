@@ -30,6 +30,12 @@ pub(crate) enum BoundContinuationOperation {
         imports: Vec<usize>,
         negated: Option<bool>,
     },
+    /// A list-local read body, collecting every mapped value in occurrence order.
+    List {
+        body: Box<BoundReadInput>,
+        imports: Vec<usize>,
+        list_column: usize,
+    },
     Apply {
         body: Box<BoundReadInput>,
         imports: Vec<usize>,
@@ -459,9 +465,8 @@ impl BoundReadInput {
                         usize::from(pattern.selection.is_some())
                     }
                     BoundContinuationOperation::Apply { body, .. }
-                    | BoundContinuationOperation::ExistsBody { body, .. } => {
-                        body.graph_source_count()
-                    }
+                    | BoundContinuationOperation::ExistsBody { body, .. }
+                    | BoundContinuationOperation::List { body, .. } => body.graph_source_count(),
                 })
                 .sum::<usize>()
     }
@@ -482,6 +487,7 @@ impl BoundReadInput {
                 BoundContinuationOperation::Apply { .. }
                     | BoundContinuationOperation::Pattern { .. }
                     | BoundContinuationOperation::ExistsBody { .. }
+                    | BoundContinuationOperation::List { .. }
             )
         }) {
             bytes.push(5);
@@ -538,6 +544,19 @@ impl BoundReadInput {
                             Some(false) => 1,
                             Some(true) => 2,
                         });
+                        bytes.extend_from_slice(&(imports.len() as u64).to_be_bytes());
+                        for &column in imports {
+                            bytes.extend_from_slice(&(column as u64).to_be_bytes());
+                        }
+                        body.append_template_transcript(bytes);
+                    }
+                    BoundContinuationOperation::List {
+                        body,
+                        imports,
+                        list_column,
+                    } => {
+                        bytes.push(8);
+                        bytes.extend_from_slice(&(*list_column as u64).to_be_bytes());
                         bytes.extend_from_slice(&(imports.len() as u64).to_be_bytes());
                         for &column in imports {
                             bytes.extend_from_slice(&(column as u64).to_be_bytes());

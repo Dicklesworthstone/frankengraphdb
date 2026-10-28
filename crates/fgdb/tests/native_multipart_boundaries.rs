@@ -1610,3 +1610,234 @@ fn aggregate_exists_uses_the_pinned_staged_and_authorized_body_source() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn list_local_graph_reads_keep_snapshot_transaction_and_capability_boundaries() {
+    use fgdb_gql::algebra::GraphValue;
+
+    let ((), report) = run_async_under_lab(0xa681_0012, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = database(&commit).await;
+        let mut parallel = WriteBatch::new(R);
+        parallel.add_edge(EId(12), VId(1), VId(2), vec![]);
+        let mut extra = WriteBatch::new(S);
+        extra.add_edge(EId(22), VId(1), VId(4), vec![]);
+        extra.add_edge(EId(24), VId(5), VId(2), vec![]);
+        db.write_atomic(&commit, vec![parallel, extra])
+            .await
+            .unwrap();
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let text = "WITH $items AS items WITH items,items[0] AS person RETURN \
+            [x IN items WHERE (x)-[:R]->()<-[:S]-(person) | x] AS shared, \
+            [x IN items WHERE (x)-[:S]->() | x] AS active, \
+            [x IN items | [(x)-[:S]->(t) | t.n]] AS amounts";
+        let mut items = [5, 1, 2, 1, 4, 3]
+            .map(|id| GraphValue::Vertex(VId(id)))
+            .to_vec();
+        items.push(GraphValue::Scalar(CanonicalScalar::Null));
+        let params = GqlParameters::new().with_list("items", items).unwrap();
+        let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+        let expected =
+            |shared: &[u128], active: &[u128], amounts: &[&[Option<i64>]]| {
+                let vertices = |ids: &[u128]| {
+                    GraphValue::List(
+                        ids.iter()
+                            .map(|id| GraphValue::Vertex(VId(*id)))
+                            .collect::<Vec<_>>()
+                            .into(),
+                    )
+                };
+                vec![
+                    vertices(shared),
+                    vertices(active),
+                    GraphValue::List(
+                        amounts
+                            .iter()
+                            .map(|values| {
+                                GraphValue::List(
+                                    values
+                                        .iter()
+                                        .map(|value| {
+                                            GraphValue::Scalar(value.map_or(
+                                                CanonicalScalar::Null,
+                                                CanonicalScalar::Int,
+                                            ))
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .into(),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .into(),
+                    ),
+                ]
+            };
+        let values = |result: QueryResult| {
+            let QueryResult::Rows { columns, rows } = result else {
+                panic!("expected list-valued read rows");
+            };
+            assert_eq!(columns, ["shared", "active", "amounts"]);
+            assert_eq!(rows.len(), 1);
+            let mut values = rows[0]
+                .iter()
+                .map(|cell| cell.as_value().unwrap().clone())
+                .collect::<Vec<_>>();
+            // Preserve the list-local order exactly. Only each native
+            // pattern's inner property bag is normalized for this oracle.
+            values[2] = GraphValue::List(
+                values[2]
+                    .as_list()
+                    .unwrap()
+                    .iter()
+                    .map(|list| {
+                        let mut properties = list.as_list().unwrap().to_vec();
+                        properties.sort();
+                        GraphValue::List(properties.into())
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            );
+            values
+        };
+        let before = expected(
+            &[1, 1],
+            &[5, 1, 2, 1],
+            &[
+                &[Some(10)],
+                &[Some(11)],
+                &[Some(7), Some(11)],
+                &[Some(11)],
+                &[],
+                &[],
+                &[],
+            ],
+        );
+        assert_eq!(
+            values(db.query(&cx, text, &params, symbols, policy()).unwrap()),
+            before
+        );
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &params, policy()).unwrap()),
+            before
+        );
+        let issuer = authority();
+        for (allowed, result) in [
+            (
+                grant(),
+                expected(
+                    &[1, 1],
+                    &[5, 2],
+                    &[&[Some(10)], &[], &[Some(7)], &[], &[], &[], &[]],
+                ),
+            ),
+            (
+                {
+                    let mut restricted = grant();
+                    restricted.properties = Scope::only([]);
+                    restricted
+                },
+                expected(
+                    &[1, 1],
+                    &[5, 2],
+                    &[&[None], &[], &[None], &[], &[], &[], &[]],
+                ),
+            ),
+            (
+                {
+                    let mut restricted = grant();
+                    restricted.relations = Scope::only([R]);
+                    restricted
+                },
+                expected(&[], &[], &[&[], &[], &[], &[], &[], &[], &[]]),
+            ),
+        ] {
+            let token = issuer.issue_at(&allowed, 100).unwrap();
+            assert_eq!(
+                values(
+                    db.query_authorized(
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        text,
+                        &params,
+                        symbols,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap()
+                ),
+                result
+            );
+            assert_eq!(
+                values(
+                    prepared
+                        .execute_authorized(
+                            &db,
+                            &cx,
+                            &issuer,
+                            &token,
+                            BRANCH,
+                            &params,
+                            policy(),
+                            || 100,
+                        )
+                        .unwrap()
+                ),
+                result
+            );
+        }
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut staged = WriteBatch::new(S);
+        staged.delete_edge(EId(20));
+        staged.delete_edge(EId(24));
+        staged.add_edge(EId(30), VId(3), VId(5), vec![]);
+        txn.write(&mut db, staged).unwrap();
+        let after = expected(
+            &[],
+            &[1, 2, 1, 3],
+            &[
+                &[],
+                &[Some(11)],
+                &[Some(11)],
+                &[Some(11)],
+                &[],
+                &[None],
+                &[],
+            ],
+        );
+        assert_eq!(
+            values(
+                txn.query(&db, &cx, text, &params, symbols, policy())
+                    .unwrap()
+            ),
+            after
+        );
+        assert_eq!(
+            values(
+                prepared
+                    .execute_in_transaction(&txn, &db, &cx, &params, policy())
+                    .unwrap()
+            ),
+            after
+        );
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &params, policy()).unwrap()),
+            before
+        );
+        txn.commit(&mut db, &commit).await.unwrap();
+        assert_eq!(
+            values(prepared.execute(&db, &cx, &params, policy()).unwrap()),
+            after
+        );
+        assert_eq!(
+            values(pinned.query(&cx, text, &params, symbols, policy()).unwrap()),
+            before
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

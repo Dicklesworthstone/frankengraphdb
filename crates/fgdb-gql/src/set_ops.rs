@@ -401,6 +401,15 @@ impl<E: core::error::Error + 'static> core::error::Error for GraphSetExecutionEr
 
 type SetResult<T, E, C> = Result<T, GqlQueryError<GraphSetExecutionError<E>, C>>;
 
+/// Correlated row extension and its compiler-owned list reduction share one
+/// governed argument frame and source-ordinal contract.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ApplyKind {
+    Inner,
+    Optional,
+    Collect { null_input: usize },
+}
+
 #[derive(Clone, PartialEq, Eq)]
 enum SetNode {
     Pattern(PreparedGraphPattern<GraphValueRow>),
@@ -429,9 +438,7 @@ enum SetNode {
         left: Box<PreparedGraphSet>,
         right: Box<PreparedGraphSet>,
         imports: Vec<usize>,
-        /// A left occurrence whose body yields no row still emits one row,
-        /// NULL in every body column (openCypher OPTIONAL MATCH).
-        optional: bool,
+        kind: ApplyKind,
     },
     Join {
         left: Box<PreparedGraphSet>,
@@ -809,7 +816,7 @@ impl PreparedGraphSet {
     /// This is the bounded relational Apply operator, not CALL syntax or a
     /// claim of spill/incremental support.
     pub fn apply(self, right: Self, imports: Vec<usize>) -> Result<Self, GraphSetBuildError> {
-        self.apply_with(right, imports, false)
+        self.apply_with(right, imports, ApplyKind::Inner)
     }
 
     /// As [`Self::apply`], except that a left occurrence whose body yields
@@ -821,14 +828,41 @@ impl PreparedGraphSet {
         right: Self,
         imports: Vec<usize>,
     ) -> Result<Self, GraphSetBuildError> {
-        self.apply_with(right, imports, true)
+        self.apply_with(right, imports, ApplyKind::Optional)
+    }
+
+    /// A compiler-owned list comprehension. The body emits exactly one mapped
+    /// cell per retained member; collect those cells in body occurrence order,
+    /// retaining NULLs and duplicates. Its saved input list is evaluated before
+    /// this operator: a NULL list returns NULL without invoking the body.
+    /// Unlike an ordinary COLLECT aggregate, this operation never discards a
+    /// mapped NULL and never invents a singleton wrapper around a member.
+    pub(crate) fn collect_apply(
+        self,
+        right: Self,
+        imports: Vec<usize>,
+        null_input: usize,
+    ) -> Result<Self, GraphSetBuildError> {
+        if right.columns.len() != 1 {
+            return Err(GraphSetBuildError::ColumnCount {
+                left: 1,
+                right: right.columns.len(),
+            });
+        }
+        if null_input >= self.columns.len() {
+            return Err(GraphSetBuildError::UnknownArgument {
+                argument: imports.len(),
+                input: null_input,
+            });
+        }
+        self.apply_with(right, imports, ApplyKind::Collect { null_input })
     }
 
     fn apply_with(
         self,
         right: Self,
         imports: Vec<usize>,
-        optional: bool,
+        kind: ApplyKind,
     ) -> Result<Self, GraphSetBuildError> {
         if imports.len() > crate::algebra::MAX_PATTERN_VERTICES {
             return Err(GraphSetBuildError::TooManyArguments {
@@ -857,13 +891,17 @@ impl PreparedGraphSet {
         let mut columns = self.columns.clone();
         columns.extend_from_slice(&right.columns);
         let mut types = self.types.clone();
-        types.extend_from_slice(&right.types);
+        if matches!(kind, ApplyKind::Collect { .. }) {
+            types.push(GraphSetColumnType::List);
+        } else {
+            types.extend_from_slice(&right.types);
+        }
         Ok(Self {
             node: SetNode::Apply {
                 left: Box::new(self),
                 right: Box::new(right),
                 imports,
-                optional,
+                kind,
             },
             columns,
             types,
@@ -1132,15 +1170,18 @@ impl PreparedGraphSet {
                 left,
                 right,
                 imports,
-                optional,
+                kind,
             } => {
                 bytes.push(0xff);
-                let tag: &[u8] = if *optional {
-                    b"fgdb:set:optional-apply:v1\0"
-                } else {
-                    b"fgdb:set:apply:v1\0"
+                let tag: &[u8] = match kind {
+                    ApplyKind::Inner => b"fgdb:set:apply:v1\0",
+                    ApplyKind::Optional => b"fgdb:set:optional-apply:v1\0",
+                    ApplyKind::Collect { .. } => b"fgdb:set:collect-apply:v1\0",
                 };
                 bytes.extend_from_slice(tag);
+                if let ApplyKind::Collect { null_input } = kind {
+                    bytes.extend_from_slice(&(*null_input as u64).to_be_bytes());
+                }
                 left.append_transcript(bytes);
                 right.append_transcript(bytes);
                 bytes.extend_from_slice(&(imports.len() as u64).to_be_bytes());

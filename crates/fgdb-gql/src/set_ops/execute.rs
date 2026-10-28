@@ -495,7 +495,7 @@ where
             left,
             right,
             imports,
-            optional,
+            kind,
         } => {
             let left = run(left, source, meter, operand)?;
             let right_operand = *operand;
@@ -503,6 +503,19 @@ where
             *operand += right.operands;
             let mut output = Vec::new();
             for (row_at, row) in left.iter().enumerate() {
+                if let ApplyKind::Collect { null_input } = kind {
+                    meter.event(GlaExecutionEvent::Work)?;
+                    if row.values()[*null_input].is_null() {
+                        meter.event(GlaExecutionEvent::ScratchEntry)?;
+                        let absent = GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+                            fgdb_types::CanonicalScalar::Null,
+                        )]);
+                        output.push(copy_cross_pair(row, &absent, &mut |event| {
+                            meter.event(event)
+                        })?);
+                        continue;
+                    }
+                }
                 meter.event(GlaExecutionEvent::ScratchEntry)?;
                 let mut arguments = Vec::with_capacity(imports.len());
                 for (column, &input) in imports.iter().enumerate() {
@@ -535,7 +548,50 @@ where
                 // Restore the enclosing frame on errors and cancellation too.
                 meter.arguments.pop();
                 let inner = inner?;
-                if *optional && inner.is_empty() {
+                if matches!(kind, ApplyKind::Collect { .. }) {
+                    // The body is a checked one-column relation. Its input
+                    // UNWIND and per-member graph Apply preserve list order;
+                    // collection must neither sort nor discard mapped NULLs.
+                    meter.event(GlaExecutionEvent::ScratchEntry)?;
+                    let mut members = Vec::new();
+                    for member in &inner {
+                        meter.event(GlaExecutionEvent::ScratchEntry)?;
+                        let value = projection::evaluate_value(
+                            &GraphSetValue::Column(0),
+                            member,
+                            row.len(),
+                            &mut |event| meter.event(event),
+                        )
+                        .map_err(|error| match error {
+                            projection::ProjectionFailure::Control(error) => error,
+                            projection::ProjectionFailure::Arithmetic { column, error } => {
+                                GqlQueryError::Source(GraphSetExecutionError::Projection {
+                                    row: row_at,
+                                    column,
+                                    error,
+                                })
+                            }
+                        })?;
+                        members.push(value);
+                    }
+                    let value = GraphValue::List(members.into_boxed_slice());
+                    if !value.validate_bounds() {
+                        return Err(GqlQueryError::Source(GraphSetExecutionError::Projection {
+                            row: row_at,
+                            column: row.len(),
+                            error: crate::GraphIntegerError {
+                                instruction: 0,
+                                kind: crate::GraphIntegerErrorKind::Overflow,
+                            },
+                        }));
+                    }
+                    let collected = GraphValueRow::from_owned_values(vec![value]);
+                    output.push(copy_cross_pair(row, &collected, &mut |event| {
+                        meter.event(event)
+                    })?);
+                    continue;
+                }
+                if matches!(kind, ApplyKind::Optional) && inner.is_empty() {
                     let nulls = GraphValueRow::from_owned_values(
                         right
                             .types
@@ -1043,6 +1099,192 @@ mod tests {
             assert_eq!(meter.arguments.len(), 1);
             assert!(Arc::ptr_eq(&meter.arguments[0], &parent));
             assert_eq!(meter.rows.result_rows, 0);
+        }
+    }
+
+    #[test]
+    fn collecting_apply_preserves_list_occurrences_nulls_and_exact_allowances() {
+        use fgdb_types::CanonicalScalar;
+        fn no_source(
+            _: &PreparedGraphPattern<GraphValueRow>,
+            _: GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<(), ()>> {
+            panic!("a values-only comprehension cannot request graph rows")
+        }
+        let member = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        let list = GraphValue::List(
+            vec![member(3), null.clone(), member(1), member(3)].into_boxed_slice(),
+        );
+        let input = PreparedGraphSet::singleton()
+            .unwind(
+                "xs".into(),
+                GraphSetValue::Value(GraphValue::List(
+                    vec![
+                        list.clone(),
+                        list,
+                        GraphValue::List(Box::new([])),
+                        null,
+                        GraphValue::Vertices(vec![VId(8), VId(2), VId(8)].into_boxed_slice()),
+                    ]
+                    .into_boxed_slice(),
+                )),
+            )
+            .unwrap();
+        let body = PreparedGraphSet::arguments(vec!["xs".into()], vec![GraphSetColumnType::Any])
+            .unwrap()
+            .unwind("x".into(), GraphSetValue::Column(0))
+            .unwrap()
+            .project_ordered_output(vec![GraphSetProjection::new(
+                "mapped",
+                GraphSetValue::Column(1),
+            )])
+            .unwrap();
+        assert!(matches!(
+            input
+                .clone()
+                .collect_apply(PreparedGraphSet::singleton(), vec![], 0),
+            Err(GraphSetBuildError::ColumnCount { left: 1, right: 0 })
+        ));
+        assert!(matches!(
+            input.clone().collect_apply(body.clone(), vec![0], 1),
+            Err(GraphSetBuildError::UnknownArgument { input: 1, .. })
+        ));
+        let ordinary = input.clone().apply(body.clone(), vec![0]).unwrap();
+        let collected = input.clone().collect_apply(body, vec![0], 0).unwrap();
+        assert_ne!(ordinary.canonical_bytes(), collected.canonical_bytes());
+        assert_eq!(
+            collected.column_types(),
+            &[GraphSetColumnType::Any, GraphSetColumnType::List]
+        );
+        let query = collected
+            .project_ordered_output(vec![GraphSetProjection::new(
+                "result",
+                GraphSetValue::Column(1),
+            )])
+            .unwrap();
+        let oracle = input
+            .project_ordered_output(vec![GraphSetProjection::new(
+                "result",
+                GraphSetValue::Comprehension {
+                    list: Box::new(GraphSetValue::Column(0)),
+                    filter: None,
+                    map: None,
+                },
+            )])
+            .unwrap();
+        let execute =
+            |query: &PreparedGraphSet, policy| query.execute_governed(policy, no_source, || Ok(()));
+        let policy = GqlQueryPolicy::new(0, 5, 1_000_000, 1_000_000);
+        let actual = execute(&query, policy).unwrap();
+        assert_eq!(actual.value, execute(&oracle, policy).unwrap().value);
+        assert_eq!(actual.value.len(), 5);
+        let exact = GqlQueryPolicy::new(
+            0,
+            5,
+            actual.evaluator.work_units,
+            actual.evaluator.scratch_entries,
+        );
+        assert_eq!(execute(&query, exact).unwrap().value, actual.value);
+        for policy in [
+            GqlQueryPolicy::new(
+                0,
+                5,
+                actual.evaluator.work_units - 1,
+                actual.evaluator.scratch_entries,
+            ),
+            GqlQueryPolicy::new(
+                0,
+                5,
+                actual.evaluator.work_units,
+                actual.evaluator.scratch_entries - 1,
+            ),
+        ] {
+            assert!(matches!(
+                execute(&query, policy),
+                Err(GqlQueryError::Evaluator(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn collecting_apply_skips_null_bodies_and_checks_final_list_depth_before_paging() {
+        use fgdb_types::CanonicalScalar;
+        fn no_source(
+            _: &PreparedGraphPattern<GraphValueRow>,
+            _: GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<(), ()>> {
+            panic!("the NULL-list guard must skip its graph body")
+        }
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        let input = PreparedGraphSet::singleton()
+            .project_ordered_output(vec![GraphSetProjection::new(
+                "xs",
+                GraphSetValue::Value(null.clone()),
+            )])
+            .unwrap();
+        let body = PreparedGraphSet::arguments(vec!["xs".into()], vec![GraphSetColumnType::Scalar])
+            .unwrap()
+            .cross_join(scope_leaf())
+            .unwrap()
+            .project_ordered_output(vec![GraphSetProjection::new(
+                "mapped",
+                GraphSetValue::Column(1),
+            )])
+            .unwrap();
+        let query = input.collect_apply(body, vec![0], 0).unwrap();
+        let policy = GqlQueryPolicy::new(0, 1, 1_000_000, 1_000_000);
+        let result = query
+            .execute_governed(policy, no_source, || Ok(()))
+            .unwrap();
+        assert_eq!(
+            result.value,
+            vec![GraphValueRow::from_owned_values(vec![null.clone(), null])]
+        );
+
+        for depth in [GraphValue::MAX_LIST_DEPTH - 1, GraphValue::MAX_LIST_DEPTH] {
+            let mut mapped = GraphValue::Scalar(CanonicalScalar::Int(1));
+            for _ in 0..depth {
+                mapped = GraphValue::List(vec![mapped].into_boxed_slice());
+            }
+            assert!(mapped.validate_bounds());
+            let input = PreparedGraphSet::singleton()
+                .project_ordered_output(vec![GraphSetProjection::new(
+                    "xs",
+                    GraphSetValue::Value(GraphValue::List(
+                        vec![GraphValue::Scalar(CanonicalScalar::Int(1))].into_boxed_slice(),
+                    )),
+                )])
+                .unwrap();
+            let body =
+                PreparedGraphSet::arguments(vec!["xs".into()], vec![GraphSetColumnType::List])
+                    .unwrap()
+                    .unwind("x".into(), GraphSetValue::Column(0))
+                    .unwrap()
+                    .project_ordered_output(vec![GraphSetProjection::new(
+                        "mapped",
+                        GraphSetValue::Value(mapped),
+                    )])
+                    .unwrap();
+            let query = input
+                .collect_apply(body, vec![0], 0)
+                .unwrap()
+                .with_page(0, Some(0));
+            let result = query.execute_governed(policy, no_source, || Ok(()));
+            if depth < GraphValue::MAX_LIST_DEPTH {
+                assert!(result.unwrap().value.is_empty());
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(GqlQueryError::Source(GraphSetExecutionError::Projection {
+                        error: crate::GraphIntegerError {
+                            kind: crate::GraphIntegerErrorKind::Overflow,
+                            ..
+                        },
+                        ..
+                    }))
+                ));
+            }
         }
     }
 

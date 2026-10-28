@@ -30,6 +30,11 @@ enum UnresolvedContinuationOperation<'a> {
         imports: Vec<usize>,
         negated: Option<bool>,
     },
+    List {
+        body: Box<UnresolvedReadInput<'a>>,
+        imports: Vec<usize>,
+        list_column: usize,
+    },
     Apply {
         body: Box<UnresolvedReadInput<'a>>,
         imports: Vec<usize>,
@@ -74,7 +79,8 @@ impl<'a> UnresolvedReadInput<'a> {
                     );
                 }
                 UnresolvedContinuationOperation::Apply { body, .. }
-                | UnresolvedContinuationOperation::ExistsBody { body, .. } => {
+                | UnresolvedContinuationOperation::ExistsBody { body, .. }
+                | UnresolvedContinuationOperation::List { body, .. } => {
                     slots.extend(body.element_key_slots());
                 }
                 UnresolvedContinuationOperation::Match(_) => {}
@@ -127,7 +133,8 @@ impl<'a> UnresolvedReadInput<'a> {
             part.input.syntax.parameters = parameters.to_vec();
             part.input.syntax.parameter_offsets = offsets.to_vec();
             if let UnresolvedContinuationOperation::Apply { body, .. }
-            | UnresolvedContinuationOperation::ExistsBody { body, .. } = &mut part.operation
+            | UnresolvedContinuationOperation::ExistsBody { body, .. }
+            | UnresolvedContinuationOperation::List { body, .. } = &mut part.operation
             {
                 body.share_parameters(parameters, offsets);
             }
@@ -165,9 +172,16 @@ impl<'a> UnresolvedReadInput<'a> {
                         UnresolvedContinuationOperation::ExistsBody { body, negated, .. } => {
                             body.depth() + if negated.is_some() { 4 } else { 2 }
                         }
-                        UnresolvedContinuationOperation::Apply { body, .. } => 1 + body.depth(),
+                        UnresolvedContinuationOperation::Apply { body, .. }
+                        | UnresolvedContinuationOperation::List { body, .. } => 1 + body.depth(),
                     };
                     source_depth
+                        + part
+                            .input
+                            .leading
+                            .iter()
+                            .map(ReadStageTemplate::depth)
+                            .sum::<usize>()
                         + usize::from(part.input.projection.is_some())
                         + 2 * usize::from(!part.input.row_fields.is_empty())
                         + part
@@ -189,9 +203,8 @@ impl<'a> UnresolvedReadInput<'a> {
                     UnresolvedContinuationOperation::Match(_) => 1,
                     UnresolvedContinuationOperation::Pattern { .. } => 1,
                     UnresolvedContinuationOperation::Apply { body, .. }
-                    | UnresolvedContinuationOperation::ExistsBody { body, .. } => {
-                        body.operand_count()
-                    }
+                    | UnresolvedContinuationOperation::ExistsBody { body, .. }
+                    | UnresolvedContinuationOperation::List { body, .. } => body.operand_count(),
                 })
                 .sum::<usize>()
     }
@@ -252,6 +265,15 @@ impl<'a> UnresolvedReadInput<'a> {
                         imports,
                         negated,
                     },
+                    UnresolvedContinuationOperation::List {
+                        body,
+                        imports,
+                        list_column,
+                    } => BoundContinuationOperation::List {
+                        body: Box::new(body.resolve(resolve)?),
+                        imports,
+                        list_column,
+                    },
                 },
             });
         }
@@ -270,6 +292,20 @@ pub(in crate::graph_text) fn has_row_graph_expressions(
     statement: &str,
     tokens: &[TextToken<'_>],
 ) -> Result<bool, GraphSetTextError> {
+    let mut list_probe = Lexer {
+        text: statement,
+        at: 0,
+        tokens: 0,
+    };
+    loop {
+        let token = list_probe.next()?;
+        if matches!(token.kind, TokenKind::End) {
+            break;
+        }
+        if list_graph_expression_follows(token.kind, &list_probe)? {
+            return Ok(true);
+        }
+    }
     for at in crate::set_text::multipart::row_existence_offsets(tokens) {
         // Compound leaves borrow a slice of the statement but retain the
         // original composition-token offsets.
@@ -534,12 +570,131 @@ fn row_pattern_filter_starts(
 /// Look ahead through one row WHERE or RETURN using the native lexer. Pattern bodies
 /// are consumed whole, so their local vertices cannot become additional
 /// expressions. Per-element list scopes retain their existing typed owner.
+fn list_comprehension_follows(
+    token: TokenKind<'_>,
+    lexer: &Lexer<'_>,
+) -> Result<bool, GraphPatternTextError> {
+    let mut lexer = lexer.clone();
+    Ok(matches!(token, TokenKind::Punct(b'['))
+        && matches!(lexer.next()?.kind, TokenKind::Word(_))
+        && matches!(lexer.next()?.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("IN")))
+}
+
+/// Route a complete enclosing list only when a graph expression reads one
+/// of its active locals. Graph-scope reads independent of those locals retain
+/// their existing owner, including correlations to nested graph ancestors.
+fn list_graph_expression_follows<'a>(
+    token: TokenKind<'a>,
+    lexer: &Lexer<'a>,
+) -> Result<bool, GraphPatternTextError> {
+    if !list_comprehension_follows(token, lexer)? {
+        return Ok(false);
+    }
+    let mut lexer = lexer.clone();
+    let mut depth = 0_usize;
+    let mut previous = None;
+    let mut locals = ReadLocals::default();
+    let mut current = Token {
+        kind: token,
+        at: lexer.at.saturating_sub(1),
+    };
+    loop {
+        let key = matches!(previous, Some(TokenKind::Punct(b'.' | b':')));
+        let mut ahead = lexer.clone();
+        let end = if super::super::pattern_comprehension_follows(current.kind, &lexer)? {
+            after_balanced(&mut ahead, b'[')?
+        } else if !key
+            && matches!(current.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("COUNT"))
+            && matches!(ahead.clone().next()?.kind, TokenKind::Punct(b'{'))
+        {
+            ahead.next()?;
+            after_balanced(&mut ahead, b'{')?
+        } else if !key
+            && matches!(current.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("EXISTS"))
+            && crate::graph_text::scoped::exists_introducer_follows(&mut ahead.clone())?
+        {
+            let opening = ahead.next()?;
+            match opening.kind {
+                TokenKind::Punct(opening @ (b'(' | b'{')) => after_balanced(&mut ahead, opening)?,
+                _ => None,
+            }
+        } else if matches!(current.kind, TokenKind::Punct(b'('))
+            && crate::graph_text::scoped::pattern_predicate_follows(
+                current.kind,
+                &mut ahead.clone(),
+            )?
+        {
+            after_row_pattern(&mut ahead)?.map(|(after, _)| after)
+        } else {
+            None
+        };
+        if let Some(end) = end {
+            let mut scan = lexer.clone();
+            let mut read = current;
+            let mut prior = None;
+            let mut nested = ReadLocals::default();
+            let mut nested_depth = 0_usize;
+            while read.at < end.at {
+                let declaration = nested.observe(read, prior, &scan, nested_depth)?;
+                if let TokenKind::Word(word) = read.kind
+                    && !declaration
+                    && !matches!(prior, Some(TokenKind::Punct(b'.' | b':')))
+                    && !matches!(prior, Some(TokenKind::Word(word)) if word.eq_ignore_ascii_case("AS"))
+                    && !(matches!(prior, Some(TokenKind::Punct(b'{' | b',')))
+                        && matches!(scan.clone().next()?.kind, TokenKind::Punct(b':')))
+                    && locals.shadows(word)
+                    && !nested.shadows(word)
+                {
+                    return Ok(true);
+                }
+                match read.kind {
+                    TokenKind::Punct(b'(' | b'[' | b'{') => nested_depth += 1,
+                    TokenKind::Punct(b')' | b']' | b'}') => {
+                        nested_depth = nested_depth.saturating_sub(1)
+                    }
+                    TokenKind::End => break,
+                    _ => {}
+                }
+                prior = Some(read.kind);
+                read = scan.next()?;
+            }
+        }
+        locals.observe(current, previous, &lexer, depth)?;
+        match current.kind {
+            TokenKind::Punct(b'(' | b'[' | b'{') => {
+                depth += 1;
+                if depth > MAX_FILTER_NESTING {
+                    return Ok(false);
+                }
+            }
+            TokenKind::Punct(b')' | b']' | b'}') => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Ok(false);
+                }
+            }
+            TokenKind::End => return Ok(false),
+            _ => {}
+        }
+        previous = Some(current.kind);
+        current = lexer.next()?;
+    }
+}
+
 fn row_pattern_expressions<'a>(
     lexer: &mut Lexer<'a>,
     mut hoisted: impl FnMut(usize) -> bool,
 ) -> Result<Vec<(Token<'a>, Lexer<'a>)>, GraphPatternTextError> {
+    let token = lexer.next()?;
+    row_pattern_expressions_from(token, lexer, &mut hoisted)
+}
+
+fn row_pattern_expressions_from<'a>(
+    mut token: Token<'a>,
+    lexer: &mut Lexer<'a>,
+    mut hoisted: impl FnMut(usize) -> bool,
+) -> Result<Vec<(Token<'a>, Lexer<'a>)>, GraphPatternTextError> {
     let mut expressions = Vec::new();
-    let mut token = lexer.next()?;
     let mut previous = None;
     let mut depth = 0_usize;
     let mut locals = ReadLocals::default();
@@ -552,7 +707,7 @@ fn row_pattern_expressions<'a>(
             && matches!(lexer.clone().next()?.kind,
                 TokenKind::Word(word) if word.eq_ignore_ascii_case("BY"));
         if matches!(token.kind, TokenKind::End)
-            || (depth == 0 && matches!(token.kind, TokenKind::Punct(b'}')))
+            || (depth == 0 && matches!(token.kind, TokenKind::Punct(b'}' | b']' | b'|')))
             || group_by
             || matches!(token.kind, TokenKind::Word(word)
                 if depth == 0 && !key && Parser::ends_where(word, previous))
@@ -565,7 +720,8 @@ fn row_pattern_expressions<'a>(
         if matches!(token.kind, TokenKind::Punct(b'[')) {
             if locals.scopes.is_empty()
                 && !hoisted(token.at)
-                && super::super::pattern_comprehension_follows(token.kind, lexer)?
+                && (super::super::pattern_comprehension_follows(token.kind, lexer)?
+                    || list_graph_expression_follows(token.kind, lexer)?)
             {
                 expressions.push((token, lexer.clone()));
             }
@@ -668,7 +824,11 @@ fn after_row_pattern<'a>(
     while matches!(token.kind, TokenKind::Punct(b'-' | b'<')) {
         loop {
             token = match token.kind {
-                TokenKind::Punct(b'-' | b'<' | b'>') => lexer.next()?,
+                TokenKind::Punct(b'-') => lexer.next()?,
+                TokenKind::Punct(b'<' | b'>') => {
+                    explicit_relationship = true;
+                    lexer.next()?
+                }
                 TokenKind::Punct(b'[') => {
                     explicit_relationship = true;
                     let Some(after) = after_balanced(lexer, b'[')? else {
@@ -768,8 +928,25 @@ impl<'a> Parser<'a> {
     /// An unhoisted graph value after UNWIND or a later WITH needs the same
     /// Apply owner as a row WHERE. An aggregating RETURN reads its gathered
     /// scalar values through the terminal aggregate compiler.
-    fn row_existence_projection(&self, width: usize) -> Result<bool, GraphPatternTextError> {
-        if !self.read_elements || !self.is_word("RETURN") {
+    fn row_list_projection(&self) -> Result<bool, GraphPatternTextError> {
+        if !self.is_word("WITH") && !self.is_word("RETURN") {
+            return Ok(false);
+        }
+        for (token, lexer) in row_pattern_expressions(&mut self.lexer.clone(), |_| false)? {
+            if list_graph_expression_follows(token.kind, &lexer)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub(super) fn row_existence_projection(
+        &self,
+        width: usize,
+    ) -> Result<bool, GraphPatternTextError> {
+        if !self.read_elements
+            || !(self.is_word("RETURN") || (self.is_word("WITH") && self.row_list_projection()?))
+        {
             return Ok(false);
         }
         Ok(!row_pattern_expressions(&mut self.lexer.clone(), |at| {
@@ -903,6 +1080,8 @@ impl<'a> Parser<'a> {
     ) -> Result<(Vec<UnresolvedContinuation<'a>>, RowSchema<'a>, bool), GraphSetTextError> {
         let at = self.current.at;
         let returning = self.is_word("RETURN");
+        let with_projection = self.is_word("WITH");
+        let projecting = returning || with_projection;
         let width = incoming.len();
         let visible = self.visible_width(incoming);
         let expressions = row_pattern_expressions(&mut self.lexer.clone(), |at| {
@@ -910,6 +1089,162 @@ impl<'a> Parser<'a> {
                 || hoisted_span(self.comprehension_reads.as_ref(), width, at).is_some()
         })?;
         let saved = (self.lexer.clone(), self.current);
+        let (mut parts, schema, spans, counts) = self.gather_row_expression_sources(
+            statement,
+            incoming,
+            visible,
+            call_depth,
+            expressions,
+        )?;
+        let expanded = schema.len();
+        let had_boundary = self
+            .boundary_reads
+            .as_ref()
+            .is_some_and(|b| b.width == width);
+        let detached_boundary = if had_boundary {
+            self.boundary_reads
+                .as_mut()
+                .expect("matching boundary")
+                .width = expanded;
+            None
+        } else {
+            let previous = self.boundary_reads.take();
+            self.boundary_reads = Some(BoundaryReads {
+                visible,
+                width: expanded,
+                reads: Vec::new(),
+                functions: Vec::new(),
+                grouped: Vec::new(),
+                scoped: Vec::new(),
+            });
+            previous
+        };
+        // Existing reads still address their original prefix. Only their
+        // exact row-width guard changes while the private suffix is present.
+        let previous_existence = self.existence_reads.take();
+        let mut combined = previous_existence
+            .as_ref()
+            .filter(|(guard, _)| *guard == width)
+            .map_or_else(Vec::new, |(_, reads)| reads.clone());
+        combined.extend(spans);
+        self.existence_reads = Some((expanded, combined));
+        let previous_comprehensions = self.comprehension_reads.take();
+        let mut combined_counts = previous_comprehensions
+            .as_ref()
+            .filter(|(guard, _)| *guard == width)
+            .map_or_else(Vec::new, |(_, reads)| reads.clone());
+        combined_counts.extend(counts);
+        self.comprehension_reads = Some((expanded, combined_counts));
+        let previous_grouped = self.grouped_comprehensions.clone();
+        let previous_projected = self.projected_sources.clone();
+        for reads in [
+            &mut self.grouped_comprehensions,
+            &mut self.projected_sources,
+        ] {
+            if let Some((guard, _)) = reads
+                && *guard == width
+            {
+                *guard = expanded;
+            }
+        }
+        (self.lexer, self.current) = saved;
+        if returning && aggregate {
+            // The terminal aggregate compiler owns RETURN and consumes these
+            // values as grouping keys or aggregate arguments. Keep the exact
+            // expanded schema and private-span guards until that owner has
+            // read the clause; restoring the old maps here loses its slots.
+            return Ok((parts, schema, true));
+        }
+        let mut pipeline = Vec::new();
+        let mut depth = 0;
+        let mut projected = None;
+        let selected = if projecting {
+            // The spans address the expanded row until RETURN has consumed
+            // every expression, including its ordinary ORDER BY/page.
+            self.multipart_row_tail(schema, aggregate)
+                .map(|(stages, next, terminal)| {
+                    pipeline = stages;
+                    projected = Some((next, terminal));
+                })
+        } else {
+            self.word("WHERE")?;
+            self.row_expression_selection(&schema, &mut pipeline, &mut depth, at)
+        };
+        if with_projection {
+            self.existence_reads = None;
+            self.comprehension_reads = None;
+        } else if returning {
+            // A terminal projection already ended its row scope.
+            self.boundary_reads = detached_boundary;
+        } else if had_boundary {
+            self.boundary_reads
+                .as_mut()
+                .expect("matching boundary")
+                .width = width;
+        } else {
+            self.boundary_reads = detached_boundary;
+        }
+        if !with_projection {
+            self.existence_reads = previous_existence;
+            self.comprehension_reads = previous_comprehensions;
+            self.grouped_comprehensions = previous_grouped;
+            self.projected_sources = previous_projected;
+        }
+        selected?;
+        let (next, terminal) = if let Some(projected) = projected {
+            projected
+        } else {
+            append_stage(
+                &mut pipeline,
+                ReadStageTemplate::Project {
+                    at,
+                    projection: incoming
+                        .iter()
+                        .enumerate()
+                        .map(|(column, (name, _))| ReadProjectionTemplate {
+                            name: name.text.to_owned(),
+                            value: ReadValueTemplate::Column(column),
+                        })
+                        .collect(),
+                    quantifier: GraphSetQuantifier::All,
+                },
+                &mut depth,
+            )?;
+            let (tail, next, terminal) = self.multipart_row_tail(incoming.clone(), aggregate)?;
+            pipeline.extend(tail);
+            (next, terminal)
+        };
+        let mut syntax = self.take_part_syntax()?;
+        syntax.return_at = at;
+        let last = parts
+            .last_mut()
+            .expect("row existence expression has a graph test");
+        syntax
+            .element_keys
+            .append(&mut last.input.syntax.element_keys);
+        last.input.syntax = syntax;
+        last.input.pipeline = pipeline;
+        Ok((parts, next, terminal))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn gather_row_expression_sources(
+        &mut self,
+        statement: &'a str,
+        incoming: &RowSchema<'a>,
+        visible: usize,
+        call_depth: usize,
+        expressions: Vec<(Token<'a>, Lexer<'a>)>,
+    ) -> Result<
+        (
+            Vec<UnresolvedContinuation<'a>>,
+            RowSchema<'a>,
+            Vec<(usize, usize, usize)>,
+            Vec<(usize, usize, usize)>,
+        ),
+        GraphSetTextError,
+    > {
+        let at = self.current.at;
         let mut schema = incoming.clone();
         let mut parts = Vec::new();
         let mut spans = Vec::new();
@@ -918,8 +1253,17 @@ impl<'a> Parser<'a> {
             self.current = token;
             self.lexer = lexer;
             let count = self.is_word("COUNT");
-            let collected = self.starts_pattern_comprehension()?;
-            let (operation, mapped) = if collected {
+            let list = list_graph_expression_follows(self.current.kind, &self.lexer)?;
+            let collected = list || self.starts_pattern_comprehension()?;
+            let (operation, mapped, leading) = if list {
+                let (operation, leading) =
+                    self.multipart_list_comprehension(statement, &schema, visible, call_depth)?;
+                (
+                    operation,
+                    Some(ReadValueTemplate::Column(schema.len() + 1)),
+                    leading,
+                )
+            } else if collected {
                 let (pattern, join, column, value) =
                     self.multipart_comprehension_pattern(statement, &schema, visible, token.at)?;
                 (
@@ -929,6 +1273,7 @@ impl<'a> Parser<'a> {
                         result: RowPatternResult::Collect { column },
                     },
                     Some(value),
+                    Vec::new(),
                 )
             } else {
                 (
@@ -944,6 +1289,7 @@ impl<'a> Parser<'a> {
                         },
                     )?,
                     None,
+                    Vec::new(),
                 )
             };
             self.capacity(
@@ -1011,112 +1357,158 @@ impl<'a> Parser<'a> {
                     projection: Some(projection),
                     pipeline: Vec::new(),
                     singleton: true,
-                    leading: Vec::new(),
-                    leading_types: schema.iter().map(|(_, kind)| *kind).collect(),
+                    leading,
+                    leading_types: schema
+                        .iter()
+                        .map(|(_, kind)| *kind)
+                        .chain(list.then_some(GraphSetColumnType::List))
+                        .collect(),
                     correlations: Vec::new(),
                     row_fields: Vec::new(),
                 },
                 operation,
             });
         }
-        let expanded = schema.len();
-        let had_boundary = self
-            .boundary_reads
-            .as_ref()
-            .is_some_and(|b| b.width == width);
-        let detached_boundary = if had_boundary {
-            self.boundary_reads
-                .as_mut()
-                .expect("matching boundary")
-                .width = expanded;
-            None
-        } else {
-            let previous = self.boundary_reads.take();
-            self.boundary_reads = Some(BoundaryReads {
-                visible,
-                width: expanded,
-                reads: Vec::new(),
-                functions: Vec::new(),
-                grouped: Vec::new(),
-                scoped: Vec::new(),
-            });
-            previous
+        Ok((parts, schema, spans, counts))
+    }
+
+    /// Lower each list occurrence through native UNWIND and correlated row stages.
+    /// The source evaluates before its local shadows an incoming name.
+    fn multipart_list_comprehension(
+        &mut self,
+        statement: &'a str,
+        incoming: &RowSchema<'a>,
+        captures: usize,
+        call_depth: usize,
+    ) -> Result<(UnresolvedContinuationOperation<'a>, Vec<ReadStageTemplate>), GraphSetTextError>
+    {
+        let at = self.current.at;
+        if call_depth >= 8 {
+            return Err(expected(
+                at,
+                "at most eight nested correlated list/read bodies",
+            ));
+        }
+        self.punct(b'[', "[ before a list comprehension")?;
+        let element = self.name()?;
+        self.word("IN")?;
+        let list = self.read_row_value(incoming, 0)?;
+        let types: Vec<_> = incoming.iter().map(|(_, kind)| *kind).collect();
+        let list_type = list.column_type(&types, &self.syntax.parameters);
+        let mut private = BOUNDARY_READ_NAMES.iter().copied().filter(|name| {
+            *name != element.text && incoming.iter().all(|(binding, _)| binding.text != *name)
+        });
+        let (Some(list_name), Some(output_name)) = (private.next(), private.next()) else {
+            return Err(expected(at, "bounded private list comprehension columns"));
         };
-        // Existing reads still address their original prefix. Only their
-        // exact row-width guard changes while the private suffix is present.
-        let previous_existence = self.existence_reads.take();
-        let mut combined = previous_existence
-            .as_ref()
-            .filter(|(guard, _)| *guard == width)
-            .map_or_else(Vec::new, |(_, reads)| reads.clone());
-        combined.extend(spans);
-        self.existence_reads = Some((expanded, combined));
-        let previous_comprehensions = self.comprehension_reads.take();
-        let mut combined_counts = previous_comprehensions
-            .as_ref()
-            .filter(|(guard, _)| *guard == width)
-            .map_or_else(Vec::new, |(_, reads)| reads.clone());
-        combined_counts.extend(counts);
-        self.comprehension_reads = Some((expanded, combined_counts));
-        let previous_grouped = self.grouped_comprehensions.clone();
-        let previous_projected = self.projected_sources.clone();
-        for reads in [
-            &mut self.grouped_comprehensions,
-            &mut self.projected_sources,
-        ] {
-            if let Some((guard, _)) = reads
-                && *guard == width
-            {
-                *guard = expanded;
+        self.capacity(
+            incoming.len() + 1,
+            MAX_PATTERN_VERTICES,
+            crate::algebra::PatternLimitDimension::Columns,
+        )?;
+        let mut leading_projection: Vec<_> = incoming
+            .iter()
+            .enumerate()
+            .map(|(column, (name, _))| ReadProjectionTemplate {
+                name: name.text.to_owned(),
+                value: ReadValueTemplate::Column(column),
+            })
+            .collect();
+        leading_projection.push(ReadProjectionTemplate {
+            name: list_name.to_owned(),
+            value: list,
+        });
+        let leading = vec![ReadStageTemplate::Project {
+            at,
+            projection: leading_projection,
+            quantifier: GraphSetQuantifier::All,
+        }];
+        let mut imports = Vec::new();
+        let mut schema = Vec::new();
+        for (column, &(name, kind)) in incoming[..captures].iter().enumerate() {
+            if name.text != element.text {
+                imports.push(column);
+                schema.push((name, kind));
             }
         }
-        (self.lexer, self.current) = saved;
-        if returning && aggregate {
-            // The terminal aggregate compiler owns RETURN and consumes these
-            // values as grouping keys or aggregate arguments. Keep the exact
-            // expanded schema and private-span guards until that owner has
-            // read the clause; restoring the old maps here loses its slots.
-            return Ok((parts, schema, true));
-        }
-        let mut pipeline = Vec::new();
-        let mut depth = 0;
-        let mut projected = None;
-        let selected = if returning {
-            // The spans address the expanded row until RETURN has consumed
-            // every expression, including its ordinary ORDER BY/page.
-            self.multipart_row_tail(schema, aggregate)
-                .map(|(stages, next, terminal)| {
-                    pipeline = stages;
-                    projected = Some((next, terminal));
-                })
-        } else {
-            self.word("WHERE")?;
-            self.row_expression_selection(&schema, &mut pipeline, &mut depth, at)
-        };
-        if returning {
-            // A terminal projection already ended its row scope.
-            self.boundary_reads = detached_boundary;
-        } else if had_boundary {
-            self.boundary_reads
-                .as_mut()
-                .expect("matching boundary")
-                .width = width;
-        } else {
-            self.boundary_reads = detached_boundary;
-        }
-        self.existence_reads = previous_existence;
-        self.comprehension_reads = previous_comprehensions;
-        self.grouped_comprehensions = previous_grouped;
-        self.projected_sources = previous_projected;
-        selected?;
-        let (next, terminal) = if let Some(projected) = projected {
-            projected
-        } else {
-            append_stage(
-                &mut pipeline,
-                ReadStageTemplate::Project {
-                    at,
-                    projection: incoming
+        let local = schema.len();
+        let mut arguments = schema.clone();
+        arguments.push((
+            Name {
+                text: list_name,
+                at,
+            },
+            list_type,
+        ));
+        imports.push(incoming.len());
+        schema.push((element, GraphSetColumnType::Any));
+        let initial = vec![
+            ReadStageTemplate::Arguments {
+                columns: arguments
+                    .iter()
+                    .map(|(name, _)| name.text.to_owned())
+                    .collect(),
+                types: arguments.iter().map(|(_, kind)| *kind).collect(),
+            },
+            ReadStageTemplate::Unwind {
+                at,
+                name: element.text.to_owned(),
+                value: ReadValueTemplate::Column(local),
+            },
+            ReadStageTemplate::Project {
+                at,
+                projection: schema
+                    .iter()
+                    .enumerate()
+                    .map(|(column, (name, _))| ReadProjectionTemplate {
+                        name: name.text.to_owned(),
+                        value: ReadValueTemplate::Column(if column == local {
+                            local + 1
+                        } else {
+                            column
+                        }),
+                    })
+                    .collect(),
+                quantifier: GraphSetQuantifier::All,
+            },
+        ];
+        let outer_syntax = self.take_part_syntax()?;
+        let boundary = self.boundary_reads.take();
+        let projected = self.projected_sources.take();
+        let existence = self.existence_reads.take();
+        let comprehensions = self.comprehension_reads.take();
+        let grouped = self.grouped_comprehensions.take();
+        let row_bindings = core::mem::take(&mut self.read_row_bindings);
+        let correlations = core::mem::take(&mut self.read_correlations);
+        let row_fields = core::mem::take(&mut self.read_row_fields);
+        let comparisons = self.read_comparisons.take();
+        let element_reads = core::mem::replace(&mut self.call_element_reads, true);
+        let optional_body = core::mem::take(&mut self.optional_body);
+        let parsed = (|| -> Result<UnresolvedReadInput<'a>, GraphSetTextError> {
+            let first = UnresolvedGraphText {
+                statement,
+                syntax: self.take_part_syntax()?,
+                projection: None,
+                pipeline: initial,
+                singleton: true,
+                leading: Vec::new(),
+                leading_types: Vec::new(),
+                correlations: Vec::new(),
+                row_fields: Vec::new(),
+            };
+            let mut body = UnresolvedReadInput::from_first(first);
+            if self.take_word("WHERE")? {
+                let predicate_at = self.current.at;
+                let expanded =
+                    self.gather_list_expression(statement, &mut body, &schema, call_depth + 1)?;
+                let mut stages = Vec::new();
+                let mut depth = body.depth();
+                self.row_expression_selection(&expanded, &mut stages, &mut depth, predicate_at)?;
+                // The map sees only retained elements. Its graph reads are below
+                // this filter, not gathered alongside the predicate's reads.
+                stages.push(ReadStageTemplate::Project {
+                    at: predicate_at,
+                    projection: schema
                         .iter()
                         .enumerate()
                         .map(|(column, (name, _))| ReadProjectionTemplate {
@@ -1125,21 +1517,89 @@ impl<'a> Parser<'a> {
                         })
                         .collect(),
                     quantifier: GraphSetQuantifier::All,
-                },
-                &mut depth,
-            )?;
-            let (tail, next, terminal) = self.multipart_row_tail(incoming.clone(), aggregate)?;
-            pipeline.extend(tail);
-            (next, terminal)
-        };
-        let mut syntax = self.take_part_syntax()?;
-        syntax.return_at = at;
-        let last = parts
-            .last_mut()
-            .expect("row existence expression has a graph test");
-        last.input.syntax = syntax;
-        last.input.pipeline = pipeline;
-        Ok((parts, next, terminal))
+                });
+                body.append_stages(stages);
+                body.append_element_keys(&mut self.syntax.element_keys);
+                self.boundary_reads = None;
+                self.existence_reads = None;
+                self.comprehension_reads = None;
+            }
+            let map = if self.take(b'|')? {
+                let expanded =
+                    self.gather_list_expression(statement, &mut body, &schema, call_depth + 1)?;
+                self.read_row_value(&expanded, 0)?
+            } else {
+                ReadValueTemplate::Column(local)
+            };
+            self.punct(b']', "] after a list comprehension")?;
+            body.append_stages(vec![ReadStageTemplate::Project {
+                at,
+                projection: vec![ReadProjectionTemplate {
+                    name: output_name.to_owned(),
+                    value: map,
+                }],
+                quantifier: GraphSetQuantifier::All,
+            }]);
+            body.append_element_keys(&mut self.syntax.element_keys);
+            Ok(body)
+        })();
+        let remainder = self.take_part_syntax()?;
+        self.syntax = outer_syntax;
+        self.syntax.parameters = remainder.parameters;
+        self.syntax.parameter_offsets = remainder.parameter_offsets;
+        self.boundary_reads = boundary;
+        self.projected_sources = projected;
+        self.existence_reads = existence;
+        self.comprehension_reads = comprehensions;
+        self.grouped_comprehensions = grouped;
+        self.read_row_bindings = row_bindings;
+        self.read_correlations = correlations;
+        self.read_row_fields = row_fields;
+        self.read_comparisons = comparisons;
+        self.call_element_reads = element_reads;
+        self.optional_body = optional_body;
+        let body = parsed?;
+        Ok((
+            UnresolvedContinuationOperation::List {
+                body: Box::new(body),
+                imports,
+                list_column: incoming.len(),
+            },
+            leading,
+        ))
+    }
+
+    /// Restore the expression lexer after gathering its native graph sources.
+    fn gather_list_expression(
+        &mut self,
+        statement: &'a str,
+        body: &mut UnresolvedReadInput<'a>,
+        schema: &RowSchema<'a>,
+        call_depth: usize,
+    ) -> Result<RowSchema<'a>, GraphSetTextError> {
+        let saved = (self.lexer.clone(), self.current);
+        let expressions =
+            row_pattern_expressions_from(self.current, &mut self.lexer.clone(), |_| false)?;
+        let (parts, expanded, existence, collected) = self.gather_row_expression_sources(
+            statement,
+            schema,
+            schema.len(),
+            call_depth,
+            expressions,
+        )?;
+        body.continuations.extend(parts);
+        self.boundary_reads = Some(BoundaryReads {
+            visible: schema.len(),
+            width: expanded.len(),
+            reads: Vec::new(),
+            functions: Vec::new(),
+            grouped: Vec::new(),
+            scoped: Vec::new(),
+        });
+        self.existence_reads = Some((expanded.len(), existence));
+        self.comprehension_reads = Some((expanded.len(), collected));
+        (self.lexer, self.current) = saved;
+        Ok(expanded)
     }
 
     fn multipart_existence_operation(
@@ -1447,6 +1907,20 @@ impl<'a> Parser<'a> {
         let mut inputs = Vec::new();
         let mut keys = Vec::new();
         for (left, &(name, kind)) in incoming[..captures].iter().enumerate() {
+            if matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Any)
+                && !self
+                    .syntax
+                    .variables
+                    .iter()
+                    .any(|variable| variable.text == name.text)
+                && self.syntax.scopes.iter().any(|scope| {
+                    scope
+                        .find_name(&|binding| binding.text == name.text)
+                        .is_some()
+                })
+            {
+                return Err(expected(name.at, "imported vertices in the root MATCH"));
+            }
             if let Some(variable) = self
                 .syntax
                 .variables
@@ -2457,7 +2931,8 @@ impl<'a> Parser<'a> {
         // An UNWIND directly after a continuation reads that same row (TCK
         // Graph8 [4]: `OPTIONAL MATCH (n) UNWIND keys(n) AS x RETURN ...`).
         let before_call = self.inline_call()?;
-        let before_existence = self.returning_existence_projection()?;
+        let before_existence =
+            self.returning_existence_projection()? || self.row_list_projection()?;
         let before_write = self.at_multipart_write();
         // An inline CALL body's aggregating RETURN reads every binding at an
         // implicit `WITH *` and aggregates those rows, once per outer row.
@@ -2473,6 +2948,7 @@ impl<'a> Parser<'a> {
             && deferred.is_none()
             && !self.is_word("WITH")
             && !before_call
+            && !before_existence
             && !before_write
             && !(kind.is_none() && self.is_word("UNWIND"))
             && !self.implicit_withs.contains(&self.current.at)
@@ -3026,6 +3502,39 @@ impl BoundReadInput {
                         }
                     })?;
                 }
+                input = super::super::bind_stages(input, &source.pipeline, values)?;
+                continue;
+            }
+            if let BoundContinuationOperation::List {
+                body,
+                imports,
+                list_column,
+            } = &part.operation
+            {
+                input = super::super::bind_stages(input, &source.leading, values)?;
+                input = input
+                    .collect_apply(body.bind_values(values)?, imports.clone(), *list_column)
+                    .map_err(|kind| GraphSetTextError {
+                        offset: source.return_at,
+                        kind: GraphSetTextErrorKind::SetBuild(kind),
+                    })?;
+                let columns = source
+                    .projection
+                    .as_ref()
+                    .expect("list expression projection")
+                    .iter()
+                    .map(|output| {
+                        super::super::bind_read_value(&output.value, values)
+                            .map(|value| GraphSetProjection::new(output.name.clone(), value))
+                    })
+                    .collect::<Result<_, _>>()?;
+                input =
+                    input
+                        .project_ordered_output(columns)
+                        .map_err(|kind| GraphSetTextError {
+                            offset: source.return_at,
+                            kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+                        })?;
                 input = super::super::bind_stages(input, &source.pipeline, values)?;
                 continue;
             }

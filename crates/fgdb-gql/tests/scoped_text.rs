@@ -1381,16 +1381,14 @@ fn nested_existence_audits_imported_and_element_names_at_every_depth() {
         (
             "MATCH (a) RETURN [v IN [a] | COUNT { MATCH (x) \
              WHERE EXISTS { MATCH (v)-[:R]->(x) } }] AS n",
-            GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::Expected(
-                "a pattern count that reads no enclosing comprehension local",
-            )),
+            GraphSetTextErrorKind::Expected("imported vertices in the root MATCH"),
         ),
         (
             "MATCH (a) RETURN [v IN [a] | [(x)-[:S]->(y) \
              WHERE EXISTS { MATCH (v)-[:R]->(x) } | x]] AS n",
-            GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::Expected(
-                "a pattern comprehension that reads no enclosing comprehension local",
-            )),
+            GraphSetTextErrorKind::Expected(
+                "imported vertices in the comprehension's positive pattern",
+            ),
         ),
         (
             "MATCH (a) RETURN any(v IN [a] WHERE EXISTS { MATCH (x) \
