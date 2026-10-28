@@ -496,7 +496,7 @@ fn dropping_authorized_session_commands_closes_handles_without_guessing_commit_o
                         &authority,
                         &token,
                         "host-route",
-                        |kind, name| {
+                        |kind: GraphSymbolKind, name: &str| {
                             if kind == GraphSymbolKind::Relation && name == "R" {
                                 Some(GraphSymbol::Relation(RelationId(1)))
                             } else {
