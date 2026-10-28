@@ -665,6 +665,7 @@ impl<'a> Parser<'a> {
             || self.any_column_ordered(row)?
             || self.local_ordered(row)?
             || self.local_element_compared(self.route(columns))?
+            || self.open_element_compared(self.route(columns))?
             || (!matches!(columns, ExpressionColumns::Resolved(_))
                 && self.element_compared(self.route(columns))?))
     }
@@ -787,7 +788,10 @@ impl<'a> Parser<'a> {
         nesting: usize,
         at: usize,
     ) -> Result<ReadValueTemplate, GraphMutationTextError> {
-        if self.list_operand_here(self.route(columns))? {
+        // A parenthesized value with a postfix read (`(m{v}).v`, `(l)[0]`)
+        // is one value-language operand: the scalar program would read the
+        // group and leave its postfix unread, ending the chain there.
+        if self.list_operand_here(self.route(columns))? || self.parenthesized_postfix_value()? {
             return self.list_operand_value(columns, nesting, at);
         }
         let base = core::mem::replace(&mut self.let_base, nesting);

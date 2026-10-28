@@ -560,7 +560,7 @@ impl<'a> Parser<'a> {
     /// anything else, which keeps its scalar reading (`(x) + 1`, `(n.p)`).
     /// A parenthesized group that is not a lone name (parenthesized_name owns
     /// those), directly followed by `.key` or `[`. Lookahead only.
-    fn parenthesized_postfix_value(&self) -> Result<bool, GraphPatternTextError> {
+    pub(super) fn parenthesized_postfix_value(&self) -> Result<bool, GraphPatternTextError> {
         if !self.is_punct(b'(') {
             return Ok(false);
         }
@@ -2237,6 +2237,66 @@ impl<'a> Parser<'a> {
         }
         let right = lexer.next()?;
         Ok(element(right, &lexer)? && !tighter_than_comparison(&mut lexer)?)
+    }
+
+    /// Whether an open (Any) row column and an element-typed row column are
+    /// compared here with `=`, `<>` or `!=`, in either order. A list-local
+    /// predicate's correlated Apply binds `p` of `[p IN posts WHERE NOT p =
+    /// person AND (p)-->()]` as such a column (68812ac2), and it may hold an
+    /// element the scalar program cannot read, so the comparison is the
+    /// value language's. This is no WITH element filter, so it routes in a
+    /// resolved scope too. Nothing is consumed.
+    pub(super) fn open_element_compared(
+        &self,
+        route: Route<'_, 'a>,
+    ) -> Result<bool, GraphPatternTextError> {
+        let bare = |token: Token<'a>,
+                    lexer: &Lexer<'a>|
+         -> Result<Option<&'a str>, GraphPatternTextError> {
+            let TokenKind::Word(word) = token.kind else {
+                return Ok(None);
+            };
+            if self.elements.contains(&word)
+                || matches!(
+                    lexer.clone().next()?.kind,
+                    TokenKind::Punct(b'(' | b'.' | b'[' | b':')
+                )
+            {
+                return Ok(None);
+            }
+            Ok(Some(word))
+        };
+        let kind = |word: &str| {
+            route.row.and_then(|schema| {
+                schema
+                    .iter()
+                    .find(|(name, _)| name.text == word)
+                    .map(|(_, kind)| *kind)
+            })
+        };
+        let Some(left) = bare(self.current, &self.lexer)? else {
+            return Ok(false);
+        };
+        let mut lexer = self.lexer.clone();
+        let follows = match lexer.next()?.kind {
+            TokenKind::Punct(b'=') => true,
+            TokenKind::Punct(b'<') => matches!(lexer.next()?.kind, TokenKind::Punct(b'>')),
+            TokenKind::Punct(b'!') => matches!(lexer.next()?.kind, TokenKind::Punct(b'=')),
+            _ => false,
+        };
+        if !follows {
+            return Ok(false);
+        }
+        let right = lexer.next()?;
+        let Some(right) = bare(right, &lexer)? else {
+            return Ok(false);
+        };
+        let (left, right) = (kind(left), kind(right));
+        let open_element = |open: Option<GraphSetColumnType>, other: Option<GraphSetColumnType>| {
+            open == Some(GraphSetColumnType::Any) && other.is_some_and(is_element_column)
+        };
+        Ok((open_element(left, right) || open_element(right, left))
+            && !tighter_than_comparison(&mut lexer)?)
     }
 
     /// Whether a bare list-comprehension element (fgdb-20foe) and a bare

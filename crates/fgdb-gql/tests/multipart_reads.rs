@@ -105,8 +105,12 @@ fn execute(text: &str) -> Vec<GraphValueRow> {
 /// `execute` with each edge occurrence's identity, for a DIFFERENT EDGES plan
 /// over more than one overlapping fixed atom.
 fn execute_identified(text: &str) -> Vec<GraphValueRow> {
+    run_identified(&prepare(text))
+}
+/// `run_identified` over a bound query, as `run` is to `execute`.
+fn run_identified(query: &PreparedGraphSet) -> Vec<GraphValueRow> {
     let values = [1, 2, 2, 3].map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)));
-    prepare(text)
+    query
         .execute_governed_with_elements(
             wide(),
             |pattern, remaining| {
@@ -4456,7 +4460,8 @@ fn list_local_graph_predicates_correlate_both_local_and_outer_identities() {
             ])
         })
         .collect();
-    assert_eq!(run(&query, wide(), &mut || Ok(())).unwrap().value, expected);
+    // Two :R atoms are DIFFERENT EDGES, which needs each edge's identity.
+    assert_eq!(run_identified(&query), expected);
 }
 
 #[test]

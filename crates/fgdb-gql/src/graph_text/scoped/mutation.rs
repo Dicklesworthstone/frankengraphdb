@@ -750,6 +750,19 @@ impl<'a> Parser<'a> {
         replace: bool,
     ) -> Result<(), GraphMutationTextError> {
         self.punct(b'=', "=")?;
+        // A bare parameter that is the whole right side (`SET n += $patch`,
+        // `SET n = $props`) can only be a map here, so an undeclared one is
+        // typed Map, as `UNWIND $p` types List; a declaration still governs.
+        if let TokenKind::Parameter(name) = self.current.kind
+            && !self.parameter_types.contains_key(name)
+            && matches!(
+                self.lexer.clone().next()?.kind,
+                TokenKind::End | TokenKind::Punct(b',' | b';') | TokenKind::Word(_)
+            )
+        {
+            self.parameter_types
+                .insert(name.to_owned(), crate::GqlParameterType::Map);
+        }
         let at = self.current.at;
         let catalog = self.syntax.element_catalog.request();
         let value = match row {
