@@ -386,24 +386,26 @@ impl PreparedGraphMutationQuery {
                 .grouping
                 .as_ref()
                 .is_some_and(crate::set_ops::WriteReturnGroup::may_read_element_properties);
-        let mut charges = crate::algebra_exec::Charges::new(
-            &mut checkpoint,
-            policy.query,
-            returning.rows.snapshot_records,
-        );
-        charges.rows = returning.rows;
-        charges.evaluator = returning.evaluator;
-        let mut post_write = PostWriteReads::new(
-            if reads_elements {
-                mutation.intents()
-            } else {
-                &[]
-            },
-            elements,
-            &mut |event| charges.event::<GraphMutationQueryError<E>, C>(event),
-        )?;
-        returning.evaluator = charges.evaluator;
-        drop(charges);
+        let mut post_write = {
+            let mut charges = crate::algebra_exec::Charges::new(
+                &mut checkpoint,
+                policy.query,
+                returning.rows.snapshot_records,
+            );
+            charges.rows = returning.rows;
+            charges.evaluator = returning.evaluator;
+            let post_write = PostWriteReads::new(
+                if reads_elements {
+                    mutation.intents()
+                } else {
+                    &[]
+                },
+                elements,
+                &mut |event| charges.event::<GraphMutationQueryError<E>, C>(event),
+            )?;
+            returning.evaluator = charges.evaluator;
+            post_write
+        };
         if let Some(grouping) = &self.grouping {
             returning = crate::set_ops::finish_owned_aggregate_reading(
                 returning,
