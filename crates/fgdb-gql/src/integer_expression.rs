@@ -2526,19 +2526,28 @@ mod tests {
             Binary(GraphIntegerBinary::Add),
         ])
         .unwrap();
-        let mut events = 0;
+        let mut events = Vec::new();
         assert_eq!(
             expression
-                .evaluate_scalar_with_control(&[], &mut |_| {
-                    events += 1;
+                .evaluate_scalar_with_control(&[], &mut |event| {
+                    events.push(event);
                     Ok::<_, ()>(())
                 })
                 .unwrap(),
             CanonicalScalar::Int(3)
         );
-        assert!(events > 3, "both frame and instruction events execute");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GlaExecutionEvent::ScratchEntry))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GlaExecutionEvent::Work))
+        );
         let reason = String::from("caller-owned control refusal");
-        for stop in 1..=events {
+        for stop in 1..=events.len() {
             let drops = std::cell::Cell::new(0);
             let mut calls = 0;
             let result = expression.evaluate_scalar_with_control(&[], &mut |_| {
