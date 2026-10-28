@@ -533,6 +533,9 @@ pub(super) fn execute_actions<V: Vfs + Clone, Clock: FnMut() -> u64>(
         _ => return Err(action_context(invalid())),
     };
     let merge = upsert.merge();
+    // Native point projection and scoped point visibility consult this
+    // immutable prefix, never an earlier occurrence's newly staged effects.
+    let input_prepared = transaction.prepared.clone();
     // The selected input is private. Only the final RETURN spends output rows;
     // source/work/scratch bounds still cover selection and all occurrences.
     let private = GqlQueryPolicy::new(
@@ -731,6 +734,25 @@ pub(super) fn execute_actions<V: Vfs + Clone, Clock: FnMut() -> u64>(
                             action_source,
                         )?;
                         GraphValue::admit_property_value(&value, &mut |event| control(event))
+                    },
+                    |element, key, _control| {
+                        let mut state = state.borrow_mut();
+                        let (transaction, database) = &mut *state;
+                        transaction.with_prepared_point_read(&input_prepared, |transaction| {
+                            // The shared scoped reader admits the key and
+                            // complete element visibility before payload or
+                            // witness access; hidden values remain NULL.
+                            selection::mutation_element_property(
+                                transaction,
+                                database,
+                                cx,
+                                element,
+                                key,
+                                scope,
+                                &controls,
+                            )
+                            .map_err(action_source)
+                        })
                     },
                     |batch| {
                         let mut state = state.borrow_mut();

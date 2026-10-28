@@ -34,6 +34,35 @@ impl GraphEdgeMergeRowComputed {
     {
         self.0.written(row, control)
     }
+
+    /// As [`Self::written`], with the host's point reader at the same frozen
+    /// input cut as the carried row. An open element's `x.key` must observe
+    /// that cut even after an earlier occurrence has changed the property.
+    /// Source and control failures retain the caller's original error type.
+    pub fn written_with_elements<C>(
+        &self,
+        row: &GraphValueRow,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), C>,
+        elements: &mut impl crate::GraphElementReader<C>,
+    ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, crate::GraphIntegerEvaluationError<C>>
+    {
+        let value = crate::set_ops::projection::evaluate_value_reading(
+            &self.0.0,
+            row,
+            0,
+            control,
+            &mut crate::set_ops::projection::HostElements(elements),
+        )
+        .map_err(|failure| match failure {
+            crate::set_ops::ProjectionFailure::Control(error) => {
+                crate::GraphIntegerEvaluationError::Control(error)
+            }
+            crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
+                crate::GraphIntegerEvaluationError::Value(error)
+            }
+        })?;
+        Ok(value.to_written_property())
+    }
 }
 
 /// One assignment in a simultaneous ON or trailing SET clause.
@@ -184,16 +213,19 @@ impl PreparedGraphEdgeUpsertRows {
                                 | GraphSetColumnType::Any)
                         ),
                         GraphEdgeMergeRowAction::RowVertex { column, value, .. } => {
-                            types.get(*column) == Some(&GraphSetColumnType::Vertex)
-                                && matches!(
-                                    crate::GraphSetProjection::admit_output(
-                                        &value.0.0, &types, action
-                                    ),
-                                    Ok(GraphSetColumnType::Scalar
-                                        | GraphSetColumnType::Stored
-                                        | GraphSetColumnType::List
-                                        | GraphSetColumnType::Any)
-                                )
+                            // As for MERGE's endpoint columns, an open row
+                            // value is checked by the native host before its
+                            // assignment. NULL is a no-op; another kind refuses.
+                            matches!(
+                                types.get(*column),
+                                Some(GraphSetColumnType::Vertex | GraphSetColumnType::Any)
+                            ) && matches!(
+                                crate::GraphSetProjection::admit_output(&value.0.0, &types, action),
+                                Ok(GraphSetColumnType::Scalar
+                                    | GraphSetColumnType::Stored
+                                    | GraphSetColumnType::List
+                                    | GraphSetColumnType::Any)
+                            )
                         }
                     };
                     if !valid {
@@ -441,6 +473,48 @@ mod tests {
         let (_, _, _, source) =
             targets("MATCH (a:A), (b:A) MERGE (a)-[:R]->(b) ON CREATE SET a.p = 1");
         assert_ne!(endpoint, source);
+    }
+
+    #[test]
+    fn computed_endpoint_columns_admit_actions_without_erasing_target_types() {
+        for endpoints in [
+            "WITH ns[0] AS a, ns[1] AS b",
+            "WITH head(ns) AS a, last(ns) AS b",
+            "UNWIND ns AS a WITH a, a AS b",
+        ] {
+            let text = format!(
+                "MATCH (n:A) WITH collect(n) AS ns {endpoints} \
+                 MERGE (a)-[r:R]->(b) ON CREATE SET a.q=1 ON MATCH SET b.q=2"
+            );
+            let program = bound(&text, &GqlParameters::new());
+            let upsert = definition(program.steps().last().unwrap());
+            assert_eq!(upsert.actions().on_create[0].vertex_column(), Some(0));
+            assert_eq!(upsert.actions().on_match[0].vertex_column(), Some(1));
+            assert_eq!(
+                &upsert.merge().input_column_types()[..2],
+                &[GraphSetColumnType::Any, GraphSetColumnType::Any]
+            );
+        }
+        // An explicitly scalar or relationship target is still a definition
+        // error. Only an open value defers the vertex check to the native host.
+        for input in ["1", "true", "[1,2]"] {
+            let text = format!(
+                "MATCH (a:A),(b:A) WITH a,b,{input} AS target \
+                 MERGE (a)-[r:R]->(b) ON CREATE SET target.q=1"
+            );
+            assert!(
+                PreparedGraphWriteChainText::prepare(&text, R, symbols).is_err(),
+                "{text}"
+            );
+        }
+        assert!(
+            PreparedGraphWriteChainText::prepare(
+                "MATCH (a)-[e:R]->(b) MERGE (a)-[r:S]->(b) ON CREATE SET e.q=1",
+                R,
+                symbols,
+            )
+            .is_err()
+        );
     }
 
     #[test]

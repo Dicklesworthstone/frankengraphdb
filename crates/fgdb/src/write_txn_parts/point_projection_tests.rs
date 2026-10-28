@@ -151,6 +151,70 @@ fn projected_fields_match_canonical_rows_through_noops_cascades_and_rollback() {
 }
 
 #[test]
+fn frozen_point_prefix_restores_current_effects_and_keeps_witnesses_on_every_exit() {
+    let ((), report) = run_async_under_lab(0x901a_3711, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, txcx) = (contexts.commit(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed(&mut db, &commit).await;
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut first = WriteBatch::new(R);
+        first.set_vertex_property(VId(0), Q, Some(CanonicalScalar::Int(10)));
+        txn.write(&mut db, first).unwrap();
+        let entry = txn.prepared.clone();
+        let mut later = WriteBatch::new(R);
+        later.set_vertex_property(VId(0), Q, Some(CanonicalScalar::Int(20)));
+        txn.write(&mut db, later).unwrap();
+        let current = txn.prepared.clone().unwrap();
+        let staged = txn.staged.len();
+        for exit in 0..3 {
+            txn.point_reads.borrow_mut().clear();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                txn.with_prepared_point_read(&entry, |reader| {
+                    assert_eq!(
+                        reader.vertex_property(&db, VId(0), Q).unwrap(),
+                        Some(CanonicalScalar::Int(10).into())
+                    );
+                    if exit == 2 {
+                        panic!("point callback unwinds after retaining its observation");
+                    }
+                    if exit == 1 { Err(()) } else { Ok(()) }
+                })
+            }));
+            match exit {
+                0 => assert_eq!(result.unwrap(), Ok(())),
+                1 => assert_eq!(result.unwrap(), Err(())),
+                _ => assert!(result.is_err()),
+            }
+            assert!(std::sync::Arc::ptr_eq(
+                txn.prepared.as_ref().unwrap(),
+                &current
+            ));
+            assert_eq!(txn.staged.len(), staged);
+            assert!(
+                txn.point_reads
+                    .borrow()
+                    .contains(ElementId::Vertex(VId(0)), PointReadField::Property(Q))
+            );
+            assert_eq!(
+                txn.vertex_property(&db, VId(0), Q).unwrap(),
+                Some(CanonicalScalar::Int(20).into())
+            );
+        }
+        txn.finish(&mut db, &commit).await.unwrap();
+        assert!(
+            db.vertex(VId(0))
+                .unwrap()
+                .unwrap()
+                .props
+                .contains(&(Q, CanonicalScalar::Int(20).into()))
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn requested_payload_is_borrowed_from_its_actual_snapshot_or_prepared_effect() {
     let ((), report) = run_async_under_lab(0x901a_0002, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
