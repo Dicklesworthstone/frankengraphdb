@@ -56,7 +56,11 @@ fn limits() -> BufferedReadLimits {
         max_source_bytes: 64 * 1024,
         max_blocks: 32,
         max_vertex_patches: 32,
-        max_work: 1024,
+        // Open also builds the charged descriptor directory, whose relation
+        // index (b815c3102) is one more controlled heap sort over at most
+        // max_blocks entries. Bound it as one, beside the old headroom: the
+        // 23-block routed fixture's open needed 1025 under the bare 1024.
+        max_work: 1024 + patch_directory_overhead(32).1,
         buffer: BufferLimits {
             max_frames: 1,
             max_ghost_entries: 2,
