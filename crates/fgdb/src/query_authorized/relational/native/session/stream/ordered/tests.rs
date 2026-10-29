@@ -1562,8 +1562,12 @@ fn correlated_bodies_keep_signed_work_and_absence_independent_of_hidden_growth()
                     .session
                     .open_ordered(&cx, &prepared, &params, limits())
                     .unwrap();
-                let OpenedOrderSource::Relation { plan, view } = source else {
-                    panic!("correlated bodies must enter the shared physical executor");
+                // Move the whole source into the match by value: a pattern
+                // over the place leaves it partially moved, and its drop at
+                // the end of the scope would outlive the session it borrows.
+                let (plan, view) = match core::convert::identity(source) {
+                    OpenedOrderSource::Relation { plan, view } => (plan, view),
+                    _ => panic!("correlated bodies must enter the shared physical executor"),
                 };
                 let mut host = ScopedOrderHost {
                     view,
@@ -1611,6 +1615,7 @@ fn correlated_bodies_keep_signed_work_and_absence_independent_of_hidden_growth()
                 ));
                 drop(reader);
                 drop(host);
+                drop(plan);
                 drop(execution);
                 drop(guard);
                 drop(ordered);

@@ -30,7 +30,9 @@ fn scratch_is_anonymous_private_distinct_and_session_capacity_is_refunded() {
         let host = OrderedReads::open(&root, config).await.unwrap();
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let query = contexts.query();
-        let (mut a, mut b, lease) = accepted(host.files(&root, &query).await);
+        // A third private file serves correlated Apply (c1578a023). It is
+        // held to the end, so the refund assertions below cover it too.
+        let (mut a, mut b, c, lease) = accepted(host.files(&root, &query).await);
         assert_eq!(host.active.load(Ordering::Acquire), 1);
         assert_eq!(
             host.files(&root, &query).await.err().unwrap().code,
@@ -54,7 +56,7 @@ fn scratch_is_anonymous_private_distinct_and_session_capacity_is_refunded() {
                 .unwrap()
                 .is_none()
         );
-        drop((a, b, lease));
+        drop((a, b, c, lease));
         assert_eq!(host.active.load(Ordering::Acquire), 0);
         assert_eq!(host.pool.used(), 0);
         drop(accepted(host.files(&root, &query).await));
