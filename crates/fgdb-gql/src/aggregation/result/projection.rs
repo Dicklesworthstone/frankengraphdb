@@ -142,92 +142,13 @@ fn element_truth<E, C>(cell: Cell<'_>, column: usize) -> Result<Option<bool>, Qu
     }
 }
 
-/// A caller's control or element-read failure, held by `governed_expression`
-/// while the type-erased evaluator below unwinds.
-#[derive(Debug, PartialEq, Eq)]
-struct Stop;
+use crate::set_ops::projection::{Relay, Stop};
 
 /// The evaluator's own failures carry no caller type. A caller's failure is a
 /// `Stop`: `Interrupted` for its control, `Source(Source)` for an element read.
 type Erased = QueryError<Stop, Stop>;
 type Control<'c> = &'c mut dyn FnMut(GlaExecutionEvent) -> Result<(), Erased>;
 type Columns<'c, 'g> = &'c dyn Fn(usize) -> Result<Cell<'g>, GraphIntegerErrorKind>;
-
-/// Relays every element read to the caller's reader and keeps its error.
-struct Relay<'a, 'r, E> {
-    read: &'a mut crate::set_ops::ElementRead<'r, E>,
-    failed: &'a mut Option<E>,
-}
-
-impl<E> Relay<'_, '_, E> {
-    fn keep<T>(&mut self, result: Result<T, E>) -> Result<T, Stop> {
-        result.map_err(|error| {
-            *self.failed = Some(error);
-            Stop
-        })
-    }
-
-    fn keep_controlled<T>(
-        &mut self,
-        result: Result<T, crate::GraphElementMetadataError<E>>,
-    ) -> Result<T, crate::GraphElementMetadataError<Stop>> {
-        use crate::GraphElementMetadataError as Failure;
-        result.map_err(|error| match error {
-            Failure::Source(error) => {
-                *self.failed = Some(error);
-                Failure::Source(Stop)
-            }
-            Failure::Interrupted => Failure::Interrupted,
-        })
-    }
-}
-
-impl<E> crate::set_ops::projection::ElementReader<Stop> for Relay<'_, '_, E> {
-    fn property(
-        &mut self,
-        element: ElementId,
-        key: fgdb_delta_types::PropertyKeyId,
-    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, Stop>> {
-        let result = self.read.property(element, key)?;
-        Some(self.keep(result))
-    }
-
-    fn property_for_column(
-        &mut self,
-        column: usize,
-        element: ElementId,
-        key: fgdb_delta_types::PropertyKeyId,
-    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, Stop>> {
-        let result = self.read.property_for_column(column, element, key)?;
-        Some(self.keep(result))
-    }
-
-    fn property_with_control(
-        &mut self,
-        column: Option<usize>,
-        element: ElementId,
-        key: fgdb_delta_types::PropertyKeyId,
-        control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>,
-    ) -> Option<
-        Result<Option<fgdb_types::CanonicalPropertyValue>, crate::GraphElementPropertyError<Stop>>,
-    > {
-        let result = self
-            .read
-            .property_with_control(column, element, key, control)?;
-        Some(self.keep_controlled(result))
-    }
-
-    fn metadata(
-        &mut self,
-        element: ElementId,
-        kind: crate::GraphElementMetadata,
-        catalog: &crate::ReverseSymbolCatalog,
-        control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>,
-    ) -> Option<Result<Option<GraphValue>, crate::GraphElementMetadataError<Stop>>> {
-        let result = self.read.metadata(element, kind, catalog, control)?;
-        Some(self.keep_controlled(result))
-    }
-}
 
 /// One governed result expression. The evaluator below is type-erased, so one
 /// copy serves every source and control type. Monomorphized per caller it was
@@ -245,10 +166,10 @@ fn governed_expression<'g, E, C>(
     column: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
 ) -> Result<OutputValue<'g>, QueryError<E, C>> {
-    let (mut controlled, mut failed) = (None, None);
+    let (mut controlled, failed) = (None, core::cell::Cell::new(None));
     let mut relay = Relay {
         read: &mut *input.read,
-        failed: &mut failed,
+        failed: &failed,
     };
     let mut erased = ExpressionInput {
         columns: &input.columns as Columns<'_, 'g>,
@@ -268,9 +189,11 @@ fn governed_expression<'g, E, C>(
         GqlQueryError::Interrupted(Stop) => {
             controlled.expect("an erased control stop holds the caller's error")
         }
-        GqlQueryError::Source(error) => GqlQueryError::Source(
-            error.map_source(|Stop| failed.expect("an erased read stop holds the caller's error")),
-        ),
+        GqlQueryError::Source(error) => GqlQueryError::Source(error.map_source(|Stop| {
+            failed
+                .take()
+                .expect("an erased read stop holds the caller's error")
+        })),
         GqlQueryError::Rows(error) => GqlQueryError::Rows(error),
         GqlQueryError::Evaluator(error) => GqlQueryError::Evaluator(error),
         GqlQueryError::IdentifiedEdgesRequired => GqlQueryError::IdentifiedEdgesRequired,

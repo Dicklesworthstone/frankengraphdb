@@ -2092,6 +2092,87 @@ where
     }
 }
 
+/// A caller's control or element-read failure, held in the caller's slot
+/// while a type-erased evaluator unwinds. The evaluators are monomorphized
+/// once over `Stop` instead of once per host error type (fgdb-chkpq).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Stop;
+
+/// Relays every element read to the caller's reader and keeps its error in
+/// `failed`, which the caller's control relay may share.
+pub(crate) struct Relay<'a, 'r, E> {
+    pub(crate) read: &'a mut ElementRead<'r, E>,
+    pub(crate) failed: &'a core::cell::Cell<Option<E>>,
+}
+
+impl<E> Relay<'_, '_, E> {
+    fn keep<T>(&mut self, result: Result<T, E>) -> Result<T, Stop> {
+        result.map_err(|error| {
+            self.failed.set(Some(error));
+            Stop
+        })
+    }
+
+    fn keep_controlled<T>(
+        &mut self,
+        result: Result<T, GraphElementMetadataError<E>>,
+    ) -> Result<T, GraphElementMetadataError<Stop>> {
+        result.map_err(|error| match error {
+            GraphElementMetadataError::Source(error) => {
+                self.failed.set(Some(error));
+                GraphElementMetadataError::Source(Stop)
+            }
+            GraphElementMetadataError::Interrupted => GraphElementMetadataError::Interrupted,
+        })
+    }
+}
+
+impl<E> ElementReader<Stop> for Relay<'_, '_, E> {
+    fn property(
+        &mut self,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, Stop>> {
+        let result = self.read.property(element, key)?;
+        Some(self.keep(result))
+    }
+
+    fn property_for_column(
+        &mut self,
+        column: usize,
+        element: ElementId,
+        key: PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, Stop>> {
+        let result = self.read.property_for_column(column, element, key)?;
+        Some(self.keep(result))
+    }
+
+    fn property_with_control(
+        &mut self,
+        column: Option<usize>,
+        element: ElementId,
+        key: PropertyKeyId,
+        control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, GraphElementPropertyError<Stop>>>
+    {
+        let result = self
+            .read
+            .property_with_control(column, element, key, control)?;
+        Some(self.keep_controlled(result))
+    }
+
+    fn metadata(
+        &mut self,
+        element: ElementId,
+        kind: GraphElementMetadata,
+        catalog: &crate::ReverseSymbolCatalog,
+        control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<Result<Option<GraphValue>, GraphElementMetadataError<Stop>>> {
+        let result = self.read.metadata(element, kind, catalog, control)?;
+        Some(self.keep_controlled(result))
+    }
+}
+
 pub(crate) struct SourceElements<'a, S: ?Sized, E, C> {
     source: &'a mut S,
     marker: std::marker::PhantomData<fn() -> (E, C)>,
@@ -3473,6 +3554,10 @@ projection_evaluator!(
 );
 projection_evaluator!(asynchronous, [async], AsyncSpillElementSource, [+ Send], [+ Sync], evaluate_value_at_inner);
 
+/// The synchronous evaluator, type-erased: one copy serves every host error
+/// type (71 copies, 4.7 MB of a release CLI before). The caller's control or
+/// element-read error comes back exactly as raised; node counts and the row
+/// ordinal flow back to the caller's evaluation.
 fn evaluate_value_at<E>(
     value: &GraphSetValue,
     row: &GraphValueRow,
@@ -3481,8 +3566,37 @@ fn evaluate_value_at<E>(
     depth: usize,
     nodes: &mut Evaluation<'_, '_, E>,
 ) -> Result<GraphValue, ProjectionFailure<E>> {
-    synchronous::evaluate_value_at(value, row, column, control, depth, nodes, &|_| {
-        Ok::<(), E>(())
+    let failed = core::cell::Cell::new(None);
+    let mut relay = Relay {
+        read: &mut *nodes.read,
+        failed: &failed,
+    };
+    let mut erased = EvaluationState {
+        nodes: nodes.nodes,
+        ordinal: nodes.ordinal,
+        read: &mut relay as &mut ElementRead<'_, Stop>,
+    };
+    let mut stop = |event| {
+        control(event).map_err(|error| {
+            failed.set(Some(error));
+            Stop
+        })
+    };
+    let mut stop: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), Stop> = &mut stop;
+    let result =
+        synchronous::evaluate_value_at(value, row, column, &mut stop, depth, &mut erased, &|_| {
+            Ok::<(), Stop>(())
+        });
+    (nodes.nodes, nodes.ordinal) = (erased.nodes, erased.ordinal);
+    result.map_err(|failure| match failure {
+        ProjectionFailure::Control(Stop) => ProjectionFailure::Control(
+            failed
+                .take()
+                .expect("an erased stop holds the caller's error"),
+        ),
+        ProjectionFailure::Arithmetic { column, error } => {
+            ProjectionFailure::Arithmetic { column, error }
+        }
     })
 }
 
