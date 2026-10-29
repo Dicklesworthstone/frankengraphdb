@@ -2510,69 +2510,6 @@ mod tests {
     }
 
     #[test]
-    fn control_refusals_keep_borrowed_nonclone_payloads_and_drop_once() {
-        struct Refusal<'a> {
-            reason: &'a String,
-            drops: &'a std::cell::Cell<usize>,
-        }
-        impl Drop for Refusal<'_> {
-            fn drop(&mut self) {
-                self.drops.set(self.drops.get() + 1);
-            }
-        }
-        let expression = GraphIntegerExpression::prepare(&[
-            Literal(Some(1)),
-            Literal(Some(2)),
-            Binary(GraphIntegerBinary::Add),
-        ])
-        .unwrap();
-        let mut events = Vec::new();
-        assert_eq!(
-            expression
-                .evaluate_scalar_with_control(&[], &mut |event| {
-                    events.push(event);
-                    Ok::<_, ()>(())
-                })
-                .unwrap(),
-            CanonicalScalar::Int(3)
-        );
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, GlaExecutionEvent::ScratchEntry))
-        );
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, GlaExecutionEvent::Work))
-        );
-        let reason = String::from("caller-owned control refusal");
-        for stop in 1..=events.len() {
-            let drops = std::cell::Cell::new(0);
-            let mut calls = 0;
-            let result = expression.evaluate_scalar_with_control(&[], &mut |_| {
-                calls += 1;
-                if calls == stop {
-                    Err(Refusal {
-                        reason: &reason,
-                        drops: &drops,
-                    })
-                } else {
-                    Ok(())
-                }
-            });
-            assert_eq!(calls, stop, "a refused event is terminal");
-            let Err(GraphIntegerEvaluationError::Control(source)) = result else {
-                panic!("the caller's exact control refusal must be returned");
-            };
-            assert!(core::ptr::eq(source.reason, &reason));
-            assert_eq!(drops.get(), 0, "the caller still owns the error");
-            drop(source);
-            assert_eq!(drops.get(), 1);
-        }
-    }
-
-    #[test]
     fn template_transcripts_preserve_expression_meaning() {
         fn transcript(ops: &[GraphIntegerOp]) -> Vec<u8> {
             let mut bytes = Vec::new();

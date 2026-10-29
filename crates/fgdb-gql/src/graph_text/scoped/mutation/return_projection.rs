@@ -4725,49 +4725,6 @@ mod graph_scope_tests {
     }
 
     #[test]
-    fn metadata_row_domains_do_not_revive_shadowed_graph_bindings() {
-        for text in [
-            "MATCH (n) WITH 0 AS n RETURN labels(n)",
-            "MATCH (a)-[r:R]->(b) WITH 0 AS r RETURN type(r)",
-            "MATCH (n) WITH [0] AS n RETURN labels(n)",
-            "MATCH (a)-[r:R]->(b) WITH r AS n RETURN labels(n)",
-            "MATCH (n) WITH n AS r RETURN type(r)",
-        ] {
-            let mut calls = 0;
-            let result = PreparedGraphSetText::prepare(text, |kind, name: &str| {
-                calls += 1;
-                symbols(kind, name)
-            });
-            assert!(result.is_err(), "{text}");
-            assert_eq!(calls, 0, "domain refusal precedes catalog access: {text}");
-        }
-        for (text, expected) in [
-            (
-                "MATCH (n) WITH n AS kept RETURN labels(kept)",
-                vec![GraphSetColumnType::List],
-            ),
-            (
-                "MATCH (a)-[r:R]->(b) WITH r AS kept RETURN type(kept)",
-                vec![GraphSetColumnType::Scalar],
-            ),
-            (
-                "MATCH (n) WITH NULL AS n RETURN labels(n), type(n)",
-                vec![GraphSetColumnType::List, GraphSetColumnType::Scalar],
-            ),
-            (
-                "MATCH (n) WITH collect(n) AS ns UNWIND ns AS n RETURN labels(n)",
-                vec![GraphSetColumnType::List],
-            ),
-            (
-                "MATCH (n) WITH 0 AS n RETURN [n IN [NULL] | labels(n)] AS names",
-                vec![GraphSetColumnType::List],
-            ),
-        ] {
-            check_schema(text, &expected);
-        }
-    }
-
-    #[test]
     fn wildcards_and_implicit_unwind_preserve_named_graph_bindings() {
         for terminal in ["RETURN *", "WITH * RETURN *"] {
             check_schema(

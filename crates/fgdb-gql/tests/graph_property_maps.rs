@@ -21,6 +21,67 @@ const P: PropertyKeyId = PropertyKeyId(1);
 const R: RelationId = RelationId(1);
 type Edge = (EId, VId, RelationId, VId);
 
+#[test]
+fn metadata_row_domains_do_not_revive_shadowed_graph_bindings() {
+    use fgdb_gql::GraphSetColumnType;
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+            _ => None,
+        }
+    }
+
+    for text in [
+        "MATCH (n) WITH 0 AS n RETURN labels(n)",
+        "MATCH (a)-[r:R]->(b) WITH 0 AS r RETURN type(r)",
+        "MATCH (n) WITH [0] AS n RETURN labels(n)",
+        "MATCH (a)-[r:R]->(b) WITH r AS n RETURN labels(n)",
+        "MATCH (n) WITH n AS r RETURN type(r)",
+    ] {
+        let mut calls = 0;
+        let result = PreparedGraphSetText::prepare(text, |kind, name: &str| {
+            calls += 1;
+            symbols(kind, name)
+        });
+        assert!(result.is_err(), "{text}");
+        assert_eq!(calls, 0, "domain refusal precedes catalog access: {text}");
+    }
+    for (text, expected) in [
+        (
+            "MATCH (n) WITH n AS kept RETURN labels(kept)",
+            vec![GraphSetColumnType::List],
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) WITH r AS kept RETURN type(kept)",
+            vec![GraphSetColumnType::Scalar],
+        ),
+        (
+            "MATCH (n) WITH NULL AS n RETURN labels(n), type(n)",
+            vec![GraphSetColumnType::List, GraphSetColumnType::Scalar],
+        ),
+        (
+            "MATCH (n) WITH collect(n) AS ns UNWIND ns AS n RETURN labels(n)",
+            vec![GraphSetColumnType::List],
+        ),
+        (
+            "MATCH (n) WITH 0 AS n RETURN [n IN [NULL] | labels(n)] AS names",
+            vec![GraphSetColumnType::List],
+        ),
+    ] {
+        let prepared = PreparedGraphSetText::prepare(text, symbols).unwrap();
+        assert_eq!(prepared.column_types(), expected, "{text}");
+        assert_eq!(
+            prepared
+                .bind_parameters(&GqlParameters::new())
+                .unwrap()
+                .column_types(),
+            expected,
+            "{text}"
+        );
+    }
+}
+
 enum FixtureRead<'a> {
     Property(PropertyKeyId),
     Metadata {
