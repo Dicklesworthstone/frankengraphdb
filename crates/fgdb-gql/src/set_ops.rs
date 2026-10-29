@@ -31,10 +31,11 @@ pub(crate) use procedure::{
 };
 pub use procedure::{
     GraphElementReader, GraphPatternFactorExecution, GraphProcedureExecution,
-    GraphProcedureRowCursor, GraphSetSource, PreparedProcedureCall, ProcedureGraphDirection,
-    ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
-    ProcedureSelfLoops, WithElementMetadata, WithElementReads, WithProcedureRows, WithProcedures,
-    procedure_row_source, with_element_metadata,
+    GraphProcedureRowCursor, GraphSeeds, GraphSetSource, PreparedProcedureCall,
+    ProcedureGraphDirection, ProcedureGraphProjection, ProcedureGraphWeight,
+    ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops, WithElementMetadata,
+    WithElementReads, WithProcedureRows, WithProcedures, procedure_row_source,
+    with_element_metadata,
 };
 pub(crate) use projection::{
     ElementRead, ProjectionFailure, construct_temporal, evaluate_equality, evaluate_membership,
@@ -1394,7 +1395,7 @@ impl PreparedGraphSet {
             -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         mut seeded: impl FnMut(
             &PreparedGraphPattern<GraphValueRow>,
-            &[fgdb_types::VId],
+            GraphSeeds<'_>,
             GqlQueryPolicy,
         )
             -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>>,

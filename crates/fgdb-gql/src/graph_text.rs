@@ -783,6 +783,15 @@ enum Filter<'a> {
         key: Name<'a>,
         predicate: crate::algebra::ScalarPredicate,
     },
+    /// A node-map value computed from literals and parameters alone, as in
+    /// `{id: toInteger($s)}` (fgdb-2npty). It is evaluated once at bind and
+    /// becomes the exact equality a parameter binds, index probe included.
+    ConstantProperty {
+        variable: Name<'a>,
+        key: Name<'a>,
+        value: Box<crate::set_text::ReadValueTemplate>,
+        at: usize,
+    },
     Null {
         variable: Name<'a>,
         key: Name<'a>,
@@ -1740,6 +1749,9 @@ impl<'a> Parser<'a> {
                 self.read_correlations.push((variable, Some(key), row));
             } else if let Some(predicate) = self.collection_property_operand(variable, key)? {
                 self.syntax.filters.push(predicate);
+            } else if !edge && self.computed_value_follows()? {
+                let predicate = self.constant_property_operand(variable, key)?;
+                self.syntax.filters.push(predicate);
             } else {
                 let at = self.current.at;
                 let predicate = self.property_operand(variable, key, IntegerComparison::Equal)?;
@@ -2279,6 +2291,13 @@ enum BoundFilter {
         comparison: IntegerComparison,
         value: Number,
     },
+    /// Filter::ConstantProperty with its key resolved.
+    ConstantProperty {
+        variable: String,
+        key: PropertyKeyId,
+        value: Box<crate::set_text::ReadValueTemplate>,
+        at: usize,
+    },
     Boolean(boolean::BoundBooleanTemplate),
 }
 #[derive(Clone)]
@@ -2634,6 +2653,17 @@ impl PreparedGraphText {
                     bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
                     bytes.extend_from_slice(&encoded);
                 }
+                BoundFilter::ConstantProperty {
+                    variable,
+                    key,
+                    value,
+                    at: _,
+                } => {
+                    bytes.push(3);
+                    append_name(bytes, variable);
+                    bytes.extend_from_slice(&key.0.to_be_bytes());
+                    value.append_template_transcript(bytes);
+                }
             }
         }
         fn append_scope(bytes: &mut Vec<u8>, scope: &BoundScope) {
@@ -2745,7 +2775,9 @@ impl PreparedGraphText {
         for filter in &self.filters {
             operators.push(match filter {
                 BoundFilter::PathLength { .. } => "FilterPathLength",
-                BoundFilter::Property { .. } => "FilterProperty",
+                BoundFilter::Property { .. } | BoundFilter::ConstantProperty { .. } => {
+                    "FilterProperty"
+                }
                 BoundFilter::Boolean(_) => "FilterBoolean",
             });
         }
@@ -3883,7 +3915,6 @@ mod tests {
             "MATCH (a {n:[1,]}) RETURN a",
             "MATCH (a {n:{n:}}) RETURN a",
             "MATCH (a {n:a.n}) RETURN a",
-            "MATCH (a {n:1+2}) RETURN a",
             "MATCH (a {n:$x}) RETURN a LIMIT $x",
             "MATCH (a {n:'unterminated}) RETURN a",
         ] {
@@ -3899,8 +3930,10 @@ mod tests {
             assert_eq!(calls, 0, "{text}");
         }
         // These exact forms used to refuse. Stored collection equality now
-        // admits them; keep them as executed positives instead of dropping
-        // coverage when extending the literal grammar.
+        // admits them, and a value computed from literals alone binds once as
+        // a constant (`1+2` refused here before fgdb-2npty); keep them as
+        // executed positives instead of dropping coverage when extending the
+        // literal grammar.
         let values = BTreeMap::from([
             (
                 VId(1),
@@ -3927,6 +3960,7 @@ mod tests {
         for (text, expected) in [
             ("MATCH (a {n:[1]}) RETURN a", VId(1)),
             ("MATCH (a {n:{n:1}}) RETURN a", VId(2)),
+            ("MATCH (a {n:0+1}) RETURN a", VId(3)),
         ] {
             let rows = query(text)
                 .plan()

@@ -491,6 +491,22 @@ fn resolve_pattern_with_captures<'a>(
                     ),
                 )?;
             }
+            Filter::ConstantProperty {
+                variable,
+                key,
+                value,
+                at,
+            } => {
+                let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, key)? else {
+                    unreachable!("symbol domain is checked by the shared resolver")
+                };
+                numeric.push(BoundFilter::ConstantProperty {
+                    variable: variable.text.to_owned(),
+                    key,
+                    value,
+                    at,
+                });
+            }
             Filter::Null {
                 variable,
                 key,
@@ -530,6 +546,51 @@ pub(super) fn bind_builder(
                 unreachable!("path length arguments were type-checked at preparation")
             };
             built(at, builder.filter_path_length(variable, *comparison, value))?;
+            continue;
+        }
+        if let BoundFilter::ConstantProperty {
+            variable,
+            key,
+            value,
+            at,
+        } = filter
+        {
+            // Evaluated once here (fgdb-2npty). A scalar is the exact equality
+            // a parameter binds, keeping the index probe; NULL matches
+            // nothing, as `{k: null}` does. A list compares as a list map
+            // value does.
+            match boolean::bind_stored_literal(value, values, *at)? {
+                fgdb_types::CanonicalPropertyValue::Scalar(value) => {
+                    let predicate =
+                        crate::algebra::ScalarPredicate::new(value, IntegerComparison::Equal)
+                            .map_err(|_| error(*at, GraphPatternTextErrorKind::ScalarLiteral))?;
+                    built(
+                        *at,
+                        builder.filter(
+                            variable,
+                            VertexPredicate::ScalarProperty {
+                                key: *key,
+                                predicate,
+                            },
+                        ),
+                    )?;
+                }
+                value => {
+                    use crate::algebra::{
+                        GraphBooleanExpression, GraphBooleanOp, GraphBooleanOperand,
+                    };
+                    let expression = GraphBooleanExpression::prepare(&[GraphBooleanOp::Compare {
+                        left: GraphBooleanOperand::Property {
+                            variable,
+                            key: *key,
+                        },
+                        comparison: IntegerComparison::Equal,
+                        right: GraphBooleanOperand::StoredLiteral(&value),
+                    }])
+                    .map_err(|_| error(*at, GraphPatternTextErrorKind::StoredLiteral))?;
+                    built(*at, builder.filter_boolean(&expression))?;
+                }
+            }
             continue;
         }
         let BoundFilter::Property {
@@ -630,6 +691,7 @@ fn predicate_captures<'a>(
                 Filter::VertexNull { variable, .. }
                 | Filter::Property { variable, .. }
                 | Filter::Scalar { variable, .. }
+                | Filter::ConstantProperty { variable, .. }
                 | Filter::Null { variable, .. } => [Some(*variable), None],
             },
         };

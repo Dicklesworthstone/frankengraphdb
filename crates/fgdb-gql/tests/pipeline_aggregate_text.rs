@@ -6,9 +6,10 @@ use fgdb_gql::{
     GraphAggregate, GraphAggregateColumn, GraphAggregateError, GraphAggregateOrder,
     GraphAggregateRow, GraphAggregateTextSlot, GraphExactAverage, GraphHavingExpression,
     GraphHavingOp, GraphHavingOperand, GraphIntegerBinary, GraphIntegerExpression, GraphIntegerOp,
-    GraphPatternTextErrorKind, GraphPipelineAggregateTextErrorKind, GraphSetExecutionError,
-    GraphSetProjection, GraphSetQuantifier, GraphSetTextErrorKind, GraphSetValue, GraphSymbol,
-    GraphSymbolKind, PreparedGraphAggregate, PreparedGraphPipelineAggregateText, PreparedGraphSet,
+    GraphPatternTextErrorKind, GraphPipelineAggregateTextErrorKind, GraphSeeds,
+    GraphSetExecutionError, GraphSetProjection, GraphSetQuantifier, GraphSetTextErrorKind,
+    GraphSetValue, GraphSymbol, GraphSymbolKind, PreparedGraphAggregate,
+    PreparedGraphPipelineAggregateText, PreparedGraphSet,
 };
 use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 use std::collections::BTreeSet;
@@ -282,7 +283,7 @@ fn leading_identity_bags_keep_the_seeded_source_for_terminal_aggregates() {
             |_, _| panic!("a leading identity equality must not admit the whole graph"),
             |pattern, seeds, remaining| {
                 calls.set(calls.get() + 1);
-                assert_eq!(seeds, &[VId(1)]);
+                assert_eq!(seeds, GraphSeeds::Identities(&[VId(1)]));
                 Some(pattern.plan().execute_governed_with_properties(
                     3,
                     [VId(1), VId(3)],

@@ -2265,10 +2265,13 @@ pub(crate) fn bound_vertices<'a, E, Row>(
                         VertexPredicate::ScalarProperty { key, predicate }
                             if predicate.comparison() == IntegerComparison::Equal =>
                         {
-                            // Equality on a non-integer canonical scalar; a
-                            // stored Null is never an equality candidate.
+                            // Equality on a non-integer canonical scalar. `=
+                            // NULL` is never TRUE, so this conjunction admits
+                            // no vertex: answer without a scan (fgdb-2npty).
+                            // Every prefix Boolean was proven error-free
+                            // above, so no skipped row could have raised.
                             match predicate.value() {
-                                CanonicalScalar::Null => continue,
+                                CanonicalScalar::Null => return Ok(Some((Vec::new(), 0))),
                                 scalar => (*key, scalar.clone()),
                             }
                         }
@@ -4643,6 +4646,42 @@ fn root_endpoint_roles<Row>(
         GlaDirection::Undirected => (first || second, first || second),
     };
     Some((*relation, source, destination))
+}
+
+/// The roots whose `key` property may equal one of `values` (fgdb-2npty):
+/// the union of their exact property postings, a numeric value also seeking
+/// its exact peer in the other canonical numeric domain, as IN membership
+/// does. Historical postings are only candidates; admission at `as_of`
+/// picks the visible rows and the join rechecks the equality, so this is a
+/// superset of the roots that can join. Ascending and distinct.
+pub(super) fn property_seed_roots<E>(
+    snapshot: &Snapshot,
+    key: PropertyKeyId,
+    values: &[CanonicalScalar],
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<Vec<VId>, E> {
+    let mut roots = std::collections::BTreeSet::new();
+    for value in values {
+        control(SourceEvent::Work)?;
+        let peers = match value {
+            CanonicalScalar::Null => continue,
+            CanonicalScalar::Int(_) | CanonicalScalar::Float(_) => {
+                numeric::equality_peers(value).map(|peer| peer.map(Cow::Owned))
+            }
+            value => [Some(Cow::Borrowed(value)), None],
+        };
+        for peer in peers.into_iter().flatten() {
+            control(SourceEvent::Work)?;
+            for vid in snapshot.property_index().lookup(key, peer.as_ref()) {
+                control(SourceEvent::Work)?;
+                if !roots.contains(vid) {
+                    control(SourceEvent::ScratchEntry)?;
+                    roots.insert(*vid);
+                }
+            }
+        }
+    }
+    Ok(roots.into_iter().collect())
 }
 
 /// A plan restricted to the slot-0 identities a leading bag carries

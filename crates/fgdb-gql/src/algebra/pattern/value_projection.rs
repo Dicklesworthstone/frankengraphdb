@@ -220,6 +220,29 @@ impl PreparedGraphPattern<GraphValueRow> {
     /// fail, and no second scan starts elsewhere.
     /// Definition-only, like the factor shape: no allocation or callback.
     pub(crate) fn seeded_root_column(&self) -> Option<usize> {
+        let root = BindingSlot(0);
+        self.seeded_columns()?
+            .iter()
+            .position(|column| matches!(column, ValueProjection::Vertex { slot } if *slot == root))
+    }
+
+    /// The property of this pattern's slot-0 vertex that visible `column`
+    /// projects, under the same single-root shape as `seeded_root_column`
+    /// (fgdb-2npty). Restricting slot 0 to the roots whose property equals a
+    /// leading bag's values keeps exactly the rows that can join on it.
+    pub(crate) fn seeded_root_property(
+        &self,
+        column: usize,
+    ) -> Option<fgdb_delta_types::PropertyKeyId> {
+        match self.seeded_columns()?.get(column)? {
+            ValueProjection::Property { slot, key } if *slot == BindingSlot(0) => Some(*key),
+            _ => None,
+        }
+    }
+
+    /// The visible columns of a pattern whose slot-0 root reaches every other
+    /// binding, as `seeded_root_column` describes; `None` for any other shape.
+    pub(crate) fn seeded_columns(&self) -> Option<&[ValueProjection]> {
         let [
             scan,
             body @ ..,
@@ -257,11 +280,8 @@ impl PreparedGraphPattern<GraphValueRow> {
         {
             return None;
         }
-        let root = BindingSlot(0);
         let visible = self.logical.visible_columns.unwrap_or(columns.len());
-        columns[..visible]
-            .iter()
-            .position(|column| matches!(column, ValueProjection::Vertex { slot } if *slot == root))
+        Some(&columns[..visible])
     }
 
     /// Prove the native visitation order for a vertex or uncaptured one-edge

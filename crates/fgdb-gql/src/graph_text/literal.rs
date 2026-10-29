@@ -387,6 +387,38 @@ impl<'a> Parser<'a> {
         ))))
     }
 
+    /// A map value longer than one literal or parameter, such as
+    /// `toInteger($s)` or `$a + 1` (fgdb-2npty): a function call, or a
+    /// literal or parameter that an operator continues before the next `,`
+    /// or `}`. Ingestion computes keys this way from row text. A bare name
+    /// keeps its existing refusal. Lexical lookahead only: nothing is
+    /// consumed or registered.
+    pub(in crate::graph_text) fn computed_value_follows(
+        &self,
+    ) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        let consumed = match self.current.kind {
+            TokenKind::Word(_) => {
+                return Ok(matches!(lexer.next()?.kind, TokenKind::Punct(b'(')));
+            }
+            // Map and list literals keep their own admission and refusals.
+            TokenKind::Parameter(_)
+            | TokenKind::Digits(_)
+            | TokenKind::Quoted(_)
+            | TokenKind::Punct(b'-' | b'.') => match self.scan_float_literal()? {
+                Some((_, consumed)) => consumed,
+                None if self.is_punct(b'-') => 2,
+                None => 1,
+            },
+            _ => return Ok(false),
+        };
+        let mut next = self.current;
+        for _ in 0..consumed {
+            next = lexer.next()?;
+        }
+        Ok(!matches!(next.kind, TokenKind::Punct(b',' | b'}')))
+    }
+
     /// The text of the float literal at the current token and how many
     /// tokens it spans, without consuming any.
     pub(in crate::graph_text) fn scan_float_literal(

@@ -459,3 +459,199 @@ fn authorized_on_clause_write_cannot_be_hidden_by_a_trailing_overwrite() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// fgdb-2npty: a MATCH or MERGE key computed from row text, as ingestion
+/// writes it (`{id: toInteger(row.s)}`, `{id: row.a + 1}`), is a bind-time
+/// constant probed like a precomputed field. 400 vertices sit behind a
+/// 50-record allowance, which one scan exceeds; the WHERE spelling, not
+/// covered yet, is the control that refuses there.
+#[test]
+fn computed_keys_probe_the_property_index_below_one_scan() {
+    let ((), report) = run_async_under_lab(0x5c73_2a7f, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        for id in 1..=400_i64 {
+            batch.create_vertex(
+                VId(id as u128),
+                vec![PERSON],
+                vec![(ID, Scalar::Int(id)), (COUNT, Scalar::Int(0))],
+            );
+        }
+        db.write(&commit, batch).await.unwrap();
+        let field = |name: &str, value: Scalar| {
+            GraphValue::map(vec![(name.into(), GraphValue::Scalar(value))]).unwrap()
+        };
+        let text = |value: &str| Scalar::ucs_basic_text(value).unwrap();
+        let batch =
+            |values: Vec<GraphValue>| GqlParameters::new().with_list("rows", values).unwrap();
+        let tight = GraphWriteProgramPolicy::new(
+            GqlQueryPolicy::new(50, 20_000, 2_000_000, 2_000_000),
+            100,
+            10,
+            0,
+        );
+        let mut allocations = 0_u128;
+        let total = |db: &Database<MemVfs>| -> i64 {
+            (1..=400)
+                .map(|id| match scalar(db, VId(id), COUNT) {
+                    Scalar::Int(count) => count,
+                    other => panic!("integer count, got {other:?}"),
+                })
+                .sum()
+        };
+        for (statement, rows, policy) in [
+            (
+                "UNWIND $rows AS row MATCH (n:Person {id: toInteger(row.s)}) SET n.count = 1",
+                vec![field("s", text("5")), field("s", text("17"))],
+                tight,
+            ),
+            (
+                "UNWIND $rows AS row MATCH (n:Person {id: row.a + 1}) SET n.count = 2",
+                vec![field("a", Scalar::Int(29))],
+                tight,
+            ),
+            (
+                "UNWIND $rows AS row MERGE (n:Person {id: toInteger(row.s)}) SET n.count = 3",
+                vec![field("s", text("7")), field("s", text("900"))],
+                tight,
+            ),
+        ] {
+            db.query_write(
+                &txn,
+                &query,
+                &commit,
+                statement,
+                &batch(rows),
+                symbols,
+                R,
+                policy,
+                |_| {
+                    allocations += 1;
+                    Ok::<_, ()>(ElementId::Vertex(VId(1_000 + allocations)))
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+        }
+        assert_eq!(scalar(&db, VId(5), COUNT), Scalar::Int(1));
+        assert_eq!(scalar(&db, VId(17), COUNT), Scalar::Int(1));
+        assert_eq!(scalar(&db, VId(30), COUNT), Scalar::Int(2));
+        assert_eq!(scalar(&db, VId(7), COUNT), Scalar::Int(3));
+        // MERGE created exactly the one missing key, with its computed id.
+        assert_eq!(allocations, 1);
+        assert_eq!(scalar(&db, VId(1_001), ID), Scalar::Int(900));
+        assert_eq!(scalar(&db, VId(1_001), COUNT), Scalar::Int(3));
+        assert_eq!(total(&db), 1 + 1 + 2 + 3);
+
+        // toInteger('x') is NULL: MATCH binds nothing. (The write overlay
+        // still scans for a NULL key, as for a NULL parameter, so this runs
+        // under the ordinary allowance; the read below needs no scan.)
+        let unparsable = batch(vec![field("s", text("x"))]);
+        db.query_write(
+            &txn,
+            &query,
+            &commit,
+            "UNWIND $rows AS row MATCH (n:Person {id: toInteger(row.s)}) SET n.count = 4",
+            &unparsable,
+            symbols,
+            R,
+            program_policy(100),
+            |_| Err::<ElementId, _>(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(total(&db), 7);
+        // MERGE refuses a NULL key and creates nothing.
+        assert!(
+            db.query_write(
+                &txn,
+                &query,
+                &commit,
+                "UNWIND $rows AS row MERGE (n:Person {id: toInteger(row.s)}) SET n.count = 4",
+                &unparsable,
+                symbols,
+                R,
+                program_policy(100),
+                |_| Err::<ElementId, _>(()),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(db.vertices().unwrap().len(), 401);
+
+        // The allowance is below one scan: the WHERE spelling refuses there
+        // and answers the same under the ordinary allowance.
+        let where_form =
+            "UNWIND $rows AS row MATCH (n:Person) WHERE n.id = toInteger(row.s) SET n.count = 9";
+        let five = batch(vec![field("s", text("5"))]);
+        assert!(
+            db.query_write(
+                &txn,
+                &query,
+                &commit,
+                where_form,
+                &five,
+                symbols,
+                R,
+                tight,
+                |_| { Err::<ElementId, _>(()) }
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(scalar(&db, VId(5), COUNT), Scalar::Int(1));
+        db.query_write(
+            &txn,
+            &query,
+            &commit,
+            where_form,
+            &five,
+            symbols,
+            R,
+            program_policy(100),
+            |_| Err::<ElementId, _>(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(scalar(&db, VId(5), COUNT), Scalar::Int(9));
+
+        // A read keyed by a computed parameter expression probes too.
+        let fgdb::QueryResult::Rows { rows, .. } = db
+            .query(
+                &query,
+                "MATCH (n:Person {id: toInteger($s) + 13}) RETURN n.count AS c",
+                &GqlParameters::new().with_text("s", "4").unwrap(),
+                symbols,
+                GqlQueryPolicy::new(5, 100, 100_000, 100_000),
+            )
+            .unwrap()
+        else {
+            panic!("a read returns rows")
+        };
+        assert_eq!(
+            rows,
+            [vec![fgdb::QueryValue::Value(GraphValue::Scalar(
+                Scalar::Int(1)
+            ))]]
+        );
+        // `= NULL` is never TRUE: the read answers nothing without a scan,
+        // within a one-record allowance.
+        let fgdb::QueryResult::Rows { rows, .. } = db
+            .query(
+                &query,
+                "MATCH (n:Person {id: toInteger($s)}) RETURN n.count AS c",
+                &GqlParameters::new().with_text("s", "x").unwrap(),
+                symbols,
+                GqlQueryPolicy::new(1, 100, 100_000, 100_000),
+            )
+            .unwrap()
+        else {
+            panic!("a read returns rows")
+        };
+        assert!(rows.is_empty());
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

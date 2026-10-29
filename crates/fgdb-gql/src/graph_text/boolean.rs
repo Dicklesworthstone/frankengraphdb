@@ -93,7 +93,7 @@ fn admit_literal_template(
     visit(template, parameters, &mut remaining)
 }
 
-fn bind_stored_literal(
+pub(super) fn bind_stored_literal(
     template: &crate::set_text::ReadValueTemplate,
     parameters: &[GqlParameterValue],
     at: usize,
@@ -219,6 +219,43 @@ impl<'a> Parser<'a> {
             }],
             at,
         }))
+    }
+
+    /// A node-map value computed from literals and parameters alone
+    /// (computed_value_follows): one value-language template, admitted as a
+    /// constant here and evaluated once at bind (fgdb-2npty).
+    pub(super) fn constant_property_operand(
+        &mut self,
+        variable: Name<'a>,
+        key: Name<'a>,
+    ) -> Result<Filter<'a>, GraphPatternTextError> {
+        let at = self.current.at;
+        let refused = || {
+            error(
+                at,
+                GraphPatternTextErrorKind::Expected("literal or typed parameter in node map"),
+            )
+        };
+        let value = self.read_row_value(&[], 0).map_err(|source| {
+            error(
+                source.offset,
+                match source.kind {
+                    crate::GraphSetTextErrorKind::Pattern(kind) => kind,
+                    _ => GraphPatternTextErrorKind::Expected(
+                        "literal or typed parameter in node map",
+                    ),
+                },
+            )
+        })?;
+        if !admit_literal_template(&value, None) {
+            return Err(refused());
+        }
+        Ok(Filter::ConstantProperty {
+            variable,
+            key,
+            value: Box::new(value),
+            at,
+        })
     }
 
     pub(super) fn boolean_predicates(&mut self) -> Result<bool, GraphPatternTextError> {
@@ -1440,6 +1477,16 @@ impl BoundBooleanTemplate {
                     },
                     Filter::Boolean { .. } => {
                         return Err(error(at, GraphPatternTextErrorKind::BooleanExpression));
+                    }
+                    // Only a node map writes one, and a node's map binds at
+                    // its own pattern, never inside a Boolean program.
+                    Filter::ConstantProperty { at, .. } => {
+                        return Err(error(
+                            at,
+                            GraphPatternTextErrorKind::Expected(
+                                "literal or typed parameter in relationship map",
+                            ),
+                        ));
                     }
                     // Path predicates bind only at the root scope (see
                     // scoped::predicate_captures); a Boolean program refuses them.

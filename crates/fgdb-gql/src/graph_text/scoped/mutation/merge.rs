@@ -305,13 +305,15 @@ impl<'a> Parser<'a> {
     }
 
     /// One MERGE map value: a non-null literal or a parameter, as both the
-    /// exact-equality filter and the creation field.
+    /// exact-equality filter and the creation field. A list, or a value
+    /// computed from literals and parameters alone, is evaluated once at
+    /// bind and its result is used the same way.
     fn merge_property_value(
         &mut self,
         lists: bool,
     ) -> Result<(Option<Number>, VertexMergeValueTemplate), MergeMapError> {
         let at = self.current.at;
-        if lists && self.set_value_is_list()? {
+        if (lists && self.set_value_is_list()?) || self.computed_value_follows()? {
             return Ok((
                 None,
                 VertexMergeValueTemplate::Stored {

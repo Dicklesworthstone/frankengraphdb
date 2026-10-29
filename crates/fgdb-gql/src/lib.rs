@@ -232,7 +232,7 @@ pub use set_ops::row_filter;
 pub use set_ops::{
     GqlTimeZones, GraphElementKey, GraphElementMetadata, GraphElementMetadataError,
     GraphElementPropertyError, GraphElementReader, GraphListQuantifier,
-    GraphPatternFactorExecution, GraphProcedureExecution, GraphProcedureRowCursor,
+    GraphPatternFactorExecution, GraphProcedureExecution, GraphProcedureRowCursor, GraphSeeds,
     GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError, GraphSetFilterError,
     GraphSetOperand, GraphSetOperation, GraphSetPredicateOp, GraphSetProjection,
     GraphSetProjectionError, GraphSetQuantifier, GraphSetRowPull, GraphSetSource, GraphSetValue,

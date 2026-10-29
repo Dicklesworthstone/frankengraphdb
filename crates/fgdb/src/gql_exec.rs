@@ -407,14 +407,15 @@ fn execute_pattern_at<R: GqlSnapshotReader + ?Sized, C, Row: GlaOutput>(
 }
 
 /// [`execute_pattern_at`] for a pattern whose one vertex root a leading bag
-/// binds by identity (fgdb-2acff): with `seeds`, a single-root plan admits
-/// only those roots by point lookup. Other shapes, and a reader without a
+/// binds (fgdb-2acff, fgdb-2npty): with `seeds`, a single-root plan admits
+/// only those roots by point lookup, property seeds first becoming the roots
+/// their property postings name. Other shapes, and a reader without a
 /// borrowed snapshot, admit as before; their rows are a superset the set
-/// executor's identity join narrows, exactly as for the unseeded leaf.
+/// executor's equality join narrows, exactly as for the unseeded leaf.
 pub(crate) fn execute_seeded_pattern_at<R: GqlSnapshotReader + ?Sized, C, Row: GlaOutput>(
     reader: &R,
     pattern: &PreparedGraphPattern<Row>,
-    seeds: Option<&[VId]>,
+    seeds: Option<fgdb_gql::GraphSeeds<'_>>,
     as_of: CommitSeq,
     policy: fgdb_gql::GqlQueryPolicy,
     mut checkpoint: impl FnMut() -> Result<(), C>,
@@ -423,13 +424,30 @@ pub(crate) fn execute_seeded_pattern_at<R: GqlSnapshotReader + ?Sized, C, Row: G
     let mut admitted = AdmittedGqlSnapshot::admit_logical(pattern.plan().clone(), reader, as_of)
         .map_err(GqlError::Read)
         .map_err(fgdb_gql::GqlQueryError::Source)?;
-    admitted.seeds = seeds.map(Box::from);
+    admitted.seeds = seeds.map(|seeds| match seeds {
+        fgdb_gql::GraphSeeds::Identities(roots) => AdmissionSeeds::Identities(Box::from(roots)),
+        fgdb_gql::GraphSeeds::Property { key, values } => AdmissionSeeds::Property {
+            key,
+            values: Box::from(values),
+        },
+    });
     admitted
         .execute_governed(policy, checkpoint)
         .map_err(|error| error.map_source(GqlError::Read))
 }
 fn as_of_for_view(view: &EmbeddedReadView) -> CommitSeq {
     view.frontier()
+}
+
+/// The roots an admission restricts slot 0 to, owned for the admission's
+/// life: identities a leading bag binds (fgdb-2acff), or the values of one
+/// root property it joins on (fgdb-2npty).
+enum AdmissionSeeds {
+    Identities(Box<[VId]>),
+    Property {
+        key: PropertyKeyId,
+        values: Box<[CanonicalScalar]>,
+    },
 }
 
 /// One exact reader/sequence/plan and its admitted source. Output shape changes
@@ -440,8 +458,8 @@ pub(crate) struct AdmittedGqlSnapshot<'a, R: ?Sized, Row = VId> {
     logical: GlaPlan<Row>,
     snapshot: Option<&'a Snapshot>,
     borrowed: Option<source::BorrowedTables<'a>>,
-    /// Root identities a leading bag binds (fgdb-2acff); see admit_seeded.
-    seeds: Option<Box<[VId]>>,
+    /// The roots a leading bag binds (fgdb-2acff, fgdb-2npty); see admit_seeded.
+    seeds: Option<AdmissionSeeds>,
     vertices: BTreeMap<VId, VertexRow>,
     edges: Vec<EdgeRecord>,
     snapshot_records: u64,
@@ -514,9 +532,13 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
         if self.borrowed.is_none()
             && let Some(snapshot) = self.snapshot
         {
-            let seeded = match self.seeds.as_deref() {
-                Some(seeds) => {
+            let seeded = match &self.seeds {
+                Some(AdmissionSeeds::Identities(seeds)) => {
                     source::admit_seeded(snapshot, &self.logical, self.as_of, seeds, control)?
+                }
+                Some(AdmissionSeeds::Property { key, values }) => {
+                    let seeds = source::property_seed_roots(snapshot, *key, values, control)?;
+                    source::admit_seeded(snapshot, &self.logical, self.as_of, &seeds, control)?
                 }
                 None => None,
             };

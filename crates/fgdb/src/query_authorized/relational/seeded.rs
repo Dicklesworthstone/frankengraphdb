@@ -14,11 +14,17 @@ pub(super) fn pattern_at<Clock: FnMut() -> u64>(
     snapshot: &Arc<Snapshot>,
     at: CommitSeq,
     pattern: &PreparedGraphPattern<GraphValueRow>,
-    seeds: &[VId],
+    seeds: fgdb_gql::GraphSeeds<'_>,
     scope: &PlannerPredicates,
     execution: &RefCell<Execution<'_, '_, Clock>>,
     policy: GqlQueryPolicy,
 ) -> Option<Governed<GraphValueRow>> {
+    // Property seeds stay unseeded here (fgdb-2npty): postings of a property
+    // the scope hides would decide which roots are admitted and charged, so
+    // hidden data would change the native work (FG-INV-20).
+    let fgdb_gql::GraphSeeds::Identities(seeds) = seeds else {
+        return None;
+    };
     let (root, rest) = pattern.plan().operators().split_first()?;
     let steps = match root {
         GlaOperator::ScanVertices => source::bound_edge_steps(rest, 1)?,

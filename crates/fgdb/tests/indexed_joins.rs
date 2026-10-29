@@ -406,3 +406,151 @@ fn filtered_closing_constraints_keep_phantom_and_rejected_vertex_dependencies() 
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// fgdb-2npty: `UNWIND $rows AS row MATCH (a {id: row.id})` admits only the
+/// roots whose `id` posting a row value names, not every vertex. 401
+/// vertices sit behind an allowance of 20 records, so a scan refuses; the
+/// generous answer is the semantic oracle at every step.
+#[test]
+fn row_keyed_property_matches_admit_only_the_posted_roots() {
+    use fgdb::{QueryResult, QueryValue};
+    use fgdb_gql::algebra::GraphValue;
+    const NODE: fgdb_delta_types::LabelId = fgdb_delta_types::LabelId(1);
+    const ID: PropertyKeyId = PropertyKeyId(2);
+    const X: PropertyKeyId = PropertyKeyId(3);
+    fn names(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+            (GraphSymbolKind::Label, "Node") => Some(GraphSymbol::Label(NODE)),
+            (GraphSymbolKind::Property, "id") => Some(GraphSymbol::Property(ID)),
+            (GraphSymbolKind::Property, "x") => Some(GraphSymbol::Property(X)),
+            _ => None,
+        }
+    }
+    fn int(value: i64) -> GraphValue {
+        GraphValue::Scalar(CanonicalScalar::Int(value))
+    }
+    fn rows(ids: Vec<Option<GraphValue>>) -> GqlParameters {
+        let rows = ids
+            .into_iter()
+            .map(|id| GraphValue::map(id.map(|id| ("id".into(), id)).into_iter().collect()))
+            .collect::<Option<Vec<_>>>()
+            .unwrap();
+        GqlParameters::new().with_list("rows", rows).unwrap()
+    }
+    fn xs(result: QueryResult) -> Vec<i64> {
+        let QueryResult::Rows { rows, .. } = result else {
+            panic!("a read returns rows")
+        };
+        rows.into_iter()
+            .map(|row| match row.as_slice() {
+                [QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(x)))] => *x,
+                other => panic!("one integer column, got {other:?}"),
+            })
+            .collect()
+    }
+    let ((), report) = run_async_under_lab(0x10a1_2a7f, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        for id in 1..=400_i64 {
+            batch.create_vertex(
+                VId(id as u128),
+                vec![NODE],
+                vec![
+                    (ID, CanonicalScalar::Int(id)),
+                    (X, CanonicalScalar::Int(id * 10)),
+                ],
+            );
+        }
+        // A list-valued key no scalar posting names.
+        let list = fgdb_types::CanonicalList::try_new(vec![
+            CanonicalScalar::Int(1).into(),
+            CanonicalScalar::Int(2).into(),
+        ])
+        .unwrap();
+        batch.create_vertex_values(
+            VId(401),
+            vec![NODE],
+            vec![
+                (ID, CanonicalPropertyValue::List(list)),
+                (
+                    X,
+                    CanonicalPropertyValue::Scalar(CanonicalScalar::Int(4010)),
+                ),
+            ],
+        );
+        for id in 1..400_u128 {
+            batch.add_edge(EId(id), VId(id), VId(id + 1), vec![]);
+        }
+        db.write(&commit, batch).await.unwrap();
+        // Vertex 7's id moves on: its id = 7 posting stays, as history.
+        let mut change = WriteBatch::new(R);
+        change.set_vertex_property(VId(7), ID, Some(CanonicalScalar::Int(700)));
+        db.write(&commit, change).await.unwrap();
+
+        let tight = GqlQueryPolicy::new(20, 1000, 1_000_000, 1_000_000);
+        let float = |value: f64| {
+            GraphValue::Scalar(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(value)))
+        };
+        let text =
+            |value: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(value).unwrap());
+        let vertex = "UNWIND $rows AS row MATCH (a:Node {id: row.id}) RETURN a.x AS x ORDER BY x";
+        let edge = "UNWIND $rows AS row MATCH (a:Node {id: row.id})-[:R]->(b) \
+            RETURN b.x AS x ORDER BY x";
+        for (statement, ids, expected) in [
+            // A duplicate row joins twice.
+            (
+                vertex,
+                vec![Some(int(3)), Some(int(5)), Some(int(5)), Some(int(400))],
+                vec![30, 50, 50, 4000],
+            ),
+            // Equality spans the numeric domains; a fraction names no id.
+            (vertex, vec![Some(float(3.0)), Some(float(2.5))], vec![30]),
+            // NULL and a missing field match nothing; text never equals Int.
+            (
+                vertex,
+                vec![
+                    Some(GraphValue::Scalar(CanonicalScalar::Null)),
+                    None,
+                    Some(text("9")),
+                    Some(int(9)),
+                ],
+                vec![90],
+            ),
+            // The id = 7 posting is history: vertex 7 now answers to 700.
+            (vertex, vec![Some(int(7)), Some(int(700))], vec![70]),
+            // No row names a root: nothing is admitted, nothing returned.
+            (vertex, vec![Some(int(1_000))], vec![]),
+            // An edge-rooted pattern walks from the posted roots only.
+            (edge, vec![Some(int(3)), Some(int(5))], vec![40, 60]),
+        ] {
+            let params = rows(ids);
+            let reference = xs(db.query(&cx, statement, &params, names, policy()).unwrap());
+            assert_eq!(reference, expected, "{statement}");
+            assert_eq!(
+                xs(db.query(&cx, statement, &params, names, tight).unwrap()),
+                expected,
+                "{statement}: the seeded read fits a 20-record allowance"
+            );
+        }
+        // The allowance is below one scan: an unkeyed correlation refuses.
+        let unkeyed = "UNWIND $rows AS row MATCH (a:Node) WHERE a.x > row.id RETURN a.x AS x";
+        let params = rows(vec![Some(int(4_005))]);
+        assert_eq!(
+            xs(db.query(&cx, unkeyed, &params, names, policy()).unwrap()),
+            [4010]
+        );
+        assert!(db.query(&cx, unkeyed, &params, names, tight).is_err());
+        // A list row may equal a stored list, which no scalar posting names,
+        // so seeding declines and the read keeps the scan. (The set predicate
+        // IR equates no two composites yet, so the scan's answer is not
+        // pinned here; fgdb-2npty notes the gap.)
+        let params = rows(vec![Some(GraphValue::List(Box::new([int(1), int(2)])))]);
+        db.query(&cx, vertex, &params, names, policy()).unwrap();
+        assert!(db.query(&cx, vertex, &params, names, tight).is_err());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
