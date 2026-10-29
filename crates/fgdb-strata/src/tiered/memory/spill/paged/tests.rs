@@ -126,6 +126,125 @@ fn read(file: &mut SpillFile<File>, run: &PagedSpillRun) -> Vec<u8> {
 }
 
 #[test]
+fn suspended_writer_keeps_its_charged_frontier_and_authenticates_interleaved_runs() {
+    let pool = MemoryPool::new(65_536, 0).unwrap();
+    let mut scratch = file(pool.clone());
+    let mut writer = scratch.paged_writer_inner(4).unwrap();
+    complete(writer.write_inner(b"abcdefghijklmnopqrs", &mut || Ok(()))).unwrap();
+    let charge = pool.used();
+    let paused = writer.suspend_inner().unwrap();
+    assert_eq!(pool.used(), charge);
+    assert!(!scratch.io_pending);
+    assert_eq!(scratch.stats.reserved_runs, 1);
+    assert_eq!(scratch.stats.published_runs, 0);
+
+    let child = append(&mut scratch, b"child result with another page size", 7, 3);
+    complete(scratch.append_inner(b"independent ordinary run", || Ok(()))).unwrap();
+    assert_eq!(pool.used(), charge);
+    assert_eq!(
+        read(&mut scratch, &child),
+        b"child result with another page size"
+    );
+    let before = scratch.stats;
+    let mut writer = paused.resume_inner(&mut scratch).unwrap();
+    assert_eq!(writer.scratch.stats, before);
+    complete(writer.write_inner(b"tuvwxyz0123456789", &mut || Ok(()))).unwrap();
+    let outer = complete(writer.finish_inner(&mut || Ok(()))).unwrap();
+    assert_eq!(pool.used(), 0);
+    assert_eq!(scratch.stats.reserved_runs, 3);
+    assert_eq!(scratch.stats.published_runs, 3);
+    assert_eq!(
+        read(&mut scratch, &outer),
+        b"abcdefghijklmnopqrstuvwxyz0123456789"
+    );
+    assert_eq!(
+        read(&mut scratch, &child),
+        b"child result with another page size"
+    );
+    // A sibling's bytes are outside the parent's authenticated tree, even
+    // though they lie between its first and last append coordinates.
+    scratch.file.data.get_mut()[child.start as usize] ^= 1;
+    assert_eq!(
+        read(&mut scratch, &outer),
+        b"abcdefghijklmnopqrstuvwxyz0123456789"
+    );
+    assert!(matches!(
+        complete(scratch.restore_page_inner(&child, 0, || Ok(()))),
+        Err(SpillError::ChecksumMismatch)
+    ));
+}
+
+#[test]
+fn abandoning_paused_writer_releases_memory_without_refunding_attempts_or_extents() {
+    let pool = MemoryPool::new(32_768, 0).unwrap();
+    let mut scratch = file(pool.clone());
+    scratch.limits.max_runs = 1;
+    let mut writer = scratch.paged_writer_inner(4).unwrap();
+    complete(writer.write_inner(b"first partial result", &mut || Ok(()))).unwrap();
+    let paused = writer.suspend_inner().unwrap();
+    let before = scratch.stats;
+    assert!(pool.used() > 0);
+    drop(paused);
+    assert_eq!(pool.used(), 0);
+    assert_eq!(scratch.stats, before);
+    assert!(!scratch.io_pending);
+    assert_eq!(scratch.stats.published_runs, 0);
+    assert!(matches!(
+        scratch.paged_writer_inner(4),
+        Err(SpillError::RunLimit { limit: 1 })
+    ));
+}
+
+#[test]
+fn suspended_writer_cannot_transfer_authority_to_another_file() {
+    let pool = MemoryPool::new(32_768, 0).unwrap();
+    let mut original = file(pool.clone());
+    let mut other = file(pool.clone());
+    let paused = original
+        .paged_writer_inner(4)
+        .unwrap()
+        .suspend_inner()
+        .unwrap();
+    assert!(matches!(
+        paused.resume_inner(&mut other),
+        Err(SpillError::ForeignRun)
+    ));
+    assert_eq!(pool.used(), 0);
+    assert_eq!(original.stats.reserved_runs, 1);
+    assert_eq!(other.stats.reserved_runs, 0);
+    assert!(!original.io_pending && !other.io_pending);
+}
+
+#[test]
+fn failed_or_abandoned_pending_writes_cannot_be_unfenced_by_suspension() {
+    for pending in [false, true] {
+        let pool = MemoryPool::new(32_768, 0).unwrap();
+        let mut scratch = file(pool.clone());
+        scratch.file.pending_write = pending;
+        scratch.file.write_limit = Some(0);
+        let mut writer = scratch.paged_writer_inner(4).unwrap();
+        {
+            let mut checkpoint = || Ok(());
+            let mut write = std::pin::pin!(writer.write_inner(b"abcd", &mut checkpoint));
+            let result = write.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+            if pending {
+                assert!(result.is_pending());
+            } else {
+                assert!(matches!(result, Poll::Ready(Err(SpillError::Io(_)))));
+            }
+        }
+        assert!(matches!(
+            writer.suspend_inner(),
+            Err(SpillError::PoisonedFile)
+        ));
+        assert!(scratch.io_pending);
+        assert_eq!(scratch.stats.reserved_runs, 1);
+        assert_eq!(scratch.stats.published_runs, 0);
+        assert_eq!(pool.used(), 0);
+    }
+}
+
+#[test]
 fn paged_runs_exceed_resident_memory_and_need_only_a_logarithmic_proof_per_read() {
     let pool = MemoryPool::new(WRITER_METADATA + 1024, 0).unwrap();
     let mut scratch = file(pool.clone());

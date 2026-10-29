@@ -936,11 +936,24 @@ impl PreparedGraphWriteChainText {
         // One write is a chain only as a vertex MERGE over a leading UNWIND
         // or MATCH (`UNWIND [1, 2] AS x MERGE (n {id: x}) RETURN n`, `MATCH
         // (p:Person) MERGE (c:City {name: p.bornIn})`), or as a relationship
-        // MERGE whose ON/SET clauses read or write the MATCH row (fgdb-at06q).
+        // MERGE whose ON/SET clauses read or write the MATCH row, or over the
+        // rows of a leading UNWIND or WITH and a MATCH (fgdb-at06q).
         let unwound_merge = matches!(steps.as_slice(), [ChainTextStep::VertexMerge(merge)]
             if matches!(merge.input, crate::mutation_text::VertexMergeRowsTextInput::Relation(_)));
+        let leading_rows = matches!(
+            script::next_script_token(&mut Lexer {
+                text: body,
+                at: 0,
+                tokens: 0,
+            })?
+            .kind,
+            TokenKind::Word(word)
+                if word.eq_ignore_ascii_case("UNWIND") || word.eq_ignore_ascii_case("WITH")
+        );
         let row_actions = matches!(steps.as_slice(), [ChainTextStep::EdgeMerge(merge)]
-            if merge.0.row_actions.is_some());
+            if merge.0.row_actions.is_some()
+                || (leading_rows
+                    && matches!(merge.0.input, crate::mutation_text::EdgeMergeTextInput::Row { .. })));
         if steps.len() < 2 && !unwound_merge && !row_actions && read.is_none() {
             return Err(expected(body.len(), "another write after the first").into());
         }
