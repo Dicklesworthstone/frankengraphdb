@@ -295,7 +295,6 @@ fn prepared_map_fields_keep_keyed_ordered_sources_with_rebound_values() {
                 ],
             ),
             (Some(1), vec![vec![GraphValue::Vertex(VId(2))]]),
-            (None, vec![]),
         ] {
             let mut cursor = ordered
                 .execute_ordered(&cx, &prepared, &arguments(key))
@@ -306,6 +305,25 @@ fn prepared_map_fields_keep_keyed_ordered_sources_with_rebound_values() {
             drop(cursor);
             assert_eq!(pool.used(), 0);
         }
+        // A missing field rebinds as NULL, and `p = NULL` has no keyed source
+        // (vertex_stream.rs with_root_equality_predicates), so its label scan
+        // is checked where the scan fits: it matches no row.
+        let (mut wide, _, _) = session(&db, &cx, &issuer, &token, &pool, || 100, limits()).await;
+        let unkeyed = wide
+            .prepare(
+                &cx,
+                "MATCH (n:L {p: $m.key}) RETURN n AS id ORDER BY id DESC",
+                &arguments(Some(3)),
+            )
+            .unwrap();
+        let mut cursor = wide
+            .execute_ordered(&cx, &unkeyed, &arguments(None))
+            .unwrap()
+            .await
+            .unwrap();
+        assert_eq!(values(&mut cursor).await, Vec::<Vec<GraphValue>>::new());
+        drop(cursor);
+        assert_eq!(pool.used(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

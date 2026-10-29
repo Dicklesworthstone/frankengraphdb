@@ -223,7 +223,7 @@ mod tests {
     use super::*;
     use fgdb_gql::algebra::{
         GraphBooleanExpression, GraphBooleanOp as BooleanOp, GraphBooleanOperand as Operand,
-        GraphPatternBuilder, IntegerComparison,
+        GraphColumn, GraphPatternBuilder, IntegerComparison,
     };
     use fgdb_gql::stream::VertexScanPlan;
     use fgdb_strata::vertex::{VertexPatchRows, VertexRow, decode_patch, encode_patch};
@@ -262,7 +262,12 @@ mod tests {
         let mut builder = GraphPatternBuilder::new();
         builder.vertex("n").unwrap();
         builder.filter_boolean(&expression).unwrap();
-        let pattern = builder.prepare("n", 0, None).unwrap();
+        // A property-reading filter needs a value projection: the identity
+        // projection refuses RequiresValueProjection (fgdb-gql
+        // vertex_stream_filters property_sensitive_filters_keep_the_legacy_projection_refusal).
+        let pattern = builder
+            .prepare_values(&[GraphColumn::vertex("node", "n")], 0, None)
+            .unwrap();
         VertexScanPlan::compile(pattern.plan())
             .unwrap()
             .leading_root_membership()

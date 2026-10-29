@@ -102,7 +102,9 @@ pub(super) struct Token {
 
 /// Every live call a successful build made, in order and run-length coded.
 /// Over a single-version snapshot it is a handful of runs: one per poll and
-/// admission pattern, not one per record.
+/// admission pattern, not one per record. Edges a retained overlay index
+/// serves are the exception: their cursor charges its actual tree descent
+/// (a0f6c8101), so neighbouring edges rarely share a run.
 #[derive(Debug, Default)]
 pub(crate) struct Tape {
     pub(super) runs: Vec<(Token, u32)>,

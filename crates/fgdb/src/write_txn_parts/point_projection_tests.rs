@@ -23,8 +23,10 @@ async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx) {
         batch.create_vertex(
             VId(id),
             vec![LabelId(1), LabelId(2)],
+            // fgdb-e26tv: a created NULL is absent, so the removals below
+            // need a present value to remove.
             vec![
-                (P, CanonicalScalar::Null),
+                (P, CanonicalScalar::Bool(false)),
                 (Q, CanonicalScalar::Int(7)),
                 (LARGE, CanonicalScalar::bytes(vec![0x35; 8_192]).unwrap()),
             ],
@@ -43,7 +45,7 @@ async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx) {
         EId(u128::MAX),
         VId(1),
         VId(2),
-        vec![(P, CanonicalScalar::Null)],
+        vec![(P, CanonicalScalar::Bool(false))],
     );
     db.write(cx, batch).await.unwrap();
 }
@@ -133,16 +135,14 @@ fn projected_fields_match_canonical_rows_through_noops_cascades_and_rollback() {
         txn.write(&mut db, changes).unwrap();
         compare_with_full_rows(&txn, &db);
         assert_eq!(txn.vertex_property(&db, VId(1), P).unwrap(), None);
-        assert_eq!(
-            txn.edge_property(&db, EId(0), Q).unwrap(),
-            Some(CanonicalScalar::Null.into())
-        );
+        // fgdb-e26tv: assigning NULL removes the seeded Int(8).
+        assert_eq!(txn.edge_property(&db, EId(0), Q).unwrap(), None);
         assert_eq!(txn.edge_property(&db, EId(u128::MAX), P).unwrap(), None);
         txn.rollback_to_savepoint(&db, "before").unwrap();
         compare_with_full_rows(&txn, &db);
         assert_eq!(
             txn.edge_property(&db, EId(u128::MAX), P).unwrap(),
-            Some(CanonicalScalar::Null.into())
+            Some(CanonicalScalar::Bool(false).into())
         );
         txn.abort();
         assert_eq!(txcx.outstanding_obligations(), 0);

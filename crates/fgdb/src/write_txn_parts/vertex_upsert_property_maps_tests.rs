@@ -83,7 +83,12 @@ fn merge_property_map_masks_borrowed_history_and_hidden_staged_edits_before_char
         let mut observations = Vec::new();
         for hidden in [false, true] {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-            let mut fields = vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Null)];
+            // fgdb-e26tv: a created NULL is absent, so the staged removal
+            // below needs a present value to remove and rollback to restore.
+            let mut fields = vec![
+                (P, CanonicalScalar::Int(1)),
+                (Q, CanonicalScalar::Bool(false)),
+            ];
             if hidden {
                 fields.push((HIDDEN, CanonicalScalar::bytes(vec![0x71; 2_048]).unwrap()));
             }
@@ -95,7 +100,7 @@ fn merge_property_map_masks_borrowed_history_and_hidden_staged_edits_before_char
             assert_eq!(
                 before.0.as_ref().unwrap(),
                 &map(&[
-                    ("alpha", GraphValue::Scalar(CanonicalScalar::Null)),
+                    ("alpha", GraphValue::Scalar(CanonicalScalar::Bool(false))),
                     ("zeta", int(1))
                 ])
             );

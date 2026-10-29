@@ -446,6 +446,16 @@ fn prepared_map_fields_rebind_inside_the_original_authority_and_snapshot() {
                 &initial,
             )
             .unwrap();
+        // A row stream needs a leading vertex identity: a property-only
+        // projection sorts and refuses as Plan (fgdb-gql stream/output.rs;
+        // native_read_view pins that refusal).
+        let streamed = session
+            .prepare(
+                &cx,
+                "AT BRANCH $route MATCH (n:L {p: $m.key}) RETURN n AS id, n.p AS p",
+                &initial,
+            )
+            .unwrap();
         assert_eq!(
             prepared.parameter_schema(),
             &[fgdb_gql::GqlParameterSpec {
@@ -472,15 +482,21 @@ fn prepared_map_fields_rebind_inside_the_original_authority_and_snapshot() {
                 session.execute(&cx, &prepared, &args).unwrap(),
                 expected(visible)
             );
+            // Only p = 30 is visible, on VId(3).
             let values = visible
-                .map(|value| vec![vec![GraphValue::Scalar(CanonicalScalar::Int(value))]])
+                .map(|value| {
+                    vec![vec![
+                        GraphValue::Vertex(VId(3)),
+                        GraphValue::Scalar(CanonicalScalar::Int(value)),
+                    ]]
+                })
                 .unwrap_or_default();
             assert_eq!(
-                read_values(session.stream(&cx, &prepared, &args).unwrap()),
+                read_values(session.stream(&cx, &streamed, &args).unwrap()),
                 values
             );
             assert_eq!(
-                read_values(session.stream_send(&cx, &prepared, &args).unwrap()),
+                read_values(session.stream_send(&cx, &streamed, &args).unwrap()),
                 values
             );
             let mut cursor = session.stream_aggregate(&cx, &aggregate, &args).unwrap();

@@ -240,9 +240,15 @@ fn retrieved_dynamic_metadata_masks_before_naming_and_restores_original_errors()
         let prepared = missing
             .prepare(&c.query(), &query, &parameters_at_prepare)
             .unwrap();
+        // A metadata catalog miss is the set statement's source error, as on
+        // every other metadata host (graph_property_maps pins the plain one).
         assert!(matches!(
             missing.execute_beacon_index(&c.query(), &index, &prepared, &parameters_at_prepare),
-            Err(QueryError::Read(crate::ReadError::UnmappedProperty(NAME)))
+            Err(QueryError::Set(fgdb_gql::GqlQueryError::Source(
+                fgdb_gql::GraphSetExecutionError::Source(crate::GqlError::Read(
+                    crate::ReadError::UnmappedProperty(NAME)
+                ))
+            )))
         ));
         // The private carrier error never escapes and never poisons later
         // statements: the missing property name is irrelevant to labels.

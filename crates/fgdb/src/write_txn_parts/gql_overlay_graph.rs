@@ -1792,23 +1792,28 @@ mod query_source {
                 ),
             ];
             let updated = CanonicalPropertyValue::Scalar(CanonicalScalar::Bool(false));
-            let added = CanonicalPropertyValue::Scalar(CanonicalScalar::Null);
+            let added = CanonicalPropertyValue::Scalar(CanonicalScalar::Int(10));
+            // fgdb-e26tv: a staged NULL is a removal, skipped before naming
+            // or charges, so this unmapped key is never consulted.
+            let null = CanonicalPropertyValue::Scalar(CanonicalScalar::Null);
             let mut vertex = VertexView::new(&[], &properties);
             vertex
                 .property_edits
                 .insert(PropertyKeyId(1), Some(&updated));
             vertex.property_edits.insert(PropertyKeyId(2), None);
             vertex.property_edits.insert(PropertyKeyId(3), Some(&added));
+            vertex.property_edits.insert(PropertyKeyId(5), Some(&null));
             let mut edge = EdgeView::new(&properties);
             edge.edits.insert(PropertyKeyId(1), Some(&updated));
             edge.edits.insert(PropertyKeyId(2), None);
             edge.edits.insert(PropertyKeyId(3), Some(&added));
+            edge.edits.insert(PropertyKeyId(5), Some(&null));
             let mut catalog = fgdb_gql::ReverseSymbolCatalog::new();
             catalog.insert_property(PropertyKeyId(1), "updated");
             catalog.insert_property(PropertyKeyId(3), "added");
             catalog.insert_property(PropertyKeyId(4), "kept");
             let expected = GraphValue::map(vec![
-                ("added".into(), GraphValue::Scalar(CanonicalScalar::Null)),
+                ("added".into(), GraphValue::Scalar(CanonicalScalar::Int(10))),
                 ("kept".into(), GraphValue::Scalar(CanonicalScalar::Int(9))),
                 (
                     "updated".into(),

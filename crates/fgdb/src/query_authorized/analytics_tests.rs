@@ -403,7 +403,8 @@ fn a_tape_replays_every_live_call_of_its_build_in_order() {
 }
 
 /// Over a single-version graph the tape is a handful of runs however many
-/// records it admits: the retained cost is the projection, not the tape.
+/// records it admits, unless a retained overlay index charges each edge's
+/// actual descent: then at most one run per overlay edge more.
 #[test]
 fn a_single_version_tape_is_constant_size() {
     let ((), report) = run_async_under_lab(0x0b7b_0002, |root| async move {
@@ -423,24 +424,41 @@ fn a_single_version_tape_is_constant_size() {
         let issuer = issuer();
         let token = issuer.issue_at(&open(), 100).unwrap();
         let verified = issuer.verify_at(&token, BRANCH, 100).unwrap();
-        let tape = RefCell::new(Tape::default());
         let mut options = options(Directedness::Directed);
         options.source_limits.max_work_units = 10_000_000;
-        build(
-            &db.snapshot,
-            SnapshotBinding {
-                root: db.snapshot.root.0,
-                as_of: db.frontier().unwrap(),
-            },
-            options,
-            verified.predicates(),
-            Some(&tape),
-            || Ok(()),
-            |_| Ok(()),
-        )
-        .unwrap();
-        let tape = tape.into_inner().finish();
-        assert!(tape.runs.len() <= 12, "{:?}", tape.runs);
+        // a0f6c8101: a retained index charges its cursor's actual descent.
+        // Over the persistent overlay (here every edge, extended by the one
+        // write) that is a tree-shaped poll count per edge, so its runs do not
+        // merge; the raw merge and the flat base keep one pattern per kind.
+        assert!(
+            db.snapshot.adjacency.get().is_some(),
+            "the write extended the index"
+        );
+        let flat = crate::gql_exec::source::AdjacencyIndex::build(&db.snapshot.blocks);
+        for (adjacency, max_runs) in [
+            (std::sync::OnceLock::new(), 12),
+            (std::sync::OnceLock::from(Arc::new(flat)), 12),
+            (db.snapshot.adjacency.clone(), 12 + 400),
+        ] {
+            let mut snapshot = (*db.snapshot).clone();
+            snapshot.adjacency = adjacency;
+            let tape = RefCell::new(Tape::default());
+            build(
+                &snapshot,
+                SnapshotBinding {
+                    root: snapshot.root.0,
+                    as_of: db.frontier().unwrap(),
+                },
+                options,
+                verified.predicates(),
+                Some(&tape),
+                || Ok(()),
+                |_| Ok(()),
+            )
+            .unwrap();
+            let tape = tape.into_inner().finish();
+            assert!(tape.runs.len() <= max_runs, "{:?}", tape.runs);
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -640,6 +658,23 @@ fn kernel_runs_admit_and_refuse_at_the_per_unit_threshold() {
 /// run. Compare with explicit signed-then-native unit charges, including both
 /// counters, partial deferred runs and the live control transcript. When the
 /// native allowance admits the run, it still receives one bulk observation.
+/// An interruption's Debug text carries the runtime's process-wide
+/// correlation counter, which no two runs share; every other field of
+/// the outcome is compared as printed.
+fn outcome(debug: String) -> String {
+    const KEY: &str = "correlation_id: Some(";
+    let mut out = String::with_capacity(debug.len());
+    let mut rest = debug.as_str();
+    while let Some(at) = rest.find(KEY) {
+        out.push_str(&rest[..at]);
+        out.push_str("correlation_id: _");
+        let tail = &rest[at + KEY.len()..];
+        rest = tail.find(')').map_or("", |end| &tail[end + 1..]);
+    }
+    out.push_str(rest);
+    out
+}
+
 #[test]
 fn kernel_bulk_work_preserves_crossed_allowance_refusals_and_control_prefixes() {
     #[derive(Clone, Copy, Debug)]
@@ -660,23 +695,6 @@ fn kernel_bulk_work_preserves_crossed_allowance_refusals_and_control_prefixes() 
         run_left: u64,
         polls: usize,
         clock_reads: usize,
-    }
-
-    /// An interruption's Debug text carries the runtime's process-wide
-    /// correlation counter, which no two runs share; every other field of
-    /// the outcome is compared as printed.
-    fn outcome(debug: String) -> String {
-        const KEY: &str = "correlation_id: Some(";
-        let mut out = String::with_capacity(debug.len());
-        let mut rest = debug.as_str();
-        while let Some(at) = rest.find(KEY) {
-            out.push_str(&rest[..at]);
-            out.push_str("correlation_id: _");
-            let tail = &rest[at + KEY.len()..];
-            rest = tail.find(')').map_or("", |end| &tail[end + 1..]);
-        }
-        out.push_str(rest);
-        out
     }
 
     struct ObservedUsage<'a> {
@@ -1561,7 +1579,7 @@ fn direct_gql_rows_match_collected_rows_and_every_authorized_refusal_prefix() {
                             .map(|row| row.canonical_bytes().unwrap())
                             .collect::<Vec<_>>()
                     })
-                    .map_err(|error| format!("{error:?}"));
+                    .map_err(|error| outcome(format!("{error:?}")));
                 (encoded, probe.calls(), clock_reads.get())
             };
             let expected = run(false, &token, None);

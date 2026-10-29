@@ -814,6 +814,14 @@ fn indexed_decoded_projection_preserves_historical_properties_and_complete_certi
         changes.set_edge_property(EId(100), PropertyKeyId(1), Some(CanonicalScalar::Int(3)));
         changes.delete_edge(EId(300));
         db.write(&commit, changes).await.unwrap();
+        // A created database publishes with a built adjacency index that every
+        // commit extends; a checkpoint reopen starts this handle cold.
+        let vfs = db.vfs.clone();
+        let path = db.path().to_path_buf();
+        drop(db);
+        let mut db = Database::<MemVfs>::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
         let view = db.read_session().unwrap();
         assert!(view.snapshot.adjacency.get().is_none());
         let call = dijkstra_call();
@@ -905,7 +913,12 @@ fn indexed_decoded_projection_limits_charge_cursor_scratch_and_all_selected_edge
             }
         }
         db.write(&commit, batch).await.unwrap();
-        let view = db.read_session().unwrap();
+        // A created database publishes with a built adjacency index that every
+        // commit extends; a checkpoint read view starts cold.
+        let view =
+            Database::<MemVfs>::open_read_view_with_vfs(&commit, db.vfs.clone(), db.path(), keys())
+                .await
+                .unwrap();
         let mut opts = FnxReadOptions::whole_graph(Some(view.frontier()));
         let expected = decoded_projection(&view, &query, view.frontier(), opts).unwrap();
         opts.source_limits.max_scratch_entries = 32;

@@ -605,7 +605,9 @@ fn frozen_unwind_keeps_entry_matches_masked_fields_and_durable_receipts() {
         scope.labels = Scope::only([L]);
         scope.properties = Scope::only([P, Q]);
         let token = authority.issue_at(&scope, NOW).unwrap();
-        let result = db
+        // 7b77fb839: a frozen selection never freezes a graph-reading right
+        // side; that feedback refuses at binding, before anything is staged.
+        let error = db
             .query_write_authorized(
                 &txn,
                 &query,
@@ -615,6 +617,32 @@ fn frozen_unwind_keeps_entry_matches_masked_fields_and_durable_receipts() {
                 "main",
                 "UNWIND $rows AS row MATCH (n {p:row.a}) \
                  SET n.p=row.b, n.q=CASE WHEN n.secret IS NULL THEN 42 ELSE 0 END",
+                &update_rows(&[(1, 2), (2, 3)]),
+                symbols,
+                R,
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Fault::UnwindBinding(
+                fgdb_gql::unwind_write::GraphUnwindWriteError::RowFeedsLaterMatch { statement: 0 }
+            )
+        ));
+        assert_eq!(db.frontier().unwrap(), before);
+        // The masked field is read by the frozen selection instead.
+        let result = db
+            .query_write_authorized(
+                &txn,
+                &query,
+                &commit,
+                &authority,
+                &token,
+                "main",
+                "UNWIND $rows AS row MATCH (n {p:row.a}) WHERE n.secret IS NULL \
+                 SET n.p=row.b, n.q=42",
                 &update_rows(&[(1, 2), (2, 3)]),
                 symbols,
                 R,

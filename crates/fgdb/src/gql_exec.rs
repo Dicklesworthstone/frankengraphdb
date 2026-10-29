@@ -1112,9 +1112,11 @@ mod admission_meter_tests {
                 vec![LabelId(1)],
                 vec![
                     (key, CanonicalScalar::Int(11)),
+                    // Encoded under the 16 KiB per-row ceiling (eb4bf6ec):
+                    // 16,384 payload bytes encode to an 18,541-byte row.
                     (
                         PropertyKeyId(2),
-                        CanonicalScalar::bytes(vec![0x5a; 16_384]).unwrap(),
+                        CanonicalScalar::bytes(vec![0x5a; 8_192]).unwrap(),
                     ),
                 ],
             );
