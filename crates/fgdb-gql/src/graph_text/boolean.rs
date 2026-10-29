@@ -170,6 +170,10 @@ struct Parsed<'a> {
     /// each an edge and its admitted types. Valid only as top-level AND
     /// conjuncts, as labels are.
     relations: Vec<(Name<'a>, Vec<Name<'a>>)>,
+    /// `v.k = <constant>` leaves (fgdb-2npty): the program index of each
+    /// Expression item and the root equality it lowers to when the whole
+    /// predicate stays flat. Otherwise the Expression stays as written.
+    constants: Vec<(usize, Filter<'a>)>,
 }
 impl<'a> Parsed<'a> {
     fn push(&mut self, item: SyntaxItem<'a>, at: usize) -> Result<(), GraphPatternTextError> {
@@ -258,6 +262,79 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// `v.k = <value>`, or `<value> = v.k`, where `v` is this pattern's
+    /// vertex and the value reads only literals and parameters through
+    /// unary conversions and binary arithmetic (fgdb-2npty): the root
+    /// equality `(v {k: <value>})` makes. The postfix program must split
+    /// into the one column, one complete value and the final `=`. Any shape
+    /// the conservative arity table below cannot prove stays an Expression.
+    fn constant_equality(
+        &self,
+        columns: &[(Name<'a>, Option<Name<'a>>)],
+        program: &[crate::mutation_text::MutationIntegerTemplateOp],
+        at: usize,
+    ) -> Option<Filter<'a>> {
+        use crate::GraphIntegerOp as Op;
+        use crate::mutation_text::MutationIntegerTemplateOp as Template;
+        let [(variable, Some(key))] = columns else {
+            return None;
+        };
+        if !self
+            .syntax
+            .variables
+            .iter()
+            .any(|name| name.text == variable.text)
+            || self.syntax.visible_edge(variable.text).is_some()
+        {
+            return None;
+        }
+        let (Template::Bound(Op::Compare(IntegerComparison::Equal)), body) =
+            program.split_last()?
+        else {
+            return None;
+        };
+        let column =
+            |op: &Template| matches!(op, Template::Bound(Op::Column(0) | Op::ScalarColumn(0)));
+        let value = match body {
+            [first, rest @ ..] if column(first) => rest,
+            [rest @ .., last] if column(last) => rest,
+            _ => return None,
+        };
+        let mut depth = 0_usize;
+        for op in value {
+            let pops = match op {
+                Template::Parameter { .. }
+                | Template::ParameterField { .. }
+                | Template::Bound(Op::Literal(_) | Op::Scalar(_)) => 0,
+                Template::Bound(
+                    Op::ToInteger
+                    | Op::ToText
+                    | Op::ToBoolean
+                    | Op::Upper
+                    | Op::Lower
+                    | Op::Trim
+                    | Op::Unary(_),
+                ) => 1,
+                Template::Bound(Op::Binary(_)) => 2,
+                _ => return None,
+            };
+            depth = depth.checked_sub(pops)? + 1;
+        }
+        if depth != 1 {
+            return None;
+        }
+        let value = crate::set_text::ReadValueTemplate::Integer {
+            program: value.to_vec(),
+            at,
+        };
+        admit_literal_template(&value, None).then(|| Filter::ConstantProperty {
+            variable: *variable,
+            key: *key,
+            value: Box::new(value),
+            at,
+        })
+    }
+
     pub(super) fn boolean_predicates(&mut self) -> Result<bool, GraphPatternTextError> {
         let at = self.current.at;
         let mut parsed = Parsed {
@@ -267,6 +344,7 @@ impl<'a> Parser<'a> {
             comparisons: Vec::new(),
             labels: Vec::new(),
             relations: Vec::new(),
+            constants: Vec::new(),
         };
         self.boolean_or(0, &mut parsed)?;
         if let Some(&(variable, _)) = parsed.labels.first() {
@@ -337,10 +415,17 @@ impl<'a> Parser<'a> {
         if !parsed.extended {
             // This is the old AND-only profile, not a migration to a different
             // predicate order, cache or transcript merely because syntax grew.
-            for item in parsed.program {
+            let mut constants = parsed.constants.into_iter().peekable();
+            for (index, item) in parsed.program.into_iter().enumerate() {
                 match item {
                     SyntaxItem::Atom(filter) => self.syntax.filters.push(filter),
                     SyntaxItem::And => {}
+                    SyntaxItem::Expression { .. }
+                        if constants.peek().is_some_and(|(at, _)| *at == index) =>
+                    {
+                        let (_, filter) = constants.next().expect("peeked constant leaf");
+                        self.syntax.filters.push(filter);
+                    }
                     _ => unreachable!("extended syntax sets its marker during parsing"),
                 }
             }
@@ -464,7 +549,12 @@ impl<'a> Parser<'a> {
         if self.starts_scalar_predicate()? {
             self.admit_compound_leaf()?;
             let (columns, program) = self.boolean_scalar_expression()?;
-            parsed.extended = true;
+            // A flat `v.k = <constant>` keeps the index probe a node map's
+            // computed value has (fgdb-2npty); anything else is extended.
+            match self.constant_equality(&columns, &program, at) {
+                Some(filter) => parsed.constants.push((parsed.program.len(), filter)),
+                None => parsed.extended = true,
+            }
             return parsed.push(SyntaxItem::Expression { columns, program }, at);
         }
         if self.is_word("NOT") && !self.boolean_word_is_variable()? {

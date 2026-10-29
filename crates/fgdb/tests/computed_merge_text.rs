@@ -462,9 +462,10 @@ fn authorized_on_clause_write_cannot_be_hidden_by_a_trailing_overwrite() {
 
 /// fgdb-2npty: a MATCH or MERGE key computed from row text, as ingestion
 /// writes it (`{id: toInteger(row.s)}`, `{id: row.a + 1}`), is a bind-time
-/// constant probed like a precomputed field. 400 vertices sit behind a
-/// 50-record allowance, which one scan exceeds; the WHERE spelling, not
-/// covered yet, is the control that refuses there.
+/// constant probed like a precomputed field, as is a flat WHERE equality
+/// on one. 400 vertices sit behind a 50-record allowance, which one scan
+/// exceeds; a column-fed key and an equality under OR are the controls
+/// that refuse there.
 #[test]
 fn computed_keys_probe_the_property_index_below_one_scan() {
     let ((), report) = run_async_under_lab(0x5c73_2a7f, |root| async move {
@@ -581,61 +582,105 @@ fn computed_keys_probe_the_property_index_below_one_scan() {
         );
         assert_eq!(db.vertices().unwrap().len(), 401);
 
-        // The allowance is below one scan: the WHERE spelling refuses there
-        // and answers the same under the ordinary allowance.
-        let where_form =
-            "UNWIND $rows AS row MATCH (n:Person) WHERE n.id = toInteger(row.s) SET n.count = 9";
-        let five = batch(vec![field("s", text("5"))]);
-        assert!(
+        // A flat WHERE equality probes like the map, mirrored or beside
+        // another conjunct.
+        for (statement, rows) in [
+            (
+                "UNWIND $rows AS row MATCH (n:Person) WHERE n.id = toInteger(row.s) SET n.count = 9",
+                vec![field("s", text("5"))],
+            ),
+            (
+                "UNWIND $rows AS row MATCH (n:Person) WHERE row.a + 1 = n.id AND n.count = 0 \
+                 SET n.count = 9",
+                vec![field("a", Scalar::Int(40))],
+            ),
+        ] {
             db.query_write(
                 &txn,
                 &query,
                 &commit,
-                where_form,
-                &five,
+                statement,
+                &batch(rows),
                 symbols,
                 R,
                 tight,
-                |_| { Err::<ElementId, _>(()) }
+                |_| Err::<ElementId, _>(()),
             )
             .await
-            .is_err()
-        );
-        assert_eq!(scalar(&db, VId(5), COUNT), Scalar::Int(1));
-        db.query_write(
-            &txn,
-            &query,
-            &commit,
-            where_form,
-            &five,
-            symbols,
-            R,
-            program_policy(100),
-            |_| Err::<ElementId, _>(()),
-        )
-        .await
-        .unwrap();
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+        }
         assert_eq!(scalar(&db, VId(5), COUNT), Scalar::Int(9));
+        assert_eq!(scalar(&db, VId(41), COUNT), Scalar::Int(9));
 
-        // A read keyed by a computed parameter expression probes too.
-        let fgdb::QueryResult::Rows { rows, .. } = db
-            .query(
+        // The allowance is below one scan: a key the column itself feeds, or
+        // an equality under OR, stays a residual filter and refuses there,
+        // and answers the same under the ordinary allowance.
+        let six = batch(vec![field("s", text("6"))]);
+        for control in [
+            "UNWIND $rows AS row MATCH (n:Person) WHERE n.id + 0 = toInteger(row.s) SET n.count = 8",
+            "UNWIND $rows AS row MATCH (n:Person) WHERE n.id = toInteger(row.s) OR n.id = 0 \
+             SET n.count = 8",
+        ] {
+            let before = scalar(&db, VId(6), COUNT);
+            assert!(
+                db.query_write(
+                    &txn,
+                    &query,
+                    &commit,
+                    control,
+                    &six,
+                    symbols,
+                    R,
+                    tight,
+                    |_| Err::<ElementId, _>(()),
+                )
+                .await
+                .is_err(),
+                "{control}"
+            );
+            assert_eq!(scalar(&db, VId(6), COUNT), before, "{control}");
+            db.query_write(
+                &txn,
                 &query,
-                "MATCH (n:Person {id: toInteger($s) + 13}) RETURN n.count AS c",
-                &GqlParameters::new().with_text("s", "4").unwrap(),
+                &commit,
+                control,
+                &six,
                 symbols,
-                GqlQueryPolicy::new(5, 100, 100_000, 100_000),
+                R,
+                program_policy(100),
+                |_| Err::<ElementId, _>(()),
             )
-            .unwrap()
-        else {
-            panic!("a read returns rows")
-        };
-        assert_eq!(
-            rows,
-            [vec![fgdb::QueryValue::Value(GraphValue::Scalar(
-                Scalar::Int(1)
-            ))]]
-        );
+            .await
+            .unwrap_or_else(|error| panic!("{control}: {error:?}"));
+            assert_eq!(scalar(&db, VId(6), COUNT), Scalar::Int(8), "{control}");
+        }
+
+        // A read keyed by a computed parameter expression probes too, in
+        // the map or in WHERE.
+        for statement in [
+            "MATCH (n:Person {id: toInteger($s) + 13}) RETURN n.count AS c",
+            "MATCH (n:Person) WHERE n.id = toInteger($s) + 13 RETURN n.count AS c",
+        ] {
+            let fgdb::QueryResult::Rows { rows, .. } = db
+                .query(
+                    &query,
+                    statement,
+                    &GqlParameters::new().with_text("s", "4").unwrap(),
+                    symbols,
+                    GqlQueryPolicy::new(5, 100, 100_000, 100_000),
+                )
+                .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+            else {
+                panic!("a read returns rows")
+            };
+            assert_eq!(
+                rows,
+                [vec![fgdb::QueryValue::Value(GraphValue::Scalar(
+                    Scalar::Int(1)
+                ))]],
+                "{statement}"
+            );
+        }
         // `= NULL` is never TRUE: the read answers nothing without a scan,
         // within a one-record allowance.
         let fgdb::QueryResult::Rows { rows, .. } = db
