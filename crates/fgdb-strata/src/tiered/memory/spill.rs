@@ -18,7 +18,7 @@
 
 mod paged;
 mod stream;
-pub use paged::{PagedSpillRun, PagedSpillWriter};
+pub use paged::{PagedSpillRun, PagedSpillWriter, PausedPagedSpillWriter};
 
 use core::fmt;
 use std::io::{self, SeekFrom};

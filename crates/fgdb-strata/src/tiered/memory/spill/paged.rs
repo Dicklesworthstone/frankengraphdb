@@ -156,7 +156,7 @@ impl fmt::Debug for PagedSpillRun {
     }
 }
 
-/// Exclusively borrows the scratch file until finish/drop. Any failed write,
+/// Exclusively borrows the scratch file until finish/suspend/drop. Any failed write,
 /// unwind or abandoned writer is terminal and fences the file. There is no
 /// observable partial run. Buffered bytes and merge-frontier memory are charged
 /// to the file's existing pool; the producer's own allocations are separate.
@@ -170,6 +170,67 @@ pub struct PagedSpillWriter<'a, F> {
     filled: usize,
     pages: u64,
     failed: bool,
+}
+
+/// A quiescent, unfinished run whose file may serve another bounded operator.
+/// The charged page and authenticated merge frontier stay owned here. This is
+/// neither a readable run nor a cloneable checkpoint: only the original file
+/// can resume it, and all attempted runs and reserved bytes remain charged.
+pub struct PausedPagedSpillWriter {
+    owner: Arc<()>,
+    buffer: TrackedBytes,
+    frontier: [Option<PageNode>; LEVELS],
+    id: u64,
+    start: u64,
+    len: usize,
+    filled: usize,
+    pages: u64,
+}
+
+impl PausedPagedSpillWriter {
+    /// Reacquire the original, quiescent file without allocating another page
+    /// or reserving another run attempt. Child runs may have appended meanwhile;
+    /// later pages use the current append frontier and retain this run's id.
+    pub fn resume<'a, F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
+        self,
+        cx: &QueryCx,
+        scratch: &'a mut SpillFile<F>,
+    ) -> Result<PagedSpillWriter<'a, F>, SpillError> {
+        cx.with_restriction(|| {
+            cx.checkpoint().map_err(SpillError::Interrupted)?;
+            self.resume_inner(scratch)
+        })
+    }
+
+    fn resume_inner<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
+        self,
+        scratch: &mut SpillFile<F>,
+    ) -> Result<PagedSpillWriter<'_, F>, SpillError> {
+        if scratch.io_pending {
+            return Err(SpillError::PoisonedFile);
+        }
+        if !Arc::ptr_eq(&self.owner, &scratch.owner) {
+            return Err(SpillError::ForeignRun);
+        }
+        if self.id == 0
+            || self.id > scratch.stats.reserved_runs
+            || self.start > scratch.stats.reserved_bytes
+        {
+            return Err(SpillError::InvalidRun);
+        }
+        scratch.io_pending = true;
+        Ok(PagedSpillWriter {
+            scratch,
+            buffer: self.buffer,
+            frontier: self.frontier,
+            id: self.id,
+            start: self.start,
+            len: self.len,
+            filled: self.filled,
+            pages: self.pages,
+            failed: false,
+        })
+    }
 }
 
 impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> SpillFile<F> {
@@ -348,6 +409,34 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> PagedSpillWriter<'_, F> {
     }
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    /// Release the file only between successfully completed writes. No flush,
+    /// publication, refund or I/O occurs; an abandoned paused run simply drops
+    /// its charged memory. A failed/cancelled write cannot be made reusable by
+    /// suspension, and dropping an active writer still fences its file.
+    pub fn suspend(self, cx: &QueryCx) -> Result<PausedPagedSpillWriter, SpillError> {
+        cx.with_restriction(|| {
+            cx.checkpoint().map_err(SpillError::Interrupted)?;
+            self.suspend_inner()
+        })
+    }
+
+    fn suspend_inner(self) -> Result<PausedPagedSpillWriter, SpillError> {
+        if self.failed {
+            return Err(SpillError::PoisonedFile);
+        }
+        self.scratch.io_pending = false;
+        Ok(PausedPagedSpillWriter {
+            owner: Arc::clone(&self.scratch.owner),
+            buffer: self.buffer,
+            frontier: self.frontier,
+            id: self.id,
+            start: self.start,
+            len: self.len,
+            filled: self.filled,
+            pages: self.pages,
+        })
     }
 
     /// Append an arbitrary fragment. Fragment boundaries do not change page
