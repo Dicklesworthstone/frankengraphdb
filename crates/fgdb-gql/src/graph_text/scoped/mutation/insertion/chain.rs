@@ -938,26 +938,16 @@ impl PreparedGraphWriteChainText {
         // One write is a chain only as a vertex MERGE over a leading UNWIND
         // or MATCH (`UNWIND [1, 2] AS x MERGE (n {id: x}) RETURN n`, `MATCH
         // (p:Person) MERGE (c:City {name: p.bornIn})`), or as a relationship
-        // MERGE whose ON/SET clauses read or write the MATCH row, or over the
-        // rows of a leading UNWIND or WITH and a MATCH (fgdb-at06q).
+        // MERGE is_chain claims: one whose ON/SET clauses read or write the
+        // row, one over a WITH row, a multipart read or a leading UNWIND or
+        // WITH (fgdb-at06q), or one that introduces an endpoint (fgdb-de6mf).
+        // TCK Merge5 [16], [17] (`MATCH (n) WITH n AS a, n AS b MERGE
+        // (a)-[r:T]->(b) RETURN a.id`) refused here once is_chain claimed
+        // every relationship MERGE after a WITH.
         let unwound_merge = matches!(steps.as_slice(), [ChainTextStep::VertexMerge(merge)]
             if matches!(merge.input, crate::mutation_text::VertexMergeRowsTextInput::Relation(_)));
-        let leading_rows = matches!(
-            script::next_script_token(&mut Lexer {
-                text: body,
-                at: 0,
-                tokens: 0,
-            })?
-            .kind,
-            TokenKind::Word(word)
-                if word.eq_ignore_ascii_case("UNWIND") || word.eq_ignore_ascii_case("WITH")
-        );
-        let row_actions = matches!(steps.as_slice(), [ChainTextStep::EdgeMerge(merge)]
-            if merge.0.row_actions.is_some()
-                || !merge.0.unbound.is_empty()
-                || (leading_rows
-                    && matches!(merge.0.input, crate::mutation_text::EdgeMergeTextInput::Row { .. })));
-        if steps.len() < 2 && !unwound_merge && !row_actions && read.is_none() {
+        let edge_merge = matches!(steps.as_slice(), [ChainTextStep::EdgeMerge(_)]);
+        if steps.len() < 2 && !unwound_merge && !edge_merge && read.is_none() {
             return Err(expected(body.len(), "another write after the first").into());
         }
         let chain = Self {

@@ -3537,6 +3537,88 @@ fn relationship_merge_maps_read_the_row() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// A lone relationship MERGE over a WITH row runs as the statement's one
+/// write (TCK Merge5 [16], [17]). is_chain claims every relationship MERGE
+/// after a WITH (fgdb-de6mf), and the chain preparer refused it with
+/// "expected another write after the first" until it admitted a single
+/// relationship MERGE step. A rerun matches every edge the first run made.
+#[test]
+fn a_lone_relationship_merge_over_with_aliases_is_one_write() {
+    let ((), report) = run_async_under_lab(0x1a5e_a717, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let write = async |db: &mut Database<MemVfs>, text: &str| {
+            let (mut vertices, mut edges) = reserve(db, &cx, 4, 8);
+            db.query_write(
+                &txcx,
+                &cx,
+                &commit,
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                policy(),
+                |request| {
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => vertices.pop_front().unwrap(),
+                        GraphInsertRequest::Edge { .. } => edges.pop_front().unwrap(),
+                    })
+                },
+            )
+            .await
+            .map_err(|error| format!("{text}: {error}"))
+        };
+        let int = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        let pairs = |db: &Database<MemVfs>| {
+            let mut pairs: Vec<_> = db
+                .edges()
+                .unwrap()
+                .into_iter()
+                .filter(|edge| edge.entry.relation == T)
+                .map(|edge| (edge.entry.src, edge.entry.dst))
+                .collect();
+            pairs.sort();
+            pairs
+        };
+        for (text, mut expected_rows, expected_pairs) in [
+            (
+                "MATCH (n:Source) MATCH (m:Source) WITH n AS a, m AS b \
+                 MERGE (a)-[r:T]->(b) RETURN a.p AS a, b.p AS b",
+                vec![
+                    vec![int(10), int(10)],
+                    vec![int(10), int(20)],
+                    vec![int(20), int(10)],
+                    vec![int(20), int(20)],
+                ],
+                vec![
+                    (VId(10), VId(10)),
+                    (VId(10), VId(20)),
+                    (VId(20), VId(10)),
+                    (VId(20), VId(20)),
+                ],
+            ),
+            (
+                "MATCH (n:Source) WITH n AS a, n AS b MERGE (a)-[r:T]->(b) RETURN a.p AS a",
+                vec![vec![int(10)], vec![int(20)]],
+                vec![(VId(10), VId(10)), (VId(20), VId(20))],
+            ),
+        ] {
+            expected_rows.sort_by_key(|row| format!("{row:?}"));
+            let mut db = fresh(&commit, true).await;
+            for _ in 0..2 {
+                let QueryResult::Rows { mut rows, .. } = write(&mut db, text).await.unwrap() else {
+                    unreachable!("MERGE ... RETURN answers rows")
+                };
+                rows.sort_by_key(|row| format!("{row:?}"));
+                assert_eq!(rows, expected_rows, "{text}");
+                assert_eq!(pairs(&db), expected_pairs, "{text}");
+            }
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// A label or relationship type spelled like the COUNT or EXISTS subquery
 /// takes its property map in a write after a WITH. The WITH head's hoist scan
 /// read `Count {` there as `COUNT {` and refused the statement ("expected
