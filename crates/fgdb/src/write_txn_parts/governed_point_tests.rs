@@ -199,7 +199,7 @@ fn absence_null_labels_and_staged_only_targets_keep_the_one_row_contract() {
         );
         txn.write(&mut db, stage).unwrap();
         for (vertex, key, expected, records) in [
-            (VId(1), P, Some(CanonicalScalar::Null), 1),
+            (VId(1), P, None, 1),
             (VId(1), PropertyKeyId(999), None, 1),
             (VId(999), P, None, 0),
             (VId(u128::MAX), P, Some(CanonicalScalar::Int(7)), 0),
@@ -242,7 +242,7 @@ fn absence_null_labels_and_staged_only_targets_keep_the_one_row_contract() {
             )
             .unwrap()
             .value,
-            vec![Some(CanonicalScalar::Null.into())]
+            vec![None]
         );
         assert!(
             matches!(txn.vertex_property_governed(&db, &query, VId(999), P,

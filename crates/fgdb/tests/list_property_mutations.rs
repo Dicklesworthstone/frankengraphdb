@@ -889,16 +889,15 @@ fn authorized_computed_reads_mask_parameter_identities_keys_and_both_edge_endpoi
                         None => hidden_stats[kind] = Some(observed),
                     }
                 }
-                let expected: CanonicalPropertyValue = expected
-                    .map_or(CanonicalScalar::Null, CanonicalScalar::Int)
-                    .into();
+                let expected: Option<CanonicalPropertyValue> =
+                    expected.map(|value| CanonicalScalar::Int(value).into());
                 assert_eq!(result.value.len(), 2, "{supplied:?}");
                 for row in result.value {
                     assert_eq!(row.values(), &[int(1)], "{supplied:?}");
                 }
                 for target in [1, 2] {
                     assert_eq!(
-                        prop(&db, target, P).unwrap_or_else(|| CanonicalScalar::Null.into()),
+                        prop(&db, target, P),
                         expected,
                         "{supplied:?} target {target}"
                     );
@@ -907,7 +906,7 @@ fn authorized_computed_reads_mask_parameter_identities_keys_and_both_edge_endpoi
         }
         // Locate the signed work boundary for each public value kind, then
         // require every hidden identity to cross exactly the same boundary as
-        // an absent one. Both allowed targets already store NULL, so every
+        // an absent one. Both allowed targets already lack P, so every
         // probe is the same no-op mutation with identical visible data.
         for identities in [
             vec![

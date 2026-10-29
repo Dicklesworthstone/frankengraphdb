@@ -1238,8 +1238,8 @@ fn relationship_actions_mask_hidden_rhs_and_admit_only_selected_branch_writes() 
                     .iter()
                     .find(|(key, _)| *key == Q)
                     .map(|(_, value)| value),
-                Some(&CanonicalPropertyValue::Scalar(CanonicalScalar::Null)),
-                "masked NULL replaces the old allowed value with stored NULL"
+                None,
+                "masked NULL removes the old allowed property"
             );
             assert_eq!(edges[0].props.iter().any(|(key, _)| *key == SECRET), hidden);
             let observed = (stats, result.value);
@@ -3129,8 +3129,8 @@ fn hidden_merge_action_inputs_are_null_before_reading_and_do_not_change_work() {
                     .iter()
                     .find(|(key, _)| *key == Q)
                     .map(|(_, value)| value),
-                Some(&CanonicalPropertyValue::Scalar(CanonicalScalar::Null)),
-                "masked NULL replaces the old allowed value with stored NULL"
+                None,
+                "masked NULL removes the old allowed property"
             );
             assert_eq!(
                 stored
