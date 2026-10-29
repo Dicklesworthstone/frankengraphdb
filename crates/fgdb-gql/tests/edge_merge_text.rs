@@ -789,11 +789,29 @@ mod matched_chain {
             assert_eq!(template.returns_rows(), bound.returns_rows(), "{text}");
             assert!(bound.steps().len() >= 2, "{text}");
         }
-        // Extending mandatory MATCH does not admit a new endpoint, a dropped
-        // binding, or nullable OPTIONAL MATCH through this native profile.
+        // Whole-pattern MERGE may declare a new endpoint, including a name
+        // dropped by WITH. It must retain that declaration rather than revive
+        // the earlier binding through the read continuation.
         for text in [
             "CREATE (a) WITH a.p AS p MATCH (b) MERGE (a)-[:R]->(b)",
             "CREATE (a) WITH a MATCH (b) MERGE (a)-[:R]->(unknown)",
+        ] {
+            let bound = PreparedGraphWriteChainText::prepare(text, R, symbols)
+                .expect(text)
+                .bind_parameters(&GqlParameters::new())
+                .expect(text);
+            let merge = match bound.steps().last().unwrap() {
+                fgdb_gql::GraphWriteChainStep::EdgeUpsert(upsert)
+                | fgdb_gql::GraphWriteChainStep::EdgeUpsertRows { upsert, .. }
+                | fgdb_gql::GraphWriteChainStep::EdgeUpsertQuery { upsert, .. } => upsert.merge(),
+                _ => panic!("the new endpoint needs whole-pattern resolution: {text}"),
+            };
+            assert_eq!(merge.unbound_columns().count(), 1, "{text}");
+        }
+        // A carried scalar cannot become a vertex. Nullable OPTIONAL MATCH
+        // still needs its own supported input profile.
+        for text in [
+            "CREATE (a) WITH a.p AS a MATCH (b) MERGE (a)-[:R]->(b)",
             "CREATE (a) WITH a OPTIONAL MATCH (b) MERGE (a)-[:R]->(b)",
         ] {
             assert!(

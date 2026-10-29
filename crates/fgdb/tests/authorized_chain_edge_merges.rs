@@ -285,6 +285,49 @@ fn whole_pattern_merge_creates_missing_endpoints_without_reusing_partial_matches
 }
 
 #[test]
+fn whole_pattern_merge_redeclares_a_dropped_name_without_reviving_its_identity() {
+    lab(0xc4a1_3818, |contexts| async move {
+        let commit = contexts.commit();
+        for authorized in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(2))]);
+            db.write(&commit, seed).await.unwrap();
+            let before = db.frontier().unwrap();
+            let program = chain(
+                "CREATE (old:Visible {p:3}) WITH old.p AS p \
+                 MATCH (b:Visible {p:2}) MERGE (old:Visible {p:4})-[:R]->(b) RETURN old,b",
+            );
+            let (stats, rows) =
+                whole_pattern_merge(&contexts, &mut db, authorized, &program, policy(10))
+                    .await
+                    .unwrap();
+            assert_eq!((stats.created_vertices, stats.created_edges), (2, 1));
+            assert_eq!(rows.len(), 1);
+            let [GraphValue::Vertex(new), GraphValue::Vertex(b)] = rows[0].values() else {
+                panic!("the redeclared endpoint and retained MATCH endpoint are explicit");
+            };
+            assert_eq!(*b, VId(1));
+            let vertices = db.vertices().unwrap();
+            assert_eq!(vertices.len(), 3);
+            let discarded = vertices
+                .iter()
+                .find(|v| v.props == [(P, CanonicalScalar::Int(3).into())])
+                .unwrap();
+            assert_ne!(*new, discarded.vid);
+            assert_eq!(
+                db.vertex(*new).unwrap().unwrap().props,
+                [(P, CanonicalScalar::Int(4).into())]
+            );
+            let edges = db.edges().unwrap();
+            assert_eq!(edges.len(), 1);
+            assert_eq!((edges[0].entry.src, edges[0].entry.dst), (*new, *b));
+            assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+        }
+    });
+}
+
+#[test]
 fn whole_pattern_merge_anonymous_endpoints_stay_distinct_and_private_across_steps() {
     lab(0xc4a1_3817, |contexts| async move {
         let commit = contexts.commit();
