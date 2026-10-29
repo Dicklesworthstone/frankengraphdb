@@ -351,8 +351,10 @@ impl PreparedGraphWriteChainText {
 
     /// Whether the ON/SET clauses of a relationship MERGE after a leading
     /// MATCH need the chain's row actions (fgdb-at06q): the relationship is
-    /// anonymous, or an assignment writes or reads (`a.key`) an element
-    /// other than it. The unique upsert writes only its named relationship.
+    /// anonymous, an assignment writes or reads (`a.key`) an element other
+    /// than it, or its property map reads one (`{k: a.v}`), which only the
+    /// chain's row MERGE computes per row. The unique upsert writes only its
+    /// named relationship, from constant map values.
     /// `lexer` is just past the `-` or `<` after the first node pattern.
     /// `any`: every ON/SET action needs the chain's rows, as after a WITH or
     /// UNWIND stage, which the unique MATCH-only upsert cannot read.
@@ -376,7 +378,7 @@ impl PreparedGraphWriteChainText {
             TokenKind::Word(word) => Some(word),
             _ => None,
         };
-        let (mut depth, mut actions) = (1_usize, false);
+        let (mut depth, mut actions, mut map_reads) = (1_usize, false, false);
         let (mut previous, mut before): (Option<TokenKind<'_>>, Option<TokenKind<'_>>) =
             (None, None);
         loop {
@@ -385,6 +387,19 @@ impl PreparedGraphWriteChainText {
                 TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
                 TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
                 TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                // A property read inside the relationship's brackets: its map
+                // reads a binding of the row.
+                TokenKind::Word(_)
+                    if depth > 1
+                        && !actions
+                        && !matches!(previous, Some(TokenKind::Punct(b'.')))
+                        && matches!(
+                            script::next_script_token(&mut lexer.clone())?.kind,
+                            TokenKind::Punct(b'.')
+                        ) =>
+                {
+                    map_reads = true;
+                }
                 // `ON CREATE` and `ON MATCH` name a branch, not a clause.
                 TokenKind::Word(word)
                     if depth == 0
@@ -399,7 +414,7 @@ impl PreparedGraphWriteChainText {
                         && (word.eq_ignore_ascii_case("ON")
                             || word.eq_ignore_ascii_case("SET")) =>
                 {
-                    if named_path || relationship.is_none() || any {
+                    if named_path || relationship.is_none() || any || map_reads {
                         return Ok(true);
                     }
                     actions = true;
@@ -1399,6 +1414,9 @@ mod tests {
             "UNWIND [1, 2] AS x MATCH (a:A), (b:B) MERGE (a)-[r:R {k: x}]->(b) RETURN r.k",
             "UNWIND $pairs AS row MATCH (a {id: row.a}), (b {id: row.b}) MERGE (a)-[:R]->(b) \
              RETURN count(*) AS c",
+            // ON/SET after a map that reads the MATCH row: only the chain's
+            // row MERGE computes the value per row (fgdb-at06q).
+            "MATCH (a), (b) MERGE (a)-[r:R {k: a.p}]->(b) ON CREATE SET r.q = 1",
             // A SET, REMOVE or DELETE after a CREATE writes its rows.
             "CREATE (n) SET n.p = 1",
             "CREATE (n:P {p: 1}) SET n.p = n.p + 1 RETURN n.p",

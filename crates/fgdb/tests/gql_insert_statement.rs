@@ -3517,6 +3517,29 @@ fn relationship_merge_maps_read_the_row() {
             ]
         );
 
+        // A MATCH-led map value with ON clauses is the chain's row MERGE: the
+        // unique upsert reads only constant map values, and refused it ("expected
+        // scalar literal or parameter MERGE property value"). ON CREATE, then
+        // ON MATCH, each read the value the row computed.
+        let mut db = fresh(&commit, true).await;
+        for expected in [(10, 1), (10, 2)] {
+            let returned = write(
+                &mut db,
+                "MATCH (a:Source {p: 10}), (b:Source {p: 20}) \
+                 MERGE (a)-[r:T {since: a.p}]->(b) \
+                 ON CREATE SET r.q = 1 ON MATCH SET r.q = r.q + 1 RETURN r.since, r.q",
+                &none,
+            )
+            .await
+            .unwrap();
+            let QueryResult::Rows { rows, .. } = returned else {
+                unreachable!("MERGE ... RETURN answers rows")
+            };
+            let int = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+            assert_eq!(rows, vec![vec![int(expected.0), int(expected.1)]]);
+        }
+        assert_eq!(merged(&db), vec![pair("2=2 5=10")]);
+
         // NULL (a missing property) and a map can neither match nor be
         // created: each refuses with no effect.
         let before = (db.frontier().unwrap(), db.edges().unwrap());
