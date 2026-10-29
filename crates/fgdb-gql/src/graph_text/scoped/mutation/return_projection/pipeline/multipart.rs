@@ -796,8 +796,9 @@ fn row_pattern_expressions_from<'a>(
         if matches!(token.kind, TokenKind::End)
             || (depth == 0 && matches!(token.kind, TokenKind::Punct(b')' | b'}' | b']' | b'|')))
             || group_by
-            || (source
-                && depth == 0
+            // A WITH's WHERE reads the completed projection, not its input.
+            // Gather that filter only after the WITH has installed its aliases.
+            || (depth == 0
                 && !key
                 && matches!(token.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("WHERE")))
             || matches!(token.kind, TokenKind::Word(word)

@@ -110,11 +110,16 @@ fn execute_identified(text: &str) -> Vec<GraphValueRow> {
 /// `run_identified` over a bound query, as `run` is to `execute`.
 fn run_identified(query: &PreparedGraphSet) -> Vec<GraphValueRow> {
     let values = [1, 2, 2, 3].map(|n| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(n)));
+    let no_labels: [GraphValue; 0] = [];
+    let relation_name = CanonicalScalar::ucs_basic_text("R").unwrap();
     query
         .execute_governed_with_elements(
             wide(),
             |pattern, remaining| {
-                pattern.plan().execute_governed_with_identified_properties(
+                // Captured-edge predicates read the captured paths through
+                // the element executor. This fixture has no edge properties
+                // or vertex labels; every actual edge has the declared R type.
+                pattern.plan().execute_governed_with_element_accessors(
                     (values.len() + EDGES.len()) as u64,
                     (1..=4).map(VId),
                     EDGES
@@ -129,6 +134,9 @@ fn run_identified(query: &PreparedGraphSet) -> Vec<GraphValueRow> {
                         }))
                     },
                     |vid, key| Ok((key == P).then(|| &values[vid.0 as usize - 1])),
+                    |_, _| Ok(None),
+                    |vid| Ok((1..=4).contains(&vid.0).then_some(no_labels.as_slice())),
+                    |edge| Ok((1..=5).contains(&edge.0).then_some(&relation_name)),
                     remaining,
                     || Ok::<_, usize>(()),
                 )
@@ -479,6 +487,16 @@ fn implicit_exists_with_stages_apply_grouping_pages_and_name_scope() {
 
 #[test]
 fn implicit_exists_preserves_late_refusals_and_cumulative_admission() {
+    for prefix in ["WITH 2 AS x", "WITH 1 AS x WITH 2 AS x"] {
+        assert_eq!(
+            execute(&format!(
+                "{prefix} WHERE EXISTS {{ WITH 6 / x AS quotient WHERE quotient = 3 }} RETURN x"
+            )),
+            vec![GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+                CanonicalScalar::Int(2)
+            )])],
+        );
+    }
     for statement in [
         "WITH 0 AS x WHERE EXISTS { WITH 1 / x AS bad } RETURN x LIMIT 0",
         "WITH 0 AS x WHERE EXISTS { WITH 1 / x AS bad LIMIT 0 } RETURN x",
@@ -769,6 +787,16 @@ fn returning_exists_shares_parameters_and_restores_outer_names_between_bodies() 
 
 #[test]
 fn returning_exists_retains_source_and_projection_failures_before_empty_pages() {
+    for prefix in ["WITH 2 AS x", "WITH 1 AS x WITH 2 AS x"] {
+        assert_eq!(
+            execute(&format!(
+                "{prefix} WHERE EXISTS {{ RETURN 6 / x AS quotient }} RETURN x"
+            )),
+            vec![GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+                CanonicalScalar::Int(2)
+            )])],
+        );
+    }
     for statement in [
         "WITH 0 AS x WHERE EXISTS { RETURN 1 / x AS bad } RETURN x LIMIT 0",
         "WITH 0 AS x WHERE EXISTS { RETURN 1 / x AS bad LIMIT 0 } RETURN x",
