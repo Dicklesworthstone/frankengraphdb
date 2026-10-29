@@ -244,6 +244,54 @@ fn parameter_right_sides_merge_as_computed_maps_and_non_maps_refuse() {
     assert!(template.bind_parameters(&scalar).is_err());
 }
 
+/// A node or relationship as the whole right side of `=` or `+=` is its
+/// property map, as `properties(m)` is (openCypher; TCK Merge6 [6], Merge7
+/// [4] in a MERGE branch). Before, it assigned the element itself and refused
+/// at preparation ("assigns a value that cannot be stored").
+#[test]
+fn an_element_right_side_copies_its_properties() {
+    for (statement, expected) in [
+        // Replacement: the target keeps exactly the source's properties.
+        (
+            "MATCH (a)-[r:R]->(b) SET r = b RETURN properties(r) AS m",
+            vec![
+                vec![map(vec![("p", int(20))])],
+                vec![map(vec![("p", int(20))])],
+            ],
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE r.p = 11 SET b = a RETURN properties(b) AS m",
+            vec![vec![map(vec![
+                ("p", int(10)),
+                ("old", int(3)),
+                ("keep", int(7)),
+            ])]],
+        ),
+        // `+=` keeps the target's other properties.
+        (
+            "MATCH (a)-[r:R]->(b) WHERE r.p = 11 SET a += r RETURN properties(a) AS m",
+            vec![vec![map(vec![
+                ("p", int(11)),
+                ("old", int(8)),
+                ("keep", int(7)),
+            ])]],
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) WHERE r.p = 12 SET r += a RETURN properties(r) AS m",
+            vec![vec![map(vec![
+                ("p", int(10)),
+                ("old", int(3)),
+                ("keep", int(7)),
+            ])]],
+        ),
+    ] {
+        let batch = Fixture::new()
+            .execute(&prepare(statement, Catalog(None)), policy())
+            .expect(statement);
+        assert_eq!(rows(&batch), expected, "{statement}");
+    }
+}
+
 #[test]
 fn aliases_of_one_element_and_aggregates_read_the_same_final_map() {
     let mut source = Fixture::new();

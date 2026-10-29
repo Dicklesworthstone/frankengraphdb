@@ -765,9 +765,56 @@ impl<'a> Parser<'a> {
         }
         let at = self.current.at;
         let catalog = self.syntax.element_catalog.request();
-        let value = match row {
-            Some(row) => self.insertion_source_value(columns, row)?,
-            None => self.mutation_assignment(columns)?,
+        // A node or relationship that is the whole right side (`SET r = a`,
+        // `SET n += m`) is its property map, as properties(m) is (openCypher;
+        // TCK Merge6 [6], Merge7 [4]).
+        let element = match self.current.kind {
+            TokenKind::Word(word)
+                if matches!(
+                    self.lexer.clone().next()?.kind,
+                    TokenKind::End | TokenKind::Punct(b',' | b';') | TokenKind::Word(_)
+                ) =>
+            {
+                let element = |kind: crate::GraphSetColumnType| {
+                    matches!(
+                        kind,
+                        crate::GraphSetColumnType::Vertex | crate::GraphSetColumnType::Edge
+                    )
+                };
+                match row {
+                    // The carried element's row column.
+                    Some(row) => row
+                        .iter()
+                        .position(|(name, kind)| name.text == word && element(*kind)),
+                    // A MATCH binding, read through its own projection below.
+                    None => self.insertion_match_kind(word).is_some_and(element).then_some(0),
+                }
+            }
+            _ => None,
+        };
+        let value = match (element, row) {
+            (Some(column), Some(_)) => {
+                self.advance()?;
+                ReadValueTemplate::ElementMetadata {
+                    kind: crate::GraphElementMetadata::Properties,
+                    value: Box::new(ReadValueTemplate::Column(column)),
+                    catalog: catalog.clone(),
+                }
+            }
+            (Some(_), None) => {
+                let source = self.name()?;
+                ReadValueTemplate::Column(self.projection_slot(
+                    columns,
+                    Projection {
+                        variable: source,
+                        property: None,
+                        path: Some(GraphPathFunction::Properties),
+                        collect: None,
+                    },
+                )?)
+            }
+            (None, Some(row)) => self.insertion_source_value(columns, row)?,
+            (None, None) => self.mutation_assignment(columns)?,
         };
         let current = if !replace {
             None
