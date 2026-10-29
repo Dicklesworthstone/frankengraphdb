@@ -131,151 +131,22 @@ where
     // The plan has a static depth bound; the future itself is still resident
     // query scratch and must be admitted before allocating its recursion box.
     let pool = destination.memory_pool().clone();
-    let future = async move {
+    recursion_box(&pool, cx, move || async move {
         let source_policy = input_policy(policy, limits.max_input_rows);
-        let (input, work) = match plan.source() {
-            AsyncSpillSetSourcePlan::Values(source) => {
-                apply::seed_values(
-                    source,
-                    snapshot,
-                    host,
-                    cx,
-                    source_policy,
-                    destination,
-                    limits,
-                )
-                .await?
-            }
-            AsyncSpillSetSourcePlan::Arguments(source) => {
-                apply::seed_arguments(
-                    source,
-                    arguments,
-                    snapshot,
-                    host,
-                    cx,
-                    source_policy,
-                    destination,
-                    limits,
-                )
-                .await?
-            }
-            AsyncSpillSetSourcePlan::Apply(source) => {
-                apply::execute(
-                    source,
-                    arguments,
-                    snapshot,
-                    host,
-                    cx,
-                    source_policy,
-                    scratch,
-                    destination,
-                    auxiliary,
-                    limits,
-                    resolver,
-                )
-                .await?
-            }
-            AsyncSpillSetSourcePlan::Binary(source) => {
-                binary::execute(
-                    source,
-                    arguments,
-                    snapshot,
-                    host,
-                    cx,
-                    source_policy,
-                    scratch,
-                    destination,
-                    auxiliary,
-                    limits.group_capacity,
-                    limits.max_partitions,
-                    limits.run_rows,
-                    limits.max_runs,
-                    limits.page_bytes,
-                    limits.max_row_bytes,
-                    limits.max_input_rows,
-                    limits.max_sort_work,
-                    resolver,
-                )
-                .await?
-            }
-            AsyncSpillSetSourcePlan::Cross(source) => {
-                cross::execute(
-                    source,
-                    arguments,
-                    snapshot,
-                    host,
-                    cx,
-                    source_policy,
-                    scratch,
-                    destination,
-                    auxiliary,
-                    limits.group_capacity,
-                    limits.max_partitions,
-                    limits.run_rows,
-                    limits.max_runs,
-                    limits.page_bytes,
-                    limits.max_row_bytes,
-                    limits.max_input_rows,
-                    limits.max_sort_work,
-                    resolver,
-                )
-                .await?
-            }
-            AsyncSpillSetSourcePlan::RowJoin(source) => {
-                relational_join::execute(
-                    source,
-                    arguments,
-                    snapshot,
-                    host,
-                    cx,
-                    source_policy,
-                    scratch,
-                    destination,
-                    auxiliary,
-                    limits.group_capacity,
-                    limits.max_partitions,
-                    limits.run_rows,
-                    limits.max_runs,
-                    limits.page_bytes,
-                    limits.max_row_bytes,
-                    limits.max_input_rows,
-                    limits.max_sort_work,
-                    resolver,
-                )
-                .await?
-            }
-            AsyncSpillSetSourcePlan::Aggregate(source) => {
-                crate::query::view::spool::aggregate::spool_group_stage_with_host(
-                    source,
-                    arguments,
-                    snapshot,
-                    host,
-                    cx,
-                    source_policy,
-                    scratch,
-                    destination,
-                    auxiliary,
-                    limits,
-                    resolver,
-                )
-                .await?
-            }
-            AsyncSpillSetSourcePlan::Vertex(_)
-            | AsyncSpillSetSourcePlan::Edge(_)
-            | AsyncSpillSetSourcePlan::Join(_) => {
-                host.leaf(
-                    plan,
-                    snapshot,
-                    cx,
-                    source_policy,
-                    scratch,
-                    destination,
-                    limits,
-                    resolver,
-                )
-                .await?
-            }
-        };
+        let (input, work) = source(
+            plan,
+            arguments,
+            snapshot,
+            &mut *host,
+            cx,
+            source_policy,
+            &mut *scratch,
+            &mut *destination,
+            &mut *auxiliary,
+            limits,
+            resolver,
+        )
+        .await?;
         host.checkpoint()?;
         host.stages(
             plan,
@@ -289,7 +160,174 @@ where
             resolver,
         )
         .await
-    };
+    })
+}
+
+/// The relation's source, built outside the recursive frame as its own
+/// admitted box. Inline, every source kind's future would sit in that frame,
+/// and an unoptimized build keeps each of them in its poll frame, so a nested
+/// Apply body paid for all of them at every level and overflowed a test
+/// thread's 2 MiB stack.
+#[allow(clippy::too_many_arguments)]
+fn source<'r, H, A, B, C>(
+    plan: &'r AsyncSpillSetPlan,
+    arguments: Option<&'r GraphValueRow>,
+    snapshot: CommitSeq,
+    host: &'r mut H,
+    cx: &'r QueryCx,
+    policy: GqlQueryPolicy,
+    scratch: &'r mut SpillFile<A>,
+    destination: &'r mut SpillFile<B>,
+    auxiliary: &'r mut SpillFile<C>,
+    limits: ExternalOrderLimits,
+    resolver: Option<&'r (dyn CanonicalScalarResolver + Send + Sync)>,
+) -> crate::SendFuture<'r, Result<(NativeResultSpool, u64)>>
+where
+    H: ExternalOrderHost + 'r,
+    A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'r,
+    B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'r,
+    C: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'r,
+{
+    let pool = destination.memory_pool().clone();
+    match plan.source() {
+        AsyncSpillSetSourcePlan::Values(source) => recursion_box(&pool, cx, move || {
+            apply::seed_values(source, snapshot, host, cx, policy, destination, limits)
+        }),
+        AsyncSpillSetSourcePlan::Arguments(source) => recursion_box(&pool, cx, move || {
+            apply::seed_arguments(
+                source,
+                arguments,
+                snapshot,
+                host,
+                cx,
+                policy,
+                destination,
+                limits,
+            )
+        }),
+        AsyncSpillSetSourcePlan::Apply(source) => recursion_box(&pool, cx, move || {
+            apply::execute(
+                source,
+                arguments,
+                snapshot,
+                host,
+                cx,
+                policy,
+                scratch,
+                destination,
+                auxiliary,
+                limits,
+                resolver,
+            )
+        }),
+        AsyncSpillSetSourcePlan::Binary(source) => recursion_box(&pool, cx, move || {
+            binary::execute(
+                source,
+                arguments,
+                snapshot,
+                host,
+                cx,
+                policy,
+                scratch,
+                destination,
+                auxiliary,
+                limits.group_capacity,
+                limits.max_partitions,
+                limits.run_rows,
+                limits.max_runs,
+                limits.page_bytes,
+                limits.max_row_bytes,
+                limits.max_input_rows,
+                limits.max_sort_work,
+                resolver,
+            )
+        }),
+        AsyncSpillSetSourcePlan::Cross(source) => recursion_box(&pool, cx, move || {
+            cross::execute(
+                source,
+                arguments,
+                snapshot,
+                host,
+                cx,
+                policy,
+                scratch,
+                destination,
+                auxiliary,
+                limits.group_capacity,
+                limits.max_partitions,
+                limits.run_rows,
+                limits.max_runs,
+                limits.page_bytes,
+                limits.max_row_bytes,
+                limits.max_input_rows,
+                limits.max_sort_work,
+                resolver,
+            )
+        }),
+        AsyncSpillSetSourcePlan::RowJoin(source) => recursion_box(&pool, cx, move || {
+            relational_join::execute(
+                source,
+                arguments,
+                snapshot,
+                host,
+                cx,
+                policy,
+                scratch,
+                destination,
+                auxiliary,
+                limits.group_capacity,
+                limits.max_partitions,
+                limits.run_rows,
+                limits.max_runs,
+                limits.page_bytes,
+                limits.max_row_bytes,
+                limits.max_input_rows,
+                limits.max_sort_work,
+                resolver,
+            )
+        }),
+        AsyncSpillSetSourcePlan::Aggregate(source) => recursion_box(&pool, cx, move || {
+            crate::query::view::spool::aggregate::spool_group_stage_with_host(
+                source,
+                arguments,
+                snapshot,
+                host,
+                cx,
+                policy,
+                scratch,
+                destination,
+                auxiliary,
+                limits,
+                resolver,
+            )
+        }),
+        // The host boxes its own leaves.
+        AsyncSpillSetSourcePlan::Vertex(_)
+        | AsyncSpillSetSourcePlan::Edge(_)
+        | AsyncSpillSetSourcePlan::Join(_) => host.leaf(
+            plan,
+            snapshot,
+            cx,
+            policy,
+            scratch,
+            destination,
+            limits,
+            resolver,
+        ),
+    }
+}
+
+/// Admit a future's resident bytes before allocating its box. The future is
+/// built here, so only this instantiation's frame holds it unboxed.
+fn recursion_box<'r, F>(
+    pool: &fgdb_strata::tiered::memory::MemoryPool,
+    cx: &QueryCx,
+    make: impl FnOnce() -> F,
+) -> crate::SendFuture<'r, Result<(NativeResultSpool, u64)>>
+where
+    F: core::future::Future<Output = Result<(NativeResultSpool, u64)>> + Send + 'r,
+{
+    let future = make();
     let bytes = size_of_val(&future)
         .checked_add(size_of::<fgdb_strata::tiered::memory::MemoryCharge>())
         .and_then(|bytes| bytes.checked_add(64));

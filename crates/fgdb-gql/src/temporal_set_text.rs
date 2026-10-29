@@ -333,9 +333,14 @@ fn locate(statement: &str) -> Result<(usize, usize, Selector), GraphTemporalSetT
         ));
     }
     // The clause closes the first MATCH, as in the aggregate facade: a WITH
-    // stage may follow it, and the set facade runs the stages at the cut.
+    // stage or a correlated CALL body may follow it, and the set facade runs
+    // the stages and every body at the cut.
     if !tokens.get(at + 6).is_some_and(|next| {
-        next.word("WHERE") || next.word("OPTIONAL") || next.word("WITH") || next.word("RETURN")
+        next.word("WHERE")
+            || next.word("OPTIONAL")
+            || next.word("WITH")
+            || next.word("CALL")
+            || next.word("RETURN")
     }) {
         return Err(fail(
             end,

@@ -1473,7 +1473,8 @@ fn corrupt_cold_refault_is_rejected_and_refunds_the_pending_frame() {
 fn propertied_durable_source_can_exceed_the_shared_resident_ceiling() {
     // Each property patch must fit the store's per-object ceiling (16 KiB):
     // a 15,000-byte payload encodes to a 16,911-byte patch the store refuses.
-    // 240 patches of this payload still exceed the 3 MiB shared ceiling.
+    // A 14,000-byte payload encodes to about 15,786 bytes, so 240 patches
+    // (about 3.79 MB) still exceed the 3.5 MiB shared ceiling.
     const PAYLOAD: usize = 14_000;
     run(|contexts, dir| async move {
         let commit = contexts.commit();
@@ -1521,7 +1522,13 @@ fn propertied_durable_source_can_exceed_the_shared_resident_ceiling() {
             vertex_patches: vec![],
         };
         let id = store.put_root(&commit, &root).await.unwrap();
-        let cap = 3 * 1024 * 1024;
+        // The V6 root carries a 205-byte descriptor beside each 48-byte block
+        // reference, so its 240 blocks need the 64 KiB root ceiling
+        // (21aa87137). The view keeps that ceiling's metadata charge (16x,
+        // 1,054,208 bytes) and the 46,080-byte descriptor directory, and a
+        // propertied edge_at holds two 1,114,112-byte object workspaces (its
+        // result and the property read): 3,328,512 bytes, over 3 MiB.
+        let cap = 3 * 1024 * 1024 + 512 * 1024;
         assert!(source_bytes > cap);
         let pool = MemoryPool::new(cap, 0).unwrap();
         let mut bounded = limits();

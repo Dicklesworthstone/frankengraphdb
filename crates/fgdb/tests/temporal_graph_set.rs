@@ -82,6 +82,31 @@ fn a_with_stage_after_the_system_time_clause_runs_at_the_selected_sequence() {
             assert_eq!(temporal, explicit);
             assert_eq!(ints(&temporal), expected, "WITH stage at {seq:?}");
         }
+        // A correlated CALL body may follow the clause too, and it reads at the
+        // cut: at seq1 a body reading the live head would count 2 above both.
+        let template = PreparedTemporalGraphSetText::prepare(
+            "MATCH (a) FOR SYSTEM_TIME AS OF SEQ $at CALL (a) { MATCH (b) WHERE b.p > a.p \
+             RETURN count(*) AS above } RETURN above ORDER BY above",
+            symbols,
+        )
+        .unwrap();
+        for (seq, expected) in [
+            (seq1, vec![0, 1]),
+            (seq2, vec![0, 1, 2]),
+            (seq3, vec![0, 1]),
+        ] {
+            let bound = template
+                .bind_parameters(&GqlParameters::new().with_uint64("at", seq.0).unwrap())
+                .unwrap();
+            let temporal = db
+                .execute_temporal_graph_set_text_governed(&query, &bound, policy())
+                .unwrap();
+            let explicit = db
+                .execute_graph_set_governed_at(&query, bound.query(), seq, policy())
+                .unwrap();
+            assert_eq!(temporal, explicit);
+            assert_eq!(ints(&temporal), expected, "CALL body at {seq:?}");
+        }
         // Any other clause after the selector still refuses its position.
         assert!(matches!(
             PreparedTemporalGraphSetText::prepare(

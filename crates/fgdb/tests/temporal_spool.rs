@@ -1223,7 +1223,9 @@ fn buffered_future_cut_precedes_recursive_frame_memory_admission_without_scratch
         batch.create_vertex(VId(1), vec![LabelId(1)], vec![]);
         let publication = db.write(&commit, batch).await.unwrap();
         drop(db);
-        let source_pool = MemoryPool::new(2_000_000, 0).unwrap();
+        // Opening keeps the 64 KiB root ceiling's 1,054,208-byte metadata
+        // charge while admission reserves a 1,114,112-byte object workspace.
+        let source_pool = MemoryPool::new(4 * 1024 * 1024, 0).unwrap();
         let mut view = Database::open_buffered_read_view_with_vfs(
             &commit,
             vfs.clone(),
@@ -1599,11 +1601,13 @@ mod authorized_carried_elements {
                 (
                     "UNWIND [2,2,99,null] AS wanted WITH wanted \
                      OPTIONAL MATCH (n:L) WHERE n.p=wanted RETURN wanted,n",
+                    // RETURN without ORDER BY is canonical row order (owner
+                    // ruling 2026-10-09), where NULL sorts first.
                     vec![
+                        vec![GraphValue::Scalar(CanonicalScalar::Null); 2],
                         vec![scalar(2), GraphValue::Vertex(VId(1))],
                         vec![scalar(2), GraphValue::Vertex(VId(1))],
                         vec![scalar(99), GraphValue::Scalar(CanonicalScalar::Null)],
-                        vec![GraphValue::Scalar(CanonicalScalar::Null); 2],
                     ],
                 ),
             ] {
