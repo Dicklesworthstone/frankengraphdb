@@ -112,6 +112,16 @@ fn int(value: i64) -> GraphValue {
     GraphValue::Scalar(CanonicalScalar::Int(value))
 }
 
+fn assert_oversized_vertex_refusal(error: fgdb::WriteError) {
+    let fgdb::WriteError::VertexStorageAdmission { vid, source } = error else {
+        panic!("expected whole-vertex storage admission refusal: {error:?}");
+    };
+    assert_eq!(vid, VId(1));
+    assert!(
+        matches!(*source, fgdb_strata::vertex::VertexPatchError::RowExceedsStorageLimit { bytes, limit: 16_384 } if bytes > 16_384)
+    );
+}
+
 async fn whole_pattern_merge(
     contexts: &PurposeContexts,
     db: &mut Database<MemVfs>,
@@ -523,7 +533,7 @@ fn whole_pattern_merge_reads_only_reached_new_endpoint_action_operands() {
         );
         for authorized in [false, true] {
             let mut baseline = None;
-            for size in [8, 16_384] {
+            for size in [8, 8_192, 16_384] {
                 let mut db = Database::open_memory(&commit, keys()).await.unwrap();
                 let mut seed = WriteBatch::new(R);
                 seed.create_vertex(
@@ -536,7 +546,20 @@ fn whole_pattern_merge_reads_only_reached_new_endpoint_action_operands() {
                     ],
                 );
                 seed.add_edge(EId(1), VId(1), VId(1), vec![]);
-                db.write(&commit, seed).await.unwrap();
+                let before = db.frontier().unwrap();
+                let seeded = db.write(&commit, seed).await;
+                if size == 16_384 {
+                    // The original payload alone fills the object budget;
+                    // its vertex envelope cannot fit. Retain that input as
+                    // a fail-closed storage control, and compare lazy work
+                    // on the large valid row above instead.
+                    assert_oversized_vertex_refusal(seeded.unwrap_err());
+                    assert_eq!(db.frontier().unwrap(), before);
+                    assert!(db.vertices().unwrap().is_empty());
+                    assert!(db.edges().unwrap().is_empty());
+                    continue;
+                }
+                seeded.unwrap();
                 let (stats, rows) = whole_pattern_merge(
                     &contexts,
                     &mut db,
@@ -1868,7 +1891,9 @@ fn computed_endpoint_fields_share_native_and_signed_budgets_without_hidden_work(
                 (Q, CanonicalScalar::bytes(vec![0x37; payload]).unwrap()),
             ];
             if hidden {
-                properties.push((SECRET, CanonicalScalar::bytes(vec![0x99; 16_384]).unwrap()));
+                // This shares one indivisible vertex with the 8 KiB visible
+                // payload. The original oversized pair is checked below.
+                properties.push((SECRET, CanonicalScalar::bytes(vec![0x99; 4_096]).unwrap()));
             }
             seed.create_vertex(VId(id as u128), vec![L], properties);
         }
@@ -1942,6 +1967,36 @@ fn computed_endpoint_fields_share_native_and_signed_budgets_without_hidden_work(
     }
 
     lab(0xc4a1_3715, |contexts| async move {
+        // Preserve the original over-limit fixture as an exact storage
+        // refusal, rather than relaxing the 16 KiB whole-object limit.
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let before = db.frontier().unwrap();
+        let mut oversized = WriteBatch::new(S);
+        for id in 1..=2 {
+            oversized.create_vertex(
+                VId(id),
+                vec![L],
+                vec![
+                    (P, CanonicalScalar::Int(id as i64)),
+                    (Q, CanonicalScalar::bytes(vec![0x37; 8_192]).unwrap()),
+                    (SECRET, CanonicalScalar::bytes(vec![0x99; 16_384]).unwrap()),
+                ],
+            );
+        }
+        for id in 3..=8 {
+            oversized.create_vertex(
+                VId(id),
+                vec![HIDDEN],
+                vec![(P, CanonicalScalar::Int(id as i64))],
+            );
+            oversized.add_edge(EId(id), VId(1), VId(id), vec![]);
+        }
+        assert_oversized_vertex_refusal(db.write(&commit, oversized).await.unwrap_err());
+        assert_eq!(db.frontier().unwrap(), before);
+        assert!(db.vertices().unwrap().is_empty());
+        assert!(db.edges().unwrap().is_empty());
+        drop(db);
         let issuer = authority();
         let budget = policy(10).with_mutation_limit(10);
         let small = attempt(&contexts, &issuer, false, 8, budget, 1_000_000)
