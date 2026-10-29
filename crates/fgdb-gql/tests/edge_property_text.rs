@@ -154,19 +154,62 @@ fn inline_relationship_and_anonymous_node_maps_filter_like_where() {
             "MATCH (a)-[r:R]->(b) WHERE r.p = 6 RETURN a, b",
             vec![],
         ),
+        // An unnamed relationship's map filters a private capture of it.
+        (
+            "MATCH (a)-[:R {p: 5}]->(b) RETURN a, b",
+            "MATCH (a)-[r:R]->(b) WHERE r.p = 5 RETURN a, b",
+            vec![vec![vertex(1), vertex(2)], vec![vertex(3), vertex(1)]],
+        ),
+        (
+            "MATCH (a)-[{p: 7}]-(b) RETURN a, b",
+            "MATCH (a)-[r]-(b) WHERE r.p = 7 RETURN a, b",
+            vec![vec![vertex(1), vertex(3)], vec![vertex(3), vertex(1)]],
+        ),
+        // Two in one pattern and one in each of two clauses: every private
+        // capture is a different relationship.
+        (
+            "MATCH (a)-[:R {p: 5}]->(b)-[:R {p: 5}]->(c) RETURN a, c",
+            "MATCH (a)-[r:R]->(b)-[s:R]->(c) WHERE r.p = 5 AND s.p = 5 RETURN a, c",
+            vec![vec![vertex(3), vertex(2)]],
+        ),
+        (
+            "MATCH (a)-[:R {p: 5}]->(b) MATCH (b)-[:R {p: 7}]->(c) RETURN a, c",
+            "MATCH (a)-[r:R {p: 5}]->(b) MATCH (b)-[s:R {p: 7}]->(c) RETURN a, c",
+            vec![vec![vertex(3), vertex(3)]],
+        ),
+        (
+            "MATCH (a) OPTIONAL MATCH (a)-[:R {p: 7}]->(b) RETURN a, b",
+            "MATCH (a) OPTIONAL MATCH (a)-[r:R {p: 7}]->(b) RETURN a, b",
+            vec![
+                vec![vertex(1), vertex(3)],
+                vec![vertex(2), GraphValue::Scalar(CanonicalScalar::Null)],
+                vec![vertex(3), GraphValue::Scalar(CanonicalScalar::Null)],
+            ],
+        ),
+        (
+            "MATCH (a) WHERE (a)-[:R {p: 7}]->() RETURN a",
+            "MATCH (a) WHERE EXISTS { MATCH (a)-[r:R]->() WHERE r.p = 7 } RETURN a",
+            vec![vec![vertex(1)]],
+        ),
     ] {
         assert_eq!(inline_rows(inline), expected, "{inline}");
         assert_eq!(inline_rows(filtered), expected, "{filtered}");
     }
-    // A map needs one captured relationship to filter.
+    // The private capture is no column of RETURN *.
+    let star = PreparedGraphText::prepare("MATCH (a)-[:R {p: 5}]->(b) RETURN *", symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+    assert_eq!(star.columns(), ["a", "b"]);
+    // A walk's map would range over a list of relationships.
     for (text, expected) in [
         (
-            "MATCH (a)-[:R {p: 5}]->(b) RETURN a",
-            "named fixed-length relationship for a property map",
+            "MATCH (a)-[r:R*1..2 {p: 5}]->(b) RETURN a",
+            "fixed-length relationship for a property map",
         ),
         (
-            "MATCH (a)-[r:R*1..2 {p: 5}]->(b) RETURN a",
-            "named fixed-length relationship for a property map",
+            "MATCH (a)-[:R*1..2 {p: 5}]->(b) RETURN a",
+            "fixed-length relationship for a property map",
         ),
         (
             "MATCH (a)-[r:R {p: 5, p: 6}]->(b) RETURN a",

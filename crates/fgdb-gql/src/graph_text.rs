@@ -1521,6 +1521,109 @@ impl<'a> Parser<'a> {
         ];
         ANONYMOUS_NAMES[ordinal]
     }
+    /// A relationship written without a name but with a property map gets a
+    /// private binding in the same reserved namespace, so the map filters it
+    /// as it filters a named relationship. The ordinal is the relationship's
+    /// position in the statement, which no other live relationship shares.
+    fn anonymous_edge_name(ordinal: usize) -> &'static str {
+        const ANONYMOUS_EDGE_NAMES: [&str; MAX_PATTERN_EDGES] = [
+            "__fgdb_anonymous_r0",
+            "__fgdb_anonymous_r1",
+            "__fgdb_anonymous_r2",
+            "__fgdb_anonymous_r3",
+            "__fgdb_anonymous_r4",
+            "__fgdb_anonymous_r5",
+            "__fgdb_anonymous_r6",
+            "__fgdb_anonymous_r7",
+            "__fgdb_anonymous_r8",
+            "__fgdb_anonymous_r9",
+            "__fgdb_anonymous_r10",
+            "__fgdb_anonymous_r11",
+            "__fgdb_anonymous_r12",
+            "__fgdb_anonymous_r13",
+            "__fgdb_anonymous_r14",
+            "__fgdb_anonymous_r15",
+            "__fgdb_anonymous_r16",
+            "__fgdb_anonymous_r17",
+            "__fgdb_anonymous_r18",
+            "__fgdb_anonymous_r19",
+            "__fgdb_anonymous_r20",
+            "__fgdb_anonymous_r21",
+            "__fgdb_anonymous_r22",
+            "__fgdb_anonymous_r23",
+            "__fgdb_anonymous_r24",
+            "__fgdb_anonymous_r25",
+            "__fgdb_anonymous_r26",
+            "__fgdb_anonymous_r27",
+            "__fgdb_anonymous_r28",
+            "__fgdb_anonymous_r29",
+            "__fgdb_anonymous_r30",
+            "__fgdb_anonymous_r31",
+            "__fgdb_anonymous_r32",
+            "__fgdb_anonymous_r33",
+            "__fgdb_anonymous_r34",
+            "__fgdb_anonymous_r35",
+            "__fgdb_anonymous_r36",
+            "__fgdb_anonymous_r37",
+            "__fgdb_anonymous_r38",
+            "__fgdb_anonymous_r39",
+            "__fgdb_anonymous_r40",
+            "__fgdb_anonymous_r41",
+            "__fgdb_anonymous_r42",
+            "__fgdb_anonymous_r43",
+            "__fgdb_anonymous_r44",
+            "__fgdb_anonymous_r45",
+            "__fgdb_anonymous_r46",
+            "__fgdb_anonymous_r47",
+            "__fgdb_anonymous_r48",
+            "__fgdb_anonymous_r49",
+            "__fgdb_anonymous_r50",
+            "__fgdb_anonymous_r51",
+            "__fgdb_anonymous_r52",
+            "__fgdb_anonymous_r53",
+            "__fgdb_anonymous_r54",
+            "__fgdb_anonymous_r55",
+            "__fgdb_anonymous_r56",
+            "__fgdb_anonymous_r57",
+            "__fgdb_anonymous_r58",
+            "__fgdb_anonymous_r59",
+            "__fgdb_anonymous_r60",
+            "__fgdb_anonymous_r61",
+            "__fgdb_anonymous_r62",
+            "__fgdb_anonymous_r63",
+        ];
+        ANONYMOUS_EDGE_NAMES[ordinal]
+    }
+    /// The private name for the relationship being parsed. Its statement
+    /// ordinal is free unless a rolled-back probe reused it, so every visible
+    /// relationship and every ancestor's private spelling is checked too: a
+    /// shared name would correlate two different relationships.
+    fn anonymous_edge(&self) -> Result<Name<'a>, GraphPatternTextError> {
+        let taken = |name: &str| {
+            self.outer_anonymous.contains(&name)
+                || self
+                    .syntax
+                    .visible_edges()
+                    .any(|(edge, _)| edge.variable.is_some_and(|seen| seen.text == name))
+        };
+        let ordinal = (self.edge_count..MAX_PATTERN_EDGES)
+            .chain(0..self.edge_count)
+            .find(|&ordinal| !taken(Self::anonymous_edge_name(ordinal)))
+            .ok_or_else(|| {
+                error(
+                    self.current.at,
+                    GraphPatternTextErrorKind::Build(PatternBuildError::LimitExceeded {
+                        dimension: crate::algebra::PatternLimitDimension::Edges,
+                        limit: MAX_PATTERN_EDGES,
+                        observed: MAX_PATTERN_EDGES + 1,
+                    }),
+                )
+            })?;
+        Ok(Name {
+            text: Self::anonymous_edge_name(ordinal),
+            at: self.current.at,
+        })
+    }
     fn node(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
         self.punct(b'(', "(")?;
@@ -1829,6 +1932,7 @@ impl<'a> Parser<'a> {
                 .syntax
                 .visible_edges()
                 .filter_map(|(edge, _)| edge.variable)
+                .filter(|name| !name.text.starts_with(Self::ANONYMOUS_PREFIX))
                 .collect();
             for name in edges {
                 self.capacity(

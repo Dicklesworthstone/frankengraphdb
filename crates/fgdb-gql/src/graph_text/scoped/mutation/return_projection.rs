@@ -1071,7 +1071,8 @@ impl<'a> Parser<'a> {
             .chain(
                 self.syntax
                     .visible_edges()
-                    .filter_map(|(edge, _)| edge.variable),
+                    .filter_map(|(edge, _)| edge.variable)
+                    .filter(|name| !name.text.starts_with(Self::ANONYMOUS_PREFIX)),
             )
     }
 

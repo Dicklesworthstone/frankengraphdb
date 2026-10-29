@@ -1187,20 +1187,26 @@ impl<'a> Parser<'a> {
                     }
                     let walk = self.pattern_walk_bounds()?;
                     // openCypher `-[r:T {k: v}]->` filters that one captured
-                    // relationship. A walk's map would range over a list.
-                    if self.is_punct(b'{') {
-                        match (variable, walk) {
-                            (Some(variable), None) => self.property_map(variable, true)?,
-                            _ => {
-                                return Err(error(
-                                    self.current.at,
-                                    GraphPatternTextErrorKind::Expected(
-                                        "named fixed-length relationship for a property map",
-                                    ),
-                                ));
-                            }
+                    // relationship, and `-[:T {k: v}]->` a private capture of
+                    // it. A walk's map would range over a list.
+                    let variable = if self.is_punct(b'{') {
+                        if walk.is_some() {
+                            return Err(error(
+                                self.current.at,
+                                GraphPatternTextErrorKind::Expected(
+                                    "fixed-length relationship for a property map",
+                                ),
+                            ));
                         }
-                    }
+                        let variable = match variable {
+                            Some(variable) => variable,
+                            None => self.anonymous_edge()?,
+                        };
+                        self.property_map(variable, true)?;
+                        Some(variable)
+                    } else {
+                        variable
+                    };
                     self.punct(b']', "]")?;
                     (variable, relation, walk)
                 } else {
@@ -1581,6 +1587,8 @@ impl<'a> Parser<'a> {
             outer
                 .variables
                 .iter()
+                .copied()
+                .chain(outer.edges.iter().filter_map(|edge| edge.variable))
                 .filter(|name| name.text.starts_with(Self::ANONYMOUS_PREFIX))
                 .map(|name| name.text),
         );
@@ -1673,8 +1681,9 @@ impl<'a> Parser<'a> {
                 });
                 let edges =
                     (self.syntax.edges.iter().filter_map(|edge| edge.variable)).filter(|name| {
-                        !(outer.edges.iter().filter_map(|edge| edge.variable))
-                            .any(|seen| seen.text == name.text)
+                        !name.text.starts_with(Self::ANONYMOUS_PREFIX)
+                            && !(outer.edges.iter().filter_map(|edge| edge.variable))
+                                .any(|seen| seen.text == name.text)
                     });
                 if let Some(name) = vertices.chain(edges).min_by_key(|name| name.at) {
                     return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));

@@ -787,7 +787,10 @@ impl<'a> Parser<'a> {
                         .iter()
                         .position(|(name, kind)| name.text == word && element(*kind)),
                     // A MATCH binding, read through its own projection below.
-                    None => self.insertion_match_kind(word).is_some_and(element).then_some(0),
+                    None => self
+                        .insertion_match_kind(word)
+                        .is_some_and(element)
+                        .then_some(0),
                 }
             }
             _ => None,
