@@ -110,13 +110,11 @@ fn verify_created(db: &Database<MemVfs>) {
         assert_eq!(vertex.labels, vec![COPY]);
         assert_eq!(
             vertex.props,
-            vec![
-                (P, CanonicalScalar::Int(p).into()),
-                (
-                    Q,
-                    q.map_or(CanonicalScalar::Null, CanonicalScalar::Int).into()
-                )
-            ]
+            // A NULL q is an absent property (bf5bc4deb, fgdb-e26tv).
+            [(P, CanonicalScalar::Int(p).into())]
+                .into_iter()
+                .chain(q.map(|q| (Q, CanonicalScalar::Int(q).into())))
+                .collect::<Vec<_>>()
         );
         let edge = db.edge(EId(10_000 + row * 4)).unwrap().unwrap();
         assert_eq!(
@@ -618,13 +616,11 @@ fn multipart_creation_freezes_the_complete_correlated_bag_before_allocating() {
                 (20, None, 1),
                 (21, None, 1),
             ] {
-                let properties = vec![
-                    (P, CanonicalScalar::Int(p).into()),
-                    (
-                        Q,
-                        q.map_or(CanonicalScalar::Null, CanonicalScalar::Int).into(),
-                    ),
-                ];
+                // A NULL q is an absent property (bf5bc4deb, fgdb-e26tv).
+                let properties = [(P, CanonicalScalar::Int(p).into())]
+                    .into_iter()
+                    .chain(q.map(|q| (Q, CanonicalScalar::Int(q).into())))
+                    .collect::<Vec<_>>();
                 assert_eq!(
                     copies
                         .iter()

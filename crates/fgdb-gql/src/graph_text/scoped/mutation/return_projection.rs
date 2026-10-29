@@ -2042,10 +2042,17 @@ impl<'a> Parser<'a> {
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('));
         let metadata = (self.is_word("LABELS") || self.is_word("TYPE"))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('));
+        // A coalesce over a row element's field takes the branch-local value
+        // route when it is the whole value (6fa695829). Followed by a scalar
+        // operator it is that operator's operand, as in `1 + coalesce(n.p,
+        // 0)`: `coalesce(n.p, 0) + 1` must not leave `+ 1` unread.
+        let coalesce = self.is_word("COALESCE")
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('));
         if !subscript
             && !entry
             && !size
             && !metadata
+            && !coalesce
             && !self.starts_let_operand()?
             && !self.collected_aggregate_call()?
         {

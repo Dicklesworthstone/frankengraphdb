@@ -6,10 +6,10 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
 use fgdb_gql::{
     GlaExecutionStats, GqlExecutionStats, GqlParameters, GqlQueryError, GqlQueryExecution,
-    GqlQueryPolicy, GraphSetExecutionError, GraphSymbol, GraphSymbolKind, GraphSymbolResolver,
-    PreparedGraphSet, PreparedGraphSetText, PreparedProcedureCall, ProcedureGraphDirection,
-    ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
-    ProcedureSelfLoops, ReverseSymbolCatalog,
+    GqlQueryPolicy, GraphPatternTextErrorKind, GraphSetExecutionError, GraphSetTextErrorKind,
+    GraphSymbol, GraphSymbolKind, GraphSymbolResolver, PreparedGraphSet, PreparedGraphSetText,
+    PreparedProcedureCall, ProcedureGraphDirection, ProcedureGraphProjection, ProcedureGraphWeight,
+    ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops, ReverseSymbolCatalog,
 };
 use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::cell::RefCell;
@@ -1222,20 +1222,29 @@ fn generic_maps_and_carried_metadata_keep_runtime_domains() {
         column(&carried.value, 0),
         vec![GraphValue::List(graph.labels.clone().into_boxed_slice()); 4]
     );
-    for statement in [
-        "MATCH (n) WITH n.p AS n RETURN labels(n)",
-        "CALL t.scores() YIELD vertex AS n UNWIND [1] AS x RETURN labels(x)",
-    ] {
-        assert!(
-            matches!(
-                graph.query(statement, wide()),
-                Err(GqlQueryError::Source(
-                    GraphSetExecutionError::Projection { .. }
-                ))
-            ),
-            "{statement}",
-        );
-    }
+    // A shadowing scalar refuses before any catalog call (6ffc77e34): its
+    // domain is known at preparation, unlike an unwound value's.
+    assert!(matches!(
+        PreparedGraphSetText::prepare_with_parameter_types_and_resolver(
+            "MATCH (n) WITH n.p AS n RETURN labels(n)",
+            &[],
+            &mut MetadataCatalog,
+        ),
+        Err(error) if error.kind
+            == GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::Expected(
+                "a vertex or edge for labels()/type()"
+            ))
+    ));
+    // An unwound value's domain is known only when it runs.
+    assert!(matches!(
+        graph.query(
+            "CALL t.scores() YIELD vertex AS n UNWIND [1] AS x RETURN labels(x)",
+            wide()
+        ),
+        Err(GqlQueryError::Source(
+            GraphSetExecutionError::Projection { .. }
+        ))
+    ));
 }
 
 #[test]

@@ -180,8 +180,11 @@ mod apply_tests {
         );
     }
 
+    /// Arguments read only inside an Apply. The spill planner admits Apply
+    /// and typed Arguments as a complete external plan since c1578a023
+    /// (fgdb-694ga); before, it refused them, which this law used to pin.
     #[test]
-    fn arguments_require_an_apply_owner_and_have_no_spill_fallback() {
+    fn arguments_require_an_apply_owner_which_the_spill_planner_admits() {
         assert!(matches!(
             execute(&arguments(), policy()),
             Err(GqlQueryError::Source(
@@ -190,7 +193,7 @@ mod apply_tests {
         ));
         let query = input(vec![int(1)]).apply(echo(), vec![0]).unwrap();
         assert!(!query.reads_graph() && !query.calls_procedure());
-        assert!(fgdb_gql::spill_set::AsyncSpillSetPlan::compile(&query).is_err());
+        assert!(fgdb_gql::spill_set::AsyncSpillSetPlan::compile(&query).is_ok());
     }
 
     #[test]

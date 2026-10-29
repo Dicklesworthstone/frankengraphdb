@@ -3104,22 +3104,17 @@ fn creation_return_maps_describe_the_durable_fields_before_projection_overrides(
             else {
                 panic!("the maps retain their created element identities")
             };
+            // A property created as NULL is absent, as openCypher and GQL
+            // treat it (bf5bc4deb, fgdb-e26tv): `edge-note` is in no map, key
+            // list or stored field.
             assert_eq!(
                 &row[3..],
                 &[
-                    map(&[
-                        ("edge-note", null()),
-                        ("name", text("created")),
-                        ("score", int(2))
-                    ]),
+                    map(&[("name", text("created")), ("score", int(2))]),
                     map(&[]),
                     map(&[("score", int(3))]),
-                    list(&["edge-note", "name", "score"]),
-                    map(&[
-                        ("edge-note", null()),
-                        ("name", text("created")),
-                        ("score", int(3))
-                    ]),
+                    list(&["name", "score"]),
+                    map(&[("name", text("created")), ("score", int(3))]),
                 ],
             );
             let fields = vec![
@@ -3128,7 +3123,6 @@ fn creation_return_maps_describe_the_durable_fields_before_projection_overrides(
                     NAME,
                     CanonicalScalar::ucs_basic_text("created").unwrap().into(),
                 ),
-                (NOTE, CanonicalScalar::Null.into()),
             ];
             assert_eq!(db.vertex(*a).unwrap().unwrap().props, fields);
             assert!(db.vertex(*b).unwrap().unwrap().props.is_empty());
@@ -3549,18 +3543,20 @@ fn authorized_merge_maps_mask_final_fields_and_preserve_hidden_storage() {
                     .iter()
                     .map(|row| row.values().to_vec())
                     .collect::<Vec<_>>(),
+                // `SET n.edge-note = NULL` is a removal (bf5bc4deb,
+                // fgdb-e26tv): no map, key list or stored field holds it.
                 vec![vec![
-                    map(&[("edge-note", null()), ("score", int(11))]),
-                    list(&["edge-note", "score"]),
-                    map(&[("edge-note", null()), ("score", int(110))]),
+                    map(&[("score", int(11))]),
+                    list(&["score"]),
+                    map(&[("score", int(110))]),
                 ]]
             );
             let props = db.vertex(VId(1)).unwrap().unwrap().props;
             assert!(
                 props.contains(&(NAME, CanonicalScalar::ucs_basic_text("one").unwrap().into()))
             );
-            assert!(props.contains(&(NOTE, CanonicalScalar::Null.into())));
-            assert_eq!(props.len(), if hidden { 23 } else { 3 });
+            assert!(!props.iter().any(|(key, _)| *key == NOTE));
+            assert_eq!(props.len(), if hidden { 22 } else { 2 });
             assert_eq!(db.frontier().unwrap().0, before.0 + 1);
             let after = (
                 db.frontier().unwrap(),
