@@ -153,10 +153,18 @@ fn occurrence_rows_keep_duplicate_values_distinct_identities_and_frozen_properti
         .enumerate()
     {
         let vertex = VId(100 + row as u128 * 256);
+        let properties = if input[row].is_null() {
+            vec![]
+        } else {
+            vec![(
+                P,
+                CanonicalPropertyValue::Scalar(input[row].as_scalar().unwrap().clone()),
+            )]
+        };
         assert!(
-            matches!(&intents[0], GraphInsertIntent::Vertex { vertex: id, properties, .. }
+            matches!(&intents[0], GraphInsertIntent::Vertex { vertex: id, properties: actual, .. }
             if *id == vertex
-                && properties[0].1.as_scalar() == Some(input[row].as_scalar().unwrap()))
+                && *actual == properties)
         );
         assert!(
             matches!(&intents[1], GraphInsertIntent::Edge { edge, source, destination, .. }
@@ -954,9 +962,14 @@ fn return_property_binds_the_computed_creation_value_and_native_null_arithmetic(
         CanonicalScalar::Int(3),
         CanonicalScalar::Null,
     ]) {
+        let properties = if matches!(expected, CanonicalScalar::Null) {
+            vec![]
+        } else {
+            vec![(P, CanonicalPropertyValue::Scalar(expected))]
+        };
         assert!(
-            matches!(intent, GraphInsertIntent::Vertex { properties, .. }
-            if properties == &[(P, CanonicalPropertyValue::Scalar(expected))])
+            matches!(intent, GraphInsertIntent::Vertex { properties: actual, .. }
+            if *actual == properties)
         );
     }
 }

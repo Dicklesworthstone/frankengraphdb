@@ -74,9 +74,7 @@ fn property(vertex: u128, key: PropertyKeyId, value: Option<i64>) -> GraphMutati
     GraphMutationIntent::Property {
         vertex: VId(vertex),
         key,
-        value: Some(CanonicalPropertyValue::Scalar(
-            value.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
-        )),
+        value: value.map(|value| CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))),
     }
 }
 
@@ -287,16 +285,17 @@ fn nullable_targets_and_lazy_arithmetic_do_not_hide_property_source_failures() {
 }
 
 #[test]
-fn computed_and_literal_assignments_share_identity_but_null_is_not_removal() {
+fn computed_literal_and_removal_assignments_share_their_field_identity() {
     for (text, expected) in [
         ("MATCH (n) SET n.q=1+2,n.q=3", Some(3)),
         ("MATCH (n) SET n.q=NULL+1,n.q=NULL", None),
+        ("MATCH (n) SET n.q=NULL+1 REMOVE n.q", None),
     ] {
         let result = run(&prepare(text), &[VId(1)], &[], &Props::new(), policy()).unwrap();
         assert_eq!(result.intents(), &[property(1, Q, expected)]);
     }
     for text in [
-        "MATCH (n) SET n.q=NULL+1 REMOVE n.q",
+        "MATCH (n) SET n.q=NULL+1,n.q=0",
         "MATCH (n) SET n.q=1+2,n.q=4",
         "MATCH (n) SET n.q=1+0,n.q=TRUE",
     ] {

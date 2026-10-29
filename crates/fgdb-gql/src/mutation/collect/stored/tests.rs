@@ -328,7 +328,7 @@ fn late_map_or_element_values_never_return_a_partial_list_batch() {
 }
 
 #[test]
-fn null_targets_skip_the_rhs_but_null_assignments_remain_stored_scalars() {
+fn null_targets_skip_the_rhs_and_null_assignments_remove_the_field() {
     let invalid = GraphValue::map(vec![("invalid".into(), int(1))]).unwrap();
     let query = mutation(
         false,
@@ -354,9 +354,7 @@ fn null_targets_skip_the_rhs_but_null_assignments_remain_stored_scalars() {
         &[GraphMutationIntent::Property {
             vertex: VId(BASE + 1),
             key: Q,
-            value: Some(fgdb_types::CanonicalPropertyValue::Scalar(
-                CanonicalScalar::Null
-            )),
+            value: None,
         }]
     );
 }

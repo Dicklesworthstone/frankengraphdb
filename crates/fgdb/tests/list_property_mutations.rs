@@ -533,6 +533,98 @@ fn authorized_element_reads_mask_properties_as_pattern_reads_do() {
     });
 }
 
+/// NULL removes a field even when the old value is a list. It does not
+/// erase NULL members of a different field, or bypass that field's authority.
+#[test]
+fn null_removals_keep_nested_values_authorization_and_durable_atomicity() {
+    run(async |commit, cx, txcx| {
+        let authority =
+            Authority::new(AuthKey::from_seed(0x7a14), NS, "graph", SchemaEpoch(1), 1).unwrap();
+        for statement in [
+            "MATCH (n:Item) SET n.q=n.p,n.p=NULL",
+            "MATCH (n:Item) SET n.q=n.p,n.p=NULL+1",
+            "MATCH (n:Item) SET n.q=n.p,n += {p:NULL}",
+            "MATCH (n:Item) SET n.q=n.p,n.p=NULL REMOVE n.p",
+        ] {
+            let prepared = PreparedGraphMutationText::prepare(statement, R, Catalog)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            for allowed in [false, true] {
+                let vfs = MemVfs::new().unwrap();
+                let path = vfs.database_dir();
+                let mut db = Database::create_with_vfs(commit, vfs.clone(), &path, keys())
+                    .await
+                    .unwrap();
+                db.write(commit, fixture()).await.unwrap();
+                let before = db.frontier().unwrap();
+                let grant = Grant {
+                    branch: "main".into(),
+                    labels: Scope::only([L]),
+                    relations: Scope::only([R]),
+                    properties: if allowed {
+                        Scope::only([P, Q])
+                    } else {
+                        Scope::only([Q])
+                    },
+                    rights: Rights::ReadWrite,
+                    limits: QueryLimits {
+                        max_nodes: 100_000,
+                        max_work: 2_000_000,
+                        max_rows: 100,
+                    },
+                    expires_at_ms: 10_000,
+                };
+                let token = authority.issue_at(&grant, 100).unwrap();
+                let result = db
+                    .execute_graph_mutation_authorized(
+                        txcx,
+                        cx,
+                        commit,
+                        &authority,
+                        &token,
+                        "main",
+                        &prepared,
+                        GraphMutationPolicy::new(query_policy(100), 100),
+                        || 100,
+                    )
+                    .await;
+                if allowed {
+                    assert!(result.is_ok(), "{statement}: {result:?}");
+                    db.compact(commit).await.unwrap();
+                    drop(db);
+                    db = Database::open_with_vfs(commit, vfs, &path, keys())
+                        .await
+                        .unwrap();
+                } else {
+                    assert!(
+                        result.is_err(),
+                        "NULL cannot bypass field admission: {statement}"
+                    );
+                    assert_eq!(db.frontier().unwrap(), before);
+                }
+                for (id, n) in [(1, 1), (2, 3)] {
+                    assert_eq!(
+                        prop(&db, id, P),
+                        (!allowed).then(|| value(n).to_written_property().unwrap()),
+                        "{statement}, allowed={allowed}, vertex={id}"
+                    );
+                    assert_eq!(
+                        prop(&db, id, Q),
+                        Some(if allowed {
+                            value(n).to_written_property().unwrap()
+                        } else {
+                            CanonicalScalar::Int(id as i64).into()
+                        }),
+                        "nested NULLs and the frozen RHS survive: {statement}"
+                    );
+                }
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        }
+    });
+}
+
 #[test]
 fn output_allowance_failure_rolls_back_lists_and_limit_zero_does_not_limit_effects() {
     run(async |commit, cx, txcx| {

@@ -119,17 +119,22 @@ fn duplicates_null_and_input_order_create_distinct_occurrence_local_structures()
     let mut expected_requests = Vec::new();
     for (row, value) in values.into_iter().enumerate() {
         let vertex = VId(100 + row as u128 * 256);
+        let properties = if matches!(value, CanonicalScalar::Null) {
+            vec![]
+        } else {
+            vec![(P, value.into())]
+        };
         expected.push(GraphInsertIntent::Vertex {
             vertex,
             labels: vec![LabelId(3)],
-            properties: vec![(P, value.clone().into())],
+            properties: properties.clone(),
         });
         expected.push(GraphInsertIntent::Edge {
             edge: EId(200 + row as u128 * 256),
             relation: R,
             source: vertex,
             destination: vertex,
-            properties: vec![(P, value.into())],
+            properties,
         });
         expected_requests.push(GraphInsertRequest::Vertex { row, vertex: 0 });
         expected_requests.push(GraphInsertRequest::Edge { row, edge: 0 });

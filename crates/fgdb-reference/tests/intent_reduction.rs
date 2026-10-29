@@ -722,11 +722,10 @@ fn a_cascade_sees_earlier_intents_in_the_same_statement() {
     assert_eq!(applied.vertex_count(), 1);
 }
 
-/// Removing a property is distinct from setting it to null: `after: None` versus
-/// `after: Some(Null)`. An absent property and one holding null are different
-/// states, and collapsing them would make removal unexpressible.
+/// A top-level NULL assignment is the same removal command. Both compute
+/// the real before image and leave the element alive with an absent field.
 #[test]
-fn removing_a_property_is_not_setting_it_to_null() {
+fn removing_a_property_is_setting_it_to_null() {
     let basis = graph(vec![vertex(1, "ada")]);
     let outcome = evaluate(
         &basis,
@@ -735,6 +734,15 @@ fn removing_a_property_is_not_setting_it_to_null() {
             name: NAME,
         }])],
     );
+    let null_assignment = evaluate(
+        &basis,
+        &[Statement::new(vec![Intent::SetProp {
+            elem: ElementId::Vertex(VId(1)),
+            name: NAME,
+            value: CanonicalScalar::Null.into(),
+        }])],
+    );
+    assert_eq!(null_assignment, outcome);
     let (effects, _) = outcome.committed_parts().expect("committed");
     let (before, after) = property_images(&effects[0]).expect("a Property row");
     assert!(before.is_some(), "the before image is computed");
@@ -763,6 +771,74 @@ fn removing_an_absent_property_emits_nothing() {
     );
     let (effects, failures) = outcome.committed_parts().expect("committed");
     assert!(effects.is_empty() && failures.is_empty());
+    assert_eq!(
+        evaluate(
+            &basis,
+            &[Statement::new(vec![Intent::SetProp {
+                elem: ElementId::Vertex(VId(1)),
+                name: PropertyKeyId(4242),
+                value: CanonicalScalar::Null.into(),
+            }])],
+        ),
+        outcome
+    );
+}
+
+#[test]
+fn creation_omits_top_level_null_fields_but_keeps_null_list_members() {
+    let nested = CanonicalPropertyValue::List(
+        fgdb_types::CanonicalList::try_new(vec![
+            CanonicalScalar::Null.into(),
+            CanonicalScalar::Int(7).into(),
+        ])
+        .unwrap(),
+    );
+    let outcome = evaluate(
+        &ReferenceGraph::new(),
+        &[Statement::new(vec![
+            Intent::CreateVertex {
+                vid: VId(1),
+                labels: vec![LABEL],
+                props: vec![(NAME, CanonicalScalar::Null.into()), (RANK, nested.clone())],
+            },
+            Intent::AddEdge {
+                eid: EId(10),
+                src: VId(1),
+                etype: REL,
+                dst: VId(1),
+                props: vec![(NAME, CanonicalScalar::Null.into()), (RANK, nested.clone())],
+            },
+        ])],
+    );
+    let (effects, failures) = outcome.committed_parts().expect("committed");
+    assert!(failures.is_empty());
+    assert_eq!(
+        effects,
+        &[
+            DeltaRow::CreateVertex {
+                vid: VId(1),
+                birth_ordinal: 1,
+                labels: vec![LABEL],
+                props: vec![(RANK, nested.clone())],
+                valid_time: None,
+            },
+            DeltaRow::CreateEdge {
+                eid: EId(10),
+                birth_ordinal: 2,
+                src: VId(1),
+                relation: REL,
+                dst: VId(1),
+                canonical_key: None,
+                props: vec![(RANK, nested)],
+                valid_time: None,
+            },
+        ]
+    );
+    let mut applied = ReferenceGraph::new();
+    for effect in effects {
+        applied.apply_row(effect).expect("oracle effects replay");
+    }
+    assert!(!applied.vertex(VId(1)).unwrap().props.contains_key(&NAME));
 }
 
 /// `EnsureVertex` is idempotent: the second evaluation emits nothing, and it does

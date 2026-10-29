@@ -257,6 +257,11 @@ fn matched_edge_results_keep_edge_identity_and_property_domains_in_creation_and_
         let GraphValue::Vertex(created) = &rows[at][2] else {
             panic!("the created vertex must not be confused with the matched edge");
         };
+        let properties = if matches!(property, CanonicalScalar::Null) {
+            vec![]
+        } else {
+            vec![(P, property.into())]
+        };
         assert!(
             batch
                 .insertion()
@@ -264,7 +269,7 @@ fn matched_edge_results_keep_edge_identity_and_property_domains_in_creation_and_
                 .contains(&GraphInsertIntent::Vertex {
                     vertex: *created,
                     labels: vec![],
-                    properties: vec![(P, property.into())],
+                    properties,
                 })
         );
     }

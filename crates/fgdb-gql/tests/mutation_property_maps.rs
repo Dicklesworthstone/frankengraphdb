@@ -186,8 +186,8 @@ fn vertex_and_edge_maps_merge_all_final_assignments_and_keep_occurrences() {
         Catalog(Some("q")),
     );
     let batch = source.execute(&query, policy()).unwrap();
-    let a = map(vec![("keep", int(7)), ("p", int(20)), ("q", null())]);
-    let projected = map(vec![("keep", int(7)), ("p", int(21)), ("q", null())]);
+    let a = map(vec![("keep", int(7)), ("p", int(20))]);
+    let projected = map(vec![("keep", int(7)), ("p", int(21))]);
     assert_eq!(
         rows(&batch),
         [12, 13]
@@ -196,7 +196,7 @@ fn vertex_and_edge_maps_merge_all_final_assignments_and_keep_occurrences() {
                 a.clone(),
                 map(vec![("p", int(20))]),
                 map(vec![("q", int(q))]),
-                list(vec![text("keep"), text("p"), text("q")]),
+                list(vec![text("keep"), text("p")]),
                 projected.clone(),
             ])
             .collect::<Vec<_>>()
@@ -551,8 +551,8 @@ mod dynamic_metadata {
             [12, 13]
                 .into_iter()
                 .map(|q| vec![
-                    map(vec![("keep", int(7)), ("p", int(20)), ("q", null())]),
-                    list(vec![text("keep"), text("p"), text("q")]),
+                    map(vec![("keep", int(7)), ("p", int(20))]),
+                    list(vec![text("keep"), text("p")]),
                     list(vec![text("After")]),
                     map(vec![("q", int(q))]),
                     text("R"),
@@ -996,7 +996,7 @@ mod dynamic_metadata {
     }
 
     #[test]
-    fn heterogeneous_nested_row_maps_preserve_missing_keys_and_stored_nulls() {
+    fn heterogeneous_nested_row_maps_preserve_missing_keys_and_remove_null_fields() {
         use fgdb_gql::GqlParameterType;
         let fixture = Fixture::new();
         let arguments = GqlParameters::new()
@@ -1029,12 +1029,7 @@ mod dynamic_metadata {
             vec![
                 vec![
                     GraphValue::Vertex(VId(1)),
-                    map(vec![
-                        ("p", int(10)),
-                        ("old", int(3)),
-                        ("keep", int(7)),
-                        ("q", null())
-                    ]),
+                    map(vec![("p", int(10)), ("old", int(3)), ("keep", int(7)),]),
                 ],
                 vec![
                     GraphValue::Vertex(VId(2)),

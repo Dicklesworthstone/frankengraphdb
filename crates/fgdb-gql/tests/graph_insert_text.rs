@@ -197,7 +197,7 @@ fn constants_preserve_walk_optional_and_edge_only_occurrences() {
         let y = VId(x.0 + 1);
         assert!(
             matches!(&intents[1], GraphInsertIntent::Vertex { properties, .. }
-            if properties == &[(P, CanonicalPropertyValue::Scalar(CanonicalScalar::Null))])
+            if properties.is_empty())
         );
         for (edge, source, destination) in [(2, x, y), (3, y, x), (4, x, x)] {
             assert!(
@@ -930,10 +930,7 @@ fn unwind_parameters_bind_once_and_empty_sources_never_create_a_unit() {
             GraphInsertIntent::Vertex {
                 vertex: VId(116),
                 labels: vec![COPY],
-                properties: vec![
-                    (P, CanonicalScalar::Null.into()),
-                    (Q, CanonicalScalar::Null.into())
-                ]
+                properties: vec![]
             },
         ]
     );

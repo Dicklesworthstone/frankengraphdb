@@ -70,7 +70,8 @@ pub enum GraphMutationAction {
     /// `None` merges only the supplied keys (`+=`). `Some(current)`
     /// replaces all properties (`=`): `current` reads the target's complete
     /// admitted property map at that frozen cut. Missing keys are removed;
-    /// explicit NULL remains a stored NULL, as for SetProperty.
+    /// explicit NULL removes the field, as for SetProperty. NULL elements
+    /// inside a stored list remain values.
     /// The pinned catalog must name every supplied/current key injectively.
     /// An absent OPTIONAL target skips both expressions.
     SetProperties {

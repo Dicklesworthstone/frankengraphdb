@@ -124,11 +124,11 @@ fn created_vertex_edge_empty_and_selective_maps_share_one_native_occurrence() {
     assert_eq!(
         rows(&batch),
         vec![vec![
-            map(vec![("p", int(3)), ("q", null())]),
+            map(vec![("p", int(3))]),
             map(vec![("p", int(7))]),
             map(vec![]),
-            list(vec![text("p"), text("q")]),
-            map(vec![("p", int(4)), ("q", null())]),
+            list(vec![text("p")]),
+            map(vec![("p", int(4))]),
             map(vec![("p", int(7)), ("a", GraphValue::Vertex(VId(100)))]),
         ]]
     );
@@ -155,7 +155,7 @@ fn unwind_maps_keep_duplicate_occurrences_and_empty_native_aggregate_groups() {
         vec![
             vec![int(1), int(2), list(vec![map(vec![("p", int(1))]); 2])],
             vec![int(2), int(1), list(vec![map(vec![("p", int(2))])])],
-            vec![null(), int(1), list(vec![map(vec![("p", null())])])],
+            vec![null(), int(1), list(vec![map(vec![])])],
         ]
     );
     assert_eq!(batch.insertion().stats().created_vertices, 4);

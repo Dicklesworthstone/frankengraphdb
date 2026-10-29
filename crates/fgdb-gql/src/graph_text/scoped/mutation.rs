@@ -2474,7 +2474,8 @@ mod graph_function_tests {
                     &[crate::GraphMutationIntent::Property {
                         vertex: fgdb_types::VId(1),
                         key: PropertyKeyId(1),
-                        value: Some(expected.clone().into()),
+                        value: (!matches!(expected, CanonicalScalar::Null))
+                            .then(|| expected.clone().into()),
                     }],
                     "{text}"
                 );

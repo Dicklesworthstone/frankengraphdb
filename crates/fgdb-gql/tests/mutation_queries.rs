@@ -314,7 +314,7 @@ fn literal_map_parameters_nulls_and_explicit_removals_keep_the_existing_contract
             GraphMutationIntent::Property {
                 vertex: VId(1),
                 key: P,
-                value: stored(CanonicalScalar::Null),
+                value: None,
             },
             GraphMutationIntent::Property {
                 vertex: VId(1),
@@ -497,7 +497,7 @@ fn literal_map_updates_preserve_conflict_and_atomic_proposal_refusals() {
     for text in [
         "MATCH (a) SET a += {p: 1},a += {p: 2}",
         "MATCH (a) SET a += {p: 1},a.p=2",
-        "MATCH (a) SET a += {q: NULL} REMOVE a.q",
+        "MATCH (a) SET a += {q: NULL},a.q=0",
     ] {
         assert!(matches!(
             run(&prepare(text), &[VId(1)], &[], &props(), policy()),
@@ -506,6 +506,22 @@ fn literal_map_updates_preserve_conflict_and_atomic_proposal_refusals() {
             ))
         ));
     }
+    let removal = run(
+        &prepare("MATCH (a) SET a += {q: NULL} REMOVE a.q"),
+        &[VId(1)],
+        &[],
+        &props(),
+        policy(),
+    )
+    .unwrap();
+    assert_eq!(
+        removal.intents(),
+        &[GraphMutationIntent::Property {
+            vertex: VId(1),
+            key: Q,
+            value: None,
+        }]
+    );
     let arithmetic = prepare("MATCH (a) SET a += {p: 1, q: 1 / (a.p - 10)}");
     assert!(matches!(
         run(&arithmetic, &[VId(1)], &[], &props(), policy()),
@@ -599,7 +615,7 @@ fn optional_null_targets_are_skipped_and_missing_rhs_is_a_canonical_null() {
             GraphMutationIntent::Property {
                 vertex: VId(1),
                 key: P,
-                value: stored(CanonicalScalar::Null)
+                value: None
             },
             GraphMutationIntent::Property {
                 vertex: VId(1),
@@ -608,13 +624,16 @@ fn optional_null_targets_are_skipped_and_missing_rhs_is_a_canonical_null() {
             },
         ]
     );
-    let conflicting_null = prepare("MATCH (a) SET a.q=NULL REMOVE a.q");
-    assert!(matches!(
-        run(&conflicting_null, &[VId(1)], &[], &props(), policy()),
-        Err(GqlQueryError::Source(
-            GraphMutationError::ConflictingAssignment { .. }
-        ))
-    ));
+    let repeated_removal = prepare("MATCH (a) SET a.q=NULL REMOVE a.q");
+    let result = run(&repeated_removal, &[VId(1)], &[], &props(), policy()).unwrap();
+    assert_eq!(
+        result.intents(),
+        &[GraphMutationIntent::Property {
+            vertex: VId(1),
+            key: Q,
+            value: None,
+        }]
+    );
 }
 
 #[test]
