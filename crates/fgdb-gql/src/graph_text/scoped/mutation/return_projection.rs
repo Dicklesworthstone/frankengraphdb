@@ -370,7 +370,7 @@ fn dynamic_column_at(
 /// one, so a CASE that returns it (`CASE WHEN c THEN a ELSE b END`) is read
 /// in the value language. A property read or a call on the name stays with
 /// the scalar program.
-fn element_column_at(
+pub(super) fn element_column_at(
     token: Token<'_>,
     lexer: &Lexer<'_>,
     route: Route<'_, '_>,

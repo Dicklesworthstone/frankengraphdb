@@ -4,7 +4,7 @@
 
 mod conditional;
 
-use super::return_projection::Route;
+use super::return_projection::{Route, element_column_at};
 use super::*;
 use crate::set_text::ReadValueTemplate;
 use crate::{
@@ -922,6 +922,17 @@ impl<'a> Parser<'a> {
             && !tighter
         {
             return self.bare_column_value(columns, column);
+        }
+        // A later MATCH can supply an element absent from the incoming row.
+        // Resolve it here once: the scalar fallback would rediscover this
+        // same comparison without consuming the element name.
+        if !tighter
+            && element_column_at(self.current, &self.lexer, self.route(columns))?
+            && let ExpressionColumns::Resolved(resolve) = columns
+        {
+            let column = resolve(self)?
+                .ok_or_else(|| error(at, GraphPatternTextErrorKind::UnknownVariable))?;
+            return Ok(ReadValueTemplate::Column(column));
         }
         self.list_operand_value(columns, nesting, at)
     }

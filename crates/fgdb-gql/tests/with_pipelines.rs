@@ -2377,7 +2377,14 @@ fn comprehension_compares_elements_bound_by_a_later_match() {
     use fgdb_gql::algebra::GraphValue;
 
     let values = [1, 2, 3].map(CanonicalScalar::Int);
-    for predicate in ["NOT x = q", "x <> q", "x != q", "NOT q = x"] {
+    for predicate in [
+        "NOT x = q",
+        "x <> q",
+        "x != q",
+        "NOT q = x",
+        "q <> x",
+        "q != x",
+    ] {
         let text = format!(
             "MATCH (p) WITH collect(p) AS ps MATCH (q {{p:1}}) \
              RETURN [x IN ps WHERE {predicate} | x.p] AS values"
