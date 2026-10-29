@@ -1742,6 +1742,10 @@ impl<'a> Parser<'a> {
             self.punct(b':', ":")?;
             let row = if edge {
                 None
+            } else if self.row_value_is_computed()? {
+                // A key computed from the leading row is a private join
+                // column, as `row.key` is (fgdb-2npty).
+                Some(self.computed_imported_operand()?)
             } else {
                 self.imported_row_field()?
             };

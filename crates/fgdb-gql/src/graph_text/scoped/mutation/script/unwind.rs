@@ -522,6 +522,15 @@ impl GraphUnwindWriteText {
             tail_at = next + 2;
         }
         let tokens = &tokens[tail_at..];
+        // A WITH stage (`WITH row, toInteger(row.s) AS k MATCH ...`) is the
+        // native multipart compiler's, which projects computed row values
+        // and joins on them (fgdb-2npty). This adapter binds row fields only.
+        if tokens
+            .first()
+            .is_some_and(|(token, _)| is_word(token, "WITH"))
+        {
+            return Ok(None);
+        }
         if !tokens
             .first()
             .is_some_and(|(token, _)| is_word(token, "MERGE") || is_word(token, "MATCH"))

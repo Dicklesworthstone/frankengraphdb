@@ -112,6 +112,67 @@ impl<'a> Parser<'a> {
         Ok(Some(column))
     }
 
+    /// Whether the value ahead computes from the leading row, as in
+    /// `toInteger(row.s)` or `row.a + 1` (fgdb-2npty). It must read a row
+    /// binding, and call a function or apply an operator outside brackets.
+    /// A bare path or subscript (`row.key`, `s[0]`) stays imported_row_field's.
+    /// The value ends at `,`, `}`, `)` or `]` outside brackets, or at AND, OR,
+    /// XOR or a clause keyword. Lookahead only: nothing is admitted.
+    pub(super) fn row_value_is_computed(&self) -> Result<bool, GraphPatternTextError> {
+        self.row_value_computes_from(self.current, self.lexer.clone())
+    }
+
+    /// [`Self::row_value_is_computed`] for a value starting at `token`.
+    pub(super) fn row_value_computes_from(
+        &self,
+        mut token: Token<'a>,
+        mut lexer: Lexer<'a>,
+    ) -> Result<bool, GraphPatternTextError> {
+        if self.read_row_bindings.is_empty() {
+            return Ok(false);
+        }
+        let mut previous = None;
+        let mut depth = 0_usize;
+        let (mut reads_row, mut computes) = (false, false);
+        loop {
+            match token.kind {
+                TokenKind::End => break,
+                TokenKind::Punct(b',' | b'}' | b')' | b']') if depth == 0 => break,
+                TokenKind::Punct(b')' | b']' | b'}') => depth -= 1,
+                TokenKind::Punct(b'(') => {
+                    computes |= depth == 0;
+                    depth += 1;
+                }
+                TokenKind::Punct(b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b'+' | b'-' | b'*' | b'/' | b'%' | b'^' | b'|') => {
+                    computes |= depth == 0;
+                }
+                TokenKind::Word(word)
+                    if depth == 0
+                        && (["AND", "OR", "XOR"]
+                            .iter()
+                            .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                            || Self::ends_where(word, previous)) =>
+                {
+                    break;
+                }
+                TokenKind::Word(word)
+                    if !matches!(previous, Some(TokenKind::Punct(b'.')))
+                        && self
+                            .read_row_bindings
+                            .iter()
+                            .any(|binding| binding.text == word) =>
+                {
+                    reads_row = true;
+                }
+                _ => {}
+            }
+            previous = Some(token.kind);
+            token = lexer.next()?;
+        }
+        Ok(reads_row && computes)
+    }
+
     /// A dotted imported value on one side and a root graph property/identity
     /// on the other, joined by one complete equality atom. The Boolean owner
     /// still enforces top-level AND and refuses OR/NOT scope changes.

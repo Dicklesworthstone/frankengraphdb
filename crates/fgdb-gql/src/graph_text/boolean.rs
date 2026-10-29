@@ -543,6 +543,13 @@ impl<'a> Parser<'a> {
             parsed.comparisons.push(comparison);
             return Ok(());
         }
+        // Before the scalar path claims its function call or arithmetic.
+        if !self.read_row_bindings.is_empty()
+            && let Some(correlation) = self.computed_row_correlation()?
+        {
+            parsed.correlations.push(correlation);
+            return Ok(());
+        }
         if self.relation_type_test(parsed)? {
             return Ok(());
         }
@@ -816,6 +823,60 @@ impl<'a> Parser<'a> {
     /// of this MATCH, is the identity form of the same key: openCypher's
     /// `MATCH (a) WITH a MATCH (b) WHERE a = b` correlates `b` with the
     /// carried `a` exactly as `MATCH (a)` reusing the name does.
+    /// `v.k = <value>` where `v` is a root vertex of this MATCH and the value
+    /// computes from the leading row, as in `toInteger(row.s)` or `row.a + 1`
+    /// (fgdb-2npty): the join key `(v {k: <value>})` makes. The value becomes
+    /// a private computed column, as a dotted imported key does.
+    #[allow(clippy::type_complexity)]
+    fn computed_row_correlation(
+        &mut self,
+    ) -> Result<Option<(Name<'a>, Option<Name<'a>>, usize, usize)>, GraphPatternTextError> {
+        let at = self.current.at;
+        let mut lexer = self.lexer.clone();
+        let (
+            TokenKind::Word(name),
+            TokenKind::Punct(b'.'),
+            TokenKind::Word(_) | TokenKind::DelimitedKeyword(_),
+            TokenKind::Punct(b'='),
+        ) = (
+            self.current.kind,
+            lexer.next()?.kind,
+            lexer.next()?.kind,
+            lexer.next()?.kind,
+        )
+        else {
+            return Ok(None);
+        };
+        let roots = (self.syntax.variables.get(..self.syntax.root_variables))
+            .unwrap_or(&self.syntax.variables);
+        if !roots.iter().any(|variable| variable.text == name)
+            || self.syntax.visible_edge(name).is_some()
+            || self
+                .read_row_bindings
+                .iter()
+                .any(|binding| binding.text == name)
+        {
+            return Ok(None);
+        }
+        // Classify the value from its first token, consuming nothing.
+        let first = lexer.next()?;
+        if !self.row_value_computes_from(first, lexer)? {
+            return Ok(None);
+        }
+        self.capacity(
+            self.predicates,
+            MAX_PATTERN_PREDICATES,
+            crate::algebra::PatternLimitDimension::Predicates,
+        )?;
+        let variable = self.property_variable()?;
+        self.punct(b'.', ".")?;
+        let key = self.schema_name()?;
+        self.punct(b'=', "=")?;
+        let row = self.computed_imported_operand()?;
+        self.predicates += 1;
+        Ok(Some((variable, Some(key), row, at)))
+    }
+
     #[allow(clippy::type_complexity)]
     fn row_correlation(
         &mut self,

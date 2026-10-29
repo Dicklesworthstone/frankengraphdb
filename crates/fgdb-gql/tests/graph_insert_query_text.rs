@@ -1724,7 +1724,6 @@ fn imported_map_correlations_refuse_scope_and_depth_changes_before_catalog() {
     for text in [
         "UNWIND [{p:1}] AS row MATCH (a) WHERE a.p=row.p OR a.q=1 CREATE (c) RETURN c",
         "UNWIND [{p:1}] AS row MATCH (a) WHERE NOT a.p=row.p CREATE (c) RETURN c",
-        "UNWIND [{p:1}] AS row MATCH (a) WHERE a.p=row.p+1 CREATE (c) RETURN c",
         "UNWIND [{p:1}] AS row MATCH (a) OPTIONAL MATCH (b {p:row.p}) CREATE (c) RETURN c",
     ] {
         let calls = Cell::new(0);
@@ -1738,6 +1737,16 @@ fn imported_map_correlations_refuse_scope_and_depth_changes_before_catalog() {
         );
         assert_eq!(calls.get(), 0, "{text}");
     }
+    // A key computed from the row changes neither scope nor depth: it is a
+    // private join column, as `row.p` is (fgdb-2npty; this used to refuse).
+    assert!(
+        PreparedGraphInsertQueryText::prepare(
+            "UNWIND [{p:1}] AS row MATCH (a) WHERE a.p=row.p+1 CREATE (c) RETURN c",
+            R,
+            symbols,
+        )
+        .is_ok()
+    );
     let long_key = "p".repeat(fgdb_gql::algebra::MAX_PATTERN_NAME_BYTES + 1);
     for predicate in [format!("a.{long_key}=row.p"), format!("row.p=a.{long_key}")] {
         let text =

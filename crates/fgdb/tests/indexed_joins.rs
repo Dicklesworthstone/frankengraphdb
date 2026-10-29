@@ -536,6 +536,49 @@ fn row_keyed_property_matches_admit_only_the_posted_roots() {
                 "{statement}: the seeded read fits a 20-record allowance"
             );
         }
+        // A key computed from the row is a private join column seeded the
+        // same way, in the map or as a flat WHERE equality.
+        let field =
+            |name: &str, value: GraphValue| GraphValue::map(vec![(name.into(), value)]).unwrap();
+        let texts = GqlParameters::new()
+            .with_list("rows", vec![field("s", text("3")), field("s", text("5"))])
+            .unwrap();
+        let numbers = GqlParameters::new()
+            .with_list("rows", vec![field("id", int(2)), field("id", int(4))])
+            .unwrap();
+        for (statement, params) in [
+            (
+                "UNWIND $rows AS row MATCH (a:Node {id: toInteger(row.s)}) RETURN a.x AS x \
+                 ORDER BY x",
+                &texts,
+            ),
+            (
+                "UNWIND $rows AS row MATCH (a:Node {id: row.id + 1}) RETURN a.x AS x ORDER BY x",
+                &numbers,
+            ),
+            (
+                "UNWIND $rows AS row MATCH (a:Node) WHERE a.id = toInteger(row.s) \
+                 RETURN a.x AS x ORDER BY x",
+                &texts,
+            ),
+            (
+                "UNWIND $rows AS row MATCH (a:Node) WHERE a.id = row.id + 1 \
+                 RETURN a.x AS x ORDER BY x",
+                &numbers,
+            ),
+        ] {
+            let reference = xs(db
+                .query(&cx, statement, params, names, policy())
+                .unwrap_or_else(|error| panic!("{statement}: {error:?}")));
+            assert_eq!(reference, [30, 50], "{statement}");
+            assert_eq!(
+                xs(db
+                    .query(&cx, statement, params, names, tight)
+                    .unwrap_or_else(|error| panic!("{statement}: {error:?}"))),
+                [30, 50],
+                "{statement}: the seeded read fits a 20-record allowance"
+            );
+        }
         // The allowance is below one scan: an unkeyed correlation refuses.
         let unkeyed = "UNWIND $rows AS row MATCH (a:Node) WHERE a.x > row.id RETURN a.x AS x";
         let params = rows(vec![Some(int(4_005))]);

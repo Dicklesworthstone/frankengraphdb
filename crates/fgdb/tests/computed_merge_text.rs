@@ -612,6 +612,47 @@ fn computed_keys_probe_the_property_index_below_one_scan() {
         assert_eq!(scalar(&db, VId(5), COUNT), Scalar::Int(9));
         assert_eq!(scalar(&db, VId(41), COUNT), Scalar::Int(9));
 
+        // A WITH stage computing the key from the row joins on it: the
+        // batch writer leaves the statement to the multipart compiler, which
+        // used to be unreachable here ("MERGE or MATCH after the UNWIND
+        // sources"). Its write-transaction source is not seeded yet, so this
+        // runs under the ordinary allowance (fgdb-2npty).
+        for (statement, s, vertex, count) in [
+            (
+                "UNWIND $rows AS row WITH row, toInteger(row.s) AS k \
+                 MATCH (n:Person {id: k}) SET n.count = 11",
+                "12",
+                12,
+                11,
+            ),
+            (
+                "UNWIND $rows AS row WITH toInteger(row.s) + 1 AS k \
+                 MATCH (n:Person) WHERE n.id = k SET n.count = 12",
+                "12",
+                13,
+                12,
+            ),
+        ] {
+            db.query_write(
+                &txn,
+                &query,
+                &commit,
+                statement,
+                &batch(vec![field("s", text(s))]),
+                symbols,
+                R,
+                program_policy(100),
+                |_| Err::<ElementId, _>(()),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+            assert_eq!(
+                scalar(&db, VId(vertex), COUNT),
+                Scalar::Int(count),
+                "{statement}"
+            );
+        }
+
         // The allowance is below one scan: a key the column itself feeds, or
         // an equality under OR, stays a residual filter and refuses there,
         // and answers the same under the ordinary allowance.
@@ -696,6 +737,127 @@ fn computed_keys_probe_the_property_index_below_one_scan() {
             panic!("a read returns rows")
         };
         assert!(rows.is_empty());
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// fgdb-at06q: `ON CREATE SET n = {map}` replaces the created vertex's map.
+/// The vertex holds exactly the MERGE pattern's keys, so the replacement
+/// assigns each entry and unsets each pattern key the map omits. ON MATCH
+/// replacement, which needs a run-time read of the matched map, still
+/// refuses, as does a replacement after another assignment in its clause.
+#[test]
+fn on_create_map_replacement_sets_the_entries_and_unsets_omitted_pattern_keys() {
+    let ((), report) = run_async_under_lab(0x5c73_a706, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut allocations = 0_u128;
+        let props = |db: &Database<MemVfs>, vertex: u128| {
+            let mut props: Vec<_> = db
+                .vertex(VId(vertex))
+                .unwrap()
+                .unwrap()
+                .props
+                .into_iter()
+                .map(|(key, value)| (key, value.as_scalar().expect("scalar property").clone()))
+                .collect();
+            props.sort_by_key(|(key, _)| *key);
+            props
+        };
+        let name = |value: &str| Scalar::ucs_basic_text(value).unwrap();
+        let rows = GqlParameters::new()
+            .with_list(
+                "rows",
+                vec![
+                    GraphValue::map(vec![
+                        ("id".into(), GraphValue::Scalar(Scalar::Int(12))),
+                        ("name".into(), GraphValue::Scalar(name("Dee"))),
+                    ])
+                    .unwrap(),
+                ],
+            )
+            .unwrap();
+        let props_param = GqlParameters::new()
+            .with_map(
+                "props",
+                vec![
+                    ("id".into(), GraphValue::Scalar(Scalar::Int(11))),
+                    ("name".into(), GraphValue::Scalar(name("Cy"))),
+                ],
+            )
+            .unwrap();
+        for (statement, params) in [
+            (
+                "MERGE (n:Person {id: 9}) ON CREATE SET n = {id: 9, name: 'Ada'}",
+                GqlParameters::new(),
+            ),
+            (
+                "MERGE (n:Person {id: 10}) ON CREATE SET n = {name: 'Bob'}",
+                GqlParameters::new(),
+            ),
+            (
+                "MERGE (n:Person {id: 11}) ON CREATE SET n = $props",
+                props_param,
+            ),
+            (
+                "UNWIND $rows AS row MERGE (n:Person {id: row.id}) \
+                 ON CREATE SET n = {id: row.id, name: row.name}",
+                rows,
+            ),
+            // The match branch: vertex 9 exists, so ON CREATE does not run.
+            (
+                "MERGE (n:Person {id: 9}) ON CREATE SET n = {name: 'Eve'}",
+                GqlParameters::new(),
+            ),
+        ] {
+            db.query_write(
+                &txn,
+                &query,
+                &commit,
+                statement,
+                &params,
+                symbols,
+                R,
+                program_policy(10),
+                |_| {
+                    allocations += 1;
+                    Ok::<_, ()>(ElementId::Vertex(VId(allocations)))
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+        }
+        assert_eq!(allocations, 4);
+        assert_eq!(props(&db, 1), [(ID, Scalar::Int(9)), (NAME, name("Ada"))]);
+        // The omitted pattern key is unset, as `SET n = {...}` unsets it.
+        assert_eq!(props(&db, 2), [(NAME, name("Bob"))]);
+        assert_eq!(props(&db, 3), [(ID, Scalar::Int(11)), (NAME, name("Cy"))]);
+        assert_eq!(props(&db, 4), [(ID, Scalar::Int(12)), (NAME, name("Dee"))]);
+        for refused in [
+            "MERGE (n:Person {id: 9}) ON MATCH SET n = {name: 'Eve'}",
+            "MERGE (n:Person {id: 20}) ON CREATE SET n.name = 'Fay', n = {id: 20}",
+            "MERGE (n:Person {id: 20}) SET n = {id: 20}",
+        ] {
+            assert!(
+                db.query_write(
+                    &txn,
+                    &query,
+                    &commit,
+                    refused,
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    program_policy(10),
+                    |_| Err::<ElementId, _>(()),
+                )
+                .await
+                .is_err(),
+                "{refused}"
+            );
+        }
+        assert_eq!(db.vertices().unwrap().len(), 4);
         assert_eq!(txn.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
