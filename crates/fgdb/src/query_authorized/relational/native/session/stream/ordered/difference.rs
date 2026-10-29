@@ -114,12 +114,13 @@ fn difference_error(error: GqlQueryError<NativeSpoolError, Cancel>) -> NativeSpo
     }
 }
 
-impl<R, C, A, B> AuthorizedOrderedReadSession<'_, R, C, A, B>
+impl<R, C, A, B, D> AuthorizedOrderedReadSession<'_, R, C, A, B, D>
 where
     R: GraphSymbolResolver,
     C: FnMut() -> u64 + Send,
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    D: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
 {
     /// Visit every changed tuple under the same pull state machine exposed by
     /// [`Self::difference_stream`]. The callback is awaited before another pull,

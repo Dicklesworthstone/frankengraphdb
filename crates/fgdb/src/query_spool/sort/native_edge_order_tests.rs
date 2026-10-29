@@ -77,6 +77,7 @@ fn undirected_parallel_occurrences_are_sorted_before_distinct_and_pagination() {
             assert!(prepared.stream(&db, &cx, &params, policy()).is_err());
             let (mut scratch, _) = file(&cx, &pool).await;
             let (mut destination, _) = file(&cx, &pool).await;
+            let (mut auxiliary, _) = file(&cx, &pool).await;
             let mut allowance = policy();
             allowance.rows = GqlExecutionBudget::new(5, values.len() as u64);
             let (spool, _) = prepared
@@ -87,6 +88,9 @@ fn undirected_parallel_occurrences_are_sorted_before_distinct_and_pagination() {
                     allowance,
                     &mut scratch,
                     &mut destination,
+                    &mut auxiliary,
+                    8,
+                    128,
                     1,
                     9,
                     31,
@@ -109,6 +113,7 @@ fn undirected_parallel_occurrences_are_sorted_before_distinct_and_pagination() {
         // Move the former edge-LIMIT-0 refusal into an actual success law.
         let (mut scratch, _) = file(&cx, &pool).await;
         let (mut destination, _) = file(&cx, &pool).await;
+        let (mut auxiliary, _) = file(&cx, &pool).await;
         let (spool, _) = plan("MATCH (a)-[e:R]->(b) RETURN e AS edge, a AS source LIMIT 0")
             .spool_ordered(
                 &db,
@@ -117,6 +122,9 @@ fn undirected_parallel_occurrences_are_sorted_before_distinct_and_pagination() {
                 policy(),
                 &mut scratch,
                 &mut destination,
+                &mut auxiliary,
+                8,
+                128,
                 1,
                 5,
                 31,
@@ -169,6 +177,7 @@ fn chains_branches_cycles_paths_and_private_probes_match_the_eager_engine() {
             for run_rows in [1, 3] {
                 let (mut scratch, _) = file(&cx, &pool).await;
                 let (mut destination, _) = file(&cx, &pool).await;
+                let (mut auxiliary, _) = file(&cx, &pool).await;
                 let (spool, _) = plan(text)
                     .spool_ordered_in_view(
                         &view,
@@ -177,6 +186,9 @@ fn chains_branches_cycles_paths_and_private_probes_match_the_eager_engine() {
                         policy(),
                         &mut scratch,
                         &mut destination,
+                        &mut auxiliary,
+                        8,
+                        128,
                         run_rows,
                         128,
                         127,
@@ -226,6 +238,7 @@ fn joined_output_exceeds_the_pool_without_retaining_the_match_population() {
         let pool = MemoryPool::new(32_768, 0).unwrap();
         let (mut scratch, _) = file(&cx, &pool).await;
         let (mut destination, _) = file(&cx, &pool).await;
+        let (mut auxiliary, _) = file(&cx, &pool).await;
         let (spool, _) = plan(text)
             .spool_ordered(
                 &db,
@@ -234,6 +247,9 @@ fn joined_output_exceeds_the_pool_without_retaining_the_match_population() {
                 policy(),
                 &mut scratch,
                 &mut destination,
+                &mut auxiliary,
+                8,
+                128,
                 3,
                 40,
                 257,
@@ -268,6 +284,7 @@ fn edge_history_is_pinned_before_await_and_temporal_cut_never_becomes_head() {
         let pool = MemoryPool::new(32_768, 0).unwrap();
         let (mut scratch, _) = file(&cx, &pool).await;
         let (mut destination, _) = file(&cx, &pool).await;
+        let (mut auxiliary, _) = file(&cx, &pool).await;
         let future = prepared.spool_ordered(
             &db,
             &cx,
@@ -275,6 +292,9 @@ fn edge_history_is_pinned_before_await_and_temporal_cut_never_becomes_head() {
             policy(),
             &mut scratch,
             &mut destination,
+            &mut auxiliary,
+            8,
+            128,
             2,
             5,
             31,
@@ -307,6 +327,9 @@ fn edge_history_is_pinned_before_await_and_temporal_cut_never_becomes_head() {
                 policy(),
                 &mut scratch,
                 &mut destination,
+                &mut auxiliary,
+                8,
+                128,
                 2,
                 5,
                 31,
@@ -340,6 +363,7 @@ fn late_edge_data_errors_and_each_row_allowance_refuse_without_a_result_handle()
         ] {
             let (mut scratch, _) = file(&cx, &pool).await;
             let (mut destination, _) = file(&cx, &pool).await;
+            let (mut auxiliary, _) = file(&cx, &pool).await;
             let mut allowance = policy();
             allowance.rows = GqlExecutionBudget::new(records, output);
             let error = prepared
@@ -350,6 +374,9 @@ fn late_edge_data_errors_and_each_row_allowance_refuse_without_a_result_handle()
                     allowance,
                     &mut scratch,
                     &mut destination,
+                    &mut auxiliary,
+                    8,
+                    128,
                     1,
                     9,
                     31,
@@ -379,6 +406,7 @@ fn late_edge_data_errors_and_each_row_allowance_refuse_without_a_result_handle()
             ));
             let (mut scratch, _) = file(&cx, &pool).await;
             let (mut destination, _) = file(&cx, &pool).await;
+            let (mut auxiliary, _) = file(&cx, &pool).await;
             let error = prepared
                 .spool_ordered(
                     &db,
@@ -387,6 +415,9 @@ fn late_edge_data_errors_and_each_row_allowance_refuse_without_a_result_handle()
                     policy(),
                     &mut scratch,
                     &mut destination,
+                    &mut auxiliary,
+                    8,
+                    128,
                     1,
                     10,
                     31,
@@ -422,6 +453,7 @@ fn unpolled_and_dropped_edge_spools_release_their_pin_without_fallback() {
         let params = GqlParameters::new();
         let (mut scratch, _) = file(&cx, &pool).await;
         let (mut destination, backing) = file(&cx, &pool).await;
+        let (mut auxiliary, _) = file(&cx, &pool).await;
         drop(prepared.spool_ordered(
             &db,
             &cx,
@@ -429,6 +461,9 @@ fn unpolled_and_dropped_edge_spools_release_their_pin_without_fallback() {
             policy(),
             &mut scratch,
             &mut destination,
+            &mut auxiliary,
+            8,
+            128,
             1,
             100,
             31,
@@ -438,6 +473,7 @@ fn unpolled_and_dropped_edge_spools_release_their_pin_without_fallback() {
         ));
         assert_eq!(scratch.stats(), SpillStats::default());
         assert_eq!(destination.stats(), SpillStats::default());
+        assert_eq!(auxiliary.stats(), SpillStats::default());
         backing.0.lock().unwrap().pending_write = true;
         let future = prepared.spool_ordered(
             &db,
@@ -446,6 +482,9 @@ fn unpolled_and_dropped_edge_spools_release_their_pin_without_fallback() {
             policy(),
             &mut scratch,
             &mut destination,
+            &mut auxiliary,
+            8,
+            128,
             1,
             100,
             31,
@@ -470,6 +509,7 @@ fn unpolled_and_dropped_edge_spools_release_their_pin_without_fallback() {
         assert!(destination.is_poisoned());
         assert_eq!(destination.stats().published_runs, 0);
         assert_eq!(scratch.stats(), SpillStats::default());
+        assert_eq!(auxiliary.stats(), SpillStats::default());
         assert_eq!(pool.used(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -492,6 +532,7 @@ fn unsupported_edge_instructions_remain_ineligible_even_with_zero_limits() {
         ] {
             let (mut scratch, _) = file(&cx, &pool).await;
             let (mut destination, _) = file(&cx, &pool).await;
+            let (mut auxiliary, _) = file(&cx, &pool).await;
             let error = plan(text)
                 .spool_ordered(
                     &db,
@@ -500,6 +541,9 @@ fn unsupported_edge_instructions_remain_ineligible_even_with_zero_limits() {
                     GqlQueryPolicy::new(0, 0, 0, 0),
                     &mut scratch,
                     &mut destination,
+                    &mut auxiliary,
+                    8,
+                    128,
                     1,
                     1,
                     31,
@@ -512,6 +556,7 @@ fn unsupported_edge_instructions_remain_ineligible_even_with_zero_limits() {
             assert!(error.prepare_error().is_some(), "{text}");
             assert_eq!(scratch.stats(), SpillStats::default());
             assert_eq!(destination.stats(), SpillStats::default());
+            assert_eq!(auxiliary.stats(), SpillStats::default());
             assert_eq!(pool.used(), 0);
         }
     });

@@ -3,7 +3,6 @@
 //! test borrowed pairs before copying/spilling them. No graph is rerun per row.
 
 use super::*;
-use crate::BufferedReadView;
 use crate::query::view::spool::sort::{Input as RunInput, Run};
 use fgdb_gql::GlaExecutionEvent;
 use fgdb_gql::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue};
@@ -41,10 +40,11 @@ pub(super) fn decode(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn execute<V, A, B, C>(
-    plan: SpillSetCrossPlan,
+pub(super) async fn execute<H, A, B, C>(
+    plan: &SpillSetCrossPlan,
+    arguments: Option<&GraphValueRow>,
     snapshot: CommitSeq,
-    view: &mut BufferedReadView<V>,
+    host: &mut H,
     cx: &QueryCx,
     policy: GqlQueryPolicy,
     scratch: &mut SpillFile<A>,
@@ -61,7 +61,7 @@ pub(super) async fn execute<V, A, B, C>(
     resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
 ) -> Result<(NativeResultSpool, u64)>
 where
-    V: Vfs + Clone,
+    H: ExternalOrderHost,
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     C: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
@@ -73,10 +73,11 @@ where
         mut evaluator,
         work: prior_work,
     } = binary::complete_children(
-        plan.left().clone(),
-        plan.right().clone(),
+        plan.left(),
+        plan.right(),
+        arguments,
         snapshot,
-        view,
+        host,
         cx,
         policy,
         scratch,
@@ -129,7 +130,7 @@ where
             let mut charge = pool.reserve(cx, 0).map_err(SpillError::Memory)?;
             let row = plan
                 .select_pair_with_control(&left_row.row, &right_row.row, &mut |event| {
-                    staged::native_event(cx, policy, &mut evaluator, event)?;
+                    host::event(host, cx, policy, &mut evaluator, event)?;
                     if event == GlaExecutionEvent::ScratchEntry {
                         charge
                             .grow(

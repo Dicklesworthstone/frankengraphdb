@@ -111,6 +111,9 @@ struct CompletedRelation<'q> {
     kind: ScanKind,
     rows: GqlExecutionStats,
     evaluator: GlaExecutionStats,
+    control: Option<
+        &'q mut (dyn FnMut(GlaExecutionEvent) -> core::result::Result<(), NativeSpoolError> + Send),
+    >,
 }
 
 impl<'q> CompletedRelation<'q> {
@@ -125,7 +128,19 @@ impl<'q> CompletedRelation<'q> {
                 result_rows: 0,
             },
             evaluator: input.evaluator_stats(),
+            control: None,
         }
+    }
+
+    fn with_control(
+        mut self,
+        control: &'q mut (
+                    dyn FnMut(GlaExecutionEvent) -> core::result::Result<(), NativeSpoolError>
+                        + Send
+                ),
+    ) -> Self {
+        self.control = Some(control);
+        self
     }
 
     fn conversion_event(
@@ -138,13 +153,23 @@ impl<'q> CompletedRelation<'q> {
             // A private group conversion cannot admit a public result row.
             GlaExecutionEvent::ResultRow => return Err(NativeSpoolError::IncompleteCursor),
         };
-        self.charge(event)
-            .map_err(execute_error)
+        self.controlled_charge(event)
+            .map_err(controlled_error)
             .map_err(NativeSpoolError::from)
     }
 }
 
 impl GroupInput for CompletedRelation<'_> {
+    fn native_control(&mut self, event: VertexScanEvent) -> Result<()> {
+        if let Some(control) = &mut self.control {
+            control(match event {
+                VertexScanEvent::Work => GlaExecutionEvent::Work,
+                VertexScanEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+            })?;
+        }
+        Ok(())
+    }
+
     fn next_input(&mut self) -> crate::SendFuture<'_, Result<Option<SpoolRow>>> {
         // This meter can only accompany the already completed input run.
         // Accidentally dispatching it as a fresh source must not imply EOF.
@@ -215,31 +240,35 @@ fn conversion_error(error: SpillSetAggregateRowError<NativeSpoolError>) -> Nativ
 /// EVERY group into ordinary rows appended to destination. No live writer
 /// aliases a reader, and earlier sibling/child runs remain intact.
 #[allow(clippy::too_many_arguments)]
-pub(in crate::query::view::spool) async fn spool_group_stage<V, A, B, C>(
-    plan: SpillSetAggregatePlan,
+pub(in crate::query::view::spool) async fn spool_group_stage_with_host<H, A, B, C>(
+    plan: &SpillSetAggregatePlan,
+    arguments: Option<&GraphValueRow>,
     snapshot: CommitSeq,
-    view: &mut BufferedReadView<V>,
+    host: &mut H,
     cx: &QueryCx,
     policy: GqlQueryPolicy,
     scratch: &mut SpillFile<A>,
     destination: &mut SpillFile<B>,
     auxiliary: &mut SpillFile<C>,
-    group_capacity: usize,
-    max_partitions: usize,
-    run_rows: usize,
-    max_runs: usize,
-    page_bytes: usize,
-    max_row_bytes: usize,
-    max_input_rows: u64,
-    max_work_units: u64,
+    limits: ExternalOrderLimits,
     resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
 ) -> core::result::Result<(NativeResultSpool, u64), NativeSpoolError>
 where
-    V: Vfs + Clone,
+    H: ExternalOrderHost,
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     C: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
 {
+    let ExternalOrderLimits {
+        group_capacity,
+        max_partitions,
+        run_rows,
+        max_runs,
+        page_bytes,
+        max_row_bytes,
+        max_input_rows,
+        max_sort_work: max_work_units,
+    } = limits;
     validate_limits(
         group_capacity,
         max_partitions,
@@ -248,33 +277,28 @@ where
         page_bytes,
         max_row_bytes,
     )?;
-    let (initial, prior_work) =
-        crate::PreparedBufferedOrder::from_relation(plan.input().clone(), Some(snapshot))
-            .spool_in_view_with_resolver(
-                view,
-                cx,
-                policy,
-                scratch,
-                destination,
-                auxiliary,
-                group_capacity,
-                max_partitions,
-                run_rows,
-                max_runs,
-                page_bytes,
-                max_row_bytes,
-                max_input_rows,
-                max_work_units,
-                resolver,
-            )
-            .await?;
+    let (initial, prior_work) = execute_relation(
+        plan.input(),
+        arguments,
+        snapshot,
+        host,
+        cx,
+        policy,
+        scratch,
+        destination,
+        auxiliary,
+        limits,
+        resolver,
+    )
+    .await?;
     let definition = plan.definition().clone();
     let slots = (0..definition.key_columns().len())
         .map(GraphAggregateTextSlot::GroupKey)
         .chain((0..definition.aggregate_columns().len()).map(GraphAggregateTextSlot::Aggregate))
         .collect();
+    let mut control = |event| host.native_event(event);
     let opened = Opened {
-        input: Box::new(CompletedRelation::new(cx, policy, &initial)),
+        input: Box::new(CompletedRelation::new(cx, policy, &initial).with_control(&mut control)),
         definition,
         columns: plan.columns().to_vec(),
         slots,
@@ -300,7 +324,8 @@ where
     .await?;
 
     let pool = destination.memory_pool().clone();
-    let mut meter = CompletedRelation::new(cx, policy, &aggregate.inner);
+    let mut control = |event| host.native_event(event);
+    let mut meter = CompletedRelation::new(cx, policy, &aggregate.inner).with_control(&mut control);
     let mut work = Work {
         cx,
         used: prior_work,

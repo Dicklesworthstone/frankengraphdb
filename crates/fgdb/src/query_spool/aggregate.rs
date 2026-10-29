@@ -30,7 +30,7 @@ mod output;
 mod partitioning;
 pub use account::NativeAggregateSpoolDifference;
 pub use buffered::PreparedBufferedAggregate;
-pub(super) use buffered::spool_group_stage;
+pub(super) use buffered::spool_group_stage_with_host;
 use partitioning::split_partition;
 
 type Result<T> = core::result::Result<T, NativeAggregateSpoolError>;
@@ -352,6 +352,25 @@ fn decode_envelope(
 
 type ExecutionError =
     fgdb_gql::GqlQueryError<fgdb_gql::GraphAggregateError<ScanError<ReadError>>, Cancel>;
+type ControlledExecutionError = fgdb_gql::GqlQueryError<
+    fgdb_gql::GraphAggregateError<ScanError<ReadError>>,
+    NativeAggregateSpoolError,
+>;
+
+// Preserve the host's exact refusal while the native reducer uses its generic
+// control-error channel. A signed rejection is never a fabricated cancellation.
+fn controlled_error(error: ControlledExecutionError) -> NativeAggregateSpoolError {
+    match error {
+        GqlQueryError::Interrupted(error) => error,
+        GqlQueryError::Source(error) => execute_error(GqlQueryError::Source(error)),
+        GqlQueryError::Rows(error) => execute_error(GqlQueryError::Rows(error)),
+        GqlQueryError::Evaluator(error) => execute_error(GqlQueryError::Evaluator(error)),
+        GqlQueryError::IdentifiedEdgesRequired => {
+            execute_error(GqlQueryError::IdentifiedEdgesRequired)
+        }
+        GqlQueryError::Data(error) => execute_error(GqlQueryError::Data(error)),
+    }
+}
 
 // The source cursor remains the sole cumulative GQL meter during partition
 // reduction. Exhaustion releases its source pin but leaves the meter alive.
@@ -359,6 +378,23 @@ trait GroupInput: Send {
     fn next_input(&mut self) -> crate::SendFuture<'_, Result<Option<SpoolRow>>>;
     fn charge(&mut self, event: VertexScanEvent) -> core::result::Result<(), ExecutionError>;
     fn finish_result(&mut self) -> core::result::Result<(), ExecutionError>;
+    fn native_control(&mut self, _event: VertexScanEvent) -> Result<()> {
+        Ok(())
+    }
+    fn controlled_charge(
+        &mut self,
+        event: VertexScanEvent,
+    ) -> core::result::Result<(), ControlledExecutionError> {
+        self.native_control(event)
+            .map_err(GqlQueryError::Interrupted)?;
+        self.charge(event)
+            .map_err(execute_error)
+            .map_err(GqlQueryError::Interrupted)
+    }
+    fn controlled_finish_result(&mut self) -> Result<()> {
+        self.native_control(VertexScanEvent::Work)?;
+        self.finish_result().map_err(execute_error)
+    }
     fn exhausted(&self) -> bool;
     fn snapshot_seq(&self) -> CommitSeq;
     fn kind(&self) -> ScanKind;
@@ -746,8 +782,8 @@ async fn validate_completed_input<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>
         let _decoded = decoded_reservation(&pool, work.cx, bytes.as_ref(), 1)?;
         let row = decode_row(bytes.as_ref(), resolver)?;
         definition
-            .validate_input(&row, &mut |event| input.charge(event))
-            .map_err(execute_error)?;
+            .validate_input(&row, &mut |event| input.controlled_charge(event))
+            .map_err(controlled_error)?;
     }
     if reader.state() != ScanState::Exhausted {
         return Err(NativeSpoolError::IncompleteCursor.into());
@@ -1075,9 +1111,9 @@ where
                     &mut groups.values[at].state,
                     &decoded.0,
                     column,
-                    &mut |event| input.charge(event),
+                    &mut |event| input.controlled_charge(event),
                 )
-                .map_err(execute_error)?;
+                .map_err(controlled_error)?;
             drop(decoded);
             // The charged authenticated bytes remain live across next_row().
             previous = Some(bytes);
@@ -1211,7 +1247,7 @@ where
             cx,
         )?;
         if !opened.definition.has_output_stage() {
-            opened.input.finish_result().map_err(execute_error)?;
+            opened.input.controlled_finish_result()?;
         }
         completed_rows = 1;
         let envelope = envelope(&row);
@@ -1300,7 +1336,7 @@ where
                     cx,
                 )?;
                 if !opened.definition.has_output_stage() {
-                    opened.input.finish_result().map_err(execute_error)?;
+                    opened.input.controlled_finish_result()?;
                 }
                 completed_rows = completed_rows
                     .checked_add(1)

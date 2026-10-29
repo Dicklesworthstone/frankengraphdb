@@ -167,6 +167,7 @@ fn native_property_order_and_window_match_eager_execution_beyond_the_pool() {
             allowance.rows = GqlExecutionBudget::new(36, expected.len() as u64);
             let (mut scratch, _) = file(&cx, &pool).await;
             let (mut destination, backing) = file(&cx, &pool).await;
+            let (mut auxiliary, _) = file(&cx, &pool).await;
             let (spool, work) = prepared
                 .spool_ordered(
                     &db,
@@ -175,6 +176,9 @@ fn native_property_order_and_window_match_eager_execution_beyond_the_pool() {
                     allowance,
                     &mut scratch,
                     &mut destination,
+                    &mut auxiliary,
+                    8,
+                    128,
                     3,
                     12,
                     127,
@@ -229,6 +233,7 @@ fn computed_property_relations_spill_results_larger_than_the_pool() {
         assert!(expected.iter().map(Vec::len).sum::<usize>() > pool.limit());
         let (mut scratch, _) = file(&cx, &pool).await;
         let (mut destination, backing) = file(&cx, &pool).await;
+        let (mut auxiliary, _) = file(&cx, &pool).await;
         let (spool, _) = prepared
             .spool_ordered(
                 &db,
@@ -237,6 +242,9 @@ fn computed_property_relations_spill_results_larger_than_the_pool() {
                 GqlQueryPolicy::new(36, 36, 100_000_000, 10_000_000),
                 &mut scratch,
                 &mut destination,
+                &mut auxiliary,
+                8,
+                128,
                 3,
                 12,
                 127,
@@ -273,6 +281,7 @@ fn paging_never_selects_the_first_source_rows_before_ordering() {
             let text = format!("MATCH (n:L) RETURN n AS id ORDER BY id DESC {suffix}");
             let (mut scratch, _) = file(&cx, &pool).await;
             let (mut destination, _) = file(&cx, &pool).await;
+            let (mut auxiliary, _) = file(&cx, &pool).await;
             let mut allowance = policy();
             allowance.rows = GqlExecutionBudget::new(10, ids.len() as u64);
             let (spool, _) = plan(&text)
@@ -283,6 +292,9 @@ fn paging_never_selects_the_first_source_rows_before_ordering() {
                     allowance,
                     &mut scratch,
                     &mut destination,
+                    &mut auxiliary,
+                    8,
+                    128,
                     2,
                     5,
                     31,
@@ -325,6 +337,7 @@ fn source_input_and_final_output_have_separate_exact_row_allowances() {
         ] {
             let (mut scratch, _) = file(&cx, &pool).await;
             let (mut destination, _) = file(&cx, &pool).await;
+            let (mut auxiliary, _) = file(&cx, &pool).await;
             let mut allowance = policy();
             allowance.rows = GqlExecutionBudget::new(records, output);
             let error = prepared
@@ -335,6 +348,9 @@ fn source_input_and_final_output_have_separate_exact_row_allowances() {
                     allowance,
                     &mut scratch,
                     &mut destination,
+                    &mut auxiliary,
+                    8,
+                    128,
                     2,
                     5,
                     31,
@@ -364,6 +380,7 @@ fn sort_and_final_window_share_one_work_allowance() {
         let pool = MemoryPool::new(32_768, 0).unwrap();
         let (mut scratch, _) = file(&cx, &pool).await;
         let (mut destination, _) = file(&cx, &pool).await;
+        let (mut auxiliary, _) = file(&cx, &pool).await;
         let (first, work) = prepared
             .spool_ordered(
                 &db,
@@ -372,6 +389,9 @@ fn sort_and_final_window_share_one_work_allowance() {
                 policy(),
                 &mut scratch,
                 &mut destination,
+                &mut auxiliary,
+                8,
+                128,
                 2,
                 6,
                 31,
@@ -386,6 +406,7 @@ fn sort_and_final_window_share_one_work_allowance() {
         for limit in [work - 1, work] {
             let (mut scratch, _) = file(&cx, &pool).await;
             let (mut destination, _) = file(&cx, &pool).await;
+            let (mut auxiliary, _) = file(&cx, &pool).await;
             let result = prepared
                 .spool_ordered(
                     &db,
@@ -394,6 +415,9 @@ fn sort_and_final_window_share_one_work_allowance() {
                     policy(),
                     &mut scratch,
                     &mut destination,
+                    &mut auxiliary,
+                    8,
+                    128,
                     2,
                     6,
                     31,
@@ -433,6 +457,7 @@ fn opening_pins_the_old_values_and_releases_the_generation_after_source_drain() 
         let pool = MemoryPool::new(32_768, 0).unwrap();
         let (mut scratch, _) = file(&cx, &pool).await;
         let (mut destination, _) = file(&cx, &pool).await;
+        let (mut auxiliary, _) = file(&cx, &pool).await;
         let future = prepared.spool_ordered_in_view(
             &view,
             &cx,
@@ -440,6 +465,9 @@ fn opening_pins_the_old_values_and_releases_the_generation_after_source_drain() 
             policy(),
             &mut scratch,
             &mut destination,
+            &mut auxiliary,
+            8,
+            128,
             2,
             6,
             31,
@@ -477,6 +505,7 @@ fn invalid_shapes_settings_and_unpolled_futures_never_start_scratch() {
         ] {
             let (mut scratch, _) = file(&cx, &pool).await;
             let (mut destination, _) = file(&cx, &pool).await;
+            let (mut auxiliary, _) = file(&cx, &pool).await;
             let result = plan(text)
                 .spool_ordered(
                     &db,
@@ -485,6 +514,9 @@ fn invalid_shapes_settings_and_unpolled_futures_never_start_scratch() {
                     policy(),
                     &mut scratch,
                     &mut destination,
+                    &mut auxiliary,
+                    8,
+                    128,
                     1,
                     10,
                     31,
@@ -496,6 +528,7 @@ fn invalid_shapes_settings_and_unpolled_futures_never_start_scratch() {
             assert!(matches!(result, Err(NativeSpoolError::Prepare(_))));
             assert_eq!(scratch.stats(), SpillStats::default());
             assert_eq!(destination.stats(), SpillStats::default());
+            assert_eq!(auxiliary.stats(), SpillStats::default());
         }
         let prepared = plan("MATCH (n:L) RETURN n.p AS p ORDER BY p DESC");
         for (run_rows, max_runs, page_bytes, work) in [
@@ -507,6 +540,7 @@ fn invalid_shapes_settings_and_unpolled_futures_never_start_scratch() {
         ] {
             let (mut scratch, _) = file(&cx, &pool).await;
             let (mut destination, _) = file(&cx, &pool).await;
+            let (mut auxiliary, _) = file(&cx, &pool).await;
             assert!(
                 prepared
                     .spool_ordered(
@@ -516,6 +550,9 @@ fn invalid_shapes_settings_and_unpolled_futures_never_start_scratch() {
                         policy(),
                         &mut scratch,
                         &mut destination,
+                        &mut auxiliary,
+                        8,
+                        128,
                         run_rows,
                         max_runs,
                         page_bytes,
@@ -528,9 +565,11 @@ fn invalid_shapes_settings_and_unpolled_futures_never_start_scratch() {
             );
             assert_eq!(scratch.stats(), SpillStats::default());
             assert_eq!(destination.stats(), SpillStats::default());
+            assert_eq!(auxiliary.stats(), SpillStats::default());
         }
         let (mut scratch, _) = file(&cx, &pool).await;
         let (mut destination, _) = file(&cx, &pool).await;
+        let (mut auxiliary, _) = file(&cx, &pool).await;
         drop(prepared.spool_ordered(
             &db,
             &cx,
@@ -538,6 +577,9 @@ fn invalid_shapes_settings_and_unpolled_futures_never_start_scratch() {
             policy(),
             &mut scratch,
             &mut destination,
+            &mut auxiliary,
+            8,
+            128,
             1,
             10,
             31,
@@ -547,6 +589,7 @@ fn invalid_shapes_settings_and_unpolled_futures_never_start_scratch() {
         ));
         assert_eq!(scratch.stats(), SpillStats::default());
         assert_eq!(destination.stats(), SpillStats::default());
+        assert_eq!(auxiliary.stats(), SpillStats::default());
         assert_eq!(pool.used(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -563,6 +606,7 @@ fn failed_and_dropped_transfers_do_not_publish_a_native_page() {
         for during_sort in [false, true] {
             let (mut scratch, scratch_file) = file(&cx, &pool).await;
             let (mut destination, destination_file) = file(&cx, &pool).await;
+            let (mut auxiliary, _) = file(&cx, &pool).await;
             if during_sort {
                 scratch_file.0.lock().unwrap().fail_flush = true;
             } else {
@@ -577,6 +621,9 @@ fn failed_and_dropped_transfers_do_not_publish_a_native_page() {
                         policy(),
                         &mut scratch,
                         &mut destination,
+                        &mut auxiliary,
+                        8,
+                        128,
                         1,
                         10,
                         31,
@@ -591,6 +638,7 @@ fn failed_and_dropped_transfers_do_not_publish_a_native_page() {
         }
         let (mut scratch, _) = file(&cx, &pool).await;
         let (mut destination, backing) = file(&cx, &pool).await;
+        let (mut auxiliary, _) = file(&cx, &pool).await;
         backing.0.lock().unwrap().pending_write = true;
         {
             let future = prepared.spool_ordered(
@@ -600,6 +648,9 @@ fn failed_and_dropped_transfers_do_not_publish_a_native_page() {
                 policy(),
                 &mut scratch,
                 &mut destination,
+                &mut auxiliary,
+                8,
+                128,
                 1,
                 10,
                 31,
@@ -618,6 +669,7 @@ fn failed_and_dropped_transfers_do_not_publish_a_native_page() {
         assert!(destination.is_poisoned());
         assert_eq!(destination.stats().published_runs, 0);
         assert_eq!(scratch.stats(), SpillStats::default());
+        assert_eq!(auxiliary.stats(), SpillStats::default());
         assert_eq!(pool.used(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -641,6 +693,7 @@ fn distinct_and_all_keep_native_row_classes_across_many_spill_runs() {
             for run_rows in [1, 3, 7] {
                 let (mut scratch, _) = file(&cx, &pool).await;
                 let (mut destination, backing) = file(&cx, &pool).await;
+                let (mut auxiliary, _) = file(&cx, &pool).await;
                 let mut allowance = policy();
                 allowance.rows = GqlExecutionBudget::new(60, expected.len() as u64);
                 let (spool, _) = plan(text)
@@ -651,6 +704,9 @@ fn distinct_and_all_keep_native_row_classes_across_many_spill_runs() {
                         allowance,
                         &mut scratch,
                         &mut destination,
+                        &mut auxiliary,
+                        8,
+                        128,
                         run_rows,
                         60,
                         127,
@@ -716,6 +772,7 @@ fn duplicate_classes_not_occurrences_are_paginated_and_counted() {
             );
             let (mut scratch, _) = file(&cx, &pool).await;
             let (mut destination, _) = file(&cx, &pool).await;
+            let (mut auxiliary, _) = file(&cx, &pool).await;
             let mut allowance = policy();
             allowance.rows = GqlExecutionBudget::new(10, wanted.len() as u64);
             let (spool, _) = plan(&text)
@@ -726,6 +783,9 @@ fn duplicate_classes_not_occurrences_are_paginated_and_counted() {
                     allowance,
                     &mut scratch,
                     &mut destination,
+                    &mut auxiliary,
+                    8,
+                    128,
                     1,
                     10,
                     31,
@@ -785,6 +845,7 @@ fn distinct_uses_the_whole_typed_row_not_just_order_keys_or_scalar_spellings() {
         let pool = MemoryPool::new(32_768, 0).unwrap();
         let (mut scratch, _) = file(&cx, &pool).await;
         let (mut destination, _) = file(&cx, &pool).await;
+        let (mut auxiliary, _) = file(&cx, &pool).await;
         let (spool, _) = plan(text)
             .spool_ordered(
                 &db,
@@ -793,6 +854,9 @@ fn distinct_uses_the_whole_typed_row_not_just_order_keys_or_scalar_spellings() {
                 policy(),
                 &mut scratch,
                 &mut destination,
+                &mut auxiliary,
+                8,
+                128,
                 1,
                 9,
                 31,
@@ -842,6 +906,7 @@ fn distinct_never_refunds_input_admission_or_resets_final_comparison_work() {
         allowance.rows = GqlExecutionBudget::new(10, 1);
         let (mut scratch, _) = file(&cx, &pool).await;
         let (mut destination, _) = file(&cx, &pool).await;
+        let (mut auxiliary, _) = file(&cx, &pool).await;
         let (spool, work) = prepared
             .spool_ordered(
                 &db,
@@ -850,6 +915,9 @@ fn distinct_never_refunds_input_admission_or_resets_final_comparison_work() {
                 allowance,
                 &mut scratch,
                 &mut destination,
+                &mut auxiliary,
+                8,
+                128,
                 2,
                 5,
                 127,
@@ -869,6 +937,7 @@ fn distinct_never_refunds_input_admission_or_resets_final_comparison_work() {
         ] {
             let (mut scratch, _) = file(&cx, &pool).await;
             let (mut destination, _) = file(&cx, &pool).await;
+            let (mut auxiliary, _) = file(&cx, &pool).await;
             allowance.rows = GqlExecutionBudget::new(10, output);
             let result = prepared
                 .spool_ordered(
@@ -878,6 +947,9 @@ fn distinct_never_refunds_input_admission_or_resets_final_comparison_work() {
                     allowance,
                     &mut scratch,
                     &mut destination,
+                    &mut auxiliary,
+                    8,
+                    128,
                     2,
                     5,
                     127,
@@ -988,6 +1060,7 @@ fn hidden_sort_keys_match_eager_rows_and_return_only_a_resortable_visible_schema
             allowance.rows = GqlExecutionBudget::new(36, wanted.len() as u64);
             let (mut scratch, _) = file(&cx, &pool).await;
             let (mut destination, backing) = file(&cx, &pool).await;
+            let (mut auxiliary, _) = file(&cx, &pool).await;
             let (spool, _) = prepared
                 .spool_ordered(
                     &db,
@@ -996,6 +1069,9 @@ fn hidden_sort_keys_match_eager_rows_and_return_only_a_resortable_visible_schema
                     allowance,
                     &mut scratch,
                     &mut destination,
+                    &mut auxiliary,
+                    8,
+                    128,
                     3,
                     12,
                     127,
@@ -1069,6 +1145,7 @@ fn hidden_payloads_spend_the_full_input_row_limit_even_when_the_visible_page_is_
             let text = format!("MATCH (n:L) RETURN n AS id ORDER BY n.q LIMIT {limit}");
             let (mut scratch, _) = file(&cx, &pool).await;
             let (mut destination, _) = file(&cx, &pool).await;
+            let (mut auxiliary, _) = file(&cx, &pool).await;
             let error = plan(&text)
                 .spool_ordered(
                     &db,
@@ -1077,6 +1154,9 @@ fn hidden_payloads_spend_the_full_input_row_limit_even_when_the_visible_page_is_
                     policy(),
                     &mut scratch,
                     &mut destination,
+                    &mut auxiliary,
+                    8,
+                    128,
                     1,
                     3,
                     127,

@@ -72,9 +72,9 @@ impl AggregateOrder<'_> {
             return self
                 .definition
                 .compare_precomputed_rank(&left, &left_rank, &right, &right_rank, &mut |event| {
-                    self.input.charge(event)
+                    self.input.controlled_charge(event)
                 })
-                .map_err(execute_error);
+                .map_err(controlled_error);
         }
         self.definition
             .compare_precomputed_output(
@@ -82,9 +82,9 @@ impl AggregateOrder<'_> {
                 &left_projected,
                 &right,
                 &right_projected,
-                &mut |event| self.input.charge(event),
+                &mut |event| self.input.controlled_charge(event),
             )
-            .map_err(execute_error)
+            .map_err(controlled_error)
     }
 }
 

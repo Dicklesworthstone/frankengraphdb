@@ -396,6 +396,7 @@ fn element_metadata_matches_bound_values_through_resident_and_cold_spill() {
             for run_rows in [1, 3] {
                 let (mut scratch, _) = file(&cx, &spill_pool).await;
                 let (mut destination, _) = file(&cx, &spill_pool).await;
+                let (mut auxiliary, _) = file(&cx, &spill_pool).await;
                 let (spool, _) = prepared
                     .spool_ordered_in_view(
                         &resident,
@@ -404,6 +405,9 @@ fn element_metadata_matches_bound_values_through_resident_and_cold_spill() {
                         policy(100),
                         &mut scratch,
                         &mut destination,
+                        &mut auxiliary,
+                        run_rows,
+                        512,
                         run_rows,
                         64,
                         127,

@@ -22,8 +22,10 @@ use crate::{GlaExecutionEvent, GraphAggregateError, GraphAggregateRow};
 use core::convert::Infallible;
 use fgdb_delta_types::{ElementId, PropertyKeyId};
 
+mod apply;
 mod relational_join;
 mod selected_cross;
+pub use apply::{SpillSetApplyKind, SpillSetApplyPlan, SpillSetArgumentsPlan};
 pub use relational_join::SpillSetJoinPlan;
 
 /// The executing host's pinned, awaitable element-property reader.
@@ -92,8 +94,9 @@ pub trait AsyncSpillElementSource: Send {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpillSetBuildError {
     /// Scope, selection, projection, UNWIND, numeric grouping, Cartesian
-    /// products and binary sets over graph or singleton leaves are admitted. This
-    /// ordinal is the depth from the root, including across binary operands.
+    /// products, correlated inner/optional Apply and binary sets over graph,
+    /// singleton or argument leaves are admitted. This ordinal is the depth
+    /// from the root, including across binary and correlated operands.
     Unsupported {
         depth: usize,
     },
@@ -121,6 +124,8 @@ impl core::error::Error for SpillSetBuildError {}
 /// Binary owns both complete operand plans and their checked set semantics.
 /// Cross owns both complete children and their native left-major product.
 /// Aggregate owns one complete input and the existing exact numeric reducer.
+/// Apply owns a complete left input and a complete body per selected occurrence;
+/// Arguments reads only its nearest enclosing Apply's imported row.
 /// This is a fixed source choice, never a fallback strategy.
 #[derive(Clone, Debug)]
 pub enum AsyncSpillSetSourcePlan {
@@ -132,14 +137,16 @@ pub enum AsyncSpillSetSourcePlan {
     Cross(SpillSetCrossPlan),
     RowJoin(SpillSetJoinPlan),
     Aggregate(SpillSetAggregatePlan),
+    Apply(SpillSetApplyPlan),
+    Arguments(SpillSetArgumentsPlan),
 }
 impl AsyncSpillSetSourcePlan {
     pub fn kind(&self) -> ScanKind {
         match self {
-            Self::Values(_) => ScanKind::Values,
+            Self::Values(_) | Self::Arguments(_) => ScanKind::Values,
             Self::Vertex(_) => ScanKind::Vertex,
             Self::Edge(_) | Self::Join(_) => ScanKind::Edge,
-            Self::Binary(_) | Self::Cross(_) | Self::RowJoin(_) => ScanKind::Set,
+            Self::Binary(_) | Self::Cross(_) | Self::RowJoin(_) | Self::Apply(_) => ScanKind::Set,
             Self::Aggregate(aggregate) => aggregate.input().source().kind(),
         }
     }
@@ -475,6 +482,20 @@ impl AsyncSpillSetPlan {
                     stages,
                 });
             }
+            CompiledSource::Apply(apply) => {
+                return Ok(Self {
+                    source: AsyncSpillSetSourcePlan::Apply(apply),
+                    graph: None,
+                    stages,
+                });
+            }
+            CompiledSource::Arguments(arguments) => {
+                return Ok(Self {
+                    source: AsyncSpillSetSourcePlan::Arguments(arguments),
+                    graph: None,
+                    stages,
+                });
+            }
             CompiledSource::Pattern(pattern) => pattern,
         };
         let (source, source_tail) = if matches!(
@@ -525,6 +546,8 @@ impl AsyncSpillSetPlan {
             AsyncSpillSetSourcePlan::Cross(cross) => cross.columns(),
             AsyncSpillSetSourcePlan::RowJoin(join) => join.columns(),
             AsyncSpillSetSourcePlan::Aggregate(aggregate) => aggregate.columns(),
+            AsyncSpillSetSourcePlan::Apply(apply) => apply.columns(),
+            AsyncSpillSetSourcePlan::Arguments(arguments) => arguments.columns(),
             _ => self
                 .graph
                 .as_ref()
@@ -537,13 +560,41 @@ impl AsyncSpillSetPlan {
     pub fn stages(&self) -> &[SpillSetStage] {
         &self.stages
     }
+    /// Logical graph-source count, independent of runtime row cardinality.
+    /// An Apply body keeps the same source-ordinal range on every invocation,
+    /// including when the left child has no rows and the body never runs.
+    /// Values and Arguments occupy no graph-source ordinal.
+    pub fn source_count(&self) -> usize {
+        match &self.source {
+            AsyncSpillSetSourcePlan::Vertex(_)
+            | AsyncSpillSetSourcePlan::Edge(_)
+            | AsyncSpillSetSourcePlan::Join(_) => 1,
+            AsyncSpillSetSourcePlan::Values(_) | AsyncSpillSetSourcePlan::Arguments(_) => 0,
+            AsyncSpillSetSourcePlan::Binary(binary) => {
+                binary.left().source_count() + binary.right().source_count()
+            }
+            AsyncSpillSetSourcePlan::Cross(cross) => {
+                cross.left().source_count() + cross.right().source_count()
+            }
+            AsyncSpillSetSourcePlan::RowJoin(join) => {
+                join.left().source_count() + join.right().source_count()
+            }
+            AsyncSpillSetSourcePlan::Aggregate(aggregate) => aggregate.input().source_count(),
+            AsyncSpillSetSourcePlan::Apply(apply) => {
+                apply.left().source_count() + apply.right().source_count()
+            }
+        }
+    }
     /// Total bounded physical barriers, including both binary descendants and
     /// their two canonicalization passes plus merge, Cartesian descendants and
     /// product/copy passes, and every aggregate's input, reduction, canonical
     /// group order and checked row conversion.
     /// Internal aggregate partitions/argument support have their own finite
     /// limits; aggregate_count() gives their number of independent reducers.
-    /// This admits append-only metadata, never larger byte or work allowances.
+    /// This is a static plan bound, not an Apply invocation-count bound. Hosts
+    /// must retire each completed invocation's transient metadata or separately
+    /// admit it under the original cumulative allowance. It never grants larger
+    /// byte or work allowances.
     pub fn stage_count(&self) -> usize {
         let descendants = match &self.source {
             AsyncSpillSetSourcePlan::Binary(binary) => binary
@@ -576,6 +627,11 @@ impl AsyncSpillSetPlan {
             AsyncSpillSetSourcePlan::Aggregate(aggregate) => {
                 aggregate.input().stage_count().saturating_add(3)
             }
+            AsyncSpillSetSourcePlan::Apply(apply) => apply
+                .left()
+                .stage_count()
+                .saturating_add(apply.right().stage_count())
+                .saturating_add(2),
             _ => 0,
         };
         self.stages.len().saturating_add(descendants)
@@ -600,6 +656,10 @@ impl AsyncSpillSetPlan {
                 .left()
                 .aggregate_count()
                 .saturating_add(join.right().aggregate_count()),
+            AsyncSpillSetSourcePlan::Apply(apply) => apply
+                .left()
+                .aggregate_count()
+                .saturating_add(apply.right().aggregate_count()),
             _ => 0,
         }
     }
@@ -1008,6 +1068,16 @@ fn compile_stages<'a>(
             false,
             false,
         ),
+        SetNode::Arguments => (
+            CompiledSource::Arguments(SpillSetArgumentsPlan {
+                columns: query.columns.clone(),
+                types: query.types.clone(),
+            }),
+            query.types.clone(),
+            Operation::Identity,
+            false,
+            false,
+        ),
         SetNode::Pattern(pattern) => (
             CompiledSource::Pattern(pattern),
             query.types.clone(),
@@ -1124,10 +1194,41 @@ fn compile_stages<'a>(
             true,
             false,
         ),
-        SetNode::ProcedureCall(_)
-        | SetNode::Owned { .. }
-        | SetNode::Arguments
-        | SetNode::Apply { .. } => {
+        SetNode::Apply {
+            left,
+            right,
+            imports,
+            kind,
+        } => {
+            let kind = match kind {
+                super::ApplyKind::Inner => SpillSetApplyKind::Inner,
+                super::ApplyKind::Optional => SpillSetApplyKind::Optional,
+                // A collected list has its own bounded resident output and
+                // NULL-input short circuit. Never turn it into an ordinary
+                // row extension or admit only part of its body.
+                super::ApplyKind::Collect { .. } => {
+                    return Err(SpillSetBuildError::Unsupported { depth });
+                }
+            };
+            if query.columns.len() > MAX_PATTERN_VERTICES {
+                return Err(SpillSetBuildError::Unsupported { depth });
+            }
+            (
+                CompiledSource::Apply(SpillSetApplyPlan {
+                    left: Box::new(AsyncSpillSetPlan::compile_at(left, depth + 1)?),
+                    right: Box::new(AsyncSpillSetPlan::compile_at(right, depth + 1)?),
+                    imports: imports.clone(),
+                    kind,
+                    columns: query.columns.clone(),
+                    types: query.types.clone(),
+                }),
+                query.types.clone(),
+                Operation::Identity,
+                false,
+                false,
+            )
+        }
+        SetNode::ProcedureCall(_) | SetNode::Owned { .. } => {
             return Err(SpillSetBuildError::Unsupported { depth });
         }
     };
@@ -1156,6 +1257,8 @@ enum CompiledSource<'a> {
     Cross(SpillSetCrossPlan),
     RowJoin(SpillSetJoinPlan),
     Aggregate(SpillSetAggregatePlan),
+    Apply(SpillSetApplyPlan),
+    Arguments(SpillSetArgumentsPlan),
 }
 
 #[cfg(test)]

@@ -354,9 +354,24 @@ pub(super) async fn run(
     );
     let prepared = PreparedNativeRead::prepare(text, params, options).map_err(execution_failure)?;
     let aggregate = is_aggregate(&prepared);
-    let mut scratch = Scratch::new(cx, options, usize::from(aggregate), 0, false).await?;
+    let (groupings, stages) = if matches!(
+        prepared,
+        PreparedNativeRead::Set(_) | PreparedNativeRead::TemporalSet(_)
+    ) {
+        let relation = prepared
+            .prepare_buffered_order(params)
+            .map_err(execution_failure)?;
+        (relation.aggregate_count(), relation.stage_count())
+    } else {
+        (usize::from(aggregate), 0)
+    };
+    let mut scratch = Scratch::new(cx, options, groupings, stages, true).await?;
     let outcome = async {
-        if let Some(partition) = scratch.partition.as_mut() {
+        let auxiliary = scratch
+            .partition
+            .as_mut()
+            .ok_or_else(|| Failure::query("external execution has no auxiliary scratch file"))?;
+        if aggregate {
             return run_aggregate(
                 &prepared,
                 view,
@@ -365,7 +380,7 @@ pub(super) async fn run(
                 params,
                 resolver,
                 &mut scratch.source,
-                partition,
+                auxiliary,
                 &mut scratch.destination,
                 scratch.run_rows,
                 scratch.max_partitions,
@@ -384,6 +399,9 @@ pub(super) async fn run(
                 options.budget.policy(),
                 &mut scratch.source,
                 &mut scratch.destination,
+                auxiliary,
+                scratch.run_rows,
+                scratch.max_partitions,
                 scratch.run_rows,
                 scratch.max_runs,
                 PAGE_BYTES,

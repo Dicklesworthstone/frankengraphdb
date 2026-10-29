@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Operator-owned physical policy for FGP `ReadOrdered` / `OrderedStream`.
-/// The directory must already exist. Each execution gets two distinct,
+/// The directory must already exist. Each execution gets three distinct,
 /// exclusive files unlinked before any query bytes are written; descriptor
 /// ownership retires them on completion, error, cancellation or disconnect.
 /// This is ephemeral scratch, never a result store or recovery directory.
@@ -29,7 +29,7 @@ pub struct OrderedReadConfig {
     pub memory_bytes: usize,
     /// Concurrent admitted ordered sessions, including those awaiting credit.
     pub max_concurrent: usize,
-    /// Append-only quotas applied separately to each of the two private files.
+    /// Append-only quotas applied separately to each of the three private files.
     pub spill: SpillLimits,
     pub sort: AuthorizedSortLimits,
 }
@@ -47,6 +47,8 @@ impl OrderedReadConfig {
                 max_run_bytes: 128 * 1024 * 1024,
             },
             sort: AuthorizedSortLimits {
+                group_capacity: 256,
+                max_partitions: 1024,
                 run_rows: 256,
                 max_runs: 1024,
                 page_bytes: 32 * 1024,
@@ -66,6 +68,8 @@ impl OrderedReadConfig {
             || self.spill.max_file_bytes == 0
             || self.spill.max_runs == 0
             || self.spill.max_run_bytes == 0
+            || self.sort.group_capacity == 0
+            || self.sort.max_partitions == 0
             || self.sort.run_rows == 0
             || self.sort.max_runs == 0
             || self.sort.page_bytes == 0
@@ -132,7 +136,15 @@ impl OrderedReads {
         &self,
         cx: &Cx,
         query: &QueryCx,
-    ) -> Result<(SpillFile<File>, SpillFile<File>, OrderLease), Refusal> {
+    ) -> Result<
+        (
+            SpillFile<File>,
+            SpillFile<File>,
+            SpillFile<File>,
+            OrderLease,
+        ),
+        Refusal,
+    > {
         self.active
             .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 (count < self.config.max_concurrent).then(|| count + 1)
@@ -144,10 +156,11 @@ impl OrderedReads {
         let mut nonce = [0; 16];
         cx.random_bytes(&mut nonce);
         let directory = self.config.directory.clone();
-        let (a, b, lease) = spawn_blocking_io(move || {
+        let (a, b, c, lease) = spawn_blocking_io(move || {
             let a = anonymous_file(&directory, nonce, 'a')?;
             let b = anonymous_file(&directory, nonce, 'b')?;
-            Ok((a, b, lease))
+            let c = anonymous_file(&directory, nonce, 'c')?;
+            Ok((a, b, c, lease))
         })
         .await
         .map_err(|_| {
@@ -172,7 +185,15 @@ impl OrderedReads {
         )
         .await
         .map_err(super::execute::ordered::spool_refusal)?;
-        Ok((a, b, lease))
+        let c = SpillFile::new(
+            query,
+            File::from_std(c),
+            self.pool.clone(),
+            self.config.spill,
+        )
+        .await
+        .map_err(super::execute::ordered::spool_refusal)?;
+        Ok((a, b, c, lease))
     }
 }
 

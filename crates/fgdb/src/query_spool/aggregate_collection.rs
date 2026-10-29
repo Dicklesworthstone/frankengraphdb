@@ -28,10 +28,7 @@ fn control<'a>(
     move |event| {
         // Keep the original cumulative native meter. Its refusal is terminal,
         // never disguised as physical capacity pressure and retried.
-        input
-            .charge(event)
-            .map_err(execute_error)
-            .map_err(GqlQueryError::Interrupted)?;
+        input.controlled_charge(event)?;
         if event == VertexScanEvent::ScratchEntry {
             // Native collection insertion charges an occurrence and each
             // 64-byte payload unit BEFORE cloning/growing; DISTINCT separately
@@ -66,8 +63,8 @@ pub(super) fn new_state(
 ) -> Result<SpillAggregateState> {
     if !definition.has_collections() {
         return definition
-            .new_state(&mut |event| input.charge(event))
-            .map_err(execute_error);
+            .new_state(&mut |event| input.controlled_charge(event))
+            .map_err(controlled_error);
     }
     definition
         .new_state(&mut control(input, charge, cx))
@@ -84,8 +81,8 @@ pub(super) fn update(
 ) -> Result<()> {
     if !definition.has_collections() {
         return definition
-            .update(state, row, &mut |event| input.charge(event))
-            .map_err(execute_error);
+            .update(state, row, &mut |event| input.controlled_charge(event))
+            .map_err(controlled_error);
     }
     definition
         .update(state, row, &mut control(input, charge, cx))
@@ -102,8 +99,8 @@ pub(super) fn finish(
 ) -> Result<GraphAggregateRow> {
     if !definition.has_collections() {
         return definition
-            .finish(keys, state, &mut |event| input.charge(event))
-            .map_err(execute_error);
+            .finish(keys, state, &mut |event| input.controlled_charge(event))
+            .map_err(controlled_error);
     }
     definition
         .finish(keys, state, &mut control(input, charge, cx))

@@ -1,6 +1,6 @@
 //! External keyed/theta joins over completed authenticated child runs.
+use super::host::ControlledStats;
 use super::*;
-use crate::BufferedReadView;
 use crate::query::view::spool::sort::{ChargedVec, Input as MergeInput};
 use fgdb_gql::GlaExecutionEvent;
 use fgdb_gql::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue, GraphValueOrder};
@@ -24,7 +24,7 @@ fn failure(error: SpillSetRowError<NativeSpoolError>) -> NativeSpoolError {
 fn event(
     cx: &QueryCx,
     policy: GqlQueryPolicy,
-    evaluator: &mut GlaExecutionStats,
+    evaluator: &mut ControlledStats<'_>,
     charge: &mut MemoryCharge,
     event: GlaExecutionEvent,
 ) -> Result<()> {
@@ -46,7 +46,7 @@ fn matches_pair(
     right: &GraphValueRow,
     cx: &QueryCx,
     policy: GqlQueryPolicy,
-    evaluator: &mut GlaExecutionStats,
+    evaluator: &mut ControlledStats<'_>,
     pool: &MemoryPool,
 ) -> Result<bool> {
     let mut temporary = pool.reserve(cx, 0).map_err(SpillError::Memory)?;
@@ -111,7 +111,7 @@ async fn pull_sorted<F>(
     source: &mut SpillFile<F>,
     pool: &MemoryPool,
     policy: GqlQueryPolicy,
-    evaluator: &mut GlaExecutionStats,
+    evaluator: &mut ControlledStats<'_>,
     work: &mut Work<'_>,
     resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
 ) -> Result<Option<SpoolRow>>
@@ -137,7 +137,7 @@ async fn merge_presence<A, B, C>(
     right: &NativeResultSpool,
     snapshot: CommitSeq,
     snapshot_records: u64,
-    mut evaluator: GlaExecutionStats,
+    mut evaluator: ControlledStats<'_>,
     policy: GqlQueryPolicy,
     scratch: &mut SpillFile<A>,
     destination: &mut SpillFile<B>,
@@ -295,17 +295,18 @@ where
             snapshot_records,
             result_rows: rows,
         },
-        evaluator,
+        evaluator: evaluator.stats,
         max_row_bytes: largest,
         run,
     })
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn execute<V, A, B, C>(
-    plan: SpillSetJoinPlan,
+pub(super) async fn execute<H, A, B, C>(
+    plan: &SpillSetJoinPlan,
+    arguments: Option<&GraphValueRow>,
     snapshot: CommitSeq,
-    view: &mut BufferedReadView<V>,
+    host: &mut H,
     cx: &QueryCx,
     policy: GqlQueryPolicy,
     scratch: &mut SpillFile<A>,
@@ -322,7 +323,7 @@ pub(super) async fn execute<V, A, B, C>(
     resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
 ) -> Result<(NativeResultSpool, u64)>
 where
-    V: Vfs + Clone,
+    H: ExternalOrderHost,
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     C: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
@@ -331,13 +332,14 @@ where
         left,
         right,
         snapshot_records,
-        mut evaluator,
+        evaluator,
         work: prior_work,
     } = binary::complete_children(
-        plan.left().clone(),
-        plan.right().clone(),
+        plan.left(),
+        plan.right(),
+        arguments,
         snapshot,
-        view,
+        host,
         cx,
         policy,
         scratch,
@@ -354,6 +356,11 @@ where
         resolver,
     )
     .await?;
+    let mut control = |event| host.native_event(event);
+    let mut evaluator = ControlledStats {
+        stats: evaluator,
+        control: &mut control,
+    };
     let pool = scratch.memory_pool().clone();
     let mut work = Work {
         cx,
@@ -377,7 +384,7 @@ where
     }
     if plan.supports_merge_filtered() {
         let result = filtered::execute(
-            &plan,
+            plan,
             &left,
             &right,
             snapshot,
@@ -400,7 +407,7 @@ where
     }
     if plan.supports_merge_presence() {
         let result = merge_presence(
-            &plan,
+            plan,
             &left,
             &right,
             snapshot,
@@ -423,7 +430,7 @@ where
     }
     if plan.supports_merge_pairs() {
         let result = pairs::execute(
-            &plan,
+            plan,
             &left,
             &right,
             snapshot,
@@ -478,7 +485,7 @@ where
         while let Some(bytes) = right_input.next(destination, cx).await? {
             let right_row = cross::decode(bytes, &pool, &mut work, resolver)?;
             if matches_pair(
-                &plan,
+                plan,
                 &left_row.row,
                 &right_row.row,
                 cx,
@@ -510,7 +517,7 @@ where
             while let Some(bytes) = left_input.next(destination, cx).await? {
                 let left_row = cross::decode(bytes, &pool, &mut work, resolver)?;
                 if matches_pair(
-                    &plan,
+                    plan,
                     &left_row.row,
                     &right_row.row,
                     cx,
@@ -539,7 +546,7 @@ where
             snapshot_records,
             result_rows: rows,
         },
-        evaluator,
+        evaluator: evaluator.stats,
         max_row_bytes: largest,
         run,
     };

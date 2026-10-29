@@ -54,7 +54,7 @@ fn compare(
     peer: &GraphValueRow,
     cx: &QueryCx,
     policy: GqlQueryPolicy,
-    evaluator: &mut GlaExecutionStats,
+    evaluator: &mut ControlledStats<'_>,
 ) -> Result<Ordering> {
     let (left, right) = pass.pair(outer, peer);
     let order = plan
@@ -149,7 +149,7 @@ impl Output {
         writer: &mut PagedSpillWriter<'_, F>,
         pool: &MemoryPool,
         policy: GqlQueryPolicy,
-        evaluator: &mut GlaExecutionStats,
+        evaluator: &mut ControlledStats<'_>,
         max_row_bytes: usize,
         max_input_rows: u64,
         work: &mut Work<'_>,
@@ -201,7 +201,7 @@ async fn sweep<A, B, C>(
     output: &mut Output,
     pool: &MemoryPool,
     policy: GqlQueryPolicy,
-    evaluator: &mut GlaExecutionStats,
+    evaluator: &mut ControlledStats<'_>,
     max_row_bytes: usize,
     max_input_rows: u64,
     work: &mut Work<'_>,
@@ -405,7 +405,7 @@ pub(super) async fn execute<A, B, C>(
     right: &NativeResultSpool,
     snapshot: CommitSeq,
     snapshot_records: u64,
-    mut evaluator: GlaExecutionStats,
+    mut evaluator: ControlledStats<'_>,
     policy: GqlQueryPolicy,
     scratch: &mut SpillFile<A>,
     destination: &mut SpillFile<B>,
@@ -538,7 +538,7 @@ where
             snapshot_records,
             result_rows: output.rows,
         },
-        evaluator,
+        evaluator: evaluator.stats,
         max_row_bytes: output.largest,
         run,
     })

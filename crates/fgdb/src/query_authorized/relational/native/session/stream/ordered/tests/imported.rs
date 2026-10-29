@@ -63,6 +63,7 @@ fn imported_ordered_templates_rebind_at_a_fresh_pin_without_catalog_callbacks() 
                 Arc::clone(&native),
                 scratch,
                 destination,
+                file(&cx, &pool).await.0,
                 limits(),
             )
             .unwrap();
@@ -143,6 +144,7 @@ fn ordered_import_admits_authority_before_templates_limits_and_scratch() {
                 Arc::clone(&native),
                 scratch,
                 destination,
+                file(&cx, &pool).await.0,
                 invalid,
             );
             if let Some(expected) = expected {
@@ -193,6 +195,7 @@ fn imported_handles_keep_exact_session_ownership_and_branch_rebinding() {
                     Arc::clone(&native),
                     scratch,
                     destination,
+                    file(&cx, &pool).await.0,
                     limits(),
                 )
                 .unwrap(),
@@ -272,6 +275,7 @@ mod projected {
                 native,
                 scratch,
                 destination,
+                file(cx, pool).await.0,
                 physical,
             )
             .unwrap()
@@ -287,6 +291,7 @@ mod projected {
                     clock as fn() -> u64,
                     scratch,
                     destination,
+                    file(cx, pool).await.0,
                     physical,
                 )
                 .unwrap();
@@ -306,18 +311,21 @@ mod projected {
             .session
             .open_ordered(cx, prepared, params, limits)
             .unwrap();
+        let OpenedOrderSource::Linear { input, .. } = &mut opened.source else {
+            panic!("one-source row pull retains its shared native meter");
+        };
         let mut count = 0;
-        while let Some(row) = opened.input.0.pull() {
+        while let Some(row) = input.0.pull() {
             drop(row.expect("the wide input allowance admits the whole source"));
             count += 1;
         }
         assert_eq!(count, 5);
-        let (at, kind, rows, evaluator) = opened.input.0.stats();
+        let (at, kind, rows, evaluator) = input.0.stats();
         assert_eq!((at, kind), (CommitSeq(1), ScanKind::Vertex));
         assert_eq!((rows.snapshot_records, rows.result_rows), (5, 5));
-        assert_eq!(opened.input.0.state(), ScanState::Exhausted);
-        assert!(opened.input.0.pull().is_none());
-        assert_eq!(opened.input.0.stats().3, evaluator);
+        assert_eq!(input.0.state(), ScanState::Exhausted);
+        assert!(input.0.pull().is_none());
+        assert_eq!(input.0.stats().3, evaluator);
         evaluator
     }
 
@@ -616,15 +624,18 @@ mod projected {
                                 .session
                                 .open_ordered(&cx, &prepared, &args, limits)
                                 .unwrap();
-                            let Err(error) = opened.input.0.pull().unwrap() else {
+                            let OpenedOrderSource::Linear { input, .. } = &mut opened.source else {
+                                panic!("one-source row pull retains its shared native meter");
+                            };
+                            let Err(error) = input.0.pull().unwrap() else {
                                 panic!("projection must spend the native allowance");
                             };
                             native_limit(error, dimension);
-                            assert_eq!(opened.input.0.state(), ScanState::Failed);
-                            assert_eq!(opened.input.0.stats().2.result_rows, 0);
-                            let stats = opened.input.0.stats();
-                            assert!(opened.input.0.pull().is_none());
-                            assert_eq!(opened.input.0.stats(), stats);
+                            assert_eq!(input.0.state(), ScanState::Failed);
+                            assert_eq!(input.0.stats().2.result_rows, 0);
+                            let stats = input.0.stats();
+                            assert!(input.0.pull().is_none());
+                            assert_eq!(input.0.stats(), stats);
                         }
                         // Opening is still lazy; the same error crosses the
                         // actual spill future before any final row is exposed.
@@ -766,18 +777,21 @@ mod projected {
                             .session
                             .open_ordered(&cx, &prepared, &args, limits)
                             .unwrap();
-                        drop(opened.input.0.pull().unwrap().unwrap());
-                        let Err(error) = opened.input.0.pull().unwrap() else {
+                        let OpenedOrderSource::Linear { input, .. } = &mut opened.source else {
+                            panic!("one-source row pull retains its shared native meter");
+                        };
+                        drop(input.0.pull().unwrap().unwrap());
+                        let Err(error) = input.0.pull().unwrap() else {
                             panic!("second row fails");
                         };
                         division(error);
-                        assert_eq!(opened.input.0.state(), ScanState::Failed);
-                        let stats = opened.input.0.stats();
+                        assert_eq!(input.0.state(), ScanState::Failed);
+                        let stats = input.0.stats();
                         assert_eq!((stats.2.snapshot_records, stats.2.result_rows), (2, 1));
                         assert_eq!(Arc::strong_count(&db.snapshot), pins);
                         for _ in 0..3 {
-                            assert!(opened.input.0.pull().is_none());
-                            assert_eq!(opened.input.0.stats(), stats);
+                            assert!(input.0.pull().is_none());
+                            assert_eq!(input.0.stats(), stats);
                         }
                     }
                     let future = session.execute_ordered(&cx, &prepared, &args).unwrap();

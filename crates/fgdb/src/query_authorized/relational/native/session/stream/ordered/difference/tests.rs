@@ -21,7 +21,7 @@ const H: PropertyKeyId = PropertyKeyId(2);
 const R: RelationId = RelationId(1);
 const ROWS: &str = "MATCH (n) RETURN n.p AS p";
 type Resolver = fn(GraphSymbolKind, &str) -> Option<GraphSymbol>;
-type Session<'a, C> = AuthorizedOrderedReadSession<'a, Resolver, C, File, File>;
+type Session<'a, C> = AuthorizedOrderedReadSession<'a, Resolver, C, File, File, File>;
 type Bag = BTreeMap<Vec<QueryValue>, i128>;
 
 fn authority() -> Authority {
@@ -47,6 +47,8 @@ fn policy(rows: u64) -> GqlQueryPolicy {
 }
 fn limits() -> AuthorizedSortLimits {
     AuthorizedSortLimits {
+        group_capacity: 2,
+        max_partitions: 32,
         run_rows: 2,
         max_runs: 128,
         page_bytes: 127,
@@ -193,6 +195,7 @@ async fn session<'a, C: FnMut() -> u64>(
     let token = authority.issue_at(grant, 100).unwrap();
     let (scratch, a) = file(cx, pool).await;
     let (destination, b) = file(cx, pool).await;
+    let (auxiliary, _) = file(cx, pool).await;
     (
         db.authorized_ordered_read_session(
             cx,
@@ -204,6 +207,7 @@ async fn session<'a, C: FnMut() -> u64>(
             clock,
             scratch,
             destination,
+            auxiliary,
             limits(),
         )
         .unwrap(),

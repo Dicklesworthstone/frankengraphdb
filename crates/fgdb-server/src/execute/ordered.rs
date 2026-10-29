@@ -14,7 +14,7 @@ use fgdb_types::QueryCx;
 use std::sync::Arc;
 
 pub(crate) struct OrderedSession<'a> {
-    native: fgdb::AuthorizedOrderedReadSession<'a, crate::Symbols, fn() -> u64, File, File>,
+    native: fgdb::AuthorizedOrderedReadSession<'a, crate::Symbols, fn() -> u64, File, File, File>,
     generation: Generation,
     // File owners drop before the slot is released. Any already-started
     // foundation syscall finishes against its unlinked, never-reused file.
@@ -131,7 +131,8 @@ pub(crate) async fn read_ordered_session<'a>(
         }
         result
     });
-    let (scratch, destination, lease) = in_generation(&generation, admitted_files).await?;
+    let (scratch, destination, auxiliary, lease) =
+        in_generation(&generation, admitted_files).await?;
     let (view, _) = db.db.read_view(cx).await.map_err(Refusal::from)?;
     generation.check().map_err(Refusal::from)?;
     let result = match prepared {
@@ -148,6 +149,7 @@ pub(crate) async fn read_ordered_session<'a>(
                 Arc::clone(&prepared.native),
                 scratch,
                 destination,
+                auxiliary,
                 host.limits(),
             )
             .map(|(session, template)| (session, Some(template))),
@@ -162,6 +164,7 @@ pub(crate) async fn read_ordered_session<'a>(
                 unix_millis as fn() -> u64,
                 scratch,
                 destination,
+                auxiliary,
                 host.limits(),
             )
             .map(|session| (session, None)),

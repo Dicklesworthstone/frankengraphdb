@@ -177,6 +177,7 @@ async fn element_spool(
     let pool = MemoryPool::new(256_000, 0).unwrap();
     let mut source = scratch(cx, &pool).await;
     let mut destination = scratch(cx, &pool).await;
+    let mut auxiliary = scratch(cx, &pool).await;
     let result = prepared
         .spool_ordered_in_view(
             view,
@@ -185,6 +186,9 @@ async fn element_spool(
             allowance,
             &mut source,
             &mut destination,
+            &mut auxiliary,
+            2,
+            32,
             run_rows,
             64,
             127,
@@ -337,6 +341,7 @@ fn temporal_distinct_and_hidden_keys_are_applied_before_the_final_page() {
                     PreparedNativeRead::prepare(text, &GqlParameters::new(), symbols).unwrap();
                 let mut source = scratch(&cx, &pool).await;
                 let mut destination = scratch(&cx, &pool).await;
+                let mut auxiliary = scratch(&cx, &pool).await;
                 let (spool, _) = prepared
                     .spool_ordered(
                         &db,
@@ -345,6 +350,9 @@ fn temporal_distinct_and_hidden_keys_are_applied_before_the_final_page() {
                         policy(),
                         &mut source,
                         &mut destination,
+                        &mut auxiliary,
+                        2,
+                        32,
                         1,
                         64,
                         31,
@@ -405,6 +413,7 @@ fn computed_set_order_finishes_native_stages_before_the_final_page() {
                 .value;
             let mut source = scratch(&cx, &pool).await;
             let mut destination = scratch(&cx, &pool).await;
+            let mut auxiliary = scratch(&cx, &pool).await;
             let (spool, work) = prepared
                 .spool_ordered_in_view(
                     &view,
@@ -413,6 +422,9 @@ fn computed_set_order_finishes_native_stages_before_the_final_page() {
                     policy(),
                     &mut source,
                     &mut destination,
+                    &mut auxiliary,
+                    2,
+                    32,
                     2,
                     64,
                     127,
@@ -465,6 +477,7 @@ fn computed_temporal_sets_bind_and_pin_before_polling() {
         let pool = MemoryPool::new(64_000, 0).unwrap();
         let mut source = scratch(&cx, &pool).await;
         let mut destination = scratch(&cx, &pool).await;
+        let mut auxiliary = scratch(&cx, &pool).await;
         let future = prepared.spool_ordered_in_view(
             &old,
             &cx,
@@ -472,6 +485,9 @@ fn computed_temporal_sets_bind_and_pin_before_polling() {
             policy(),
             &mut source,
             &mut destination,
+            &mut auxiliary,
+            2,
+            32,
             2,
             64,
             127,
@@ -527,6 +543,7 @@ fn computed_temporal_sets_bind_and_pin_before_polling() {
                 .unwrap();
             let mut source = scratch(&cx, &pool).await;
             let mut destination = scratch(&cx, &pool).await;
+            let mut auxiliary = scratch(&cx, &pool).await;
             let (spool, _) = prepared
                 .spool_ordered(
                     &db,
@@ -535,6 +552,9 @@ fn computed_temporal_sets_bind_and_pin_before_polling() {
                     policy(),
                     &mut source,
                     &mut destination,
+                    &mut auxiliary,
+                    2,
+                    32,
                     2,
                     64,
                     127,
@@ -601,6 +621,7 @@ fn computed_set_errors_follow_complete_source_order_even_for_empty_pages() {
             assert_eq!(expected_error.kind, GraphIntegerErrorKind::DivisionByZero);
             let mut source = scratch(&cx, &pool).await;
             let mut destination = scratch(&cx, &pool).await;
+            let mut auxiliary = scratch(&cx, &pool).await;
             let result = prepared
                 .spool_ordered_in_view(
                     &view,
@@ -609,6 +630,9 @@ fn computed_set_errors_follow_complete_source_order_even_for_empty_pages() {
                     policy(),
                     &mut source,
                     &mut destination,
+                    &mut auxiliary,
+                    2,
+                    32,
                     1,
                     64,
                     127,
@@ -637,6 +661,7 @@ fn computed_set_errors_follow_complete_source_order_even_for_empty_pages() {
             let prepared = PreparedNativeRead::prepare(&text, &params, symbols).unwrap();
             let mut source = scratch(&cx, &pool).await;
             let mut destination = scratch(&cx, &pool).await;
+            let mut auxiliary = scratch(&cx, &pool).await;
             let result = prepared
                 .spool_ordered_in_view(
                     &view,
@@ -645,6 +670,9 @@ fn computed_set_errors_follow_complete_source_order_even_for_empty_pages() {
                     policy(),
                     &mut source,
                     &mut destination,
+                    &mut auxiliary,
+                    2,
+                    32,
                     1,
                     64,
                     127,
@@ -707,6 +735,7 @@ fn computed_set_stages_share_work_and_keep_intermediate_and_final_row_quotas_sep
             }
             let mut source = scratch(&cx, &pool).await;
             let mut destination = scratch(&cx, &pool).await;
+            let mut auxiliary = scratch(&cx, &pool).await;
             let result = prepared
                 .spool_ordered(
                     &db,
@@ -715,6 +744,9 @@ fn computed_set_stages_share_work_and_keep_intermediate_and_final_row_quotas_sep
                     allowance,
                     &mut source,
                     &mut destination,
+                    &mut auxiliary,
+                    2,
+                    32,
                     2,
                     64,
                     127,
@@ -777,24 +809,48 @@ fn computed_set_stages_share_work_and_keep_intermediate_and_final_row_quotas_sep
 }
 
 #[test]
-fn computed_order_refuses_unowned_sources_and_future_cuts_before_scratch() {
+fn computed_order_admits_complete_relations_and_refuses_future_cuts_before_scratch() {
     let ((), report) = run_async_under_lab(0x7e4d_0007, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let (db, _) = database(&contexts.commit(), &[CanonicalScalar::Int(1)]).await;
         let view = db.read_session().unwrap();
         let pool = MemoryPool::new(64_000, 0).unwrap();
+        for (text, expected) in [
+            ("RETURN 1 + 2 AS value", vec![3]),
+            (
+                "RETURN 1 + 2 AS value UNION ALL RETURN 2 + 2 AS value",
+                vec![3, 4],
+            ),
+        ] {
+            let params = GqlParameters::new();
+            let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+            let actual = element_spool(&view, &cx, &prepared, &params, policy(), 1)
+                .await
+                .unwrap();
+            assert_eq!(actual.snapshot, view.frontier());
+            assert_eq!(
+                actual.rows,
+                expected
+                    .into_iter()
+                    .map(
+                        |value| GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+                            CanonicalScalar::Int(value)
+                        ),])
+                    )
+                    .collect::<Vec<_>>()
+            );
+        }
         for text in [
-            "RETURN 1 + 2 AS value LIMIT 0",
-            "MATCH (a:L) RETURN a.p + 1 AS value UNION ALL MATCH (b:L) RETURN b.p + 1 AS value LIMIT 0",
             "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ 999 RETURN n.p + 1 AS value LIMIT 0",
             "MATCH (a:L) FOR SYSTEM_TIME AS OF SEQ 999 RETURN a.p + 1 AS value UNION ALL MATCH (b:L) RETURN b.p + 1 AS value LIMIT 0",
         ] {
             let params = GqlParameters::new();
             let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
-            let temporal = matches!(prepared, PreparedNativeRead::TemporalSet(_));
+            assert!(matches!(prepared, PreparedNativeRead::TemporalSet(_)));
             let mut source = scratch(&cx, &pool).await;
             let mut destination = scratch(&cx, &pool).await;
+            let mut auxiliary = scratch(&cx, &pool).await;
             let result = prepared
                 .spool_ordered_in_view(
                     &view,
@@ -803,6 +859,9 @@ fn computed_order_refuses_unowned_sources_and_future_cuts_before_scratch() {
                     policy(),
                     &mut source,
                     &mut destination,
+                    &mut auxiliary,
+                    2,
+                    32,
                     1,
                     64,
                     127,
@@ -814,30 +873,25 @@ fn computed_order_refuses_unowned_sources_and_future_cuts_before_scratch() {
             let NativeSpoolError::Prepare(error) = result.unwrap_err() else {
                 panic!("expected preparation refusal: {text}");
             };
-            if temporal {
-                assert!(matches!(
-                    *error,
-                    fgdb::QueryError::Stream(GqlQueryError::Source(
-                        fgdb_gql::stream::VertexScanError::Source(
-                            fgdb::ReadError::BeyondFrontier {
-                                asked: fgdb_types::CommitSeq(999),
-                                ..
-                            }
-                        )
-                    ))
-                ));
-            } else {
-                assert!(matches!(
-                    *error,
-                    fgdb::QueryError::StreamingUnsupported { .. }
-                ));
-            }
+            assert!(matches!(
+                *error,
+                fgdb::QueryError::Stream(GqlQueryError::Source(
+                    fgdb_gql::stream::VertexScanError::Source(fgdb::ReadError::BeyondFrontier {
+                        asked: fgdb_types::CommitSeq(999),
+                        ..
+                    })
+                ))
+            ));
             assert_eq!(
                 source.stats(),
                 fgdb_strata::tiered::memory::SpillStats::default()
             );
             assert_eq!(
                 destination.stats(),
+                fgdb_strata::tiered::memory::SpillStats::default()
+            );
+            assert_eq!(
+                auxiliary.stats(),
                 fgdb_strata::tiered::memory::SpillStats::default()
             );
             assert_eq!(pool.used(), 0);
@@ -1148,6 +1202,109 @@ fn carried_element_reads_share_snapshot_records_work_and_the_exact_history_cut()
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+#[test]
+fn buffered_future_cut_precedes_recursive_frame_memory_admission_without_scratch_io() {
+    let ((), report) = run_async_under_lab(0xc077_0006, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let keys = || {
+            DatabaseKeys::new(
+                [0x64; 32],
+                DatabaseSecurityNamespaceId([0x65; 32]),
+                [0x66; 32],
+            )
+        };
+        let vfs = MemVfs::new().unwrap();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        batch.create_vertex(VId(1), vec![LabelId(1)], vec![]);
+        let publication = db.write(&commit, batch).await.unwrap();
+        drop(db);
+        let source_pool = MemoryPool::new(2_000_000, 0).unwrap();
+        let mut view = Database::open_buffered_read_view_with_vfs(
+            &commit,
+            vfs.clone(),
+            vfs.database_dir(),
+            keys(),
+            source_pool.clone(),
+            fgdb::BufferedReadLimits {
+                max_root_bytes: 64 * 1024,
+                max_source_bytes: 16_000_000,
+                max_blocks: 512,
+                max_vertex_patches: 512,
+                max_work: 10_000_000,
+                buffer: fgdb::BufferLimits {
+                    max_frames: 1,
+                    max_ghost_entries: 2,
+                    max_extent_bytes: 16 * 1024,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let buffer = view.buffer_stats();
+        let baseline = source_pool.used();
+        let params = GqlParameters::new();
+        // One byte cannot admit a recursive future or a writer page. Even so,
+        // an impossible historical cut has its own earlier typed refusal.
+        for future in [true, false] {
+            let requested = fgdb_types::CommitSeq(publication.0 + u64::from(future));
+            let text = format!(
+                "UNWIND [7] AS item FOR SYSTEM_TIME AS OF SEQ {} RETURN item LIMIT 0",
+                requested.0,
+            );
+            let prepared = PreparedNativeRead::prepare(&text, &params, symbols)
+                .unwrap()
+                .prepare_buffered_order(&params)
+                .unwrap();
+            let pool = MemoryPool::new(1, 0).unwrap();
+            let mut source = scratch(&cx, &pool).await;
+            let mut destination = scratch(&cx, &pool).await;
+            let mut auxiliary = scratch(&cx, &pool).await;
+            let error = prepared
+                .spool_in_view(
+                    &mut view,
+                    &cx,
+                    policy(),
+                    &mut source,
+                    &mut destination,
+                    &mut auxiliary,
+                    1,
+                    32,
+                    1,
+                    64,
+                    127,
+                    4096,
+                    100,
+                    1_000_000,
+                )
+                .await
+                .unwrap_err();
+            if future {
+                assert!(matches!(error, NativeSpoolError::BufferedRead(error)
+                    if matches!(*error, fgdb::BufferedReadError::BeyondPublication {
+                        requested: actual, publication: cut,
+                    } if actual == requested && cut == publication)));
+            } else {
+                assert!(matches!(
+                    error,
+                    NativeSpoolError::Spill(fgdb_strata::tiered::memory::SpillError::Memory(_))
+                ));
+            }
+            for stats in [source.stats(), destination.stats(), auxiliary.stats()] {
+                assert_eq!(stats, fgdb_strata::tiered::memory::SpillStats::default());
+            }
+            assert_eq!(pool.used(), 0);
+            assert_eq!(view.buffer_stats(), buffer);
+            assert_eq!(source_pool.used(), baseline);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 mod authorized_carried_elements {
     use super::*;
     use asupersync::security::key::AuthKey;
@@ -1162,7 +1319,7 @@ mod authorized_carried_elements {
 
     const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x62; 32]);
     type Resolver = fn(GraphSymbolKind, &str) -> Option<GraphSymbol>;
-    type Session<'a> = AuthorizedOrderedReadSession<'a, Resolver, fn() -> u64, File, File>;
+    type Session<'a> = AuthorizedOrderedReadSession<'a, Resolver, fn() -> u64, File, File, File>;
 
     fn authority() -> Authority {
         Authority::new(
@@ -1224,7 +1381,10 @@ mod authorized_carried_elements {
             now as fn() -> u64,
             source,
             destination,
+            scratch(cx, pool).await,
             AuthorizedSortLimits {
+                group_capacity: 2,
+                max_partitions: 32,
                 run_rows: 2,
                 max_runs: 16,
                 page_bytes: 31,
@@ -1313,6 +1473,464 @@ mod authorized_carried_elements {
             );
         }
         rows
+    }
+
+    #[test]
+    fn external_calls_keep_duplicate_occurrences_local_pages_and_nested_argument_frames() {
+        let ((), report) = run_async_under_lab(0xc077_0001, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let db = fixture(&contexts.commit(), false).await;
+            let view = db.read_session().unwrap();
+            let issuer = authority();
+            let pool = MemoryPool::new(256_000, 0).unwrap();
+            let params = GqlParameters::new();
+            let scalar = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+            let null = GraphValue::Scalar(CanonicalScalar::Null);
+            for (text, expected) in [
+                (
+                    "UNWIND [2,2,null] AS x CALL (x) { RETURN x AS y } RETURN x,y",
+                    vec![
+                        vec![scalar(2), scalar(2)],
+                        vec![scalar(2), scalar(2)],
+                        vec![null.clone(), null.clone()],
+                    ],
+                ),
+                (
+                    "UNWIND [2,1,2] AS x CALL (x) { \
+                     UNWIND [x,x+10,x+10] AS y \
+                     RETURN DISTINCT y ORDER BY y DESC SKIP 1 LIMIT 1 } RETURN x,y",
+                    vec![
+                        vec![scalar(2), scalar(2)],
+                        vec![scalar(1), scalar(1)],
+                        vec![scalar(2), scalar(2)],
+                    ],
+                ),
+                (
+                    "WITH 3 AS x CALL (x) { \
+                     CALL (x) { RETURN x*2 AS z } RETURN z+1 AS y } RETURN x,y",
+                    vec![vec![scalar(3), scalar(7)]],
+                ),
+                (
+                    "WITH 1 AS x CALL (x) { UNWIND [] AS y RETURN y } RETURN x,y",
+                    vec![],
+                ),
+                (
+                    "UNWIND [] AS x CALL (x) { RETURN 1/(x-x) AS y } RETURN y",
+                    vec![],
+                ),
+            ] {
+                let prepared = PreparedNativeRead::prepare(text, &params, resolve).unwrap();
+                for run_rows in [1, 3] {
+                    let actual = element_spool(&view, &cx, &prepared, &params, policy(), run_rows)
+                        .await
+                        .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+                    assert_eq!(actual.snapshot, view.frontier());
+                    assert_eq!(actual.stats.snapshot_records, 0);
+                    assert_eq!(
+                        actual
+                            .rows
+                            .into_iter()
+                            .map(|row| row.values().to_vec())
+                            .collect::<Vec<_>>(),
+                        expected,
+                        "{text}"
+                    );
+                }
+                let mut ordered = session(&db, &cx, &issuer, &grant(0), &pool, policy()).await;
+                let prepared = ordered.prepare(&cx, text, &params).unwrap();
+                let future = ordered.execute_ordered(&cx, &prepared, &params).unwrap();
+                fn require_send<T: Send>(_: &T) {}
+                require_send(&future);
+                assert_eq!(future.snapshot_seq(), view.frontier());
+                let mut cursor = future
+                    .await
+                    .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+                assert_eq!(rows(&mut cursor).await, expected, "{text}");
+                drop(cursor);
+                assert_eq!(pool.used(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn external_correlated_graph_bodies_keep_zero_counts_null_extensions_and_scope_masks() {
+        let ((), report) = run_async_under_lab(0xc077_0002, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let visible = fixture(&contexts.commit(), false).await;
+            let masked = fixture(&contexts.commit(), true).await;
+            let view = visible.read_session().unwrap();
+            let issuer = authority();
+            let pool = MemoryPool::new(512_000, 0).unwrap();
+            let params = GqlParameters::new();
+            let scalar = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+            let allowance = GqlQueryPolicy::new(10_000, 100, 1_000_000, 1_000_000);
+            let counts = [1, 6, 7, u128::MAX]
+                .into_iter()
+                .map(|id| {
+                    vec![
+                        GraphValue::Vertex(VId(id)),
+                        scalar(if id == 1 { 3 } else { 0 }),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            let witnesses = [1, 6, 7, u128::MAX]
+                .into_iter()
+                .map(|id| {
+                    vec![
+                        GraphValue::Vertex(VId(id)),
+                        GraphValue::Scalar(CanonicalScalar::Bool(id == 1)),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            for (text, expected) in [
+                (
+                    "MATCH (n:L) CALL (n) { MATCH (n)-[:R]->(m) \
+                     RETURN count(*) AS degree } RETURN n,degree ORDER BY n",
+                    counts,
+                ),
+                (
+                    "MATCH (n:L) RETURN n, EXISTS { MATCH (n)-[:R]->(m) \
+                     WITH m.p AS value WHERE value>10 } AS witness ORDER BY n",
+                    witnesses,
+                ),
+                (
+                    "UNWIND [2,2,99,null] AS wanted WITH wanted \
+                     OPTIONAL MATCH (n:L) WHERE n.p=wanted RETURN wanted,n",
+                    vec![
+                        vec![scalar(2), GraphValue::Vertex(VId(1))],
+                        vec![scalar(2), GraphValue::Vertex(VId(1))],
+                        vec![scalar(99), GraphValue::Scalar(CanonicalScalar::Null)],
+                        vec![GraphValue::Scalar(CanonicalScalar::Null); 2],
+                    ],
+                ),
+            ] {
+                let prepared = PreparedNativeRead::prepare(text, &params, resolve).unwrap();
+                let actual = element_spool(&view, &cx, &prepared, &params, allowance, 1)
+                    .await
+                    .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+                assert_eq!(
+                    actual
+                        .rows
+                        .into_iter()
+                        .map(|row| row.values().to_vec())
+                        .collect::<Vec<_>>(),
+                    expected,
+                    "visible graph: {text}"
+                );
+                for db in [&visible, &masked] {
+                    let mut ordered =
+                        session(db, &cx, &issuer, &grant(10_000), &pool, allowance).await;
+                    let prepared = ordered.prepare(&cx, text, &params).unwrap();
+                    let mut cursor = ordered
+                        .execute_ordered(&cx, &prepared, &params)
+                        .unwrap()
+                        .await
+                        .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+                    assert_eq!(rows(&mut cursor).await, expected, "masked graph: {text}");
+                    drop(cursor);
+                    assert_eq!(pool.used(), 0);
+                }
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn external_correlated_limits_and_late_errors_span_all_reached_bodies() {
+        let ((), report) = run_async_under_lab(0xc077_0003, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let db = fixture(&contexts.commit(), false).await;
+            let view = db.read_session().unwrap();
+            let issuer = authority();
+            let pool = MemoryPool::new(256_000, 0).unwrap();
+            let params = GqlParameters::new();
+            for text in [
+                "UNWIND [1,0] AS x CALL (x) { RETURN 1/x AS y } RETURN y LIMIT 0",
+                "WITH 0 AS x CALL (x) { RETURN 1/x AS y LIMIT 0 } RETURN y",
+            ] {
+                let prepared = PreparedNativeRead::prepare(text, &params, resolve).unwrap();
+                assert!(
+                    matches!(
+                        element_spool(&view, &cx, &prepared, &params, policy(), 1).await,
+                        Err(NativeSpoolError::SetExecution(GraphSetExecutionError::Projection { error, .. }))
+                            if error.kind == GraphIntegerErrorKind::DivisionByZero
+                    ),
+                    "{text}"
+                );
+                let mut ordered = session(&db, &cx, &issuer, &grant(0), &pool, policy()).await;
+                let prepared = ordered.prepare(&cx, text, &params).unwrap();
+                assert!(
+                    matches!(ordered.execute_ordered(&cx, &prepared, &params).unwrap().await,
+                    Err(NativeSpoolError::Authorized(error))
+                    if matches!(*error, QueryError::Set(GqlQueryError::Source(
+                        GraphSetExecutionError::Projection { error, .. }))
+                        if error.kind == GraphIntegerErrorKind::DivisionByZero))
+                );
+                assert!(!ordered.is_closed());
+                assert_eq!(pool.used(), 0);
+            }
+            let single = PreparedNativeRead::prepare(
+                "UNWIND [1] AS x CALL (x) { UNWIND range(1,8) AS y RETURN y+x AS value } RETURN value",
+                &params, resolve,
+            ).unwrap();
+            let repeated_text = "UNWIND [1,1,1] AS x CALL (x) { \
+                UNWIND range(1,8) AS y RETURN y+x AS value } RETURN value LIMIT 0";
+            let repeated = PreparedNativeRead::prepare(repeated_text, &params, resolve).unwrap();
+            let one = element_spool(&view, &cx, &single, &params, policy(), 1)
+                .await
+                .unwrap();
+            let many = element_spool(&view, &cx, &repeated, &params, policy(), 1)
+                .await
+                .unwrap();
+            assert!(many.rows.is_empty());
+            assert!(many.evaluator.work_units > one.evaluator.work_units);
+            for (work, scratch, dimension) in [
+                (
+                    one.evaluator.work_units,
+                    1_000_000,
+                    GlaLimitDimension::WorkUnits,
+                ),
+                (
+                    10_000_000,
+                    one.evaluator.scratch_entries,
+                    GlaLimitDimension::ScratchEntries,
+                ),
+            ] {
+                let allowance = GqlQueryPolicy::new(100, 100, work, scratch);
+                assert!(matches!(
+                    element_spool(&view, &cx, &repeated, &params, allowance, 1).await,
+                    Err(NativeSpoolError::Execute(error))
+                        if matches!(*error, GqlQueryError::Evaluator(error) if error.dimension == dimension)
+                ));
+                let mut ordered = session(&db, &cx, &issuer, &grant(0), &pool, allowance).await;
+                let prepared = ordered.prepare(&cx, repeated_text, &params).unwrap();
+                let limit = match dimension {
+                    GlaLimitDimension::WorkUnits => work,
+                    GlaLimitDimension::ScratchEntries => scratch,
+                };
+                assert!(
+                    matches!(ordered.execute_ordered(&cx, &prepared, &params).unwrap().await,
+                    Err(NativeSpoolError::Authorized(error))
+                    if matches!(*error, QueryError::Set(GqlQueryError::Evaluator(error))
+                        if error.dimension == dimension && error.limit == limit
+                            && error.observed == u128::from(limit) + 1))
+                );
+                assert_eq!(pool.used(), 0);
+            }
+            // The keyed body admits one visible node per invocation. A final
+            // empty page cannot reset or refund the signed node allowance.
+            for (items, succeeds) in [("[1]", true), ("[1,1]", false)] {
+                let mut ordered = session(&db, &cx, &issuer, &grant(1), &pool, policy()).await;
+                let text = format!(
+                    "UNWIND {items} AS x CALL (x) {{ MATCH (n:L {{p:2}}) RETURN n }} RETURN n LIMIT 0"
+                );
+                let prepared = ordered.prepare(&cx, &text, &params).unwrap();
+                let result = ordered
+                    .execute_ordered(&cx, &prepared, &params)
+                    .unwrap()
+                    .await;
+                if succeeds {
+                    let mut cursor = result.unwrap();
+                    assert!(rows(&mut cursor).await.is_empty());
+                } else {
+                    assert!(matches!(result, Err(NativeSpoolError::Authorized(error))
+                        if matches!(*error, QueryError::Authorization(
+                            AuthorizationError::LimitExceeded(LimitDimension::Nodes)))));
+                }
+                assert_eq!(pool.used(), 0);
+            }
+            let allowance = GqlQueryPolicy::new(1, 100, 1_000_000, 1_000_000);
+            let mut ordered = session(&db, &cx, &issuer, &grant(100), &pool, allowance).await;
+            let prepared = ordered
+                .prepare(
+                    &cx,
+                    "UNWIND [1,1] AS x CALL (x) { MATCH (n:L {p:2}) RETURN n } RETURN n LIMIT 0",
+                    &params,
+                )
+                .unwrap();
+            assert!(
+                matches!(ordered.execute_ordered(&cx, &prepared, &params).unwrap().await,
+                Err(NativeSpoolError::Authorized(error))
+                if matches!(*error, QueryError::Stream(GqlQueryError::Rows(error))
+                    if error.dimension == GqlBudgetDimension::SnapshotRecords
+                        && error.limit == 1 && error.observed == 2))
+            );
+            assert_eq!(pool.used(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn external_correlated_bodies_rebind_values_without_moving_the_pinned_generation() {
+        let ((), report) = run_async_under_lab(0xc077_0004, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let commit = contexts.commit();
+            let mut db = fixture(&commit, false).await;
+            let old = db.read_session().unwrap();
+            let issuer = authority();
+            let pool = MemoryPool::new(512_000, 0).unwrap();
+            let allowance = GqlQueryPolicy::new(10_000, 100, 1_000_000, 1_000_000);
+            let arguments = |cut, threshold| {
+                GqlParameters::new()
+                    .with_uint64("cut", cut)
+                    .unwrap()
+                    .with_int64("threshold", threshold)
+                    .unwrap()
+            };
+            let text = "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $cut \
+                CALL (n) { MATCH (n)-[:R]->(m) WHERE m.p >= $threshold \
+                RETURN count(*) AS degree } RETURN n,degree ORDER BY n";
+            let params = arguments(old.frontier().0, 10);
+            let mut ordered = session(&db, &cx, &issuer, &grant(10_000), &pool, allowance).await;
+            let prepared = ordered.prepare(&cx, text, &params).unwrap();
+            let pending = ordered.execute_ordered(&cx, &prepared, &params).unwrap();
+            assert_eq!(pending.columns(), &["n", "degree"]);
+            assert_eq!(pending.snapshot_seq(), old.frontier());
+            let mut update = WriteBatch::new(RelationId(1));
+            update.delete_edge(EId(6));
+            update.add_edge(EId(66), VId(6), VId(7), vec![]);
+            let latest = db.write(&commit, update).await.unwrap();
+            let expected = |first, sixth| {
+                [1, 6, 7, u128::MAX]
+                    .into_iter()
+                    .map(|id| {
+                        vec![
+                            GraphValue::Vertex(VId(id)),
+                            GraphValue::Scalar(CanonicalScalar::Int(match id {
+                                1 => first,
+                                6 => sixth,
+                                _ => 0,
+                            })),
+                        ]
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let mut cursor = pending.await.unwrap();
+            assert_eq!(rows(&mut cursor).await, expected(2, 0));
+            drop(cursor);
+            let mut cursor = ordered
+                .execute_ordered(&cx, &prepared, &arguments(old.frontier().0, 18))
+                .unwrap()
+                .await
+                .unwrap();
+            assert_eq!(rows(&mut cursor).await, expected(1, 0));
+            drop(cursor);
+            assert!(
+                matches!(ordered.execute_ordered(&cx, &prepared, &arguments(latest.0, 10)),
+                Err(NativeSpoolError::Authorized(error))
+                if matches!(*error, QueryError::Read(fgdb::ReadError::BeyondFrontier { .. })))
+            );
+            assert!(!ordered.is_closed());
+            let prepared = PreparedNativeRead::prepare(text, &params, resolve).unwrap();
+            for (view, params, expected) in [
+                (old.clone(), arguments(old.frontier().0, 10), expected(2, 0)),
+                (
+                    db.read_session().unwrap(),
+                    arguments(latest.0, 10),
+                    expected(1, 1),
+                ),
+            ] {
+                let actual = element_spool(&view, &cx, &prepared, &params, allowance, 1)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    actual
+                        .rows
+                        .into_iter()
+                        .map(|row| row.values().to_vec())
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            }
+            assert_eq!(pool.used(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn external_collected_apply_refuses_before_scratch_and_expiry_closes_correlated_execution() {
+        let ((), report) = run_async_under_lab(0xc077_0005, |root| async move {
+            use std::sync::{
+                Arc,
+                atomic::{AtomicU64, Ordering},
+            };
+
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.query();
+            let db = fixture(&contexts.commit(), false).await;
+            let view = db.read_session().unwrap();
+            let issuer = authority();
+            let pool = MemoryPool::new(256_000, 0).unwrap();
+            let params = GqlParameters::new();
+            let text =
+                "WITH null AS xs RETURN [x IN xs WHERE (x)-[:R]->() | 1/0] AS mapped LIMIT 0";
+            let prepared = PreparedNativeRead::prepare(text, &params, resolve).unwrap();
+            let mut source = scratch(&cx, &pool).await;
+            let mut destination = scratch(&cx, &pool).await;
+            let mut auxiliary = scratch(&cx, &pool).await;
+            assert!(matches!(prepared.spool_ordered_in_view(
+                &view, &cx, &params, policy(), &mut source, &mut destination, &mut auxiliary,
+                2, 32, 1, 64, 127, 4096, 100, 1_000_000,
+            ).await, Err(NativeSpoolError::Prepare(error))
+                if matches!(*error, QueryError::StreamingUnsupported { .. })));
+            for stats in [source.stats(), destination.stats(), auxiliary.stats()] {
+                assert_eq!(stats, fgdb_strata::tiered::memory::SpillStats::default());
+            }
+            let token = issuer.issue_at(&grant(10_000), 100).unwrap();
+            let clock = Arc::new(AtomicU64::new(100));
+            let time = Arc::clone(&clock);
+            let mut ordered = db
+                .authorized_ordered_read_session(
+                    &cx,
+                    &issuer,
+                    &token,
+                    "main",
+                    resolve as Resolver,
+                    policy(),
+                    move || time.load(Ordering::SeqCst),
+                    source,
+                    destination,
+                    auxiliary,
+                    AuthorizedSortLimits {
+                        group_capacity: 2,
+                        max_partitions: 32,
+                        run_rows: 1,
+                        max_runs: 64,
+                        page_bytes: 127,
+                        max_row_bytes: 4096,
+                        max_input_rows: 100,
+                        max_sort_work: 1_000_000,
+                    },
+                )
+                .unwrap();
+            let refused = ordered.prepare(&cx, text, &params).unwrap();
+            assert!(matches!(ordered.execute_ordered(&cx, &refused, &params),
+                Err(NativeSpoolError::Authorized(error))
+                if matches!(*error, QueryError::StreamingUnsupported { .. })));
+            assert!(!ordered.is_closed());
+            let prepared = ordered
+                .prepare(
+                    &cx,
+                    "UNWIND [1,2] AS x CALL (x) { RETURN x+1 AS y } RETURN y",
+                    &params,
+                )
+                .unwrap();
+            let pending = ordered.execute_ordered(&cx, &prepared, &params).unwrap();
+            assert_eq!(pool.used(), 0, "opening must remain lazy");
+            clock.store(1001, Ordering::SeqCst);
+            assert!(
+                matches!(pending.await, Err(NativeSpoolError::Authorized(error))
+                if matches!(*error, QueryError::Authorization(AuthorizationError::Expired)))
+            );
+            assert!(ordered.is_closed());
+            assert_eq!(pool.used(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     type DifferenceBag = std::collections::BTreeMap<Vec<fgdb::QueryValue>, i128>;

@@ -17,7 +17,7 @@ const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0xe8; 32]);
 const P: PropertyKeyId = PropertyKeyId(1);
 const R: RelationId = RelationId(1);
 type Resolver = fn(GraphSymbolKind, &str) -> Option<GraphSymbol>;
-type Session<'a> = AuthorizedOrderedReadSession<'a, Resolver, fn() -> u64, File, File>;
+type Session<'a> = AuthorizedOrderedReadSession<'a, Resolver, fn() -> u64, File, File, File>;
 type Bag = BTreeMap<Vec<QueryValue>, i128>;
 
 fn now() -> u64 {
@@ -46,6 +46,8 @@ fn policy() -> GqlQueryPolicy {
 }
 fn limits() -> AuthorizedSortLimits {
     AuthorizedSortLimits {
+        group_capacity: 2,
+        max_partitions: 32,
         run_rows: 2,
         max_runs: 128,
         page_bytes: 127,
@@ -158,6 +160,7 @@ async fn session<'a>(
     let token = authority.issue_at(&grant(), 100).unwrap();
     let (scratch, a) = file(cx, pool).await;
     let (destination, b) = file(cx, pool).await;
+    let (auxiliary, _) = file(cx, pool).await;
     (
         db.authorized_ordered_read_session(
             cx,
@@ -169,6 +172,7 @@ async fn session<'a>(
             now as fn() -> u64,
             scratch,
             destination,
+            auxiliary,
             limits(),
         )
         .unwrap(),

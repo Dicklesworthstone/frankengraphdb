@@ -3,7 +3,6 @@
 //! canonically and merged with the same decision kernel as resident SetOp.
 
 use super::*;
-use crate::BufferedReadView;
 use crate::query::view::spool::sort::{Input as MergeInput, Run};
 use fgdb_gql::spill_set::{AsyncSpillSetPlan, SpillSetBinaryPlan, SpillSetMergeStep};
 use fgdb_gql::{
@@ -14,7 +13,10 @@ use fgdb_types::CanonicalScalarResolver;
 // A child owns its ordinary cursor and counters. Pass only the remaining
 // allowance to the next child, then translate its refusal back into the one
 // enclosing query's counters. Result rows remain private per-operator limits.
-fn remaining_policy(policy: GqlQueryPolicy, left: &NativeResultSpool) -> Result<GqlQueryPolicy> {
+pub(super) fn remaining_policy(
+    policy: GqlQueryPolicy,
+    left: &NativeResultSpool,
+) -> Result<GqlQueryPolicy> {
     let remaining = |limit: u64, used: u64| {
         limit
             .checked_sub(used)
@@ -77,7 +79,7 @@ fn rebase_query_error<E, C>(
     })
 }
 
-fn rebase_error(
+pub(super) fn rebase_error(
     error: NativeSpoolError,
     policy: GqlQueryPolicy,
     left: &NativeResultSpool,
@@ -89,6 +91,27 @@ fn rebase_error(
             .map(|error| NativeSpoolError::BufferedExecute(Box::new(error))),
         NativeSpoolError::Execute(error) => rebase_query_error(*error, policy, left)
             .map(|error| NativeSpoolError::Execute(Box::new(error))),
+        NativeSpoolError::Authorized(error) => {
+            let mapped = match *error {
+                QueryError::Stream(error) => {
+                    rebase_query_error(error, policy, left).map(QueryError::Stream)
+                }
+                QueryError::EdgeStream(error) => {
+                    rebase_query_error(error, policy, left).map(QueryError::EdgeStream)
+                }
+                QueryError::Set(error) => {
+                    rebase_query_error(error, policy, left).map(QueryError::Set)
+                }
+                QueryError::Pattern(error) => {
+                    rebase_query_error(error, policy, left).map(QueryError::Pattern)
+                }
+                QueryError::Aggregate(error) => {
+                    rebase_query_error(error, policy, left).map(QueryError::Aggregate)
+                }
+                other => Ok(other),
+            };
+            mapped.map(|error| NativeSpoolError::Authorized(Box::new(error)))
+        }
         NativeSpoolError::Aggregate(error) => match *error {
             NativeAggregateSpoolError::Execute(error) => rebase_query_error(*error, policy, left)
                 .map(|error| NativeAggregateSpoolError::Execute(Box::new(error)).into()),
@@ -127,11 +150,12 @@ pub(super) struct CompletedChildren {
 /// one cumulative allowance. Reading an already completed child again never
 /// spends source records or reexecutes its graph or expressions.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn complete_children<V, A, B, C>(
-    left_plan: AsyncSpillSetPlan,
-    right_plan: AsyncSpillSetPlan,
+pub(super) async fn complete_children<H, A, B, C>(
+    left_plan: &AsyncSpillSetPlan,
+    right_plan: &AsyncSpillSetPlan,
+    arguments: Option<&GraphValueRow>,
     snapshot: CommitSeq,
-    view: &mut BufferedReadView<V>,
+    host: &mut H,
     cx: &QueryCx,
     policy: GqlQueryPolicy,
     scratch: &mut SpillFile<A>,
@@ -148,7 +172,7 @@ pub(super) async fn complete_children<V, A, B, C>(
     resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
 ) -> Result<CompletedChildren>
 where
-    V: Vfs + Clone,
+    H: ExternalOrderHost,
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     C: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
@@ -158,51 +182,54 @@ where
     validate_spill_limits(run_rows, max_runs, page_bytes, max_sort_work)?;
     let left_width = left_plan.columns().len();
     let right_width = right_plan.columns().len();
-    let (left, left_work) = PreparedBufferedOrder::from_relation(left_plan, Some(snapshot))
-        .spool_in_view_with_resolver(
-            view,
-            cx,
-            policy,
-            scratch,
-            destination,
-            auxiliary,
-            group_capacity,
-            max_partitions,
-            run_rows,
-            max_runs,
-            page_bytes,
-            max_row_bytes,
-            max_input_rows,
-            max_sort_work,
-            resolver,
-        )
-        .await?;
+    let limits = ExternalOrderLimits {
+        group_capacity,
+        max_partitions,
+        run_rows,
+        max_runs,
+        page_bytes,
+        max_row_bytes,
+        max_input_rows,
+        max_sort_work,
+    };
+    let (left, left_work) = execute_relation(
+        left_plan,
+        arguments,
+        snapshot,
+        host,
+        cx,
+        policy,
+        scratch,
+        destination,
+        auxiliary,
+        limits,
+        resolver,
+    )
+    .await?;
     let right_policy = remaining_policy(policy, &left)?;
     let right_work_limit = max_sort_work
         .checked_sub(left_work)
         .ok_or(NativeSpoolError::IncompleteCursor)?;
     // Append-only files keep the complete left result alive while the right
     // child runs through the same files. Empty left bags do not skip it.
-    let (right, right_work) = PreparedBufferedOrder::from_relation(right_plan, Some(snapshot))
-        .spool_in_view_with_resolver(
-            view,
-            cx,
-            right_policy,
-            scratch,
-            destination,
-            auxiliary,
-            group_capacity,
-            max_partitions,
-            run_rows,
-            max_runs,
-            page_bytes,
-            max_row_bytes,
-            max_input_rows,
-            right_work_limit,
-            resolver,
-        )
-        .await
-        .map_err(|error| rebase_error(error, policy, &left, left_work, max_sort_work))?;
+    let (right, right_work) = execute_relation(
+        right_plan,
+        arguments,
+        snapshot,
+        host,
+        cx,
+        right_policy,
+        scratch,
+        destination,
+        auxiliary,
+        ExternalOrderLimits {
+            max_sort_work: right_work_limit,
+            ..limits
+        },
+        resolver,
+    )
+    .await
+    .map_err(|error| rebase_error(error, policy, &left, left_work, max_sort_work))?;
     if left.snapshot != snapshot
         || right.snapshot != snapshot
         || left.encoded_columns != left_width
@@ -240,7 +267,7 @@ where
             .checked_add(right.evaluator.scratch_entries)
             .ok_or(SpillError::SizeOverflow)?,
     };
-    staged::native_event(cx, policy, &mut evaluator, GlaExecutionEvent::Work)?;
+    host::event(host, cx, policy, &mut evaluator, GlaExecutionEvent::Work)?;
     let work = left_work
         .checked_add(right_work)
         .ok_or(SpillError::SizeOverflow)?;
@@ -254,10 +281,11 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn execute<V, A, B, C>(
-    plan: SpillSetBinaryPlan,
+pub(super) async fn execute<H, A, B, C>(
+    plan: &SpillSetBinaryPlan,
+    arguments: Option<&GraphValueRow>,
     snapshot: CommitSeq,
-    view: &mut BufferedReadView<V>,
+    host: &mut H,
     cx: &QueryCx,
     policy: GqlQueryPolicy,
     scratch: &mut SpillFile<A>,
@@ -274,7 +302,7 @@ pub(super) async fn execute<V, A, B, C>(
     resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
 ) -> Result<(NativeResultSpool, u64)>
 where
-    V: Vfs + Clone,
+    H: ExternalOrderHost,
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     C: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
@@ -286,10 +314,11 @@ where
         mut evaluator,
         work: prior_work,
     } = complete_children(
-        plan.left().clone(),
-        plan.right().clone(),
+        plan.left(),
+        plan.right(),
+        arguments,
         snapshot,
-        view,
+        host,
         cx,
         policy,
         scratch,
@@ -337,10 +366,10 @@ where
     let distinct = plan.quantifier() == GraphSetQuantifier::Distinct;
     let mut left = Head::new(left, distinct);
     let mut right = Head::new(right, distinct);
-    left.advance(scratch, policy, &mut evaluator, &mut work)
+    left.advance(scratch, host, policy, &mut evaluator, &mut work)
         .await?;
     right
-        .advance(scratch, policy, &mut evaluator, &mut work)
+        .advance(scratch, host, policy, &mut evaluator, &mut work)
         .await?;
     let mut writer = destination.paged_writer(cx, page_bytes)?;
     let mut rows = 0_u64;
@@ -349,7 +378,7 @@ where
         let step = plan.next_with_control(
             left.row.as_ref(),
             right.row.as_ref(),
-            &mut |event| staged::native_event(cx, policy, &mut evaluator, event),
+            &mut |event| host::event(host, cx, policy, &mut evaluator, event),
             &mut |a, b, control| {
                 control(GlaExecutionEvent::Work)?;
                 canonical::compare(a.as_ref(), b.as_ref(), &[], width, &mut work)
@@ -377,30 +406,36 @@ where
                 .map_err(|error| {
                     NativeSpoolError::BufferedExecute(Box::new(GqlQueryError::Rows(error)))
                 })?;
-            staged::native_event(cx, policy, &mut evaluator, GlaExecutionEvent::ScratchEntry)?;
+            host::event(
+                host,
+                cx,
+                policy,
+                &mut evaluator,
+                GlaExecutionEvent::ScratchEntry,
+            )?;
             write_row(&mut writer, row.as_ref(), &mut work).await?;
             rows = next;
             largest = largest.max(row.len());
         }
         if advance_left {
-            left.advance(scratch, policy, &mut evaluator, &mut work)
+            left.advance(scratch, host, policy, &mut evaluator, &mut work)
                 .await?;
         }
         if advance_right {
             right
-                .advance(scratch, policy, &mut evaluator, &mut work)
+                .advance(scratch, host, policy, &mut evaluator, &mut work)
                 .await?;
         }
     }
     // A native decision may know that the rest cannot contribute. Finish
     // authentication and quota/cancellation checks before accepting a result.
     while left.row.is_some() {
-        left.advance(scratch, policy, &mut evaluator, &mut work)
+        left.advance(scratch, host, policy, &mut evaluator, &mut work)
             .await?;
     }
     while right.row.is_some() {
         right
-            .advance(scratch, policy, &mut evaluator, &mut work)
+            .advance(scratch, host, policy, &mut evaluator, &mut work)
             .await?;
     }
     if left.input.remaining != 0 || right.input.remaining != 0 {
@@ -505,16 +540,17 @@ impl Head {
         }
     }
 
-    async fn advance<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin>(
+    async fn advance<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin, H: ExternalOrderHost>(
         &mut self,
         source: &mut SpillFile<F>,
+        host: &mut H,
         policy: GqlQueryPolicy,
         evaluator: &mut GlaExecutionStats,
         work: &mut Work<'_>,
     ) -> Result<()> {
         let previous = self.row.take().filter(|_| self.distinct);
         loop {
-            staged::native_event(work.cx, policy, evaluator, GlaExecutionEvent::Work)?;
+            host::event(host, work.cx, policy, evaluator, GlaExecutionEvent::Work)?;
             let Some(row) = self.input.next(source, work.cx).await? else {
                 return Ok(());
             };
@@ -523,14 +559,20 @@ impl Head {
             if self.distinct
                 && let Some(previous) = &previous
             {
-                staged::native_event(work.cx, policy, evaluator, GlaExecutionEvent::Work)?;
+                host::event(host, work.cx, policy, evaluator, GlaExecutionEvent::Work)?;
                 if canonical::compare(previous.as_ref(), row.as_ref(), &[], self.columns, work)?
                     == Ordering::Equal
                 {
                     continue;
                 }
             }
-            staged::native_event(work.cx, policy, evaluator, GlaExecutionEvent::ScratchEntry)?;
+            host::event(
+                host,
+                work.cx,
+                policy,
+                evaluator,
+                GlaExecutionEvent::ScratchEntry,
+            )?;
             self.row = Some(row);
             return Ok(());
         }

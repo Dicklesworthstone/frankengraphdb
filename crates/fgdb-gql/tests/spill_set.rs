@@ -6,11 +6,11 @@ use core::cmp::Ordering;
 use core::convert::Infallible;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValue, GraphValueOrder, GraphValueRow, PreparedGraphPattern};
-use fgdb_gql::row_join::RowJoinSpec;
+use fgdb_gql::row_join::{RowJoinKind, RowJoinSpec};
 use fgdb_gql::spill_aggregate::SpillAggregateDefinition;
 use fgdb_gql::spill_set::{
-    AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetAggregateRowError, SpillSetBuildError,
-    SpillSetRowError, SpillSetStage,
+    AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetAggregateRowError, SpillSetApplyKind,
+    SpillSetBuildError, SpillSetRowError, SpillSetStage,
 };
 use fgdb_gql::{
     GlaExecutionEvent, GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
@@ -262,6 +262,14 @@ fn staged_plan(
     graph: &Graph,
     plan: &AsyncSpillSetPlan,
 ) -> Result<Vec<GraphValueRow>, SpillSetRowError<()>> {
+    staged_plan_with_arguments(graph, plan, None)
+}
+
+fn staged_plan_with_arguments(
+    graph: &Graph,
+    plan: &AsyncSpillSetPlan,
+    arguments: Option<&GraphValueRow>,
+) -> Result<Vec<GraphValueRow>, SpillSetRowError<()>> {
     // A graph source completes its own ordered/page/visible contract first.
     // Values starts with one unit occurrence and never opens a graph source.
     let mut rows = match plan.source() {
@@ -276,14 +284,44 @@ fn staged_plan(
             }
             rows
         }
+        AsyncSpillSetSourcePlan::Arguments(input) => {
+            assert!(plan.source_pattern().is_none());
+            assert!(plan.source_tail().is_none());
+            assert_eq!(plan.source_columns(), input.columns());
+            let mut cursor = input.start(arguments, &mut |_| Ok::<_, ()>(()))?;
+            let mut rows = Vec::new();
+            while let Some((row, next)) = cursor.next_with_control(&mut |_| Ok::<_, ()>(()))? {
+                rows.push(row);
+                cursor = next;
+            }
+            rows
+        }
+        AsyncSpillSetSourcePlan::Apply(apply) => {
+            assert!(plan.source_pattern().is_none());
+            assert!(plan.source_tail().is_none());
+            assert_eq!(plan.source_columns(), apply.columns());
+            let left = staged_plan_with_arguments(graph, apply.left(), arguments)?;
+            let mut rows = Vec::new();
+            for (index, left) in left.iter().enumerate() {
+                let frame = apply.prepare_arguments(left, index, &mut |_| Ok::<_, ()>(()))?;
+                let right = staged_plan_with_arguments(graph, apply.right(), Some(&frame))?;
+                if apply.kind() == SpillSetApplyKind::Optional && right.is_empty() {
+                    rows.push(apply.null_extend(left, &mut |_| Ok::<_, ()>(()))?);
+                }
+                for right in right {
+                    rows.push(apply.copy_pair(left, &right, &mut |_| Ok::<_, ()>(()))?);
+                }
+            }
+            rows
+        }
         AsyncSpillSetSourcePlan::Binary(binary) => {
             assert!(plan.source_pattern().is_none());
             assert!(plan.source_tail().is_none());
             assert_eq!(plan.source_columns(), binary.columns());
             // Complete both children before any parent operation, then use
             // independent count arithmetic, not the production merge driver.
-            let left = staged_plan(graph, binary.left())?;
-            let right = staged_plan(graph, binary.right())?;
+            let left = staged_plan_with_arguments(graph, binary.left(), arguments)?;
+            let right = staged_plan_with_arguments(graph, binary.right(), arguments)?;
             let mut counts = BTreeMap::<GraphValueRow, (usize, usize)>::new();
             for row in left {
                 counts.entry(row).or_default().0 += 1;
@@ -316,8 +354,8 @@ fn staged_plan(
             assert!(plan.source_tail().is_none());
             assert_eq!(plan.source_columns(), cross.columns());
             assert_eq!(plan.source().kind(), fgdb_gql::scan_stream::ScanKind::Set);
-            let left = staged_plan(graph, cross.left())?;
-            let right = staged_plan(graph, cross.right())?;
+            let left = staged_plan_with_arguments(graph, cross.left(), arguments)?;
+            let right = staged_plan_with_arguments(graph, cross.right(), arguments)?;
             // A selected product (7d0bb0bb) keeps only its accepted pairs, as
             // the production host does; an unselected one copies every pair.
             let mut rows = Vec::new();
@@ -335,13 +373,64 @@ fn staged_plan(
             }
             rows
         }
+        AsyncSpillSetSourcePlan::RowJoin(join) => {
+            let left = staged_plan_with_arguments(graph, join.left(), arguments)?;
+            let right = staged_plan_with_arguments(graph, join.right(), arguments)?;
+            let mut rows = Vec::new();
+            let mut right_seen = vec![false; right.len()];
+            for left in &left {
+                let mut matched = false;
+                for (index, right) in right.iter().enumerate() {
+                    if join.matches_pair_with_control(left, right, &mut |_| Ok(()))? {
+                        matched = true;
+                        right_seen[index] = true;
+                        if matches!(
+                            join.kind(),
+                            RowJoinKind::Inner
+                                | RowJoinKind::Left
+                                | RowJoinKind::Right
+                                | RowJoinKind::Full
+                        ) {
+                            rows.push(join.project_pair_with_control(
+                                Some(left),
+                                Some(right),
+                                &mut |_| Ok(()),
+                            )?);
+                        }
+                    }
+                }
+                if (matched && join.kind() == RowJoinKind::Semi)
+                    || (!matched
+                        && matches!(
+                            join.kind(),
+                            RowJoinKind::Left | RowJoinKind::Full | RowJoinKind::Anti
+                        ))
+                {
+                    rows.push(join.project_pair_with_control(Some(left), None, &mut |_| Ok(()))?);
+                }
+            }
+            if matches!(join.kind(), RowJoinKind::Right | RowJoinKind::Full) {
+                for (right, matched) in right.iter().zip(right_seen) {
+                    if !matched {
+                        rows.push(join.project_pair_with_control(
+                            None,
+                            Some(right),
+                            &mut |_| Ok(()),
+                        )?);
+                    }
+                }
+            }
+            // The compiler-owned identity stage below supplies the native
+            // canonical join order before any body aggregate or local page.
+            rows
+        }
         AsyncSpillSetSourcePlan::Aggregate(aggregate) => {
             assert!(plan.source_pattern().is_none());
             assert!(plan.source_tail().is_none());
             assert_eq!(plan.source_columns(), aggregate.columns());
             assert_eq!(plan.source().kind(), aggregate.input().source().kind());
             assert!(!aggregate.definition().has_output_stage());
-            let input = staged_plan(graph, aggregate.input())?;
+            let input = staged_plan_with_arguments(graph, aggregate.input(), arguments)?;
             let groups = reduce_groups(aggregate.definition(), input)?;
             let mut rows = Vec::new();
             for group in groups {
@@ -392,6 +481,96 @@ fn staged_plan(
             .collect();
     }
     Ok(rows)
+}
+
+#[test]
+fn correlated_call_keeps_occurrences_nulls_local_pages_and_nested_frames() {
+    let graph = Graph::sample();
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    for (text, expected) in [
+        (
+            "UNWIND [2,2,null] AS x CALL (x) { RETURN x AS y } RETURN x,y",
+            vec![
+                row(vec![scalar(2), scalar(2)]),
+                row(vec![scalar(2), scalar(2)]),
+                row(vec![null.clone(), null.clone()]),
+            ],
+        ),
+        (
+            "UNWIND [2,1,2] AS x CALL (x) { \
+             UNWIND [x,x+10,x+10] AS y RETURN DISTINCT y ORDER BY y DESC SKIP 1 LIMIT 1 \
+             } RETURN x,y",
+            vec![
+                row(vec![scalar(2), scalar(2)]),
+                row(vec![scalar(1), scalar(1)]),
+                row(vec![scalar(2), scalar(2)]),
+            ],
+        ),
+        (
+            "WITH 3 AS x CALL (x) { \
+             CALL (x) { RETURN x*2 AS z } RETURN z+1 AS y } RETURN x,y",
+            vec![row(vec![scalar(3), scalar(7)])],
+        ),
+        (
+            "WITH 1 AS x CALL (x) { UNWIND [] AS y RETURN y } RETURN x,y",
+            vec![],
+        ),
+    ] {
+        let query = prepare(text);
+        let plan = AsyncSpillSetPlan::compile(&query).unwrap();
+        assert_eq!(plan.source_count(), 0, "{text}");
+        assert_eq!(staged_plan(&graph, &plan).unwrap(), expected, "{text}");
+        assert_eq!(graph.native(&query).unwrap(), expected, "{text}");
+    }
+}
+
+#[test]
+fn correlated_graph_count_preserves_zero_groups_and_static_source_ordinals() {
+    let graph = Graph::sample();
+    let query = prepare(
+        "MATCH (n) CALL (n) { MATCH (n)-[:R]->(m) RETURN count(*) AS degree } \
+         RETURN n,degree ORDER BY n",
+    );
+    let plan = AsyncSpillSetPlan::compile(&query).unwrap();
+    assert_eq!(plan.source_count(), 2);
+    assert_eq!(plan.aggregate_count(), 1);
+    let expected = (1..=6)
+        .map(|id| {
+            row(vec![
+                GraphValue::Vertex(VId(id)),
+                scalar(if id <= 2 { 2 } else { 0 }),
+            ])
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(staged_plan(&graph, &plan).unwrap(), expected);
+    assert_eq!(graph.native(&query).unwrap(), expected);
+    // The source identity range is logical metadata; a later empty page
+    // neither removes the body source nor changes its ordinal.
+    let empty = AsyncSpillSetPlan::compile(&query.with_page(0, Some(0))).unwrap();
+    assert_eq!(empty.source_count(), 2);
+}
+
+#[test]
+fn correlated_late_failure_survives_empty_pages_but_empty_outer_never_invokes_body() {
+    let graph = Graph::sample();
+    for text in [
+        "UNWIND [1,0] AS x CALL (x) { RETURN 1/x AS y } RETURN y LIMIT 0",
+        "WITH 0 AS x CALL (x) { RETURN 1/x AS y LIMIT 0 } RETURN y",
+    ] {
+        let query = prepare(text);
+        assert!(
+            matches!(
+                staged(&graph, &query),
+                Err(SpillSetRowError::Native(GraphSetExecutionError::Projection { error, .. }))
+                    if error.kind == GraphIntegerErrorKind::DivisionByZero
+            ),
+            "{text}"
+        );
+        assert!(graph.native(&query).is_err(), "{text}");
+    }
+    let query = prepare("UNWIND [] AS x CALL (x) { RETURN 1/(x-x) AS y } RETURN y");
+    assert!(staged(&graph, &query).unwrap().is_empty());
+    assert!(graph.native(&query).unwrap().is_empty());
 }
 
 #[test]

@@ -1,12 +1,13 @@
 //! Bind two admitted endpoints and open the shared external merge.
 use super::*;
 
-impl<R, C, A, B> AuthorizedOrderedReadSession<'_, R, C, A, B>
+impl<R, C, A, B, D> AuthorizedOrderedReadSession<'_, R, C, A, B, D>
 where
     R: GraphSymbolResolver,
     C: FnMut() -> u64 + Send,
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    D: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
 {
     /// Open resumable `result(after) - result(before)` delivery under ONE live
     /// capability permit. Both cuts belong to this session's immutable
@@ -49,6 +50,7 @@ where
             session,
             scratch,
             destination,
+            auxiliary: _,
             limits,
         } = self;
         let limits = *limits;

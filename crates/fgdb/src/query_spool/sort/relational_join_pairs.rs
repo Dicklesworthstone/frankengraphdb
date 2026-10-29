@@ -20,7 +20,7 @@ fn compare_keys(
     right: &GraphValueRow,
     cx: &QueryCx,
     policy: GqlQueryPolicy,
-    evaluator: &mut GlaExecutionStats,
+    evaluator: &mut ControlledStats<'_>,
 ) -> Result<Ordering> {
     plan.compare_keys_with_control(left, right, &mut |event| {
         staged::native_event(cx, policy, evaluator, event)
@@ -41,7 +41,7 @@ pub(super) async fn execute<A, B, C>(
     right: &NativeResultSpool,
     snapshot: CommitSeq,
     snapshot_records: u64,
-    mut evaluator: GlaExecutionStats,
+    mut evaluator: ControlledStats<'_>,
     policy: GqlQueryPolicy,
     scratch: &mut SpillFile<A>,
     destination: &mut SpillFile<B>,
@@ -287,7 +287,7 @@ where
             snapshot_records,
             result_rows: rows,
         },
-        evaluator,
+        evaluator: evaluator.stats,
         max_row_bytes: largest,
         run,
     })

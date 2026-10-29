@@ -6,6 +6,7 @@ use super::*;
 #[path = "native_order.rs"]
 mod native_order;
 pub use native_order::PreparedBufferedOrder;
+pub(crate) use native_order::{ExternalOrderHost, ExternalOrderLimits, execute_relation};
 pub(crate) use native_order::{
     OpenedOrder as OpenedResidentOrder, execute_opened as execute_resident_order,
 };

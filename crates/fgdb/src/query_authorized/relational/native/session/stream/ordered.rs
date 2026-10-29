@@ -3,27 +3,36 @@
 //! cross the narrowed session boundary; only live-admitted final rows do.
 
 use super::*;
-use crate::query::view::{SpoolInput, SpoolRow, ordered_input, ordered_stages};
+use crate::query::view::{
+    ExternalOrderHost, ExternalOrderLimits, SpoolInput, SpoolRow, execute_relation, ordered_input,
+    ordered_stages,
+};
 use crate::{NativeResultSpool, NativeSpoolCursor, NativeSpoolError};
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use fgdb_delta_types::ElementId;
 use fgdb_gql::edge_stream::{EdgeScanCursor, EdgeScanSource, EdgeScanState};
 use fgdb_gql::scan_stream::{ScanKind, ScanSortTail, ScanState};
-use fgdb_gql::spill_set::{AsyncSpillElementSource, AsyncSpillSetPlan};
+use fgdb_gql::spill_set::{AsyncSpillElementSource, AsyncSpillSetPlan, AsyncSpillSetSourcePlan};
 use fgdb_gql::{GlaExecutionStats, GqlBudgetDimension, GqlExecutionBudget, GqlExecutionStats};
 use fgdb_strata::tiered::memory::{SpillError, SpillFile, TrackedBytes};
-use fgdb_types::CanonicalPropertyValue;
+use fgdb_types::{CanonicalPropertyValue, CanonicalScalarResolver};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 type Result<T> = core::result::Result<T, NativeSpoolError>;
+type PreparedOrderedSession<'a, R, C, A, B, D> = (
+    AuthorizedOrderedReadSession<'a, R, C, A, B, D>,
+    AuthorizedPreparedRead,
+);
 
 /// Physical limits fixed by the trusted host when it creates an ordered
 /// session. Execution arguments cannot replace these limits or scratch files.
-/// Both files should use children of one memory pool for a combined bound.
+/// All files should use children of one memory pool for a combined bound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AuthorizedSortLimits {
+    pub group_capacity: usize,
+    pub max_partitions: usize,
     pub run_rows: usize,
     pub max_runs: usize,
     pub page_bytes: usize,
@@ -34,8 +43,23 @@ pub struct AuthorizedSortLimits {
     pub max_sort_work: u64,
 }
 impl AuthorizedSortLimits {
+    fn external(self) -> ExternalOrderLimits {
+        ExternalOrderLimits {
+            group_capacity: self.group_capacity,
+            max_partitions: self.max_partitions,
+            run_rows: self.run_rows,
+            max_runs: self.max_runs,
+            page_bytes: self.page_bytes,
+            max_row_bytes: self.max_row_bytes,
+            max_input_rows: self.max_input_rows,
+            max_sort_work: self.max_sort_work,
+        }
+    }
+
     fn validate(self) -> Result<()> {
-        if self.run_rows == 0
+        if self.group_capacity == 0
+            || self.max_partitions == 0
+            || self.run_rows == 0
             || self.page_bytes == 0
             || self.page_bytes > 64 * 1024
             || self.max_row_bytes == 0
@@ -58,7 +82,7 @@ impl AuthorizedSortLimits {
     }
 }
 
-/// A narrowed session with two privately owned, trusted scratch backends.
+/// A narrowed session with three privately owned, trusted scratch backends.
 /// Obtain it only through `Database::authorized_ordered_read_session`.
 ///
 /// The host fixes the database generation, capability, catalog, clock, native
@@ -69,13 +93,14 @@ impl AuthorizedSortLimits {
 /// Close/drop never evaluates pending work; backend/path retirement belongs to
 /// the host's query region. No durable result, resume token or spill of the
 /// underlying resident graph is implied.
-pub struct AuthorizedOrderedReadSession<'a, R, C, A, B> {
+pub struct AuthorizedOrderedReadSession<'a, R, C, A, B, D> {
     session: AuthorizedReadSession<'a, R, C>,
     scratch: SpillFile<A>,
     destination: SpillFile<B>,
+    auxiliary: SpillFile<D>,
     limits: AuthorizedSortLimits,
 }
-impl<R, C, A, B> core::fmt::Debug for AuthorizedOrderedReadSession<'_, R, C, A, B> {
+impl<R, C, A, B, D> core::fmt::Debug for AuthorizedOrderedReadSession<'_, R, C, A, B, D> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AuthorizedOrderedReadSession")
             .field("closed", &self.session.is_closed())
@@ -83,7 +108,7 @@ impl<R, C, A, B> core::fmt::Debug for AuthorizedOrderedReadSession<'_, R, C, A, 
             .finish()
     }
 }
-impl<R, C, A, B> AuthorizedOrderedReadSession<'_, R, C, A, B> {
+impl<R, C, A, B, D> AuthorizedOrderedReadSession<'_, R, C, A, B, D> {
     pub fn close(&mut self) {
         self.session.close();
     }
@@ -91,7 +116,9 @@ impl<R, C, A, B> AuthorizedOrderedReadSession<'_, R, C, A, B> {
         self.session.is_closed()
     }
 }
-impl<R: GraphSymbolResolver, C: FnMut() -> u64, A, B> AuthorizedOrderedReadSession<'_, R, C, A, B> {
+impl<R: GraphSymbolResolver, C: FnMut() -> u64, A, B, D>
+    AuthorizedOrderedReadSession<'_, R, C, A, B, D>
+{
     /// Retain only immutable syntax/catalog bindings owned by this session.
     /// No query execution, scratch admission or result-row reservation occurs.
     pub fn prepare(
@@ -116,11 +143,11 @@ impl<V: Vfs + Clone> Database<V> {
     /// independently; execution rebinds every argument under its live permit.
     ///
     /// Authority and template admission precede physical-limit inspection.
-    /// Both backends and their fixed ceilings move into the private wrapper;
+    /// All backends and their fixed ceilings move into the private wrapper;
     /// neither a raw template nor a scratch attachment API is exposed to
     /// narrowed request code. A failed constructor releases its new read pin.
     #[allow(clippy::too_many_arguments)]
-    pub fn authorized_prepared_ordered_read_session<'a, R, C, A, B>(
+    pub fn authorized_prepared_ordered_read_session<'a, R, C, A, B, D>(
         &self,
         cx: &QueryCx,
         authority: &'a Authority,
@@ -133,11 +160,9 @@ impl<V: Vfs + Clone> Database<V> {
         native: Arc<PreparedNativeRead>,
         scratch: SpillFile<A>,
         destination: SpillFile<B>,
+        auxiliary: SpillFile<D>,
         limits: AuthorizedSortLimits,
-    ) -> Result<(
-        AuthorizedOrderedReadSession<'a, R, C, A, B>,
-        AuthorizedPreparedRead,
-    )>
+    ) -> Result<PreparedOrderedSession<'a, R, C, A, B, D>>
     where
         R: GraphSymbolResolver,
         C: FnMut() -> u64,
@@ -153,6 +178,7 @@ impl<V: Vfs + Clone> Database<V> {
                 session,
                 scratch,
                 destination,
+                auxiliary,
                 limits,
             },
             prepared,
@@ -167,7 +193,7 @@ impl<V: Vfs + Clone> Database<V> {
     /// Authentication precedes physical-limit inspection. A failed constructor
     /// releases its read pin; the host retains its ordinary path cleanup duty.
     #[allow(clippy::too_many_arguments)]
-    pub fn authorized_ordered_read_session<'a, R, C, A, B>(
+    pub fn authorized_ordered_read_session<'a, R, C, A, B, D>(
         &self,
         cx: &QueryCx,
         authority: &'a Authority,
@@ -178,8 +204,9 @@ impl<V: Vfs + Clone> Database<V> {
         clock: C,
         scratch: SpillFile<A>,
         destination: SpillFile<B>,
+        auxiliary: SpillFile<D>,
         limits: AuthorizedSortLimits,
-    ) -> Result<AuthorizedOrderedReadSession<'a, R, C, A, B>>
+    ) -> Result<AuthorizedOrderedReadSession<'a, R, C, A, B, D>>
     where
         R: GraphSymbolResolver,
         C: FnMut() -> u64,
@@ -192,6 +219,7 @@ impl<V: Vfs + Clone> Database<V> {
             session,
             scratch,
             destination,
+            auxiliary,
             limits,
         })
     }
@@ -203,7 +231,7 @@ impl EmbeddedReadView {
     /// [`Database::authorized_prepared_ordered_read_session`]. The host must
     /// retain its recovery fence while this immutable view is in use.
     #[allow(clippy::too_many_arguments)]
-    pub fn authorized_prepared_ordered_read_session<'a, R, C, A, B>(
+    pub fn authorized_prepared_ordered_read_session<'a, R, C, A, B, D>(
         &self,
         cx: &QueryCx,
         authority: &'a Authority,
@@ -216,11 +244,9 @@ impl EmbeddedReadView {
         native: Arc<PreparedNativeRead>,
         scratch: SpillFile<A>,
         destination: SpillFile<B>,
+        auxiliary: SpillFile<D>,
         limits: AuthorizedSortLimits,
-    ) -> Result<(
-        AuthorizedOrderedReadSession<'a, R, C, A, B>,
-        AuthorizedPreparedRead,
-    )>
+    ) -> Result<PreparedOrderedSession<'a, R, C, A, B, D>>
     where
         R: GraphSymbolResolver,
         C: FnMut() -> u64,
@@ -236,6 +262,7 @@ impl EmbeddedReadView {
                 session,
                 scratch,
                 destination,
+                auxiliary,
                 limits,
             },
             prepared,
@@ -246,7 +273,7 @@ impl EmbeddedReadView {
     /// The namespace and live permit checks precede physical-limit admission,
     /// as in [`Database::authorized_ordered_read_session`].
     #[allow(clippy::too_many_arguments)]
-    pub fn authorized_ordered_read_session<'a, R, C, A, B>(
+    pub fn authorized_ordered_read_session<'a, R, C, A, B, D>(
         &self,
         cx: &QueryCx,
         authority: &'a Authority,
@@ -257,8 +284,9 @@ impl EmbeddedReadView {
         clock: C,
         scratch: SpillFile<A>,
         destination: SpillFile<B>,
+        auxiliary: SpillFile<D>,
         limits: AuthorizedSortLimits,
-    ) -> Result<AuthorizedOrderedReadSession<'a, R, C, A, B>>
+    ) -> Result<AuthorizedOrderedReadSession<'a, R, C, A, B, D>>
     where
         R: GraphSymbolResolver,
         C: FnMut() -> u64,
@@ -271,6 +299,7 @@ impl EmbeddedReadView {
             session,
             scratch,
             destination,
+            auxiliary,
             limits,
         })
     }
@@ -503,11 +532,162 @@ fn bind_ordered(
     Ok((plan, tail, at, query.columns().to_vec(), None, None))
 }
 
+enum BoundExternalOrder {
+    Linear(Box<BoundOrder>),
+    Relation(Box<AsyncSpillSetPlan>, CommitSeq),
+}
+
+// Validate every scoped graph profile before opening any source, even a body
+// whose outer relation will be empty. The physical choice cannot fall back to
+// a resident evaluator after a sibling has already consumed private input.
+fn admit_external_sources(plan: &AsyncSpillSetPlan) -> core::result::Result<(), QueryError> {
+    match plan.source() {
+        AsyncSpillSetSourcePlan::Values(_) | AsyncSpillSetSourcePlan::Arguments(_) => Ok(()),
+        AsyncSpillSetSourcePlan::Vertex(_)
+        | AsyncSpillSetSourcePlan::Edge(_)
+        | AsyncSpillSetSourcePlan::Join(_) => {
+            compile_ordered(
+                plan.source_pattern()
+                    .expect("graph plan retains its pattern"),
+            )?;
+            Ok(())
+        }
+        AsyncSpillSetSourcePlan::Binary(plan) => {
+            admit_external_sources(plan.left())?;
+            admit_external_sources(plan.right())
+        }
+        AsyncSpillSetSourcePlan::Cross(plan) => {
+            admit_external_sources(plan.left())?;
+            admit_external_sources(plan.right())
+        }
+        AsyncSpillSetSourcePlan::RowJoin(plan) => {
+            admit_external_sources(plan.left())?;
+            admit_external_sources(plan.right())
+        }
+        AsyncSpillSetSourcePlan::Aggregate(plan) => admit_external_sources(plan.input()),
+        AsyncSpillSetSourcePlan::Apply(plan) => {
+            admit_external_sources(plan.left())?;
+            admit_external_sources(plan.right())
+        }
+    }
+}
+
+fn bind_external_order(
+    prepared: &PreparedNativeRead,
+    params: &GqlParameters,
+    default: CommitSeq,
+) -> core::result::Result<BoundExternalOrder, QueryError> {
+    let (query, at) = match prepared {
+        PreparedNativeRead::Set(set) => (
+            set.bind_parameters(params).map_err(QueryError::SetText)?,
+            default,
+        ),
+        PreparedNativeRead::TemporalSet(set) => {
+            let bound = set
+                .bind_parameters(params)
+                .map_err(QueryError::TemporalSetText)?;
+            (bound.query().clone(), bound.as_of())
+        }
+        _ => {
+            return bind_ordered(prepared, params, default)
+                .map(|bound| BoundExternalOrder::Linear(Box::new(bound)));
+        }
+    };
+    // Retain the proved one-source row-pull fusion and its shared input meter.
+    if query.ordered_row_pull().is_some() {
+        return bind_projected_order(&query, at, prepared.facade_class())
+            .map(|bound| BoundExternalOrder::Linear(Box::new(bound)));
+    }
+    let plan =
+        AsyncSpillSetPlan::compile(&query).map_err(|_| QueryError::StreamingUnsupported {
+            facade: prepared.facade_class(),
+        })?;
+    admit_external_sources(&plan)?;
+    if let Some(pattern) = plan.source_pattern() {
+        let (input, tail) = compile_ordered(pattern)?;
+        let columns = pattern.columns().to_vec();
+        Ok(BoundExternalOrder::Linear(Box::new((
+            input,
+            tail,
+            at,
+            columns,
+            None,
+            Some(plan),
+        ))))
+    } else {
+        Ok(BoundExternalOrder::Relation(Box::new(plan), at))
+    }
+}
+
+fn scoped_ordered_input<'q, C: FnMut() -> u64 + Send>(
+    plan: RowPlan,
+    pull: Option<GraphSetRowPull>,
+    at: CommitSeq,
+    view: &EmbeddedReadView,
+    cx: &'q QueryCx,
+    execution: Shared<'q, C>,
+    policy: GqlQueryPolicy,
+) -> core::result::Result<OrderedInput<'q>, QueryError> {
+    let control = execution.clone();
+    let input: Box<dyn InputCursor + Send + 'q> = match plan {
+        RowPlan::Vertex(plan) => {
+            let source = ScopedSource {
+                inner: view
+                    .vertex_scan_source(cx, at)
+                    .map_err(QueryError::Read)?
+                    .with_root_equality(&plan, |key| {
+                        execution.borrow().permit.predicates().allows_property(key)
+                    }),
+                execution,
+            };
+            let rows = VertexInput(VertexScanCursor::new(source, plan, policy, move || {
+                control.borrow_mut().checkpoint()
+            }));
+            match pull {
+                Some(pull) => Box::new(SetInput { rows, pull }),
+                None => Box::new(rows),
+            }
+        }
+        RowPlan::Edge(plan) => {
+            let source = aggregate::edge::ordered_source(at, view, cx, execution)?;
+            Box::new(EdgeInput(EdgeScanCursor::new(
+                source,
+                plan,
+                policy,
+                move || control.borrow_mut().checkpoint(),
+            )))
+        }
+    };
+    Ok(OrderedInput(input))
+}
+
+enum OpenedOrderSource<'q> {
+    Linear {
+        input: OrderedInput<'q>,
+        tail: ScanSortTail,
+        columns: Vec<String>,
+        stages: Option<(AsyncSpillSetPlan, EmbeddedReadView)>,
+    },
+    Relation {
+        plan: AsyncSpillSetPlan,
+        view: EmbeddedReadView,
+    },
+}
+impl OpenedOrderSource<'_> {
+    fn columns(&self) -> &[String] {
+        match self {
+            Self::Linear {
+                columns, stages, ..
+            } => stages
+                .as_ref()
+                .map_or(columns, |(stages, _)| stages.columns()),
+            Self::Relation { plan, .. } => plan.columns(),
+        }
+    }
+}
+
 struct OpenedOrder<'q, C> {
-    input: OrderedInput<'q>,
-    tail: ScanSortTail,
-    columns: Vec<String>,
-    stages: Option<(AsyncSpillSetPlan, EmbeddedReadView)>,
+    source: OpenedOrderSource<'q>,
     at: CommitSeq,
     policy: GqlQueryPolicy,
     execution: Shared<'q, C>,
@@ -554,8 +734,8 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send> AuthorizedReadSession<'_,
             prepared,
             params,
             *policy,
-            bind_ordered,
-            |(plan, tail, at, columns, pull, stages), view, cx, execution, policy| {
+            bind_external_order,
+            |selected, view, cx, execution, policy| {
                 execution.borrow_mut().reserve_work(limits.max_sort_work)?;
                 let input_policy = GqlQueryPolicy {
                     rows: match policy.rows.max_snapshot_records() {
@@ -564,60 +744,47 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64 + Send> AuthorizedReadSession<'_,
                     },
                     evaluator: policy.evaluator,
                 };
-                let control = execution.clone();
-                let input: Box<dyn InputCursor + Send + 'q> = match plan {
-                    RowPlan::Vertex(plan) => {
-                        let source = ScopedSource {
-                            inner: view
-                                .vertex_scan_source(cx, at)
-                                .map_err(QueryError::Read)?
-                                .with_root_equality(&plan, |key| {
-                                    execution.borrow().permit.predicates().allows_property(key)
-                                }),
-                            execution: execution.clone(),
-                        };
-                        let rows = VertexInput(VertexScanCursor::new(
-                            source,
-                            plan,
-                            input_policy,
-                            move || control.borrow_mut().checkpoint(),
-                        ));
-                        match pull {
-                            Some(pull) => Box::new(SetInput { rows, pull }),
-                            None => Box::new(rows),
-                        }
+                let (source, at) = match selected {
+                    BoundExternalOrder::Linear(bound) => {
+                        let (plan, tail, at, columns, pull, stages) = *bound;
+                        (
+                            OpenedOrderSource::Linear {
+                                input: scoped_ordered_input(
+                                    plan,
+                                    pull,
+                                    at,
+                                    view,
+                                    cx,
+                                    execution.clone(),
+                                    input_policy,
+                                )?,
+                                tail,
+                                columns,
+                                stages: stages.map(|stages| (stages, view.clone())),
+                            },
+                            at,
+                        )
                     }
-                    RowPlan::Edge(plan) => {
-                        let source =
-                            aggregate::edge::ordered_source(at, view, cx, execution.clone())?;
-                        Box::new(EdgeInput(EdgeScanCursor::new(
-                            source,
-                            plan,
-                            input_policy,
-                            move || control.borrow_mut().checkpoint(),
-                        )))
+                    BoundExternalOrder::Relation(plan, at) => {
+                        view.snapshot.check_frontier(at).map_err(QueryError::Read)?;
+                        (
+                            OpenedOrderSource::Relation {
+                                plan: *plan,
+                                view: view.clone(),
+                            },
+                            at,
+                        )
                     }
                 };
                 execution.borrow_mut().checkpoint()?;
-                Ok((
-                    OrderedInput(input),
-                    tail,
-                    columns,
-                    stages.map(|stages| (stages, view.clone())),
-                    at,
-                    policy,
-                    execution,
-                ))
+                Ok((source, at, policy, execution))
             },
         );
         match result {
-            Ok((input, tail, columns, stages, at, policy, execution)) => {
+            Ok((source, at, policy, execution)) => {
                 guard.armed = false;
                 Ok(OpenedOrder {
-                    input,
-                    tail,
-                    columns,
-                    stages,
+                    source,
                     at,
                     policy,
                     execution,
@@ -928,6 +1095,134 @@ impl<'s, C: FnMut() -> u64 + Send> AsyncSpillElementSource for ScopedElements<'s
     }
 }
 
+// Correlated bodies reuse this one host. A new argument frame never creates a
+// new authority permit or retargets the source generation. Only graph leaves
+// construct scoped cursors; all relational copying stays in the native owner.
+struct ScopedOrderHost<'q, C> {
+    view: EmbeddedReadView,
+    cx: &'q QueryCx,
+    at: CommitSeq,
+    execution: Shared<'q, C>,
+}
+
+impl<C: FnMut() -> u64 + Send> ExternalOrderHost for ScopedOrderHost<'_, C> {
+    fn check_snapshot(&mut self, snapshot: CommitSeq) -> Result<()> {
+        if snapshot != self.at {
+            return Err(NativeSpoolError::IncompleteCursor);
+        }
+        self.view
+            .snapshot
+            .check_frontier(snapshot)
+            .map_err(|error| authorized(QueryError::Read(error)))
+    }
+
+    fn checkpoint(&mut self) -> Result<()> {
+        self.execution.borrow_mut().poll().map_err(authorized)
+    }
+
+    fn native_event(&mut self, _event: GlaExecutionEvent) -> Result<()> {
+        self.execution.borrow_mut().checkpoint().map_err(authorized)
+    }
+
+    fn leaf<'q, A, B>(
+        &'q mut self,
+        plan: &'q AsyncSpillSetPlan,
+        snapshot: CommitSeq,
+        cx: &'q QueryCx,
+        policy: GqlQueryPolicy,
+        scratch: &'q mut SpillFile<A>,
+        destination: &'q mut SpillFile<B>,
+        limits: ExternalOrderLimits,
+        _resolver: Option<&'q (dyn CanonicalScalarResolver + Send + Sync)>,
+    ) -> crate::SendFuture<'q, Result<(NativeResultSpool, u64)>>
+    where
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+    {
+        Box::pin(async move {
+            self.check_snapshot(snapshot)?;
+            let pattern = plan.source_pattern().ok_or(SpillError::InvalidRun)?;
+            let (input, tail) = compile_ordered(pattern).map_err(authorized)?;
+            let input = scoped_ordered_input(
+                input,
+                None,
+                snapshot,
+                &self.view,
+                self.cx,
+                self.execution.clone(),
+                policy,
+            )
+            .map_err(authorized)?;
+            ordered_input(
+                cx,
+                pattern.columns().to_vec(),
+                input,
+                tail,
+                policy,
+                scratch,
+                destination,
+                limits.run_rows,
+                limits.max_runs,
+                limits.page_bytes,
+                limits.max_row_bytes,
+                limits.max_sort_work,
+            )
+            .await
+        })
+    }
+
+    fn stages<'q, A, B>(
+        &'q mut self,
+        plan: &'q AsyncSpillSetPlan,
+        input: NativeResultSpool,
+        cx: &'q QueryCx,
+        policy: GqlQueryPolicy,
+        scratch: &'q mut SpillFile<A>,
+        destination: &'q mut SpillFile<B>,
+        limits: ExternalOrderLimits,
+        prior_work: u64,
+        resolver: Option<&'q (dyn CanonicalScalarResolver + Send + Sync)>,
+    ) -> crate::SendFuture<'q, Result<(NativeResultSpool, u64)>>
+    where
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+    {
+        Box::pin(async move {
+            self.check_snapshot(input.snapshot_seq())?;
+            let execution = self.execution.clone();
+            let mut elements = ScopedElements {
+                view: &self.view,
+                cx: self.cx,
+                at: self.at,
+                execution: execution.clone(),
+                budget: policy.rows,
+                records: input.row_stats().snapshot_records,
+            };
+            let (spool, work) = ordered_stages(
+                plan,
+                input,
+                &mut elements,
+                &mut || execution.borrow_mut().checkpoint().map_err(authorized),
+                cx,
+                policy,
+                scratch,
+                destination,
+                limits.run_rows,
+                limits.max_runs,
+                limits.page_bytes,
+                limits.max_row_bytes,
+                limits.max_input_rows,
+                limits.max_sort_work,
+                prior_work,
+                resolver,
+            )
+            .await
+            .map_err(stage_error)?;
+            Ok((spool.with_snapshot_records(elements.records)?, work))
+        })
+    }
+}
+
 // These stages have no buffered graph source. Preserve the authorized set
 // error surface for data and controls, including its original row ordinal.
 fn stage_error(error: NativeSpoolError) -> NativeSpoolError {
@@ -1019,7 +1314,7 @@ where
         records: spool.row_stats().snapshot_records,
     };
     let (spool, work) = ordered_stages(
-        stages,
+        &stages,
         spool,
         &mut elements,
         &mut || execution.borrow_mut().checkpoint().map_err(authorized),
@@ -1073,12 +1368,13 @@ enum Control {
 }
 type LiveControl<'q> = Box<dyn FnMut(Control) -> core::result::Result<(), QueryError> + Send + 'q>;
 
-impl<'a, R, C, A, B> AuthorizedOrderedReadSession<'a, R, C, A, B>
+impl<'a, R, C, A, B, D> AuthorizedOrderedReadSession<'a, R, C, A, B, D>
 where
     R: GraphSymbolResolver,
     C: FnMut() -> u64 + Send,
     A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
     B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
+    D: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send,
 {
     /// Execute the query's own external ORDER BY, DISTINCT and final window.
     /// Property-only and hidden-key projections use the ordinary sort compiler;
@@ -1091,6 +1387,10 @@ where
     /// property captures and carried-element lookups share the exact cut and
     /// live capability. Each reached field is scoped before value inspection;
     /// the evaluator reserves its destination copy before cloning any payload.
+    /// Correlated CALL, OPTIONAL MATCH, EXISTS and COUNT complete each body in
+    /// external scratch under the same pin and cumulative allowances. Nested
+    /// argument frames are lexical; duplicate outer rows remain occurrences.
+    /// Collected-list Apply and procedure bodies retain admission refusals.
     ///
     /// Opening binds and admits the exact snapshot synchronously; a refusal
     /// returns immediately without creating a future. The successful future
@@ -1118,38 +1418,68 @@ where
             session,
             scratch,
             destination,
+            auxiliary,
             limits,
         } = self;
         let limits = *limits;
         let opened = session.open_ordered(cx, prepared, params, limits)?;
-        let columns = opened.stages.as_ref().map_or_else(
-            || opened.columns.clone(),
-            |(stages, _)| stages.columns().to_vec(),
-        );
+        let columns = opened.source.columns().to_vec();
         let at = opened.at;
         let future = Box::pin(async move {
             let OpenedOrder {
-                input,
-                tail,
-                columns,
-                stages,
+                source,
                 at,
                 policy,
                 execution,
                 mut guard,
             } = opened;
-            let future = complete_ordered_input(
-                cx,
-                input,
-                tail,
-                columns,
-                stages,
-                policy,
-                execution.clone(),
-                scratch,
-                destination,
-                limits,
-            );
+            let future = async {
+                match source {
+                    OpenedOrderSource::Linear {
+                        input,
+                        tail,
+                        columns,
+                        stages,
+                    } => {
+                        complete_ordered_input(
+                            cx,
+                            input,
+                            tail,
+                            columns,
+                            stages,
+                            policy,
+                            execution.clone(),
+                            scratch,
+                            destination,
+                            limits,
+                        )
+                        .await
+                    }
+                    OpenedOrderSource::Relation { plan, view } => {
+                        let mut host = ScopedOrderHost {
+                            view,
+                            cx,
+                            at,
+                            execution: execution.clone(),
+                        };
+                        execute_relation(
+                            &plan,
+                            None,
+                            at,
+                            &mut host,
+                            cx,
+                            policy,
+                            scratch,
+                            destination,
+                            auxiliary,
+                            limits.external(),
+                            None,
+                        )
+                        .await
+                        .map_err(stage_error)
+                    }
+                }
+            };
             let (spool, _) =
                 checked_future(&mut guard, || execution.borrow_mut().checkpoint(), future).await?;
             guard.armed = true;

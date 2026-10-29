@@ -6,21 +6,13 @@ use crate::BufferedReadView;
 use fgdb_gql::edge_stream::{
     AsyncEdgeJoinCursor, AsyncEdgeJoinPlan, AsyncEdgeJoinSource, AsyncEdgeScanPlan,
 };
-use fgdb_gql::spill_set::{
-    AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetAggregatePlan, SpillSetBinaryPlan,
-    SpillSetCrossPlan, SpillSetJoinPlan, SpillSetValuesPlan,
-};
+use fgdb_gql::spill_set::{AsyncSpillSetPlan, AsyncSpillSetSourcePlan};
 use fgdb_gql::stream::AsyncVertexScanPlan;
 use fgdb_strata::tiered::memory::MemoryCharge;
 use fgdb_types::CanonicalScalarResolver;
 
 #[derive(Clone)]
 enum Input {
-    Values(SpillSetValuesPlan),
-    Binary(SpillSetBinaryPlan),
-    Cross(SpillSetCrossPlan),
-    RowJoin(SpillSetJoinPlan),
-    Aggregate(SpillSetAggregatePlan),
     Vertex(AsyncVertexScanPlan<GraphValueRow>, ScanSortTail),
     Edge(AsyncEdgeScanPlan, ScanSortTail),
     Join(AsyncEdgeJoinPlan, ScanSortTail),
@@ -66,8 +58,13 @@ impl PreparedNativeRead {
     /// source, including probes without an expansion. Keyed/theta relational
     /// joins finish both child plans, then use bounded-row external matching
     /// and canonical bag ordering for inner/outer/semi/anti results. Pair work
-    /// may be quadratic. Independent/nested probes and OPTIONAL/variable-length
-    /// graph paths still refuse; relational outer joins do not unlock them.
+    /// may be quadratic. Correlated Inner/Optional Apply executes each complete
+    /// body under its own typed argument frame, including nested CALL, EXISTS,
+    /// COUNT and lowered OPTIONAL MATCH relations. Duplicate outer occurrences
+    /// run independently; grouping, order and windows remain local to a body.
+    /// Empty outer input skips the body, while a final LIMIT zero cannot hide
+    /// a reached body error. Collected-list Apply, procedures, variable-length
+    /// graph paths and unlowered optional pattern instructions still refuse.
     /// Terminal exact aggregate results have their own preparation.
     pub fn prepare_buffered_order(&self, params: &GqlParameters) -> Result<PreparedBufferedOrder> {
         let prepare = |error| NativeSpoolError::Prepare(Box::new(error));
@@ -179,8 +176,9 @@ impl PreparedBufferedOrder {
     }
 
     /// Number of native relational and binary canonicalization/merge barriers.
-    /// Every barrier has finite external sort/window/copy work; hosts may use
-    /// this bound to admit scratch metadata before opening the database.
+    /// Every barrier has finite external sort/window/copy work. Correlated
+    /// bodies may invoke a barrier repeatedly: this static shape is not a
+    /// bound on scratch run attempts, which retain cumulative file quotas.
     pub fn stage_count(&self) -> usize {
         match &self.input {
             Input::Set(plan) => plan.stage_count(),
@@ -188,13 +186,12 @@ impl PreparedBufferedOrder {
         }
     }
 
-    /// Exact number of reducers in this complete relational tree. Each owns
-    /// partition and DISTINCT-argument passes within the shared scratch limits.
+    /// Exact number of reducer definitions in this relational tree. Correlated
+    /// invocations repeat their partition and DISTINCT-argument passes within
+    /// the same cumulative scratch limits.
     pub fn aggregate_count(&self) -> usize {
         match &self.input {
             Input::Set(plan) => plan.aggregate_count(),
-            Input::Aggregate(plan) => 1 + plan.input().aggregate_count(),
-            Input::RowJoin(plan) => plan.left().aggregate_count() + plan.right().aggregate_count(),
             _ => 0,
         }
     }
@@ -303,46 +300,19 @@ impl PreparedBufferedOrder {
         match &self.input {
             Input::Set(plan) => {
                 let plan = plan.clone();
-                // Source rows and every intermediate page have their own
-                // allowance. Only the last native stage spends final rows.
                 Box::pin(async move {
-                    let tail = || plan.source_tail().cloned().ok_or(SpillError::InvalidRun);
-                    let source = Self {
-                        columns: plan.source_columns().to_vec(),
-                        input: match plan.source() {
-                            AsyncSpillSetSourcePlan::Values(source) => {
-                                Input::Values(source.clone())
-                            }
-                            AsyncSpillSetSourcePlan::Binary(source) => {
-                                Input::Binary(source.clone())
-                            }
-                            AsyncSpillSetSourcePlan::Cross(source) => Input::Cross(source.clone()),
-                            AsyncSpillSetSourcePlan::RowJoin(source) => {
-                                Input::RowJoin(source.clone())
-                            }
-                            AsyncSpillSetSourcePlan::Aggregate(source) => {
-                                Input::Aggregate(source.clone())
-                            }
-                            AsyncSpillSetSourcePlan::Vertex(source) => {
-                                Input::Vertex(source.clone(), tail()?)
-                            }
-                            AsyncSpillSetSourcePlan::Edge(source) => {
-                                Input::Edge(source.clone(), tail()?)
-                            }
-                            AsyncSpillSetSourcePlan::Join(source) => {
-                                Input::Join(source.clone(), tail()?)
-                            }
-                        },
-                        as_of: Some(as_of),
-                    };
-                    let (input, work) = source
-                        .spool_in_view_with_resolver(
-                            view,
-                            cx,
-                            input_policy,
-                            &mut *scratch,
-                            &mut *destination,
-                            &mut *auxiliary,
+                    let mut host = BufferedHost { view };
+                    execute_relation(
+                        &plan,
+                        None,
+                        as_of,
+                        &mut host,
+                        cx,
+                        policy,
+                        scratch,
+                        destination,
+                        auxiliary,
+                        ExternalOrderLimits {
                             group_capacity,
                             max_partitions,
                             run_rows,
@@ -351,141 +321,8 @@ impl PreparedBufferedOrder {
                             max_row_bytes,
                             max_input_rows,
                             max_sort_work,
-                            resolver,
-                        )
-                        .await?;
-                    super::staged::execute(
-                        plan,
-                        input,
-                        view,
-                        cx,
-                        policy,
-                        scratch,
-                        destination,
-                        run_rows,
-                        max_runs,
-                        page_bytes,
-                        max_row_bytes,
-                        max_input_rows,
-                        max_sort_work,
-                        work,
+                        },
                         resolver,
-                    )
-                    .await
-                })
-            }
-            Input::Binary(plan) => {
-                let plan = plan.clone();
-                Box::pin(super::binary::execute(
-                    plan,
-                    as_of,
-                    view,
-                    cx,
-                    input_policy,
-                    scratch,
-                    destination,
-                    auxiliary,
-                    group_capacity,
-                    max_partitions,
-                    run_rows,
-                    max_runs,
-                    page_bytes,
-                    max_row_bytes,
-                    max_input_rows,
-                    max_sort_work,
-                    resolver,
-                ))
-            }
-            Input::Cross(plan) => {
-                let plan = plan.clone();
-                Box::pin(super::cross::execute(
-                    plan,
-                    as_of,
-                    view,
-                    cx,
-                    input_policy,
-                    scratch,
-                    destination,
-                    auxiliary,
-                    group_capacity,
-                    max_partitions,
-                    run_rows,
-                    max_runs,
-                    page_bytes,
-                    max_row_bytes,
-                    max_input_rows,
-                    max_sort_work,
-                    resolver,
-                ))
-            }
-            Input::RowJoin(plan) => {
-                let plan = plan.clone();
-                Box::pin(super::relational_join::execute(
-                    plan,
-                    as_of,
-                    view,
-                    cx,
-                    input_policy,
-                    scratch,
-                    destination,
-                    auxiliary,
-                    group_capacity,
-                    max_partitions,
-                    run_rows,
-                    max_runs,
-                    page_bytes,
-                    max_row_bytes,
-                    max_input_rows,
-                    max_sort_work,
-                    resolver,
-                ))
-            }
-            Input::Aggregate(plan) => {
-                let plan = plan.clone();
-                Box::pin(crate::query::view::spool::aggregate::spool_group_stage(
-                    plan,
-                    as_of,
-                    view,
-                    cx,
-                    input_policy,
-                    scratch,
-                    destination,
-                    auxiliary,
-                    group_capacity,
-                    max_partitions,
-                    run_rows,
-                    max_runs,
-                    page_bytes,
-                    max_row_bytes,
-                    max_input_rows,
-                    max_sort_work,
-                    resolver,
-                ))
-            }
-            Input::Values(plan) => {
-                let plan = plan.clone();
-                let publication = view.frontier();
-                Box::pin(async move {
-                    if as_of > publication {
-                        return Err(NativeSpoolError::BufferedRead(Box::new(
-                            crate::BufferedReadError::BeyondPublication {
-                                requested: as_of,
-                                publication,
-                            },
-                        )));
-                    }
-                    super::staged::seed_values(
-                        &plan,
-                        as_of,
-                        cx,
-                        input_policy,
-                        destination,
-                        run_rows,
-                        max_runs,
-                        page_bytes,
-                        max_row_bytes,
-                        max_input_rows,
-                        max_sort_work,
                     )
                     .await
                 })
@@ -572,6 +409,169 @@ impl PreparedBufferedOrder {
                 })
             }
         }
+    }
+}
+
+/// Cold physical leaves and reached fields for the shared relational owner.
+pub(super) struct BufferedHost<'v, V: Vfs> {
+    pub(super) view: &'v mut BufferedReadView<V>,
+}
+
+impl<V: Vfs + Clone> ExternalOrderHost for BufferedHost<'_, V> {
+    fn check_snapshot(&mut self, snapshot: CommitSeq) -> Result<()> {
+        let publication = self.view.frontier();
+        if snapshot > publication {
+            return Err(NativeSpoolError::BufferedRead(Box::new(
+                crate::BufferedReadError::BeyondPublication {
+                    requested: snapshot,
+                    publication,
+                },
+            )));
+        }
+        Ok(())
+    }
+
+    fn checkpoint(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    fn native_event(&mut self, _event: GlaExecutionEvent) -> Result<()> {
+        Ok(())
+    }
+
+    fn leaf<'q, A, B>(
+        &'q mut self,
+        plan: &'q AsyncSpillSetPlan,
+        snapshot: CommitSeq,
+        cx: &'q QueryCx,
+        policy: GqlQueryPolicy,
+        scratch: &'q mut SpillFile<A>,
+        destination: &'q mut SpillFile<B>,
+        limits: ExternalOrderLimits,
+        _resolver: Option<&'q (dyn CanonicalScalarResolver + Send + Sync)>,
+    ) -> crate::SendFuture<'q, Result<(NativeResultSpool, u64)>>
+    where
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+    {
+        Box::pin(async move {
+            self.check_snapshot(snapshot)?;
+            let tail = plan.source_tail().cloned().ok_or(SpillError::InvalidRun)?;
+            let columns = plan.source_columns().to_vec();
+            match plan.source() {
+                AsyncSpillSetSourcePlan::Vertex(source) => {
+                    let cursor = self
+                        .view
+                        .open_vertex_input(cx, source.clone(), snapshot, policy)
+                        .map_err(|error| {
+                            NativeSpoolError::BufferedExecute(Box::new(
+                                error.map_source(ScanError::Vertex),
+                            ))
+                        })?;
+                    ordered_input(
+                        cx,
+                        columns,
+                        cursor,
+                        tail,
+                        policy,
+                        scratch,
+                        destination,
+                        limits.run_rows,
+                        limits.max_runs,
+                        limits.page_bytes,
+                        limits.max_row_bytes,
+                        limits.max_sort_work,
+                    )
+                    .await
+                }
+                AsyncSpillSetSourcePlan::Edge(source) => {
+                    let cursor = self
+                        .view
+                        .open_edge_input(cx, source.clone(), snapshot, policy)
+                        .map_err(|error| {
+                            NativeSpoolError::BufferedExecute(Box::new(
+                                error.map_source(ScanError::Edge),
+                            ))
+                        })?;
+                    ordered_input(
+                        cx,
+                        columns,
+                        cursor,
+                        tail,
+                        policy,
+                        scratch,
+                        destination,
+                        limits.run_rows,
+                        limits.max_runs,
+                        limits.page_bytes,
+                        limits.max_row_bytes,
+                        limits.max_sort_work,
+                    )
+                    .await
+                }
+                AsyncSpillSetSourcePlan::Join(source) => {
+                    let cursor = self
+                        .view
+                        .open_edge_join_input(cx, source.clone(), snapshot, policy)
+                        .map_err(|error| {
+                            NativeSpoolError::BufferedExecute(Box::new(
+                                error.map_source(ScanError::Edge),
+                            ))
+                        })?;
+                    ordered_input(
+                        cx,
+                        columns,
+                        cursor,
+                        tail,
+                        policy,
+                        scratch,
+                        destination,
+                        limits.run_rows,
+                        limits.max_runs,
+                        limits.page_bytes,
+                        limits.max_row_bytes,
+                        limits.max_sort_work,
+                    )
+                    .await
+                }
+                _ => Err(SpillError::InvalidRun.into()),
+            }
+        })
+    }
+
+    fn stages<'q, A, B>(
+        &'q mut self,
+        plan: &'q AsyncSpillSetPlan,
+        input: NativeResultSpool,
+        cx: &'q QueryCx,
+        policy: GqlQueryPolicy,
+        scratch: &'q mut SpillFile<A>,
+        destination: &'q mut SpillFile<B>,
+        limits: ExternalOrderLimits,
+        prior_work: u64,
+        resolver: Option<&'q (dyn CanonicalScalarResolver + Send + Sync)>,
+    ) -> crate::SendFuture<'q, Result<(NativeResultSpool, u64)>>
+    where
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+    {
+        Box::pin(staged::execute(
+            plan,
+            input,
+            self.view,
+            cx,
+            policy,
+            scratch,
+            destination,
+            limits.run_rows,
+            limits.max_runs,
+            limits.page_bytes,
+            limits.max_row_bytes,
+            limits.max_input_rows,
+            limits.max_sort_work,
+            prior_work,
+            resolver,
+        ))
     }
 }
 

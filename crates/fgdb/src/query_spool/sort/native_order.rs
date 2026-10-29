@@ -24,6 +24,13 @@ mod relational_join;
 #[path = "staged.rs"]
 mod staged;
 pub(crate) use staged::execute_with_controls as ordered_stages;
+#[path = "apply.rs"]
+mod apply;
+#[path = "host.rs"]
+mod host;
+pub(crate) use host::{ExternalOrderHost, ExternalOrderLimits, execute_relation};
+#[path = "external_resident.rs"]
+mod external_resident;
 
 fn input_policy(policy: GqlQueryPolicy, max_input_rows: u64) -> GqlQueryPolicy {
     GqlQueryPolicy {
@@ -80,22 +87,8 @@ fn open<'q>(
     params: &GqlParameters,
     policy: GqlQueryPolicy,
     max_input_rows: u64,
+    bound_set: Option<(fgdb_gql::PreparedGraphSet, CommitSeq)>,
 ) -> core::result::Result<OpenedOrder<impl SpoolInput + 'q + use<'q>>, QueryError> {
-    let bound_set = match prepared {
-        PreparedNativeRead::Set(template) => Some((
-            template
-                .bind_parameters(params)
-                .map_err(QueryError::SetText)?,
-            view.frontier(),
-        )),
-        PreparedNativeRead::TemporalSet(template) => {
-            let bound = template
-                .bind_parameters(params)
-                .map_err(QueryError::TemporalSetText)?;
-            Some((bound.query().clone(), bound.as_of()))
-        }
-        _ => None,
-    };
     let mut projection = None;
     let mut projected_tail = None;
     let mut projected_columns = None;
@@ -413,7 +406,7 @@ where
         records: input.row_stats().snapshot_records,
     };
     let (mut output, work) = staged::execute_with_elements(
-        plan,
+        &plan,
         input,
         &mut elements,
         cx,
@@ -475,7 +468,7 @@ impl PreparedNativeRead {
     /// orientations remain distinct input occurrences; only explicit DISTINCT
     /// can collapse equal complete output rows. Traversal state is proportional
     /// to the admitted fixed hop count, not the number of matches.
-    /// Unary Set and TemporalSet relations over one admitted pattern use the
+    /// Set and TemporalSet relations over admitted patterns use the
     /// same external Project/Filter/Scope/UNWIND stages as buffered reads.
     /// Every source and intermediate order, DISTINCT and window finishes
     /// before the next expression runs. Computed property-only output therefore
@@ -484,16 +477,20 @@ impl PreparedNativeRead {
     /// elements borrow the same pinned generation at its exact cut. Each
     /// reached lookup spends the original snapshot-record allowance, while
     /// history/key searches share the cumulative native evaluator controls.
-    /// Binary/group/procedure sources and
-    /// unsupported physical instructions refuse before execution.
+    /// Native binary, grouping and correlated Inner/Optional Apply relations
+    /// share the recursive external executor. Every body runs once per outer
+    /// occurrence with its own argument frame and complete order/window.
+    /// Collected-list Apply, procedures and unsupported physical instructions
+    /// refuse before execution.
     ///
     /// Opening binds parameters and pins the exact source synchronously. The
-    /// future borrows ONLY cx and the two scratch files; writer/template/params
+    /// future borrows ONLY cx and the three scratch files; writer/template/params
     /// may change or drop. Unpolled futures reserve no scratch. Unsupported
     /// shapes refuse even under LIMIT 0. Complete source evaluation and sorting
     /// precede pagination, so a small page cannot hide a later data exception.
     ///
-    /// policy's source-record/work/scratch limits govern one source traversal.
+    /// policy's source-record/work/scratch limits cover all source traversals,
+    /// repeated bodies and reached element reads cumulatively.
     /// max_input_rows is a separate intermediate-occurrence ceiling (reported
     /// by the input cursor's ResultRows error). policy.rows.max_result_rows is
     /// enforced on the FINAL selected rows, including zero, before acceptance.
@@ -503,7 +500,7 @@ impl PreparedNativeRead {
     /// the final window resets that allowance. Spill buffers/catalogs are byte-
     /// charged to their existing pools; source logical scratch remains separate.
     ///
-    /// Both files must be distinct query-private files; use children of a common
+    /// All files must be distinct query-private files; use children of a common
     /// pool for a combined resident bound. Runs append without quota refunds or
     /// recycling. Intermediates initially use destination, sort into scratch,
     /// then the final page is appended to destination. Only its complete result
@@ -520,7 +517,7 @@ impl PreparedNativeRead {
     /// The returned future proves Send here, so callers do not recursively
     /// re-prove every source, transformation and spill-write future.
     #[allow(clippy::too_many_arguments)]
-    pub fn spool_ordered<'q, V, A, B>(
+    pub fn spool_ordered<'q, V, A, B, C>(
         &self,
         database: &Database<V>,
         cx: &'q QueryCx,
@@ -528,6 +525,9 @@ impl PreparedNativeRead {
         policy: GqlQueryPolicy,
         scratch: &'q mut SpillFile<A>,
         destination: &'q mut SpillFile<B>,
+        auxiliary: &'q mut SpillFile<C>,
+        group_capacity: usize,
+        max_partitions: usize,
         run_rows: usize,
         max_runs: usize,
         page_bytes: usize,
@@ -539,25 +539,33 @@ impl PreparedNativeRead {
         V: Vfs + Clone,
         A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
         B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        C: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
     {
         let opened = database
             .read_session()
             .map_err(|e| QueryError::Stream(GqlQueryError::Source(VertexScanError::Source(e))))
-            .and_then(|view| open(self, &view, cx, params, policy, max_input_rows));
+            .and_then(|view| {
+                external_resident::open(self, &view, cx, params, policy, max_input_rows)
+            });
         Box::pin(async move {
             let opened = opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
-            execute_opened(
+            external_resident::execute(
                 opened,
                 cx,
                 policy,
                 scratch,
                 destination,
-                run_rows,
-                max_runs,
-                page_bytes,
-                max_row_bytes,
-                max_input_rows,
-                max_sort_work,
+                auxiliary,
+                ExternalOrderLimits {
+                    group_capacity,
+                    max_partitions,
+                    run_rows,
+                    max_runs,
+                    page_bytes,
+                    max_row_bytes,
+                    max_input_rows,
+                    max_sort_work,
+                },
             )
             .await
         })
@@ -566,7 +574,7 @@ impl PreparedNativeRead {
     /// The same query-owned external order/window at this already-pinned view.
     /// A temporal selector uses its bound historical cut, not a newer live head.
     #[allow(clippy::too_many_arguments)]
-    pub fn spool_ordered_in_view<'q, A, B>(
+    pub fn spool_ordered_in_view<'q, A, B, C>(
         &self,
         view: &EmbeddedReadView,
         cx: &'q QueryCx,
@@ -574,6 +582,9 @@ impl PreparedNativeRead {
         policy: GqlQueryPolicy,
         scratch: &'q mut SpillFile<A>,
         destination: &'q mut SpillFile<B>,
+        auxiliary: &'q mut SpillFile<C>,
+        group_capacity: usize,
+        max_partitions: usize,
         run_rows: usize,
         max_runs: usize,
         page_bytes: usize,
@@ -584,22 +595,28 @@ impl PreparedNativeRead {
     where
         A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
         B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        C: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
     {
-        let opened = open(self, view, cx, params, policy, max_input_rows);
+        let opened = external_resident::open(self, view, cx, params, policy, max_input_rows);
         Box::pin(async move {
             let opened = opened.map_err(|e| NativeSpoolError::Prepare(Box::new(e)))?;
-            execute_opened(
+            external_resident::execute(
                 opened,
                 cx,
                 policy,
                 scratch,
                 destination,
-                run_rows,
-                max_runs,
-                page_bytes,
-                max_row_bytes,
-                max_input_rows,
-                max_sort_work,
+                auxiliary,
+                ExternalOrderLimits {
+                    group_capacity,
+                    max_partitions,
+                    run_rows,
+                    max_runs,
+                    page_bytes,
+                    max_row_bytes,
+                    max_input_rows,
+                    max_sort_work,
+                },
             )
             .await
         })

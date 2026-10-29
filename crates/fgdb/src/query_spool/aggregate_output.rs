@@ -103,10 +103,7 @@ fn project_computed(
 ) -> Result<(GraphAggregateRow, Option<GraphAggregateRow>)> {
     definition
         .project_output_with_rank(row, &mut |event| {
-            input
-                .charge(event)
-                .map_err(execute_error)
-                .map_err(GqlQueryError::Interrupted)?;
+            input.controlled_charge(event)?;
             if event == VertexScanEvent::ScratchEntry {
                 // Native payload callbacks reserve one entry per 64 bytes.
                 // Eight GraphValue-sized slots cover fixed cells, vector
@@ -158,8 +155,10 @@ impl AggregateOrder<'_> {
             self.definition.aggregate_columns().len(),
         )?;
         self.definition
-            .compare_projected_output(&left, &right, &mut |event| self.input.charge(event))
-            .map_err(execute_error)
+            .compare_projected_output(&left, &right, &mut |event| {
+                self.input.controlled_charge(event)
+            })
+            .map_err(controlled_error)
     }
 }
 
@@ -261,8 +260,10 @@ impl FrameOrder for AggregateOrder<'_> {
             self.definition.evaluation_aggregate_columns().len(),
         )?;
         self.definition
-            .compare_output(&left, &right, &mut |event| self.input.charge(event))
-            .map_err(execute_error)
+            .compare_output(&left, &right, &mut |event| {
+                self.input.controlled_charge(event)
+            })
+            .map_err(controlled_error)
     }
 }
 
@@ -506,8 +507,8 @@ where
         drop(frame);
         if opened
             .definition
-            .qualifies_output(&row, &mut |event| opened.input.charge(event))
-            .map_err(execute_error)?
+            .qualifies_output(&row, &mut |event| opened.input.controlled_charge(event))
+            .map_err(controlled_error)?
         {
             if opened.definition.has_precomputed_output() {
                 // A plain identity projection can emit no allocation events;
@@ -614,7 +615,7 @@ where
             // Every qualified expression already ran in canonical group order.
             // Preserve its exact numeric variants and never recharge/evaluate
             // it according to the selected page or the external sort schedule.
-            opened.input.finish_result().map_err(execute_error)?;
+            opened.input.controlled_finish_result()?;
             work.write(&mut writer, projected).await?;
             largest = largest.max(projected.len());
             selected = selected.checked_add(1).ok_or(SpillError::SizeOverflow)?;
@@ -637,9 +638,9 @@ where
         )?;
         let row = opened
             .definition
-            .project_output(row, &mut |event| opened.input.charge(event))
-            .map_err(execute_error)?;
-        opened.input.finish_result().map_err(execute_error)?;
+            .project_output(row, &mut |event| opened.input.controlled_charge(event))
+            .map_err(controlled_error)?;
+        opened.input.controlled_finish_result()?;
         let envelope = envelope(&row);
         let encoded = account::encode(&pool, work, &envelope, max_row_bytes)?;
         work.write(&mut writer, &encoded.0).await?;

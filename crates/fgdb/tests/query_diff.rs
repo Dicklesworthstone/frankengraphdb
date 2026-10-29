@@ -783,6 +783,7 @@ mod spill {
             let pool = MemoryPool::new(262_144, 0).unwrap();
             let (mut source, _) = file(&cx, &pool).await;
             let (mut scratch, _) = file(&cx, &pool).await;
+            let (mut auxiliary, _) = file(&cx, &pool).await;
             // Independently measure one ordinary ordered endpoint, then require
             // the difference to pay exactly twice its complete native costs.
             let (one, _) = prepared
@@ -793,6 +794,9 @@ mod spill {
                     wide(),
                     &mut scratch,
                     &mut source,
+                    &mut auxiliary,
+                    8,
+                    128,
                     2,
                     128,
                     127,
@@ -902,6 +906,9 @@ mod spill {
                         wide(),
                         &mut scratch,
                         &mut source,
+                        &mut auxiliary,
+                        8,
+                        128,
                         2,
                         128,
                         127,

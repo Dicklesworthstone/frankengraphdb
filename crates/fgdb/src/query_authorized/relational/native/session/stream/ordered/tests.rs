@@ -20,7 +20,7 @@ mod imported;
 
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x86; 32]);
 type Resolver = fn(GraphSymbolKind, &str) -> Option<GraphSymbol>;
-type Session<'a, C> = AuthorizedOrderedReadSession<'a, Resolver, C, File, File>;
+type Session<'a, C> = AuthorizedOrderedReadSession<'a, Resolver, C, File, File, File>;
 
 fn authority() -> Authority {
     Authority::new(AuthKey::from_seed(8601), NS, "graph", SchemaEpoch(0), 1).unwrap()
@@ -45,6 +45,8 @@ fn policy() -> GqlQueryPolicy {
 }
 fn limits() -> AuthorizedSortLimits {
     AuthorizedSortLimits {
+        group_capacity: 2,
+        max_partitions: 32,
         run_rows: 2,
         max_runs: 16,
         page_bytes: 31,
@@ -109,6 +111,7 @@ struct FileState {
     bytes: Cursor<Vec<u8>>,
     pending_read: bool,
     pending_write: bool,
+    pending_on_payload: Option<&'static [u8]>,
     expire_after_read: Option<Arc<AtomicU64>>,
 }
 #[derive(Clone, Default)]
@@ -144,6 +147,12 @@ impl AsyncWrite for File {
         bytes: &[u8],
     ) -> Poll<io::Result<usize>> {
         let mut state = self.0.lock().unwrap();
+        if state
+            .pending_on_payload
+            .is_some_and(|payload| bytes.windows(payload.len()).any(|window| window == payload))
+        {
+            state.pending_write = true;
+        }
         if state.pending_write {
             return Poll::Pending;
         }
@@ -189,6 +198,7 @@ async fn session<'a, C: FnMut() -> u64>(
 ) -> (Session<'a, C>, File, File) {
     let (scratch, a) = file(cx, pool).await;
     let (destination, b) = file(cx, pool).await;
+    let (auxiliary, _) = file(cx, pool).await;
     let session = db
         .authorized_ordered_read_session(
             cx,
@@ -200,6 +210,7 @@ async fn session<'a, C: FnMut() -> u64>(
             clock,
             scratch,
             destination,
+            auxiliary,
             limits,
         )
         .unwrap();
@@ -252,6 +263,7 @@ fn prepared_map_fields_keep_keyed_ordered_sources_with_rebound_values() {
                 || 100,
                 scratch,
                 destination,
+                file(&cx, &pool).await.0,
                 AuthorizedSortLimits {
                     max_input_rows: 2,
                     ..limits()
@@ -343,6 +355,7 @@ fn keyed_ordered_streams_bound_input_before_sort_and_preserve_the_eager_window()
                 || 100,
                 scratch,
                 destination,
+                file(&cx, &pool).await.0,
                 AuthorizedSortLimits {
                     max_input_rows: 3,
                     ..limits()
@@ -418,6 +431,7 @@ fn ordered_equality_preserves_denied_key_quota_and_earlier_expression_errors() {
                     || 100,
                     scratch,
                     destination,
+                    file(&cx, &pool).await.0,
                     limits(),
                 )
                 .unwrap();
@@ -458,6 +472,7 @@ fn ordered_equality_preserves_denied_key_quota_and_earlier_expression_errors() {
                     || 100,
                     scratch,
                     destination,
+                    file(&cx, &pool).await.0,
                     limits(),
                 )
                 .unwrap();
@@ -601,8 +616,8 @@ fn a_vertex_set_with_constant_columns_sorts_its_projected_scan() {
             .unwrap();
         assert_eq!(values(&mut cursor).await, vec![vec![scalar(1)]; 3]);
         drop(cursor);
-        // Binary relations still require a separate physical owner. Refuse
-        // before scratch, even when the final page is empty.
+        // The shared relational owner completes both binary operands. Opening
+        // remains lazy; the final empty page is applied only after execution.
         let scratch_bytes = a.0.lock().unwrap().bytes.get_ref().len();
         let destination_bytes = b.0.lock().unwrap().bytes.get_ref().len();
         let binary = ordered
@@ -613,10 +628,13 @@ fn a_vertex_set_with_constant_columns_sorts_its_projected_scan() {
                 &params,
             )
             .unwrap();
-        assert!(matches!(ordered.execute_ordered(&cx, &binary, &params),
-            Err(NativeSpoolError::Authorized(error)) if matches!(*error, QueryError::StreamingUnsupported { .. })));
+        let future = ordered.execute_ordered(&cx, &binary, &params).unwrap();
         assert_eq!(a.0.lock().unwrap().bytes.get_ref().len(), scratch_bytes);
         assert_eq!(b.0.lock().unwrap().bytes.get_ref().len(), destination_bytes);
+        let mut cursor = future.await.unwrap();
+        assert!(values(&mut cursor).await.is_empty());
+        drop(cursor);
+        assert_eq!(pool.used(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -892,7 +910,10 @@ fn carried_edge_reads_keep_the_opened_cut_and_do_not_revive_hidden_successors() 
             .session
             .open_ordered(&cx, &prepared, &params, limits())
             .unwrap();
-        let (_, view) = opened.stages.as_ref().unwrap();
+        let OpenedOrderSource::Linear { stages, .. } = &opened.source else {
+            panic!("one-source stages retain their scoped source");
+        };
+        let (_, view) = stages.as_ref().unwrap();
         let mut elements = ScopedElements {
             view,
             cx: &cx,
@@ -1077,6 +1098,7 @@ fn staged_ordering_keeps_private_input_and_final_delivery_allowances_separate() 
                 || 100,
                 scratch,
                 destination,
+                file(&cx, &pool).await.0,
                 limits(),
             )
             .unwrap();
@@ -1170,6 +1192,7 @@ fn staged_final_row_limits_keep_the_authorized_set_error_surface() {
                 || 100,
                 scratch,
                 destination,
+                file(&cx, &pool).await.0,
                 limits(),
             )
             .unwrap();
@@ -1235,6 +1258,7 @@ fn carried_element_reads_share_source_record_and_node_limits_and_short_circuit()
                     || 100,
                     scratch,
                     destination,
+                    file(&cx, &pool).await.0,
                     limits(),
                 )
                 .unwrap();
@@ -1388,7 +1412,10 @@ fn carried_element_visibility_and_work_equal_the_physically_removed_graph() {
                 .session
                 .open_ordered(&cx, &prepared, &params, limits())
                 .unwrap();
-            let (_, view) = opened.stages.as_ref().unwrap();
+            let OpenedOrderSource::Linear { stages, .. } = &opened.source else {
+                panic!("one-source stages retain their scoped source");
+            };
+            let (_, view) = stages.as_ref().unwrap();
             let execution = opened.execution.clone();
             let mut elements = ScopedElements {
                 view,
@@ -1461,6 +1488,143 @@ fn carried_element_visibility_and_work_equal_the_physically_removed_graph() {
 }
 
 #[test]
+fn correlated_bodies_keep_signed_work_and_absence_independent_of_hidden_growth() {
+    let ((), report) = run_async_under_lab(0x8600_0030, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let issuer = authority();
+        let mut scope = grant();
+        scope.limits.max_rows = 0;
+        let token = issuer.issue_at(&scope, 100).unwrap();
+        let pool = MemoryPool::new(2_000_000, 0).unwrap();
+        let params = GqlParameters::new();
+        let mut transcripts = Vec::new();
+        for hidden_count in [0_u128, 7, 70] {
+            let mut db = database(&commit).await;
+            if hidden_count != 0 {
+                let mut hidden = WriteBatch::new(RelationId(1));
+                for offset in 0..hidden_count {
+                    hidden.create_vertex(
+                        VId(1000 + offset),
+                        vec![LabelId(99)],
+                        vec![(PropertyKeyId(1), CanonicalScalar::Int(999))],
+                    );
+                    hidden.add_edge(EId(1000 + offset), VId(4), VId(1000 + offset), vec![]);
+                }
+                db.write(&commit, hidden).await.unwrap();
+                let mut foreign = WriteBatch::new(RelationId(99));
+                foreign.add_edge(EId(2000), VId(4), VId(2), vec![]);
+                db.write(&commit, foreign).await.unwrap();
+                for value in 0..4 {
+                    let mut history = WriteBatch::new(RelationId(1));
+                    history.set_vertex_property(
+                        VId(4),
+                        PropertyKeyId(2),
+                        Some(CanonicalScalar::Int(value)),
+                    );
+                    db.write(&commit, history).await.unwrap();
+                }
+            }
+            let mut transcript = Vec::new();
+            for (text, expected) in [
+                (
+                    "UNWIND [1,-1,1] AS wanted CALL (wanted) { \
+                     MATCH (n:L) WHERE n.p=wanted CALL (n) { \
+                     MATCH (n)-[:R]->(m) RETURN count(*) AS degree } RETURN degree } \
+                     RETURN wanted,degree ORDER BY wanted",
+                    vec![
+                        vec![scalar(-1), scalar(0)],
+                        vec![scalar(1), scalar(1)],
+                        vec![scalar(1), scalar(1)],
+                    ],
+                ),
+                (
+                    "MATCH (n:L {p:-1}) WITH n OPTIONAL MATCH (n)-[:R]->(m) RETURN n,m",
+                    vec![vec![GraphValue::Vertex(VId(4)), null()]],
+                ),
+                (
+                    "MATCH (n:L {p:-1}) RETURN EXISTS { MATCH (n)-[:R]->(m) \
+                     WITH m.p AS value WHERE value>0 } AS found",
+                    vec![vec![GraphValue::Scalar(CanonicalScalar::Bool(false))]],
+                ),
+            ] {
+                let (mut ordered, _, _) =
+                    session(&db, &cx, &issuer, &token, &pool, || 100, limits()).await;
+                let prepared = ordered.prepare(&cx, text, &params).unwrap();
+                let OpenedOrder {
+                    source,
+                    at,
+                    policy,
+                    execution,
+                    guard,
+                } = ordered
+                    .session
+                    .open_ordered(&cx, &prepared, &params, limits())
+                    .unwrap();
+                let OpenedOrderSource::Relation { plan, view } = source else {
+                    panic!("correlated bodies must enter the shared physical executor");
+                };
+                let mut host = ScopedOrderHost {
+                    view,
+                    cx: &cx,
+                    at,
+                    execution: execution.clone(),
+                };
+                let (spool, work) = execute_relation(
+                    &plan,
+                    None,
+                    at,
+                    &mut host,
+                    &cx,
+                    policy,
+                    &mut ordered.scratch,
+                    &mut ordered.destination,
+                    &mut ordered.auxiliary,
+                    limits().external(),
+                    None,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("hidden={hidden_count} {text}: {error:?}"));
+                let usage = execution.borrow().permit.usage();
+                assert_eq!(
+                    usage.rows, 0,
+                    "private bodies never spend signed result rows"
+                );
+                let mut reader = spool.reader(&mut ordered.destination);
+                let mut actual = Vec::new();
+                while let Some(bytes) = reader.next_row(&cx).await.unwrap() {
+                    actual.push(
+                        fgdb_gql::algebra::GraphValueRow::decode_canonical(bytes.as_ref())
+                            .unwrap()
+                            .values()
+                            .to_vec(),
+                    );
+                }
+                assert_eq!(actual, expected, "hidden={hidden_count} {text}");
+                transcript.push((
+                    actual,
+                    usage,
+                    spool.row_stats(),
+                    spool.evaluator_stats(),
+                    work,
+                ));
+                drop(reader);
+                drop(host);
+                drop(execution);
+                drop(guard);
+                drop(ordered);
+                assert_eq!(pool.used(), 0);
+            }
+            transcripts.push(transcript);
+        }
+        assert_eq!(transcripts[0], transcripts[1]);
+        assert_eq!(transcripts[0], transcripts[2]);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn staged_ordering_charges_live_signed_work_and_cumulative_native_work() {
     let ((), report) = run_async_under_lab(0x8600_0027, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -1513,6 +1677,7 @@ fn staged_ordering_charges_live_signed_work_and_cumulative_native_work() {
                 || 100,
                 scratch,
                 destination,
+                file(&cx, &pool).await.0,
                 limits(),
             )
             .unwrap();
@@ -1703,6 +1868,83 @@ fn foreign_handles_unsupported_limit_zero_and_unpolled_work_touch_no_scratch() {
             .await
             .unwrap();
         assert_eq!(values(&mut cursor).await.len(), 5);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn expiry_while_a_correlated_body_write_is_pending_releases_frames_and_the_pin() {
+    let ((), report) = run_async_under_lab(0x8600_0031, |root| async move {
+        // Canonical text inserts a marker after each eight-byte group. The
+        // first group is a stable witness; the complete raw string is not.
+        const BODY: &[u8] = b"correlat";
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = database(&contexts.commit()).await;
+        let issuer = authority();
+        let mut scope = grant();
+        scope.limits.max_nodes = 0;
+        let token = issuer.issue_at(&scope, 100).unwrap();
+        let pool = MemoryPool::new(2_000_000, 0).unwrap();
+        let params = GqlParameters::new();
+        let pins = Arc::strong_count(&db.snapshot);
+        let now = Arc::new(AtomicU64::new(100));
+        let sampled = Arc::clone(&now);
+        let (scratch, a) = file(&cx, &pool).await;
+        let (destination, b) = file(&cx, &pool).await;
+        let (auxiliary, c) = file(&cx, &pool).await;
+        for backend in [&a, &b, &c] {
+            backend.0.lock().unwrap().pending_on_payload = Some(BODY);
+        }
+        let mut ordered = db
+            .authorized_ordered_read_session(
+                &cx,
+                &issuer,
+                &token,
+                "main",
+                symbols,
+                policy(),
+                move || sampled.load(Ordering::SeqCst),
+                scratch,
+                destination,
+                auxiliary,
+                AuthorizedSortLimits {
+                    page_bytes: 4096,
+                    ..limits()
+                },
+            )
+            .unwrap();
+        let prepared = ordered
+            .prepare(
+                &cx,
+                "UNWIND [1,2] AS x CALL (x) { \
+                 RETURN 'correlated-body-has-started-86000031' AS y } RETURN x,y",
+                &params,
+            )
+            .unwrap();
+        let mut future = Box::pin(ordered.execute_ordered(&cx, &prepared, &params).unwrap());
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(future.as_mut().poll(&mut context).is_pending());
+        assert!(
+            [&a, &b, &c]
+                .into_iter()
+                .any(|backend| backend.0.lock().unwrap().pending_write),
+            "only a reached body payload may trigger the I/O pause"
+        );
+        assert!(
+            pool.used() > 0,
+            "the outer frame remains charged across body I/O"
+        );
+        now.store(1001, Ordering::SeqCst);
+        let Poll::Ready(result) = future.as_mut().poll(&mut context) else {
+            panic!("expired authority must end pending correlated I/O")
+        };
+        refusal(result, AuthorizationError::Expired);
+        drop(future);
+        assert!(ordered.is_closed());
+        assert!(ordered.scratch.is_poisoned() || ordered.destination.is_poisoned());
+        assert_eq!(Arc::strong_count(&db.snapshot), pins);
+        assert_eq!(pool.used(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -2110,6 +2352,7 @@ fn range_and_prefix_ordered_streams_bound_sort_input_across_capacity_fallback() 
                         || 100,
                         scratch,
                         destination,
+                        file(&cx, &pool).await.0,
                         AuthorizedSortLimits {
                             max_input_rows: 3,
                             ..limits()
@@ -2211,6 +2454,7 @@ fn ordered_range_and_prefix_keep_denied_key_refusals_and_earlier_arithmetic_erro
                         || 100,
                         scratch,
                         destination,
+                        file(&cx, &pool).await.0,
                         limits(),
                     )
                     .unwrap();
@@ -2249,6 +2493,7 @@ fn ordered_range_and_prefix_keep_denied_key_refusals_and_earlier_arithmetic_erro
                         || 100,
                         scratch,
                         destination,
+                        file(&cx, &pool).await.0,
                         limits(),
                     )
                     .unwrap();

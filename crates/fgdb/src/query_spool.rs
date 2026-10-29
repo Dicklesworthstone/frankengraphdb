@@ -20,6 +20,7 @@ pub use aggregate::{
     NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolDifference,
     NativeAggregateSpoolError, NativeAggregateSpoolRow, PreparedBufferedAggregate,
 };
+pub(crate) use sort::{ExternalOrderHost, ExternalOrderLimits, execute_relation};
 pub use sort::{NativeSpoolDifference, PreparedBufferedOrder};
 pub(crate) use sort::{ordered_input, ordered_stages};
 
