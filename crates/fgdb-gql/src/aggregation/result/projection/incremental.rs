@@ -203,7 +203,8 @@ impl PreparedGraphAggregate {
             for (column, output) in projection.iter().enumerate() {
                 govern(GlaExecutionEvent::ScratchEntry)?;
                 values.push(
-                    expression(output.value(), &mut input, column, govern)?.into_owned(govern)?,
+                    governed_expression(output.value(), &mut input, column, govern)?
+                        .into_owned(govern)?,
                 );
             }
         } else {

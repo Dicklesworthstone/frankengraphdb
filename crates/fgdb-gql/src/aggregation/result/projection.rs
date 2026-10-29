@@ -142,7 +142,99 @@ fn element_truth<E, C>(cell: Cell<'_>, column: usize) -> Result<Option<bool>, Qu
     }
 }
 
-fn expression<'g, E, C>(
+/// A caller's control or element-read failure, held by `governed_expression`
+/// while the type-erased evaluator below unwinds.
+#[derive(Debug, PartialEq, Eq)]
+struct Stop;
+
+/// The evaluator's own failures carry no caller type. A caller's failure is a
+/// `Stop`: `Interrupted` for its control, `Source(Source)` for an element read.
+type Erased = QueryError<Stop, Stop>;
+type Control<'c> = &'c mut dyn FnMut(GlaExecutionEvent) -> Result<(), Erased>;
+type Columns<'c, 'g> = &'c dyn Fn(usize) -> Result<Cell<'g>, GraphIntegerErrorKind>;
+
+/// Relays every element read to the caller's reader and keeps its error.
+struct Relay<'a, 'r, E> {
+    read: &'a mut crate::set_ops::ElementRead<'r, E>,
+    failed: &'a mut Option<E>,
+}
+
+impl<E> Relay<'_, '_, E> {
+    fn keep<T>(&mut self, result: Result<T, E>) -> Result<T, Stop> {
+        result.map_err(|error| {
+            *self.failed = Some(error);
+            Stop
+        })
+    }
+
+    fn keep_controlled<T>(
+        &mut self,
+        result: Result<T, crate::GraphElementMetadataError<E>>,
+    ) -> Result<T, crate::GraphElementMetadataError<Stop>> {
+        use crate::GraphElementMetadataError as Failure;
+        result.map_err(|error| match error {
+            Failure::Source(error) => {
+                *self.failed = Some(error);
+                Failure::Source(Stop)
+            }
+            Failure::Interrupted => Failure::Interrupted,
+        })
+    }
+}
+
+impl<E> crate::set_ops::projection::ElementReader<Stop> for Relay<'_, '_, E> {
+    fn property(
+        &mut self,
+        element: ElementId,
+        key: fgdb_delta_types::PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, Stop>> {
+        let result = self.read.property(element, key)?;
+        Some(self.keep(result))
+    }
+
+    fn property_for_column(
+        &mut self,
+        column: usize,
+        element: ElementId,
+        key: fgdb_delta_types::PropertyKeyId,
+    ) -> Option<Result<Option<fgdb_types::CanonicalPropertyValue>, Stop>> {
+        let result = self.read.property_for_column(column, element, key)?;
+        Some(self.keep(result))
+    }
+
+    fn property_with_control(
+        &mut self,
+        column: Option<usize>,
+        element: ElementId,
+        key: fgdb_delta_types::PropertyKeyId,
+        control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<
+        Result<Option<fgdb_types::CanonicalPropertyValue>, crate::GraphElementPropertyError<Stop>>,
+    > {
+        let result = self
+            .read
+            .property_with_control(column, element, key, control)?;
+        Some(self.keep_controlled(result))
+    }
+
+    fn metadata(
+        &mut self,
+        element: ElementId,
+        kind: crate::GraphElementMetadata,
+        catalog: &crate::ReverseSymbolCatalog,
+        control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<Result<Option<GraphValue>, crate::GraphElementMetadataError<Stop>>> {
+        let result = self.read.metadata(element, kind, catalog, control)?;
+        Some(self.keep_controlled(result))
+    }
+}
+
+/// One governed result expression. The evaluator below is type-erased, so one
+/// copy serves every source and control type. Monomorphized per caller it was
+/// the largest function in the engine (229 copies, about 18 MB of a release
+/// CLI) and it pushed the fgdb lib test image past the link limit (fgdb-chkpq).
+/// The caller's own error comes back exactly as its control or reader raised it.
+fn governed_expression<'g, E, C>(
     value: &'g GraphSetValue,
     input: &mut ExpressionInput<
         '_,
@@ -153,6 +245,45 @@ fn expression<'g, E, C>(
     column: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
 ) -> Result<OutputValue<'g>, QueryError<E, C>> {
+    let (mut controlled, mut failed) = (None, None);
+    let mut relay = Relay {
+        read: &mut *input.read,
+        failed: &mut failed,
+    };
+    let mut erased = ExpressionInput {
+        columns: &input.columns as Columns<'_, 'g>,
+        width: input.width,
+        locals: core::mem::take(&mut input.locals),
+        read: &mut relay,
+    };
+    let mut stop = |event| {
+        control(event).map_err(|error| {
+            controlled = Some(error);
+            GqlQueryError::Interrupted(Stop)
+        })
+    };
+    let result = expression(value, &mut erased, column, &mut (&mut stop as Control<'_>));
+    input.locals = erased.locals;
+    result.map_err(|error| match error {
+        GqlQueryError::Interrupted(Stop) => {
+            controlled.expect("an erased control stop holds the caller's error")
+        }
+        GqlQueryError::Source(error) => GqlQueryError::Source(
+            error.map_source(|Stop| failed.expect("an erased read stop holds the caller's error")),
+        ),
+        GqlQueryError::Rows(error) => GqlQueryError::Rows(error),
+        GqlQueryError::Evaluator(error) => GqlQueryError::Evaluator(error),
+        GqlQueryError::IdentifiedEdgesRequired => GqlQueryError::IdentifiedEdgesRequired,
+        GqlQueryError::Data(error) => GqlQueryError::Data(error),
+    })
+}
+
+fn expression<'g>(
+    value: &'g GraphSetValue,
+    input: &mut ExpressionInput<'_, '_, Columns<'_, 'g>, Stop>,
+    column: usize,
+    control: &mut Control<'_>,
+) -> Result<OutputValue<'g>, Erased> {
     // The same checked expression program reads batch or maintained cells.
     // Preparation bounds the recursive expression depth and number of nodes.
     control(GlaExecutionEvent::Work)?;
@@ -478,7 +609,7 @@ fn expression<'g, E, C>(
                 input.locals.push(GraphAggregateValue::Value(
                     member.copy_with_control(control)?,
                 ));
-                let projected = (|| -> Result<Option<GraphValue>, QueryError<E, C>> {
+                let projected = (|| -> Result<Option<GraphValue>, Erased> {
                     if let Some(filter) = filter {
                         let predicate = expression(filter, input, column, control)?;
                         if !element_truth(predicate.cell(), column)?.unwrap_or(false) {
@@ -943,7 +1074,7 @@ pub(super) fn having_value<'g, E, C>(
         locals: Vec::new(),
         read: &mut crate::set_ops::no_element_reads,
     };
-    expression(value, &mut input, column, control)
+    governed_expression(value, &mut input, column, control)
 }
 
 /// Resolve a HAVING operand's referenced aliases through the ordinary result
@@ -967,7 +1098,7 @@ pub(super) fn having_resolved_value<'g, E, C>(
     let mut resolved = Vec::new();
     for value in inputs {
         control(GlaExecutionEvent::ScratchEntry)?;
-        resolved.push(expression(value, &mut input, column, control)?);
+        resolved.push(governed_expression(value, &mut input, column, control)?);
     }
     let mut input = ExpressionInput {
         columns: |at| {
@@ -982,7 +1113,7 @@ pub(super) fn having_resolved_value<'g, E, C>(
     };
     // A result borrowing one resolved alias must outlive this temporary row.
     Ok(OutputValue::Owned(
-        expression(value, &mut input, column, control)?.into_owned(control)?,
+        governed_expression(value, &mut input, column, control)?.into_owned(control)?,
     ))
 }
 
@@ -1033,7 +1164,9 @@ impl PreparedGraphAggregate {
             control(GlaExecutionEvent::ScratchEntry)?;
             // Own rank cells before retaining them beside their visible input.
             // No self-referential row and no repeated comparator evaluation.
-            values.push(expression(value, &mut input, column, control)?.into_owned(control)?);
+            values.push(
+                governed_expression(value, &mut input, column, control)?.into_owned(control)?,
+            );
         }
         Ok(values)
     }
@@ -1268,7 +1401,12 @@ impl PreparedGraphAggregate {
             };
             for (column, value) in projection.iter().enumerate() {
                 control(GlaExecutionEvent::ScratchEntry)?;
-                values.push(expression(value.value(), &mut input, column, control)?);
+                values.push(governed_expression(
+                    value.value(),
+                    &mut input,
+                    column,
+                    control,
+                )?);
             }
             let group_width = group.key.len() + group.state.len();
             let rank = self.computed_order_values(
