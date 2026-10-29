@@ -559,6 +559,30 @@ impl PreparedGraphWriteChainText {
         ))
     }
 
+    /// Inspect the complete first node, including labels and computed maps,
+    /// before selecting the relationship compiler. A named path has the same
+    /// owner. Do not reduce this to `(name)`: whole-pattern endpoints may be
+    /// anonymous or newly declared with their own labels and properties.
+    fn relationship_merge(mut lexer: Lexer<'_>) -> Result<bool, GraphPatternTextError> {
+        let mut depth = 0_usize;
+        loop {
+            match script::next_script_token(&mut lexer)?.kind {
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Ok(matches!(
+                            script::next_script_token(&mut lexer)?.kind,
+                            TokenKind::Punct(b'-' | b'<')
+                        ));
+                    }
+                }
+                TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
+                _ => {}
+            }
+        }
+    }
+
     /// DELETE and DETACH are also legal identifiers. A deletion clause
     /// follows a complete read expression and starts a new target expression;
     /// `WITH delete`, `ORDER BY detach` and `n.p = delete` remain row uses.
@@ -728,24 +752,7 @@ impl PreparedGraphWriteChainText {
                     tokens: 0,
                 };
                 script::next_script_token(&mut lexer)?;
-                let mut nested = 0_usize;
-                loop {
-                    match script::next_script_token(&mut lexer)?.kind {
-                        TokenKind::Punct(b'(' | b'[' | b'{') => nested += 1,
-                        TokenKind::Punct(b')' | b']' | b'}') => {
-                            nested = nested.saturating_sub(1);
-                            if nested == 0 {
-                                break;
-                            }
-                        }
-                        TokenKind::End | TokenKind::Punct(b';') => break,
-                        _ => {}
-                    }
-                }
-                matches!(
-                    script::next_script_token(&mut lexer)?.kind,
-                    TokenKind::Punct(b'-' | b'<')
-                )
+                Self::relationship_merge(lexer)?
             }
             None => false,
         };
@@ -880,14 +887,9 @@ impl PreparedGraphWriteChainText {
                 lexer.next()?; // path name
                 lexer.next()?; // equals
             }
-            // A relationship MERGE names row vertices: `(a)-` or `(a)<-`.
+            // Whole-pattern MERGE may declare either endpoint here.
             let relationship = matched_edge_merge
-                || (merge
-                    && !matched_vertex_merge
-                    && matches!(lexer.next()?.kind, TokenKind::Punct(b'('))
-                    && matches!(lexer.next()?.kind, TokenKind::Word(_))
-                    && matches!(lexer.next()?.kind, TokenKind::Punct(b')'))
-                    && matches!(lexer.next()?.kind, TokenKind::Punct(b'-' | b'<')));
+                || (merge && !matched_vertex_merge && Self::relationship_merge(lexer)?);
             if merge && !relationship {
                 let (merge, after) = PreparedGraphVertexMergeRowsText::prepare_step(
                     body,
@@ -952,6 +954,7 @@ impl PreparedGraphWriteChainText {
         );
         let row_actions = matches!(steps.as_slice(), [ChainTextStep::EdgeMerge(merge)]
             if merge.0.row_actions.is_some()
+                || !merge.0.unbound.is_empty()
                 || (leading_rows
                     && matches!(merge.0.input, crate::mutation_text::EdgeMergeTextInput::Row { .. })));
         if steps.len() < 2 && !unwound_merge && !row_actions && read.is_none() {

@@ -1880,7 +1880,10 @@ fn computed_endpoint_fields_share_native_and_signed_budgets_without_hidden_work(
                 assert_eq!(db.edges().unwrap().len(), before.2.len() + 1);
                 Some(stats)
             }
-            Err(_) => {
+            Err(error) => {
+                eprintln!(
+                    "computed endpoint refusal (hidden={hidden}, payload={payload}): {error:?}"
+                );
                 assert_eq!(
                     (
                         db.frontier().unwrap(),

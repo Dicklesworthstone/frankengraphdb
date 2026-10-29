@@ -18,6 +18,55 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
 }
 
 #[test]
+fn whole_pattern_actions_keep_lazy_reads_of_resolved_endpoint_fields() {
+    use fgdb_gql::algebra::{GraphValue, GraphValueRow};
+    use fgdb_gql::{GraphEdgeMergeRowAction, GraphWriteChainStep, PreparedGraphWriteChainText};
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
+
+    let statement = "MATCH (a) UNWIND [0,0] AS occurrence \
+        MERGE (a)-[r:R]->(b {p:1}) \
+        ON MATCH SET b.p=CASE WHEN occurrence=0 THEN b.p+1 ELSE size(b.hidden) END";
+    let program = PreparedGraphWriteChainText::prepare(statement, R, |kind, name: &str| {
+        if (kind, name) == (GraphSymbolKind::Property, "hidden") {
+            Some(GraphSymbol::Property(PropertyKeyId(2)))
+        } else {
+            symbols(kind, name)
+        }
+    })
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    let GraphWriteChainStep::EdgeUpsert(upsert) = &program.steps()[0] else {
+        panic!("whole-pattern ON MATCH must retain its row-action owner");
+    };
+    let merge = upsert.merge();
+    let row = GraphValueRow::from_owned_values(vec![
+        GraphValue::Vertex(VId(1)),
+        GraphValue::Scalar(CanonicalScalar::Int(0)),
+        GraphValue::Vertex(VId(1)),
+    ]);
+    assert_eq!(row.values().len(), merge.input_column_types().len());
+    let [GraphEdgeMergeRowAction::RowVertex { column, value, .. }] = &upsert.actions().on_match[..]
+    else {
+        panic!("the endpoint property must remain an explicit row-vertex assignment");
+    };
+    assert_eq!(*column, merge.destination_column());
+    let reads = Cell::new(0);
+    let written = value
+        .written_with_elements(&row, &mut |_| Ok::<_, ()>(()), &mut |element, key| {
+            assert_eq!(element, fgdb_delta_types::ElementId::Vertex(VId(1)));
+            assert_eq!(key, P, "an unselected CASE branch must not read hidden");
+            reads.set(reads.get() + 1);
+            Ok(Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(
+                3,
+            ))))
+        })
+        .unwrap();
+    assert_eq!(written, Some(CanonicalScalar::Int(4).into()));
+    assert_eq!(reads.get(), 1);
+}
+
+#[test]
 fn forward_reverse_and_renamed_forms_compile_to_the_same_directed_definition() {
     let forward_text = "MATCH (a),(b) WHERE a.p=$left AND b.p=$right MERGE (a)-[:R]->(b)";
     let calls = Cell::new(0);

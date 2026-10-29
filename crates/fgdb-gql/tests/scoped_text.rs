@@ -1390,15 +1390,12 @@ fn nested_existence_audits_imported_and_element_names_at_every_depth() {
                 "imported vertices in the comprehension's positive pattern",
             ),
         ),
-        // A quantifier's graph predicate (0352660c) is a row-scope EXISTS,
-        // whose body reads no WHERE (only COUNT's does), so it refuses at that
-        // WHERE, still before any rebinding.
+        // Row-scope EXISTS now admits its body's WHERE. The per-element
+        // vertex still cannot be silently rebound inside a nested scope.
         (
             "MATCH (a) RETURN any(v IN [a] WHERE EXISTS { MATCH (x) \
              WHERE EXISTS { MATCH (v)-[:R]->(x) } }) AS n",
-            GraphSetTextErrorKind::Pattern(GraphPatternTextErrorKind::Expected(
-                "} after an identity-correlated graph pattern",
-            )),
+            GraphSetTextErrorKind::Expected("imported vertices in the root MATCH"),
         ),
         (
             "MATCH (a), (z) WITH z WHERE EXISTS { MATCH (x) \
@@ -1408,11 +1405,19 @@ fn nested_existence_audits_imported_and_element_names_at_every_depth() {
             ),
         ),
     ] {
-        let error = match PreparedGraphSetText::prepare(text, symbols) {
+        let mut calls = 0;
+        let error = match PreparedGraphSetText::prepare(text, |kind, name: &str| {
+            calls += 1;
+            symbols(kind, name)
+        }) {
             Ok(_) => panic!("silently rebound an out-of-scope name: {text}"),
             Err(error) => error,
         };
         assert_eq!(error.kind, expected, "{text}");
+        assert_eq!(
+            calls, 0,
+            "scope refusal must precede catalog access: {text}"
+        );
     }
     // The supported forms keep the imported vertex in the root MATCH, or
     // use an actual graph ancestor rather than a per-element local.
@@ -1425,6 +1430,8 @@ fn nested_existence_audits_imported_and_element_names_at_every_depth() {
          WHERE EXISTS { MATCH (a)-[:R]->(x) } | x]] AS n",
         "MATCH (a) WITH a WHERE EXISTS { MATCH (x) \
          WHERE EXISTS { MATCH (a)-[:R]->(x) } } RETURN a",
+        "MATCH (a) RETURN any(v IN [a] WHERE EXISTS { MATCH (v), (x) \
+         WHERE EXISTS { MATCH (v)-[:R]->(x) } }) AS n",
     ] {
         PreparedGraphSetText::prepare(text, symbols)
             .unwrap_or_else(|error| panic!("{text}: {error:?}"))

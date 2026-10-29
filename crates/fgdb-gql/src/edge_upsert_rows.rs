@@ -780,10 +780,65 @@ mod tests {
         let anonymous = "MERGE (a:A {p:1}) MERGE (b:A {p:2}) \
                          MERGE (a)-[:R]->(b) ON CREATE SET r.p=1";
         assert!(PreparedGraphWriteChainText::prepare(anonymous, R, symbols).is_err());
-        // A relationship property map still defines identity; it cannot
-        // quietly become a row-dependent action map.
+    }
+
+    #[test]
+    fn row_computed_merge_keys_remain_identity_separate_from_branch_actions() {
+        // The map remains part of MERGE identity even when a carried row
+        // computes it. ON CREATE is a separate assignment, not the map owner.
         let dynamic_map = "UNWIND [1] AS w MERGE (a:A {p:1}) MERGE (b:A {p:2}) \
                            MERGE (a)-[r:R {p:w}]->(b) ON CREATE SET r.q=w";
-        assert!(PreparedGraphWriteChainText::prepare(dynamic_map, R, symbols).is_err());
+        let program = bound(dynamic_map, &GqlParameters::new());
+        let upsert = definition(program.steps().last().unwrap());
+        let merge = upsert.merge();
+        assert!(merge.has_row_properties());
+        assert_eq!(merge.property_keys().collect::<Vec<_>>(), [P]);
+        assert_eq!(
+            merge.input_column_types(),
+            [
+                GraphSetColumnType::Scalar,
+                GraphSetColumnType::Vertex,
+                GraphSetColumnType::Vertex
+            ]
+        );
+        let row = GraphValueRow::from_owned_values(vec![
+            scalar(7),
+            GraphValue::Vertex(VId(11)),
+            GraphValue::Vertex(VId(12)),
+        ]);
+        let (values, equality_key) = merge
+            .row_values::<(), (), ()>(0, &row, &mut |_| Ok(()))
+            .unwrap();
+        assert_eq!(values, [(P, CanonicalScalar::Int(7).into())]);
+        assert!(equality_key.is_some());
+        let [GraphEdgeMergeRowAction::Value { key, value }] = &upsert.actions().on_create[..]
+        else {
+            panic!("the ON action must retain its separate row-value input");
+        };
+        assert_eq!(*key, Q);
+        assert_eq!(
+            value.written(&row, &mut |_| Ok::<_, ()>(())).unwrap(),
+            Some(CanonicalScalar::Int(7).into())
+        );
+        assert!(upsert.actions().on_match.is_empty());
+        for value in [
+            GraphValue::Scalar(CanonicalScalar::Null),
+            GraphValue::Vertex(VId(7)),
+        ] {
+            let invalid = GraphValueRow::from_owned_values(vec![
+                value,
+                GraphValue::Vertex(VId(11)),
+                GraphValue::Vertex(VId(12)),
+            ]);
+            assert!(matches!(
+                merge.row_values::<(), (), ()>(0, &invalid, &mut |_| Ok(())),
+                Err(crate::GqlQueryError::Source(
+                    crate::GraphEdgeMergeError::RowValue {
+                        row: 0,
+                        property: 0
+                    }
+                ))
+            ));
+        }
     }
 }
