@@ -64,6 +64,99 @@ fn whole_pattern_actions_keep_lazy_reads_of_resolved_endpoint_fields() {
         .unwrap();
     assert_eq!(written, Some(CanonicalScalar::Int(4).into()));
     assert_eq!(reads.get(), 1);
+
+    let selected_failure = GraphValueRow::from_owned_values(vec![
+        GraphValue::Vertex(VId(1)),
+        GraphValue::Scalar(CanonicalScalar::Int(1)),
+        GraphValue::Vertex(VId(1)),
+    ]);
+    let error = value
+        .written_with_elements(
+            &selected_failure,
+            &mut |_| Ok::<_, &str>(()),
+            &mut |_, key| {
+                assert_eq!(key, PropertyKeyId(2));
+                Err("selected endpoint read failed")
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        fgdb_gql::GraphIntegerEvaluationError::Control("selected endpoint read failed")
+    ));
+}
+
+#[test]
+fn computed_element_coalesce_keeps_stored_payloads_and_selected_read_errors() {
+    use fgdb_gql::algebra::{GraphValue, GraphValueRow};
+    use fgdb_gql::{GraphEdgeMergeRowAction, GraphWriteChainStep, PreparedGraphWriteChainText};
+    use fgdb_types::{CanonicalScalar, VId};
+
+    let statement = "MATCH (a),(b) WITH a,b,[a,a] AS targets UNWIND targets AS target \
+        MERGE (a)-[r:R]->(b) ON CREATE SET target.p=coalesce(target.hidden,target.p)";
+    let program = PreparedGraphWriteChainText::prepare(statement, R, |kind, name: &str| {
+        if (kind, name) == (GraphSymbolKind::Property, "hidden") {
+            Some(GraphSymbol::Property(PropertyKeyId(2)))
+        } else {
+            symbols(kind, name)
+        }
+    })
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    let GraphWriteChainStep::EdgeUpsert(upsert) = &program.steps()[0] else {
+        panic!("computed endpoint actions retain their row owner");
+    };
+    let row = GraphValueRow::from_owned_values(vec![
+        GraphValue::Vertex(VId(1)),
+        GraphValue::Vertex(VId(2)),
+        GraphValue::List(vec![GraphValue::Vertex(VId(1)), GraphValue::Vertex(VId(1))].into()),
+        GraphValue::Vertex(VId(1)),
+    ]);
+    assert_eq!(
+        row.values().len(),
+        upsert.merge().input_column_types().len()
+    );
+    let [GraphEdgeMergeRowAction::RowVertex { value, .. }] = &upsert.actions().on_create[..] else {
+        panic!("the carried target is a row-vertex assignment");
+    };
+    let payload = CanonicalScalar::bytes(vec![7; 32]).unwrap();
+    for first_present in [false, true] {
+        let mut reads = Vec::new();
+        let written = value
+            .written_with_elements(&row, &mut |_| Ok::<_, ()>(()), &mut |_, key| {
+                reads.push(key);
+                if key == PropertyKeyId(2) {
+                    Ok(first_present.then(|| payload.clone().into()))
+                } else {
+                    assert_eq!(key, P);
+                    assert!(
+                        !first_present,
+                        "a non-NULL first argument must skip the suffix"
+                    );
+                    Ok(Some(payload.clone().into()))
+                }
+            })
+            .unwrap();
+        assert_eq!(written, Some(payload.clone().into()));
+        assert_eq!(
+            reads,
+            if first_present {
+                vec![PropertyKeyId(2)]
+            } else {
+                vec![PropertyKeyId(2), P]
+            }
+        );
+    }
+    let error = value
+        .written_with_elements(&row, &mut |_| Ok::<_, &str>(()), &mut |_, _| {
+            Err("first coalesce read failed")
+        })
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        fgdb_gql::GraphIntegerEvaluationError::Control("first coalesce read failed")
+    ));
 }
 
 #[test]

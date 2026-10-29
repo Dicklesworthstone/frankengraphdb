@@ -796,7 +796,7 @@ mod tests {
         assert_eq!(
             merge.input_column_types(),
             [
-                GraphSetColumnType::Scalar,
+                GraphSetColumnType::Any,
                 GraphSetColumnType::Vertex,
                 GraphSetColumnType::Vertex
             ]

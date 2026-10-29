@@ -2579,6 +2579,25 @@ impl<'a> Parser<'a> {
                 if self.elements.contains(&word) {
                     return Ok(true);
                 }
+                // Open/carried element fields use governed let slots just as
+                // list-local fields do. Hoisting them out of a scalar CASE
+                // would read even the unselected branch (including payloads
+                // the capability cannot observe).
+                if matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
+                    && route.row.is_some_and(|schema| {
+                        schema.iter().any(|(name, kind)| {
+                            name.text == word
+                                && matches!(
+                                    kind,
+                                    GraphSetColumnType::Any
+                                        | GraphSetColumnType::Vertex
+                                        | GraphSetColumnType::Edge
+                                )
+                        })
+                    })
+                {
+                    return Ok(true);
+                }
                 // Metadata is a source read even when its result is scalar.
                 // Its let slots belong to the selected branch, including
                 // calls nested in scalar functions such as upper(type(x)).
@@ -3547,6 +3566,13 @@ impl<'a> Parser<'a> {
             // value/property reads must be evaluated in this argument's
             // scope, after earlier non-NULL arguments have been considered.
             if matches!(token.kind, TokenKind::Word(word) if self.elements.contains(&word)) {
+                return Ok(true);
+            }
+            if matches!(token.kind, TokenKind::Word(word)
+                if schema.iter().any(|(name, kind)| name.text == word
+                    && matches!(kind, GraphSetColumnType::Any | GraphSetColumnType::Vertex | GraphSetColumnType::Edge)))
+                && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
+            {
                 return Ok(true);
             }
             if matches!(token.kind, TokenKind::Word(word)
