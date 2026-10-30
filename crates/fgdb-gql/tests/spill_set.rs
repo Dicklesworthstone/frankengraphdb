@@ -575,6 +575,109 @@ fn graph_reading_collections_preserve_member_order_nulls_and_nested_frames() {
 }
 
 #[test]
+fn nested_graph_collections_and_quantifiers_keep_unknowns_and_outer_frames() {
+    let graph = Graph::sample();
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    let vertices = |ids: &[u128]| {
+        GraphValue::List(ids.iter().map(|&id| GraphValue::Vertex(VId(id))).collect())
+    };
+    let bind = |text: &str, parameters: &GqlParameters| {
+        PreparedGraphSetText::prepare_with_parameter_types(
+            text,
+            &[("items", fgdb_gql::GqlParameterType::List)],
+            symbols,
+        )
+        .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+        .bind_parameters(parameters)
+        .unwrap()
+    };
+    let compare = |query: &PreparedGraphSet, expected: Vec<GraphValueRow>| {
+        let plan = AsyncSpillSetPlan::compile(query).unwrap();
+        assert!(plan.source_count() > 0);
+        assert_eq!(staged_plan(&graph, &plan).unwrap(), expected);
+        assert_eq!(graph.native(query).unwrap(), expected);
+    };
+
+    // Each inner list is a collected Apply under another collected Apply.
+    // Equal inputs remain separate occurrences; an empty inner body yields
+    // [], while its NULL input skips that body and retains NULL. The inner x
+    // shadows, then restores, the outer scalar binding.
+    let parameters = GqlParameters::new()
+        .with_list(
+            "items",
+            vec![
+                vertices(&[2, 1, 2, 3]),
+                vertices(&[2, 1, 2, 3]),
+                vertices(&[]),
+                null.clone(),
+            ],
+        )
+        .unwrap();
+    let query = bind(
+        "WITH 7 AS x,$items AS groups RETURN x,\
+         [xs IN groups | [x IN xs WHERE (x)-[:R]->() | x]] AS values,x AS restored",
+        &parameters,
+    );
+    compare(
+        &query,
+        vec![row(vec![
+            scalar(7),
+            GraphValue::List(
+                vec![
+                    vertices(&[2, 1, 2]),
+                    vertices(&[2, 1, 2]),
+                    vertices(&[]),
+                    null.clone(),
+                ]
+                .into(),
+            ),
+            scalar(7),
+        ])],
+    );
+
+    // Graph predicates are evaluated per member and their Boolean/UNKNOWN
+    // results are collected before the ordinary quantifier runs. In the
+    // [true,NULL] case, dropping mapped NULLs would turn ALL and SINGLE from
+    // UNKNOWN into true. A duplicate true makes SINGLE false instead.
+    for (ids, expected) in [
+        (Some(vec![1, 3]), [Some(true), None, Some(false), None]),
+        (Some(vec![3]), [None; 4]),
+        (
+            Some(vec![1, 1]),
+            [Some(true), Some(true), Some(false), Some(false)],
+        ),
+        (
+            Some(vec![]),
+            [Some(false), Some(true), Some(true), Some(false)],
+        ),
+        (None, [None; 4]),
+    ] {
+        let parameters = if let Some(ids) = ids {
+            GqlParameters::new()
+                .with_list(
+                    "items",
+                    ids.into_iter()
+                        .map(|id| GraphValue::Vertex(VId(id)))
+                        .collect(),
+                )
+                .unwrap()
+        } else {
+            GqlParameters::new().with_null("items").unwrap()
+        };
+        for (kind, expected) in ["ANY", "ALL", "NONE", "SINGLE"].into_iter().zip(expected) {
+            let text = format!(
+                "WITH $items AS xs RETURN {kind}(x IN xs WHERE (x)-[:R]->() OR NULL) AS value"
+            );
+            let expected = expected.map_or_else(
+                || null.clone(),
+                |value| GraphValue::Scalar(CanonicalScalar::Bool(value)),
+            );
+            compare(&bind(&text, &parameters), vec![row(vec![expected])]);
+        }
+    }
+}
+
+#[test]
 fn graph_reading_collections_skip_null_and_empty_inputs_but_keep_late_failures() {
     let graph = Graph::sample();
     for (list, expected) in [
