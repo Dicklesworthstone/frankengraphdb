@@ -152,6 +152,65 @@ fn every_three_vertex_topology_has_identical_canonical_components_at_every_quant
 }
 
 #[test]
+fn seed_component_row_omission_matches_stored_and_cooperative_results() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let n = 65;
+        let star: Vec<_> = (0..n - 1).map(|leaf| (leaf, n - 1)).collect();
+        let mut disconnected: Vec<_> = (0..64)
+            .flat_map(|left| {
+                (left + 1..64)
+                    .filter(move |&right| left / 32 == right / 32)
+                    .map(move |right| (left, right))
+            })
+            .collect();
+        disconnected.push((64, 64));
+        for (edges, opened, scanned) in [
+            (star, 1, n - 1),
+            (disconnected, 1 + 32 + 1, 31 + 32 * 31 + 1),
+        ] {
+            let db = stored(&contexts.commit(), n, &edges).await;
+            let opt = options(Directedness::Undirected);
+            let graph = projection(&db, &cx, opt).await;
+            let call = FnxCallSpec::connected_components();
+            let expected = reference(n, &edges, false);
+            let sync = call
+                .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                .unwrap();
+            assert_eq!(sync.rows, expected);
+            assert_eq!(sync.certificate.witness.nodes_touched, opened);
+            assert_eq!(sync.certificate.witness.edges_scanned, scanned);
+            assert_eq!(
+                sync.certificate.kernel_workspace_bytes,
+                2 * n * size_of::<usize>(),
+                "seed selection and membership need no extra per-vertex storage"
+            );
+            for q in [1, 7, 64] {
+                let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                let (actual, _) = drive(
+                    call.execute_sealed_cooperative(
+                        &controlled,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(q),
+                        yield_now,
+                    ),
+                    &probe,
+                    q,
+                );
+                compare_execution(&actual.unwrap(), &sync);
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
 fn canonical_minima_are_not_union_roots_and_scalar_only_populations_still_yield() {
     let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);

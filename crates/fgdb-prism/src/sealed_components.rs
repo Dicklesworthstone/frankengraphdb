@@ -7,6 +7,9 @@
 //! isolated, so only its nonzero-degree population must be joined. Remaining
 //! immutable edges cannot change that partition; no inverse graph or sample
 //! is needed to omit their compressed scans.
+//! Symmetric rows also admit one growing seed component: an edge whose two
+//! endpoint rows are both omitted already lies inside that component. Scan the
+//! highest-degree seed first, so a late hub is not left for its leaves to join.
 
 use super::{
     ComplexityWitness, Cursor, ExecutionError, KernelOutput, KernelValues, Result, ResultAdmission,
@@ -58,6 +61,37 @@ fn root(
     Ok(vertex)
 }
 
+/// A sufficient, constant-time membership proof for one growing component.
+/// Indirect descendants may still be scanned; no extra find, bitmap or sample
+/// is needed. Root changes follow the same union-by-size decisions as parents.
+#[derive(Default)]
+pub(super) struct WeakSeed {
+    pub(super) vertex: usize,
+    degree: usize,
+    representative: usize,
+}
+
+impl WeakSeed {
+    pub(super) fn consider(&mut self, vertex: usize, degree: usize) {
+        // Initialization visits canonical ordinals, so ties keep the minimum.
+        if degree > self.degree {
+            self.vertex = vertex;
+            self.degree = degree;
+            self.representative = vertex;
+        }
+    }
+
+    pub(super) fn contains(&self, parents: &[usize], vertex: usize) -> bool {
+        parents[vertex] == self.representative
+    }
+
+    pub(super) fn joined(&mut self, parent: usize, child: usize) {
+        if self.representative == child {
+            self.representative = parent;
+        }
+    }
+}
+
 pub(super) fn weak(
     graph: &impl Rows,
     admission: &ResultAdmission,
@@ -70,21 +104,23 @@ pub(super) fn weak(
     let mut sizes = reserve(n)?;
     let symmetric = graph.is_undirected();
     let mut remaining = if symmetric { 0 } else { n };
+    let mut seed = WeakSeed::default();
     for vertex in 0..n {
         checkpoint()?;
-        if symmetric
-            && graph
+        if symmetric {
+            let degree = graph
                 .degree(vertex)
-                .ok_or(ExecutionError::InvalidUpstreamResult)?
-                != 0
-        {
-            remaining = add(remaining, 1)?;
+                .ok_or(ExecutionError::InvalidUpstreamResult)?;
+            if degree != 0 {
+                remaining = add(remaining, 1)?;
+            }
+            seed.consider(vertex, degree);
         }
         parents.push(vertex);
         sizes.push(1usize);
     }
     let mut witness = ComplexityWitness {
-        algorithm: "weakly_connected_components_union_find_complete_v2".to_owned(),
+        algorithm: "weakly_connected_components_union_find_seed_component_v3".to_owned(),
         complexity_claim:
             "O(|V| log(1+H) + (H+|V|) log(1+|V|)) compressed row visits and bounded union-find"
                 .to_owned(),
@@ -95,12 +131,23 @@ pub(super) fn weak(
     // Remaining counts eligible components: each successful union joins two,
     // so no union can take this count below one. Symmetric
     // zero-degree vertices cannot be endpoints; directed WCC includes ALL n.
-    for source in 0..n {
+    let first = (symmetric && n != 0).then_some(seed.vertex);
+    let sources = first
+        .into_iter()
+        .chain((0..n).filter(move |&vertex| Some(vertex) != first));
+    for source in sources {
         // Finish the current row before omitting later row opens entirely.
         if remaining <= 1 {
             break;
         }
         checkpoint()?;
+        // Every omitted source belongs to the same monotonically growing
+        // component. An edge between distinct final components cannot have
+        // BOTH endpoints omitted: the other endpoint's symmetric row is read.
+        // Directed WCC has no such reverse-incidence guarantee.
+        if symmetric && Some(source) != first && seed.contains(&parents, source) {
+            continue;
+        }
         witness.nodes_touched = add(witness.nodes_touched, 1)?;
         let mut row = graph.open(source)?;
         while let Some((target, _)) = row.next()? {
@@ -119,6 +166,7 @@ pub(super) fn weak(
             }
             sizes[a] = add(sizes[a], sizes[b])?;
             parents[b] = a;
+            seed.joined(a, b);
             remaining = remaining
                 .checked_sub(1)
                 .ok_or(ExecutionError::InvalidUpstreamResult)?;
@@ -393,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn separate_nontrivial_components_and_loop_only_vertices_prevent_early_completion() {
+    fn seed_component_skips_only_proven_rows_in_disconnected_and_loop_populations() {
         let n = 65;
         let rows: Vec<_> = (0..n)
             .map(|source| {
@@ -423,8 +471,10 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         );
-        assert_eq!(graph.opened.get(), n);
-        assert_eq!(graph.visited.get(), 2 * 32 * 31 + 1);
+        // The seed clique needs only its first row. Every row in the other
+        // clique and the loop-only component remains outside the seed proof.
+        assert_eq!(graph.opened.get(), 1 + 32 + 1);
+        assert_eq!(graph.visited.get(), 31 + 32 * 31 + 1);
         for (rows, labels) in [
             (vec![], vec![]),
             (vec![vec![]], vec![0]),
@@ -440,6 +490,121 @@ mod tests {
                 assert_eq!(graph.opened.get(), 0);
                 assert_eq!(graph.visited.get(), 0);
             }
+        }
+    }
+
+    fn reference(rows: &[Vec<usize>]) -> Vec<usize> {
+        let mut labels = vec![usize::MAX; rows.len()];
+        for source in 0..rows.len() {
+            if labels[source] != usize::MAX {
+                continue;
+            }
+            labels[source] = source;
+            let mut queue = std::collections::VecDeque::from([source]);
+            while let Some(vertex) = queue.pop_front() {
+                for &target in &rows[vertex] {
+                    if labels[target] == usize::MAX {
+                        labels[target] = source;
+                        queue.push_back(target);
+                    }
+                }
+            }
+        }
+        labels
+    }
+
+    #[test]
+    fn every_five_vertex_undirected_topology_matches_independent_reachability() {
+        let n = 5;
+        let pairs: Vec<_> = (0..n)
+            .flat_map(|left| (left + 1..n).map(move |right| (left, right)))
+            .collect();
+        for mask in 0usize..1 << pairs.len() {
+            for loops in [false, true] {
+                let mut rows = vec![Vec::new(); n];
+                for (bit, &(left, right)) in pairs.iter().enumerate() {
+                    if mask & (1 << bit) != 0 {
+                        rows[left].push(right);
+                        rows[right].push(left);
+                    }
+                }
+                if loops {
+                    for (vertex, row) in rows.iter_mut().enumerate() {
+                        row.push(vertex);
+                    }
+                }
+                for row in &mut rows {
+                    row.sort_unstable();
+                }
+                let expected = reference(&rows);
+                let arcs: usize = rows.iter().map(Vec::len).sum();
+                let graph = counted(rows, true);
+                let KernelValues::Components(actual) = execute(&graph).values else {
+                    panic!("components")
+                };
+                assert_eq!(actual, expected, "mask={mask}, loops={loops}");
+                assert!(graph.opened.get() <= n);
+                assert!(graph.visited.get() <= arcs);
+            }
+        }
+    }
+
+    #[test]
+    fn maximum_degree_seed_avoids_leaf_scans_for_early_and_late_stars() {
+        let n = 1_025;
+        for center in [0, n / 2, n - 1] {
+            let mut rows = vec![Vec::new(); n];
+            for leaf in 0..n {
+                if leaf != center {
+                    rows[center].push(leaf);
+                    rows[leaf].push(center);
+                }
+            }
+            let graph = counted(rows, true);
+            let KernelValues::Components(actual) = execute(&graph).values else {
+                panic!("components")
+            };
+            assert_eq!(actual, vec![0; n]);
+            assert_eq!(graph.opened.get(), 1, "center={center}");
+            assert_eq!(graph.visited.get(), n - 1, "center={center}");
+        }
+    }
+
+    #[test]
+    fn seed_scan_and_omitted_rows_keep_every_live_cancellation_boundary() {
+        let n = 10;
+        let rows: Vec<Vec<_>> = (0..n)
+            .map(|source| {
+                (0..n)
+                    .filter(|&target| source / 5 == target / 5 && source != target)
+                    .collect()
+            })
+            .collect();
+        let admission = ResultAdmission {
+            row_bytes: 0,
+            column_bytes: 0,
+            max_rows: n,
+            max_bytes: 0,
+            delivery: super::super::Delivery::Collected,
+        };
+        let mut calls = 0;
+        weak(&counted(rows.clone(), true), &admission, &mut || {
+            calls += 1;
+            Ok(())
+        })
+        .unwrap();
+        for stop in 1..=calls {
+            let mut observed = 0;
+            let result = weak(&counted(rows.clone(), true), &admission, &mut || {
+                observed += 1;
+                if observed == stop {
+                    Err(ExecutionError::InvalidUpstreamResult.into())
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(result.is_err(), "stop={stop}");
+            assert_eq!(observed, stop, "no callback after the refusing boundary");
         }
     }
 }

@@ -604,7 +604,7 @@ impl FnxCallSpec {
                         if strong {
                             "fgdb-prism/sealed-tarjan-cooperative-v1"
                         } else {
-                            "fgdb-prism/sealed-union-find-complete-cooperative-v2"
+                            "fgdb-prism/sealed-union-find-seed-component-cooperative-v3"
                         },
                         super::components::work(n, graph.adjacency_entry_count(), pass, strong)?,
                         super::components::workspace(n, strong)?,
@@ -967,21 +967,23 @@ where
     let mut sizes = reserve(n)?;
     let symmetric = graph.spec().directedness == crate::Directedness::Undirected;
     let mut remaining = if symmetric { 0 } else { n };
+    let mut seed = super::components::WeakSeed::default();
     for vertex in 0..n {
         control.tick().await?;
-        if symmetric
-            && graph
+        if symmetric {
+            let degree = graph
                 .degree(vertex)
-                .ok_or(ExecutionError::InvalidUpstreamResult)?
-                != 0
-        {
-            remaining = add(remaining, 1)?;
+                .ok_or(ExecutionError::InvalidUpstreamResult)?;
+            if degree != 0 {
+                remaining = add(remaining, 1)?;
+            }
+            seed.consider(vertex, degree);
         }
         parents.push(vertex);
         sizes.push(1usize);
     }
     let mut witness = ComplexityWitness {
-        algorithm: "weakly_connected_components_union_find_complete_v2".to_owned(),
+        algorithm: "weakly_connected_components_union_find_seed_component_v3".to_owned(),
         complexity_claim:
             "O(|V| log(1+H) + (H+|V|) log(1+|V|)) compressed row visits and bounded union-find"
                 .to_owned(),
@@ -991,11 +993,20 @@ where
     };
     // A successful union joins two eligible components, decrementing this
     // count once. Test only between rows, preserving the synchronous prefix.
-    for source in 0..n {
+    let first = (symmetric && n != 0).then_some(seed.vertex);
+    let sources = first
+        .into_iter()
+        .chain((0..n).filter(move |&vertex| Some(vertex) != first));
+    for source in sources {
         if remaining <= 1 {
             break;
         }
         control.tick().await?;
+        // Omitted rows still spend fuel. The same sufficient membership proof
+        // and symmetric-incidence law govern the synchronous kernel.
+        if symmetric && Some(source) != first && seed.contains(&parents, source) {
+            continue;
+        }
         witness.nodes_touched = add(witness.nodes_touched, 1)?;
         let mut row = graph.neighbor_cursor_controlled(control.cx, source, None)?;
         while let Some((target, _)) = control.next(&mut row).await? {
@@ -1014,6 +1025,7 @@ where
             }
             sizes[a] = add(sizes[a], sizes[b])?;
             parents[b] = a;
+            seed.joined(a, b);
             remaining = remaining
                 .checked_sub(1)
                 .ok_or(ExecutionError::InvalidUpstreamResult)?;

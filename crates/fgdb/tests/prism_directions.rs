@@ -1311,7 +1311,7 @@ fn registered_procedures_reach_directional_images_from_database_and_reusable_pro
                 if text == CC {
                     assert_eq!(
                         output.analytics.certificate.execution_kernel,
-                        "fgdb-prism/sealed-union-find-complete-v2"
+                        "fgdb-prism/sealed-union-find-seed-component-v3"
                     );
                     assert!(
                         output

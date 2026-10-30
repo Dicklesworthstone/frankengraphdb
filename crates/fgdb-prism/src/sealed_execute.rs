@@ -1024,7 +1024,7 @@ impl FnxCallSpec {
                 let kernel = if strong {
                     "fgdb-prism/sealed-tarjan-v1"
                 } else {
-                    "fgdb-prism/sealed-union-find-complete-v2"
+                    "fgdb-prism/sealed-union-find-seed-component-v3"
                 };
                 (
                     kernel,
