@@ -561,22 +561,56 @@ mod tests {
                     row.sort_unstable();
                 }
                 let expected = reference(&rows);
-                let arcs: usize = rows.iter().map(Vec::len).sum();
-                for admitted in [false, true] {
-                    let mut graph = counted(rows.clone(), true);
-                    graph.admitted = admitted;
-                    let KernelValues::Components(actual) = execute(&graph).values else {
-                        panic!("components")
-                    };
-                    assert_eq!(
-                        actual, expected,
-                        "mask={mask}, loops={loops}, admitted={admitted}"
-                    );
-                    assert!(graph.opened.get() <= n);
-                    assert!(graph.visited.get() <= arcs);
-                    if !admitted {
-                        assert_eq!(graph.opened.get(), n);
-                        assert_eq!(graph.visited.get(), arcs);
+                for duplicates in [false, true] {
+                    let expanded: Vec<Vec<usize>> = rows
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .flat_map(|&target| {
+                                    std::iter::repeat_n(target, if duplicates { 2 } else { 1 })
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    for order in ["ascending", "reversed", "rotated"] {
+                        let mut ordered = expanded.clone();
+                        for (source, row) in ordered.iter_mut().enumerate() {
+                            if order == "reversed" {
+                                row.reverse();
+                            } else if order == "rotated" && !row.is_empty() {
+                                let shift = (source + 1) % row.len();
+                                row.rotate_left(shift);
+                            }
+                        }
+                        assert_eq!(reference(&ordered), expected);
+                        let arcs: usize = ordered.iter().map(Vec::len).sum();
+                        for admitted in [false, true] {
+                            let mut graph = counted(ordered.clone(), true);
+                            graph.admitted = admitted;
+                            let KernelValues::Components(actual) = execute(&graph).values else {
+                                panic!("components")
+                            };
+                            assert_eq!(
+                                actual, expected,
+                                "mask={mask}, loops={loops}, duplicates={duplicates}, order={order}, admitted={admitted}"
+                            );
+                            assert!(graph.opened.get() <= n);
+                            assert!(graph.visited.get() <= arcs);
+                            if !admitted {
+                                assert_eq!(graph.opened.get(), n);
+                                assert_eq!(graph.visited.get(), arcs);
+                            }
+                            // Bounded receipts for isolates/disconnected rows
+                            // and a highest-ordinal hub. Every mask is asserted;
+                            // only these three representatives print full labels.
+                            if matches!(mask, 0 | 1 | 840) {
+                                let opened = graph.opened.get();
+                                let visited = graph.visited.get();
+                                println!(
+                                    r#"{{"check":"component_partition_model","source_kind":"immutable_library_rows","source_root":null,"seed":null,"case_id":{mask},"vertices":{n},"symmetric":true,"loops":{loops},"duplicate_incidences":{duplicates},"row_order":"{order}","admitted":{admitted},"expected":{expected:?},"actual":{actual:?},"ops":{{"opened_rows":{opened},"visited_incidences":{visited},"available_incidences":{arcs}}},"fault":null,"terminal":"ok"}}"#
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -643,13 +677,21 @@ mod tests {
                     rows[leaf].push(center);
                 }
             }
-            let graph = counted(rows, true);
-            let KernelValues::Components(actual) = execute(&graph).values else {
-                panic!("components")
-            };
-            assert_eq!(actual, vec![0; n]);
-            assert_eq!(graph.opened.get(), 1, "center={center}");
-            assert_eq!(graph.visited.get(), n - 1, "center={center}");
+            for admitted in [false, true] {
+                let mut graph = counted(rows.clone(), true);
+                graph.admitted = admitted;
+                let KernelValues::Components(actual) = execute(&graph).values else {
+                    panic!("components")
+                };
+                assert_eq!(actual, vec![0; n]);
+                if admitted {
+                    assert_eq!(graph.opened.get(), 1, "center={center}");
+                    assert_eq!(graph.visited.get(), n - 1, "center={center}");
+                } else {
+                    assert_eq!(graph.opened.get(), n, "center={center}");
+                    assert_eq!(graph.visited.get(), 2 * (n - 1), "center={center}");
+                }
+            }
         }
     }
 

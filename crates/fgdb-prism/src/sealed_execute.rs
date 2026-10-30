@@ -2929,6 +2929,211 @@ mod tests {
         }
     }
 
+    // Validation precedes fault injection and derives the omission facts from
+    // the complete immutable rows, independently of the component evaluator.
+    struct AdmittedFaultRows<'a> {
+        graph: &'a SnapshotGraphView,
+        degrees: Vec<usize>,
+        symmetric: bool,
+        calls: std::cell::Cell<usize>,
+        events: RefCell<Vec<(&'static str, usize)>>,
+        fail_at: usize,
+    }
+    impl<'a> AdmittedFaultRows<'a> {
+        fn new(graph: &'a SnapshotGraphView, fail_at: usize) -> Result<Self> {
+            let n = graph.node_count();
+            let mut degrees = Vec::new();
+            let mut occurrences = std::collections::BTreeMap::new();
+            for source in 0..n {
+                let (targets, weights) = graph
+                    .projected_row(source)
+                    .ok_or(ExecutionError::InvalidUpstreamResult)?;
+                if targets.len() != weights.len()
+                    || graph.neighbors_indices(source) != Some(targets)
+                {
+                    return Err(ExecutionError::InvalidUpstreamResult.into());
+                }
+                let mut degree = 0;
+                for &target in targets {
+                    if target >= n {
+                        return Err(ExecutionError::InvalidUpstreamResult.into());
+                    }
+                    degree = add(degree, 1)?;
+                    let count = occurrences.entry((source, target)).or_insert(0usize);
+                    *count = add(*count, 1)?;
+                }
+                degrees.push(degree);
+            }
+            let symmetric = !graph.is_directed();
+            if symmetric {
+                for (&(source, target), &count) in &occurrences {
+                    if occurrences.get(&(target, source)) != Some(&count) {
+                        return Err(ExecutionError::InvalidUpstreamResult.into());
+                    }
+                }
+            }
+            Ok(Self {
+                graph,
+                degrees,
+                symmetric,
+                calls: std::cell::Cell::new(0),
+                events: RefCell::new(Vec::new()),
+                fail_at,
+            })
+        }
+    }
+    struct AdmittedFaultRow<'a> {
+        row: DecodedRow<'a>,
+        source: usize,
+        calls: &'a std::cell::Cell<usize>,
+        events: &'a RefCell<Vec<(&'static str, usize)>>,
+        fail_at: usize,
+    }
+    impl Cursor for AdmittedFaultRow<'_> {
+        fn next(&mut self) -> Result<Option<(usize, f64)>> {
+            let kind = if self.row.row.len() == 0 {
+                "eof"
+            } else {
+                "pull"
+            };
+            self.events.borrow_mut().push((kind, self.source));
+            fault_step(self.calls, self.fail_at)?;
+            self.row.next()
+        }
+    }
+    impl Rows for AdmittedFaultRows<'_> {
+        type Cursor<'a>
+            = AdmittedFaultRow<'a>
+        where
+            Self: 'a;
+        fn node_count(&self) -> usize {
+            self.degrees.len()
+        }
+        fn degree(&self, source: usize) -> Option<usize> {
+            self.degrees.get(source).copied()
+        }
+        fn has_validated_adjacency(&self) -> bool {
+            true
+        }
+        fn is_undirected(&self) -> bool {
+            self.symmetric
+        }
+        fn open(&self, source: usize) -> Result<Self::Cursor<'_>> {
+            self.events.borrow_mut().push(("open", source));
+            fault_step(&self.calls, self.fail_at)?;
+            let (targets, weights) = self
+                .graph
+                .projected_row(source)
+                .ok_or(ExecutionError::InvalidUpstreamResult)?;
+            Ok(AdmittedFaultRow {
+                row: DecodedRow {
+                    row: targets.iter().zip(weights),
+                },
+                source,
+                calls: &self.calls,
+                events: &self.events,
+                fail_at: self.fail_at,
+            })
+        }
+    }
+
+    #[test]
+    fn admitted_components_drain_the_last_required_eof_and_stop_at_each_reached_source_fault() {
+        // These are library fixture coordinates, not an authenticated DB root.
+        let vertices = [VId(0), VId(17), VId(u128::MAX)];
+        let edges: Vec<_> = (0..9)
+            .map(|bit| ProjectionEdge {
+                eid: EId(bit as u128),
+                source: vertices[bit / 3],
+                target: vertices[bit % 3],
+                weight: 1.0,
+            })
+            .collect();
+        for direction in [Directedness::Directed, Directedness::Undirected] {
+            let graph = SnapshotGraphView::build(
+                SnapshotBinding {
+                    root: ObjectId([0xa7; 32]),
+                    as_of: CommitSeq(1),
+                },
+                &vertices,
+                &edges,
+                ProjectionSpec {
+                    directedness: direction,
+                    parallel_edges: ParallelEdgePolicy::Sum,
+                    self_loops: SelfLoopPolicy::Keep,
+                },
+                ProjectionLimits {
+                    max_vertices: 3,
+                    max_input_edges: 9,
+                    max_adjacency_entries: 9,
+                    max_workspace_bytes: 1 << 20,
+                },
+            )
+            .unwrap();
+            let admission =
+                ResultAdmission::new(&component_call(false), limits(), memory()).unwrap();
+            let source = AdmittedFaultRows::new(&graph, usize::MAX).unwrap();
+            assert_eq!(
+                source.calls.get(),
+                0,
+                "complete validation precedes fault injection"
+            );
+            let output = run_components(&source, false, &admission, &mut || Ok(())).unwrap();
+            let KernelValues::Components(actual) = output.values else {
+                panic!("components")
+            };
+            let expected = vec![0, 0, 0];
+            assert_eq!(actual, expected);
+            let events = source.events.borrow().clone();
+            let operations = source.calls.get();
+            assert_eq!(
+                operations,
+                1 + 3 + 1,
+                "one open, complete row, required EOF"
+            );
+            assert_eq!(
+                events,
+                vec![
+                    ("open", 0),
+                    ("pull", 0),
+                    ("pull", 0),
+                    ("pull", 0),
+                    ("eof", 0)
+                ]
+            );
+            assert_eq!(output.witness.nodes_touched, 1);
+            assert_eq!(output.witness.edges_scanned, 3);
+            let symmetric = source.symmetric;
+            println!(
+                r#"{{"check":"admitted_component_faults","source_kind":"validated_decoded_library_fixture","source_root":null,"seed":null,"case_id":"complete_three","symmetric":{symmetric},"expected":{expected:?},"actual":{actual:?},"ops":{{"open":1,"pull":3,"eof":1,"total":{operations}}},"fault":null,"terminal":"ok"}}"#
+            );
+            for fail_at in 1..=operations {
+                let source = AdmittedFaultRows::new(&graph, fail_at).unwrap();
+                let result = run_components(&source, false, &admission, &mut || Ok(()));
+                assert!(matches!(
+                    result,
+                    Err(Error::Source(SealedProjectionError::UnknownOrdinal(
+                        usize::MAX
+                    )))
+                ));
+                assert_eq!(
+                    source.calls.get(),
+                    fail_at,
+                    "no source resume after failure"
+                );
+                assert_eq!(source.events.borrow().as_slice(), &events[..fail_at]);
+                let (kind, ordinal) = events[fail_at - 1];
+                let last_required_eof = fail_at == operations;
+                if last_required_eof {
+                    assert_eq!(kind, "eof", "the final reached pull must remain observable");
+                }
+                println!(
+                    r#"{{"check":"admitted_component_faults","source_kind":"validated_decoded_library_fixture","source_root":null,"seed":null,"case_id":"complete_three","symmetric":{symmetric},"expected":{expected:?},"actual":null,"ops":{{"attempted":{fail_at}}},"fault":{{"at":{fail_at},"kind":"{kind}","source_ordinal":{ordinal},"last_required_eof":{last_required_eof}}},"terminal":"source_error"}}"#
+                );
+            }
+        }
+    }
+
     #[test]
     fn component_admission_precedes_source_access_and_counts_isolates() {
         let graph = projection(0);
