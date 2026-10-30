@@ -16,6 +16,8 @@ pub(super) fn compile(
     query: &PreparedGraphSet,
     depth: usize,
     stages: &mut Vec<SpillSetStage>,
+    admission: &mut ProcedureAdmission,
+    in_apply_body: bool,
 ) -> Result<Option<SpillSetCrossPlan>, SpillSetBuildError> {
     let Some((left, right, code, projection)) = query.filtered_cross_inputs() else {
         return Ok(None);
@@ -51,8 +53,18 @@ pub(super) fn compile(
             .into_boxed_slice()
     });
     let plan = SpillSetCrossPlan {
-        left: Box::new(AsyncSpillSetPlan::compile_at(left, child_depth)?),
-        right: Box::new(AsyncSpillSetPlan::compile_at(right, child_depth)?),
+        left: Box::new(AsyncSpillSetPlan::compile_at(
+            left,
+            child_depth,
+            admission,
+            in_apply_body,
+        )?),
+        right: Box::new(AsyncSpillSetPlan::compile_at(
+            right,
+            child_depth,
+            admission,
+            in_apply_body,
+        )?),
         columns: query.columns.clone(),
         types: query.types.clone(),
         selection: Some(Selection {

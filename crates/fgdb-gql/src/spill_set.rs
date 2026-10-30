@@ -11,11 +11,14 @@
 //! NULLs and duplicates in body order under the native value bounds.
 //! The host owns scratch files, memory reservations and one cumulative query
 //! allowance. Row stages use ordinary native expression and predicate evaluators.
+//! An explicit single-procedure compiler admits one source outside correlated
+//! bodies; the host must validate that original call before opening storage.
+//! Default compilation continues to refuse every procedure source.
 
 pub use crate::set_ops::spill::{
     AsyncSpillElementSource, AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetAggregatePlan,
     SpillSetAggregateRowError, SpillSetApplyKind, SpillSetApplyPlan, SpillSetArgumentsPlan,
     SpillSetBinaryPlan, SpillSetBuildError, SpillSetCollection, SpillSetCrossPlan,
-    SpillSetJoinPlan, SpillSetMergeStep, SpillSetRowError, SpillSetRows, SpillSetStage,
-    SpillSetValuesPlan,
+    SpillSetJoinPlan, SpillSetMergeStep, SpillSetProcedurePlan, SpillSetRowError, SpillSetRows,
+    SpillSetStage, SpillSetValuesPlan,
 };

@@ -23,9 +23,11 @@ use core::convert::Infallible;
 use fgdb_delta_types::{ElementId, PropertyKeyId};
 
 mod apply;
+mod procedure;
 mod relational_join;
 mod selected_cross;
 pub use apply::{SpillSetApplyKind, SpillSetApplyPlan, SpillSetArgumentsPlan, SpillSetCollection};
+pub use procedure::SpillSetProcedurePlan;
 pub use relational_join::SpillSetJoinPlan;
 
 /// The executing host's pinned, awaitable element-property reader.
@@ -126,6 +128,8 @@ impl core::error::Error for SpillSetBuildError {}
 /// Aggregate owns one complete input and the existing exact numeric reducer.
 /// Apply owns a complete left input and a complete body per selected occurrence;
 /// Arguments reads only its nearest enclosing Apply's imported row.
+/// Procedure is available only through explicit single-procedure compilation;
+/// the host admits and completes its source before downstream stages run.
 /// This is a fixed source choice, never a fallback strategy.
 #[derive(Clone, Debug)]
 pub enum AsyncSpillSetSourcePlan {
@@ -139,6 +143,7 @@ pub enum AsyncSpillSetSourcePlan {
     Aggregate(SpillSetAggregatePlan),
     Apply(SpillSetApplyPlan),
     Arguments(SpillSetArgumentsPlan),
+    Procedure(SpillSetProcedurePlan),
 }
 impl AsyncSpillSetSourcePlan {
     pub fn kind(&self) -> ScanKind {
@@ -146,7 +151,11 @@ impl AsyncSpillSetSourcePlan {
             Self::Values(_) | Self::Arguments(_) => ScanKind::Values,
             Self::Vertex(_) => ScanKind::Vertex,
             Self::Edge(_) | Self::Join(_) => ScanKind::Edge,
-            Self::Binary(_) | Self::Cross(_) | Self::RowJoin(_) | Self::Apply(_) => ScanKind::Set,
+            Self::Binary(_)
+            | Self::Cross(_)
+            | Self::RowJoin(_)
+            | Self::Apply(_)
+            | Self::Procedure(_) => ScanKind::Set,
             Self::Aggregate(aggregate) => aggregate.input().source().kind(),
         }
     }
@@ -439,14 +448,49 @@ pub struct AsyncSpillSetPlan {
     graph: Option<GraphSourceMetadata>,
     stages: Vec<SpillSetStage>,
 }
+
+#[derive(Default)]
+struct ProcedureAdmission {
+    enabled: bool,
+    count: usize,
+}
+
 impl AsyncSpillSetPlan {
     pub fn compile(query: &PreparedGraphSet) -> Result<Self, SpillSetBuildError> {
-        Self::compile_at(query, 0)
+        Self::compile_at(query, 0, &mut ProcedureAdmission::default(), false)
     }
 
-    fn compile_at(query: &PreparedGraphSet, depth: usize) -> Result<Self, SpillSetBuildError> {
+    /// Admit exactly one procedure source that executes once, outside every
+    /// correlated Apply body. The ordinary compiler still refuses procedures.
+    /// This is a physical-source capability, not query or storage authority.
+    ///
+    /// Before opening any source or scratch writer, the host must inspect
+    /// `procedure_source()` and admit its namespace, signature, graph selection
+    /// and output profile. Arguments remain unevaluated until that source is
+    /// reached: earlier children and expressions retain their error order.
+    /// All ordinary descendants are still compiled, even beneath empty pages.
+    pub fn compile_with_single_procedure(
+        query: &PreparedGraphSet,
+    ) -> Result<Self, SpillSetBuildError> {
+        let mut admission = ProcedureAdmission {
+            enabled: true,
+            count: 0,
+        };
+        let plan = Self::compile_at(query, 0, &mut admission, false)?;
+        if admission.count != 1 {
+            return Err(SpillSetBuildError::Unsupported { depth: 0 });
+        }
+        Ok(plan)
+    }
+
+    fn compile_at(
+        query: &PreparedGraphSet,
+        depth: usize,
+        admission: &mut ProcedureAdmission,
+        in_apply_body: bool,
+    ) -> Result<Self, SpillSetBuildError> {
         let mut stages = Vec::new();
-        let pattern = match compile_stages(query, depth, &mut stages)? {
+        let pattern = match compile_stages(query, depth, &mut stages, admission, in_apply_body)? {
             CompiledSource::Values => {
                 return Ok(Self {
                     source: AsyncSpillSetSourcePlan::Values(SpillSetValuesPlan { _private: () }),
@@ -496,6 +540,13 @@ impl AsyncSpillSetPlan {
                     stages,
                 });
             }
+            CompiledSource::Procedure(procedure) => {
+                return Ok(Self {
+                    source: AsyncSpillSetSourcePlan::Procedure(procedure),
+                    graph: None,
+                    stages,
+                });
+            }
             CompiledSource::Pattern(pattern) => pattern,
         };
         let (source, source_tail) = if matches!(
@@ -540,6 +591,31 @@ impl AsyncSpillSetPlan {
     pub fn source(&self) -> &AsyncSpillSetSourcePlan {
         &self.source
     }
+
+    /// The single explicit procedure capability, wherever its original source
+    /// occurs in the complete relation. Default-compiled plans return None.
+    /// This definition-only inspection never evaluates arguments or reads data.
+    pub fn procedure_source(&self) -> Option<&SpillSetProcedurePlan> {
+        match &self.source {
+            AsyncSpillSetSourcePlan::Procedure(procedure) => Some(procedure),
+            AsyncSpillSetSourcePlan::Binary(binary) => binary
+                .left()
+                .procedure_source()
+                .or_else(|| binary.right().procedure_source()),
+            AsyncSpillSetSourcePlan::Cross(cross) => cross
+                .left()
+                .procedure_source()
+                .or_else(|| cross.right().procedure_source()),
+            AsyncSpillSetSourcePlan::RowJoin(join) => join
+                .left()
+                .procedure_source()
+                .or_else(|| join.right().procedure_source()),
+            AsyncSpillSetSourcePlan::Aggregate(aggregate) => aggregate.input().procedure_source(),
+            AsyncSpillSetSourcePlan::Apply(apply) => apply.left().procedure_source(),
+            _ => None,
+        }
+    }
+
     pub fn source_columns(&self) -> &[String] {
         match &self.source {
             AsyncSpillSetSourcePlan::Binary(binary) => binary.columns(),
@@ -548,6 +624,7 @@ impl AsyncSpillSetPlan {
             AsyncSpillSetSourcePlan::Aggregate(aggregate) => aggregate.columns(),
             AsyncSpillSetSourcePlan::Apply(apply) => apply.columns(),
             AsyncSpillSetSourcePlan::Arguments(arguments) => arguments.columns(),
+            AsyncSpillSetSourcePlan::Procedure(procedure) => procedure.columns(),
             _ => self
                 .graph
                 .as_ref()
@@ -560,7 +637,7 @@ impl AsyncSpillSetPlan {
     pub fn stages(&self) -> &[SpillSetStage] {
         &self.stages
     }
-    /// Logical graph-source count, independent of runtime row cardinality.
+    /// Logical graph/procedure-source count, independent of runtime row cardinality.
     /// An Apply body keeps the same source-ordinal range on every invocation,
     /// including when the left child has no rows and the body never runs.
     /// Values and Arguments occupy no graph-source ordinal.
@@ -568,7 +645,8 @@ impl AsyncSpillSetPlan {
         match &self.source {
             AsyncSpillSetSourcePlan::Vertex(_)
             | AsyncSpillSetSourcePlan::Edge(_)
-            | AsyncSpillSetSourcePlan::Join(_) => 1,
+            | AsyncSpillSetSourcePlan::Join(_)
+            | AsyncSpillSetSourcePlan::Procedure(_) => 1,
             AsyncSpillSetSourcePlan::Values(_) | AsyncSpillSetSourcePlan::Arguments(_) => 0,
             AsyncSpillSetSourcePlan::Binary(binary) => {
                 binary.left().source_count() + binary.right().source_count()
@@ -1056,8 +1134,10 @@ fn compile_stages<'a>(
     query: &'a PreparedGraphSet,
     depth: usize,
     stages: &mut Vec<SpillSetStage>,
+    admission: &mut ProcedureAdmission,
+    in_apply_body: bool,
 ) -> Result<CompiledSource<'a>, SpillSetBuildError> {
-    if let Some(cross) = selected_cross::compile(query, depth, stages)? {
+    if let Some(cross) = selected_cross::compile(query, depth, stages, admission, in_apply_body)? {
         return Ok(CompiledSource::Cross(cross));
     }
     let (pattern, input, operation, canonical, distinct) = match &query.node {
@@ -1086,14 +1166,14 @@ fn compile_stages<'a>(
             false,
         ),
         SetNode::Scope(input) => (
-            compile_stages(input, depth + 1, stages)?,
+            compile_stages(input, depth + 1, stages, admission, in_apply_body)?,
             input.types.clone(),
             Operation::Identity,
             false,
             false,
         ),
         SetNode::Filter { input, predicate } => (
-            compile_stages(input, depth + 1, stages)?,
+            compile_stages(input, depth + 1, stages, admission, in_apply_body)?,
             input.types.clone(),
             Operation::Filter(predicate.clone()),
             false,
@@ -1105,7 +1185,7 @@ fn compile_stages<'a>(
             quantifier,
             preserve_order,
         } => (
-            compile_stages(input, depth + 1, stages)?,
+            compile_stages(input, depth + 1, stages, admission, in_apply_body)?,
             input.types.clone(),
             Operation::Project {
                 projection: projection.clone(),
@@ -1118,7 +1198,7 @@ fn compile_stages<'a>(
             *quantifier == GraphSetQuantifier::Distinct,
         ),
         SetNode::Unwind { input, value } => (
-            compile_stages(input, depth + 1, stages)?,
+            compile_stages(input, depth + 1, stages, admission, in_apply_body)?,
             input.types.clone(),
             Operation::Unwind {
                 value: value.clone(),
@@ -1134,8 +1214,18 @@ fn compile_stages<'a>(
             right,
         } => (
             CompiledSource::Binary(SpillSetBinaryPlan {
-                left: Box::new(AsyncSpillSetPlan::compile_at(left, depth + 1)?),
-                right: Box::new(AsyncSpillSetPlan::compile_at(right, depth + 1)?),
+                left: Box::new(AsyncSpillSetPlan::compile_at(
+                    left,
+                    depth + 1,
+                    admission,
+                    in_apply_body,
+                )?),
+                right: Box::new(AsyncSpillSetPlan::compile_at(
+                    right,
+                    depth + 1,
+                    admission,
+                    in_apply_body,
+                )?),
                 operation: *operation,
                 quantifier: *quantifier,
                 columns: query.columns.clone(),
@@ -1152,8 +1242,18 @@ fn compile_stages<'a>(
             }
             (
                 CompiledSource::Cross(SpillSetCrossPlan {
-                    left: Box::new(AsyncSpillSetPlan::compile_at(left, depth + 1)?),
-                    right: Box::new(AsyncSpillSetPlan::compile_at(right, depth + 1)?),
+                    left: Box::new(AsyncSpillSetPlan::compile_at(
+                        left,
+                        depth + 1,
+                        admission,
+                        in_apply_body,
+                    )?),
+                    right: Box::new(AsyncSpillSetPlan::compile_at(
+                        right,
+                        depth + 1,
+                        admission,
+                        in_apply_body,
+                    )?),
                     columns: query.columns.clone(),
                     types: query.types.clone(),
                     selection: None,
@@ -1165,7 +1265,12 @@ fn compile_stages<'a>(
             )
         }
         SetNode::Aggregate(summary) => {
-            let input = AsyncSpillSetPlan::compile_at(summary.input(), depth + 1)?;
+            let input = AsyncSpillSetPlan::compile_at(
+                summary.input(),
+                depth + 1,
+                admission,
+                in_apply_body,
+            )?;
             let definition = SpillAggregateDefinition::from_relation(summary)
                 .map_err(|_| SpillSetBuildError::Unsupported { depth })?;
             (
@@ -1183,8 +1288,18 @@ fn compile_stages<'a>(
         }
         SetNode::Join { left, right, spec } => (
             CompiledSource::RowJoin(SpillSetJoinPlan {
-                left: Box::new(AsyncSpillSetPlan::compile_at(left, depth + 1)?),
-                right: Box::new(AsyncSpillSetPlan::compile_at(right, depth + 1)?),
+                left: Box::new(AsyncSpillSetPlan::compile_at(
+                    left,
+                    depth + 1,
+                    admission,
+                    in_apply_body,
+                )?),
+                right: Box::new(AsyncSpillSetPlan::compile_at(
+                    right,
+                    depth + 1,
+                    admission,
+                    in_apply_body,
+                )?),
                 spec: spec.clone(),
                 columns: query.columns.clone(),
                 types: query.types.clone(),
@@ -1212,8 +1327,20 @@ fn compile_stages<'a>(
             }
             (
                 CompiledSource::Apply(SpillSetApplyPlan {
-                    left: Box::new(AsyncSpillSetPlan::compile_at(left, depth + 1)?),
-                    right: Box::new(AsyncSpillSetPlan::compile_at(right, depth + 1)?),
+                    left: Box::new(AsyncSpillSetPlan::compile_at(
+                        left,
+                        depth + 1,
+                        admission,
+                        in_apply_body,
+                    )?),
+                    // A procedure below this body would execute once for each
+                    // outer occurrence, even with no imported argument cells.
+                    right: Box::new(AsyncSpillSetPlan::compile_at(
+                        right,
+                        depth + 1,
+                        admission,
+                        true,
+                    )?),
                     imports: imports.clone(),
                     kind,
                     columns: query.columns.clone(),
@@ -1225,7 +1352,24 @@ fn compile_stages<'a>(
                 false,
             )
         }
-        SetNode::ProcedureCall(_) | SetNode::Owned { .. } => {
+        SetNode::ProcedureCall(call) => {
+            if !admission.enabled || in_apply_body || admission.count != 0 {
+                return Err(SpillSetBuildError::Unsupported { depth });
+            }
+            admission.count = 1;
+            (
+                CompiledSource::Procedure(SpillSetProcedurePlan {
+                    call: call.clone(),
+                    columns: query.columns.clone(),
+                    types: query.types.clone(),
+                }),
+                query.types.clone(),
+                Operation::Identity,
+                !call.preserves_row_order(),
+                false,
+            )
+        }
+        SetNode::Owned { .. } => {
             return Err(SpillSetBuildError::Unsupported { depth });
         }
     };
@@ -1256,6 +1400,7 @@ enum CompiledSource<'a> {
     Aggregate(SpillSetAggregatePlan),
     Apply(SpillSetApplyPlan),
     Arguments(SpillSetArgumentsPlan),
+    Procedure(SpillSetProcedurePlan),
 }
 
 #[cfg(test)]

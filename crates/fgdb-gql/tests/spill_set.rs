@@ -13,11 +13,13 @@ use fgdb_gql::spill_set::{
     SpillSetBuildError, SpillSetRowError, SpillSetStage,
 };
 use fgdb_gql::{
-    GlaExecutionEvent, GqlParameters, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
-    GraphAggregate, GraphAggregateError, GraphAggregateRow, GraphAggregateValue, GraphExactAverage,
-    GraphIntegerErrorKind, GraphSetColumnType, GraphSetExecutionError, GraphSetOperation,
-    GraphSetProjection, GraphSetQuantifier, GraphSetValue, GraphSymbol, GraphSymbolKind,
-    PreparedGraphSet, PreparedGraphSetAggregate, PreparedGraphSetText, PreparedGraphText,
+    GlaExecutionEvent, GlaExecutionStats, GqlExecutionStats, GqlParameters, GqlQueryError,
+    GqlQueryExecution, GqlQueryPolicy, GraphAggregate, GraphAggregateError, GraphAggregateRow,
+    GraphAggregateValue, GraphExactAverage, GraphIntegerBinary, GraphIntegerErrorKind,
+    GraphIntegerExpression, GraphIntegerOp, GraphSetColumnType, GraphSetExecutionError,
+    GraphSetOperation, GraphSetProjection, GraphSetQuantifier, GraphSetValue, GraphSymbol,
+    GraphSymbolKind, PreparedGraphSet, PreparedGraphSetAggregate, PreparedGraphSetText,
+    PreparedGraphText, PreparedProcedureCall,
 };
 use fgdb_types::{CanonicalF64, CanonicalPropertyValue, CanonicalScalar, EId, VId};
 use std::collections::BTreeMap;
@@ -54,6 +56,27 @@ fn scalar(value: i64) -> GraphValue {
 }
 fn row(values: Vec<GraphValue>) -> GraphValueRow {
     GraphValueRow::from_owned_values(values)
+}
+
+fn procedure_rows(call: &PreparedProcedureCall, arguments: &[GraphValue]) -> Vec<GraphValueRow> {
+    assert_eq!((call.namespace(), call.name()), ("test", "rows"));
+    let [GraphValue::Scalar(CanonicalScalar::Int(bias))] = arguments else {
+        panic!("the semantic procedure fixture takes one integer");
+    };
+    [(3, 5), (1, 7), (2, 2)]
+        .into_iter()
+        .map(|(id, score)| {
+            row(call
+                .outputs()
+                .iter()
+                .map(|output| match output.as_str() {
+                    "vertex" => GraphValue::Vertex(VId(id)),
+                    "score" => scalar(bias + score),
+                    _ => panic!("the semantic procedure fixture exposes vertex and score"),
+                })
+                .collect())
+        })
+        .collect()
 }
 
 fn stage_rows<E>(
@@ -296,6 +319,15 @@ fn staged_plan_with_arguments(
             }
             rows
         }
+        AsyncSpillSetSourcePlan::Procedure(procedure) => {
+            assert!(plan.source_pattern().is_none());
+            assert!(plan.source_tail().is_none());
+            assert_eq!(plan.source_columns(), procedure.columns());
+            assert_eq!(plan.source_count(), 1);
+            assert_eq!(plan.source().kind(), fgdb_gql::scan_stream::ScanKind::Set);
+            let arguments = procedure.evaluate_arguments(&mut |_| Ok::<_, ()>(()))?;
+            procedure_rows(procedure.call(), &arguments)
+        }
         AsyncSpillSetSourcePlan::Apply(apply) => {
             assert!(plan.source_pattern().is_none());
             assert!(plan.source_tail().is_none());
@@ -494,6 +526,152 @@ fn staged_plan_with_arguments(
             .collect();
     }
     Ok(rows)
+}
+
+#[test]
+fn explicit_single_procedure_composes_with_native_stages_and_graph_sources() {
+    let graph = Graph::sample();
+    let vertex = |id| GraphValue::Vertex(VId(id));
+    let mut joined = Vec::new();
+    for marker in [7, 7] {
+        for (_, from, _, to) in &graph.edges {
+            joined.push(row(vec![
+                scalar(marker),
+                vertex(from.0),
+                vertex(to.0),
+                scalar(if from.0 == 1 { 17 } else { 12 }),
+            ]));
+        }
+    }
+    joined.sort();
+    for (text, expected, sources, aggregates) in [
+        (
+            "CALL test.rows(10) YIELD vertex AS n,score RETURN n,score ORDER BY n",
+            vec![
+                row(vec![vertex(1), scalar(17)]),
+                row(vec![vertex(2), scalar(12)]),
+                row(vec![vertex(3), scalar(15)]),
+            ],
+            1,
+            0,
+        ),
+        (
+            "CALL test.rows(10) YIELD vertex AS n,score WITH n,score ORDER BY score DESC SKIP 1 LIMIT 2 RETURN n,score ORDER BY score DESC",
+            vec![
+                row(vec![vertex(3), scalar(15)]),
+                row(vec![vertex(2), scalar(12)]),
+            ],
+            1,
+            0,
+        ),
+        (
+            "CALL test.rows(10) YIELD vertex AS n,score WITH score % 2 AS parity,count(*) AS total RETURN parity,total ORDER BY parity",
+            vec![
+                row(vec![scalar(0), scalar(1)]),
+                row(vec![scalar(1), scalar(2)]),
+            ],
+            1,
+            1,
+        ),
+        (
+            "UNWIND [7,7] AS marker CALL test.rows(10) YIELD vertex AS n,score MATCH (n)-[:R]->(m) RETURN marker,n,m,score ORDER BY marker,n,m,score",
+            joined,
+            2,
+            0,
+        ),
+    ] {
+        let query = prepare(text);
+        let transcript = query.canonical_bytes();
+        assert!(AsyncSpillSetPlan::compile(&query).is_err(), "{text}");
+        let plan = AsyncSpillSetPlan::compile_with_single_procedure(&query)
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        assert_eq!(plan.source_count(), sources, "{text}");
+        assert_eq!(plan.aggregate_count(), aggregates, "{text}");
+        assert_eq!(
+            plan.procedure_source().unwrap().call().outputs(),
+            ["vertex", "score"]
+        );
+        assert_eq!(staged_plan(&graph, &plan).unwrap(), expected, "{text}");
+        let mut calls = 0;
+        let native = query
+            .execute_governed_with_procedures(
+                policy(),
+                |pattern, policy| graph.execute(pattern, policy),
+                |call, arguments, _| {
+                    calls += 1;
+                    let value = procedure_rows(call, arguments);
+                    Ok(GqlQueryExecution {
+                        rows: GqlExecutionStats {
+                            snapshot_records: 0,
+                            result_rows: value.len() as u64,
+                        },
+                        evaluator: GlaExecutionStats::default(),
+                        value,
+                    })
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(calls, 1, "{text}");
+        assert_eq!(native.value, expected, "{text}");
+        assert_eq!(query.canonical_bytes(), transcript);
+    }
+}
+
+#[test]
+fn earlier_child_failures_precede_lazy_procedure_arguments_under_empty_pages() {
+    let graph = Graph::sample();
+    let argument = GraphSetValue::Integer(
+        GraphIntegerExpression::prepare(&[
+            GraphIntegerOp::Literal(Some(1)),
+            GraphIntegerOp::Literal(Some(0)),
+            GraphIntegerOp::Binary(GraphIntegerBinary::Divide),
+        ])
+        .unwrap(),
+    );
+    let procedure = PreparedGraphSet::singleton()
+        .procedure_call(
+            "test".into(),
+            "rows".into(),
+            vec![argument],
+            Vec::new(),
+            vec![("vertex".into(), "n".into())],
+            vec![0],
+        )
+        .unwrap();
+    let query = PreparedGraphSet::singleton()
+        .unwind("x".into(), GraphSetValue::Value(scalar(1)))
+        .unwrap()
+        .cross_join(procedure)
+        .unwrap()
+        .with_page(0, Some(0));
+    let plan = AsyncSpillSetPlan::compile_with_single_procedure(&query).unwrap();
+    let mut called = false;
+    let native = query.execute_governed_with_procedures(
+        policy(),
+        |pattern, policy| graph.execute(pattern, policy),
+        |call, arguments, _| {
+            called = true;
+            let value = procedure_rows(call, arguments);
+            Ok(GqlQueryExecution {
+                rows: GqlExecutionStats {
+                    snapshot_records: 0,
+                    result_rows: value.len() as u64,
+                },
+                evaluator: GlaExecutionStats::default(),
+                value,
+            })
+        },
+        || Ok(()),
+    );
+    let Err(GqlQueryError::Source(expected)) = native else {
+        panic!("UNWIND of a scalar must fail before the procedure source");
+    };
+    assert!(!called);
+    assert_eq!(
+        staged_plan(&graph, &plan),
+        Err(SpillSetRowError::Native(expected))
+    );
 }
 
 #[test]

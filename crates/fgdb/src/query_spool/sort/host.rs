@@ -304,7 +304,8 @@ where
         // The host boxes its own leaves.
         AsyncSpillSetSourcePlan::Vertex(_)
         | AsyncSpillSetSourcePlan::Edge(_)
-        | AsyncSpillSetSourcePlan::Join(_) => host.leaf(
+        | AsyncSpillSetSourcePlan::Join(_)
+        | AsyncSpillSetSourcePlan::Procedure(_) => host.leaf(
             plan,
             snapshot,
             cx,
