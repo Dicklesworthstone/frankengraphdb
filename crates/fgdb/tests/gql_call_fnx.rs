@@ -62,7 +62,7 @@ fn graph() -> WriteBatch {
 
 /// Every registered procedure: name, arguments, value output, and whether
 /// its signature law reads the graph undirected.
-const CALLS: [(&str, &str, &str, bool); 19] = [
+const CALLS: [(&str, &str, &str, bool); 20] = [
     ("pagerank", "", "score", false),
     ("single_source_shortest_path_length", "1", "distance", false),
     ("connected_components", "", "component", true),
@@ -86,6 +86,7 @@ const CALLS: [(&str, &str, &str, bool); 19] = [
     ("in_degree_centrality", "", "score", false),
     ("out_degree_centrality", "", "score", false),
     ("load_centrality", "", "score", true),
+    ("hits_centrality", "", "hub", false),
 ];
 
 /// The whole graph spelled out field by field, independent of
@@ -216,12 +217,15 @@ fn every_registered_procedure_composes_and_equals_the_standalone_call() {
     run_transaction(async |commit, cx, txcx| {
         let mut db = open(commit).await;
         let txn = db.begin(txcx).unwrap();
-        for (name, arguments, field, undirected) in CALLS.into_iter().chain([(
-            "pagerank",
-            "l1_tol => 1e-9, max_iter => 1000",
-            "score",
-            false,
-        )]) {
+        for (name, arguments, field, undirected) in CALLS.into_iter().chain([
+            (
+                "pagerank",
+                "l1_tol => 1e-9, max_iter => 1000",
+                "score",
+                false,
+            ),
+            ("hits_centrality", "", "authority", false),
+        ]) {
             let standalone = db
                 .call_fnx(
                     cx,

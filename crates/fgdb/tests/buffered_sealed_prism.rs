@@ -473,6 +473,10 @@ fn cooperative_buffered_calls_preserve_historical_answers_across_quanta() {
             "CALL fnx.pagerank(iterations => 4, weighted => false) YIELD vertex,score",
             "CALL fnx.in_degree_centrality() YIELD vertex,score",
             "CALL fnx.out_degree_centrality() YIELD vertex,score",
+            "CALL fnx.cdlp(max_iter => 0) YIELD vertex,component",
+            "CALL fnx.cdlp(max_iter => 1) YIELD vertex,component",
+            "CALL fnx.cdlp(max_iter => 2) YIELD vertex,component",
+            "CALL fnx.cdlp(max_iter => 5) YIELD vertex,component",
         ] {
             for cut in [CommitSeq(2), CommitSeq(3)] {
                 let mut opt = options();
@@ -488,6 +492,32 @@ fn cooperative_buffered_calls_preserve_historical_answers_across_quanta() {
                     .unwrap();
                 let decoded = writer.execute_fnx(&cx, &procedure, opt).unwrap();
                 assert_eq!(synchronous.analytics.rows, decoded.analytics.rows);
+                if let fgdb_prism::FnxAlgorithm::Cdlp { max_iter } = procedure.algorithm() {
+                    // Independent labels for the triangle (cut 2), then the
+                    // path after deleting its closing edge (cut 3). Each round
+                    // reads the preceding round; the isolated vertex keeps
+                    // its own full-width identity.
+                    let labels = if max_iter == 0 {
+                        [1, 2, 3]
+                    } else if cut == CommitSeq(2) {
+                        if max_iter == 1 { [2, 1, 1] } else { [1, 1, 1] }
+                    } else if max_iter % 2 == 1 {
+                        [2, 1, 2]
+                    } else {
+                        [1, 2, 1]
+                    };
+                    let expected: Vec<_> = [BASE + 1, BASE + 2, BASE + 3, u128::MAX]
+                        .into_iter()
+                        .zip(labels.map(|id| BASE + id).into_iter().chain([u128::MAX]))
+                        .map(|(vertex, component)| {
+                            vec![
+                                FnxValue::Vertex(VId(vertex)),
+                                FnxValue::Vertex(VId(component)),
+                            ]
+                        })
+                        .collect();
+                    assert_eq!(synchronous.analytics.rows, expected);
+                }
                 if directed_degree {
                     let incoming = text.contains("in_degree");
                     let counts = if cut == CommitSeq(2) {
@@ -595,15 +625,13 @@ fn cooperative_buffered_preflight_and_limits_remain_active_after_a_warm_build() 
         let mut view = cold(&contexts, &vfs, pool()).await;
         let q = NonZeroUsize::new(1).unwrap();
         let before = view.buffer_stats();
-        let unsupported = FnxCallSpec::bind(
-            "CALL fnx.cdlp(max_iter => 2) YIELD vertex,component",
-            &FnxParameters::new(),
-        )
-        .unwrap();
+        // Every currently registered algorithm has a cooperative kernel.
+        // Malformed arguments still refuse before any source access.
         assert!(matches!(
-            view.execute_fnx_sealed_cooperative(
+            view.call_fnx_sealed_cooperative(
                 &cx,
-                &unsupported,
+                "CALL fnx.cdlp(max_iter => -1) YIELD vertex,component",
+                &FnxParameters::new(),
                 options(),
                 memory(),
                 sealing(),
@@ -611,9 +639,7 @@ fn cooperative_buffered_preflight_and_limits_remain_active_after_a_warm_build() 
                 q,
             )
             .await,
-            Err(FnxSealedReadError::Execution(
-                FnxSealedExecutionError::UnsupportedCooperativeAlgorithm(_)
-            ))
+            Err(FnxSealedReadError::Input(FnxReadError::Bind(_)))
         ));
         let mut directed = options();
         directed.projection.directedness = Directedness::Directed;
