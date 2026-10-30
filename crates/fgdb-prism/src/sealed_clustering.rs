@@ -6,7 +6,9 @@
 //! one to all three exact u64 counts. Loops never enter counts or degrees.
 //! A bitmap and its sorted touched-word directory retain one source's marks.
 //! Enumerating those bits replaces a second compressed scan of that source;
-//! no projected adjacency or per-edge cache is retained.
+//! no projected adjacency or per-edge cache is retained. Each sorted inner row
+//! stops after the greatest marked ordinal: its remaining suffix cannot close
+//! a triangle, even when retained-cost order differs from ordinal order.
 //!
 //! Retained history, including invisible and excluded incidences on BOTH faces,
 //! determines row cost. A bounded planning pass admits every later repeated
@@ -67,9 +69,9 @@ pub(super) fn execute(
         &mut control,
     )?;
     let kernel = if coefficients {
-        "fgdb-prism/sealed-clustering-retained-cost-bitmap-v3"
+        "fgdb-prism/sealed-clustering-retained-cost-bitmap-v4"
     } else {
-        "fgdb-prism/sealed-triangles-retained-cost-bitmap-v3"
+        "fgdb-prism/sealed-triangles-retained-cost-bitmap-v4"
     };
     finish(
         call,
@@ -145,6 +147,14 @@ impl MarkedNeighbors {
     #[inline]
     fn contains(&self, vertex: usize) -> bool {
         self.words[vertex / 64] & (1u64 << (vertex % 64)) != 0
+    }
+
+    fn maximum(&self) -> Option<usize> {
+        let &word = self.touched.last()?;
+        // Insertions follow the fully validated strictly ascending source row;
+        // touched words are ordered and each still contains at least one mark.
+        let bit = (u64::BITS - 1 - self.words[word].leading_zeros()) as usize;
+        Some(word * 64 + bit)
     }
 
     fn clear(&mut self, control: &mut impl FnMut() -> Result<()>) -> Result<()> {
@@ -429,6 +439,9 @@ fn count_rows<const PRUNE: bool>(
         if PRUNE && lower_neighbors < 2 {
             continue;
         }
+        let Some(maximum) = marked.maximum() else {
+            continue;
+        };
         for &word in &marked.touched {
             control()?;
             let mut bits = marked.words[word];
@@ -443,6 +456,12 @@ fn count_rows<const PRUNE: bool>(
                 while let Some(third) = next_neighbor(&mut other, n, &mut previous)? {
                     control()?;
                     witness.edges_scanned = add(witness.edges_scanned, 1)?;
+                    // Planning validated the complete immutable row. The first
+                    // value beyond all marks proves its sorted suffix useless;
+                    // ordinal order alone cannot replace retained-cost order.
+                    if third > maximum {
+                        break;
+                    }
                     if lower(costs, third, target) && marked.contains(third) {
                         // Total orientation makes all three endpoints distinct.
                         for vertex in [source, target, third] {
@@ -633,9 +652,9 @@ where
     }
     control.tick().await?;
     let kernel = if coefficients {
-        "fgdb-prism/sealed-clustering-retained-cost-bitmap-cooperative-v3"
+        "fgdb-prism/sealed-clustering-retained-cost-bitmap-cooperative-v4"
     } else {
-        "fgdb-prism/sealed-triangles-retained-cost-bitmap-cooperative-v3"
+        "fgdb-prism/sealed-triangles-retained-cost-bitmap-cooperative-v4"
     };
     super::finish_encoded(
         call,
@@ -694,6 +713,9 @@ where
         if PRUNE && lower_neighbors < 2 {
             continue;
         }
+        let Some(maximum) = marked.maximum() else {
+            continue;
+        };
         for &word in &marked.touched {
             control.tick().await?;
             let mut bits = marked.words[word];
@@ -708,6 +730,12 @@ where
                 {
                     control.tick().await?;
                     witness.edges_scanned = add(witness.edges_scanned, 1)?;
+                    // Planning validated the complete immutable row. The first
+                    // value beyond all marks proves its sorted suffix useless;
+                    // ordinal order alone cannot replace retained-cost order.
+                    if third > maximum {
+                        break;
+                    }
                     if lower(costs, third, target) && marked.contains(third) {
                         for vertex in [source, target, third] {
                             counts[vertex] = counts[vertex]

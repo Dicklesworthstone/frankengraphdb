@@ -453,7 +453,7 @@ fn isolates_alone_do_not_select_neighbor_pruning_for_the_connected_population() 
     };
     assert_eq!(counts, [1, 1, 1, 0]);
     assert_eq!(graph.opens[3].get(), 2);
-    assert_eq!(output.witness.edges_scanned, 12);
+    assert_eq!(output.witness.edges_scanned, 11);
 }
 
 #[test]
@@ -478,11 +478,192 @@ fn all_eligible_rows_enumerate_marks_without_reopening_sources() {
         output.witness.algorithm,
         "triangles_retained_cost_oriented_bitmap"
     );
-    assert_eq!(output.witness.edges_scanned, 4 * n);
+    assert_eq!(output.witness.edges_scanned, 4 * n - 1);
     assert_eq!(output.witness.nodes_touched, n);
     assert_eq!(graph.opens.iter().map(Cell::get).sum::<usize>(), 3 * n);
-    assert_eq!(graph.steps.get(), 12 * n);
-    assert_eq!(controls, 13 * n + 1);
+    // The first out-of-range neighbor remains a visit; its sorted suffix and
+    // the inner cursor's unnecessary EOF pull are no longer performed.
+    assert_eq!(graph.steps.get(), 11 * n - 1);
+    assert_eq!(controls, 13 * n);
+}
+
+#[test]
+fn bipartite_rows_stop_after_the_first_neighbor_beyond_all_marks() {
+    for d in [2, 3, 16, 64, 129] {
+        let n = 2 * d;
+        let rows: Vec<_> = (0..n)
+            .map(|source| {
+                if source < d {
+                    (d..n).collect()
+                } else {
+                    (0..d).collect()
+                }
+            })
+            .collect();
+        let graph = Fixture::new(rows, vec![d; n]);
+        for coefficients in [false, true] {
+            graph.reset();
+            let (output, work) = graph
+                .execute(coefficients, usize::MAX, &mut || Ok(()))
+                .unwrap();
+            assert_eq!(
+                output.witness.algorithm,
+                "triangles_retained_cost_oriented_bitmap"
+            );
+            // K(d,d) has no triangles and no degree-one rows. Every higher
+            // partition source marks the whole lower partition. Each inner
+            // row's very first neighbor is beyond that entire marked set.
+            match output.values {
+                KernelValues::Counts(counts) => assert_eq!(counts, vec![0; n]),
+                KernelValues::Scores(scores) => assert_eq!(
+                    scores
+                        .iter()
+                        .map(|score| score.to_bits())
+                        .collect::<Vec<_>>(),
+                    vec![0.0f64.to_bits(); n]
+                ),
+                _ => panic!("wrong output"),
+            }
+            // These counters observe real cursor opens/pulls, including full
+            // planning. They distinguish quadratic work from the former d^3
+            // inner visits without depending on wall-clock timing.
+            assert_eq!(output.witness.edges_scanned, 3 * d * d, "d={d}");
+            assert_eq!(
+                graph.opens.iter().map(Cell::get).sum::<usize>(),
+                4 * d + d * d
+            );
+            assert_eq!(graph.steps.get(), 6 * d * d + 8 * d);
+            let history = 2 * d * d;
+            let row_cost = row_work(n, history, d).unwrap();
+            assert_eq!(
+                work,
+                n * (32 + 4 * bits(history)) + (2 * n + d * d) * row_cost + 6 * d * d,
+                "admission still covers every possible full inner scan"
+            );
+            graph.execute(coefficients, work, &mut || Ok(())).unwrap();
+            assert!(matches!(
+                graph.execute(coefficients, work - 1, &mut || Ok(())),
+                Err(Error::Execution(ExecutionError::LimitExceeded {
+                    resource: "estimated work",
+                    ..
+                }))
+            ));
+        }
+    }
+}
+
+#[test]
+fn retained_history_can_place_a_closing_neighbor_above_the_inner_source_ordinal() {
+    let graph = Fixture::new(
+        vec![vec![1, 2], vec![0, 2], vec![0, 1]],
+        vec![30_000, 2_000, 2],
+    );
+    // Source 0 marks 1 and 2, then row 1 must reach 2 to close the triangle.
+    // A cutoff at the inner source's ordinal, as opposed to the actual maximum
+    // mark, would silently lose it when retained cost reverses ordinal order.
+    for coefficients in [false, true] {
+        let (output, _) = graph
+            .execute(coefficients, usize::MAX, &mut || Ok(()))
+            .unwrap();
+        match output.values {
+            KernelValues::Counts(counts) => assert_eq!(counts, [1, 1, 1]),
+            KernelValues::Scores(scores) => assert_eq!(
+                scores
+                    .iter()
+                    .map(|score| score.to_bits())
+                    .collect::<Vec<_>>(),
+                [1.0f64.to_bits(); 3]
+            ),
+            _ => panic!("wrong output"),
+        }
+    }
+}
+
+#[test]
+fn random_relabelings_and_retained_history_match_independent_triples() {
+    let mut state = 0x7172_616e_676c_6573u64;
+    let mut next = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        state
+    };
+    for n in [9, 17, 65] {
+        for sample in 0..8 {
+            let mut original = vec![Vec::new(); n];
+            for source in 0..n {
+                for target in source..n {
+                    if next() % 5 < 2 {
+                        original[source].push(target);
+                        if source != target {
+                            original[target].push(source);
+                        }
+                    }
+                }
+            }
+            for row in &mut original {
+                row.sort_unstable();
+            }
+            let (original_counts, original_scores) = oracle(&original);
+            for reverse in [false, true] {
+                let ordinal = |vertex| if reverse { n - 1 - vertex } else { vertex };
+                let mut rows = vec![Vec::new(); n];
+                for (source, row) in original.iter().enumerate() {
+                    for &target in row.iter().rev() {
+                        rows[ordinal(source)].push(ordinal(target));
+                    }
+                }
+                for row in &mut rows {
+                    row.sort_unstable();
+                }
+                let retained: Vec<_> = rows
+                    .iter()
+                    .map(|row| row.len() + (next() % 4096) as usize)
+                    .collect();
+                let graph = Fixture::new(rows, retained);
+                for coefficients in [false, true] {
+                    let (output, _) = graph
+                        .execute(coefficients, usize::MAX, &mut || Ok(()))
+                        .unwrap();
+                    for vertex in 0..n {
+                        let at = ordinal(vertex);
+                        match &output.values {
+                            KernelValues::Counts(counts) => assert_eq!(
+                                counts[at], original_counts[vertex],
+                                "n={n}, sample={sample}, reverse={reverse}, vertex={vertex}"
+                            ),
+                            KernelValues::Scores(scores) => assert_eq!(
+                                scores[at].to_bits(),
+                                original_scores[vertex].to_bits(),
+                                "n={n}, sample={sample}, reverse={reverse}, vertex={vertex}"
+                            ),
+                            _ => panic!("wrong output"),
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn planning_validates_suffixes_that_the_counting_bound_would_skip() {
+    for suffix in [vec![3, 5, 4], vec![3, 4, usize::MAX]] {
+        let mut rows = vec![
+            vec![3, 4, 5],
+            vec![3, 4, 5],
+            vec![3, 4, 5],
+            vec![0, 1, 2],
+            vec![0, 1, 2],
+            vec![0, 1, 2],
+        ];
+        rows[0] = suffix;
+        let graph = Fixture::new(rows, vec![3; 6]);
+        assert!(matches!(
+            graph.execute(false, usize::MAX, &mut || Ok(())),
+            Err(Error::Execution(ExecutionError::InvalidUpstreamResult))
+        ));
+    }
 }
 
 #[test]
