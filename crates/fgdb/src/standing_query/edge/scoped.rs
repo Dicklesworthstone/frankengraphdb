@@ -59,9 +59,9 @@ impl Shape {
     /// One correlated positive child rooted at the outer vertex. The compiler
     /// copies slot 0 to child slot 1; each expansion adds one child slot, even
     /// when an identity predicate closes a graph cycle. Independent scans,
-    /// additional/nested scopes, multi-hop captures and nullable outer captures
-    /// refuse. A one-hop OPTIONAL may export its exact relationship identity
-    /// and fields. OPTIONAL must declare the exact complete child-frame width.
+    /// additional/nested scopes, multi-edge path captures and nullable outer
+    /// captures refuse. OPTIONAL may export each child's exact relationship
+    /// identity and fields, and must declare the complete child-frame width.
     fn fixed_hop(query: &PreparedGraphAggregate) -> Option<Self> {
         let ops = query.input_pattern().plan().operators();
         if !matches!(ops.first(), Some(GlaOperator::ScanVertices)) {
@@ -128,10 +128,10 @@ impl Shape {
                 GlaOperator::CapturePath {
                     start, segments, ..
                 } if mode == Mode::Optional
-                    && width == 3
-                    && start.ordinal() == 1
+                    && start.ordinal() >= 1
                     && segments.len() == 1
-                    && segments[0].ordinal() == 2 => {}
+                    && start.ordinal() < segments[0].ordinal()
+                    && segments[0].ordinal() < width => {}
                 op if predicate(op, width) => {}
                 _ => return None,
             }
@@ -154,7 +154,7 @@ impl Shape {
             | ValueProjection::Path {
                 capture,
                 function: GraphPathFunction::Edge,
-            } if mode == Mode::Optional && width == 3 => !ops[start + 2..end].iter().any(|op| {
+            } if mode == Mode::Optional => !ops[start + 2..end].iter().any(|op| {
                 matches!(op, GlaOperator::CapturePath { capture: actual, .. }
                         if actual == capture)
             }),
@@ -207,7 +207,7 @@ impl Shape {
         &self,
         query: &PreparedGraphAggregate,
         binding: &[(VId, &VertexState)],
-        edge: Option<EdgeBinding<'_>>,
+        edge: EdgeBindings<'_>,
         sign: i128,
         counts: &mut BTreeMap<VId, i128>,
         output: &mut Vec<grouped::Contribution>,
@@ -238,7 +238,7 @@ impl Shape {
                     .map(Some)
                     .ok_or(StandingQueryFailure::InvalidDelta)
             },
-            edge.map_or(EdgeBindings::None, EdgeBindings::One),
+            edge,
             sign,
             output,
             meter,
@@ -265,7 +265,15 @@ impl Shape {
         let target = vertex(vertices, staged, pair.1)?;
         let mut visit = |root, root_state, child, child_state| {
             let binding = [(root, root_state), (root, root_state), (child, child_state)];
-            self.binding_contribution(query, &binding, Some(edge), sign, counts, output, meter)
+            self.binding_contribution(
+                query,
+                &binding,
+                EdgeBindings::One(edge),
+                sign,
+                counts,
+                output,
+                meter,
+            )
         };
         match self.direction {
             GlaDirection::Forward => visit(pair.0, source, pair.1, target),
@@ -308,6 +316,8 @@ impl Shape {
         }
         // Preserve the outer root but null-extend the ENTIRE child frame. Do
         // not test child WHERE or root-copy identities against these nulls.
+        // Every admitted relationship capture belongs to that child frame,
+        // so one null binding supplies all of them without inventing an EId.
         grouped::project_contributions(
             query,
             |slot| match slot {

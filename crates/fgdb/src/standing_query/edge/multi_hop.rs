@@ -41,6 +41,26 @@ pub(super) struct Shape {
 }
 
 impl Shape {
+    fn capture(
+        capture: u32,
+        start: fgdb_gql::algebra::BindingSlot,
+        segments: &[fgdb_gql::algebra::BindingSlot],
+        atoms: &[Atom],
+        captures: &mut Vec<(u32, usize)>,
+    ) -> Option<()> {
+        let [segment] = segments else {
+            return None;
+        };
+        let atom = atoms.iter().position(|atom| {
+            atom.left == start.ordinal() as usize && atom.right == segment.ordinal() as usize
+        })?;
+        if captures.iter().any(|(index, _)| *index == capture) {
+            return None;
+        }
+        captures.push((capture, atom));
+        Some(())
+    }
+
     fn constraint(
         segments: &[fgdb_gql::algebra::BindingSlot],
         atoms: &[Atom],
@@ -108,16 +128,25 @@ impl Shape {
                 return None;
             }
             let mut different_edges = Vec::new();
+            let mut captures = Vec::new();
             for op in scope.body(query) {
-                if let GlaOperator::DifferentEdges { segments } = op {
-                    different_edges.push(Self::constraint(segments, &atoms)?);
+                match op {
+                    GlaOperator::DifferentEdges { segments } => {
+                        different_edges.push(Self::constraint(segments, &atoms)?);
+                    }
+                    GlaOperator::CapturePath {
+                        capture,
+                        start,
+                        segments,
+                    } => Self::capture(*capture, *start, segments, &atoms, &mut captures)?,
+                    _ => {}
                 }
             }
             let relations = atoms.iter().map(|atom| atom.relation).collect();
             return Some(Self {
                 atoms,
                 different_edges,
-                captures: Vec::new(),
+                captures,
                 width,
                 relations,
                 scope: Some(scope),
@@ -189,14 +218,7 @@ impl Shape {
                     start,
                     segments,
                 } if !projected && segments.len() == 1 => {
-                    let atom = atoms.iter().position(|atom| {
-                        atom.left == start.ordinal() as usize
-                            && atom.right == segments[0].ordinal() as usize
-                    })?;
-                    if captures.iter().any(|(index, _)| index == capture) {
-                        return None;
-                    }
-                    captures.push((*capture, atom));
+                    Self::capture(*capture, *start, segments, &atoms, &mut captures)?;
                 }
                 GlaOperator::ProjectValues { columns } if !projected => {
                     if columns.iter().any(|column| match column {
@@ -554,41 +576,35 @@ impl Enumeration<'_> {
             let vid = vid.ok_or(StandingQueryFailure::InvalidDelta)?;
             row.push((vid, vertex(self.vertices, self.vertex_patch, vid)?));
         }
-        // Reuse typed GLA predicate/projectors and the scope derivative. NULL
-        // extension and semi/anti presence happen once per root after all paths.
-        match self.shape.scope {
-            Some(scope) => {
-                scope.binding_contribution(self.query, &row, None, self.sign, counts, output, meter)
+        let mut captures = Vec::new();
+        if !self.shape.captures.is_empty() {
+            meter.units(ZSetEvent::ScratchEntry, 1 + self.shape.captures.len())?;
+            captures.reserve_exact(self.shape.captures.len());
+            for &(capture, atom) in &self.shape.captures {
+                meter.charge(ZSetEvent::Work)?;
+                let eid = selected
+                    .get(atom)
+                    .copied()
+                    .flatten()
+                    .ok_or(StandingQueryFailure::InvalidDelta)?;
+                captures.push((
+                    capture,
+                    EdgeBinding {
+                        id: Some(eid),
+                        props: self.graph.properties(eid),
+                    },
+                ));
             }
+        }
+        let edges = EdgeBindings::Captures(&captures);
+        // Reuse typed GLA predicate/projectors and the scope derivative. Only
+        // COMPLETE child occurrences carry edge fields and count as witnesses;
+        // null extension happens once per root after all old/final paths.
+        match self.shape.scope {
+            Some(scope) => scope
+                .binding_contribution(self.query, &row, edges, self.sign, counts, output, meter),
             None => {
-                let mut captures = Vec::new();
-                if !self.shape.captures.is_empty() {
-                    meter.units(ZSetEvent::ScratchEntry, 1 + self.shape.captures.len())?;
-                    captures.reserve_exact(self.shape.captures.len());
-                    for &(capture, atom) in &self.shape.captures {
-                        meter.charge(ZSetEvent::Work)?;
-                        let eid = selected
-                            .get(atom)
-                            .copied()
-                            .flatten()
-                            .ok_or(StandingQueryFailure::InvalidDelta)?;
-                        captures.push((
-                            capture,
-                            EdgeBinding {
-                                id: Some(eid),
-                                props: self.graph.properties(eid),
-                            },
-                        ));
-                    }
-                }
-                grouped::binding_contributions(
-                    self.query,
-                    &row,
-                    EdgeBindings::Captures(&captures),
-                    self.sign,
-                    output,
-                    meter,
-                )
+                grouped::binding_contributions(self.query, &row, edges, self.sign, output, meter)
             }
         }
     }

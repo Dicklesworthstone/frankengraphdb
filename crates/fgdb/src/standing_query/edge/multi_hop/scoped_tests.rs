@@ -109,7 +109,13 @@ fn advance(
 }
 
 fn seeded(batches: &[LogicalDeltaBatch], mode: Mode) -> StandingQuery {
-    let definition = definition(mode);
+    seeded_definition(batches, definition(mode))
+}
+
+fn seeded_definition(
+    batches: &[LogicalDeltaBatch],
+    definition: PreparedGraphAggregate,
+) -> StandingQuery {
     assert!(eligible(&definition));
     assert!(scoped::Shape::of(&definition).is_none());
     let shape = Shape::of(&definition).unwrap();
@@ -371,6 +377,173 @@ fn incomplete_cascade_refuses_even_when_every_child_has_only_a_partial_path() {
             advance(&mut candidate, &delta, &mut || Ok(())).unwrap();
             assert_eq!(candidate.vertices.len(), 1);
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn optional_edge_fields_refuse_atomically_and_retry_across_witness_transitions() {
+    fn definition() -> PreparedGraphAggregate {
+        use fgdb_gql::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText};
+        PreparedGraphAggregateText::prepare(
+            "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN a AS root,COUNT(*) AS copies,COUNT(r) AS starts,COUNT(s) AS ends,SUM(r.p) AS prefix,SUM(s.q) AS suffix",
+            |kind, name| match (kind, name) {
+                (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+                (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(2))),
+                (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+                (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+                _ => None,
+            },
+        ).unwrap().bind_parameters(&GqlParameters::new()).unwrap()
+    }
+    let ((), report) = run_async_under_lab(0x6ab8, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut r = WriteBatch::new(RelationId(1));
+        for id in 1..=5 {
+            r.create_vertex(VId(id), vec![], vec![]);
+        }
+        for (eid, value) in [(0, 1), (u128::MAX, 2)] {
+            r.add_edge(
+                EId(eid),
+                VId(1),
+                VId(2),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(value))],
+            );
+        }
+        let mut s = WriteBatch::new(RelationId(2));
+        s.add_edge(
+            EId(10),
+            VId(2),
+            VId(3),
+            vec![(PropertyKeyId(2), CanonicalScalar::Int(3))],
+        );
+        s.add_edge(
+            EId(11),
+            VId(4),
+            VId(5),
+            vec![(PropertyKeyId(2), CanonicalScalar::Int(7))],
+        );
+        let at = db.write_atomic(&commit, vec![r, s]).await.unwrap();
+        let initial = db.delta_index().unwrap().get(at).unwrap().clone();
+        let mut r = WriteBatch::new(RelationId(1));
+        // A changed prefix becomes partial, so neither its old nor new fields
+        // can leak into the null-extended result. A different root gains a path.
+        r.set_edge_property(
+            EId(u128::MAX),
+            PropertyKeyId(1),
+            Some(CanonicalScalar::Int(9)),
+        );
+        r.add_edge(
+            EId(20),
+            VId(3),
+            VId(4),
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(8))],
+        );
+        let mut s = WriteBatch::new(RelationId(2));
+        s.delete_edge(EId(10));
+        let at = db.write_atomic(&commit, vec![s, r]).await.unwrap();
+        let delta = db.delta_index().unwrap().get(at).unwrap().clone();
+        let make = || seeded_definition(core::slice::from_ref(&initial), definition());
+        let before = make();
+        let mut successful = make();
+        let mut calls = 0;
+        let stats = advance(&mut successful, &delta, &mut || {
+            calls += 1;
+            Ok(())
+        })
+        .unwrap();
+        let absent = row(&successful, 1).unwrap();
+        assert_eq!(absent.get(0).unwrap().as_count(), Some(1));
+        assert_eq!(absent.get(1).unwrap().as_count(), Some(0));
+        assert_eq!(absent.get(2).unwrap().as_count(), Some(0));
+        assert!(absent.get(3).unwrap().is_null());
+        assert!(absent.get(4).unwrap().is_null());
+        let present = row(&successful, 3).unwrap();
+        assert_eq!(present.get(0).unwrap().as_count(), Some(1));
+        assert_eq!(present.get(1).unwrap().as_count(), Some(1));
+        assert_eq!(present.get(2).unwrap().as_count(), Some(1));
+        assert_eq!(present.get(3).unwrap().as_integer(), Some(8));
+        assert_eq!(present.get(4).unwrap().as_integer(), Some(7));
+        same(
+            &successful,
+            &db.prepare_standing_query(&cx, definition(), policy())
+                .unwrap(),
+        );
+        for stop in 1..=calls {
+            let mut candidate = make();
+            let mut seen = 0;
+            assert_eq!(
+                advance(&mut candidate, &delta, &mut || {
+                    seen += 1;
+                    if seen == stop {
+                        Err(StandingQueryFailure::Interrupted)
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(StandingQueryFailure::Interrupted)
+            );
+            assert_eq!(seen, stop);
+            same(&candidate, &before);
+            assert_eq!(candidate.last_delta, before.last_delta);
+            advance(&mut candidate, &delta, &mut || Ok(())).unwrap();
+            same(&candidate, &successful);
+            assert_eq!(candidate.last_delta, successful.last_delta);
+        }
+        for reason in [
+            StandingQueryFailure::WorkBudget,
+            StandingQueryFailure::ScratchBudget,
+            StandingQueryFailure::ResultBudget,
+        ] {
+            let mut candidate = make();
+            match reason {
+                StandingQueryFailure::WorkBudget => {
+                    candidate.policy.evaluator.max_work_units = stats.work_units - 1;
+                }
+                StandingQueryFailure::ScratchBudget => {
+                    candidate.policy.evaluator.max_scratch_entries = stats.scratch_entries - 1;
+                }
+                _ => candidate.policy = GqlQueryPolicy::new(100_000, 0, 10_000_000, 10_000_000),
+            }
+            assert_eq!(advance(&mut candidate, &delta, &mut || Ok(())), Err(reason));
+            same(&candidate, &before);
+            assert_eq!(candidate.last_delta, before.last_delta);
+            candidate.policy = policy();
+            advance(&mut candidate, &delta, &mut || Ok(())).unwrap();
+            same(&candidate, &successful);
+            assert_eq!(candidate.last_delta, successful.last_delta);
+        }
+        let mut entries = delta.coordinate_entries().to_vec();
+        let mut changed = 0;
+        for entry in &mut entries {
+            for row in &mut entry.rows {
+                if let DeltaRow::Property { before, .. } = row {
+                    *before = Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(999)));
+                    changed += 1;
+                }
+            }
+        }
+        assert_eq!(changed, 1);
+        let malformed = LogicalDeltaBatch::from_parts_for_test(
+            entries,
+            *delta.source_template_digest(),
+            delta.commit_marker_identity(),
+            delta.commit_seq(),
+            delta.frontier(),
+        );
+        let mut candidate = make();
+        assert_eq!(
+            advance(&mut candidate, &malformed, &mut || Ok(())),
+            Err(StandingQueryFailure::InvalidDelta)
+        );
+        same(&candidate, &before);
+        assert_eq!(candidate.last_delta, before.last_delta);
+        advance(&mut candidate, &delta, &mut || Ok(())).unwrap();
+        same(&candidate, &successful);
+        assert_eq!(candidate.last_delta, successful.last_delta);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

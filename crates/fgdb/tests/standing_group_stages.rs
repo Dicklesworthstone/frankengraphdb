@@ -432,18 +432,13 @@ fn edge_field_ticks_are_sparse_and_failed_groups_rebuild_from_committed_values()
             for supported in [
                 "MATCH (a)-[e:R]->(b)-[:R]->(c) RETURN e.p AS p",
                 "MATCH (a)-[e:R]->(b)-[:R]->(c) RETURN e AS edge",
+                "MATCH (a) OPTIONAL MATCH (a)-[e:R]->(b)-[:R]->(c) RETURN e.p AS p",
             ] {
                 let handle = db
                     .register_standing_native(&cx, supported, &args, symbols, policy())
                     .unwrap();
                 assert_native(&db, &cx, &handle, supported, &args);
             }
-            // Nullable multi-hop edge captures still need their own derivative.
-            let unsupported = "MATCH (a) OPTIONAL MATCH (a)-[e:R]->(b)-[:R]->(c) RETURN e.p AS p";
-            assert!(matches!(
-                db.register_standing_native(&cx, unsupported, &args, symbols, policy()),
-                Err(StandingQueryError::Unsupported)
-            ));
         }
         assert_eq!(measured[0], measured[1]);
         assert_eq!(measured[0].affected_edges, 1);
@@ -994,51 +989,272 @@ fn multi_hop_edge_field_maintenance_visits_only_affected_join_partners() {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let (cx, commit) = (c.query(), c.commit());
         let args = GqlParameters::new();
-        let text = "MATCH (a)-[r:R]->(b)-[s:R]->(c) WITH r.p AS bucket,SUM(s.q) AS total,COUNT(*) AS copies RETURN bucket,total,copies ORDER BY bucket LIMIT 1000";
-        let mut measurements = Vec::new();
-        for unrelated in [1, 64] {
-            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-            let mut seed = WriteBatch::new(RelationId(1));
-            for component in 0..=unrelated {
-                let a = 10 * component + 1;
-                for vertex in [a, a + 1, a + 2] {
-                    seed.create_vertex(VId(vertex), vec![], vec![]);
+        for text in [
+            "MATCH (a)-[r:R]->(b)-[s:R]->(c) WITH r.p AS bucket,SUM(s.q) AS total,COUNT(*) AS copies RETURN bucket,total,copies ORDER BY bucket LIMIT 1000",
+            "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b)-[s:R]->(c) WITH r.p AS bucket,SUM(s.q) AS total,COUNT(*) AS copies RETURN bucket,total,copies ORDER BY bucket LIMIT 1000",
+        ] {
+            let mut measurements = Vec::new();
+            for unrelated in [1, 64] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(RelationId(1));
+                for component in 0..=unrelated {
+                    let a = 10 * component + 1;
+                    for vertex in [a, a + 1, a + 2] {
+                        seed.create_vertex(VId(vertex), vec![], vec![]);
+                    }
+                    seed.add_edge(
+                        EId(a),
+                        VId(a),
+                        VId(a + 1),
+                        vec![(P, CanonicalScalar::Int(1))],
+                    );
+                    seed.add_edge(
+                        EId(a + 1),
+                        VId(a + 1),
+                        VId(a + 2),
+                        vec![(Q, CanonicalScalar::Int(3))],
+                    );
                 }
-                seed.add_edge(
-                    EId(a),
-                    VId(a),
-                    VId(a + 1),
-                    vec![(P, CanonicalScalar::Int(1))],
+                db.write(&commit, seed).await.unwrap();
+                let handle = db
+                    .register_standing_native(&cx, text, &args, symbols, policy())
+                    .unwrap();
+                let mut change = WriteBatch::new(RelationId(1));
+                change.set_edge_property(EId(2), Q, Some(CanonicalScalar::Int(7)));
+                db.write(&commit, change).await.unwrap();
+                assert_native(&db, &cx, &handle, text, &args);
+                let stats: Vec<_> = db
+                    .standing_query_node_stats(&cx, &handle)
+                    .unwrap()
+                    .copied()
+                    .collect();
+                assert_eq!(
+                    stats.iter().map(|stats| stats.affected_edges).max(),
+                    Some(1)
                 );
-                seed.add_edge(
-                    EId(a + 1),
-                    VId(a + 1),
-                    VId(a + 2),
-                    vec![(Q, CanonicalScalar::Int(3))],
-                );
+                measurements.push(stats);
             }
-            db.write(&commit, seed).await.unwrap();
-            let handle = db
-                .register_standing_native(&cx, text, &args, symbols, policy())
-                .unwrap();
-            let mut change = WriteBatch::new(RelationId(1));
-            change.set_edge_property(EId(2), Q, Some(CanonicalScalar::Int(7)));
-            db.write(&commit, change).await.unwrap();
-            assert_native(&db, &cx, &handle, text, &args);
-            let stats: Vec<_> = db
-                .standing_query_node_stats(&cx, &handle)
-                .unwrap()
-                .copied()
-                .collect();
-            assert_eq!(
-                stats.iter().map(|stats| stats.affected_edges).max(),
-                Some(1)
-            );
-            measurements.push(stats);
+            // Both sizes keep the unchanged value row and aggregate group alive;
+            // extra components do not change the source or downstream work.
+            assert_eq!(measurements[0], measurements[1]);
         }
-        // Both sizes keep the unchanged value row and aggregate group alive;
-        // extra components do not change the source or downstream work.
-        assert_eq!(measurements[0], measurements[1]);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn optional_multi_hop_edge_fields_follow_complete_witnesses_and_null_transitions() {
+    fn field(edge: &fgdb::EdgeRecord, key: PropertyKeyId) -> QueryValue {
+        QueryValue::Value(
+            edge.props
+                .iter()
+                .find(|(actual, _)| *actual == key)
+                .map(|(_, value)| GraphValue::from_property_value(value).unwrap())
+                .unwrap_or(GraphValue::Scalar(CanonicalScalar::Null)),
+        )
+    }
+    // Independent physical-occurrence oracle. A reachable prefix contributes
+    // no relationship fields when the whole OPTIONAL pattern has no witness.
+    fn oracle(db: &Database<MemVfs>) -> (QueryResult, QueryResult) {
+        let edges = db.edges().unwrap();
+        let mut vertices = db.vertices().unwrap();
+        vertices.sort_unstable_by_key(|vertex| vertex.vid);
+        let null = QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null));
+        let cell = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        let mut paths = Vec::new();
+        let mut groups = Vec::new();
+        for vertex in vertices {
+            let root = QueryValue::Value(GraphValue::Vertex(vertex.vid));
+            let mut found = Vec::new();
+            let mut sum = None;
+            let mut ends = std::collections::BTreeSet::new();
+            for r in edges
+                .iter()
+                .filter(|edge| edge.entry.relation == RelationId(1) && edge.entry.src == vertex.vid)
+            {
+                for s in edges.iter().filter(|edge| {
+                    edge.entry.relation == RelationId(2) && edge.entry.src == r.entry.dst
+                }) {
+                    let amount = field(s, Q);
+                    if let QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value))) =
+                        &amount
+                    {
+                        sum = Some(sum.unwrap_or(0) + *value);
+                    }
+                    ends.insert(s.entry.eid);
+                    found.push((
+                        (r.entry.eid, s.entry.eid),
+                        vec![
+                            root.clone(),
+                            QueryValue::Value(GraphValue::Edge(r.entry.eid)),
+                            QueryValue::Value(GraphValue::Edge(s.entry.eid)),
+                            field(r, P),
+                            amount,
+                        ],
+                    ));
+                }
+            }
+            let witnesses = i64::try_from(found.len()).unwrap();
+            groups.push(vec![
+                root.clone(),
+                sum.map_or_else(|| null.clone(), cell),
+                cell(witnesses.max(1)),
+                cell(witnesses),
+                cell(i64::try_from(ends.len()).unwrap()),
+            ]);
+            if found.is_empty() {
+                paths.push(vec![
+                    root,
+                    null.clone(),
+                    null.clone(),
+                    null.clone(),
+                    null.clone(),
+                ]);
+            } else {
+                found.sort_unstable_by_key(|(ids, _)| *ids);
+                paths.extend(found.into_iter().map(|(_, row)| row));
+            }
+        }
+        (
+            QueryResult::Rows {
+                columns: vec![
+                    "root".into(),
+                    "first".into(),
+                    "second".into(),
+                    "bucket".into(),
+                    "amount".into(),
+                ],
+                rows: paths,
+            },
+            QueryResult::Rows {
+                columns: vec![
+                    "root".into(),
+                    "total".into(),
+                    "copies".into(),
+                    "starts".into(),
+                    "ends".into(),
+                ],
+                rows: groups,
+            },
+        )
+    }
+    let ((), report) = run_async_under_lab(0x6772_3042, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let (cx, commit) = (c.query(), c.commit());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(RelationId(1));
+        for id in 1..=6 {
+            seed.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(999))]);
+        }
+        for (eid, a, b, p) in [
+            (0, 1, 2, 10),
+            (u128::MAX, 1, 2, 20),
+            (104, 4, 5, 40),
+            (105, 2, 2, 50),
+        ] {
+            seed.add_edge(EId(eid), VId(a), VId(b), vec![(P, CanonicalScalar::Int(p))]);
+        }
+        db.write(&commit, seed).await.unwrap();
+        let texts = [
+            "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN a AS root,r AS first,s AS second,r.p AS bucket,s.q AS amount ORDER BY root,first,second LIMIT 1000",
+            "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b)-[s:S]->(c) WITH a AS root,SUM(s.q) AS total,COUNT(*) AS copies,COUNT(r) AS starts,COUNT(DISTINCT s) AS ends RETURN root,total,copies,starts,ends ORDER BY root LIMIT 1000",
+            "MATCH (a) OPTIONAL MATCH (a)<-[r:R]-(b)<-[s:S]-(c) RETURN a AS root,r AS first,s AS second,r.p AS bucket,s.q AS amount ORDER BY root,first,second LIMIT 1000",
+            "MATCH (a) OPTIONAL MATCH (a)-[r:R]-(b)-[s:S]-(c) RETURN a AS root,r AS first,s AS second,r.p AS bucket,s.q AS amount ORDER BY root,first,second LIMIT 1000",
+            "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN a AS root,r AS first,s AS second,r.p AS bucket,s.p AS amount ORDER BY root,first,second LIMIT 1000",
+            "MATCH (a) OPTIONAL MATCH (a)-[r]->(b)-[s]->(c) RETURN a AS root,r AS first,s AS second,r.p AS bucket,s.q AS amount ORDER BY root,first,second LIMIT 1000",
+            "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b)-[s:S]->(c)-[t:R]->(d) RETURN a AS root,r AS first,s AS second,t AS third,r.p AS bucket,s.q AS amount,t.p AS last ORDER BY root,first,second,third LIMIT 1000",
+            "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b)-[s:S]->(c) WITH a AS root,r.p AS bucket,SUM(r.p*s.q) AS total,COUNT(DISTINCT r) AS starts RETURN root,bucket,total,starts ORDER BY root,bucket LIMIT 1000",
+        ];
+        let args = GqlParameters::new();
+        let handles: Vec<_> = texts
+            .iter()
+            .map(|text| {
+                let prepared = PreparedNativeRead::prepare(text, &args, symbols).unwrap();
+                let (_, width) = prepared.subscription_footprint(&cx, &args).unwrap();
+                assert!(width >= 4, "{text}");
+                prepared
+                    .register_standing(&mut db, &cx, &args, policy())
+                    .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            })
+            .collect();
+        for tick in 0..=9 {
+            let (paths, groups) = oracle(&db);
+            for (index, (text, handle)) in texts.iter().zip(&handles).enumerate() {
+                assert_native(&db, &cx, handle, text, &args);
+                let actual = db.standing_native_query(&cx, handle, delivery()).unwrap().1;
+                if index == 0 {
+                    assert_eq!(actual, paths, "physical OPTIONAL oracle, tick {tick}");
+                } else if index == 1 {
+                    assert_eq!(actual, groups, "nullable aggregate oracle, tick {tick}");
+                }
+                if tick == 2 || tick == 9 {
+                    db.rebuild_standing_query(&cx, handle, policy()).unwrap();
+                    assert_native(&db, &cx, handle, text, &args);
+                }
+                if tick == 8 {
+                    assert!(
+                        db.standing_query_node_stats(&cx, handle)
+                            .unwrap()
+                            .all(|stats| stats.affected_edges == 0),
+                        "{text}"
+                    );
+                }
+            }
+            if tick == 9 {
+                break;
+            }
+            let mut r = WriteBatch::new(RelationId(1));
+            let mut s = WriteBatch::new(RelationId(2));
+            match tick {
+                0 => {
+                    s.add_edge(EId(20), VId(2), VId(3), vec![(Q, CanonicalScalar::Int(7))]);
+                    s.add_edge(EId(21), VId(2), VId(6), vec![]);
+                    s.add_edge(EId(22), VId(2), VId(2), vec![(Q, CanonicalScalar::Int(9))]);
+                    db.write(&commit, s).await.unwrap();
+                }
+                1 => {
+                    r.set_edge_property(EId(0), P, Some(CanonicalScalar::Int(12)));
+                    r.set_edge_property(EId(105), P, None);
+                    db.write(&commit, r).await.unwrap();
+                }
+                2 => {
+                    s.set_edge_property(EId(20), Q, Some(CanonicalScalar::Int(0)));
+                    s.set_edge_property(EId(21), Q, Some(CanonicalScalar::Null));
+                    s.set_edge_property(EId(22), Q, None);
+                    db.write(&commit, s).await.unwrap();
+                }
+                3 => {
+                    s.delete_edge(EId(20))
+                        .delete_edge(EId(21))
+                        .delete_edge(EId(22));
+                    db.write(&commit, s).await.unwrap();
+                }
+                4 => {
+                    // One atomic commit changes a projected prefix and adds
+                    // its first complete witness in another relation.
+                    r.set_edge_property(EId(104), P, Some(CanonicalScalar::Int(41)));
+                    s.add_edge(EId(23), VId(5), VId(6), vec![(Q, CanonicalScalar::Int(11))]);
+                    db.write_atomic(&commit, vec![s, r]).await.unwrap();
+                }
+                5 => {
+                    s.delete_edge(EId(23));
+                    s.add_edge(EId(24), VId(5), VId(6), vec![(Q, CanonicalScalar::Int(13))]);
+                    db.write(&commit, s).await.unwrap();
+                }
+                6 => {
+                    r.delete_vertex(VId(2));
+                    db.write(&commit, r).await.unwrap();
+                }
+                7 => {
+                    s.set_edge_property(EId(24), PropertyKeyId(3), Some(CanonicalScalar::Int(77)));
+                    db.write(&commit, s).await.unwrap();
+                }
+                _ => {
+                    r.delete_vertex(VId(5));
+                    db.write(&commit, r).await.unwrap();
+                }
+            }
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
