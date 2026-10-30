@@ -177,36 +177,8 @@ fn whole_edge_merge_property<V: Vfs + Clone>(
     Ok(value)
 }
 
-struct EdgeMergeRowElementReader<F>(F);
-
-impl<E, F> fgdb_gql::GraphElementReader<E> for EdgeMergeRowElementReader<F>
-where
-    F: FnMut(
-        Option<usize>,
-        ElementId,
-        fgdb_delta_types::PropertyKeyId,
-    ) -> Result<Option<CanonicalPropertyValue>, E>,
-{
-    fn element_property(
-        &mut self,
-        element: ElementId,
-        key: fgdb_delta_types::PropertyKeyId,
-    ) -> Result<Option<CanonicalPropertyValue>, E> {
-        (self.0)(None, element, key)
-    }
-
-    fn element_property_for_column(
-        &mut self,
-        column: usize,
-        element: ElementId,
-        key: fgdb_delta_types::PropertyKeyId,
-    ) -> Result<Option<CanonicalPropertyValue>, E> {
-        (self.0)(Some(column), element, key)
-    }
-}
-
-/// A copied map's reader (fgdb-at06q): the row's point reads, and the
-/// properties of an element the map copies (`n = a`, `r = a`), at the same
+/// A row value's reader (fgdb-at06q): governed point reads and element
+/// metadata, including copied property maps (`n = a`, `r = a`), at the same
 /// cut. Vertex and relationship MERGE use this same reader adapter.
 struct MergeRowMapReader<F, M>(F, M);
 
@@ -558,19 +530,22 @@ pub(crate) fn edge_merge_row_actions_controlled<E, A, C>(
                 }
                 GraphEdgeMergeRowAction::Value { key, value }
                 | GraphEdgeMergeRowAction::RowVertex { key, value, .. } => {
-                    // Both callbacks spend the same evaluator allowance. The
-                    // host's row reader retains the input cut, whereas `read`
-                    // above reads the resolved edge at this ON/SET clause.
+                    // Property and metadata reads share the evaluator's
+                    // allowance and the host's carried input cut, whereas
+                    // `read` above sees the edge at this ON/SET clause.
                     let controls = std::cell::RefCell::new(&mut control);
                     let written = value
                         .written_with_elements(
                             row,
                             &mut |event| controls.borrow_mut()(event),
-                            &mut EdgeMergeRowElementReader(|column, element, property| {
-                                read_row(column, element, property, &mut |event| {
-                                    controls.borrow_mut()(event)
-                                })
-                            }),
+                            &mut MergeRowMapReader(
+                                |column, element, property| {
+                                    read_row(column, element, property, &mut |event| {
+                                        controls.borrow_mut()(event)
+                                    })
+                                },
+                                &mut metadata,
+                            ),
                         )
                         .map_err(|error| match error {
                             GraphIntegerEvaluationError::Control(error) => error,

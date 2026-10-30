@@ -13,8 +13,8 @@ use fgdb_gql::{
     PreparedGraphEdgeUpsertText, PreparedGraphWriteProgram,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, TxnCx,
-    VId,
+    CanonicalList, CanonicalPropertyValue, CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId,
+    EId, PurposeContexts, QueryCx, TxnCx, VId,
 };
 
 const R: RelationId = RelationId(1);
@@ -598,6 +598,130 @@ fn on_and_set_clauses_write_carried_endpoints_atomically() {
         vertex_props(&db, VId(1), &[(P, 1)]);
         vertex_props(&db, VId(3), &[(P, 103), (Q, 31)]);
         assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn selected_relationship_and_endpoint_values_read_carried_metadata() {
+    let ((), report) = run_async_under_lab(0xe8a0_0008, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        for existing in [false, true] {
+            for (expression, expected) in [
+                ("properties(a).p", CanonicalScalar::Int(1).into()),
+                (
+                    "keys(a)",
+                    CanonicalPropertyValue::List(
+                        CanonicalList::try_new(vec![
+                            CanonicalScalar::ucs_basic_text("p").unwrap().into(),
+                        ])
+                        .unwrap(),
+                    ),
+                ),
+                (
+                    "labels(a)",
+                    CanonicalPropertyValue::List(CanonicalList::try_new(vec![]).unwrap()),
+                ),
+                (
+                    "type(s)",
+                    CanonicalScalar::ucs_basic_text("S").unwrap().into(),
+                ),
+                ("properties(b).q+1", CanonicalScalar::Int(11).into()),
+            ] {
+                let mut db = database(&commit, false, existing).await;
+                let mut seed = WriteBatch::new(S);
+                seed.add_edge(EId(50), VId(1), VId(2), vec![]);
+                seed.set_vertex_property(VId(2), Q, Some(CanonicalScalar::Int(10)));
+                db.write(&commit, seed).await.unwrap();
+                let carried = db.edge(EId(50)).unwrap();
+                let before = db.frontier().unwrap();
+                let selected = format!("r.q={expression}, b.q={expression}");
+                let unselected = "r.q=properties(a).p/(x-x), b.q=properties(a).p/(x-x)";
+                let (create, update) = if existing {
+                    (unselected, selected.as_str())
+                } else {
+                    (selected.as_str(), unselected)
+                };
+                let text = format!(
+                    "MATCH (a)-[s:S]->(b) WHERE a.p=1 AND b.p=2 WITH a,b,s \
+                     FOREACH (x IN [1] | MERGE (a)-[r:R]->(b) \
+                     ON CREATE SET {create} ON MATCH SET {update})",
+                );
+                let mut next = 900;
+                write_text(&mut db, (&commit, &cx, &txcx), &text, &mut next)
+                    .await
+                    .unwrap_or_else(|error| panic!("{expression}, existing={existing}: {error}"));
+                assert_eq!(next, if existing { 900 } else { 901 });
+                let merged: Vec<_> = db
+                    .edges()
+                    .unwrap()
+                    .into_iter()
+                    .filter(|edge| edge.entry.relation == R)
+                    .collect();
+                assert_eq!(merged.len(), if existing { 2 } else { 1 });
+                for edge in merged {
+                    assert_eq!(
+                        edge.props.iter().find(|(key, _)| *key == Q),
+                        Some(&(Q, expected.clone())),
+                        "every parallel target reads the same carried input image"
+                    );
+                }
+                assert_eq!(
+                    db.vertex(VId(2)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(2).into()), (Q, expected)],
+                    "RowVertex assignments share the complete metadata reader"
+                );
+                vertex_props(&db, VId(1), &[(P, 1)]);
+                assert_eq!(db.edge(EId(50)).unwrap(), carried);
+                assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+                assert_eq!(db.delta_since(before).unwrap().count(), 1);
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn late_relationship_metadata_value_refusals_roll_back_prior_edges_and_endpoints() {
+    let ((), report) = run_async_under_lab(0xe8a0_0009, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        for value in [
+            "properties(a).p/(2-x)",
+            "CASE WHEN x=1 THEN properties(a).p ELSE properties(a) END",
+        ] {
+            let mut db = database(&commit, false, false).await;
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            let text = format!(
+                "MATCH (a),(b) WHERE a.p=1 AND b.p=2 \
+                 FOREACH (x IN [1,2] | MERGE (a)-[r:R {{q:x}}]->(b) \
+                 ON CREATE SET r.p={value}, b.q=properties(a).p)",
+            );
+            let mut next = 900;
+            write_text(&mut db, (&commit, &cx, &txcx), &text, &mut next)
+                .await
+                .expect_err("the second selected ON value must refuse atomically");
+            assert_eq!(
+                next, 902,
+                "the first iteration and second creation completed"
+            );
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before,
+                "both arithmetic errors and map-valued properties discard prior effects"
+            );
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

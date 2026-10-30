@@ -4334,6 +4334,200 @@ fn matched_relationship_merge_masks_hidden_inputs_and_refuses_denied_actions_ato
     });
 }
 
+#[test]
+fn relationship_on_values_read_scoped_metadata_only_in_the_selected_branch() {
+    lab(0xc4a1_3734, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 1), NOW).unwrap();
+        for matched in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            for (id, p, q, secret) in [(1, 1, 7, 99), (2, 2, 0, 88)] {
+                seed.create_vertex(
+                    VId(id),
+                    vec![L],
+                    vec![
+                        (P, CanonicalScalar::Int(p)),
+                        (Q, CanonicalScalar::Int(q)),
+                        (SECRET, CanonicalScalar::Int(secret)),
+                    ],
+                );
+            }
+            if matched {
+                seed.add_edge(
+                    EId(99),
+                    VId(1),
+                    VId(2),
+                    vec![
+                        (P, CanonicalScalar::Int(-1)),
+                        (Q, CanonicalScalar::Int(55)),
+                        (SECRET, CanonicalScalar::Int(66)),
+                    ],
+                );
+            }
+            db.write(&commit, seed).await.unwrap();
+            let before = db.frontier().unwrap();
+            let source = db.vertex(VId(1)).unwrap();
+            let selected = "r.p=properties(a).p,b.q=properties(a).q,r.q=properties(a).secret";
+            let unselected = "r.secret=[properties(a).secret,1/(properties(a).p-properties(a).p)]";
+            let (on_create, on_match) = if matched {
+                (unselected, selected)
+            } else {
+                (selected, unselected)
+            };
+            let program = chain_named(&format!(
+                "MATCH (a:Visible {{p:1}}),(b:Visible {{p:2}}) WITH a,b \
+                 MERGE (a)-[r:R]->(b) ON CREATE SET {on_create} ON MATCH SET {on_match} \
+                 RETURN r.p AS copied,r.q AS masked,b.q AS endpoint"
+            ));
+            let (stats, rows, completion) = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    policy(1).with_mutation_limit(3),
+                    || NOW,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("matched={matched}: {error:?}"));
+            assert_eq!(stats.created_edges, u64::from(!matched));
+            assert_eq!(rows.value.len(), 1);
+            assert_eq!(
+                rows.value[0].values(),
+                &[int(1), GraphValue::Scalar(CanonicalScalar::Null), int(7)]
+            );
+            let edges = db.edges().unwrap();
+            assert_eq!(edges.len(), 1);
+            let mut expected = vec![(P, CanonicalScalar::Int(1).into())];
+            if matched {
+                expected.push((SECRET, CanonicalScalar::Int(66).into()));
+            }
+            assert_eq!(edges[0].props, expected, "masked metadata removes r.q");
+            assert_eq!(db.vertex(VId(1)).unwrap(), source);
+            assert_eq!(
+                db.vertex(VId(2)).unwrap().unwrap().props,
+                vec![
+                    (P, CanonicalScalar::Int(2).into()),
+                    (SECRET, CanonicalScalar::Int(88).into()),
+                    (Q, CanonicalScalar::Int(7).into()),
+                ]
+            );
+            assert!(
+                matches!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq }
+                if commit_seq.0 == before.0 + 1)
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn relationship_metadata_value_limits_and_late_errors_rollback_endpoint_effects() {
+    lab(0xc4a1_3735, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 2), NOW).unwrap();
+        let mut measured_work = None;
+        for attempt in 0..4 {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(
+                VId(1),
+                vec![L],
+                vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(7))],
+            );
+            seed.create_vertex(
+                VId(2),
+                vec![L],
+                vec![(P, CanonicalScalar::Int(2)), (Q, CanonicalScalar::Int(0))],
+            );
+            db.write(&commit, seed).await.unwrap();
+            let before = (db.frontier().unwrap(), db.vertices().unwrap());
+            // Both occurrences read the existing row-input cut. The first
+            // creates an edge and mutates b; a refusal in the second must
+            // roll back both effects, including the carried endpoint change.
+            let divisor = if attempt == 3 { "2-x" } else { "3-x" };
+            let program = chain_named(&format!(
+                "MATCH (a:Visible {{p:1}}),(b:Visible {{p:2}}) WITH a,b UNWIND [1,2] AS x \
+                 MERGE (a)-[r:R]->(b) \
+                 ON CREATE SET r.p=properties(a).q,b.q=properties(a).p \
+                 ON MATCH SET r.p=properties(a).q/({divisor}),b.q=properties(b).q+1 \
+                 RETURN r.p AS copied,b.q AS endpoint"
+            ));
+            let mut bounded = GraphInsertPolicy::new(policy(2).query, 0, 1).with_mutation_limit(4);
+            if attempt == 1 {
+                bounded.query.evaluator.max_work_units = measured_work.unwrap() - 1;
+            } else if attempt == 2 {
+                bounded.max_mutation_effects = 3;
+            }
+            let result = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    bounded,
+                    || NOW,
+                )
+                .await;
+            if attempt == 0 {
+                let (stats, rows, completion) = result.unwrap();
+                assert_eq!((stats.created_vertices, stats.created_edges), (0, 1));
+                assert_eq!(rows.value.len(), 2);
+                for row in &rows.value {
+                    assert_eq!(row.values(), &[int(7), int(1)]);
+                }
+                assert_eq!(
+                    db.edges().unwrap()[0].props,
+                    vec![(P, CanonicalScalar::Int(7).into())]
+                );
+                assert_eq!(
+                    db.vertex(VId(2)).unwrap().unwrap().props,
+                    vec![
+                        (P, CanonicalScalar::Int(2).into()),
+                        (Q, CanonicalScalar::Int(1).into())
+                    ]
+                );
+                assert!(
+                    matches!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq }
+                    if commit_seq.0 == before.0.0 + 1)
+                );
+                assert!(stats.evaluator.work_units > 0);
+                measured_work = Some(stats.evaluator.work_units);
+            } else {
+                let error = result.unwrap_err();
+                if attempt == 3 {
+                    let mut cause: Option<&(dyn core::error::Error + 'static)> = Some(&error);
+                    let mut arithmetic = None;
+                    while let Some(error) = cause {
+                        if let Some(error) = error.downcast_ref::<fgdb_gql::GraphIntegerError>() {
+                            arithmetic = Some(error.kind);
+                            break;
+                        }
+                        cause = error.source();
+                    }
+                    assert_eq!(
+                        arithmetic,
+                        Some(fgdb_gql::GraphIntegerErrorKind::DivisionByZero),
+                        "{error:?}"
+                    );
+                }
+                assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+                assert!(db.edges().unwrap().is_empty());
+            }
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
 fn returned_map(entries: Vec<(&str, GraphValue)>) -> GraphValue {
     GraphValue::map(
         entries
