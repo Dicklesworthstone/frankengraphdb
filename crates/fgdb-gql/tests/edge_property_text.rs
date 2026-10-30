@@ -372,9 +372,9 @@ fn quantified_maps_preserve_stored_collection_equality_and_multiple_keys() {
     let float = |n| GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(n)));
     let null = GraphValue::Scalar(CanonicalScalar::Null);
     let values = [
-        GraphValue::List(vec![int(5), int(6)]),
-        GraphValue::List(vec![float(5.0), float(6.0)]),
-        GraphValue::List(vec![int(5), null.clone()]),
+        GraphValue::List(vec![int(5), int(6)].into()),
+        GraphValue::List(vec![float(5.0), float(6.0)].into()),
+        GraphValue::List(vec![int(5), null.clone()].into()),
         GraphValue::map(vec![("a".into(), int(5))]).unwrap(),
     ];
     let stored: Vec<_> = values
