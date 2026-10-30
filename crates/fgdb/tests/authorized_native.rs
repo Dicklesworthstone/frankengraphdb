@@ -2201,8 +2201,25 @@ fn unrestricted_capabilities_admit_only_an_index_bound_closure() {
             ),
             "{unbound:?}"
         );
-        let unbound = read(&open, "MATCH (n:L) RETURN count(*) AS n", small);
-        assert!(unbound.is_err(), "{unbound:?}");
+        // Exact current label metadata does not admit a graph-sized source,
+        // but still returns the owner's count under the same small policy.
+        let count = "MATCH (n:L) RETURN count(*) AS n";
+        assert_eq!(
+            read(&open, count, small).unwrap(),
+            PreparedNativeRead::prepare(count, &params, symbols)
+                .unwrap()
+                .execute(&db, &cx, &params, large)
+                .unwrap(),
+        );
+        // Metadata never widens the signed node ceiling. Even this shortcut
+        // must admit the entire visible population to the holder's allowance.
+        let no_nodes = open.attenuate(Restriction::MaxNodes(0)).unwrap();
+        assert!(matches!(
+            read(&no_nodes, count, small),
+            Err(QueryError::Authorization(Error::LimitExceeded(
+                LimitDimension::Nodes
+            )))
+        ));
         // A scoped capability cannot match through the property it cannot see,
         // even where the owner's index holds the value; visible keys still bind.
         let hidden = "MATCH (n:L {hidden: 70}) RETURN n.p AS p";

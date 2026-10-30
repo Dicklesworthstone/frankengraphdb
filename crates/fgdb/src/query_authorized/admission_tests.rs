@@ -15,7 +15,10 @@ use fgdb_types::context::SimulationCheckpointProbe;
 use fgdb_types::{
     CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
 };
-use fgdb_warden::{Authority, CapabilityToken, Grant, QueryLimits, Restriction, Scope};
+use fgdb_warden::{
+    Authority, CapabilityToken, Error as WardenError, Grant, LimitDimension, QueryLimits,
+    Restriction, Scope,
+};
 use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -34,8 +37,16 @@ const EDGE_READS: [&str; 5] = [
     // record's properties with another record's identity answers differently.
     "MATCH (a)-[r:R]->(b) RETURN a.p AS p, b.p AS q, r.w AS w ORDER BY p, q, w",
 ];
-/// A vertex-only plan admits no edge: its own admitted set.
-const VERTEX_READ: &str = "MATCH (n:L) RETURN count(*) AS n";
+/// A vertex-only plan that needs source records, rather than exact metadata:
+/// its own admitted set, containing no edge.
+const VERTEX_READ: &str = "MATCH (n:L) RETURN n.p AS p";
+/// Current counts can use owner metadata, but still spend the complete
+/// admitted vertex population's signed node allowance.
+const VERTEX_COUNTS: [(&str, u64); 3] = [
+    ("MATCH (n) RETURN count(*) AS n", 8),
+    ("MATCH (n:L) RETURN count(*) AS n", 8),
+    ("MATCH (n:M) RETURN count(*) AS n", 4),
+];
 
 fn scans() -> usize {
     SCANS.with(Cell::get)
@@ -433,7 +444,11 @@ fn work_runs_admit_and_refuse_native_reads_at_the_per_unit_thresholds() {
             Restriction::MaxNodes,
             Restriction::MaxRows,
         ];
-        for text in EDGE_READS.into_iter().chain([VERTEX_READ]) {
+        for text in EDGE_READS
+            .into_iter()
+            .chain([VERTEX_READ])
+            .chain(VERTEX_COUNTS.map(|(text, _)| text))
+        {
             for limit in limits {
                 let threshold = |runs: bool| {
                     WORK_RUNS.with(|cell| cell.set(runs));
@@ -595,10 +610,12 @@ fn a_single_version_scan_retains_a_constant_size_tape() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-/// A repeated filterless count neither merges history nor refills the vertex
-/// table. A refill initializes the core's shared vertex-position cache, even
-/// when its small-table result is None, so an untouched OnceLock distinguishes
-/// the summary path from merely reusing admission before traversing rows.
+/// A repeated historical filterless count neither merges history nor refills
+/// the vertex table. The cut precedes the frontier, so exact current metadata
+/// cannot replace source admission. A refill initializes the core's shared
+/// vertex-position cache, even when its small-table result is None, so an
+/// untouched OnceLock distinguishes the summary path from merely reusing
+/// admission before traversing rows.
 #[test]
 fn filterless_counts_replay_without_refilling_source_tables() {
     let _serial = serial();
@@ -606,12 +623,26 @@ fn filterless_counts_replay_without_refilling_source_tables() {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let cx = c.query();
         let token = issuer().issue_at(&open(), 100).unwrap();
-        for text in [
-            "MATCH (n) RETURN count(*) AS n",
-            "MATCH (a)-[:R]->(b) RETURN count(*) AS n",
+        for (text, expected) in [
+            (
+                "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 3 RETURN count(*) AS n",
+                9,
+            ),
+            (
+                "MATCH (a)-[:R]->(b) FOR SYSTEM_TIME AS OF SEQ 3 RETURN count(*) AS n",
+                8,
+            ),
         ] {
             let db = database(&c.commit()).await;
             let cold = read(&db, &cx, &token, text, || 100).unwrap();
+            assert_eq!(
+                cold,
+                QueryResult::Rows {
+                    columns: vec!["n".into()],
+                    rows: vec![vec![crate::QueryValue::Count(expected)]],
+                },
+                "{text}: the fixture's historical population",
+            );
             let before = scans();
             let core = db
                 .snapshot
@@ -620,7 +651,7 @@ fn filterless_counts_replay_without_refilling_source_tables() {
                 .lookup(
                     &db.snapshot,
                     AdmissionKey {
-                        at: db.frontier().unwrap(),
+                        at: fgdb_types::CommitSeq(3),
                         edges: text.contains("[:R]"),
                     },
                 )
@@ -629,6 +660,76 @@ fn filterless_counts_replay_without_refilling_source_tables() {
             assert_eq!(read(&db, &cx, &token, text, || 100).unwrap(), cold);
             assert_eq!(scans(), before);
             assert!(core.positions.get().is_none(), "{text}: table was refilled");
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// Eligible current counts bypass full-scan reuse, but do not bypass signed
+/// node admission or apply unrestricted metadata to a scoped reader.
+#[test]
+fn current_metadata_counts_keep_exact_rows_node_limits_and_scoped_admission() {
+    let _serial = serial();
+    let ((), report) = run_async_under_lab(0x61b1_0010, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = database(&c.commit()).await;
+        let token = issuer().issue_at(&open(), 100).unwrap();
+        let scoped = token
+            .attenuate(Restriction::Properties(Scope::only([W])))
+            .unwrap();
+        let too_small = token.attenuate(Restriction::MaxNodes(7)).unwrap();
+        let exact = token.attenuate(Restriction::MaxNodes(8)).unwrap();
+        let key = AdmissionKey {
+            at: db.frontier().unwrap(),
+            edges: false,
+        };
+        for (text, count) in VERTEX_COUNTS {
+            let expected = QueryResult::Rows {
+                columns: vec!["n".into()],
+                rows: vec![vec![crate::QueryValue::Count(count)]],
+            };
+            let before = scans();
+            assert_eq!(read(&db, &cx, &token, text, || 100).unwrap(), expected);
+            assert_eq!(read(&db, &cx, &token, text, || 100).unwrap(), expected);
+            assert_eq!(scans(), before, "{text}: exact metadata needs no scan");
+            assert!(
+                db.snapshot
+                    .read_caches
+                    .admitted
+                    .lookup(&db.snapshot, key)
+                    .is_none()
+            );
+            let refused = read(&db, &cx, &too_small, text, || 100);
+            assert!(
+                matches!(
+                    &refused,
+                    Err(QueryError::Authorization(WardenError::LimitExceeded(
+                        LimitDimension::Nodes
+                    )))
+                ),
+                "{text}: every current count admits all eight vertices: {refused:?}",
+            );
+            assert_eq!(read(&db, &cx, &exact, text, || 100).unwrap(), expected);
+            assert_eq!(
+                scans(),
+                before,
+                "{text}: node admission still uses metadata"
+            );
+            // Hiding p does not change these counts, but that scope must not
+            // consume or populate an unrestricted record-admission core.
+            assert_eq!(read(&db, &cx, &scoped, text, || 100).unwrap(), expected);
+            assert_eq!(scans(), before + 1, "{text}: a scoped count scans");
+            assert_eq!(read(&db, &cx, &scoped, text, || 100).unwrap(), expected);
+            assert_eq!(scans(), before + 2, "{text}: a scoped count never reuses");
+            assert!(
+                db.snapshot
+                    .read_caches
+                    .admitted
+                    .lookup(&db.snapshot, key)
+                    .is_none()
+            );
         }
         assert_eq!(c.outstanding_obligations(), 0);
     });
