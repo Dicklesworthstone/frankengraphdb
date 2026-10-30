@@ -9,11 +9,13 @@ use asupersync::Budget;
 use asupersync::Cx;
 use asupersync::io::AsyncWriteExt as _;
 use asupersync::net::TcpListener;
+use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, VectorEncoding};
+use fgdb_beacon::{DistanceMetric, HnswConfig, IndexConfig};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_gql::GraphSymbolKind;
+use fgdb_gql::{GraphSymbol, GraphSymbolKind};
 use fgdb_server::{
-    DatabaseConfig, MaintenanceEvent, MaintenanceSchedule, OrderedReadConfig, Server, ServerLimits,
-    Symbols,
+    BeaconIndexConfig, DatabaseConfig, MaintenanceEvent, MaintenanceSchedule, OrderedReadConfig,
+    Server, ServerLimits, Symbols,
 };
 use fgdb_warden::{Grant, QueryLimits, Restriction, Rights, Scope};
 use std::collections::BTreeSet;
@@ -37,6 +39,9 @@ USAGE:
                   [--compact-interval-seconds <n>] [--scrub-interval-seconds <n>]
                   [--subscription-coalesce-ticks <n>]
                   [--label <name>=<u64>]... [--relation <name>=<u64>]... [--property <name>=<u64>]...
+                  [--beacon-index <name> [--beacon-text <property>]
+                    [--beacon-vector <property,...> | --beacon-packed-vector <property>=<dimensions>]
+                    [--beacon-label <label>] [--beacon-metric l2|cosine|dot]]...
       [--max-connections <n>]
   fgdbd token --key-file <path> --issuer-key-file <path> [--policy-epoch <n>]
       [--rights read|write|read-write|admin] [--expires-in <seconds>]
@@ -66,6 +71,25 @@ idle connections say GOODBYE), and exits 0.
 fgdb CLI's query limits; defaults 100000, 100000, 10000000 and 10000000).
 They apply to every read and to the selection phase of every write. A token's
 own --max-nodes/--max-work/--max-rows caveats still bound each statement too.
+
+--beacon-index declares a maintained retrieval index for that database. The
+following --beacon-* fields belong to that index until the next declaration.
+Supply a text lane, a vector lane, or both. Properties and optional labels
+must be declared by the database's bindings; they may come from --bindings-file.
+Coordinate properties keep the stated order and round to f32; packed vectors
+contain exactly <dimensions> little-endian f32 values in one bytes property.
+The default metric is l2. Each database admits at most 64 named definitions,
+and vector dimensions must be 1..=65536. Names are operator diagnostics, not
+GQL catalog names: matching CALL hybrid.search requests select the index.
+
+Definitions are rebuilt before serving at startup and after authoritative
+recovery. Initial construction and each committed maintenance tick use the
+database's source/work/scratch ceilings. A later refused maintenance tick
+fences that index without changing the committed write. Matching fully visible
+exact reads reuse healthy generations; masked, historical and approximate
+requests keep their existing admitted execution paths. These are resident,
+operator-configured indexes, not a durable index catalog or approximate-index
+reuse. The original signed query limits still apply to every client search.
 
 --subscription-coalesce-ticks selects the maximum number of consecutive
 retained commits combined into one FGP subscription delta for that database.
@@ -224,6 +248,194 @@ struct DatabaseOptions {
     symbols: Symbols,
     /// `--bindings-file`: more bindings, merged in before the database opens.
     bindings_file: Option<PathBuf>,
+    beacon_indexes: Vec<BeaconIndexOptions>,
+}
+
+struct BeaconIndexOptions {
+    name: String,
+    text: Option<String>,
+    vector: Option<BeaconVectorOptions>,
+    label: Option<String>,
+    metric: Option<DistanceMetric>,
+}
+
+enum BeaconVectorOptions {
+    Coordinates(Vec<String>),
+    Packed { property: String, dimensions: usize },
+}
+
+impl BeaconIndexOptions {
+    fn new(name: &str) -> Result<Self, Failure> {
+        if name.is_empty()
+            || name.len() > 128
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+        {
+            return Err(Failure::usage(
+                "--beacon-index needs a name of 1..=128 bytes from [A-Za-z0-9_.-]",
+            ));
+        }
+        Ok(Self {
+            name: name.to_owned(),
+            text: None,
+            vector: None,
+            label: None,
+            metric: None,
+        })
+    }
+
+    fn field(&mut self, flag: &str, raw: &str) -> Result<(), Failure> {
+        if raw.is_empty() {
+            return Err(Failure::usage(format!("{flag} needs a nonempty value")));
+        }
+        match flag {
+            "--beacon-text" if self.text.is_none() => self.text = Some(raw.to_owned()),
+            "--beacon-label" if self.label.is_none() => self.label = Some(raw.to_owned()),
+            "--beacon-vector" if self.vector.is_none() => {
+                let mut properties = Vec::new();
+                for name in raw.split(',') {
+                    if name.is_empty() {
+                        return Err(Failure::usage("--beacon-vector has an empty property name"));
+                    }
+                    if properties.len() == 65_536 {
+                        return Err(Failure::usage("--beacon-vector exceeds 65536 dimensions"));
+                    }
+                    properties.push(name.to_owned());
+                }
+                self.vector = Some(BeaconVectorOptions::Coordinates(properties));
+            }
+            "--beacon-packed-vector" if self.vector.is_none() => {
+                let (property, dimensions) = raw.split_once('=').ok_or_else(|| {
+                    Failure::usage("--beacon-packed-vector needs <property>=<dimensions>")
+                })?;
+                let dimensions = number(dimensions, flag)?;
+                if property.is_empty() || !(1..=65_536).contains(&dimensions) {
+                    return Err(Failure::usage(
+                        "--beacon-packed-vector needs a property and 1..=65536 dimensions",
+                    ));
+                }
+                self.vector = Some(BeaconVectorOptions::Packed {
+                    property: property.to_owned(),
+                    dimensions,
+                });
+            }
+            "--beacon-metric" if self.metric.is_none() => {
+                self.metric = Some(match raw {
+                    "l2" => DistanceMetric::SquaredEuclidean,
+                    "cosine" => DistanceMetric::Cosine,
+                    "dot" => DistanceMetric::NegativeDotProduct,
+                    _ => return Err(Failure::usage("--beacon-metric needs l2, cosine, or dot")),
+                });
+            }
+            _ => {
+                return Err(Failure::usage(format!(
+                    "duplicate or conflicting field {flag} for Beacon index {:?}",
+                    self.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), Failure> {
+        if self.text.is_none() && self.vector.is_none() {
+            return Err(Failure::usage(format!(
+                "Beacon index {:?} needs a text or vector lane",
+                self.name
+            )));
+        }
+        if self.metric.is_some() && self.vector.is_none() {
+            return Err(Failure::usage("--beacon-metric requires a vector lane"));
+        }
+        Ok(())
+    }
+
+    /// Bind only after the complete operator catalog (including a bindings
+    /// file) is available. Never introduce schema names through index options.
+    fn bind(&self, symbols: &Symbols, limits: [u64; 4]) -> Result<BeaconIndexConfig, Failure> {
+        self.validate()?;
+        let property = |name: &str| match symbols.resolve(GraphSymbolKind::Property, name) {
+            Some(GraphSymbol::Property(id)) => Ok(id),
+            _ => Err(Failure::usage(format!(
+                "Beacon index {:?} refers to unbound property {name:?}",
+                self.name
+            ))),
+        };
+        let text = self.text.as_deref().map(property).transpose()?;
+        let label = self
+            .label
+            .as_deref()
+            .map(|name| match symbols.resolve(GraphSymbolKind::Label, name) {
+                Some(GraphSymbol::Label(id)) => Ok(id),
+                _ => Err(Failure::usage(format!(
+                    "Beacon index {:?} refers to unbound label {name:?}",
+                    self.name
+                ))),
+            })
+            .transpose()?;
+        let (vector, dimensions, encoding) = match &self.vector {
+            None => (Vec::new(), 0, VectorEncoding::CoordinatesRoundedF32),
+            Some(BeaconVectorOptions::Coordinates(names)) => (
+                names
+                    .iter()
+                    .map(|name| property(name))
+                    .collect::<Result<_, _>>()?,
+                names.len(),
+                VectorEncoding::CoordinatesRoundedF32,
+            ),
+            Some(BeaconVectorOptions::Packed {
+                property: name,
+                dimensions,
+            }) => (
+                vec![property(name)?],
+                *dimensions,
+                VectorEncoding::PackedF32Le,
+            ),
+        };
+        let mut native_limits = [0; 4];
+        for (at, value) in limits.into_iter().enumerate() {
+            native_limits[at] = usize::try_from(value).map_err(|_| {
+                Failure::usage(format!(
+                    "{} exceeds the native Beacon limit domain",
+                    QUERY_LIMIT_FLAGS[at]
+                ))
+            })?;
+        }
+        let [records, rows, work, scratch] = native_limits;
+        let mut index = IndexConfig::default();
+        if text.is_none() {
+            index.text = None;
+        }
+        if self.vector.is_some() {
+            index.vector = Some(
+                HnswConfig::new(
+                    dimensions,
+                    self.metric.unwrap_or(DistanceMetric::SquaredEuclidean),
+                )
+                .exact_only(),
+            );
+        }
+        Ok(BeaconIndexConfig::new(
+            self.name.clone(),
+            ReadOptions {
+                as_of: None,
+                vertex_label: label,
+                projection: Projection {
+                    text,
+                    vector,
+                    encoding,
+                },
+                index,
+                policy: ReadPolicy {
+                    max_work_units: work,
+                    max_source_scratch: scratch,
+                    max_staging_rows: records,
+                    max_result_rows: rows,
+                },
+            },
+        ))
+    }
 }
 
 const QUERY_LIMIT_FLAGS: [&str; 4] = [
@@ -320,6 +532,7 @@ impl ServeOptions {
                         subscription_coalesce_ticks: None,
                         symbols: Symbols::new(),
                         bindings_file: None,
+                        beacon_indexes: Vec::new(),
                     });
                 }
                 _ => {
@@ -346,6 +559,30 @@ impl ServeOptions {
                         }
                         "--bindings-file" if db.bindings_file.is_none() => {
                             db.bindings_file = Some(PathBuf::from(value(args, &mut at, flag)?));
+                        }
+                        "--beacon-index" => {
+                            if db.beacon_indexes.len() == fgdb::MAX_MAINTAINED_BEACON_INDEXES {
+                                return Err(Failure::usage(
+                                    "at most 64 Beacon indexes per database",
+                                ));
+                            }
+                            let name = value(args, &mut at, flag)?;
+                            if db.beacon_indexes.iter().any(|index| index.name == name) {
+                                return Err(Failure::usage(format!(
+                                    "duplicate Beacon index {name:?}"
+                                )));
+                            }
+                            db.beacon_indexes.push(BeaconIndexOptions::new(name)?);
+                        }
+                        "--beacon-text"
+                        | "--beacon-vector"
+                        | "--beacon-packed-vector"
+                        | "--beacon-label"
+                        | "--beacon-metric" => {
+                            let index = db.beacon_indexes.last_mut().ok_or_else(|| {
+                                Failure::usage(format!("{flag} must follow --beacon-index"))
+                            })?;
+                            index.field(flag, value(args, &mut at, flag)?)?;
                         }
                         "--max-snapshot-records"
                         | "--max-result-rows"
@@ -404,6 +641,9 @@ impl ServeOptions {
             return Err(Failure::usage("serve needs at least one --database"));
         }
         for db in &databases {
+            for index in &db.beacon_indexes {
+                index.validate()?;
+            }
             MaintenanceSchedule::new(db.maintenance_intervals[0], db.maintenance_intervals[1])
                 .map_err(Failure::usage)?;
             if db.key_file.is_none() || db.issuer_key_file.is_none() {
@@ -492,6 +732,14 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
                 .await
                 .map_err(Failure::open)?;
         let mut config = DatabaseConfig::new(db.name, keys, issuer_key);
+        let query_limits = core::array::from_fn(|at| {
+            db.query_limits[at].unwrap_or(DatabaseConfig::DEFAULT_QUERY_LIMITS[at])
+        });
+        config.beacon_indexes = db
+            .beacon_indexes
+            .iter()
+            .map(|index| index.bind(&db.symbols, query_limits))
+            .collect::<Result<_, _>>()?;
         config.policy_epoch = db.policy_epoch;
         config.write_relation = RelationId(db.write_relation);
         config.symbols = db.symbols;
@@ -499,9 +747,7 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
         if let Some(ticks) = db.subscription_coalesce_ticks {
             config.subscription_max_coalesced_ticks = ticks;
         }
-        config.set_query_limits(core::array::from_fn(|at| {
-            db.query_limits[at].unwrap_or(DatabaseConfig::DEFAULT_QUERY_LIMITS[at])
-        }));
+        config.set_query_limits(query_limits);
         server
             .open_database(cx, &db.path, config)
             .await
@@ -1015,6 +1261,302 @@ async fn keygen(cx: &Cx, args: &[String]) -> Result<(), Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn beacon_options(extra: &[&str]) -> Result<ServeOptions, Failure> {
+        let base = [
+            "--listen",
+            "127.0.0.1:0",
+            "--database",
+            "first=first-db",
+            "--key-file",
+            "first.key",
+            "--issuer-key-file",
+            "issuer.key",
+        ];
+        let args: Vec<String> = base.iter().chain(extra).map(|s| (*s).to_owned()).collect();
+        ServeOptions::parse(&args)
+    }
+
+    #[test]
+    fn beacon_indexes_bind_combined_lanes_after_the_complete_catalog_is_available() {
+        let mut parsed = beacon_options(&[
+            "--beacon-index",
+            "retrieval",
+            "--beacon-text",
+            "body",
+            "--beacon-vector",
+            "y,x,y",
+            "--beacon-label",
+            "Document",
+            "--beacon-metric",
+            "cosine",
+            "--property",
+            "x=4294967296",
+            "--property",
+            "y=18446744073709551615",
+        ])
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        let db = &mut parsed.databases[0];
+        let index = &db.beacon_indexes[0];
+        // Definitions cannot create symbols or reuse one from another kind.
+        assert!(index.bind(&db.symbols, [11, 12, 13, 14]).is_err());
+        db.symbols.bind(GraphSymbolKind::Label, "body", 20).unwrap();
+        assert!(index.bind(&db.symbols, [11, 12, 13, 14]).is_err());
+        // This is the same merge that serve performs after --bindings-file.
+        for binding in fgdb_gql::symbol_bindings::parse_symbol_bindings(
+            b"property body=7\nlabel Document=18446744073709551615\n",
+        )
+        .unwrap()
+        {
+            db.symbols
+                .bind(binding.kind, &binding.name, binding.id)
+                .unwrap();
+        }
+        let bound = index
+            .bind(&db.symbols, [11, 12, 13, 14])
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(bound.name, "retrieval");
+        assert_eq!(bound.options.as_of, None);
+        assert_eq!(bound.options.vertex_label, Some(LabelId(u64::MAX)));
+        assert_eq!(bound.options.projection.text, Some(PropertyKeyId(7)));
+        assert_eq!(
+            bound.options.projection.vector,
+            [
+                PropertyKeyId(u64::MAX),
+                PropertyKeyId(4_294_967_296),
+                PropertyKeyId(u64::MAX)
+            ]
+        );
+        assert_eq!(
+            bound.options.projection.encoding,
+            VectorEncoding::CoordinatesRoundedF32
+        );
+        assert_eq!(
+            bound.options.index.vector,
+            Some(HnswConfig::new(3, DistanceMetric::Cosine).exact_only())
+        );
+        assert_eq!(bound.options.index.text, IndexConfig::default().text);
+        let policy = ReadPolicy {
+            max_work_units: 13,
+            max_source_scratch: 14,
+            max_staging_rows: 11,
+            max_result_rows: 12,
+        };
+        assert_eq!(bound.options.policy, policy);
+        assert_eq!(bound.maintenance, policy);
+    }
+
+    #[test]
+    fn beacon_definitions_and_defaults_are_isolated_between_databases() {
+        let parsed = beacon_options(&[
+            "--beacon-index",
+            "text",
+            "--beacon-text",
+            "body",
+            "--property",
+            "body=1",
+            "--beacon-index",
+            "embedding",
+            "--beacon-packed-vector",
+            "embedding=384",
+            "--property",
+            "embedding=2",
+            "--database",
+            "second=second-db",
+            "--key-file",
+            "second.key",
+            "--issuer-key-file",
+            "issuer.key",
+            "--beacon-index",
+            "text",
+            "--beacon-vector",
+            "position",
+            "--beacon-metric",
+            "dot",
+            "--property",
+            "position=5",
+        ])
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(parsed.databases[0].beacon_indexes.len(), 2);
+        assert_eq!(parsed.databases[1].beacon_indexes.len(), 1);
+        let bind = |db: usize, index: usize| {
+            let db = &parsed.databases[db];
+            db.beacon_indexes[index]
+                .bind(&db.symbols, DatabaseConfig::DEFAULT_QUERY_LIMITS)
+                .unwrap_or_else(|error| panic!("{}", error.message))
+        };
+        let text = bind(0, 0);
+        assert!(text.options.index.text.is_some());
+        assert!(text.options.index.vector.is_none());
+        let packed = bind(0, 1);
+        assert_eq!(packed.options.projection.vector, [PropertyKeyId(2)]);
+        assert_eq!(
+            packed.options.projection.encoding,
+            VectorEncoding::PackedF32Le
+        );
+        assert!(packed.options.index.text.is_none());
+        assert_eq!(
+            packed.options.index.vector,
+            Some(HnswConfig::new(384, DistanceMetric::SquaredEuclidean).exact_only())
+        );
+        let second = bind(1, 0);
+        assert_eq!(second.options.projection.vector, [PropertyKeyId(5)]);
+        assert_eq!(
+            second.options.index.vector,
+            Some(HnswConfig::new(1, DistanceMetric::NegativeDotProduct).exact_only())
+        );
+        assert!(
+            beacon_options(&[])
+                .unwrap_or_else(|error| panic!("{}", error.message))
+                .databases[0]
+                .beacon_indexes
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn beacon_options_refuse_ambiguous_incomplete_or_unbounded_definitions() {
+        for extra in [
+            vec!["--beacon-index"],
+            vec!["--beacon-index", ""],
+            vec!["--beacon-index", "bad/name", "--beacon-text", "body"],
+            vec!["--beacon-index", "empty"],
+            vec!["--beacon-text", "body"],
+            vec!["--beacon-index", "one", "--beacon-text", ""],
+            vec![
+                "--beacon-index",
+                "one",
+                "--beacon-text",
+                "body",
+                "--beacon-text",
+                "title",
+            ],
+            vec![
+                "--beacon-index",
+                "one",
+                "--beacon-text",
+                "body",
+                "--beacon-index",
+                "one",
+                "--beacon-text",
+                "title",
+            ],
+            vec![
+                "--beacon-index",
+                "one",
+                "--beacon-text",
+                "body",
+                "--beacon-metric",
+                "l2",
+            ],
+            vec!["--beacon-index", "one", "--beacon-vector", "x,"],
+            vec!["--beacon-index", "one", "--beacon-vector", ",x"],
+            vec!["--beacon-index", "one", "--beacon-vector", "x,,y"],
+            vec![
+                "--beacon-index",
+                "one",
+                "--beacon-vector",
+                "x",
+                "--beacon-packed-vector",
+                "e=2",
+            ],
+            vec![
+                "--beacon-index",
+                "one",
+                "--beacon-packed-vector",
+                "e=2",
+                "--beacon-vector",
+                "x",
+            ],
+            vec![
+                "--beacon-index",
+                "one",
+                "--beacon-vector",
+                "x",
+                "--beacon-metric",
+                "unknown",
+            ],
+            vec![
+                "--beacon-index",
+                "one",
+                "--beacon-vector",
+                "x",
+                "--beacon-metric",
+                "l2",
+                "--beacon-metric",
+                "dot",
+            ],
+            vec![
+                "--beacon-index",
+                "one",
+                "--beacon-vector",
+                "x",
+                "--beacon-label",
+                "A",
+                "--beacon-label",
+                "B",
+            ],
+        ] {
+            assert!(beacon_options(&extra).is_err(), "{extra:?}");
+        }
+        for packed in [
+            "e",
+            "=1",
+            "e=0",
+            "e=-1",
+            "e=1.5",
+            "e=65537",
+            "e=18446744073709551616",
+        ] {
+            assert!(
+                beacon_options(&["--beacon-index", "one", "--beacon-packed-vector", packed])
+                    .is_err(),
+                "{packed}"
+            );
+        }
+        let long = "x".repeat(129);
+        assert!(beacon_options(&["--beacon-index", &long, "--beacon-text", "body"]).is_err());
+        let coordinates = vec!["x"; 65_537].join(",");
+        assert!(
+            beacon_options(&["--beacon-index", "one", "--beacon-vector", &coordinates]).is_err()
+        );
+        let mut arguments = Vec::new();
+        for i in 0..=fgdb::MAX_MAINTAINED_BEACON_INDEXES {
+            arguments.extend([
+                "--beacon-index".to_owned(),
+                format!("index{i}"),
+                "--beacon-text".to_owned(),
+                "body".to_owned(),
+            ]);
+        }
+        let borrowed = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+        assert!(beacon_options(&borrowed[..borrowed.len() - 4]).is_ok());
+        assert!(beacon_options(&borrowed).is_err());
+    }
+
+    #[test]
+    fn beacon_budget_conversion_never_truncates_host_limits() {
+        let parsed = beacon_options(&[
+            "--beacon-index",
+            "one",
+            "--beacon-text",
+            "body",
+            "--property",
+            "body=1",
+        ])
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        let db = &parsed.databases[0];
+        let bound = db.beacon_indexes[0].bind(&db.symbols, [u64::MAX; 4]);
+        if usize::BITS == 64 {
+            let bound = bound.unwrap_or_else(|error| panic!("{}", error.message));
+            assert_eq!(bound.options.policy.max_work_units, usize::MAX);
+            assert_eq!(bound.options.policy.max_source_scratch, usize::MAX);
+            assert_eq!(bound.options.policy.max_staging_rows, usize::MAX);
+            assert_eq!(bound.options.policy.max_result_rows, usize::MAX);
+        } else {
+            assert!(bound.is_err());
+        }
+    }
 
     #[test]
     fn serve_symbol_flags_preserve_the_full_native_ordinal_domain() {
