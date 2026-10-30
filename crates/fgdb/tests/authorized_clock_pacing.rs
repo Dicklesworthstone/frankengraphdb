@@ -12,6 +12,7 @@ use fgdb::{Database, DatabaseKeys, MemVfs, QueryError, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::{GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText};
+use fgdb_prism::{FnxCallSpec, FnxMeter, FnxParameters, FnxReadOptions};
 use fgdb_types::{
     CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
 };
@@ -199,8 +200,21 @@ fn delivery_samples_afresh_however_few_charges_share_the_interval() {
 /// Run `text` through an authorized read session (fgdbd's path) under `cx`,
 /// counting the host clock samples the statement itself takes.
 fn session_samples(db: &Database<MemVfs>, cx: &QueryCx, issuer: &Authority, text: &str) -> usize {
+    let (result, samples) = session_sampled(db, cx, issuer, text, |_| LIVE);
+    result.unwrap();
+    samples
+}
+
+fn session_sampled(
+    db: &Database<MemVfs>,
+    cx: &QueryCx,
+    issuer: &Authority,
+    text: &str,
+    mut reading: impl FnMut(usize) -> u64,
+) -> (Result<fgdb::QueryResult, QueryError>, usize) {
     let token = issuer.issue_at(&grant(), LIVE).unwrap();
     let samples = std::cell::Cell::new(0_usize);
+    let opened = std::cell::Cell::new(None::<usize>);
     let symbols = |kind, name: &str| match (kind, name) {
         (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
@@ -210,12 +224,15 @@ fn session_samples(db: &Database<MemVfs>, cx: &QueryCx, issuer: &Authority, text
     let mut session = db
         .authorized_read_session(cx, issuer, &token, BRANCH, symbols, policy(), || {
             samples.set(samples.get() + 1);
-            LIVE
+            opened
+                .get()
+                .map_or(LIVE, |offset| reading(samples.get() - offset))
         })
         .unwrap();
-    let opened = samples.get();
-    session.query(cx, text, &GqlParameters::new()).unwrap();
-    samples.get() - opened
+    let before = samples.get();
+    opened.set(Some(before));
+    let result = session.query(cx, text, &GqlParameters::new());
+    (result, samples.get() - before)
 }
 
 #[test]
@@ -230,7 +247,6 @@ fn session_statements_share_paced_samples() {
         for text in [
             "MATCH (a:L)-[:R]->(b) RETURN count(*) AS n",
             "MATCH (a:L)-[:R]->(b) RETURN a.p AS p",
-            "CALL fnx.weakly_connected_components() YIELD vertex, component RETURN count(DISTINCT component) AS c",
         ] {
             let per_charge = session_samples(&db, &cx, &issuer, text);
             let paced = session_samples(&db, &paced_cx, &issuer, text);
@@ -242,6 +258,100 @@ fn session_statements_share_paced_samples() {
                 paced <= per_charge.div_ceil(K as usize) + 3,
                 "{text}: {paced} paced samples for {per_charge} charges at K = {K}"
             );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn session_analytics_paces_charges_and_samples_every_prepaid_physical_boundary() {
+    let ((), report) = run_async_under_lab(0x5ec0_e704, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let db = chain(&contexts.commit(), 400).await;
+        let issuer = authority(704);
+        let call = FnxCallSpec::bind(
+            "CALL fnx.weakly_connected_components() YIELD vertex,component",
+            &FnxParameters::new(),
+        )
+        .unwrap();
+        let options = FnxReadOptions::whole_graph_for(&call, None);
+        let view = db.read_session().unwrap();
+        let graph = view
+            .prism_projection_at(
+                &cx,
+                view.frontier(),
+                options.selection,
+                options.projection,
+                options.projection_limits,
+                options.source_limits,
+            )
+            .unwrap();
+        // Count physical freshness obligations independently of the host's
+        // clock. Logical unit charges and uncharged physical polls are distinct
+        // operations in the public kernel contract.
+        struct Polls<'a>(&'a std::cell::Cell<usize>);
+        impl FnxMeter<()> for Polls<'_> {
+            fn unit(&mut self) -> Result<(), ()> {
+                Ok(())
+            }
+            fn poll(&mut self) -> Result<(), ()> {
+                self.0.set(self.0.get() + 1);
+                Ok(())
+            }
+        }
+        let kernel_polls = std::cell::Cell::new(0);
+        let mut cursor = call
+            .execute_rows(&graph, options.execution_limits, Polls(&kernel_polls))
+            .unwrap();
+        let mut pull_polls = 0;
+        let mut rows = 0;
+        let mut scratch = Vec::new();
+        while cursor
+            .next_row(&mut scratch, || {
+                pull_polls += 1;
+                Ok::<_, ()>(())
+            })
+            .unwrap()
+        {
+            rows += 1;
+        }
+        assert_eq!((rows, pull_polls), (400, 400));
+        // The host also checks the prepaid pull reservation's end and the
+        // procedure wrapper's exhausted drain. Neither spends logical work.
+        let fresh = kernel_polls.get() + pull_polls + 2;
+        let text = "CALL fnx.weakly_connected_components() YIELD vertex, component \
+                    RETURN count(DISTINCT component) AS c";
+        let (expected, per_charge) = session_sampled(&db, &cx, &issuer, text, |_| LIVE);
+        let expected = expected.unwrap();
+        const K: u32 = 16;
+        let paced_cx = cx.with_host_clock_interval(interval(K));
+        let (result, paced) = session_sampled(&db, &paced_cx, &issuer, text, |_| LIVE);
+        assert_eq!(result.unwrap(), expected);
+        assert!(per_charge > fresh + 40 * K as usize);
+        assert!(
+            paced <= (per_charge - fresh).div_ceil(K as usize) + fresh + 3,
+            "{paced} samples for {per_charge} charge-clock samples and {fresh} fresh polls"
+        );
+        let physical_cx = cx.with_host_clock_interval(NonZeroU32::MAX);
+        let (result, physical) = session_sampled(&db, &physical_cx, &issuer, text, |_| LIVE);
+        assert_eq!(result.unwrap(), expected);
+        assert_eq!(
+            physical,
+            fresh + 3,
+            "only authorization, first charge, delivery and independently counted physical polls"
+        );
+        // No prepaid physical boundary may share away an expired sample, and
+        // no source, evaluator or completion callback may run past its refusal.
+        for stop in 1..=physical {
+            let (result, seen) = session_sampled(&db, &physical_cx, &issuer, text, |at| {
+                if at == stop { EXPIRED } else { LIVE }
+            });
+            assert!(
+                matches!(result, Err(QueryError::Authorization(Error::Expired))),
+                "sample {stop}: {result:?}"
+            );
+            assert_eq!(seen, stop, "nothing samples after expiry at {stop}");
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
