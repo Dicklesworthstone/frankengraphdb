@@ -4333,3 +4333,181 @@ fn matched_relationship_merge_masks_hidden_inputs_and_refuses_denied_actions_ato
         }
     });
 }
+
+fn returned_map(entries: Vec<(&str, GraphValue)>) -> GraphValue {
+    GraphValue::map(
+        entries
+            .into_iter()
+            .map(|(name, value)| (name.into(), value))
+            .collect(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn vertex_merge_wildcard_maps_read_final_aliases_and_mask_hidden_fields() {
+    lab(0xc4a1_3730, |contexts| async move {
+        let commit = contexts.commit();
+        for authorized in [false, true] {
+            for replace in [false, true] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(R);
+                seed.create_vertex(
+                    VId(1),
+                    vec![L],
+                    vec![
+                        (P, CanonicalScalar::Int(1)),
+                        (SECRET, CanonicalScalar::Int(42)),
+                        (Q, CanonicalScalar::Int(5)),
+                    ],
+                );
+                db.write(&commit, seed).await.unwrap();
+                let before = db.frontier().unwrap();
+                let action = if replace {
+                    "ON MATCH SET n = {p:1, q:value}"
+                } else {
+                    "ON MATCH SET n.q = value"
+                };
+                let program = chain_named(&format!(
+                    "MATCH (a:Visible {{p:1}}) WITH a, null AS missing \
+                     UNWIND [7,8] AS value MERGE (n:Visible {{p:1}}) {action} \
+                     RETURN a{{.*}} AS carried, n{{.*, q:99, copied:a.q}} AS merged, \
+                     a{{.p, .q, value}} AS selected, properties(a) AS props, \
+                     keys(a) AS keys, missing{{.*}} AS absent"
+                ));
+                let (stats, rows) = whole_pattern_merge(
+                    &contexts,
+                    &mut db,
+                    authorized,
+                    &program,
+                    policy(2).with_mutation_limit(100),
+                )
+                .await
+                .unwrap();
+                assert_eq!(stats.created_vertices, 0);
+                assert_eq!(rows.len(), 2);
+                let visible_secret = !authorized && !replace;
+                let mut plain = vec![("p", int(1)), ("q", int(8))];
+                let mut overridden = vec![("copied", int(8)), ("p", int(1)), ("q", int(99))];
+                let mut names = vec!["p", "q"];
+                if visible_secret {
+                    plain.push(("secret", int(42)));
+                    overridden.push(("secret", int(42)));
+                    names.push("secret");
+                }
+                let plain = returned_map(plain);
+                let overridden = returned_map(overridden);
+                let names = GraphValue::List(
+                    names
+                        .into_iter()
+                        .map(|name| {
+                            GraphValue::Scalar(CanonicalScalar::ucs_basic_text(name).unwrap())
+                        })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                );
+                for (row, value) in rows.iter().zip([7, 8]) {
+                    assert_eq!(
+                        row.values(),
+                        &[
+                            plain.clone(),
+                            overridden.clone(),
+                            returned_map(vec![("p", int(1)), ("q", int(8)), ("value", int(value))]),
+                            plain.clone(),
+                            names.clone(),
+                            GraphValue::Scalar(CanonicalScalar::Null),
+                        ],
+                        "authorized={authorized}, replace={replace}",
+                    );
+                }
+                let mut expected = vec![(P, CanonicalScalar::Int(1).into())];
+                if authorized || !replace {
+                    expected.push((SECRET, CanonicalScalar::Int(42).into()));
+                }
+                expected.push((Q, CanonicalScalar::Int(8).into()));
+                assert_eq!(db.vertices().unwrap()[0].props, expected);
+                assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+            }
+        }
+    });
+}
+
+#[test]
+fn vertex_merge_wildcard_with_maps_freeze_before_the_next_write() {
+    lab(0xc4a1_3731, |contexts| async move {
+        let commit = contexts.commit();
+        let program = chain_named(
+            "UNWIND [1,2] AS value MERGE (n:Visible {p:value}) \
+             ON CREATE SET n.q=value+10 WITH n, n{.*} AS saved \
+             MERGE (m:Visible {p:1}) SET m.q=99 \
+             RETURN saved, n{.*} AS current, m{.*} AS merged",
+        );
+        for authorized in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let (stats, rows) = whole_pattern_merge(
+                &contexts,
+                &mut db,
+                authorized,
+                &program,
+                policy(2).with_mutation_limit(100),
+            )
+            .await
+            .unwrap();
+            assert_eq!(stats.created_vertices, 2);
+            assert_eq!(rows.len(), 2);
+            for (row, value) in rows.iter().zip([1, 2]) {
+                assert_eq!(
+                    row.values(),
+                    &[
+                        returned_map(vec![("p", int(value)), ("q", int(value + 10))]),
+                        returned_map(vec![
+                            ("p", int(value)),
+                            ("q", int(if value == 1 { 99 } else { 12 })),
+                        ]),
+                        returned_map(vec![("p", int(1)), ("q", int(99))]),
+                    ],
+                    "authorized={authorized}",
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn vertex_merge_wildcard_projection_failure_rolls_back_even_with_limit_zero() {
+    lab(0xc4a1_3732, |contexts| async move {
+        let commit = contexts.commit();
+        for authorized in [false, true] {
+            for page in ["", " LIMIT 0"] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(R);
+                seed.create_vertex(
+                    VId(1),
+                    vec![L],
+                    vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(5))],
+                );
+                db.write(&commit, seed).await.unwrap();
+                let before = (db.frontier().unwrap(), db.vertices().unwrap());
+                let program = chain_named(&format!(
+                    "MATCH (a:Visible {{p:1}}) MERGE (n:Visible {{p:1}}) SET n.q=9 \
+                     RETURN n{{.*, invalid:1/(a.q-9)}} AS value{page}"
+                ));
+                let error = whole_pattern_merge(
+                    &contexts,
+                    &mut db,
+                    authorized,
+                    &program,
+                    policy(1).with_mutation_limit(100),
+                )
+                .await
+                .unwrap_err();
+                assert!(error.contains("DivisionByZero"), "{error}");
+                assert_eq!(
+                    (db.frontier().unwrap(), db.vertices().unwrap()),
+                    before,
+                    "authorized={authorized}, page={page}",
+                );
+            }
+        }
+    });
+}

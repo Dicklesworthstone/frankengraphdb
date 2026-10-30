@@ -90,6 +90,17 @@ pub(super) trait ReturnLeaves<'a> {
             GraphPatternTextErrorKind::Expected("map projection over a readable write binding"),
         ))
     }
+    /// The complete map behind a wildcard projection. Most write owners
+    /// already hold a native final-map cell. Owners that retain an identity
+    /// instead can evaluate this expression with their final-overlay reader.
+    fn map_properties(
+        &mut self,
+        parser: &mut Parser<'a>,
+        source: Name<'a>,
+    ) -> Result<ReadValueTemplate, GraphPatternTextError> {
+        self.map_input(parser, source, ReturnMapInput::Properties)
+            .map(ReadValueTemplate::Column)
+    }
     /// Every binding column's type, in column order.
     fn types(&self) -> Vec<GraphSetColumnType>;
 }

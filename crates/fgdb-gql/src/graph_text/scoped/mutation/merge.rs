@@ -2496,11 +2496,6 @@ enum RowsBinding<'a> {
 struct ParsedVertexRowsReturn<'r, 'a> {
     variable: Option<Name<'a>>,
     row: &'r [(Name<'a>, GraphSetColumnType)],
-    /// With ON/SET clauses, the property names they write. A carried
-    /// element's properties read their final values (InputProperty), but its
-    /// labels(), keys() and properties() would read a hidden read from
-    /// before the clauses, so RETURN refuses them.
-    written: Option<Vec<&'a str>>,
     bindings: Vec<(RowsBinding<'a>, GraphSetColumnType)>,
     projection: Vec<ReadProjectionTemplate>,
     grouping: Option<WriteReturnGroupTemplate>,
@@ -2649,27 +2644,9 @@ impl<'a> ReturnLeaves<'a> for ParsedVertexRowsReturn<'_, 'a> {
             return Ok(None);
         };
         let at = parser.current.at;
-        // After ON/SET, labels(), keys() and properties() of a carried
-        // element would read its state before the clauses.
-        if self.written.is_some()
-            && ["labels", "keys", "properties"]
-                .iter()
-                .any(|function| word.eq_ignore_ascii_case(function))
-        {
-            let mut lexer = parser.lexer.clone();
-            if matches!(lexer.next()?.kind, TokenKind::Punct(b'('))
-                && matches!(lexer.next()?.kind, TokenKind::Word(argument)
-                    if !self.variable.is_some_and(|variable| variable.text == argument))
-            {
-                return Err(error(
-                    at,
-                    GraphPatternTextErrorKind::Expected(
-                        "no carried-element metadata in RETURN after MERGE ON/SET",
-                    ),
-                ));
-            }
-        }
         // Functions stay with the shared compiler; their arguments return here.
+        // Metadata reads these identities through the host's final-overlay
+        // reader, after every MERGE occurrence and its ON/SET actions.
         if matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
             || parser.elements.contains(&word)
         {
@@ -2727,32 +2704,69 @@ impl<'a> ReturnLeaves<'a> for ParsedVertexRowsReturn<'_, 'a> {
 
     fn map_input(
         &mut self,
-        _: &mut Parser<'a>,
+        parser: &mut Parser<'a>,
         source: Name<'a>,
         input: ReturnMapInput<'a>,
     ) -> Result<usize, GraphPatternTextError> {
-        if !self
+        if parser.elements.contains(&source.text) {
+            return Err(error(source.at, GraphPatternTextErrorKind::UnknownVariable));
+        }
+        let (identity, kind) = if self
             .variable
             .is_some_and(|variable| variable.text == source.text)
         {
-            return Err(error(source.at, GraphPatternTextErrorKind::UnknownVariable));
+            (RowsBinding::Vertex, GraphSetColumnType::Vertex)
+        } else {
+            let visible = parser.visible_width(self.row);
+            let column = self.row[..visible]
+                .iter()
+                .position(|(name, _)| name.text == source.text)
+                .ok_or_else(|| error(source.at, GraphPatternTextErrorKind::UnknownVariable))?;
+            (RowsBinding::Input(column), self.row[column].1)
+        };
+        // Shorthand entries may retain any visible row value. A selected
+        // graph property, like a.key, must bind its post-MERGE value.
+        if matches!(input, ReturnMapInput::Identity) {
+            return self.column(identity, kind, source.at);
+        }
+        if !matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge) {
+            return Err(error(
+                source.at,
+                GraphPatternTextErrorKind::Expected("a retained vertex or relationship map source"),
+            ));
         }
         match input {
             ReturnMapInput::Identity | ReturnMapInput::Guard => {
-                self.column(RowsBinding::Vertex, GraphSetColumnType::Vertex, source.at)
+                self.column(identity, kind, source.at)
             }
-            ReturnMapInput::Property(key) => self.column(
-                RowsBinding::Property(key),
-                GraphSetColumnType::Stored,
-                key.at,
-            ),
+            ReturnMapInput::Property(key) => {
+                let binding = match identity {
+                    RowsBinding::Vertex => RowsBinding::Property(key),
+                    RowsBinding::Input(column) => RowsBinding::InputProperty(column, key),
+                    _ => unreachable!("map source is an identity"),
+                };
+                self.column(binding, GraphSetColumnType::Stored, key.at)
+            }
+            // Full maps use map_properties below; they are evaluated by the
+            // final-overlay reader rather than held in a pre-write column.
             ReturnMapInput::Properties => Err(error(
                 source.at,
-                GraphPatternTextErrorKind::Expected(
-                    "named vertex properties in RETURN after a chained MERGE",
-                ),
+                GraphPatternTextErrorKind::Expected("a post-MERGE property-map expression"),
             )),
         }
+    }
+
+    fn map_properties(
+        &mut self,
+        parser: &mut Parser<'a>,
+        source: Name<'a>,
+    ) -> Result<ReadValueTemplate, GraphPatternTextError> {
+        let column = self.map_input(parser, source, ReturnMapInput::Identity)?;
+        Ok(ReadValueTemplate::ElementMetadata {
+            kind: crate::GraphElementMetadata::Properties,
+            value: Box::new(ReadValueTemplate::Column(column)),
+            catalog: parser.syntax.element_catalog.request(),
+        })
     }
 
     fn types(&self) -> Vec<GraphSetColumnType> {
@@ -2771,7 +2785,6 @@ impl<'a> Parser<'a> {
         keyword: &'static str,
         variable: Option<Name<'a>>,
         row: &'r [(Name<'a>, GraphSetColumnType)],
-        written: Option<Vec<&'a str>>,
     ) -> Result<ParsedVertexRowsReturn<'r, 'a>, GraphVertexMergeTextError> {
         let at = self.current.at;
         self.word(keyword)?;
@@ -2785,7 +2798,6 @@ impl<'a> Parser<'a> {
         let mut returning = ParsedVertexRowsReturn {
             variable,
             row,
-            written,
             bindings: Vec::new(),
             projection: Vec::new(),
             grouping: None,
@@ -3048,7 +3060,6 @@ impl PreparedGraphVertexMergeRowsText {
                 let mut head = ParsedVertexRowsReturn {
                     variable,
                     row: &row,
-                    written: None,
                     bindings: Vec::new(),
                     projection: Vec::new(),
                     grouping: None,
@@ -3085,32 +3096,12 @@ impl PreparedGraphVertexMergeRowsText {
                 parameters: parser.syntax.parameters.clone(),
             })
         } else {
-            // A carried element the MERGE also merged would read stale
-            // metadata through its hidden read, so after ON/SET clauses
-            // RETURN (or a WITH head) refuses labels(), keys() and
-            // properties() of a carried element. Its properties read final
-            // values.
-            let written = parsed_actions.as_ref().map(|(on_match, on_create, after)| {
-                on_match
-                    .iter()
-                    .chain(on_create)
-                    .chain(after)
-                    .filter_map(|action| match action {
-                        ParsedUpsertAction::Property { key, .. }
-                        | ParsedUpsertAction::Expression { key, .. }
-                        | ParsedUpsertAction::RowValue { key, .. } => Some(key.text),
-                        // Dynamic map keys resolve at execution. Metadata
-                        // reads below retain the same post-action rules.
-                        ParsedUpsertAction::RowVertex { .. }
-                        | ParsedUpsertAction::RowProperties { .. }
-                        | ParsedUpsertAction::Label { .. }
-                        | ParsedUpsertAction::ClearProperties { .. } => None,
-                    })
-                    .collect()
-            });
+            // RETURN and WITH metadata read final identities through the
+            // host's post-MERGE reader, including carried aliases of the
+            // same vertex that ON/SET actions changed.
             if parser.is_word("WITH") {
                 // A WITH head: its output row is what the next write reads.
-                let mut head = parser.vertex_rows_return("WITH", variable, &row, written)?;
+                let mut head = parser.vertex_rows_return("WITH", variable, &row)?;
                 let requested = parser.write_chain_reads(&head.output)?;
                 let boundary = head.hoist_continuation_reads(requested)?;
                 let continuation = if parser.at_chained_write()? {
@@ -3138,7 +3129,7 @@ impl PreparedGraphVertexMergeRowsText {
                 continuation
             } else {
                 if parser.is_word("RETURN") {
-                    let returning = parser.vertex_rows_return("RETURN", variable, &row, written)?;
+                    let returning = parser.vertex_rows_return("RETURN", variable, &row)?;
                     parsed_return = Some(returning);
                 }
                 parser.end()?;

@@ -61,6 +61,20 @@ impl<'a> ValueResolver<'_, 'a> {
             )),
         }
     }
+
+    fn map_properties(
+        &mut self,
+        parser: &mut Parser<'a>,
+        source: Name<'a>,
+    ) -> Result<ReadValueTemplate, GraphPatternTextError> {
+        match self {
+            Self::Write(leaves) => leaves.map_properties(parser, source),
+            Self::Columns(_) | Self::Items(_) => Err(error(
+                source.at,
+                GraphPatternTextErrorKind::Expected("a map source in the current projection scope"),
+            )),
+        }
+    }
 }
 
 fn expression_error(source: GraphMutationTextError) -> GraphSetTextError {
@@ -1712,16 +1726,18 @@ impl<'a> Parser<'a> {
         }
         let (keys, values): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
         if all {
-            let column = match columns.as_deref_mut() {
-                Some(columns) => self.property_map_projection(columns, source)?,
+            let base = match columns.as_deref_mut() {
+                Some(columns) => {
+                    ReadValueTemplate::Column(self.property_map_projection(columns, source)?)
+                }
                 None if resolve.is_some() => resolve
                     .as_mut()
                     .expect("resolver checked")
-                    .map_input(self, source, ReturnMapInput::Properties)?,
-                None => carried.expect("carried map source checked"),
+                    .map_properties(self, source)?,
+                None => ReadValueTemplate::Column(carried.expect("carried map source checked")),
             };
             return Ok(ReadValueTemplate::MapOverlay {
-                base: Box::new(ReadValueTemplate::Column(column)),
+                base: Box::new(base),
                 keys: keys.into_boxed_slice(),
                 values,
             });
