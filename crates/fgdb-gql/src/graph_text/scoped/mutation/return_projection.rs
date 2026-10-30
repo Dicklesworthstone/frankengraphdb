@@ -2578,10 +2578,66 @@ impl<'a> Parser<'a> {
         list_operand_at(self.current, &self.lexer, route)
     }
 
+    /// Whether one CASE operand may carry a non-scalar value. This is only
+    /// routing lookahead; the ordinary value reader still validates the
+    /// complete operand. Parentheses around an element keep its domain.
+    fn case_value_operand_at(
+        &self,
+        mut token: Token<'a>,
+        lexer: &Lexer<'a>,
+        route: Route<'_, 'a>,
+    ) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = lexer.clone();
+        let mut parentheses = 0_usize;
+        while matches!(token.kind, TokenKind::Punct(b'(')) {
+            if parentheses == 64 {
+                return Ok(false);
+            }
+            parentheses += 1;
+            token = lexer.next()?;
+        }
+        if let TokenKind::Parameter(name) = token.kind {
+            // list_operand_value consumes a bare typed parameter. Postfix
+            // reads keep their existing complete scalar/value reader.
+            return Ok(
+                !matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'.' | b'['))
+                    && matches!(
+                        self.parameter_types.get(name),
+                        Some(GqlParameterType::List | GqlParameterType::Map)
+                    ),
+            );
+        }
+        Ok(list_operand_at(token, &lexer, route)?
+            || dynamic_column_at(token, &lexer, route.row)?
+            || element_column_at(token, &lexer, route)?
+            || composite_result_at(token, &lexer)?)
+    }
+
+    /// A complete CASE subject or WHEN operand needing the value language.
+    /// A following operator keeps an ordinary scalar expression on its
+    /// existing route: `CASE n IS NULL ...` does not compare the element.
+    fn whole_case_value_operand(
+        &self,
+        token: Token<'a>,
+        lexer: &Lexer<'a>,
+        route: Route<'_, 'a>,
+        boundary: &str,
+    ) -> Result<bool, GraphPatternTextError> {
+        if !self.case_value_operand_at(token, lexer, route)? {
+            return Ok(false);
+        }
+        Ok(matches!(
+            skip_factor(token, &mut lexer.clone())?.kind,
+            TokenKind::Word(word) if word.eq_ignore_ascii_case(boundary)
+        ))
+    }
+
     /// Whether a CASE needs branch-local value scopes. Element locals are
     /// dynamically typed, and their property/subscript reads use let slots.
     /// Those slots must stay inside the selected branch, even when the CASE
-    /// ultimately returns a scalar.
+    /// ultimately returns a scalar. A simple CASE's subject and WHEN values
+    /// also need this route when they carry elements or composites: its
+    /// equality compares whole values, never a scalar representation of them.
     pub(super) fn list_case_follows(
         &self,
         route: Route<'_, 'a>,
@@ -2593,13 +2649,33 @@ impl<'a> Parser<'a> {
             return Ok(true);
         }
         let mut lexer = self.lexer.clone();
+        let subject = lexer.next()?;
+        let simple = !matches!(subject.kind,
+            TokenKind::Word(word) if word.eq_ignore_ascii_case("WHEN"));
+        if simple && self.whole_case_value_operand(subject, &lexer, route, "WHEN")? {
+            return Ok(true);
+        }
+        let mut lexer = self.lexer.clone();
         let mut cases = 1_usize;
+        let mut groups = 0_usize;
         let mut property = false;
         loop {
             let token = lexer.next()?;
+            match token.kind {
+                TokenKind::Punct(b'(' | b'[' | b'{') => groups += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => groups = groups.saturating_sub(1),
+                _ => {}
+            }
             if let TokenKind::Word(word) = token.kind
                 && !property
             {
+                if simple && cases == 1 && groups == 0 && word.eq_ignore_ascii_case("WHEN") {
+                    let mut ahead = lexer.clone();
+                    let value = ahead.next()?;
+                    if self.whole_case_value_operand(value, &ahead, route, "THEN")? {
+                        return Ok(true);
+                    }
+                }
                 if self.elements.contains(&word) {
                     return Ok(true);
                 }
@@ -2656,9 +2732,7 @@ impl<'a> Parser<'a> {
     ) -> Result<bool, GraphPatternTextError> {
         // A map literal or a name's subscript or slice is a whole result too
         // (case_has_list routes its CASE here): the value reader reads it.
-        if !list_operand_at(self.current, &self.lexer, route)?
-            && !composite_result_at(self.current, &self.lexer)?
-            && !element_column_at(self.current, &self.lexer, route)?
+        if !self.case_value_operand_at(self.current, &self.lexer, route)?
             && !matches!(self.current.kind, TokenKind::Word(word) if self.elements.contains(&word))
         {
             return Ok(false);

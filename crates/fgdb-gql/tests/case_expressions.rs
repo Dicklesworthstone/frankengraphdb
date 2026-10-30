@@ -699,3 +699,343 @@ fn mixed_numeric_branches_keep_each_rows_type_and_integer_roots_stay_strict() {
     assert!(GraphIntegerExpression::prepare_scalar(&ops).is_ok());
     assert!(GraphIntegerExpression::prepare(&ops).is_err());
 }
+
+fn prepare_value_case(text: &str, values: Vec<GraphValue>) -> PreparedGraphSet {
+    PreparedGraphSetText::prepare_with_parameter_types(
+        text,
+        &[("values", fgdb_gql::GqlParameterType::List)],
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new().with_list("values", values).unwrap())
+    .unwrap()
+}
+
+#[test]
+fn simple_case_compares_whole_element_identities_including_wide_ids() {
+    use fgdb_gql::algebra::GraphPath;
+    use fgdb_types::EId;
+
+    let first = VId((1_u128 << 104) | 7);
+    let second = VId((2_u128 << 104) | 7);
+    let edge = EId(first.0);
+    let values = vec![
+        GraphValue::Vertex(first),
+        GraphValue::Vertex(second),
+        GraphValue::Edge(edge),
+        GraphValue::Path(GraphPath::new(
+            first,
+            vec![(edge, second)].into_boxed_slice(),
+        )),
+        GraphValue::Scalar(CanonicalScalar::Null),
+    ];
+    let query = prepare_value_case(
+        "UNWIND $values AS value UNWIND $values AS other \
+         RETURN value, other, CASE value WHEN other THEN true ELSE false END AS same",
+        values,
+    );
+    let result = run(
+        &query,
+        &[],
+        &[],
+        &Props::new(),
+        policy(),
+        || Ok::<_, ()>(()),
+    )
+    .unwrap();
+    assert_eq!(result.value.len(), 25);
+    for row in result.value {
+        let [left, right, same] = row.values() else {
+            panic!("two operands and their equality result");
+        };
+        // Fixture equality is identity/domain equality. NULL selects no
+        // simple-CASE arm, including WHEN NULL, as in the scalar CASE.
+        let expected = !left.is_null() && left == right;
+        assert_eq!(same, &GraphValue::Scalar(CanonicalScalar::Bool(expected)));
+    }
+}
+
+#[test]
+fn simple_case_element_subjects_and_when_values_keep_grouping_and_scalar_operators() {
+    for (expression, expected) in [
+        ("CASE n WHEN n THEN 7 ELSE 1/0 END", 7),
+        ("CASE ((n)) WHEN (n) THEN 7 ELSE 1/0 END", 7),
+        ("CASE NULL WHEN n THEN 1/0 ELSE 8 END", 8),
+        ("CASE 0 WHEN n THEN 1/0 WHEN 0 THEN 9 ELSE 1/0 END", 9),
+        ("(CASE n WHEN n THEN 3 ELSE 4 END) + 2", 5),
+        ("CASE n WHEN n THEN 3 ELSE 4 END + 2", 5),
+        // A name rebound to a scalar must keep the row's domain.
+        ("CASE n.p WHEN 1 THEN 7 ELSE 8 END", 8),
+    ] {
+        assert_eq!(scalar(expression), Some(expected), "{expression}");
+    }
+    let query =
+        prepare("MATCH (n) WITH 3 AS n RETURN CASE n WHEN 3 THEN 4 ELSE 1/0 END + 2 AS value");
+    assert_eq!(
+        integer(
+            &run(&query, &[VId(1)], &[], &Props::new(), policy(), || Ok::<
+                _,
+                (),
+            >(
+                ()
+            ))
+            .unwrap()
+            .value[0]
+                .values()[0]
+        ),
+        Some(6)
+    );
+}
+
+#[test]
+fn simple_case_typed_edge_and_path_columns_reach_the_existing_value_evaluator() {
+    use fgdb_gql::algebra::GraphPath;
+    use fgdb_types::EId;
+
+    let edge = EId((3_u128 << 104) | 7);
+    let path = GraphPath::new(VId(1), vec![(edge, VId(2))].into_boxed_slice());
+    for (statement, source, expected) in [
+        (
+            "MATCH (a)-[r:R]->(b) \
+             RETURN CASE r WHEN null THEN false ELSE true END AS value",
+            GraphValue::Edge(edge),
+            CanonicalScalar::Bool(true),
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) WITH r AS carried \
+             RETURN CASE (carried) WHEN carried THEN 7 ELSE 1/0 END AS value",
+            GraphValue::Edge(edge),
+            CanonicalScalar::Int(7),
+        ),
+        (
+            "MATCH p = (a)-[:R]->{1,2}(b) \
+             RETURN CASE p WHEN p THEN 7 ELSE 1/0 END AS value",
+            GraphValue::Path(path),
+            CanonicalScalar::Int(7),
+        ),
+    ] {
+        let template = PreparedGraphSetText::prepare(statement, symbols).unwrap();
+        assert_eq!(
+            template.column_types(),
+            &[fgdb_gql::GraphSetColumnType::Any]
+        );
+        let query = template.bind_parameters(&GqlParameters::new()).unwrap();
+        let mut calls = 0;
+        // Supply exactly the captured edge/path projection. This law checks
+        // parsing, typed binding and value execution; it is not a storage law.
+        let result = query
+            .execute_governed(
+                policy(),
+                |_, _| {
+                    calls += 1;
+                    Ok::<_, GqlQueryError<(), ()>>(GqlQueryExecution {
+                        value: vec![GraphValueRow::from_owned_values(vec![source.clone()])],
+                        rows: fgdb_gql::GqlExecutionStats {
+                            snapshot_records: 1,
+                            result_rows: 1,
+                        },
+                        evaluator: Default::default(),
+                    })
+                },
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(
+            result.value,
+            vec![GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+                expected
+            )])],
+            "{statement}"
+        );
+    }
+}
+
+#[test]
+fn simple_case_composite_selectors_use_numeric_peer_and_three_valued_equality() {
+    for (expression, expected) in [
+        ("CASE [1, 2] WHEN [1.0, 2.0] THEN 7 ELSE 8 END", 7),
+        ("CASE {b: 2, a: 1} WHEN {a: 1.0, b: 2} THEN 7 ELSE 8 END", 7),
+        ("CASE [NULL] WHEN [NULL] THEN 7 ELSE 8 END", 8),
+        ("CASE {a: NULL} WHEN {a: NULL} THEN 7 ELSE 8 END", 8),
+        ("CASE NULL WHEN [1] THEN 1/0 ELSE 8 END", 8),
+        ("CASE 1 WHEN [1] THEN 1/0 WHEN 1 THEN 7 ELSE 8 END", 7),
+    ] {
+        assert_eq!(scalar(expression), Some(expected), "{expression}");
+    }
+    let value = GraphValue::Scalar(CanonicalScalar::Int(1));
+    for (kind, arguments) in [
+        (
+            fgdb_gql::GqlParameterType::List,
+            GqlParameters::new()
+                .with_list("left", vec![value.clone()])
+                .unwrap()
+                .with_list("right", vec![value.clone()])
+                .unwrap(),
+        ),
+        (
+            fgdb_gql::GqlParameterType::Map,
+            GqlParameters::new()
+                .with_map("left", vec![("key".into(), value.clone())])
+                .unwrap()
+                .with_map("right", vec![("key".into(), value)])
+                .unwrap(),
+        ),
+    ] {
+        let template = PreparedGraphSetText::prepare_with_parameter_types(
+            "RETURN CASE $left WHEN $right THEN 7 ELSE 8 END AS value",
+            &[("left", kind), ("right", kind)],
+            symbols,
+        )
+        .unwrap();
+        assert_eq!(template.parameter_schema().len(), 2);
+        let query = template.bind_parameters(&arguments).unwrap();
+        assert_eq!(
+            integer(
+                &run(
+                    &query,
+                    &[],
+                    &[],
+                    &Props::new(),
+                    policy(),
+                    || Ok::<_, ()>(())
+                )
+                .unwrap()
+                .value[0]
+                    .values()[0]
+            ),
+            Some(7)
+        );
+        let nulls = GqlParameters::new()
+            .with_null("left")
+            .unwrap()
+            .with_null("right")
+            .unwrap();
+        let query = template.bind_parameters(&nulls).unwrap();
+        assert_eq!(
+            integer(
+                &run(
+                    &query,
+                    &[],
+                    &[],
+                    &Props::new(),
+                    policy(),
+                    || Ok::<_, ()>(())
+                )
+                .unwrap()
+                .value[0]
+                    .values()[0]
+            ),
+            Some(8)
+        );
+    }
+}
+
+#[test]
+fn simple_case_value_selectors_keep_later_arms_lazy_and_every_refusal_terminal() {
+    let query = prepare_value_case(
+        "UNWIND $values AS value \
+         RETURN CASE value WHEN value THEN 7 WHEN 1/0 THEN 8 ELSE 1/0 END AS result",
+        vec![GraphValue::Vertex(VId(1))],
+    );
+    let mut events = 0;
+    let result = run(&query, &[], &[], &Props::new(), policy(), || {
+        events += 1;
+        Ok::<_, usize>(())
+    })
+    .unwrap();
+    assert_eq!(integer(&result.value[0].values()[0]), Some(7));
+    let exact = GqlQueryPolicy::new(
+        result.rows.snapshot_records,
+        result.rows.result_rows,
+        result.evaluator.work_units,
+        result.evaluator.scratch_entries,
+    );
+    assert_eq!(
+        run(
+            &query,
+            &[],
+            &[],
+            &Props::new(),
+            exact,
+            || Ok::<_, usize>(())
+        )
+        .unwrap(),
+        result
+    );
+    for stop in 1..=events {
+        let mut seen = 0;
+        assert!(matches!(
+            run(&query, &[], &[], &Props::new(), exact, || {
+                seen += 1;
+                if seen == stop { Err(stop) } else { Ok(()) }
+            }),
+            Err(GqlQueryError::Interrupted(actual)) if actual == stop
+        ));
+        assert_eq!(seen, stop);
+    }
+    for refusal in [
+        GqlQueryPolicy::new(u64::MAX, result.rows.result_rows - 1, u64::MAX, u64::MAX),
+        GqlQueryPolicy::new(
+            u64::MAX,
+            u64::MAX,
+            result.evaluator.work_units - 1,
+            u64::MAX,
+        ),
+        GqlQueryPolicy::new(
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+            result.evaluator.scratch_entries - 1,
+        ),
+    ] {
+        assert!(run(&query, &[], &[], &Props::new(), refusal, || Ok::<_, ()>(())).is_err());
+    }
+}
+
+#[test]
+fn simple_case_parameter_postfix_reads_keep_their_complete_operand() {
+    let arguments = GqlParameters::new()
+        .with_list("items", vec![GraphValue::Scalar(CanonicalScalar::Int(1))])
+        .unwrap()
+        .with_map(
+            "map",
+            vec![("answer".into(), GraphValue::Scalar(CanonicalScalar::Int(7)))],
+        )
+        .unwrap();
+    for statement in [
+        "RETURN CASE $items[0] WHEN 1 THEN $map.answer ELSE 0 END AS value",
+        "RETURN CASE ($items[0]) WHEN 1 THEN $map.answer ELSE 0 END AS value",
+        "RETURN CASE ($map.answer) WHEN 7 THEN $items[0] + 6 ELSE 0 END AS value",
+        "RETURN CASE $items WHEN [1] THEN $map.answer ELSE 0 END AS value",
+        "RETURN CASE $map WHEN {answer: 7} THEN $items[0] + 6 ELSE 0 END AS value",
+    ] {
+        let template = PreparedGraphSetText::prepare_with_parameter_types(
+            statement,
+            &[
+                ("items", fgdb_gql::GqlParameterType::List),
+                ("map", fgdb_gql::GqlParameterType::Map),
+            ],
+            symbols,
+        )
+        .unwrap();
+        let query = template.bind_parameters(&arguments).unwrap();
+        assert_eq!(
+            integer(
+                &run(
+                    &query,
+                    &[],
+                    &[],
+                    &Props::new(),
+                    policy(),
+                    || Ok::<_, ()>(())
+                )
+                .unwrap()
+                .value[0]
+                    .values()[0]
+            ),
+            Some(7),
+            "{statement}"
+        );
+    }
+}
