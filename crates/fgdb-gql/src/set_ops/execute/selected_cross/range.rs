@@ -74,8 +74,9 @@ fn required<E>(
     Ok(None)
 }
 
-// The existing predicate admits order comparisons only between compatible
-// scalars. Duration ordering, graph identities and composites yield UNKNOWN.
+// This access path admits only compatible scalar ordering. The shared
+// predicate also orders dynamic Lists element by element; their partial
+// comparability is not an exact scalar interval and must use the native walk.
 fn scalar(value: &GraphValue) -> Option<&CanonicalScalar> {
     match value {
         GraphValue::Scalar(CanonicalScalar::Null | CanonicalScalar::Duration(_)) => None,
@@ -114,18 +115,25 @@ impl Index {
         let Some(constraint) = required(width, code, columns, control)? else {
             return Ok(None);
         };
-        Self::with_constraint(constraint, right, control).map(Some)
+        Self::with_constraint(constraint, right, control)
     }
 
     fn with_constraint<E>(
         constraint: Constraint,
         right: &[GraphValueRow],
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-    ) -> Result<Self, E> {
+    ) -> Result<Option<Self>, E> {
         let at = constraint.key.1;
         let mut ordinals = Vec::new();
         for (ordinal, row) in right.iter().enumerate() {
             control(GlaExecutionEvent::Work)?;
+            // Only List/List can produce a composite ordering witness. A
+            // right List therefore prevents this scalar-only specialization,
+            // for both row emission and exact interval COUNT. This is a
+            // semantic domain check, never a retry after a control refusal.
+            if matches!(&row.values()[at], GraphValue::List(_)) {
+                return Ok(None);
+            }
             if scalar(&row.values()[at]).is_some() {
                 control(GlaExecutionEvent::ScratchEntry)?;
                 ordinals.push(ordinal);
@@ -154,11 +162,11 @@ impl Index {
             control(GlaExecutionEvent::ScratchEntry)?;
             families.push(position..position + 1);
         }
-        Ok(Self {
+        Ok(Some(Self {
             constraint,
             ordinals,
             families,
-        })
+        }))
     }
 
     fn range<E>(
@@ -311,7 +319,10 @@ pub(super) fn try_count<E, Context>(
     else {
         return Ok(false);
     };
-    let index = Index::with_constraint(bounds[0], right, &mut |value| event(context, value))?;
+    let Some(index) = Index::with_constraint(bounds[0], right, &mut |value| event(context, value))?
+    else {
+        return Ok(false);
+    };
     for row in left {
         event(context, GlaExecutionEvent::Work)?;
         let (mut start, mut end) = (0, index.ordinals.len());
@@ -500,13 +511,25 @@ mod tests {
                     collect(&left, &right, &code, None, &mut allow).unwrap(),
                     expected
                 );
-                let index = Index::build(1, &right, &code, None, &mut allow)
+                let index = Index::build(1, &right, &code, None, &mut allow).unwrap();
+                // A dynamic List now has real ordering semantics. Its
+                // presence declines the scalar-only interval specialization;
+                // the public selected rows above must still match the oracle.
+                assert!(index.is_none());
+                let scalar_right: Vec<_> = right
+                    .iter()
+                    .filter(|row| !matches!(&row.values()[0], GraphValue::List(_)))
+                    .cloned()
+                    .collect();
+                let index = Index::build(1, &scalar_right, &code, None, &mut allow)
                     .unwrap()
                     .unwrap();
                 for l in &left {
                     let mut selected = Vec::new();
-                    index.select(l, &right, &mut selected, &mut allow).unwrap();
-                    let literal: Vec<_> = right
+                    index
+                        .select(l, &scalar_right, &mut selected, &mut allow)
+                        .unwrap();
+                    let literal: Vec<_> = scalar_right
                         .iter()
                         .enumerate()
                         .filter_map(|(at, r)| {
@@ -728,6 +751,95 @@ mod tests {
         )
         .unwrap();
         total
+    }
+
+    #[test]
+    fn dynamic_list_inequalities_keep_mixed_bag_rows_and_count_after_projection() {
+        let list = |items: Vec<GraphValue>| GraphValue::List(items.into_boxed_slice());
+        let null = || GraphValue::Scalar(CanonicalScalar::Null);
+        let left = [
+            int(1),
+            list(vec![int(1)]),
+            list(vec![int(2)]),
+            list(vec![int(1), null()]),
+            list(vec![]),
+            null(),
+        ]
+        .into_iter()
+        .map(|value| row(vec![value]))
+        .collect::<Vec<_>>();
+        let right = [
+            int(2),
+            list(vec![int(2)]),
+            list(vec![int(1)]),
+            list(vec![int(2)]),
+            list(vec![null()]),
+            list(vec![]),
+        ]
+        .into_iter()
+        .map(|value| row(vec![value]))
+        .collect::<Vec<_>>();
+        // One scalar pair, four pairs with leading list value 1, and the
+        // empty list against four nonempty lists. A decisive earlier element
+        // is sufficient even when a later left child is NULL.
+        assert_eq!(
+            ordinary(
+                &left,
+                &right,
+                &[comparison(0, IntegerComparison::Less, 1)],
+                None
+            )
+            .len(),
+            9
+        );
+        let mapping = [1, 0, 1];
+        for projection in [None, Some(mapping.as_slice())] {
+            for op in OPS {
+                for reversed in [false, true] {
+                    let (a, b) = if projection.is_some() { (1, 0) } else { (0, 1) };
+                    let code = [if reversed {
+                        comparison(b, op, a)
+                    } else {
+                        comparison(a, op, b)
+                    }];
+                    validate(projection.map_or(2, <[usize]>::len), &code);
+                    assert!(
+                        Index::build(1, &right, &code, projection, &mut allow)
+                            .unwrap()
+                            .is_none()
+                    );
+                    let mut deliveries = 0;
+                    assert!(
+                        !try_count(
+                            &left,
+                            &right,
+                            &code,
+                            projection,
+                            &mut deliveries,
+                            &mut |_, _| Ok::<_, usize>(()),
+                            &mut |_, deliveries| {
+                                *deliveries += 1;
+                                Ok(())
+                            },
+                        )
+                        .unwrap()
+                    );
+                    assert_eq!(
+                        deliveries, 0,
+                        "a scalar-only count cannot publish a partial mixed-domain answer"
+                    );
+                    let expected = ordinary(&left, &right, &code, projection);
+                    assert_eq!(
+                        collect(&left, &right, &code, projection, &mut allow).unwrap(),
+                        expected
+                    );
+                    assert_eq!(
+                        counted(&left, &right, &code, projection),
+                        expected.len() as u128
+                    );
+                }
+            }
+        }
     }
 
     #[test]

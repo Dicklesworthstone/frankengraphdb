@@ -250,6 +250,56 @@ fn every_accepted_scalar_equality_is_in_one_candidate_group() {
 }
 
 #[test]
+fn external_composite_probe_groups_keep_numeric_peers_and_nested_unknown() {
+    use core::cmp::Ordering;
+    use fgdb_types::{CanonicalDecimal, CanonicalF64, CanonicalScalar as S};
+    let nested = |value| {
+        GraphValueRow::from_owned_values(vec![
+            GraphValue::map(vec![(
+                "key".into(),
+                GraphValue::List(Box::new([GraphValue::Scalar(value)])),
+            )])
+            .unwrap(),
+        ])
+    };
+    let int = nested(S::Int(7));
+    let float = nested(S::Float(CanonicalF64::new(7.0)));
+    let decimal = nested(S::Decimal(CanonicalDecimal::from_integer(7).unwrap()));
+    let null = nested(S::Null);
+    let nan = nested(S::Float(CanonicalF64::new(f64::NAN)));
+    for kind in [
+        RowJoinKind::Inner,
+        RowJoinKind::Left,
+        RowJoinKind::Right,
+        RowJoinKind::Full,
+        RowJoinKind::Semi,
+        RowJoinKind::Anti,
+    ] {
+        let plan = probe_plan(kind, false, &[equal(0, 1)]);
+        let join = compiled_join(&plan);
+        let keys = join.probe_keys_with_control(&mut allow).unwrap();
+        for (left, right, matches) in [
+            (&int, &float, true),
+            (&float, &int, true),
+            (&int, &decimal, false),
+            (&null, &null, false),
+            (&nan, &nan, true),
+        ] {
+            assert_eq!(
+                join.compare_probe_keys_with_control(left, right, &keys, &mut allow)
+                    .unwrap(),
+                Ordering::Equal
+            );
+            assert_eq!(
+                join.matches_pair_with_control(left, right, &mut allow)
+                    .unwrap(),
+                matches
+            );
+        }
+    }
+}
+
+#[test]
 fn probe_preparation_and_comparison_refusals_are_terminal_and_bad_columns_do_not_panic() {
     use fgdb_types::{CanonicalF64, CanonicalScalar as S};
     let plan = probe_plan(RowJoinKind::Anti, false, &[equal(0, 1)]);

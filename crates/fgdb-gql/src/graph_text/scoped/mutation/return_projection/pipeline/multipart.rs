@@ -496,11 +496,10 @@ fn join_spec(
     let typed_keys = !keys.is_empty()
         && keys.iter().all(|&(l, r)| {
             left[l] == right[r]
-                && (left[l].is_scalar_like()
-                    || matches!(
-                        left[l],
-                        GraphSetColumnType::Vertex | GraphSetColumnType::Edge
-                    ))
+                && matches!(
+                    left[l],
+                    GraphSetColumnType::Vertex | GraphSetColumnType::Edge
+                )
         });
     let spec = if typed_keys {
         RowJoinSpec::new(left, &right, keys)
@@ -509,8 +508,9 @@ fn join_spec(
             if keys.is_empty() {
                 return Ok(spec);
             }
-            // UNWIND has the Any domain. The checked ordinary comparison
-            // predicate handles it without coercion or a guessed scalar type.
+            // Scalar and stored-property domains also need language equality:
+            // exact Int/Float peers can occur at any list/map depth. Canonical
+            // typed keys would discard them before the predicate could run.
             let mut code = Vec::new();
             for &(l, r) in keys {
                 code.push(GraphSetPredicateOp::Compare {

@@ -51,93 +51,109 @@ impl<'a> Probe<'a> {
         value: &GraphValue,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<GraphValue, ZSetError<E>> {
-        let replacement = if matches!(self, Self::Predicate(_)) {
-            charge(control, ZSetEvent::Work)?;
-            match value {
-                GraphValue::Scalar(CanonicalScalar::Float(number)) => {
-                    integral(number).map(|int| GraphValue::Scalar(CanonicalScalar::Int(int)))
+        if matches!(self, Self::Predicate(_)) {
+            if matches!(
+                value,
+                GraphValue::Scalar(_) | GraphValue::Vertex(_) | GraphValue::Edge(_)
+            ) {
+                // Preserve the existing atomic-key event contract. A scalar
+                // payload needs one admitted copy, not a self-comparison and
+                // another normalization traversal over its bytes.
+                charge(control, ZSetEvent::Work)?;
+                if let GraphValue::Scalar(CanonicalScalar::Float(number)) = value
+                    && let Some(candidate) = exact_integer_peer(*number)
+                {
+                    let value = GraphValue::Scalar(CanonicalScalar::Int(candidate));
+                    reserve_cell(&value, control)?;
+                    return Ok(value);
                 }
-                GraphValue::Scalar(_) | GraphValue::Vertex(_) | GraphValue::Edge(_) => None,
-                // A composite equals another element by element (fgdb-2npty,
-                // membership::equal): its key is its normalized form. One
-                // holding a NULL is never TRUE-equal, so the NULL sentinel
-                // selects the caller's SIDE-SPECIFIC non-witness tag; it is not
-                // an output or a dropped input.
-                composite => Some(
-                    normalized(composite, control)?
-                        .unwrap_or(GraphValue::Scalar(CanonicalScalar::Null)),
-                ),
+                reserve_cell(value, control)?;
+                return Ok(value.clone());
             }
-        } else {
-            None
-        };
-        let value = replacement.as_ref().unwrap_or(value);
+            // A nested NULL cannot supply an equality witness, but retaining
+            // its original row is necessary for outer/anti joins. The shared
+            // eager comparison governs every child before selecting a private
+            // side-specific sentinel. Canonical NaN retains its native law.
+            let reflexive =
+                crate::set_ops::projection::membership::equal(value, value, &mut |event| {
+                    charge_gla(control, event)
+                })? == Some(true);
+            if !reflexive {
+                let null = GraphValue::Scalar(CanonicalScalar::Null);
+                reserve_cell(&null, control)?;
+                return Ok(null);
+            }
+            let mut value = value.copy_with_control(&mut |event| charge_gla(control, event))?;
+            normalize(&mut value, control)?;
+            return Ok(value);
+        }
         reserve_cell(value, control)?;
         Ok(value.clone())
     }
 }
 
-/// Rust's saturating cast supplies only a candidate. The native EXACT
-/// comparison must prove equivalence before using it. Fractions, infinities,
-/// NaN and the rounded 2^63 boundary therefore remain Float keys, never false
-/// Ints.
-fn integral(number: &fgdb_types::CanonicalF64) -> Option<i64> {
+fn exact_integer_peer(number: fgdb_types::CanonicalF64) -> Option<i64> {
+    // A cast supplies only a candidate. The EXACT comparison proves it,
+    // keeping fractions, infinities, NaN, >2^53 rounding and the saturated
+    // i64 boundary distinct from a false integer peer.
     let candidate = number.get() as i64;
     (number.compare_rational(i128::from(candidate), NonZeroU64::MIN) == Ordering::Equal)
         .then_some(candidate)
 }
 
-/// A composite key in the form two TRUE-equal composites share: integral
-/// Floats as Ints and element lists as lists of elements, at every depth.
-/// Map keys stay as they are, so their canonical order holds. `None` when a
-/// NULL sits anywhere inside: such a composite is never TRUE-equal.
-fn normalized<E>(
-    value: &GraphValue,
+fn charge_gla<E>(
     control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
-) -> Result<Option<GraphValue>, ZSetError<E>> {
-    charge(control, ZSetEvent::Work)?;
-    Ok(Some(match value {
-        GraphValue::Scalar(CanonicalScalar::Null) => return Ok(None),
-        GraphValue::Scalar(CanonicalScalar::Float(number)) => match integral(number) {
-            Some(int) => GraphValue::Scalar(CanonicalScalar::Int(int)),
-            None => value.clone(),
+    event: GlaExecutionEvent,
+) -> Result<(), ZSetError<E>> {
+    charge(
+        control,
+        match event {
+            GlaExecutionEvent::ScratchEntry => ZSetEvent::ScratchEntry,
+            _ => ZSetEvent::Work,
         },
-        GraphValue::Scalar(_)
-        | GraphValue::Vertex(_)
-        | GraphValue::Edge(_)
-        | GraphValue::Path(_) => value.clone(),
-        GraphValue::Vertices(ids) => {
-            GraphValue::List(ids.iter().map(|id| GraphValue::Vertex(*id)).collect())
-        }
-        GraphValue::Edges(ids) => {
-            GraphValue::List(ids.iter().map(|id| GraphValue::Edge(*id)).collect())
-        }
-        GraphValue::List(list) => match normalized_items(list, control)? {
-            Some(list) => GraphValue::List(list),
-            None => return Ok(None),
-        },
-        GraphValue::Map { keys, values } => match normalized_items(values, control)? {
-            Some(values) => GraphValue::Map {
-                keys: keys.clone(),
-                values,
-            },
-            None => return Ok(None),
-        },
-    }))
+    )
 }
 
-fn normalized_items<E>(
-    items: &[GraphValue],
+/// Normalize only the admitted private copy. Its depth has already passed
+/// GraphValue::MAX_LIST_DEPTH, so recursion is bounded; original rows and
+/// canonical storage/grouping identity remain untouched.
+fn normalize<E>(
+    value: &mut GraphValue,
     control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
-) -> Result<Option<Box<[GraphValue]>>, ZSetError<E>> {
-    let mut normalized_items = Vec::with_capacity(items.len());
-    for item in items {
-        match normalized(item, control)? {
-            Some(item) => normalized_items.push(item),
-            None => return Ok(None),
+) -> Result<(), ZSetError<E>> {
+    charge(control, ZSetEvent::Work)?;
+    match value {
+        GraphValue::Scalar(CanonicalScalar::Float(number)) => {
+            if let Some(candidate) = exact_integer_peer(*number) {
+                *value = GraphValue::Scalar(CanonicalScalar::Int(candidate));
+            }
         }
+        GraphValue::List(values) | GraphValue::Map { values, .. } => {
+            for value in values {
+                normalize(value, control)?;
+            }
+        }
+        GraphValue::Vertices(ids) => {
+            let mut values = Vec::new();
+            for &id in ids.iter() {
+                charge(control, ZSetEvent::Work)?;
+                charge(control, ZSetEvent::ScratchEntry)?;
+                values.push(GraphValue::Vertex(id));
+            }
+            *value = GraphValue::List(values.into_boxed_slice());
+        }
+        GraphValue::Edges(ids) => {
+            let mut values = Vec::new();
+            for &id in ids.iter() {
+                charge(control, ZSetEvent::Work)?;
+                charge(control, ZSetEvent::ScratchEntry)?;
+                values.push(GraphValue::Edge(id));
+            }
+            *value = GraphValue::List(values.into_boxed_slice());
+        }
+        _ => {}
     }
-    Ok(Some(normalized_items.into_boxed_slice()))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -266,9 +282,25 @@ mod tests {
             GraphValue::Edge(EId(0)),
             GraphValue::Edge(EId(u128::MAX)),
             GraphValue::List(vec![int(7)].into_boxed_slice()),
+            GraphValue::List(vec![float(7.0)].into_boxed_slice()),
+            GraphValue::List(vec![null()].into_boxed_slice()),
+            GraphValue::List(vec![int(9_007_199_254_740_993)].into_boxed_slice()),
+            GraphValue::List(vec![float(9_007_199_254_740_992.0)].into_boxed_slice()),
+            GraphValue::List(vec![GraphValue::Vertex(VId(7))].into_boxed_slice()),
+            GraphValue::List(vec![GraphValue::Edge(EId(7))].into_boxed_slice()),
             GraphValue::Vertices(vec![VId(7)].into_boxed_slice()),
             GraphValue::Edges(vec![EId(7)].into_boxed_slice()),
+            GraphValue::Vertices(Box::new([])),
+            GraphValue::Edges(Box::new([])),
+            GraphValue::List(Box::new([])),
             GraphValue::map(vec![("key".into(), int(7))]).unwrap(),
+            GraphValue::map(vec![("key".into(), float(7.0))]).unwrap(),
+            GraphValue::map(vec![(
+                "key".into(),
+                GraphValue::List(Box::new([float(f64::NAN)])),
+            )])
+            .unwrap(),
+            GraphValue::map(vec![("key".into(), GraphValue::List(Box::new([null()])))]).unwrap(),
         ];
         for a in &values {
             for b in &values {
@@ -574,6 +606,7 @@ mod tests {
             null(),
             GraphValue::List(vec![int(7), null()].into_boxed_slice()),
             GraphValue::map(vec![("k".into(), null())]).unwrap(),
+            GraphValue::map(vec![("k".into(), GraphValue::List(Box::new([null()])))]).unwrap(),
         ] {
             let left = row(vec![value.clone(), int(10)]);
             let right = row(vec![value, int(20)]);
@@ -648,6 +681,62 @@ mod tests {
                 };
                 assert_eq!(join.rows(), &bag(&expected), "{kind:?}");
             }
+        }
+    }
+
+    #[test]
+    fn nested_numeric_bag_transitions_and_refusals_preserve_every_join_mode() {
+        let nested = |value| {
+            GraphValue::map(vec![("k".into(), GraphValue::List(Box::new([value])))]).unwrap()
+        };
+        let wrap = |rows: Rows| {
+            rows.into_iter()
+                .map(|(row, weight)| {
+                    (
+                        GraphValueRow::from_owned_values(vec![
+                            nested(row.values()[0].clone()),
+                            row.values()[1].clone(),
+                        ]),
+                        weight,
+                    )
+                })
+                .collect::<Rows>()
+        };
+        let (l0, r0) = (wrap(input(1, false)), wrap(input(1, true)));
+        let (l1, r1) = (wrap(input(3, false)), wrap(input(2, true)));
+        for kind in KINDS {
+            let spec = definition(kind, true, true);
+            let mut join = seeded(spec.clone(), &l0, &r0);
+            let original = seeded(spec.clone(), &l0, &r0);
+            assert_eq!(join.rows(), &bag(&oracle(&l0, &r0, kind, true)));
+            let (dl, dr) = (changed(&l1, &l0), changed(&r1, &r0));
+            let mut total = 0;
+            drop(
+                join.prepare(&dl, &dr, LIMBS, None, &mut |_| {
+                    total += 1;
+                    Ok::<_, usize>(())
+                })
+                .unwrap(),
+            );
+            for stop in 1..=total {
+                let mut seen = 0;
+                assert_eq!(
+                    join.prepare(&dl, &dr, LIMBS, None, &mut |_| {
+                        seen += 1;
+                        if seen == stop { Err(stop) } else { Ok(()) }
+                    })
+                    .unwrap_err(),
+                    RowJoinError::Delta(ZSetError::Control(stop))
+                );
+                assert_eq!(seen, stop);
+                assert_eq!(join, original);
+            }
+            join.prepare(&dl, &dr, LIMBS, None, &mut allow)
+                .unwrap()
+                .commit();
+            assert_eq!(join.rows(), &bag(&oracle(&l1, &r1, kind, true)));
+            let unindexed = seeded(definition(kind, true, false), &l1, &r1);
+            assert_eq!(join.rows(), unindexed.rows());
         }
     }
 

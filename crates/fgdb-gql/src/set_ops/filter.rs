@@ -261,9 +261,8 @@ impl RowPredicate {
                                 | GraphSetColumnType::List
                         )
                     };
-                    // A composite equals another composite as the value
-                    // language says (fgdb-2npty) and is unequal to a scalar
-                    // or an element (fgdb-v6ku6); only (in)equality applies.
+                    // Equality uses the shared, three-valued collection law.
+                    // This predicate IR still admits no composite ordering.
                     if (composite(left) || composite(right)) && !equality {
                         return Err(Error::InvalidValueComparison { instruction });
                     }
@@ -393,11 +392,11 @@ fn resolve<'a, E>(
                 GraphValue::Vertex(value) => Cell::Vertex(*value),
                 GraphValue::Edge(value) => Cell::Edge(*value),
                 GraphValue::Scalar(value) => Cell::Scalar(value),
-                composite @ (GraphValue::Path(_)
+                GraphValue::Path(_)
                 | GraphValue::Vertices(_)
                 | GraphValue::Edges(_)
                 | GraphValue::List(_)
-                | GraphValue::Map { .. }) => Cell::Composite(composite),
+                | GraphValue::Map { .. } => Cell::Composite(value),
             }
         }
         GraphSetOperand::Literal(value) => Cell::Scalar(value.value()),
@@ -426,20 +425,13 @@ fn compare<E>(
         (Cell::Scalar(left), Cell::Scalar(right)) => {
             comparison.evaluate_scalar_pair(Some(left), Some(right))
         }
-        // Two composites compare as the value language compares them
-        // (fgdb-2npty): element by element, numeric peers equal, and a nested
-        // NULL makes an otherwise equal pair UNKNOWN. The join indexes key
-        // composites consistently (selected_cross, row_join's probe).
-        (Cell::Composite(left), Cell::Composite(right)) => {
-            use super::projection::membership;
-            return match comparison {
-                IntegerComparison::Equal => membership::equal(left, right, control),
-                IntegerComparison::NotEqual => {
-                    membership::equal(left, right, control).map(|equal| equal.map(|equal| !equal))
-                }
-                _ => membership::order(comparison, left, right, control),
-            };
-        }
+        (Cell::Composite(left), Cell::Composite(right)) => match comparison {
+            IntegerComparison::Equal => super::projection::membership::equal(left, right, control)?,
+            IntegerComparison::NotEqual => {
+                super::projection::membership::equal(left, right, control)?.map(|equal| !equal)
+            }
+            _ => super::projection::membership::order(comparison, left, right, control)?,
+        },
         // Values of different domains are unequal and unordered (fgdb-v6ku6).
         _ => comparison.across_domains(),
     })
@@ -662,6 +654,147 @@ mod tests {
         );
         assert_eq!(checkpoints, 3);
         for stop in 1..=checkpoints {
+            let mut seen = 0;
+            assert_eq!(
+                GraphSetPredicateOp::evaluate_cells_with_control(
+                    &code,
+                    &cells,
+                    &[],
+                    None,
+                    &mut |_| {
+                        seen += 1;
+                        if seen == stop { Err(stop) } else { Ok(()) }
+                    }
+                ),
+                Err(stop)
+            );
+            assert_eq!(seen, stop);
+        }
+    }
+
+    #[test]
+    fn composite_predicates_share_nested_three_valued_equality() {
+        let int = |n| GraphValue::Scalar(CanonicalScalar::Int(n));
+        let float = |n| GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(n)));
+        let null = || GraphValue::Scalar(CanonicalScalar::Null);
+        let list = |values: Vec<GraphValue>| GraphValue::List(values.into_boxed_slice());
+        let map = |key: &str, value| GraphValue::map(vec![(key.into(), value)]).unwrap();
+        for (left, right, expected) in [
+            (
+                list(vec![int(1), map("k", float(2.0))]),
+                list(vec![float(1.0), map("k", int(2))]),
+                Some(true),
+            ),
+            (
+                list(vec![null(), int(1)]),
+                list(vec![null(), int(2)]),
+                Some(false),
+            ),
+            (
+                list(vec![null(), int(1)]),
+                list(vec![null(), float(1.0)]),
+                None,
+            ),
+            (map("a", null()), map("b", null()), Some(false)),
+            (
+                list(vec![int(9_007_199_254_740_993)]),
+                list(vec![float(9_007_199_254_740_992.0)]),
+                Some(false),
+            ),
+            (
+                map("k", list(vec![float(f64::NAN)])),
+                map("k", list(vec![float(f64::NAN)])),
+                Some(true),
+            ),
+            (
+                GraphValue::Vertices(Box::new([fgdb_types::VId(7)])),
+                list(vec![GraphValue::Vertex(fgdb_types::VId(7))]),
+                Some(true),
+            ),
+            (
+                GraphValue::Vertices(Box::new([])),
+                GraphValue::Edges(Box::new([])),
+                Some(true),
+            ),
+        ] {
+            let cells = [left, right];
+            for comparison in [IntegerComparison::Equal, IntegerComparison::NotEqual] {
+                for negate in [false, true] {
+                    let mut code = vec![GraphSetPredicateOp::Compare {
+                        left: GraphSetOperand::Column(0),
+                        comparison,
+                        right: GraphSetOperand::Column(1),
+                    }];
+                    if negate {
+                        code.push(GraphSetPredicateOp::Not);
+                    }
+                    GraphSetPredicateOp::validate_schema(&[GraphSetColumnType::Any; 2], &code)
+                        .unwrap();
+                    let expected = expected
+                        .map(|equal| (equal == (comparison == IntegerComparison::Equal)) != negate)
+                        == Some(true);
+                    for split in [1, 2] {
+                        assert_eq!(
+                            GraphSetPredicateOp::evaluate_cells_with_control(
+                                &code,
+                                &cells[..split],
+                                &cells[split..],
+                                None,
+                                &mut |_| Ok::<_, ()>(()),
+                            )
+                            .unwrap(),
+                            expected
+                        );
+                    }
+                }
+            }
+        }
+        let equality = code(IntegerComparison::Equal, false);
+        for domain in [
+            GraphSetColumnType::List,
+            GraphSetColumnType::Path,
+            GraphSetColumnType::Vertices,
+            GraphSetColumnType::Edges,
+        ] {
+            GraphSetPredicateOp::validate_schema(&[domain; 2], &equality).unwrap();
+            assert!(
+                GraphSetPredicateOp::validate_schema(
+                    &[domain; 2],
+                    &code(IntegerComparison::Less, false)
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn nested_predicate_cancellation_after_a_decisive_mismatch_is_terminal() {
+        let list = |n| {
+            GraphValue::List(Box::new([
+                GraphValue::Scalar(CanonicalScalar::Int(n)),
+                GraphValue::map(vec![(
+                    "key".into(),
+                    GraphValue::List(Box::new([
+                        GraphValue::Scalar(CanonicalScalar::Null),
+                        GraphValue::Scalar(
+                            CanonicalScalar::ucs_basic_text(&"x".repeat(4096)).unwrap(),
+                        ),
+                    ])),
+                )])
+                .unwrap(),
+            ]))
+        };
+        let cells = [list(1), list(2)];
+        let code = code(IntegerComparison::NotEqual, false);
+        let mut total = 0;
+        assert!(
+            GraphSetPredicateOp::evaluate_cells_with_control(&code, &cells, &[], None, &mut |_| {
+                total += 1;
+                Ok::<_, usize>(())
+            })
+            .unwrap()
+        );
+        for stop in 1..=total {
             let mut seen = 0;
             assert_eq!(
                 GraphSetPredicateOp::evaluate_cells_with_control(

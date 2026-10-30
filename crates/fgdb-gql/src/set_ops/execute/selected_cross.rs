@@ -132,10 +132,17 @@ fn eligible<E>(
     for &(a, b) in keys {
         control(GlaExecutionEvent::Work)?;
         let cell = &row.values()[if right { b } else { a }];
-        // Dynamic Any inputs may carry either graph identity or a composite,
-        // which equals another composite element by element (fgdb-2npty).
-        // NULL never supplies equality.
+        // Composite keys are witnesses under the same three-valued law as
+        // the final predicate. In particular, a nested NULL rejects the key;
+        // the original row remains available to every other operator.
         if cell.is_null() {
+            return Ok(false);
+        }
+        if !matches!(
+            cell,
+            GraphValue::Scalar(_) | GraphValue::Vertex(_) | GraphValue::Edge(_)
+        ) && super::super::projection::membership::equal(cell, cell, control)? != Some(true)
+        {
             return Ok(false);
         }
     }
@@ -148,6 +155,9 @@ fn eligible<E>(
 // ties decimals to numbers, but the native WHERE law does not. Putting only
 // cross-kind numeric pairs through a different comparator would not suffice:
 // an intervening scalar family could make that comparator nontransitive.
+// Composite cells recursively use this SAME equality-key domain. In particular,
+// Decimal must stay separate even inside lists/maps: pure equality COUNT uses
+// a complete key range's length without running a residual predicate.
 fn compare_key_value<E>(
     left: &GraphValue,
     right: &GraphValue,
@@ -175,10 +185,8 @@ fn compare_key_value<E>(
     }
 }
 
-/// The lookup family of a composite key, after every atomic key. Equality
-/// between composites is element by element (membership::equal), so a list
-/// of graph elements (nodes(p), relationships(p)) shares the list family:
-/// it equals the list holding the same elements.
+/// Composite families follow atomic keys. Element lists share the ordinary
+/// list family, including empty lists, exactly as membership::equal requires.
 fn composite_family(value: &GraphValue) -> Option<u8> {
     match value {
         GraphValue::List(_) | GraphValue::Vertices(_) | GraphValue::Edges(_) => Some(0),
@@ -188,17 +196,15 @@ fn composite_family(value: &GraphValue) -> Option<u8> {
     }
 }
 
-/// A total order on two composites of one family that is Equal whenever
-/// membership::equal could be TRUE: elements compare through
-/// compare_key_value, so Int 1 and Float 1.0 are one key at any depth. It
-/// may also be Equal for pairs that are not TRUE (NaN, nested NULL); the
-/// complete predicate rejects those.
+/// The same recursive key order at every composite depth. Complete rows have
+/// already passed the native depth bounds. Nested NULLs are excluded by
+/// eligible(), so Equal identifies a TRUE equality class, including canonical
+/// NaN and exact Int/Float peers, without conflating Decimal representations.
 fn compare_composite_key<E>(
     left: &GraphValue,
     right: &GraphValue,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Ordering, E> {
-    // A list's items are borrowed; an element list yields its identities.
     fn element(value: &GraphValue, at: usize) -> Option<std::borrow::Cow<'_, GraphValue>> {
         use std::borrow::Cow;
         match value {
@@ -228,8 +234,14 @@ fn compare_composite_key<E>(
                 values: right_values,
             },
         ) => {
-            for _ in left_keys.iter().chain(right_keys.iter()) {
+            for key in left_keys.iter().chain(right_keys.iter()) {
                 control(GlaExecutionEvent::Work)?;
+                for _ in 0..key
+                    .len()
+                    .div_ceil(crate::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+                {
+                    control(GlaExecutionEvent::Work)?;
+                }
             }
             let order = left_keys.cmp(right_keys);
             if order != Ordering::Equal {
@@ -775,6 +787,15 @@ mod lookup_domain_tests {
             GraphValue::Vertex(VId(7)),
             GraphValue::Edge(EId(7)),
             GraphValue::List(vec![int(7)].into_boxed_slice()),
+            GraphValue::List(vec![float(7.0)].into_boxed_slice()),
+            GraphValue::List(vec![GraphValue::Scalar(CanonicalScalar::Null)].into_boxed_slice()),
+            GraphValue::map(vec![("k".into(), GraphValue::List(Box::new([int(7)])))]).unwrap(),
+            GraphValue::map(vec![("k".into(), GraphValue::List(Box::new([float(7.0)])))]).unwrap(),
+            GraphValue::Vertices(Box::new([VId(7)])),
+            GraphValue::List(Box::new([GraphValue::Vertex(VId(7))])),
+            GraphValue::Vertices(Box::new([])),
+            GraphValue::Edges(Box::new([])),
+            GraphValue::List(Box::new([])),
         ];
         let left = rows(values.clone());
         let right = rows(values.into_iter().rev().collect());
@@ -859,6 +880,76 @@ mod lookup_domain_tests {
             expected
         );
         assert_eq!(count(&left, &right, &code, Some(&mapping)), 3);
+    }
+
+    #[test]
+    fn composite_equality_count_uses_exact_numeric_classes_and_excludes_nested_null() {
+        let nested = |value| {
+            GraphValue::map(vec![(
+                "key".into(),
+                GraphValue::List(Box::new([
+                    GraphValue::map(vec![("leaf".into(), value)]).unwrap()
+                ])),
+            )])
+            .unwrap()
+        };
+        let decimal = || {
+            GraphValue::Scalar(CanonicalScalar::Decimal(
+                CanonicalDecimal::from_integer(7).unwrap(),
+            ))
+        };
+        let left = rows(vec![
+            nested(int(7)),
+            nested(float(7.0)),
+            nested(decimal()),
+            nested(GraphValue::Scalar(CanonicalScalar::Null)),
+            nested(float(f64::NAN)),
+            nested(int(7)),
+        ]);
+        let right = rows(vec![
+            nested(float(7.0)),
+            nested(decimal()),
+            nested(GraphValue::Scalar(CanonicalScalar::Null)),
+            nested(float(f64::NAN)),
+            nested(int(7)),
+        ]);
+        // Three ordinary numeric occurrences each match two peers, one
+        // Decimal matches its own kind, and canonical NaN matches itself.
+        // The NULL-containing values never contribute a cardinality witness.
+        let pairs = [
+            (0, 0),
+            (0, 4),
+            (1, 0),
+            (1, 4),
+            (2, 1),
+            (4, 3),
+            (5, 0),
+            (5, 4),
+        ];
+        let code = [equal(0, 1)];
+        assert_eq!(
+            collect(&left, &right, &code, None, &mut allow).unwrap(),
+            literal_pairs(&left, &right, &pairs)
+        );
+        assert_eq!(count(&left, &right, &code, None), pairs.len());
+
+        let mapping = [1, 0, 1];
+        let code = [equal(1, 0), equal(1, 2), GraphSetPredicateOp::And];
+        let expected: Vec<_> = pairs
+            .iter()
+            .map(|&(a, b)| {
+                GraphValueRow::from_owned_values(vec![
+                    right[b].values()[0].clone(),
+                    left[a].values()[0].clone(),
+                    right[b].values()[0].clone(),
+                ])
+            })
+            .collect();
+        assert_eq!(
+            collect(&left, &right, &code, Some(&mapping), &mut allow).unwrap(),
+            expected
+        );
+        assert_eq!(count(&left, &right, &code, Some(&mapping)), pairs.len());
     }
 
     #[test]
