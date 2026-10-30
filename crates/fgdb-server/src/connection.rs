@@ -1376,8 +1376,10 @@ impl Lane {
     /// per change, until the client cancels (answered with END at the last
     /// delivered frontier), drains, or the capability lapses. Each batch is
     /// acknowledged to the engine only after its last frame is written, and
-    /// the next delta always starts at the last acknowledged frontier, so a
-    /// slow subscriber receives coalesced deltas rather than a backlog.
+    /// the next delta always starts at the last acknowledged frontier. The
+    /// operator's per-database policy selects atomic ticks (the default) or
+    /// bounded net catch-up for slow subscribers. The wire format describes
+    /// both as one exact bag transition between consecutive delivered cuts.
     #[allow(clippy::too_many_arguments)]
     async fn subscription(
         &mut self,

@@ -18,6 +18,7 @@ use fgdb_server::{
 use fgdb_warden::{Grant, QueryLimits, Restriction, Rights, Scope};
 use std::collections::BTreeSet;
 use std::io::Write as _;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -34,6 +35,7 @@ USAGE:
                   [--max-snapshot-records <n>] [--max-result-rows <n>]
                   [--max-work-units <n>] [--max-scratch-entries <n>] [--bindings-file <path>]
                   [--compact-interval-seconds <n>] [--scrub-interval-seconds <n>]
+                  [--subscription-coalesce-ticks <n>]
                   [--label <name>=<u64>]... [--relation <name>=<u64>]... [--property <name>=<u64>]...
       [--max-connections <n>]
   fgdbd token --key-file <path> --issuer-key-file <path> [--policy-epoch <n>]
@@ -64,6 +66,15 @@ idle connections say GOODBYE), and exits 0.
 fgdb CLI's query limits; defaults 100000, 100000, 10000000 and 10000000).
 They apply to every read and to the selection phase of every write. A token's
 own --max-nodes/--max-work/--max-rows caveats still bound each statement too.
+
+--subscription-coalesce-ticks selects the maximum number of consecutive
+retained commits combined into one FGP subscription delta for that database.
+The default 1 delivers each retained tick. A value greater than 1 opts clients
+into net-state synchronization: changes that cancel within a range disappear,
+and an empty delta still advances the frontier. Each complete range shares
+one signed work, scratch and result-row allowance; budget exhaustion refuses
+the pull without acknowledging a partial range. Retention gaps still yield
+a replacement baseline. This option does not enable durable reconnect resume.
 
 --query-scratch-dir enables FGP ordered reads for that database using bounded
 query-private files in an existing directory. The operator chooses this path;
@@ -209,6 +220,7 @@ struct DatabaseOptions {
     query_limits: [Option<u64>; 4],
     /// Fixed compaction and scrub delays, in that order; absent disables one.
     maintenance_intervals: [Option<Duration>; 2],
+    subscription_coalesce_ticks: Option<NonZeroUsize>,
     symbols: Symbols,
     /// `--bindings-file`: more bindings, merged in before the database opens.
     bindings_file: Option<PathBuf>,
@@ -305,6 +317,7 @@ impl ServeOptions {
                         write_relation: 1,
                         query_limits: [None; 4],
                         maintenance_intervals: [None; 2],
+                        subscription_coalesce_ticks: None,
                         symbols: Symbols::new(),
                         bindings_file: None,
                     });
@@ -355,6 +368,12 @@ impl ServeOptions {
                             }
                             let seconds = number(value(args, &mut at, flag)?, flag)?;
                             db.maintenance_intervals[slot] = Some(Duration::from_secs(seconds));
+                        }
+                        "--subscription-coalesce-ticks"
+                            if db.subscription_coalesce_ticks.is_none() =>
+                        {
+                            db.subscription_coalesce_ticks =
+                                Some(number(value(args, &mut at, flag)?, flag)?);
                         }
                         "--label" | "--relation" | "--property" => {
                             let kind = match flag {
@@ -477,6 +496,9 @@ async fn serve(cx: &Cx, options: ServeOptions) -> Result<(), Failure> {
         config.write_relation = RelationId(db.write_relation);
         config.symbols = db.symbols;
         config.ordered_reads = db.query_scratch_dir.map(OrderedReadConfig::new);
+        if let Some(ticks) = db.subscription_coalesce_ticks {
+            config.subscription_max_coalesced_ticks = ticks;
+        }
         config.set_query_limits(core::array::from_fn(|at| {
             db.query_limits[at].unwrap_or(DatabaseConfig::DEFAULT_QUERY_LIMITS[at])
         }));
@@ -1207,6 +1229,65 @@ mod tests {
         let options =
             AttenuateOptions::parse(&args).unwrap_or_else(|error| panic!("{}", error.message));
         assert_eq!(options.rights, Some(Rights::Admin));
+    }
+
+    #[test]
+    fn subscription_coalescing_is_explicit_positive_and_per_database() {
+        let base = [
+            "--listen",
+            "127.0.0.1:0",
+            "--database",
+            "first=first-db",
+            "--key-file",
+            "first.key",
+            "--issuer-key-file",
+            "issuer.key",
+        ];
+        let parse = |extra: &[&str]| {
+            let args: Vec<String> = base.iter().chain(extra).map(|s| (*s).to_owned()).collect();
+            ServeOptions::parse(&args)
+        };
+        let defaults = parse(&[]).unwrap_or_else(|error| panic!("{}", error.message));
+        assert!(defaults.databases[0].subscription_coalesce_ticks.is_none());
+        let flag = "--subscription-coalesce-ticks";
+        let configured = parse(&[
+            flag,
+            "32",
+            "--database",
+            "second=second-db",
+            "--key-file",
+            "second.key",
+            "--issuer-key-file",
+            "issuer.key",
+            flag,
+            "1",
+        ])
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(
+            configured.databases[0]
+                .subscription_coalesce_ticks
+                .unwrap()
+                .get(),
+            32
+        );
+        assert_eq!(
+            configured.databases[1]
+                .subscription_coalesce_ticks
+                .unwrap()
+                .get(),
+            1
+        );
+        assert!(parse(&[flag]).is_err());
+        for invalid in ["0", "-1", "1.5", "18446744073709551616"] {
+            assert!(parse(&[flag, invalid]).is_err(), "{flag}={invalid}");
+        }
+        assert!(parse(&[flag, "2", flag, "3"]).is_err());
+        let misplaced: Vec<String> = [flag, "2"]
+            .iter()
+            .chain(&base)
+            .map(|s| (*s).to_owned())
+            .collect();
+        assert!(ServeOptions::parse(&misplaced).is_err());
     }
 
     #[test]

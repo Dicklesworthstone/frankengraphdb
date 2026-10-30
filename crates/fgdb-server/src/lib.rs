@@ -110,6 +110,7 @@ use fgdb_protocol::transport::DuplexIo;
 use fgdb_types::PurposeContexts;
 use fgdb_warden::{Authority, CapabilityToken, Grant, Restriction};
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -191,6 +192,14 @@ pub struct DatabaseConfig {
     /// Subscription registrations this database admits over the server's
     /// lifetime: a registration lives as long as the open database.
     pub max_subscriptions: usize,
+    /// Maximum consecutive retained commits combined into one subscription
+    /// delta. One preserves atomic tick delivery. Larger values opt every
+    /// subscription on this database into exact net-state catch-up: transient
+    /// intermediate rows may cancel, while the delivered frontier advances
+    /// through the entire range, including empty ticks. Each pull still has
+    /// one cumulative signed work/scratch/row allowance. This does not extend
+    /// replay retention or enable resumption after disconnect.
+    pub subscription_max_coalesced_ticks: NonZeroUsize,
     /// External ordered FGP reads are disabled unless the host supplies a
     /// trusted scratch directory and physical limits. Request bodies cannot
     /// replace those files, limits or the database's shared resident pool.
@@ -218,6 +227,7 @@ impl DatabaseConfig {
             write_policy: GraphWriteProgramPolicy::new(query_policy, 100_000, 100_000, 100_000),
             max_statements: 64,
             max_subscriptions: 64,
+            subscription_max_coalesced_ticks: NonZeroUsize::MIN,
             ordered_reads: None,
         }
     }
@@ -378,6 +388,7 @@ pub(crate) struct Served {
     pub(crate) write_policy: GraphWriteProgramPolicy,
     pub(crate) max_statements: usize,
     pub(crate) max_subscriptions: usize,
+    pub(crate) subscription_max_coalesced_ticks: NonZeroUsize,
     pub(crate) subscriptions: Arc<AtomicUsize>,
     pub(crate) commits: Arc<commits::CommitSignal>,
     pub(crate) namespace: [u8; 32],
@@ -496,6 +507,7 @@ impl Server {
                 write_policy: config.write_policy,
                 max_statements: config.max_statements,
                 max_subscriptions: config.max_subscriptions,
+                subscription_max_coalesced_ticks: config.subscription_max_coalesced_ticks,
                 subscriptions,
                 commits,
                 namespace,

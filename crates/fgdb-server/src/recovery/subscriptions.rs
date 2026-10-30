@@ -10,6 +10,7 @@ use fgdb::{
 };
 use fgdb_gql::GqlQueryPolicy;
 use fgdb_types::{CommitSeq, QueryCx};
+use std::num::NonZeroUsize;
 use std::sync::Weak;
 
 pub(super) struct Retirement {
@@ -63,9 +64,18 @@ impl OwnedSubscription {
         &mut self,
         database: &Database,
         cx: &QueryCx,
+        max_ticks: NonZeroUsize,
         policy: GqlQueryPolicy,
     ) -> Result<Option<Arc<SubscriptionBatch>>, SubscriptionError> {
-        self.consumer()?.poll(database, cx, policy)
+        // Keep the default atomic replay's shared-payload path. Coalescing
+        // is an explicit host policy, with one pending receipt for the whole
+        // selected net transition; it never grants access to a producer handle.
+        if max_ticks == NonZeroUsize::MIN {
+            self.consumer()?.poll(database, cx, policy)
+        } else {
+            self.consumer()?
+                .poll_coalesced(database, cx, max_ticks, policy)
+        }
     }
 
     pub(crate) fn acknowledge(

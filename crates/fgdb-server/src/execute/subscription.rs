@@ -6,6 +6,9 @@
 //! allowances. Each poll separately reserves two native pulls (including a
 //! possible gap restart) and one final delivery. These are per-execution
 //! ceilings, not a whole-subscription-lifetime ledger.
+//! The operator may opt into bounded coalescing: each native pull then
+//! integrates a complete retained range under that SAME allowance. A failed
+//! range is never replaced by a smaller successful prefix to fit a budget.
 //!
 //! Native maintenance has no Warden vertex-admission hook. Conservatively,
 //! graph-node work is also bounded by the signed node grant divided by the
@@ -592,7 +595,12 @@ pub(crate) async fn poll(
     let guard = db.db.read(cx).await.map_err(Refusal::from)?;
     subscription.generation.check().map_err(Refusal::from)?;
     permit.checkpoint_at(unix_millis()).map_err(authorization)?;
-    let batch = match subscription.consumer.poll(&guard, &query, policy) {
+    let batch = match subscription.consumer.poll(
+        &guard,
+        &query,
+        db.subscription_max_coalesced_ticks,
+        policy,
+    ) {
         Err(SubscriptionError::Query(
             StandingQueryError::DeltaUnavailable { .. }
             | StandingQueryError::DeltaGap { .. }
@@ -600,7 +608,12 @@ pub(crate) async fn poll(
         )) => {
             permit.checkpoint_at(unix_millis()).map_err(authorization)?;
             subscription.consumer.restart_from_current()?;
-            subscription.consumer.poll(&guard, &query, policy)?
+            subscription.consumer.poll(
+                &guard,
+                &query,
+                db.subscription_max_coalesced_ticks,
+                policy,
+            )?
         }
         other => other?,
     };

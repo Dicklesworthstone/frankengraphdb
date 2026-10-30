@@ -269,6 +269,158 @@ fn signed_rows_count_complete_support_and_cover_cached_pending_redelivery() {
 }
 
 #[test]
+fn coalesced_server_pulls_bound_net_ranges_and_preserve_pending_receipts() {
+    use fgdb_delta_types::{PropertyKeyId, RelationId};
+    use fgdb_types::{CanonicalScalar, VId};
+    use std::future::Future as _;
+    use std::num::NonZeroUsize;
+
+    let ((), report) = run_async_under_lab(0x79a0_0320, |root| async move {
+        let (mut server, token, _) = served(&root, "subscription-coalesced-ranges").await;
+        let configured = Arc::get_mut(server.databases.get_mut("test").unwrap()).unwrap();
+        assert_eq!(configured.subscription_max_coalesced_ticks.get(), 1);
+        configured.subscription_max_coalesced_ticks = NonZeroUsize::new(3).unwrap();
+        configured
+            .symbols
+            .bind(fgdb_gql::GraphSymbolKind::Property, "p", 1)
+            .unwrap();
+        let db = &server.databases["test"];
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let edit = |value| {
+            let mut batch = fgdb::WriteBatch::new(RelationId(1));
+            batch.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(value)));
+            batch
+        };
+        let mut seed = vertex(1);
+        seed.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(0)));
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), seed)
+            .await
+            .unwrap();
+        let mut subscription = success(
+            subscribe(
+                &root,
+                db,
+                &token,
+                &request("SUBSCRIBE TO MATCH (n) RETURN n.p AS p"),
+            )
+            .await,
+        );
+        let baseline = success(poll(&root, db, &token, &mut subscription).await).unwrap();
+        assert_eq!(baseline.entries, [(1, vec![WireValue::Int(0)])]);
+        let mut cuts = Vec::new();
+        for value in [1, 2, 0, 9] {
+            cuts.push(
+                db.db
+                    .write(&root)
+                    .await
+                    .unwrap()
+                    .write(&contexts.commit(), edit(value))
+                    .await
+                    .unwrap(),
+            );
+        }
+        let repeated = success(poll(&root, db, &token, &mut subscription).await).unwrap();
+        assert!(Arc::ptr_eq(&baseline.batch, &repeated.batch));
+        assert_eq!(subscription.consumer.acknowledged_frontier(), None);
+        subscription
+            .consumer
+            .acknowledge(baseline.batch.receipt())
+            .unwrap();
+
+        // The first three commits cancel exactly. The final NET row ceiling
+        // may therefore be zero despite two changed rows in each atomic tick.
+        let no_rows = token.attenuate(Restriction::MaxRows(0)).unwrap();
+        let empty = success(poll(&root, db, &no_rows, &mut subscription).await).unwrap();
+        assert!(!empty.batch.is_snapshot());
+        assert_eq!(empty.batch.from(), Some(baseline.batch.frontier()));
+        assert_eq!(empty.batch.frontier(), cuts[2]);
+        assert!(empty.entries.is_empty());
+        assert_eq!(
+            subscription.consumer.acknowledged_frontier(),
+            Some(baseline.batch.frontier())
+        );
+        let latest = db
+            .db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), edit(10))
+            .await
+            .unwrap();
+        let repeated = success(poll(&root, db, &no_rows, &mut subscription).await).unwrap();
+        assert!(Arc::ptr_eq(&empty.batch, &repeated.batch));
+        subscription
+            .consumer
+            .acknowledge(empty.batch.receipt())
+            .unwrap();
+
+        // The next range is 0 -> 10, not 0 -> 9 or 9 -> 10. Refusing its
+        // complete support leaves the acknowledged cut and both ticks intact.
+        let one_row = token.attenuate(Restriction::MaxRows(1)).unwrap();
+        refused(
+            poll(&root, db, &one_row, &mut subscription).await,
+            ErrorCode::Budget,
+        );
+        assert_eq!(subscription.consumer.acknowledged_frontier(), Some(cuts[2]));
+        let changed = success(poll(&root, db, &token, &mut subscription).await).unwrap();
+        assert_eq!(changed.batch.from(), Some(cuts[2]));
+        assert_eq!(changed.batch.frontier(), latest);
+        assert_eq!(
+            changed.entries,
+            [(-1, vec![WireValue::Int(0)]), (1, vec![WireValue::Int(10)])]
+        );
+        let tiny = token.attenuate(Restriction::MaxWork(1)).unwrap();
+        refused(
+            poll(&root, db, &tiny, &mut subscription).await,
+            ErrorCode::Budget,
+        );
+        let hidden = token
+            .attenuate(Restriction::Properties(fgdb_warden::Scope::only([])))
+            .unwrap();
+        refused(
+            poll(&root, db, &hidden, &mut subscription).await,
+            ErrorCode::PermissionDenied,
+        );
+        // Dropping a pull while it waits behind a writer cannot acknowledge
+        // or split the already selected range. The next pull shares its Arc.
+        let held = db.db.write(&root).await.unwrap();
+        let mut interrupted = Box::pin(poll(&root, db, &token, &mut subscription));
+        assert!(
+            interrupted
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+                .is_pending()
+        );
+        drop(interrupted);
+        drop(held);
+        assert_eq!(subscription.consumer.acknowledged_frontier(), Some(cuts[2]));
+        let repeated = success(poll(&root, db, &token, &mut subscription).await).unwrap();
+        assert!(Arc::ptr_eq(&changed.batch, &repeated.batch));
+        assert_eq!(changed.entries, repeated.entries);
+        assert_eq!(
+            subscription
+                .consumer
+                .acknowledge(changed.batch.receipt())
+                .unwrap(),
+            latest
+        );
+        assert_eq!(
+            subscription
+                .consumer
+                .acknowledge(changed.batch.receipt())
+                .unwrap(),
+            latest
+        );
+        assert!(success(poll(&root, db, &token, &mut subscription).await).is_none());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn maintenance_keeps_the_original_signed_policy_across_later_writes() {
     let ((), report) = run_async_under_lab(0x79a0_0303, |root| async move {
         let (server, token, _) = served(&root, "subscription-maintenance-budget").await;
@@ -318,69 +470,78 @@ fn maintenance_keeps_the_original_signed_policy_across_later_writes() {
 #[test]
 fn replay_retention_gap_uses_one_bounded_replacement_baseline() {
     let ((), report) = run_async_under_lab(0x79a0_0304, |root| async move {
-        let (server, token, _) = served(&root, "subscription-replay-gap-budget").await;
-        let db = &server.databases["test"];
-        let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let query = contexts.query();
-        let params = GqlParameters::new();
-        let prepared = PreparedNativeRead::prepare_subscription(
-            &query,
-            "SUBSCRIBE TO MATCH (n) RETURN n",
-            &params,
-            db.symbols.clone(),
-        )
-        .unwrap();
-        let mut guard = db.db.write(&root).await.unwrap();
-        let generation = guard.generation();
-        let (mut consumer, baseline) = prepared
-            .subscribe_scoped(
-                &mut guard,
+        for max_ticks in [1, 3] {
+            let (mut server, token, _) = served(
+                &root,
+                &format!("subscription-replay-gap-budget-{max_ticks}"),
+            )
+            .await;
+            Arc::get_mut(server.databases.get_mut("test").unwrap())
+                .unwrap()
+                .subscription_max_coalesced_ticks = std::num::NonZeroUsize::new(max_ticks).unwrap();
+            let db = &server.databases["test"];
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let query = contexts.query();
+            let params = GqlParameters::new();
+            let prepared = PreparedNativeRead::prepare_subscription(
                 &query,
+                "SUBSCRIBE TO MATCH (n) RETURN n",
                 &params,
-                NativeSubscriptionSetup {
-                    maintenance: db.query_policy,
-                    delivery: db.query_policy,
-                    retention: [1, 1000, 100_000],
-                },
-                |_, batch| Ok::<_, SubscriptionError>(Arc::clone(batch)),
+                db.symbols.clone(),
             )
             .unwrap();
-        consumer.acknowledge(baseline.receipt()).unwrap();
-        for id in 1..=3 {
-            guard.write(&contexts.commit(), vertex(id)).await.unwrap();
+            let mut guard = db.db.write(&root).await.unwrap();
+            let generation = guard.generation();
+            let (mut consumer, baseline) = prepared
+                .subscribe_scoped(
+                    &mut guard,
+                    &query,
+                    &params,
+                    NativeSubscriptionSetup {
+                        maintenance: db.query_policy,
+                        delivery: db.query_policy,
+                        retention: [1, 1000, 100_000],
+                    },
+                    |_, batch| Ok::<_, SubscriptionError>(Arc::clone(batch)),
+                )
+                .unwrap();
+            consumer.acknowledge(baseline.receipt()).unwrap();
+            for id in 1..=3 {
+                guard.write(&contexts.commit(), vertex(id)).await.unwrap();
+            }
+            drop(guard);
+            let admitted = db
+                .authority
+                .verify_at(&token, TRUNK, unix_millis())
+                .unwrap()
+                .predicates()
+                .limits();
+            db.subscriptions.fetch_add(1, Ordering::AcqRel);
+            let consumer = generation.own_subscription(consumer);
+            let mut subscription = Subscription {
+                consumer,
+                columns: vec!["n".into()],
+                generation,
+                admitted,
+                initial: None,
+                registration_work: 0,
+                registration_nodes: 0,
+            };
+            let tiny = token.attenuate(Restriction::MaxWork(6)).unwrap();
+            refused(
+                poll(&root, db, &tiny, &mut subscription).await,
+                ErrorCode::Budget,
+            );
+            assert_eq!(subscription.consumer.acknowledged_frontier(), None);
+            let replacement = success(poll(&root, db, &token, &mut subscription).await).unwrap();
+            assert!(replacement.batch.is_snapshot());
+            assert_eq!(replacement.entries.len(), 3);
+            subscription
+                .consumer
+                .acknowledge(replacement.batch.receipt())
+                .unwrap();
+            assert!(success(poll(&root, db, &token, &mut subscription).await).is_none());
         }
-        drop(guard);
-        let admitted = db
-            .authority
-            .verify_at(&token, TRUNK, unix_millis())
-            .unwrap()
-            .predicates()
-            .limits();
-        db.subscriptions.fetch_add(1, Ordering::AcqRel);
-        let consumer = generation.own_subscription(consumer);
-        let mut subscription = Subscription {
-            consumer,
-            columns: vec!["n".into()],
-            generation,
-            admitted,
-            initial: None,
-            registration_work: 0,
-            registration_nodes: 0,
-        };
-        let tiny = token.attenuate(Restriction::MaxWork(6)).unwrap();
-        refused(
-            poll(&root, db, &tiny, &mut subscription).await,
-            ErrorCode::Budget,
-        );
-        assert_eq!(subscription.consumer.acknowledged_frontier(), None);
-        let replacement = success(poll(&root, db, &token, &mut subscription).await).unwrap();
-        assert!(replacement.batch.is_snapshot());
-        assert_eq!(replacement.entries.len(), 3);
-        subscription
-            .consumer
-            .acknowledge(replacement.batch.receipt())
-            .unwrap();
-        assert!(success(poll(&root, db, &token, &mut subscription).await).is_none());
     });
     assert!(report.lab_test_passed());
 }
