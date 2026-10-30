@@ -403,11 +403,32 @@ tracks that work; checked investigation is not delivered capability.
   additive import, first verified on a preserved copy. The plan created 107,
   updated/deleted zero, remapped 136 incoming comment IDs and retained every
   original issue, label, dependency, comment and audit-event row exactly.
-  The live DB now has 1,360 records (the 1,357 canonical IDs plus three local
-  children); canonical JSONL is byte-identical. This is partial recovery,
-  not resolution of the remaining shared-row/relation drift.
-- [ ] Resolve formatting and complete the mandatory chain on a stable source.
-- [ ] Reconcile tracker publication without dropping JSONL-only records or
+  That admission recovered 1,360 records (the 1,357 canonical IDs plus three
+  local children); canonical JSONL remained byte-identical during admission.
+- [x] Reconcile shared records through reviewed native output on preserved
+  copies and ordinary lossless reconciliation on the live DB. All 3,307
+  canonical and 3,052 pre-repair local comment facts survive, including
+  multiplicity and full nanosecond timestamps; all old labels, dependencies
+  and audit events survive.
+- [x] Publish through the exact-ID helper (1,358 declared changed IDs, exit 0).
+  The DB and JSONL now have 1,361 records including the qualification task.
+  Native reconcile reports every record equal with zero relation changes;
+  active cycles are empty. A fresh empty DB imports every issue, label,
+  dependency and comment. Portable fields match; primary audit events remain
+  intact and are not part of the JSONL export format.
+- [x] Repair the first formatting failures and run focused integration tests.
+- [ ] Complete the mandatory chain on a stable source. The first full run
+  found additional integration reds. Another process fast-forwarded main from
+  `3cda9945f7877502cc9c636b70067a8140099b9d` to
+  `1e5577ddd691f26b838f808d0290b0c3268377f1` during that run despite its landing
+  lease; that run cannot qualify either tree. Preserve its terminal receipt.
+- [ ] Qualify `fgdb-epic-verif-phi.2`: retain scan/metadata, scope, expiry,
+  cancellation, storage and binding-budget laws while repairing stale fixtures.
+  Release vanished root-decode slack without changing the 3 MiB history limit;
+  connect returning mutations over leading row relations to the native chain.
+  Preserve exact catalog coverage and test every now-supported cooperative
+  procedure rather than retaining an obsolete CDLP refusal.
+- [x] Reconcile tracker publication without dropping JSONL-only records or
   peer changes; export only the attributable exact set through `br_sync.sh`.
 - [ ] Commit substantive units on canonical main, retain and verify the
   exact-tree local proof, push main and mirror the identical commit to master.
