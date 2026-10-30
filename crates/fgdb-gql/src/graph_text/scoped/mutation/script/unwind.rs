@@ -43,6 +43,33 @@ fn blank(bytes: &mut [u8]) {
     }
 }
 
+// An UNWIND after the graph input reads the completed row, including any
+// aliases carried through WITH. The native multipart compiler owns that row
+// and its clause order. Binding the leading document row once per statement
+// would instead turn a list source into a scalar hole and can expose earlier
+// rows' writes to a later MATCH. Inspect only clause tokens, never values or
+// words inside a property, pattern, literal or comment.
+fn has_graph_unwind(tokens: &[(Token<'_>, usize)]) -> bool {
+    let mut depth = 0_usize;
+    for (index, (token, _)) in tokens.iter().enumerate() {
+        match token.kind {
+            TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+            TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+            _ if depth == 0 => {
+                let previous = index.checked_sub(1).and_then(|at| tokens.get(at));
+                if is_word(token, "UNWIND")
+                    && !is_punct(previous, b'.')
+                    && !previous.is_some_and(|(token, _)| is_word(token, "AS"))
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 // Consume a complete, static input path using the SAME native tokens. The
 // returned end is an original UTF-8 byte boundary, including all selectors.
 // Dynamic keys/indexes, slices and arithmetic indexes cannot be partly erased.
@@ -522,12 +549,14 @@ impl GraphUnwindWriteText {
             tail_at = next + 2;
         }
         let tokens = &tokens[tail_at..];
-        // A WITH stage (`WITH row, toInteger(row.s) AS k MATCH ...`) is the
-        // native multipart compiler's, which projects computed row values
-        // and joins on them (fgdb-2npty). This adapter binds row fields only.
+        // A WITH stage (`WITH row, toInteger(row.s) AS k MATCH ...`) or an
+        // UNWIND after MATCH is the native multipart compiler's. It projects
+        // and expands complete row values in clause order (fgdb-2npty,
+        // fgdb-0s2pq). This adapter binds leading document fields only.
         if tokens
             .first()
             .is_some_and(|(token, _)| is_word(token, "WITH"))
+            || has_graph_unwind(tokens)
         {
             return Ok(None);
         }
@@ -719,6 +748,78 @@ mod computed_map_routing_tests {
                 ))
                 .unwrap(),
                 "{tail}",
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod graph_unwind_routing_tests {
+    use crate::algebra::GraphValue;
+    use crate::unwind_write::GraphUnwindWriteText;
+    use crate::{BoundNativeGraphWrite, GqlParameters, GraphSymbol, GraphSymbolKind};
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+    use fgdb_types::CanonicalScalar;
+
+    #[test]
+    fn nested_lists_after_match_keep_one_native_clause_pipeline() {
+        let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+        let rows = (1..=2)
+            .map(|id| {
+                GraphValue::map(vec![
+                    ("id".into(), int(id)),
+                    (
+                        "friends".into(),
+                        GraphValue::List(vec![int(3), int(4)].into()),
+                    ),
+                ])
+                .unwrap()
+            })
+            .collect();
+        let arguments = GqlParameters::new().with_list("rows", rows).unwrap();
+        let resolve = |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Label, "Entity") => Some(GraphSymbol::Label(LabelId(1))),
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+            (GraphSymbolKind::Property, "id") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            (GraphSymbolKind::Property, "name") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+            _ => None,
+        };
+        for carry in ["", "WITH p, row "] {
+            for tail in [
+                "MERGE (p)-[:R]->(f)",
+                "CREATE (p)-[:R]->(f)",
+                "SET f.name = row.id",
+            ] {
+                let text = format!(
+                    "UNWIND $rows AS row MATCH (p:Entity {{id: row.id}}) \
+                     {carry}UNWIND row.friends AS fid MATCH (f:Entity {{id: fid}}) {tail}"
+                );
+                assert!(
+                    GraphUnwindWriteText::parse_if_supported(&text)
+                        .unwrap()
+                        .is_none(),
+                    "{text}"
+                );
+                let bound = BoundNativeGraphWrite::bind(&text, &arguments, RelationId(1), resolve)
+                    .unwrap_or_else(|error| panic!("{text}: {error}"));
+                assert_eq!(bound.program().statements().len(), 1, "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn words_inside_values_and_fields_do_not_change_batch_routing() {
+        for text in [
+            "UNWIND $rows AS row MATCH (n) SET n.name = row.UNWIND",
+            "UNWIND $rows AS row MATCH (n {id:row.id}) SET n.name = 'UNWIND row.friends AS x'",
+            "UNWIND $rows AS row MATCH (n) /* UNWIND row.friends AS x */ SET n.name=row.id",
+            "UNWIND $rows AS row UNWIND row.friends AS friend MATCH (n {id:friend}) SET n.name=row.id",
+        ] {
+            assert!(
+                GraphUnwindWriteText::parse_if_supported(text)
+                    .unwrap()
+                    .is_some(),
+                "{text}"
             );
         }
     }

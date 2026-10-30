@@ -120,6 +120,14 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
                 {
                     with = true;
                 }
+                // UNWIND after a MATCH reads that MATCH's complete row, just
+                // as an implicit WITH * would. A following MATCH is therefore
+                // a continuation of the expanded row, not another pattern in
+                // the first MATCH. Leading UNWIND sources keep their existing
+                // correlated-root compiler (fgdb-0s2pq).
+                if matched && !name && token.word("UNWIND") {
+                    with = true;
+                }
                 if with && !name && token.word("MATCH") {
                     let next = tokens.get(index + 1);
                     let pattern = next.is_some_and(|next| {

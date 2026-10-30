@@ -20,6 +20,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[path = "no_return_rows/prepared_batch.rs"]
 mod prepared_batch;
 
+#[path = "no_return_rows/post_match_unwind.rs"]
+mod post_match_unwind;
+
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
         [0x31; 32],

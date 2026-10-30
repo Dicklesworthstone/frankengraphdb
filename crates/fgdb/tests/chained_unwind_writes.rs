@@ -369,3 +369,229 @@ fn a_late_expanded_statement_failure_preserves_preceding_outer_transaction_work(
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn post_match_nested_lists_keep_row_aliases_duplicates_and_the_entry_overlay() {
+    let ((), report) = run_async_under_lab(0x6e65_7404, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        for carry in ["", "WITH p, row "] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut txn = db.begin(&contexts.txn()).unwrap();
+            let mut seed = WriteBatch::new(R);
+            for id in 1..=4 {
+                seed.create_vertex(
+                    VId(id),
+                    vec![ENTITY],
+                    vec![(ID, CanonicalScalar::Int(id as i64))],
+                );
+            }
+            // The graph input must see the caller's unpublished prefix.
+            txn.write(&mut db, seed).unwrap();
+            let arguments = args(vec![
+                object(vec![
+                    ("id", int(1)),
+                    ("friends", list(vec![int(2), int(2)])),
+                ]),
+                object(vec![
+                    ("id", int(2)),
+                    ("friends", list(vec![int(1), int(3)])),
+                ]),
+                object(vec![("id", int(3)), ("friends", list(vec![]))]),
+                object(vec![
+                    ("id", int(4)),
+                    ("friends", GraphValue::Scalar(CanonicalScalar::Null)),
+                ]),
+                object(vec![("id", int(3))]),
+                GraphValue::Scalar(CanonicalScalar::Null),
+            ]);
+            let frozen = arguments.canonical_bytes();
+            let statement = format!(
+                "UNWIND $rows AS row MATCH (p:Entity {{id:row.id}}) \
+                 {carry}UNWIND row.friends AS fid MATCH (f:Entity {{id:fid}}) \
+                 MERGE (p)-[r:R]->(f) ON CREATE SET r.score=row.id \
+                 ON MATCH SET r.score=r.score+10"
+            );
+            let mut next = 100_u128;
+            txn.query_write(
+                &mut db,
+                &cx,
+                &statement,
+                &arguments,
+                symbols,
+                R,
+                writes(),
+                |request| {
+                    assert!(matches!(request.request, GraphInsertRequest::Edge { .. }));
+                    next += 1;
+                    Ok::<_, Infallible>(ElementId::Edge(EId(next)))
+                },
+            )
+            .unwrap();
+            let read = "MATCH (p:Entity)-[r:R]->(f:Entity) \
+                RETURN p.id AS source,f.id AS target,r.score AS score ORDER BY source,target";
+            let expected = integers(
+                &["source", "target", "score"],
+                &[&[1, 2, 11], &[2, 1, 2], &[2, 3, 2]],
+            );
+            assert_eq!(
+                txn.query(&db, &cx, read, &GqlParameters::new(), symbols, reads())
+                    .unwrap(),
+                expected,
+                "{statement}"
+            );
+            assert!(db.vertices().unwrap().is_empty());
+            assert!(db.edges().unwrap().is_empty());
+            assert_eq!(arguments.canonical_bytes(), frozen);
+            assert_eq!(
+                txn.finish(&mut db, &commit).await.unwrap(),
+                EmbeddedTxnCompletion::WriteCommitted {
+                    commit_seq: CommitSeq(1)
+                }
+            );
+            assert_eq!(
+                db.query(&cx, read, &GqlParameters::new(), symbols, reads())
+                    .unwrap(),
+                expected
+            );
+            let updates = args(
+                [10, 20]
+                    .into_iter()
+                    .map(|score| {
+                        object(vec![
+                            ("id", int(1)),
+                            ("friends", list(vec![int(2)])),
+                            ("score", int(score)),
+                        ])
+                    })
+                    .collect(),
+            );
+            db.query_write(
+                &contexts.txn(),
+                &cx,
+                &commit,
+                &format!(
+                    "UNWIND $rows AS row MATCH (p:Entity {{id:row.id}}) \
+                     {carry}UNWIND row.friends AS fid MATCH (f:Entity {{id:fid}}) \
+                     SET p.id=99, f.score=row.score"
+                ),
+                &updates,
+                symbols,
+                R,
+                writes(),
+                |_| -> Result<ElementId, Infallible> { panic!("SET allocates no identity") },
+            )
+            .await
+            .unwrap();
+            // Both original occurrences belong to one MATCH input cut. A
+            // row-by-row rematch loses the second root after p.id changes
+            // and would leave score=10 instead of the second row's 20.
+            assert_eq!(
+                db.query(
+                    &cx,
+                    "MATCH (n:Entity {id:2}) RETURN n.score AS score",
+                    &GqlParameters::new(),
+                    symbols,
+                    reads(),
+                )
+                .unwrap(),
+                integers(&["score"], &[&[20]])
+            );
+        }
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn post_match_nested_lists_share_effect_limits_and_roll_back_late_failures() {
+    let ((), report) = run_async_under_lab(0x6e65_7405, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut txn = db.begin(&contexts.txn()).unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in 1..=3 {
+            seed.create_vertex(
+                VId(id),
+                vec![ENTITY],
+                vec![(ID, CanonicalScalar::Int(id as i64))],
+            );
+        }
+        txn.write(&mut db, seed).unwrap();
+        let arguments = args(vec![
+            object(vec![
+                ("id", int(1)),
+                ("friends", list(vec![int(2), int(3)])),
+            ]),
+            object(vec![("id", int(2)), ("friends", list(vec![int(3)]))]),
+        ]);
+        let prefix = "UNWIND $rows AS row MATCH (p:Entity {id:row.id}) \
+            UNWIND row.friends AS fid MATCH (f:Entity {id:fid})";
+        let mut limited = writes();
+        limited.max_created_edges = 2;
+        let mut next = 100_u128;
+        for (text, policy, expected) in [
+            (format!("{prefix} CREATE (p)-[:R]->(f)"), limited, "limit"),
+            (
+                format!(
+                    "{prefix} MERGE (p)-[r:R]->(f) \
+                     ON CREATE SET r.score=10/(2-row.id)"
+                ),
+                writes(),
+                "zero",
+            ),
+        ] {
+            let error = txn
+                .query_write(&mut db, &cx, &text, &arguments, symbols, R, policy, |_| {
+                    next += 1;
+                    Ok::<_, Infallible>(ElementId::Edge(EId(next)))
+                })
+                .unwrap_err();
+            assert!(
+                error.to_string().to_ascii_lowercase().contains(expected),
+                "{text}: {error}"
+            );
+            assert_eq!(
+                txn.query(
+                    &db,
+                    &cx,
+                    "MATCH (n:Entity) RETURN n.id AS id ORDER BY id",
+                    &GqlParameters::new(),
+                    symbols,
+                    reads(),
+                )
+                .unwrap(),
+                integers(&["id"], &[&[1], &[2], &[3]])
+            );
+            assert_eq!(
+                txn.query(
+                    &db,
+                    &cx,
+                    "MATCH ()-[r:R]->() RETURN r",
+                    &GqlParameters::new(),
+                    symbols,
+                    reads(),
+                )
+                .unwrap(),
+                QueryResult::Rows {
+                    columns: vec!["r".into()],
+                    rows: vec![],
+                }
+            );
+            assert_eq!(db.frontier().unwrap(), CommitSeq(0));
+        }
+        assert_eq!(
+            txn.finish(&mut db, &commit).await.unwrap(),
+            EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: CommitSeq(1)
+            }
+        );
+        assert_eq!(db.vertices().unwrap().len(), 3);
+        assert!(db.edges().unwrap().is_empty());
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
