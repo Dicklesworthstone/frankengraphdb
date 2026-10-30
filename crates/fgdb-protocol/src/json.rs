@@ -401,6 +401,8 @@ pub fn argument(json: &Json) -> Result<WireValue, String> {
     // `{"$vector": [numbers]}` as packed little-endian f32 values, each
     // rounded to the nearest f32 and required to stay finite: the stored
     // form of an embedding that `hybrid.search(vector_property => ...)` reads.
+    // `{"$uint64": "<decimal>"}` retains the unsigned domain used by temporal
+    // selectors and row windows. Ordinary JSON integers keep their signed type.
     if let Json::Object(fields) = json
         && fields.len() == 1
         && let Some((key, value)) = fields.iter().next()
@@ -408,6 +410,15 @@ pub fn argument(json: &Json) -> Result<WireValue, String> {
     {
         return match (key.as_str(), value) {
             ("$bytes", Json::String(hex)) => bytes_from_hex(hex).map(WireValue::Bytes),
+            ("$uint64", Json::String(text)) => {
+                if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err("a $uint64 holds unsigned decimal text".into());
+                }
+                text.parse::<u64>()
+                    .map(WireValue::Count)
+                    .map_err(|_| "a $uint64 is out of range".into())
+            }
+            ("$uint64", _) => Err("a $uint64 holds unsigned decimal text".into()),
             ("$decimal", Json::String(text)) => {
                 if text.len() > crate::body::MAX_SCALAR_BYTES {
                     return Err("a $decimal exceeds the wire scalar byte limit".into());
@@ -431,7 +442,7 @@ pub fn argument(json: &Json) -> Result<WireValue, String> {
                 Ok(WireValue::Bytes(bytes))
             }
             _ => Err(format!(
-                "unknown typed argument {key:?}; use $bytes, $vector or $decimal"
+                "unknown typed argument {key:?}; use $bytes, $vector, $decimal or $uint64"
             )),
         };
     }
@@ -486,6 +497,60 @@ pub fn bytes_from_hex(hex: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsigned_arguments_preserve_full_width_and_nested_wire_domains() {
+        let parse = |text: &str| argument(&parse_json(text, 32, 64).unwrap());
+        for (text, value) in [
+            (r#"{"$uint64":"0"}"#, 0),
+            (r#"{"$uint64":"9007199254740993"}"#, 9_007_199_254_740_993),
+            (r#"{"$uint64":"18446744073709551615"}"#, u64::MAX),
+        ] {
+            assert_eq!(parse(text), Ok(WireValue::Count(value)));
+        }
+        assert_eq!(
+            parse(r#"[{"$uint64":"1"},{"cut":{"$uint64":"18446744073709551615"}}]"#),
+            Ok(WireValue::List(vec![
+                WireValue::Count(1),
+                WireValue::Map(vec![("cut".into(), WireValue::Count(u64::MAX))]),
+            ]))
+        );
+        assert_eq!(parse("1"), Ok(WireValue::Int(1)));
+        assert_eq!(parse("-1"), Ok(WireValue::Int(-1)));
+        assert_eq!(parse(r#""1""#), Ok(WireValue::Text("1".into())));
+        assert_eq!(
+            parse(r#"{"$uint64":"1","ordinary":2}"#),
+            Ok(WireValue::Map(vec![
+                ("$uint64".into(), WireValue::Text("1".into())),
+                ("ordinary".into(), WireValue::Int(2)),
+            ]))
+        );
+    }
+
+    #[test]
+    fn unsigned_argument_tags_reject_coercion_malformed_text_and_overflow() {
+        let parse = |text: &str| argument(&parse_json(text, 16, 64).unwrap());
+        for text in [
+            r#"{"$uint64":1}"#,
+            r#"{"$uint64":1.0}"#,
+            r#"{"$uint64":null}"#,
+            r#"{"$uint64":true}"#,
+            r#"{"$uint64":[]}"#,
+            r#"{"$uint64":{}}"#,
+            r#"{"$uint64":""}"#,
+            r#"{"$uint64":"-1"}"#,
+            r#"{"$uint64":"+1"}"#,
+            r#"{"$uint64":"1.0"}"#,
+            r#"{"$uint64":"1e3"}"#,
+            r#"{"$uint64":" 1"}"#,
+            r#"{"$uint64":"1 "}"#,
+            r#"{"$uint64":"١"}"#,
+            r#"{"$uint64":"18446744073709551616"}"#,
+        ] {
+            assert!(parse(text).is_err(), "{text}");
+        }
+        assert!(parse("18446744073709551615").is_err());
+    }
 
     #[test]
     fn typed_decimals_preserve_exact_text_at_every_collection_depth() {
