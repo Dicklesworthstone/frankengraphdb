@@ -2,7 +2,9 @@
 //! WCC uses union-by-size; SCC retains one resumable cursor per active DFS
 //! frame. Both publish the minimum snapshot-local ordinal of each component,
 //! which the CALL boundary maps back to the full stable VId.
-//! WCC stops reading once unions prove the entire population connected. For
+//! WCC over fully admitted adjacency stops reading once unions prove the
+//! entire population connected. Unknown providers are scanned completely so
+//! an omitted row cannot conceal invalid ordinals or source failures. For
 //! admitted symmetric CC, the degree directory proves zero-degree vertices
 //! isolated, so only its nonzero-degree population must be joined. Remaining
 //! immutable edges cannot change that partition; no inverse graph or sample
@@ -102,7 +104,8 @@ pub(super) fn weak(
     admission.rows(n)?;
     let mut parents = reserve(n)?;
     let mut sizes = reserve(n)?;
-    let symmetric = graph.is_undirected();
+    let admitted = graph.has_validated_adjacency();
+    let symmetric = admitted && graph.is_undirected();
     let mut remaining = if symmetric { 0 } else { n };
     let mut seed = WeakSeed::default();
     for vertex in 0..n {
@@ -137,7 +140,7 @@ pub(super) fn weak(
         .chain((0..n).filter(move |&vertex| Some(vertex) != first));
     for source in sources {
         // Finish the current row before omitting later row opens entirely.
-        if remaining <= 1 {
+        if admitted && remaining <= 1 {
             break;
         }
         checkpoint()?;
@@ -326,6 +329,7 @@ mod tests {
     struct CountedRows {
         rows: Vec<Vec<usize>>,
         symmetric: bool,
+        admitted: bool,
         opened: Cell<usize>,
         visited: Cell<usize>,
     }
@@ -349,6 +353,9 @@ mod tests {
         fn degree(&self, source: usize) -> Option<usize> {
             self.rows.get(source).map(Vec::len)
         }
+        fn has_validated_adjacency(&self) -> bool {
+            self.admitted
+        }
         fn is_undirected(&self) -> bool {
             self.symmetric
         }
@@ -365,9 +372,26 @@ mod tests {
         }
     }
     fn counted(rows: Vec<Vec<usize>>, symmetric: bool) -> CountedRows {
+        // The test provider earns the same omission preconditions as the
+        // production constructor instead of treating directedness as proof.
+        for (source, row) in rows.iter().enumerate() {
+            for &target in row {
+                assert!(target < rows.len());
+                if symmetric {
+                    assert_eq!(
+                        row.iter().filter(|&&vertex| vertex == target).count(),
+                        rows[target]
+                            .iter()
+                            .filter(|&&vertex| vertex == source)
+                            .count()
+                    );
+                }
+            }
+        }
         CountedRows {
             rows,
             symmetric,
+            admitted: true,
             opened: Cell::new(0),
             visited: Cell::new(0),
         }
@@ -538,15 +562,74 @@ mod tests {
                 }
                 let expected = reference(&rows);
                 let arcs: usize = rows.iter().map(Vec::len).sum();
-                let graph = counted(rows, true);
-                let KernelValues::Components(actual) = execute(&graph).values else {
-                    panic!("components")
-                };
-                assert_eq!(actual, expected, "mask={mask}, loops={loops}");
-                assert!(graph.opened.get() <= n);
-                assert!(graph.visited.get() <= arcs);
+                for admitted in [false, true] {
+                    let mut graph = counted(rows.clone(), true);
+                    graph.admitted = admitted;
+                    let KernelValues::Components(actual) = execute(&graph).values else {
+                        panic!("components")
+                    };
+                    assert_eq!(
+                        actual, expected,
+                        "mask={mask}, loops={loops}, admitted={admitted}"
+                    );
+                    assert!(graph.opened.get() <= n);
+                    assert!(graph.visited.get() <= arcs);
+                    if !admitted {
+                        assert_eq!(graph.opened.get(), n);
+                        assert_eq!(graph.visited.get(), arcs);
+                    }
+                }
             }
         }
+    }
+
+    #[test]
+    fn unadmitted_rows_cannot_hide_invalid_targets_after_connectivity_is_proven() {
+        for rows in [
+            vec![vec![usize::MAX]],
+            vec![vec![1, 2], vec![], vec![usize::MAX]],
+        ] {
+            for symmetric in [false, true] {
+                let graph = CountedRows {
+                    rows: rows.clone(),
+                    symmetric,
+                    admitted: false,
+                    opened: Cell::new(0),
+                    visited: Cell::new(0),
+                };
+                let admission = ResultAdmission {
+                    row_bytes: 0,
+                    column_bytes: 0,
+                    max_rows: graph.node_count(),
+                    max_bytes: 0,
+                    delivery: super::super::Delivery::Collected,
+                };
+                assert!(matches!(
+                    weak(&graph, &admission, &mut || Ok(())),
+                    Err(super::super::FnxSealedExecutionError::Execution(
+                        ExecutionError::InvalidUpstreamResult
+                    ))
+                ));
+                assert_eq!(graph.opened.get(), rows.len());
+            }
+        }
+    }
+
+    #[test]
+    fn unadmitted_symmetric_hint_does_not_hide_a_one_way_bridge() {
+        let graph = CountedRows {
+            rows: vec![vec![1], vec![2], vec![], vec![]],
+            symmetric: true,
+            admitted: false,
+            opened: Cell::new(0),
+            visited: Cell::new(0),
+        };
+        let KernelValues::Components(labels) = execute(&graph).values else {
+            panic!("components")
+        };
+        assert_eq!(labels, vec![0, 0, 0, 3]);
+        assert_eq!(graph.opened.get(), 4);
+        assert_eq!(graph.visited.get(), 2);
     }
 
     #[test]

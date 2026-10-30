@@ -181,6 +181,13 @@ trait Rows {
         Self: 'a;
     fn node_count(&self) -> usize;
     fn degree(&self, source: usize) -> Option<usize>;
+    /// Complete admission validated every target ordinal and exact degree in
+    /// this immutable projection, including the symmetry law when undirected.
+    /// Only then may connectivity omit rows whose edges cannot change labels.
+    /// Unknown providers must still expose malformed rows and source failures.
+    fn has_validated_adjacency(&self) -> bool {
+        false
+    }
     /// Only an admitted symmetric projection can prove that a zero outgoing
     /// degree is an isolate. Unknown/directed providers must return false.
     fn is_undirected(&self) -> bool {
@@ -222,6 +229,11 @@ impl Rows for SealedRows<'_> {
     }
     fn degree(&self, source: usize) -> Option<usize> {
         self.graph.degree(source)
+    }
+    fn has_validated_adjacency(&self) -> bool {
+        // SealedGraphView's only constructors drain every selected row before
+        // publishing the immutable projection, degrees and direction binding.
+        true
     }
     fn is_undirected(&self) -> bool {
         self.graph.spec().directedness == Directedness::Undirected
