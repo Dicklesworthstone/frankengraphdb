@@ -7,8 +7,9 @@ use asupersync::security::key::AuthKey;
 use fgdb::{Database, DatabaseKeys, MemVfs, QueryError, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::{
-    GqlExecutionBudget, GqlParameters, GqlQueryPolicy, GraphAggregateRow, GraphAggregateValue,
-    GraphSymbol, GraphSymbolKind, PreparedGraphAggregate, PreparedGraphAggregateText,
+    GqlBudgetDimension, GqlExecutionBudget, GqlParameters, GqlQueryError, GqlQueryPolicy,
+    GraphAggregateRow, GraphAggregateValue, GraphSymbol, GraphSymbolKind, PreparedGraphAggregate,
+    PreparedGraphAggregateText,
 };
 use fgdb_types::context::SimulationCheckpointProbe;
 use fgdb_types::{
@@ -28,6 +29,8 @@ const P: PropertyKeyId = PropertyKeyId(1);
 const VERTICES: &str = "MATCH (n) RETURN COUNT(*) AS n";
 const R_EDGES: &str = "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n";
 const S_EDGES: &str = "MATCH (a)-[:S]->(b) RETURN COUNT(*) AS n";
+const ALL_EDGES: &str = "MATCH (a)-[]->(b) RETURN COUNT(*) AS n";
+const A_VERTICES: &str = "MATCH (n:A) RETURN COUNT(*) AS n";
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -334,7 +337,7 @@ fn warm_counts_keep_cold_refusal_thresholds_and_cancellation_prefixes() {
         let commit = c.commit();
         let warm = database(&commit).await;
         let token = issuer().issue_at(&grant(), 100).unwrap();
-        for text in [VERTICES, R_EDGES] {
+        for text in [VERTICES, R_EDGES, ALL_EDGES, A_VERTICES] {
             let query = prepare(text);
             let cold = footprint(&warm, &cx, &token, &query, policy(), None);
             assert!(cold.0.is_ok(), "{cold:?}");
@@ -450,6 +453,199 @@ fn cached_full_counts_never_replace_scoped_or_fallible_inputs() {
             )
             .unwrap();
         assert_eq!(count(&rows), 0);
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn maintained_authorized_counts_admit_one_metadata_record_independent_of_graph_size() {
+    let ((), report) = run_async_under_lab(0xc161_0005, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let authority = issuer();
+        let full = authority.issue_at(&grant(), 100).unwrap();
+        let mut baseline = None;
+        for total in [1_u64, 32, 512] {
+            let mut db =
+                Database::open_memory(&commit, DatabaseKeys::new([0xc2; 32], NS, [0xc3; 32]))
+                    .await
+                    .unwrap();
+            let mut batch = WriteBatch::new(R);
+            for id in 1..=total {
+                let id = u128::from(id);
+                batch.create_vertex(VId(id), vec![A], vec![]);
+                batch.add_edge(EId(id), VId(id), VId(id), vec![]);
+            }
+            db.write(&commit, batch).await.unwrap();
+            let exact_nodes = full.attenuate(Restriction::MaxNodes(total)).unwrap();
+            let short_nodes = full.attenuate(Restriction::MaxNodes(total - 1)).unwrap();
+            let mut observed = Vec::new();
+            for (text, expected) in [
+                (VERTICES, total),
+                (R_EDGES, total),
+                (ALL_EDGES, total),
+                (A_VERTICES, total),
+                (S_EDGES, 0),
+                ("MATCH (n:B) RETURN COUNT(*) AS n", 0),
+            ] {
+                let query = prepare(text);
+                assert!(query.count_metadata_source().is_some(), "{text}");
+                let owner = db
+                    .execute_graph_aggregate_governed(&cx, &query, policy())
+                    .unwrap();
+                assert_eq!(count(&owner.value), expected, "{text}");
+                assert_eq!(owner.rows.snapshot_records, 1, "{text}");
+                // The same metadata input must fit the owner's exact native
+                // work/scratch/record limits under current authorization.
+                let exact = GqlQueryPolicy::new(
+                    1,
+                    owner.rows.result_rows,
+                    owner.evaluator.work_units,
+                    owner.evaluator.scratch_entries,
+                );
+                let result = footprint(&db, &cx, &exact_nodes, &query, exact, None);
+                assert_eq!(result.0.as_ref().unwrap(), &owner.value, "{text}");
+                observed.push((result.1, result.2));
+                assert!(
+                    matches!(
+                        db.execute_graph_aggregate_authorized(
+                            &cx,
+                            &authority,
+                            &short_nodes,
+                            "main",
+                            &query,
+                            exact,
+                            || 100,
+                        ),
+                        Err(QueryError::Authorization(fgdb_warden::Error::LimitExceeded(
+                            fgdb_warden::LimitDimension::Nodes
+                        )))
+                    ),
+                    "{text}, {total} vertices"
+                );
+            }
+            if let Some(expected) = &baseline {
+                assert_eq!(&observed, expected, "metadata work grew with {total} vertices");
+            } else {
+                baseline = Some(observed);
+            }
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn exact_metadata_keeps_scope_history_and_live_permit_fences() {
+    let ((), report) = run_async_under_lab(0xc161_0006, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = database(&c.commit()).await;
+        let authority = issuer();
+        let full = authority.issue_at(&grant(), 100).unwrap();
+        let one_record = GqlQueryPolicy::new(1, 100, 1_000_000, 100_000);
+        for (at, text) in [VERTICES, R_EDGES, ALL_EDGES, A_VERTICES]
+            .into_iter()
+            .enumerate()
+        {
+            let query = prepare(text);
+            let current = db
+                .execute_graph_aggregate_authorized(
+                    &cx, &authority, &full, "main", &query, one_record, || 100,
+                )
+                .unwrap();
+            assert_eq!(
+                current,
+                db.execute_graph_aggregate_governed(&cx, &query, one_record)
+                    .unwrap()
+                    .value
+            );
+            for (restriction, expected) in [
+                (Restriction::Labels(Scope::only([A])), [5, 4, 5, 5]),
+                (Restriction::Relations(Scope::only([R])), [6, 5, 5, 5]),
+                (Restriction::Properties(Scope::only([])), [6, 5, 7, 5]),
+            ] {
+                let scoped = full.attenuate(restriction).unwrap();
+                assert!(
+                    matches!(
+                        db.execute_graph_aggregate_authorized(
+                            &cx, &authority, &scoped, "main", &query, one_record, || 100,
+                        ),
+                        Err(QueryError::Aggregate(GqlQueryError::Rows(error)))
+                            if error.dimension == GqlBudgetDimension::SnapshotRecords
+                    ),
+                    "scoped source incorrectly used full metadata: {text}"
+                );
+                let rows = db
+                    .execute_graph_aggregate_authorized(
+                        &cx, &authority, &scoped, "main", &query, policy(), || 100,
+                    )
+                    .unwrap();
+                assert_eq!(count(&rows), expected[at], "scoped {text}");
+            }
+            assert!(
+                matches!(
+                    db.execute_graph_aggregate_authorized_at(
+                        &cx, &authority, &full, "main", &query, CommitSeq(1),
+                        one_record, || 100,
+                    ),
+                    Err(QueryError::Aggregate(GqlQueryError::Rows(error)))
+                        if error.dimension == GqlBudgetDimension::SnapshotRecords
+                ),
+                "historical source incorrectly used current metadata: {text}"
+            );
+            let history = db
+                .execute_graph_aggregate_authorized_at(
+                    &cx, &authority, &full, "main", &query, CommitSeq(1),
+                    policy(), || 100,
+                )
+                .unwrap();
+            assert_eq!(count(&history), [6, 6, 6, 5][at], "historical {text}");
+            for (restriction, dimension) in [
+                (Restriction::MaxNodes(5), fgdb_warden::LimitDimension::Nodes),
+                (Restriction::MaxWork(0), fgdb_warden::LimitDimension::Work),
+                (Restriction::MaxRows(0), fgdb_warden::LimitDimension::Rows),
+            ] {
+                let limited = full.attenuate(restriction).unwrap();
+                assert!(
+                    matches!(
+                        db.execute_graph_aggregate_authorized(
+                            &cx, &authority, &limited, "main", &query, one_record, || 100,
+                        ),
+                        Err(QueryError::Authorization(fgdb_warden::Error::LimitExceeded(found)))
+                            if found == dimension
+                    ),
+                    "metadata bypassed {dimension:?}: {text}"
+                );
+            }
+            let mut clocks = 0;
+            assert!(
+                matches!(
+                    db.execute_graph_aggregate_authorized(
+                        &cx, &authority, &full, "main", &query, one_record, || {
+                            clocks += 1;
+                            if clocks == 1 { 100 } else { 10_000 }
+                        },
+                    ),
+                    Err(QueryError::Authorization(fgdb_warden::Error::Expired))
+                ),
+                "metadata bypassed a live expiry check: {text}"
+            );
+        }
+        let fallible = prepare(
+            "MATCH (n) RETURN 1 / (COUNT(*) - COUNT(*)) AS n LIMIT 0",
+        );
+        assert!(
+            matches!(
+                db.execute_graph_aggregate_authorized(
+                    &cx, &authority, &full, "main", &fallible, one_record, || 100,
+                ),
+                Err(QueryError::Aggregate(_))
+            ),
+            "metadata must retain the native output error before LIMIT 0"
+        );
         assert_eq!(c.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

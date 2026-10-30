@@ -153,12 +153,54 @@ fn visit_at<Clock: FnMut() -> u64>(
     // in runs.
     work_runs(execution, GqlQueryError::Interrupted, || {
         let mut usage = AdmissionUsage::default();
+        // Reuse the owner's exact metadata only at this snapshot's frontier,
+        // with no hidden incidence or fields. The full vertex population still
+        // spends signed node allowance; unknown metadata keeps scan admission.
+        let metadata = if at == snapshot.frontier
+            && scope.sees_all_incidence()
+            && scope.sees_all_fields()
+        {
+            if let Some(source) = query.count_metadata_source() {
+                let counts = snapshot
+                    .exact_counts
+                    .lookup_with_vertices(source, &mut |event| {
+                        execution
+                            .borrow_mut()
+                            .checkpoint()
+                            .map_err(GqlQueryError::Interrupted)?;
+                        usage.observe::<ReadError, QueryError>(policy, event)
+                    })
+                    .map_err(|error| {
+                        error.map_source(|error| {
+                            GraphAggregateError::Source(GqlError::Read(error))
+                        })
+                    })?;
+                if let Some((vertices, matching)) = counts {
+                    execution
+                        .borrow_mut()
+                        .nodes(vertices)
+                        .map_err(GqlQueryError::Interrupted)?;
+                    let count = query
+                        .prepare_count_metadata(source, matching)
+                        .expect("the exact metadata source shape was checked before admission");
+                    Some((1, count))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         // A filterless COUNT folds the canonical admission directly into
         // cardinalities. An unrestricted cached core still replays its exact
         // transcript; a cold or scoped source admits the same winners without
         // an edge table. A core without a bounded count summary keeps the
         // ordinary cached visitor rather than rescanning its history.
-        let count_summary = if let Some(source) = query.count_summary_source() {
+        let count_summary = if metadata.is_some() {
+            metadata
+        } else if let Some(source) = query.count_summary_source() {
             count::probe(
                 snapshot,
                 at,

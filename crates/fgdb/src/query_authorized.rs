@@ -287,10 +287,16 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
         self.cx.checkpoint().map_err(interrupted)
     }
     fn node(&mut self) -> Result<(), QueryError> {
+        self.nodes(1)
+    }
+    /// Admit an exact vertex population without replaying a source scan.
+    /// Metadata changes physical work, never the signed admission ceiling.
+    /// Ordinary source admission still calls this once per vertex.
+    fn nodes(&mut self, amount: u64) -> Result<(), QueryError> {
         self.checkpoint()?;
         self.settle()?;
         let now = self.now();
-        let charged = self.permit.charge_nodes_at(now, 1);
+        let charged = self.permit.charge_nodes_at(now, amount);
         charged.map_err(|error| self.refusal(error))
     }
     /// A pull root costs one node when admitted, whether or not anything

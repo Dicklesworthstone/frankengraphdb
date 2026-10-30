@@ -63,6 +63,21 @@ impl ExactCounts {
         Ok(value)
     }
 
+    /// Read one exact metadata record while retaining the live vertex total
+    /// needed by an authorized host's node budget. An unknown population must
+    /// keep ordinary admission; it is never a zero-node metadata shortcut.
+    pub(crate) fn lookup_with_vertices<E>(
+        &self,
+        source: GraphCountSource,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<Option<(u64, u64)>, E> {
+        let Some(vertices) = self.vertices.get().copied() else {
+            return Ok(None);
+        };
+        self.lookup(source, control)
+            .map(|matching| matching.map(|matching| (vertices, matching)))
+    }
+
     pub(super) fn relation_builder(&self) -> Option<RelationBuilder> {
         self.relations
             .get()
