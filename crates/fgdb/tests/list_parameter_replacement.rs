@@ -134,18 +134,23 @@ fn replacement_parameters_rebind_nested_empty_and_null_values_and_reopen() {
         int(9),
         list(vec![int(4), GraphValue::Scalar(CanonicalScalar::Null)]),
     ];
+    // The stored q of each case. A top-level NULL is no stored value
+    // (fgdb-e26tv): `{q: NULL}` replaces the map with an empty one.
     let cases = [
-        (listed(nested.clone()), list(nested)),
-        (listed(Vec::new()), list(Vec::new())),
+        (listed(nested.clone()), Some(list(nested))),
+        (listed(Vec::new()), Some(list(Vec::new()))),
         (
             arguments(GqlParameterValue::Scalar(
                 GqlScalarParameter::new(CanonicalScalar::Null).unwrap(),
             )),
-            GraphValue::Scalar(CanonicalScalar::Null),
+            None,
         ),
     ];
     let mut definitions = std::collections::BTreeSet::new();
-    for (arguments, expected) in cases {
+    for (arguments, stored) in cases {
+        let expected = stored
+            .clone()
+            .unwrap_or(GraphValue::Scalar(CanonicalScalar::Null));
         let query = template.bind_parameters(&arguments).unwrap();
         assert!(definitions.insert(query.canonical_bytes()));
         run(async |commit, cx, txcx| {
@@ -160,8 +165,16 @@ fn replacement_parameters_rebind_nested_empty_and_null_values_and_reopen() {
                 .execute_graph_mutation_query_governed(&mut db, cx, &query, policy(2))
                 .unwrap();
             assert_eq!(stats.target_vertices, 2);
-            assert_eq!(stats.effects, 4, "each target sets q and removes p");
-            let document = GraphValue::map(vec![("q".into(), expected.clone())]).unwrap();
+            assert_eq!(
+                stats.effects, 4,
+                "each target sets or removes q and removes p"
+            );
+            let document = GraphValue::map(
+                (stored.iter())
+                    .map(|value| ("q".into(), value.clone()))
+                    .collect(),
+            )
+            .unwrap();
             assert_eq!(
                 rows(&output),
                 vec![
@@ -186,7 +199,9 @@ fn replacement_parameters_rebind_nested_empty_and_null_values_and_reopen() {
             for id in [BASE + 1, BASE + 2] {
                 assert_eq!(
                     db.vertex(VId(id)).unwrap().unwrap().props,
-                    vec![(Q, expected.to_written_property().unwrap())]
+                    (stored.iter())
+                        .map(|value| (Q, value.to_written_property().unwrap()))
+                        .collect::<Vec<_>>()
                 );
             }
             assert_eq!(txcx.outstanding_obligations(), 0);
