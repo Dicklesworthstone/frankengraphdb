@@ -106,7 +106,7 @@ fn workspace(n: usize, coefficients: bool) -> Result<usize> {
 }
 
 fn bitmap_words(n: usize) -> usize {
-    n / 64 + usize::from(n % 64 != 0)
+    n.div_ceil(64)
 }
 
 fn vector_bytes<T>(values: &Vec<T>) -> Result<usize> {
