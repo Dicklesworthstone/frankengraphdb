@@ -126,7 +126,8 @@ impl<'a> Parser<'a> {
             || ((self.is_word("KEYS") || self.is_word("PROPERTIES"))
                 && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
             || (matches!(self.current.kind, TokenKind::Word(_))
-                && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'{')));
+                && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'{')))
+            || self.subscripted_operand()?;
         let operand = if composite {
             None
         } else if bare_variable {
@@ -208,6 +209,32 @@ impl<'a> Parser<'a> {
             path: None,
             computed: Some(index),
         })
+    }
+
+    /// Whether the operand starting here is a name, a `.key` chain or a call
+    /// followed by a subscript (`labels(n)[0]`, `n.tags[0]`): the value
+    /// grammar reads the subscript, which the scalar operand cannot.
+    fn subscripted_operand(&self) -> Result<bool, GraphPatternTextError> {
+        let TokenKind::Word(_) = self.current.kind else {
+            return Ok(false);
+        };
+        let mut lexer = self.lexer.clone();
+        let mut token = lexer.next()?;
+        if matches!(token.kind, TokenKind::Punct(b'(')) {
+            super::return_projection::skip_group(&mut lexer)?;
+            token = lexer.next()?;
+        } else {
+            while matches!(token.kind, TokenKind::Punct(b'.')) {
+                if !matches!(
+                    lexer.next()?.kind,
+                    TokenKind::Word(_) | TokenKind::DelimitedKeyword(_)
+                ) {
+                    return Ok(false);
+                }
+                token = lexer.next()?;
+            }
+        }
+        Ok(matches!(token.kind, TokenKind::Punct(b'[')))
     }
 }
 

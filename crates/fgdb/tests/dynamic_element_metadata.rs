@@ -570,3 +570,78 @@ fn dynamic_metadata_read_witnesses_cover_new_properties_and_label_membership() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// A subscripted call or property is a grouping key beside an aggregate as it
+/// is a plain projection (`labels(n)[1]`, `n.note[0]`). The aggregate key
+/// parser used to read only the operand and refuse the `[` as "expected path
+/// function", although the same key without an aggregate answered.
+#[test]
+fn subscripted_metadata_and_list_properties_group_beside_aggregates() {
+    let ((), report) = run_async_under_lab(0xa1b3_0006, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx) = (contexts.commit(), contexts.query());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        for (id, labels, score, note) in [
+            (1, vec![THING, EXTRA], 10, &["a", "b"][..]),
+            (2, vec![THING], 20, &["a", "c"][..]),
+            (3, vec![THING, EXTRA], 40, &["b"][..]),
+        ] {
+            batch.create_vertex_values(
+                VId(id),
+                labels,
+                vec![
+                    (SCORE, CanonicalScalar::Int(score).into()),
+                    (NOTE, names(note).to_written_property().unwrap()),
+                ],
+            );
+        }
+        db.write(&commit, batch).await.unwrap();
+        let parameters = GqlParameters::new();
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        for (statement, expected) in [
+            (
+                "MATCH (n:Thing) RETURN labels(n)[1] AS second, count(*) AS c ORDER BY second",
+                vec![
+                    vec![text("Extra"), integer(2)],
+                    vec![null.clone(), integer(1)],
+                ],
+            ),
+            (
+                "MATCH (n:Thing) RETURN labels(n)[0] AS first, count(*) AS c",
+                vec![vec![text("Thing"), integer(3)]],
+            ),
+            (
+                "MATCH (n:Thing) RETURN n.note[0] AS first, count(*) AS c ORDER BY first",
+                vec![vec![text("a"), integer(2)], vec![text("b"), integer(1)]],
+            ),
+            (
+                "MATCH (n:Thing) RETURN n.note[1] AS second, sum(n.score) AS total \
+                 ORDER BY second",
+                vec![
+                    vec![text("b"), integer(10)],
+                    vec![text("c"), integer(20)],
+                    vec![null.clone(), integer(40)],
+                ],
+            ),
+            (
+                "MATCH (n:Thing) RETURN n.note[0] AS first, max(n.score) AS top, \
+                 count(*) AS c ORDER BY top DESC",
+                vec![
+                    vec![text("b"), integer(40), integer(1)],
+                    vec![text("a"), integer(20), integer(2)],
+                ],
+            ),
+            (
+                "MATCH (n:Thing) RETURN keys(n)[0] AS key, count(*) AS c",
+                vec![vec![text("note"), integer(3)]],
+            ),
+        ] {
+            let result = db
+                .query(&cx, statement, &parameters, Catalog, policy())
+                .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+            assert_eq!(cells(result), expected, "{statement}");
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
