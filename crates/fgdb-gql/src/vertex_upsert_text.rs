@@ -38,6 +38,9 @@ pub(crate) enum VertexUpsertActionTemplate {
         label: LabelId,
         present: bool,
     },
+    ClearProperties {
+        keep: Vec<PropertyKeyId>,
+    },
 }
 
 #[derive(Clone)]

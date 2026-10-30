@@ -41,15 +41,14 @@ impl MixedMeter {
         input: &PreparedGraphVertexUpsert,
         stats: GraphVertexUpsertStats,
     ) -> Result<(), GraphWriteProgramError<E, A, C>> {
-        let (actions, created) = match stats.branch {
-            GraphVertexUpsertBranch::Match => (input.on_match(), 0),
-            GraphVertexUpsertBranch::Create => (input.on_create(), 1),
+        let (created, selected) = match stats.branch {
+            GraphVertexUpsertBranch::Match => (0, input.on_match()),
+            GraphVertexUpsertBranch::Create => (1, input.on_create()),
         };
         // Both clauses produce original actions, even when the common SET
         // overwrites an ON assignment. Require the exact expanded count; never
         // accept a receipt that silently drops one clause from the allowance.
-        let expected = actions.len() as u128 + input.after().len() as u128;
-        if stats.merge.created_vertices != created || u128::from(stats.action_effects) != expected {
+        if stats.merge.created_vertices != created || !input.validates_action_effects(&stats, 1) {
             return Err(GraphMutationProgramError::InvalidStatistics { statement }.into());
         }
         // A create branch can apply actions despite selecting ZERO MATCH rows.
@@ -64,7 +63,7 @@ impl MixedMeter {
             .common
             .stats
             .target_vertex_visits
-            .checked_add(u64::from(stats.action_effects != 0))
+            .checked_add(u64::from(!selected.is_empty() || !input.after().is_empty()))
             .ok_or(GraphMutationProgramError::InvalidStatistics { statement })?;
         // All action counters are checked before the common successor changes;
         // absorb_vertex_merge itself installs counters only after all checks.

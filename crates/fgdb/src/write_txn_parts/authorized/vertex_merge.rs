@@ -6,7 +6,8 @@ use crate::write_txn::authorized::{
     WriteTxnError, selection, stage,
 };
 use crate::write_txn::{
-    collect_vertex_merge, vertex_upsert_actions, vertex_upsert_labels, vertex_upsert_properties,
+    collect_vertex_merge, vertex_replacement_keys, vertex_upsert_actions,
+    vertex_upsert_known_effects, vertex_upsert_labels, vertex_upsert_properties,
     vertex_upsert_query_selection_policy, vertex_upsert_returning,
 };
 use fgdb_delta_types::ElementId;
@@ -384,6 +385,7 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
             policy,
             merge_stats,
             outcome,
+            (0, 0),
             || {
                 cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                 controls.borrow_mut().checkpoint()
@@ -416,6 +418,26 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
                     |error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)),
                 )
                 .and_then(selection::scalar)
+            },
+            |control| {
+                let state = state.borrow();
+                vertex_replacement_keys(
+                    state.0,
+                    state.1,
+                    outcome.vertex(),
+                    Some(scope),
+                    || {
+                        cx.checkpoint()
+                            .map_err(WriteTxnError::Interrupted)
+                            .map_err(GqlQueryError::Interrupted)?;
+                        controls
+                            .borrow_mut()
+                            .poll()
+                            .map_err(GqlQueryError::Interrupted)
+                    },
+                    control,
+                    |error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)),
+                )
             },
             |batch| {
                 let mut state = state.borrow_mut();
@@ -691,7 +713,10 @@ mod all_targets {
             (GraphVertexUpsertBranch::Match, upsert.on_match())
         };
         let observed = (targets.len() as u128)
-            .checked_mul(actions.len() as u128 + upsert.after().len() as u128)
+            .checked_mul(
+                vertex_upsert_known_effects(actions) as u128
+                    + vertex_upsert_known_effects(upsert.after()) as u128,
+            )
             .ok_or_else(|| {
                 GqlQueryError::Source(GraphVertexUpsertError::Merge(
                     GraphVertexMergeError::AccountingOverflow,
@@ -728,7 +753,8 @@ mod all_targets {
         let mut stats = GraphVertexUpsertStats {
             merge: proposal.stats,
             branch,
-            action_effects: observed as u64,
+            property_removals: 0,
+            action_effects: 0,
         };
         for outcome in targets.outcomes() {
             event(
@@ -745,6 +771,7 @@ mod all_targets {
                 policy,
                 stats.merge,
                 outcome,
+                (stats.action_effects, stats.property_removals),
                 || {
                     cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                     controls.borrow_mut().checkpoint()
@@ -775,6 +802,26 @@ mod all_targets {
                     )
                     .and_then(selection::scalar)
                 },
+                |control| {
+                    let state = state.borrow();
+                    vertex_replacement_keys(
+                        state.0,
+                        state.1,
+                        outcome.vertex(),
+                        Some(scope),
+                        || {
+                            cx.checkpoint()
+                                .map_err(WriteTxnError::Interrupted)
+                                .map_err(GqlQueryError::Interrupted)?;
+                            controls
+                                .borrow_mut()
+                                .poll()
+                                .map_err(GqlQueryError::Interrupted)
+                        },
+                        control,
+                        staging,
+                    )
+                },
                 |batch| {
                     let mut state = state.borrow_mut();
                     let (transaction, database) = &mut *state;
@@ -792,6 +839,8 @@ mod all_targets {
                 },
             )?;
             stats.merge.evaluator = completed.merge.evaluator;
+            stats.action_effects = completed.action_effects;
+            stats.property_removals = completed.property_removals;
         }
         let mut evaluator = stats.merge.evaluator;
         let rows = {

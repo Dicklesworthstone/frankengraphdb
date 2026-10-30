@@ -45,10 +45,23 @@ impl WriteTxn {
                 policy,
                 merge_stats,
                 outcome,
+                (0, 0),
                 || cx.checkpoint(),
                 |key, control| {
                     let state = state.borrow();
                     vertex_upsert_property(state.0, state.1, outcome.vertex(), key, control)
+                },
+                |control| {
+                    let state = state.borrow();
+                    vertex_replacement_keys(
+                        state.0,
+                        state.1,
+                        outcome.vertex(),
+                        None,
+                        || cx.checkpoint().map_err(GqlQueryError::Interrupted),
+                        control,
+                        |error| GqlQueryError::Source(GraphVertexUpsertError::Staging(error)),
+                    )
                 },
                 |batch| {
                     let mut state = state.borrow_mut();
@@ -271,19 +284,37 @@ fn vertex_upsert_returning<E, A, C>(
         .map_err(|error| error.map_source(GraphVertexUpsertError::Returning))
 }
 
-// Both adapters supply authority-appropriate reads and native staging. This
-// collector owns only scalar evaluation and clause boundaries, never a graph.
+// Replacement unsets depend on the selected target's current visible keys.
+fn vertex_upsert_known_effects(actions: &[fgdb_gql::GraphVertexUpsertAction]) -> usize {
+    actions
+        .iter()
+        .filter(|action| {
+            !matches!(
+                action,
+                fgdb_gql::GraphVertexUpsertAction::ClearProperties { .. }
+            )
+        })
+        .count()
+}
+
+// Every callback belongs to one admitted target; the separate key reader
+// prevents replacing a map from copying (or revealing) its property payloads.
+// This collector owns scalar evaluation and clause boundaries, never a graph.
 #[allow(clippy::too_many_arguments)]
 fn vertex_upsert_actions<E, A, C>(
     upsert: &fgdb_gql::PreparedGraphVertexUpsert,
     policy: fgdb_gql::GraphVertexUpsertPolicy,
     mut merge_stats: fgdb_gql::GraphVertexMergeStats,
     outcome: fgdb_gql::GraphVertexMergeOutcome,
+    (prior_actions, mut property_removals): (u64, u64),
     mut checkpoint: impl FnMut() -> Result<(), C>,
     mut property: impl FnMut(
         fgdb_delta_types::PropertyKeyId,
         &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> VertexUpsertActionResult<(), E, A, C>,
     ) -> VertexUpsertActionResult<CanonicalScalar, E, A, C>,
+    mut keys: impl FnMut(
+        &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> VertexUpsertActionResult<(), E, A, C>,
+    ) -> VertexUpsertActionResult<Vec<fgdb_delta_types::PropertyKeyId>, E, A, C>,
     mut stage: impl FnMut(WriteBatch) -> VertexUpsertActionResult<(), E, A, C>,
 ) -> VertexUpsertActionResult<fgdb_gql::GraphVertexUpsertStats, E, A, C> {
     use crate::gql_exec::source::SourceEvent;
@@ -298,7 +329,9 @@ fn vertex_upsert_actions<E, A, C>(
             (GraphVertexUpsertBranch::Create, upsert.on_create())
         }
     };
-    let observed = selected.len() as u128 + upsert.after().len() as u128;
+    let mut observed = u128::from(prior_actions)
+        + vertex_upsert_known_effects(selected) as u128
+        + vertex_upsert_known_effects(upsert.after()) as u128;
     if observed > u128::from(policy.max_actions) {
         return Err(GqlQueryError::Source(GraphVertexUpsertError::ActionLimit {
             limit: policy.max_actions,
@@ -367,6 +400,26 @@ fn vertex_upsert_actions<E, A, C>(
                     })?;
                     batch.set_vertex_property_value(outcome.vertex(), *key, Some(value.clone()));
                 }
+                GraphVertexUpsertAction::ClearProperties { keep } => {
+                    for key in keys(&mut control)? {
+                        control(GlaExecutionEvent::Work)?;
+                        if keep.binary_search(&key).is_ok() {
+                            continue;
+                        }
+                        observed += 1;
+                        if observed > u128::from(policy.max_actions) {
+                            return Err(GqlQueryError::Source(
+                                GraphVertexUpsertError::ActionLimit {
+                                    limit: policy.max_actions,
+                                    observed,
+                                },
+                            ));
+                        }
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        property_removals += 1;
+                        batch.set_vertex_property(outcome.vertex(), key, None);
+                    }
+                }
                 GraphVertexUpsertAction::SetExpression {
                     key,
                     properties,
@@ -408,8 +461,72 @@ fn vertex_upsert_actions<E, A, C>(
     Ok(GraphVertexUpsertStats {
         merge: merge_stats,
         branch,
+        property_removals,
         action_effects: observed as u64,
     })
+}
+
+/// Read only the visible key set for a simultaneous map replacement. The
+/// whole-element witness includes absent keys, so a concurrent insertion
+/// cannot evade validation. Visibility precedes per-key charges and no value
+/// payload is copied or inspected solely to remove its key.
+fn vertex_replacement_keys<V: Vfs + Clone, E>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    vertex: VId,
+    scope: Option<&fgdb_warden::PlannerPredicates>,
+    poll: impl FnMut() -> Result<(), E>,
+    control: &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), E>,
+    source_error: impl Fn(WriteTxnError) -> E,
+) -> Result<Vec<fgdb_delta_types::PropertyKeyId>, E> {
+    use crate::gql_exec::source::SourceEvent;
+    use fgdb_gql::GlaExecutionEvent;
+    let poll = std::cell::RefCell::new(poll);
+    let mut visible = |key| scope.is_none_or(|scope| scope.allows_property(key));
+    let element = ElementId::Vertex(vertex);
+    let mut attempt = ProjectionReadAttempt {
+        reads: &transaction.point_reads,
+        element,
+        accepted: false,
+    };
+    let projected = {
+        let mut source_control = |event| {
+            match event {
+                SourceEvent::ScratchEntry => control(GlaExecutionEvent::ScratchEntry),
+                // Physical identity/history searches must not reveal hidden
+                // populations or versions through native work and refusal bounds.
+                SourceEvent::Work | SourceEvent::SnapshotRecord if scope.is_some() => {
+                    poll.borrow_mut()()
+                }
+                SourceEvent::Work | SourceEvent::SnapshotRecord => control(GlaExecutionEvent::Work),
+            }
+        };
+        let projected = transaction.vertex_properties_with_control(
+            database,
+            vertex,
+            &mut visible,
+            &mut || poll.borrow_mut()(),
+            &mut source_control,
+            &source_error,
+        )?;
+        source_control(SourceEvent::ScratchEntry)?;
+        transaction.read_set.borrow_mut().insert(element);
+        projected
+    };
+    let mut keys = Vec::new();
+    if let Some(projected) = projected {
+        for (key, _) in projected.effective_properties() {
+            poll.borrow_mut()()?;
+            if !visible(key) {
+                continue;
+            }
+            control(GlaExecutionEvent::Work)?;
+            control(GlaExecutionEvent::ScratchEntry)?;
+            keys.push(key);
+        }
+    }
+    attempt.accepted = true;
+    Ok(keys)
 }
 
 // Read fields of the already admitted MERGE target with the same controlled

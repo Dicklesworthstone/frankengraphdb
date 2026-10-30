@@ -30,6 +30,14 @@ pub enum GraphVertexUpsertAction {
         key: PropertyKeyId,
         value: fgdb_types::CanonicalPropertyValue,
     },
+    /// Unset the chosen vertex's currently visible properties except `keep`.
+    /// The kept values are ordinary assignments in this same simultaneous
+    /// clause. Keys are strictly increasing; the host reads them at the
+    /// clause's input cut and retains a whole-element conflict witness.
+    /// Every removed property consumes one action, just like a NULL write.
+    ClearProperties {
+        keep: Vec<PropertyKeyId>,
+    },
     /// Columns address `properties` in order, on the chosen vertex before
     /// this clause. Missing/masked fields are NULL. No ambient row or local
     /// comprehension binding is admitted. The entire input is frozen before
@@ -49,6 +57,7 @@ impl core::fmt::Debug for GraphVertexUpsertAction {
         match self {
             Self::SetProperty { .. } => f.write_str("SetProperty([REDACTED])"),
             Self::SetStored { .. } => f.write_str("SetStored([REDACTED])"),
+            Self::ClearProperties { .. } => f.write_str("ClearProperties([REDACTED])"),
             Self::SetExpression { .. } => f.write_str("SetExpression([REDACTED])"),
             Self::SetLabel { present, .. } => f
                 .debug_struct("SetLabel")
@@ -78,6 +87,10 @@ pub enum GraphVertexUpsertBuildError {
         branch: GraphVertexUpsertBranch,
         action: usize,
     },
+    PropertyReplacement {
+        branch: GraphVertexUpsertBranch,
+        action: usize,
+    },
 }
 impl core::fmt::Display for GraphVertexUpsertBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -94,6 +107,10 @@ impl core::fmt::Display for GraphVertexUpsertBuildError {
             Self::ExpressionInputs { branch, action } => write!(
                 f,
                 "{branch} action {action} reads a value other than the merged vertex's"
+            ),
+            Self::PropertyReplacement { branch, action } => write!(
+                f,
+                "{branch} action {action} has an invalid or repeated property replacement"
             ),
         }
     }
@@ -135,6 +152,9 @@ pub struct GraphVertexUpsertStats {
     /// already selected vertex does not introduce another source/result row.
     pub merge: crate::GraphVertexMergeStats,
     pub branch: GraphVertexUpsertBranch,
+    /// Original property unsets expanded from ClearProperties, included in
+    /// action_effects. Static assignments retain their exact declared count.
+    pub property_removals: u64,
     pub action_effects: u64,
 }
 
@@ -222,6 +242,7 @@ fn validate_branch(
     }
     let mut properties = BTreeSet::new();
     let mut labels = BTreeSet::new();
+    let mut replacement = None;
     for (at, action) in actions.iter().enumerate() {
         match action {
             GraphVertexUpsertAction::SetProperty { key, .. }
@@ -248,8 +269,30 @@ fn validate_branch(
             GraphVertexUpsertAction::SetLabel { label, .. } if !labels.insert(*label) => {
                 return Err(GraphVertexUpsertBuildError::DuplicateLabel { branch });
             }
+            GraphVertexUpsertAction::ClearProperties { keep } => {
+                if replacement.is_some()
+                    || keep.len() > MAX_GRAPH_VERTEX_UPSERT_ACTIONS
+                    || keep.windows(2).any(|keys| keys[0] >= keys[1])
+                {
+                    return Err(GraphVertexUpsertBuildError::PropertyReplacement {
+                        branch,
+                        action: at,
+                    });
+                }
+                replacement = Some((at, keep));
+            }
             _ => {}
         }
+    }
+    if let Some((action, keep)) = replacement
+        && properties
+            .iter()
+            .any(|key| keep.binary_search(key).is_err())
+    {
+        // A simultaneous clause cannot both assign and clear one key. The
+        // parser retains every assigned key, and typed callers obey the same
+        // rule instead of making effects depend on their action-vector order.
+        return Err(GraphVertexUpsertBuildError::PropertyReplacement { branch, action });
     }
     Ok(())
 }
@@ -312,6 +355,35 @@ impl PreparedGraphVertexUpsert {
         &self.after
     }
 
+    /// Static assignments remain an exact count. A replacement additionally
+    /// reports the original unsets it expanded; they are legal only when the
+    /// selected clauses contain a replacement and must have been metered.
+    pub(crate) fn validates_action_effects(
+        &self,
+        stats: &GraphVertexUpsertStats,
+        targets: u64,
+    ) -> bool {
+        let selected = match stats.branch {
+            GraphVertexUpsertBranch::Match => self.on_match(),
+            GraphVertexUpsertBranch::Create => self.on_create(),
+        };
+        let mut fixed = 0_u128;
+        let mut replacement = false;
+        for action in selected.iter().chain(self.after()) {
+            if matches!(action, GraphVertexUpsertAction::ClearProperties { .. }) {
+                replacement = true;
+            } else {
+                fixed += 1;
+            }
+        }
+        let removals = stats.property_removals;
+        (removals == 0 || replacement)
+            && removals <= stats.merge.evaluator.work_units
+            && removals <= stats.merge.evaluator.scratch_entries
+            && u128::from(stats.action_effects)
+                == u128::from(targets) * fixed + u128::from(removals)
+    }
+
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = b"fgdb:unique-vertex-upsert:v2\0".to_vec();
@@ -347,6 +419,13 @@ impl PreparedGraphVertexUpsert {
                                 bytes.extend_from_slice(&encoded);
                             }
                             Err(_) => bytes.push(4),
+                        }
+                    }
+                    GraphVertexUpsertAction::ClearProperties { keep } => {
+                        bytes.push(5);
+                        bytes.extend_from_slice(&(keep.len() as u64).to_be_bytes());
+                        for key in keep {
+                            bytes.extend_from_slice(&key.0.to_be_bytes());
                         }
                     }
                     GraphVertexUpsertAction::SetExpression {

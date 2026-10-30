@@ -986,8 +986,8 @@ impl WriteTxn {
                     // Price the branch that actually ran for every selected
                     // target, including repeated/no-op assignments. Admit the
                     // whole occurrence before evaluating any of its actions.
-                    let observed = (selected.len() as u128)
-                        .checked_add(actions.after.len() as u128)
+                    let observed = (vertex_merge_known_effects(selected) as u128)
+                        .checked_add(vertex_merge_known_effects(&actions.after) as u128)
                         .and_then(|count| count.checked_mul(resolved[&tuple].len() as u128))
                         .and_then(|count| u128::from(*effects).checked_add(count))
                         .ok_or(GqlQueryError::Source(
@@ -1009,6 +1009,7 @@ impl WriteTxn {
                             [selected, &actions.after],
                             policy,
                             &mut used,
+                            (max_effects, &mut *effects),
                             frozen.as_deref_mut(),
                         )?;
                     }
@@ -1043,6 +1044,7 @@ impl WriteTxn {
         clauses: [&[fgdb_gql::GraphVertexMergeRowAction]; 2],
         policy: fgdb_gql::GraphVertexMergePolicy,
         used: &mut fgdb_gql::GraphVertexMergeStats,
+        effects: (u64, &mut u64),
         held: Option<&mut FrozenCreations>,
     ) -> Result<(), TxnGqlError<fgdb_gql::GraphVertexMergeError<WriteTxnError, A>>> {
         use fgdb_gql::algebra::GraphValue;
@@ -1055,6 +1057,7 @@ impl WriteTxn {
             clauses,
             policy,
             used,
+            effects,
             || cx.checkpoint(),
             |key, _control| {
                 let state = state.borrow();
@@ -1079,6 +1082,23 @@ impl WriteTxn {
                     ),
                 }
             },
+            |control| {
+                let state = state.borrow();
+                // A whole-map replacement is never admitted by frozen_chain:
+                // ON MATCH and trailing SET require ordinary per-row staging.
+                if state.2.is_some() {
+                    return Err(source(WriteTxnError::UnsupportedAtomicMutation));
+                }
+                vertex_replacement_keys(
+                    state.0,
+                    state.1,
+                    vertex,
+                    None,
+                    || cx.checkpoint().map_err(GqlQueryError::Interrupted),
+                    control,
+                    source,
+                )
+            },
             |batch| {
                 let mut state = state.borrow_mut();
                 let (transaction, database, held) = &mut *state;
@@ -1100,6 +1120,20 @@ impl WriteTxn {
     }
 }
 
+fn vertex_merge_known_effects(actions: &[fgdb_gql::GraphVertexMergeRowAction]) -> usize {
+    actions
+        .iter()
+        .filter(|action| {
+            !matches!(
+                action,
+                fgdb_gql::GraphVertexMergeRowAction::Vertex(
+                    fgdb_gql::GraphVertexUpsertAction::ClearProperties { .. }
+                )
+            )
+        })
+        .count()
+}
+
 /// One shared ON/SET evaluator for owner and capability-authorized row MERGE.
 /// The host owns property visibility and original-intent staging; expressions,
 /// simultaneous assignments and clause order have no alternate evaluator.
@@ -1110,6 +1144,7 @@ pub(crate) fn vertex_merge_row_actions_controlled<E, A, C>(
     clauses: [&[fgdb_gql::GraphVertexMergeRowAction]; 2],
     policy: fgdb_gql::GraphVertexMergePolicy,
     used: &mut fgdb_gql::GraphVertexMergeStats,
+    (max_effects, effects): (u64, &mut u64),
     checkpoint: impl FnMut() -> Result<(), C>,
     mut read: impl FnMut(
         fgdb_delta_types::PropertyKeyId,
@@ -1121,6 +1156,17 @@ pub(crate) fn vertex_merge_row_actions_controlled<E, A, C>(
         >,
     ) -> Result<
         fgdb_gql::algebra::GraphValue,
+        fgdb_gql::GqlQueryError<fgdb_gql::GraphVertexMergeError<E, A>, C>,
+    >,
+    mut keys: impl FnMut(
+        &mut dyn FnMut(
+            fgdb_gql::GlaExecutionEvent,
+        ) -> Result<
+            (),
+            fgdb_gql::GqlQueryError<fgdb_gql::GraphVertexMergeError<E, A>, C>,
+        >,
+    ) -> Result<
+        Vec<fgdb_delta_types::PropertyKeyId>,
         fgdb_gql::GqlQueryError<fgdb_gql::GraphVertexMergeError<E, A>, C>,
     >,
     mut stage: impl FnMut(
@@ -1199,6 +1245,28 @@ pub(crate) fn vertex_merge_row_actions_controlled<E, A, C>(
                     present,
                 }) => {
                     batch.set_vertex_label(vertex, *label, *present);
+                }
+                GraphVertexMergeRowAction::Vertex(GraphVertexUpsertAction::ClearProperties {
+                    keep,
+                }) => {
+                    for key in keys(&mut |event| charge(used, event))? {
+                        charge(used, GlaExecutionEvent::Work)?;
+                        if keep.binary_search(&key).is_ok() {
+                            continue;
+                        }
+                        let observed = u128::from(*effects) + 1;
+                        if observed > u128::from(max_effects) {
+                            return Err(GqlQueryError::Source(
+                                GraphVertexMergeError::EffectLimit {
+                                    limit: max_effects,
+                                    observed,
+                                },
+                            ));
+                        }
+                        charge(used, GlaExecutionEvent::ScratchEntry)?;
+                        *effects = observed as u64;
+                        batch.set_vertex_property(vertex, key, None);
+                    }
                 }
                 // The step compiler builds every expression as a row
                 // expression; a vertex-only one is the unique MERGE's.

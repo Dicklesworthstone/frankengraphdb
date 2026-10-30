@@ -81,6 +81,16 @@ enum ParsedUpsertAction<'a> {
     Label {
         label: Name<'a>,
     },
+    ClearProperties {
+        keep: Vec<Name<'a>>,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum UpsertReplacement<'k, 's> {
+    Refuse,
+    Created(&'k [Name<'s>]),
+    Current,
 }
 
 /// One input of a MERGE action expression: a property of the MERGE vertex,
@@ -372,9 +382,10 @@ impl<'a> Parser<'a> {
     /// sides may read (fgdb-cpny9); a unique MERGE has none. With
     /// `row_vertices`, an assignment may also target a vertex the row
     /// carries (relationship MERGE, fgdb-at06q).
-    /// `pattern_keys`: the MERGE pattern's property keys, which a created
-    /// element holds exactly, so ON CREATE may replace its whole map; `None`
-    /// refuses replacement.
+    /// `pattern_keys`: a vertex MERGE's property keys. ON CREATE can lower a
+    /// replacement from those known keys; ON MATCH and trailing SET read the
+    /// selected vertex's current keys. `None` keeps the relationship grammar's
+    /// unsupported replacement outside this vertex action family.
     fn upsert_branch_actions(
         &mut self,
         variable: Name<'a>,
@@ -415,16 +426,24 @@ impl<'a> Parser<'a> {
                 .into());
             };
             self.word("SET")?;
-            let (target, branch, replaced) = if create {
+            let (target, branch, replacement) = if create {
                 (
                     &mut on_create,
                     GraphVertexUpsertBranch::Create,
-                    pattern_keys,
+                    pattern_keys.map_or(UpsertReplacement::Refuse, UpsertReplacement::Created),
                 )
             } else {
-                (&mut on_match, GraphVertexUpsertBranch::Match, None)
+                (
+                    &mut on_match,
+                    GraphVertexUpsertBranch::Match,
+                    if pattern_keys.is_some() {
+                        UpsertReplacement::Current
+                    } else {
+                        UpsertReplacement::Refuse
+                    },
+                )
             };
-            self.upsert_assignments(variable, target, branch, row, row_vertices, replaced)?;
+            self.upsert_assignments(variable, target, branch, row, row_vertices, replacement)?;
         }
         // The common SET is a distinct clause, not a deduplicated extension
         // of both branches. It sees prior effects and cannot erase an earlier
@@ -436,7 +455,11 @@ impl<'a> Parser<'a> {
                 GraphVertexUpsertBranch::Match,
                 row,
                 row_vertices,
-                None,
+                if pattern_keys.is_some() {
+                    UpsertReplacement::Current
+                } else {
+                    UpsertReplacement::Refuse
+                },
             )?;
         }
         for (branch, actions) in [
@@ -489,7 +512,7 @@ impl<'a> Parser<'a> {
         branch: GraphVertexUpsertBranch,
         row: Option<&[(Name<'a>, GraphSetColumnType)]>,
         row_vertices: bool,
-        replaced: Option<&[Name<'a>]>,
+        replacement: UpsertReplacement<'_, 'a>,
     ) -> Result<(), GraphVertexUpsertTextError> {
         loop {
             self.upsert_capacity(target.len(), branch)?;
@@ -555,21 +578,20 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 continue;
-            } else if let Some(pattern_keys) = replaced
+            } else if !matches!(replacement, UpsertReplacement::Refuse)
                 && self.is_punct(b'=')
                 && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'{'))
             {
-                // `ON CREATE SET n = {key: value, ...}` (fgdb-at06q): the
-                // created element holds exactly the MERGE pattern's keys, so
-                // replacing its map assigns each entry and removes each
-                // pattern key the map omits (a NULL write unsets it). As the
-                // clause's first item only: an earlier assignment in the
-                // same clause could not be erased without a run-time read.
+                // Freeze every RHS before clearing the old keys. A newly
+                // created vertex has exactly the pattern's keys; the other
+                // branches ask the host for its visible keys at this clause.
+                // Preserve the first-assignment restriction rather than
+                // silently changing preceding same-clause assignments.
                 if !target.is_empty() {
                     return Err(error(
                         self.current.at,
                         GraphPatternTextErrorKind::Expected(
-                            "a replacing map as the first ON CREATE assignment",
+                            "a replacing map as the first SET assignment",
                         ),
                     )
                     .into());
@@ -578,21 +600,26 @@ impl<'a> Parser<'a> {
                 let assigned = |action: &ParsedUpsertAction<'a>| match action {
                     ParsedUpsertAction::Property { key, .. }
                     | ParsedUpsertAction::Expression { key, .. }
-                    | ParsedUpsertAction::RowValue { key, .. } => Some(key.text),
+                    | ParsedUpsertAction::RowValue { key, .. } => Some(*key),
                     _ => None,
                 };
-                let written: Vec<&str> = target.iter().filter_map(assigned).collect();
-                for key in pattern_keys {
-                    if written.contains(&key.text) {
-                        continue;
+                let written: Vec<Name<'a>> = target.iter().filter_map(assigned).collect();
+                if let UpsertReplacement::Created(pattern_keys) = replacement {
+                    for key in pattern_keys {
+                        if written.iter().any(|written| written.text == key.text) {
+                            continue;
+                        }
+                        self.upsert_capacity(target.len(), branch)?;
+                        let null = crate::GqlScalarParameter::new(CanonicalScalar::Null)
+                            .map_err(|_| error(key.at, GraphPatternTextErrorKind::ScalarLiteral))?;
+                        target.push(ParsedUpsertAction::Property {
+                            key: *key,
+                            value: VertexUpsertValueTemplate::Bound(null),
+                        });
                     }
+                } else {
                     self.upsert_capacity(target.len(), branch)?;
-                    let null = crate::GqlScalarParameter::new(CanonicalScalar::Null)
-                        .map_err(|_| error(key.at, GraphPatternTextErrorKind::ScalarLiteral))?;
-                    target.push(ParsedUpsertAction::Property {
-                        key: *key,
-                        value: VertexUpsertValueTemplate::Bound(null),
-                    });
+                    target.push(ParsedUpsertAction::ClearProperties { keep: written });
                 }
                 if !self.take(b',')? {
                     break;
@@ -607,6 +634,29 @@ impl<'a> Parser<'a> {
             target.push(action);
             if !self.take(b',')? {
                 break;
+            }
+        }
+        // Additional explicit assignments of this simultaneous clause also
+        // survive its replacement; clearing must never propose a competing
+        // unset for one of those fields.
+        if target
+            .iter()
+            .any(|action| matches!(action, ParsedUpsertAction::ClearProperties { .. }))
+        {
+            let written: Vec<_> = target
+                .iter()
+                .filter_map(|action| match action {
+                    ParsedUpsertAction::Property { key, .. }
+                    | ParsedUpsertAction::Expression { key, .. }
+                    | ParsedUpsertAction::RowValue { key, .. } => Some(*key),
+                    _ => None,
+                })
+                .collect();
+            for action in target {
+                if let ParsedUpsertAction::ClearProperties { keep } = action {
+                    *keep = written;
+                    break;
+                }
             }
         }
         Ok(())
@@ -822,6 +872,17 @@ fn resolve_row_actions<'a>(
                     present: true,
                 })
             }
+            ParsedUpsertAction::ClearProperties { keep } => {
+                let mut keep = keep
+                    .into_iter()
+                    .map(|key| property_symbol(symbol, key))
+                    .collect::<Result<Vec<_>, _>>()?;
+                keep.sort_unstable();
+                keep.dedup();
+                VertexMergeRowActionTemplate::Vertex(VertexUpsertActionTemplate::ClearProperties {
+                    keep,
+                })
+            }
             ParsedUpsertAction::Expression {
                 key,
                 inputs,
@@ -903,6 +964,9 @@ pub(super) fn bind_row_actions(
                             label: *label,
                             present: *present,
                         }
+                    }
+                    VertexUpsertActionTemplate::ClearProperties { keep } => {
+                        GraphVertexUpsertAction::ClearProperties { keep: keep.clone() }
                     }
                     VertexUpsertActionTemplate::Expression { at, .. } => {
                         return Err(error(
@@ -1454,6 +1518,15 @@ impl PreparedGraphVertexUpsertText {
                                 present: true,
                             }
                         }
+                        ParsedUpsertAction::ClearProperties { keep } => {
+                            let mut keep = keep
+                                .into_iter()
+                                .map(|key| property_symbol(&mut symbol, key))
+                                .collect::<Result<Vec<_>, _>>()?;
+                            keep.sort_unstable();
+                            keep.dedup();
+                            VertexUpsertActionTemplate::ClearProperties { keep }
+                        }
                     })
                 })
                 .collect()
@@ -1530,6 +1603,8 @@ impl PreparedGraphVertexUpsertText {
                     },
                 VertexUpsertActionTemplate::Label { label, present } =>
                     GraphVertexUpsertAction::SetLabel { label: *label, present: *present },
+                VertexUpsertActionTemplate::ClearProperties { keep } =>
+                    GraphVertexUpsertAction::ClearProperties { keep: keep.clone() },
             })).collect()
         };
         let on_match = bind_actions(&self.on_match)?;
@@ -2847,9 +2922,9 @@ impl PreparedGraphVertexMergeRowsText {
                         | ParsedUpsertAction::Expression { key, .. }
                         | ParsedUpsertAction::RowValue { key, .. } => Some(key.text),
                         // A vertex MERGE step parses no row-vertex target.
-                        ParsedUpsertAction::RowVertex { .. } | ParsedUpsertAction::Label { .. } => {
-                            None
-                        }
+                        ParsedUpsertAction::RowVertex { .. }
+                        | ParsedUpsertAction::Label { .. }
+                        | ParsedUpsertAction::ClearProperties { .. } => None,
                     })
                     .collect()
             });

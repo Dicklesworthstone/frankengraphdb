@@ -425,7 +425,10 @@ impl WriteTxn {
             // All targets take the same branch. Admit the WHOLE action count
             // before staging the first one, without refreshing it per target.
             let observed = (targets.len() as u128)
-                .checked_mul(actions.len() as u128 + upsert.after().len() as u128)
+                .checked_mul(
+                    vertex_upsert_known_effects(actions) as u128
+                        + vertex_upsert_known_effects(upsert.after()) as u128,
+                )
                 .ok_or_else(|| {
                     GqlQueryError::Source(GraphVertexUpsertError::Merge(
                         fgdb_gql::GraphVertexMergeError::AccountingOverflow,
@@ -450,7 +453,8 @@ impl WriteTxn {
             let mut stats = GraphVertexUpsertStats {
                 merge: proposal.stats,
                 branch,
-                action_effects: observed as u64,
+                property_removals: 0,
+                action_effects: 0,
             };
             for outcome in targets.outcomes() {
                 vertex_upsert_batch_event::<A>(
@@ -466,10 +470,23 @@ impl WriteTxn {
                     policy,
                     stats.merge,
                     outcome,
+                    (stats.action_effects, stats.property_removals),
                     || cx.checkpoint(),
                     |key, control| {
                         let state = state.borrow();
                         vertex_upsert_property(state.0, state.1, outcome.vertex(), key, control)
+                    },
+                    |control| {
+                        let state = state.borrow();
+                        vertex_replacement_keys(
+                            state.0,
+                            state.1,
+                            outcome.vertex(),
+                            None,
+                            || cx.checkpoint().map_err(GqlQueryError::Interrupted),
+                            control,
+                            infrastructure,
+                        )
                     },
                     |batch| {
                         let mut state = state.borrow_mut();
@@ -481,6 +498,8 @@ impl WriteTxn {
                     },
                 )?;
                 stats.merge.evaluator = action_stats.merge.evaluator;
+                stats.action_effects = action_stats.action_effects;
+                stats.property_removals = action_stats.property_removals;
             }
             let result = finish(workspace.txn, database, stats, targets)?;
             workspace.accept();

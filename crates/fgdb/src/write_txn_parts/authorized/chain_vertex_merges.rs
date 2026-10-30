@@ -7,7 +7,8 @@ use super::{Fault, admit_pattern, stage_batch};
 use crate::WriteBatch;
 use crate::write_txn::{
     FrozenCreations, FrozenValueClass, VertexMergeTargets, collect_vertex_merge_output,
-    frozen_merge_predicates, point_scalar_payload_admission, vertex_merge_row_actions_controlled,
+    frozen_merge_predicates, point_scalar_payload_admission, vertex_merge_known_effects,
+    vertex_merge_row_actions_controlled, vertex_replacement_keys,
 };
 use fgdb_delta_types::{ElementId, PropertyKeyId};
 use fgdb_gql::algebra::{GraphValue, GraphValueRow, VertexPredicate};
@@ -126,6 +127,13 @@ fn admit_actions(
             }
             GraphVertexMergeRowAction::Expression { key, .. } => {
                 if !scope.allows_property(*key) {
+                    return Err(denied());
+                }
+            }
+            GraphVertexMergeRowAction::Vertex(GraphVertexUpsertAction::ClearProperties {
+                keep,
+            }) => {
+                if keep.iter().any(|key| !scope.allows_property(*key)) {
                     return Err(denied());
                 }
             }
@@ -659,8 +667,8 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 };
                 admit_actions(on, scope).map_err(chained)?;
                 admit_actions(&actions.after, scope).map_err(chained)?;
-                let observed = (on.len() as u128)
-                    .checked_add(actions.after.len() as u128)
+                let observed = (vertex_merge_known_effects(on) as u128)
+                    .checked_add(vertex_merge_known_effects(&actions.after) as u128)
                     .and_then(|actions| actions.checked_mul(vertices.len() as u128))
                     .and_then(|actions| u128::from(effects).checked_add(actions))
                     .ok_or_else(|| {
@@ -687,6 +695,7 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
                         [on, &actions.after],
                         private,
                         &mut used,
+                        (policy.max_mutation_effects, &mut effects),
                         || {
                             cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                             controls.borrow_mut().checkpoint()
@@ -703,6 +712,29 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
                                 scope,
                                 &controls,
                                 control,
+                            )
+                        },
+                        |control| {
+                            let state = state.borrow();
+                            if state.2.is_some() {
+                                return Err(source(WriteTxnError::UnsupportedAtomicMutation));
+                            }
+                            vertex_replacement_keys(
+                                state.0,
+                                state.1,
+                                vertex,
+                                Some(scope),
+                                || {
+                                    cx.checkpoint()
+                                        .map_err(WriteTxnError::Interrupted)
+                                        .map_err(GqlQueryError::Interrupted)?;
+                                    controls
+                                        .borrow_mut()
+                                        .poll()
+                                        .map_err(GqlQueryError::Interrupted)
+                                },
+                                control,
+                                source,
                             )
                         },
                         |batch| {

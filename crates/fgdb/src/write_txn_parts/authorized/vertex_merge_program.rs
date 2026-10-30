@@ -217,7 +217,9 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
     execution: &mut Execution<'_, '_, Clock>,
     returning: bool,
 ) -> Result<(fgdb_gql::GraphWriteStepStats, Option<GraphWriteStepReceipt>), UpsertFault> {
-    use crate::write_txn::vertex_upsert_actions;
+    use crate::write_txn::{
+        vertex_replacement_keys, vertex_upsert_actions, vertex_upsert_known_effects,
+    };
     use fgdb_delta_types::ElementId;
     use fgdb_gql::{GraphVertexUpsertBranch, GraphVertexUpsertError, GraphVertexUpsertStats};
     cx.with_restriction(|| {
@@ -245,7 +247,10 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
         // Pre-admit EVERY original action before any target's effects, even if
         // a later clause overwrites it or it is equal to the stored value.
         let observed = u128::from(target_vertices)
-            .checked_mul(selected.len() as u128 + upsert.after().len() as u128)
+            .checked_mul(
+                vertex_upsert_known_effects(selected) as u128
+                    + vertex_upsert_known_effects(upsert.after()) as u128,
+            )
             .ok_or_else(|| {
                 GqlQueryError::Source(GraphVertexUpsertError::Merge(
                     GraphVertexMergeError::AccountingOverflow,
@@ -269,7 +274,8 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
         let mut stats = GraphVertexUpsertStats {
             merge: proposal.stats,
             branch,
-            action_effects: observed as u64,
+            property_removals: 0,
+            action_effects: 0,
         };
         for outcome in targets.outcomes() {
             event(
@@ -286,6 +292,7 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 policy,
                 stats.merge,
                 outcome,
+                (stats.action_effects, stats.property_removals),
                 || {
                     cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                     controls.borrow_mut().checkpoint()
@@ -312,6 +319,26 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
                     )
                     .and_then(selection::scalar)
                 },
+                |control| {
+                    let state = state.borrow();
+                    vertex_replacement_keys(
+                        state.0,
+                        state.1,
+                        outcome.vertex(),
+                        Some(scope),
+                        || {
+                            cx.checkpoint()
+                                .map_err(WriteTxnError::Interrupted)
+                                .map_err(GqlQueryError::Interrupted)?;
+                            controls
+                                .borrow_mut()
+                                .poll()
+                                .map_err(GqlQueryError::Interrupted)
+                        },
+                        control,
+                        upsert_staging,
+                    )
+                },
                 |batch| {
                     let mut state = state.borrow_mut();
                     let (transaction, database) = &mut *state;
@@ -330,6 +357,8 @@ pub(super) fn upsert<V: Vfs + Clone, Clock: FnMut() -> u64>(
             // The action evaluator starts with the previous target's usage;
             // never reset native work/scratch or the live signed allowance.
             stats.merge.evaluator = completed.merge.evaluator;
+            stats.action_effects = completed.action_effects;
+            stats.property_removals = completed.property_removals;
         }
         let receipt = outcomes(
             targets,

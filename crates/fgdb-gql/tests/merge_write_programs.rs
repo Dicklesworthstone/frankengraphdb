@@ -114,6 +114,7 @@ fn create_upsert_actions_are_metered_even_with_zero_selected_rows() {
             Ok(GraphWriteStepStats::VertexUpsert(GraphVertexUpsertStats {
                 merge: stats(true),
                 branch: GraphVertexUpsertBranch::Create,
+                property_removals: 0,
                 action_effects: 1,
             }))
         },
@@ -167,6 +168,7 @@ fn impossible_merge_and_upsert_statistics_refuse_before_later_steps() {
                     } else {
                         GraphVertexUpsertBranch::Create
                     },
+                    property_removals: 0,
                     action_effects: if corruption == 0 { 1 } else { 0 },
                 }))
             },

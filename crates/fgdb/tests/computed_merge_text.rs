@@ -547,9 +547,7 @@ fn computed_keys_probe_the_property_index_below_one_scan() {
         assert_eq!(scalar(&db, VId(1_001), COUNT), Scalar::Int(3));
         assert_eq!(total(&db), 1 + 1 + 2 + 3);
 
-        // toInteger('x') is NULL: MATCH binds nothing. (The write overlay
-        // still scans for a NULL key, as for a NULL parameter, so this runs
-        // under the ordinary allowance; the read below needs no scan.)
+        // toInteger('x') is NULL: MATCH binds nothing, without scanning.
         let unparsable = batch(vec![field("s", text("x"))]);
         db.query_write(
             &txn,
@@ -559,7 +557,7 @@ fn computed_keys_probe_the_property_index_below_one_scan() {
             &unparsable,
             symbols,
             R,
-            program_policy(100),
+            tight,
             |_| Err::<ElementId, _>(()),
         )
         .await
@@ -616,8 +614,8 @@ fn computed_keys_probe_the_property_index_below_one_scan() {
         // A WITH stage computing the key from the row joins on it: the
         // batch writer leaves the statement to the multipart compiler, which
         // used to be unreachable here ("MERGE or MATCH after the UNWIND
-        // sources"). Its write-transaction source is not seeded yet, so this
-        // runs under the ordinary allowance (fgdb-2npty).
+        // sources"). The transaction now admits the computed key's indexed
+        // candidates under an allowance below one scan (fgdb-2npty).
         for (statement, s, vertex, count) in [
             (
                 "UNWIND $rows AS row WITH row, toInteger(row.s) AS k \
@@ -642,7 +640,7 @@ fn computed_keys_probe_the_property_index_below_one_scan() {
                 &batch(vec![field("s", text(s))]),
                 symbols,
                 R,
-                program_policy(100),
+                tight,
                 |_| Err::<ElementId, _>(()),
             )
             .await
@@ -888,28 +886,23 @@ fn on_create_map_replacement_sets_the_entries_and_unsets_omitted_pattern_keys() 
             db.edges().unwrap()[0].props,
             vec![(NAME, fgdb_types::CanonicalPropertyValue::Scalar(name("x")))]
         );
-        for refused in [
-            "MERGE (n:Person {id: 9}) ON MATCH SET n = {name: 'Eve'}",
-            "MERGE (n:Person {id: 20}) ON CREATE SET n.name = 'Fay', n = {id: 20}",
-            "MERGE (n:Person {id: 20}) SET n = {id: 20}",
-        ] {
-            assert!(
-                db.query_write(
-                    &txn,
-                    &query,
-                    &commit,
-                    refused,
-                    &GqlParameters::new(),
-                    symbols,
-                    R,
-                    program_policy(10),
-                    |_| Err::<ElementId, _>(()),
-                )
-                .await
-                .is_err(),
-                "{refused}"
-            );
-        }
+        let refused = "MERGE (n:Person {id: 20}) ON CREATE SET n.name = 'Fay', n = {id: 20}";
+        assert!(
+            db.query_write(
+                &txn,
+                &query,
+                &commit,
+                refused,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                program_policy(10),
+                |_| Err::<ElementId, _>(()),
+            )
+            .await
+            .is_err(),
+            "{refused}"
+        );
         assert_eq!(db.vertices().unwrap().len(), 5);
         assert_eq!(txn.outstanding_obligations(), 0);
     });

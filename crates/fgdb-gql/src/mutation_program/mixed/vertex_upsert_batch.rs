@@ -27,8 +27,7 @@ impl MixedMeter {
             ),
         };
         let per_target = actions.len() as u128 + input.after().len() as u128;
-        let expected = u128::from(target_vertices) * per_target;
-        if !valid_targets || u128::from(stats.action_effects) != expected {
+        if !valid_targets || !input.validates_action_effects(&stats, target_vertices) {
             return Err(GraphMutationProgramError::InvalidStatistics { statement }.into());
         }
         let effects = self.common.add(
@@ -103,6 +102,7 @@ mod tests {
                 created_vertices: 0,
             },
             branch: GraphVertexUpsertBranch::Match,
+            property_removals: 0,
             action_effects: 9,
         }
     }
@@ -123,6 +123,84 @@ mod tests {
         assert_eq!(meter.common.stats.target_vertex_visits, 6);
         assert_eq!(meter.common.stats.target_edge_visits, 0);
         assert_eq!(meter.vertices, 0);
+    }
+
+    #[test]
+    fn replacement_receipts_count_dynamic_unsets_and_empty_target_visits() {
+        let input = input();
+        let replacement = PreparedGraphVertexUpsert::prepare(
+            input.merge().clone(),
+            vec![crate::GraphVertexUpsertAction::ClearProperties { keep: Vec::new() }],
+            Vec::new(),
+        )
+        .unwrap();
+        let empty = GraphVertexUpsertStats {
+            action_effects: 0,
+            ..matched()
+        };
+        let mut singular = meter(policy());
+        singular
+            .absorb_vertex_upsert::<(), (), ()>(0, &replacement, empty)
+            .unwrap();
+        assert_eq!(singular.common.stats.target_vertex_visits, 1);
+        assert_eq!(singular.common.stats.effects, 0);
+        let mut plural = meter(policy());
+        plural
+            .absorb_vertex_upsert_batch::<(), (), ()>(0, &replacement, empty, 3)
+            .unwrap();
+        assert_eq!(plural.common.stats.target_vertex_visits, 3);
+        assert_eq!(plural.common.stats.effects, 0);
+
+        let dynamic = GraphVertexUpsertStats {
+            property_removals: 6,
+            action_effects: 6,
+            ..matched()
+        };
+        let mut plural = meter(policy());
+        plural
+            .absorb_vertex_upsert_batch::<(), (), ()>(0, &replacement, dynamic, 3)
+            .unwrap();
+        assert_eq!(plural.common.stats.effects, 6);
+        let mut unmetered = dynamic;
+        unmetered.merge.evaluator.scratch_entries = 5;
+        for stats in [
+            GraphVertexUpsertStats {
+                action_effects: 5,
+                ..dynamic
+            },
+            GraphVertexUpsertStats {
+                property_removals: 0,
+                ..dynamic
+            },
+            unmetered,
+        ] {
+            let mut meter = meter(policy());
+            let before = meter.common.stats;
+            assert!(matches!(
+                meter.absorb_vertex_upsert_batch::<(), (), ()>(0, &replacement, stats, 3),
+                Err(GraphWriteProgramError::Program(
+                    GraphMutationProgramError::InvalidStatistics { .. }
+                ))
+            ));
+            assert_eq!(meter.common.stats, before);
+        }
+        // A fixed-shape clause cannot explain extra writes as replacement
+        // removals, even if all generic work and effect limits would allow it.
+        let mut meter = meter(policy());
+        assert!(matches!(
+            meter.absorb_vertex_upsert_batch::<(), (), ()>(
+                0,
+                &input,
+                GraphVertexUpsertStats {
+                    action_effects: 15,
+                    ..dynamic
+                },
+                3,
+            ),
+            Err(GraphWriteProgramError::Program(
+                GraphMutationProgramError::InvalidStatistics { .. }
+            ))
+        ));
     }
 
     #[test]

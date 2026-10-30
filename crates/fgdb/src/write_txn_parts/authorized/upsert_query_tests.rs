@@ -43,6 +43,118 @@ fn prepared_map(text: &str) -> PreparedGraphVertexUpsertQuery {
 }
 
 #[test]
+fn map_replacement_preserves_hidden_fields_and_charges_only_visible_removals() {
+    lab(0xb967, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let authority = authority();
+        let token = authority.issue_at(&grant(), NOW).unwrap();
+        let statement = prepared_map(
+            "MERGE (n:Visible {p:7}) ON MATCH SET n = {p:n.p} \
+             RETURN n.p AS kept, n.q AS removed",
+        );
+        let mut observed = Vec::new();
+        for hidden in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut fields = vec![(P, CanonicalScalar::Int(7)), (Q, CanonicalScalar::Int(2))];
+            if hidden {
+                fields.push((SECRET, CanonicalScalar::bytes(vec![0x75; 2_048]).unwrap()));
+            }
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(VId(1), vec![L], fields);
+            if hidden {
+                for id in 2..=33 {
+                    seed.create_vertex(VId(id), vec![HIDDEN], vec![(P, CanonicalScalar::Int(7))]);
+                }
+            }
+            db.write(&commit, seed).await.unwrap();
+            if hidden {
+                // Hidden-only revisions and extra invisible identities must
+                // not affect the authorized replacement's work allowance.
+                for revision in 0..8 {
+                    let mut update = WriteBatch::new(R);
+                    update.set_vertex_property(
+                        VId(1),
+                        SECRET,
+                        Some(CanonicalScalar::Int(revision)),
+                    );
+                    db.write(&commit, update).await.unwrap();
+                }
+            }
+            let mut allowance = upsert_policy();
+            allowance.max_actions = 2;
+            let (stats, _, rows, _) = db
+                .execute_graph_vertex_upsert_query_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &statement,
+                    allowance,
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!((stats.action_effects, stats.property_removals), (2, 1));
+            assert_eq!(
+                rows.value[0].values(),
+                &[int(7), GraphValue::Scalar(CanonicalScalar::Null),]
+            );
+            observed.push((stats.merge.evaluator, rows.evaluator, rows.value));
+            let fields = db.vertex(VId(1)).unwrap().unwrap().props;
+            assert!(!fields.iter().any(|(key, _)| *key == Q));
+            assert_eq!(fields.iter().any(|(key, _)| *key == SECRET), hidden);
+
+            let before = (db.frontier().unwrap(), db.vertices().unwrap());
+            for text in [
+                "MERGE (n:Visible {p:7}) ON MATCH SET n = {secret:1} RETURN n.p",
+                "MERGE (n:Visible {p:7}) SET n = {p:0} RETURN 1/n.p",
+            ] {
+                assert!(
+                    db.execute_graph_vertex_upsert_query_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &authority,
+                        &token,
+                        "main",
+                        &prepared_map(text),
+                        upsert_policy(),
+                        || NOW,
+                    )
+                    .await
+                    .is_err()
+                );
+                assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+            }
+            let (_, _, cleared, _) = db
+                .execute_graph_vertex_upsert_query_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &authority,
+                    &token,
+                    "main",
+                    &prepared_map("MERGE (n:Visible {p:7}) SET n = {} RETURN properties(n)"),
+                    upsert_policy(),
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                cleared.value[0].values(),
+                &[GraphValue::map(Vec::new()).unwrap()]
+            );
+            let fields = db.vertex(VId(1)).unwrap().unwrap().props;
+            assert_eq!(fields.len(), usize::from(hidden));
+            assert!(fields.iter().all(|(key, _)| *key == SECRET));
+        }
+        assert_eq!(observed[0], observed[1]);
+    });
+}
+
+#[test]
 fn merge_returning_whole_maps_mask_before_naming_and_preserve_atomic_authority() {
     lab(0xb966, |contexts| async move {
         let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());

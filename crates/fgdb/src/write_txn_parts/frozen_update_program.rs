@@ -391,6 +391,7 @@ impl WriteTxn {
                             let mut stats = GraphVertexUpsertStats {
                                 merge: proposal.stats,
                                 branch,
+                                property_removals: 0,
                                 action_effects: observed as u64,
                             };
                             for outcome in targets.outcomes() {
@@ -405,6 +406,7 @@ impl WriteTxn {
                                     policy,
                                     stats.merge,
                                     outcome,
+                                    (0, 0),
                                     || cx.checkpoint(),
                                     // The profile admits no action that reads its
                                     // target; a read would see the entry overlay.
@@ -415,6 +417,21 @@ impl WriteTxn {
                                             outcome.vertex(),
                                             key,
                                             control,
+                                        )
+                                    },
+                                    |control| {
+                                        vertex_replacement_keys(
+                                            &*workspace.txn,
+                                            &*database,
+                                            outcome.vertex(),
+                                            None,
+                                            || cx.checkpoint().map_err(GqlQueryError::Interrupted),
+                                            control,
+                                            |error| {
+                                                GqlQueryError::Source(
+                                                    GraphVertexUpsertError::Staging(error),
+                                                )
+                                            },
                                         )
                                     },
                                     |staged| {

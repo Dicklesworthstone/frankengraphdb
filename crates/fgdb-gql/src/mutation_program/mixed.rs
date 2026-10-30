@@ -597,6 +597,10 @@ impl PreparedGraphWriteProgram {
                     GraphVertexUpsertAction::SetExpression { key: written, .. } => {
                         !names.contains(written)
                     }
+                    // Replacement reads the current target's complete key
+                    // set and may remove a MERGE key. It needs ordinary
+                    // within-row staging, never the frozen batch shortcut.
+                    GraphVertexUpsertAction::ClearProperties { .. } => false,
                 };
                 if !safe {
                     return false;

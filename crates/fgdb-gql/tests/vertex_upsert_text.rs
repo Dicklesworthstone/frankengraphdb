@@ -26,6 +26,109 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
 }
 
 #[test]
+fn map_replacement_binds_current_keys_only_for_the_selected_clause() {
+    use fgdb_gql::GraphVertexUpsertAction;
+
+    let prepared = PreparedGraphVertexUpsertText::prepare(
+        "MERGE (n:Person {p:7}) ON MATCH SET n = {p:n.p,q:$value} SET n = {}",
+        R,
+        symbols,
+    )
+    .unwrap();
+    let arguments = GqlParameters::new().with_int64("value", 9).unwrap();
+    let upsert = prepared.bind_parameters(&arguments).unwrap();
+    assert!(matches!(
+        upsert.on_match().last(),
+        Some(GraphVertexUpsertAction::ClearProperties { keep }) if keep == &[P, Q]
+    ));
+    assert_eq!(
+        upsert.after(),
+        &[GraphVertexUpsertAction::ClearProperties { keep: Vec::new() }]
+    );
+    assert!(upsert.on_create().is_empty());
+    assert_eq!(
+        prepared
+            .bind_parameters(&arguments)
+            .unwrap()
+            .canonical_bytes(),
+        upsert.canonical_bytes()
+    );
+
+    // A sibling explicit assignment survives the same simultaneous map
+    // replacement, while repeated keys and a later replacement still refuse.
+    let sibling = PreparedGraphVertexUpsertText::prepare(
+        "MERGE (n {p:7}) ON MATCH SET n = {q:1}, n.p=8",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    assert!(sibling.on_match().iter().any(|action| {
+        matches!(action, GraphVertexUpsertAction::ClearProperties { keep } if keep == &[P, Q])
+    }));
+    for text in [
+        "MERGE (n {p:7}) ON MATCH SET n.q=1, n = {p:7}",
+        "MERGE (n {p:7}) SET n = {}, n = {p:7}",
+        "MERGE (n {p:7}) SET n = {p:8}, n.p=9",
+    ] {
+        assert!(
+            PreparedGraphVertexUpsertText::prepare(text, R, symbols)
+                .and_then(|template| template.bind_parameters(&GqlParameters::new()))
+                .is_err(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn typed_replacement_never_competes_with_a_sibling_assignment() {
+    use fgdb_gql::{
+        GqlScalarParameter, GraphVertexUpsertAction as Action, GraphVertexUpsertBuildError,
+        PreparedGraphVertexUpsert,
+    };
+    use fgdb_types::CanonicalScalar;
+
+    let merge = PreparedGraphVertexMergeText::prepare("MERGE (n {p:7})", R, symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+    let assignment = Action::SetProperty {
+        key: P,
+        value: GqlScalarParameter::new(CanonicalScalar::Int(8)).unwrap(),
+    };
+    let clear = Action::ClearProperties { keep: Vec::new() };
+    for actions in [
+        vec![assignment.clone(), clear.clone()],
+        vec![clear, assignment.clone()],
+    ] {
+        assert!(matches!(
+            PreparedGraphVertexUpsert::prepare(merge.clone(), actions, Vec::new()),
+            Err(GraphVertexUpsertBuildError::PropertyReplacement { .. })
+        ));
+    }
+    for keep in [vec![Q, P], vec![P, P]] {
+        assert!(matches!(
+            PreparedGraphVertexUpsert::prepare(
+                merge.clone(),
+                vec![Action::ClearProperties { keep }],
+                Vec::new(),
+            ),
+            Err(GraphVertexUpsertBuildError::PropertyReplacement { .. })
+        ));
+    }
+    for actions in [
+        vec![
+            assignment.clone(),
+            Action::ClearProperties { keep: vec![P] },
+        ],
+        vec![Action::ClearProperties { keep: vec![P] }, assignment],
+    ] {
+        PreparedGraphVertexUpsert::prepare(merge.clone(), actions, Vec::new()).unwrap();
+    }
+}
+
+#[test]
 fn one_parameter_table_spans_merge_key_and_both_action_branches() {
     let text = "MERGE (n:Person {p:$p}) ON MATCH SET n.q=$matched,n:Seen ON CREATE SET n.q=$created,n:Created";
     let calls = Cell::new(0);
