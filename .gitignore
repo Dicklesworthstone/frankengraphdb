@@ -91,6 +91,9 @@ perf.data.old
 .beads/*.db-wal-cert
 .beads/*.db-wal-cert-head
 .beads/.*-wal-cert*
+
+# br retains forensic WAL-index quarantine data beside its runtime database.
+.beads/.br-wal-index-*/
 # beads_rust migration marker (tool state written by `br` on schema upgrade;
 # unignored it fails scripts/local_proof.sh's clean-worktree preflight).
 .beads/*.fsqlite-migration-state
