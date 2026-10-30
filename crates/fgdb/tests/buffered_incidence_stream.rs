@@ -509,7 +509,38 @@ fn first_cold_incidence_seeks_descriptors_without_reading_unrelated_graph_payloa
             CommitSeq(2)
         );
         let memory = pool();
-        let mut view = cold(&contexts, &vfs, memory.clone()).await;
+        // V6 persists descriptors beside these 256 independent blocks. Their
+        // combined root/segment bytes exceed the old 64 KiB fixture ceiling;
+        // that ceiling must still refuse and refund before payload admission.
+        let too_small = Database::open_buffered_read_view_with_vfs(
+            &contexts.commit(),
+            vfs.clone(),
+            vfs.database_dir(),
+            keys(),
+            memory.clone(),
+            limits(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            too_small,
+            fgdb::BufferedOpenError::Read(BufferedReadError::Store(error))
+                if matches!(error.as_ref(), fgdb_strata::store::StoreError::ObjectTooLarge { .. })
+        ));
+        assert_eq!(memory.used(), 0);
+        let mut view = Database::open_buffered_read_view_with_vfs(
+            &contexts.commit(),
+            vfs.clone(),
+            vfs.database_dir(),
+            keys(),
+            memory.clone(),
+            BufferedReadLimits {
+                max_root_bytes: 128 * 1024,
+                ..limits()
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(
             view.buffer_stats().bypasses,
             0,

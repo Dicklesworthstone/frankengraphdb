@@ -687,6 +687,27 @@ fn buffered_views_release_opening_metadata_for_shared_pool_history_reads() {
         let writer = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
             .await
             .unwrap();
+        // Refunding vanished root-decode slack must not erase either of the
+        // simultaneous incoming/birth-refault object workspaces. One fits in
+        // this pool, but both do not; the complete history must still refuse.
+        let insufficient = MemoryPool::new(2 * 1024 * 1024, 0).unwrap();
+        let refusal = Database::open_buffered_read_view_with_vfs(
+            &commit,
+            vfs.clone(),
+            &path,
+            keys(),
+            insufficient.clone(),
+            limits(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            refusal,
+            BufferedOpenError::Read(BufferedReadError::Memory(
+                fgdb::MemoryError::ResourceExhausted { requested, available, limit }
+            )) if requested > available && limit == insufficient.limit()
+        ));
+        assert_eq!(insufficient.used(), 0);
         let parent = MemoryPool::new(3 * 1024 * 1024, 0).unwrap();
         let cold_pool = parent.child(parent.limit(), 0).unwrap();
         let trusted_pool = parent.child(parent.limit(), 0).unwrap();

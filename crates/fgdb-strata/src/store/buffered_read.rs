@@ -82,8 +82,10 @@ impl BufferedReadLimits {
     /// Reserve before decoding a manifest/root. This opening allowance covers
     /// simultaneous encoded frames, V4 segment vectors, flattened references,
     /// descriptors, and bounded cache-policy bookkeeping. Payload and history
-    /// use separate reservations. After admission, only retained metadata
-    /// capacities and the cache-policy allowance remain charged to the view.
+    /// use separate reservations. After root decoding, unused decode slack is
+    /// refunded while both staged descriptor sets remain charged. After
+    /// admission, only retained metadata capacities and the cache-policy
+    /// allowance remain charged to the view.
     pub fn metadata_bytes(self) -> Result<usize, BufferedReadError> {
         let policy = self.metadata_policy_bytes()?;
         self.max_root_bytes
@@ -549,6 +551,40 @@ impl<V: Vfs + Clone> BlockStore<V> {
             },
             |descriptors| (descriptors.blocks.clone(), descriptors.patches.clone()),
         );
+        // Root frames and segment-decode workspaces have dropped. Keep the
+        // actual reference capacities and BOTH descriptor sets charged, but
+        // release vanished decode slack before admitting payloads. In
+        // particular, an incoming vertex patch and its refaulted birth patch
+        // each still reserve their complete independent object workspace.
+        let (staged_blocks, staged_patches) = untrusted.as_ref().map_or((0, 0), |descriptors| {
+            (
+                descriptors.blocks.capacity(),
+                descriptors.patches.capacity(),
+            )
+        });
+        let admission_metadata = limits.retained_metadata_bytes(
+            &root,
+            blocks
+                .capacity()
+                .checked_add(staged_blocks)
+                .ok_or(BufferedReadError::SizeOverflow)?,
+            patches
+                .capacity()
+                .checked_add(staged_patches)
+                .ok_or(BufferedReadError::SizeOverflow)?,
+        )?;
+        let excess = metadata.bytes().checked_sub(admission_metadata).ok_or(
+            MemoryError::ResourceExhausted {
+                requested: admission_metadata,
+                available: metadata.bytes(),
+                limit: metadata.bytes(),
+            },
+        )?;
+        drop(
+            metadata
+                .split_off(excess)
+                .ok_or(BufferedReadError::SizeOverflow)?,
+        );
         let mut work = 0;
         if !certified {
             // Declaration order keeps the charges alive until the validators drop.
@@ -679,8 +715,8 @@ impl<V: Vfs + Clone> BlockStore<V> {
             }
         }
         // Published descriptors are temporary admission evidence; their copies
-        // must die before releasing the opening allowance. The root-segment
-        // vectors and cold history validators have already been dropped.
+        // must die before releasing their allowance. The root-segment vectors,
+        // unused decode slack and cold history validators have already dropped.
         drop(untrusted);
         let retained =
             limits.retained_metadata_bytes(&root, blocks.capacity(), patches.capacity())?;
