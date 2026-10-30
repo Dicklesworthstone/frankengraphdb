@@ -42,6 +42,38 @@ struct EdgeBinding<'a> {
     props: Option<&'a EdgeProperties>,
 }
 
+/// Borrow only the edge identities/fields of this complete occurrence. A
+/// one-hop definition proves all captures name its one edge; a multi-hop
+/// definition binds each admitted capture to its own selected atom.
+#[derive(Clone, Copy)]
+enum EdgeBindings<'a> {
+    None,
+    One(EdgeBinding<'a>),
+    Captures(&'a [(u32, EdgeBinding<'a>)]),
+}
+
+impl<'a> EdgeBindings<'a> {
+    fn get(
+        self,
+        capture: u32,
+        meter: &mut Meter<'_>,
+    ) -> Result<Option<EdgeBinding<'a>>, StandingQueryFailure> {
+        match self {
+            Self::None => Ok(None),
+            Self::One(edge) => Ok(Some(edge)),
+            Self::Captures(captures) => {
+                for &(index, edge) in captures {
+                    meter.charge(ZSetEvent::Work)?;
+                    if index == capture {
+                        return Ok(Some(edge));
+                    }
+                }
+                Ok(None)
+            }
+        }
+    }
+}
+
 pub(crate) struct StandingQuery {
     pub(super) definition: PreparedGraphAggregate,
     pub(super) policy: GqlQueryPolicy,

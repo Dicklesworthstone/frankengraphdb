@@ -62,16 +62,23 @@ pub(super) fn contributions(
     output: &mut Vec<Contribution>,
     meter: &mut Meter<'_>,
 ) -> Result<(), StandingQueryFailure> {
-    binding_contributions(query, &[(vid, state)], None, sign, output, meter)
+    binding_contributions(
+        query,
+        &[(vid, state)],
+        EdgeBindings::None,
+        sign,
+        output,
+        meter,
+    )
 }
 
 /// Project one admitted binding through the same predicate and aggregate
-/// domains as a vertex scan. The one-hop maintainer supplies two endpoint
-/// slots, not another text parser or a second expression evaluator.
+/// domains as a vertex scan. Fixed-hop maintainers supply endpoint slots and
+/// admitted edge captures, not a second expression evaluator.
 pub(super) fn binding_contributions(
     query: &PreparedGraphAggregate,
     binding: &[(VId, &VertexState)],
-    edge: Option<EdgeBinding<'_>>,
+    edge: EdgeBindings<'_>,
     sign: i128,
     output: &mut Vec<Contribution>,
     meter: &mut Meter<'_>,
@@ -190,7 +197,7 @@ pub(super) fn keeps(
 fn projected_value<'a>(
     column: ValueProjection,
     binding: &mut impl FnMut(u32) -> Result<Option<(VId, &'a VertexState)>, StandingQueryFailure>,
-    edge: Option<EdgeBinding<'_>>,
+    edge: EdgeBindings<'_>,
     meter: &mut Meter<'_>,
 ) -> Result<GraphValue, StandingQueryFailure> {
     match column {
@@ -216,11 +223,12 @@ fn projected_value<'a>(
             // A stored List or Map projects as the value it is (fgdb-k3nub).
             GraphValue::from_property_value(value).ok_or(StandingQueryFailure::InvalidDelta)
         }
-        ValueProjection::EdgeProperty { key, .. } => {
-            // Shape admission proved every capture is the same single edge.
-            // Missing fields and the explicitly null-extended OPTIONAL edge
-            // are NULL; an absent edge binding is still malformed.
-            let edge = edge.ok_or(StandingQueryFailure::InvalidDelta)?;
+        ValueProjection::EdgeProperty { capture, key } => {
+            // Missing fields and a null-extended edge are NULL. An absent
+            // capture is malformed; distinct atoms retain distinct identities.
+            let edge = edge
+                .get(capture, meter)?
+                .ok_or(StandingQueryFailure::InvalidDelta)?;
             let Some(value) = edge.props.and_then(|props| props.get(&key)) else {
                 meter.units(
                     ZSetEvent::ScratchEntry,
@@ -232,10 +240,12 @@ fn projected_value<'a>(
             GraphValue::from_property_value(value).ok_or(StandingQueryFailure::InvalidDelta)
         }
         ValueProjection::Path {
+            capture,
             function: GraphPathFunction::Edge,
-            ..
         } => {
-            let edge = edge.ok_or(StandingQueryFailure::InvalidDelta)?;
+            let edge = edge
+                .get(capture, meter)?
+                .ok_or(StandingQueryFailure::InvalidDelta)?;
             meter.charge(ZSetEvent::ScratchEntry)?;
             Ok(edge
                 .id
@@ -250,7 +260,7 @@ fn projected_value<'a>(
 pub(super) fn project_contributions<'a>(
     query: &PreparedGraphAggregate,
     mut binding: impl FnMut(u32) -> Result<Option<(VId, &'a VertexState)>, StandingQueryFailure>,
-    edge: Option<EdgeBinding<'_>>,
+    edge: EdgeBindings<'_>,
     sign: i128,
     output: &mut Vec<Contribution>,
     meter: &mut Meter<'_>,
@@ -311,8 +321,9 @@ pub(super) fn project_contributions<'a>(
                     _ => return Err(StandingQueryFailure::NonIntegerSum),
                 }
             }
-            Some(ValueProjection::EdgeProperty { key, .. }) => {
+            Some(ValueProjection::EdgeProperty { capture, key }) => {
                 match edge
+                    .get(capture, meter)?
                     .ok_or(StandingQueryFailure::InvalidDelta)?
                     .props
                     .and_then(|props| props.get(&key))
@@ -326,9 +337,10 @@ pub(super) fn project_contributions<'a>(
                 }
             }
             Some(ValueProjection::Path {
+                capture,
                 function: GraphPathFunction::Edge,
-                ..
             }) if aggregate.function() == GraphAggregateFunction::Count => edge
+                .get(capture, meter)?
                 .ok_or(StandingQueryFailure::InvalidDelta)?
                 .id
                 .map(|_| 0),

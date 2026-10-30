@@ -238,7 +238,7 @@ impl Shape {
                     .map(Some)
                     .ok_or(StandingQueryFailure::InvalidDelta)
             },
-            edge,
+            edge.map_or(EdgeBindings::None, EdgeBindings::One),
             sign,
             output,
             meter,
@@ -315,7 +315,7 @@ impl Shape {
                 slot if self.mode == Mode::Optional && slot < self.width => Ok(None),
                 _ => Err(StandingQueryFailure::InvalidDelta),
             },
-            Some(EdgeBinding {
+            EdgeBindings::One(EdgeBinding {
                 id: None,
                 props: None,
             }),

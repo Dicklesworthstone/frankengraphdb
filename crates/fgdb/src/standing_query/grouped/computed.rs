@@ -11,7 +11,7 @@ use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GraphAggregateError};
 pub(super) fn contributions<'a>(
     query: &PreparedGraphAggregate,
     mut binding: impl FnMut(u32) -> Result<Option<(VId, &'a VertexState)>, StandingQueryFailure>,
-    edge: Option<EdgeBinding<'_>>,
+    edge: EdgeBindings<'_>,
     sign: i128,
     output: &mut Vec<Contribution>,
     meter: &mut Meter<'_>,

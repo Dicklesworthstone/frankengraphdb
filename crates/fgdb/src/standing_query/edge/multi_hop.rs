@@ -32,6 +32,9 @@ pub(super) struct Shape {
     // Each clause owns its own relationship-identity domain. Atom indexes
     // retain that boundary even when several clauses have the same topology.
     different_edges: Vec<Vec<usize>>,
+    // Only one-edge captures are admitted. Keep each output capture's atom,
+    // not a shared edge identity that could conflate different path segments.
+    captures: Vec<(u32, usize)>,
     width: usize,
     relations: BTreeSet<EdgeRelation>,
     scope: Option<scoped::Shape>,
@@ -114,6 +117,7 @@ impl Shape {
             return Some(Self {
                 atoms,
                 different_edges,
+                captures: Vec::new(),
                 width,
                 relations,
                 scope: Some(scope),
@@ -135,6 +139,7 @@ impl Shape {
         }];
         let mut width = 2;
         let mut different_edges = Vec::new();
+        let mut captures = Vec::new();
         let mut projected = false;
         for op in &operators[1..] {
             match op {
@@ -179,11 +184,32 @@ impl Shape {
                 GlaOperator::DifferentEdges { segments } if !projected => {
                     different_edges.push(Self::constraint(segments, &atoms)?);
                 }
+                GlaOperator::CapturePath {
+                    capture,
+                    start,
+                    segments,
+                } if !projected && segments.len() == 1 => {
+                    let atom = atoms.iter().position(|atom| {
+                        atom.left == start.ordinal() as usize
+                            && atom.right == segments[0].ordinal() as usize
+                    })?;
+                    if captures.iter().any(|(index, _)| index == capture) {
+                        return None;
+                    }
+                    captures.push((*capture, atom));
+                }
                 GlaOperator::ProjectValues { columns } if !projected => {
-                    if columns.iter().any(|column| {
-                        !matches!(column,
-                        ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. }
-                            if (slot.ordinal() as usize) < width)
+                    if columns.iter().any(|column| match column {
+                        ValueProjection::Vertex { slot }
+                        | ValueProjection::Property { slot, .. } => {
+                            (slot.ordinal() as usize) >= width
+                        }
+                        ValueProjection::EdgeProperty { capture, .. }
+                        | ValueProjection::Path {
+                            capture,
+                            function: GraphPathFunction::Edge,
+                        } => !captures.iter().any(|(index, _)| index == capture),
+                        _ => true,
                     }) {
                         return None;
                     }
@@ -204,6 +230,7 @@ impl Shape {
         Some(Self {
             atoms,
             different_edges,
+            captures,
             width,
             relations,
             scope: None,
@@ -233,6 +260,8 @@ fn orientations(edge: Edge, direction: GlaDirection) -> [Option<Endpoints>; 2] {
 struct Arrangement {
     edges: BTreeMap<EId, Edge>,
     incident: BTreeMap<(EdgeRelation, VId), BTreeSet<EId>>,
+    // Only keys read by the immutable definition, just as in OneHopState.
+    properties: BTreeMap<EId, EdgeProperties>,
 }
 
 impl Arrangement {
@@ -256,6 +285,7 @@ impl Arrangement {
     }
 
     fn remove(&mut self, eid: EId, selectors: &BTreeSet<EdgeRelation>) {
+        self.properties.remove(&eid);
         if let Some(edge) = self.edges.remove(&eid) {
             for &selector in selectors {
                 if !selector.matches(edge.relation) {
@@ -320,6 +350,13 @@ impl Overlay<'_> {
             .get(&eid)
             .or_else(|| self.base.edges.get(&eid))
             .copied()
+    }
+
+    fn properties(&self, eid: EId) -> Option<&EdgeProperties> {
+        self.created
+            .properties
+            .get(&eid)
+            .or_else(|| self.base.properties.get(&eid))
     }
 
     fn incident(&self, relation: EdgeRelation, vid: VId) -> impl Iterator<Item = EId> + '_ {
@@ -524,7 +561,34 @@ impl Enumeration<'_> {
                 scope.binding_contribution(self.query, &row, None, self.sign, counts, output, meter)
             }
             None => {
-                grouped::binding_contributions(self.query, &row, None, self.sign, output, meter)
+                let mut captures = Vec::new();
+                if !self.shape.captures.is_empty() {
+                    meter.units(ZSetEvent::ScratchEntry, 1 + self.shape.captures.len())?;
+                    captures.reserve_exact(self.shape.captures.len());
+                    for &(capture, atom) in &self.shape.captures {
+                        meter.charge(ZSetEvent::Work)?;
+                        let eid = selected
+                            .get(atom)
+                            .copied()
+                            .flatten()
+                            .ok_or(StandingQueryFailure::InvalidDelta)?;
+                        captures.push((
+                            capture,
+                            EdgeBinding {
+                                id: Some(eid),
+                                props: self.graph.properties(eid),
+                            },
+                        ));
+                    }
+                }
+                grouped::binding_contributions(
+                    self.query,
+                    &row,
+                    EdgeBindings::Captures(&captures),
+                    self.sign,
+                    output,
+                    meter,
+                )
             }
         }
     }
@@ -551,7 +615,9 @@ impl State {
 
     pub(super) fn seed(
         &mut self,
+        query: &PreparedGraphAggregate,
         row: &fgdb_strata::AdjacencyEntry,
+        properties: &[(PropertyKeyId, CanonicalPropertyValue)],
         vertices: &Vertices,
         meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
@@ -571,7 +637,15 @@ impl State {
             dst: row.dst,
         };
         self.shape.reserve_edge(edge, meter)?;
+        let fields = retained_properties(
+            query,
+            properties.iter().map(|(key, value)| (key, value)),
+            meter,
+        )?;
         self.input.insert(row.eid, edge, &self.shape.relations);
+        if let Some(fields) = fields {
+            self.input.properties.insert(row.eid, fields);
+        }
         Ok(())
     }
 
@@ -665,6 +739,7 @@ impl State {
                     src,
                     relation,
                     dst,
+                    props,
                     ..
                 } = row
                 {
@@ -686,6 +761,13 @@ impl State {
                     self.shape.reserve_edge(edge, meter)?;
                     self.shape.reserve_edge(edge, meter)?;
                     created.insert(*eid, edge, &self.shape.relations);
+                    if let Some(fields) = retained_properties(
+                        query,
+                        props.iter().map(|(key, value)| (key, value)),
+                        meter,
+                    )? {
+                        created.properties.insert(*eid, fields);
+                    }
                     touch(&mut affected, *eid, meter)?;
                 }
             }
@@ -698,6 +780,61 @@ impl State {
             for row in &entry.rows {
                 meter.charge(ZSetEvent::Work)?;
                 match row {
+                    DeltaRow::Property {
+                        elem: ElementId::Edge(eid),
+                        property,
+                        before,
+                        after,
+                    } if needs_edge_property(query, *property) => {
+                        let known = created.edges.get(eid).or_else(|| self.input.edges.get(eid));
+                        if !self.shape.reads_relation(entry.relation) {
+                            if known.is_some() {
+                                return Err(StandingQueryFailure::InvalidDelta);
+                            }
+                            continue;
+                        }
+                        if known.is_none_or(|edge| edge.relation != entry.relation) {
+                            return Err(StandingQueryFailure::InvalidDelta);
+                        }
+                        if !created.properties.contains_key(eid) {
+                            let old = self
+                                .input
+                                .properties
+                                .get(eid)
+                                .ok_or(StandingQueryFailure::InvalidDelta)?;
+                            let fields = retained_properties(query, old, meter)?
+                                .ok_or(StandingQueryFailure::InvalidDelta)?;
+                            created.properties.insert(*eid, fields);
+                        }
+                        let fields = created
+                            .properties
+                            .get_mut(eid)
+                            .ok_or(StandingQueryFailure::InvalidDelta)?;
+                        if fields.get(property) != before.as_ref() {
+                            return Err(StandingQueryFailure::InvalidDelta);
+                        }
+                        if let Some(value) = after {
+                            meter.units(ZSetEvent::ScratchEntry, 1 + stored_units(value))?;
+                            fields.insert(*property, value.clone());
+                        } else {
+                            fields.remove(property);
+                        }
+                        touch(&mut affected, *eid, meter)?;
+                    }
+                    DeltaRow::Counter {
+                        elem: ElementId::Edge(eid),
+                        ..
+                    }
+                    | DeltaRow::Escrow {
+                        subject: ElementId::Edge(eid),
+                        ..
+                    } if self.input.properties.contains_key(eid)
+                        || created.properties.contains_key(eid) =>
+                    {
+                        // No canonical after-image is available to this field
+                        // reader. Never publish a stale property as current.
+                        return Err(StandingQueryFailure::InvalidDelta);
+                    }
                     DeltaRow::DeleteEdge { eid, .. } => {
                         let edge = created.edges.get(eid).or_else(|| self.input.edges.get(eid));
                         if let Some(edge) = edge {
@@ -817,6 +954,11 @@ impl State {
                 self.input.insert(eid, edge, &self.shape.relations);
             }
         }
+        for (eid, fields) in patch.created.properties {
+            if !patch.removed.contains(&eid) {
+                self.input.properties.insert(eid, fields);
+            }
+        }
         for (root, count) in patch.witnesses {
             if count == 0 {
                 self.witnesses.remove(&root);
@@ -902,7 +1044,13 @@ mod tests {
     }
 
     fn seeded(batches: &[LogicalDeltaBatch]) -> StandingQuery {
-        let definition = definition();
+        seeded_definition(definition(), batches)
+    }
+
+    fn seeded_definition(
+        definition: PreparedGraphAggregate,
+        batches: &[LogicalDeltaBatch],
+    ) -> StandingQuery {
         assert!(eligible(&definition));
         let edges = super::super::State::for_definition(&definition);
         let mut query = StandingQuery {
@@ -1030,6 +1178,154 @@ mod tests {
                 advance(&mut candidate, &delta, &mut || Ok(())).unwrap();
                 same_state(&candidate, &complete);
             }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn multi_hop_edge_fields_roll_back_at_every_checkpoint_and_refusal() {
+        fn definition() -> PreparedGraphAggregate {
+            use fgdb_gql::{
+                GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText,
+            };
+            PreparedGraphAggregateText::prepare(
+                "MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN r.p AS bucket,SUM(s.q) AS total,COUNT(*) AS copies",
+                |kind, name| match (kind, name) {
+                    (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+                    (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(2))),
+                    (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+                    (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+                    _ => None,
+                },
+            ).unwrap().bind_parameters(&GqlParameters::new()).unwrap()
+        }
+        let ((), report) = run_async_under_lab(0x6a36, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let keys = DatabaseKeys::new([1; 32], DatabaseSecurityNamespaceId([2; 32]), [3; 32]);
+            let mut db = Database::open_memory(&commit, keys).await.unwrap();
+            let mut r = WriteBatch::new(RelationId(1));
+            for id in 1..=3 {
+                r.create_vertex(VId(id), vec![], vec![]);
+            }
+            r.add_edge(
+                EId(0),
+                VId(1),
+                VId(2),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(1))],
+            );
+            r.add_edge(
+                EId(u128::MAX),
+                VId(1),
+                VId(2),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(2))],
+            );
+            let first = db.write(&commit, r).await.unwrap();
+            let mut s = WriteBatch::new(RelationId(2));
+            s.add_edge(
+                EId(10),
+                VId(2),
+                VId(3),
+                vec![(PropertyKeyId(2), CanonicalScalar::Int(3))],
+            );
+            let second = db.write(&commit, s).await.unwrap();
+            let batches = [
+                db.delta_index().unwrap().get(first).unwrap().clone(),
+                db.delta_index().unwrap().get(second).unwrap().clone(),
+            ];
+            let mut change = WriteBatch::new(RelationId(1));
+            for eid in [EId(0), EId(u128::MAX)] {
+                change.set_edge_property(eid, PropertyKeyId(1), Some(CanonicalScalar::Int(3)));
+            }
+            let at = db.write(&commit, change).await.unwrap();
+            let delta = db.delta_index().unwrap().get(at).unwrap().clone();
+            let original = seeded_definition(definition(), &batches);
+            let mut complete = seeded_definition(definition(), &batches);
+            let mut calls = 0;
+            let stats = advance(&mut complete, &delta, &mut || {
+                calls += 1;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(stats.affected_edges, 2);
+            assert_eq!(complete.rows.len(), 1);
+            let (row, weight) = complete.rows.iter().next().unwrap();
+            assert_eq!(weight, &fgdb_delta_types::ZWeight::ONE);
+            assert_eq!(row.keys(), &[GraphValue::Scalar(CanonicalScalar::Int(3))]);
+            assert_eq!(row.get(0).unwrap().as_integer(), Some(6));
+            assert_eq!(row.get(1).unwrap().as_count(), Some(2));
+
+            for stop in 1..=calls {
+                let mut candidate = seeded_definition(definition(), &batches);
+                let mut seen = 0;
+                let result = advance(&mut candidate, &delta, &mut || {
+                    seen += 1;
+                    if seen == stop {
+                        Err(StandingQueryFailure::Interrupted)
+                    } else {
+                        Ok(())
+                    }
+                });
+                assert_eq!(
+                    result,
+                    Err(StandingQueryFailure::Interrupted),
+                    "checkpoint {stop}"
+                );
+                assert_eq!(seen, stop);
+                same_state(&candidate, &original);
+                advance(&mut candidate, &delta, &mut || Ok(())).unwrap();
+                same_state(&candidate, &complete);
+            }
+            for reason in [
+                StandingQueryFailure::WorkBudget,
+                StandingQueryFailure::ScratchBudget,
+                StandingQueryFailure::ResultBudget,
+            ] {
+                let mut candidate = seeded_definition(definition(), &batches);
+                match reason {
+                    StandingQueryFailure::WorkBudget => {
+                        candidate.policy.evaluator.max_work_units =
+                            stats.work_units.checked_sub(1).unwrap();
+                    }
+                    StandingQueryFailure::ScratchBudget => {
+                        candidate.policy.evaluator.max_scratch_entries =
+                            stats.scratch_entries.checked_sub(1).unwrap();
+                    }
+                    _ => candidate.policy = GqlQueryPolicy::new(100_000, 0, 10_000_000, 10_000_000),
+                }
+                assert_eq!(advance(&mut candidate, &delta, &mut || Ok(())), Err(reason));
+                same_state(&candidate, &original);
+                candidate.policy = original.policy;
+                advance(&mut candidate, &delta, &mut || Ok(())).unwrap();
+                same_state(&candidate, &complete);
+            }
+
+            let mut entries = delta.coordinate_entries().to_vec();
+            let mut changed = 0;
+            for entry in &mut entries {
+                for row in &mut entry.rows {
+                    if let DeltaRow::Property { before, .. } = row {
+                        *before = Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(999)));
+                        changed += 1;
+                    }
+                }
+            }
+            assert_eq!(changed, 2);
+            let malformed = LogicalDeltaBatch::from_parts_for_test(
+                entries,
+                *delta.source_template_digest(),
+                delta.commit_marker_identity(),
+                delta.commit_seq(),
+                delta.frontier(),
+            );
+            let mut candidate = seeded_definition(definition(), &batches);
+            assert_eq!(
+                advance(&mut candidate, &malformed, &mut || Ok(())),
+                Err(StandingQueryFailure::InvalidDelta)
+            );
+            same_state(&candidate, &original);
+            advance(&mut candidate, &delta, &mut || Ok(())).unwrap();
+            same_state(&candidate, &complete);
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }

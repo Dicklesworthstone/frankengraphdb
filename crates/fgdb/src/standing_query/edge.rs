@@ -69,7 +69,7 @@ impl State {
     ) -> Result<(), StandingQueryFailure> {
         match &mut self.input {
             Input::OneHop(state) => state.seed(query, row, properties, vertices, output, meter),
-            Input::MultiHop(state) => state.seed(row, vertices, meter),
+            Input::MultiHop(state) => state.seed(query, row, properties, vertices, meter),
         }
     }
 
@@ -289,20 +289,37 @@ impl OneHopState {
         let forward = [(src, source), (dst, target)];
         let reverse = [(dst, target), (src, source)];
         match self.direction {
-            GlaDirection::Forward => {
-                grouped::binding_contributions(query, &forward, Some(edge), sign, output, meter)
-            }
-            GlaDirection::Reverse => {
-                grouped::binding_contributions(query, &reverse, Some(edge), sign, output, meter)
-            }
+            GlaDirection::Forward => grouped::binding_contributions(
+                query,
+                &forward,
+                EdgeBindings::One(edge),
+                sign,
+                output,
+                meter,
+            ),
+            GlaDirection::Reverse => grouped::binding_contributions(
+                query,
+                &reverse,
+                EdgeBindings::One(edge),
+                sign,
+                output,
+                meter,
+            ),
             GlaDirection::Undirected => {
-                grouped::binding_contributions(query, &forward, Some(edge), sign, output, meter)?;
+                grouped::binding_contributions(
+                    query,
+                    &forward,
+                    EdgeBindings::One(edge),
+                    sign,
+                    output,
+                    meter,
+                )?;
                 // One undirected self-loop is one edge occurrence, not two.
                 if src != dst {
                     grouped::binding_contributions(
                         query,
                         &reverse,
-                        Some(edge),
+                        EdgeBindings::One(edge),
                         sign,
                         output,
                         meter,

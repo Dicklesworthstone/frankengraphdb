@@ -37,6 +37,7 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+        (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(2))),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
         _ => None,
@@ -428,19 +429,21 @@ fn edge_field_ticks_are_sparse_and_failed_groups_rebuild_from_committed_values()
             db.write(&commit, repair).await.unwrap();
             db.rebuild_standing_query(&cx, &handle, policy()).unwrap();
             assert_native(&db, &cx, &handle, text, &args);
-            for unsupported in [
+            for supported in [
                 "MATCH (a)-[e:R]->(b)-[:R]->(c) RETURN e.p AS p",
-                "MATCH (a) OPTIONAL MATCH (a)-[e:R]->(b)-[:R]->(c) RETURN e.p AS p",
                 "MATCH (a)-[e:R]->(b)-[:R]->(c) RETURN e AS edge",
             ] {
-                assert!(
-                    matches!(
-                        db.register_standing_native(&cx, unsupported, &args, symbols, policy()),
-                        Err(StandingQueryError::Unsupported)
-                    ),
-                    "{unsupported}"
-                );
+                let handle = db
+                    .register_standing_native(&cx, supported, &args, symbols, policy())
+                    .unwrap();
+                assert_native(&db, &cx, &handle, supported, &args);
             }
+            // Nullable multi-hop edge captures still need their own derivative.
+            let unsupported = "MATCH (a) OPTIONAL MATCH (a)-[e:R]->(b)-[:R]->(c) RETURN e.p AS p";
+            assert!(matches!(
+                db.register_standing_native(&cx, unsupported, &args, symbols, policy()),
+                Err(StandingQueryError::Unsupported)
+            ));
         }
         assert_eq!(measured[0], measured[1]);
         assert_eq!(measured[0].affected_edges, 1);
@@ -756,6 +759,286 @@ fn conversion_failure_fences_derived_rows_not_committed_writes_and_rebuild_recov
             repaired
         );
         assert_native(&db, &cx, &handle, text, &params);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn multi_hop_edge_captures_follow_each_atom_through_field_changes_and_rebuild() {
+    fn value(edge: &fgdb::EdgeRecord, key: PropertyKeyId) -> QueryValue {
+        QueryValue::Value(
+            edge.props
+                .iter()
+                .find(|(actual, _)| *actual == key)
+                .map(|(_, value)| GraphValue::from_property_value(value).unwrap())
+                .unwrap_or(GraphValue::Scalar(CanonicalScalar::Null)),
+        )
+    }
+    // Definition-level nested loop over physical EIds, independent of the
+    // maintained arrangements, anchor ownership, captures and aggregate kernel.
+    fn oracle(db: &Database<MemVfs>) -> (QueryResult, QueryResult) {
+        let edges = db.edges().unwrap();
+        let mut paths = Vec::new();
+        let mut groups = std::collections::BTreeMap::<i64, (Option<i64>, i64)>::new();
+        for r in edges
+            .iter()
+            .filter(|edge| edge.entry.relation == RelationId(1))
+        {
+            for s in edges.iter().filter(|edge| {
+                edge.entry.relation == RelationId(2) && edge.entry.src == r.entry.dst
+            }) {
+                let QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(bucket))) =
+                    value(r, P)
+                else {
+                    panic!("fixture bucket");
+                };
+                let amount = value(s, Q);
+                let group = groups.entry(bucket).or_insert((None, 0));
+                group.1 += 1;
+                if let QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(amount))) = &amount
+                {
+                    group.0 = Some(group.0.unwrap_or(0) + *amount);
+                }
+                paths.push((
+                    (r.entry.eid, s.entry.eid),
+                    vec![
+                        QueryValue::Value(GraphValue::Edge(r.entry.eid)),
+                        QueryValue::Value(GraphValue::Edge(s.entry.eid)),
+                        value(r, P),
+                        amount,
+                    ],
+                ));
+            }
+        }
+        paths.sort_by_key(|(ids, _)| *ids);
+        let cell = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+        (
+            QueryResult::Rows {
+                columns: vec![
+                    "first".into(),
+                    "second".into(),
+                    "bucket".into(),
+                    "amount".into(),
+                ],
+                rows: paths.into_iter().map(|(_, row)| row).collect(),
+            },
+            QueryResult::Rows {
+                columns: vec!["bucket".into(), "total".into(), "copies".into()],
+                rows: groups
+                    .into_iter()
+                    .map(|(bucket, (total, copies))| {
+                        vec![
+                            cell(bucket),
+                            total.map_or(
+                                QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
+                                cell,
+                            ),
+                            cell(copies),
+                        ]
+                    })
+                    .collect(),
+            },
+        )
+    }
+    let ((), report) = run_async_under_lab(0x6772_3040, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let (cx, commit) = (c.query(), c.commit());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut r = WriteBatch::new(RelationId(1));
+        for id in 1..=5 {
+            r.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(999))]);
+        }
+        for (eid, a, b, p, q) in [
+            (0, 1, 2, 10, 2),
+            (u128::MAX, 1, 2, 20, 3),
+            (101, 2, 3, 30, 5),
+            (102, 2, 2, 40, 7),
+        ] {
+            r.add_edge(
+                EId(eid),
+                VId(a),
+                VId(b),
+                vec![(P, CanonicalScalar::Int(p)), (Q, CanonicalScalar::Int(q))],
+            );
+        }
+        db.write(&commit, r).await.unwrap();
+        let mut s = WriteBatch::new(RelationId(2));
+        for (eid, a, b, p, q) in [
+            (200, 2, 3, 50, Some(11)),
+            (201, 2, 4, 60, Some(13)),
+            (202, 3, 5, 70, None),
+            (203, 2, 2, 80, Some(17)),
+        ] {
+            let mut fields = vec![(P, CanonicalScalar::Int(p))];
+            if let Some(q) = q {
+                fields.push((Q, CanonicalScalar::Int(q)));
+            }
+            s.add_edge(EId(eid), VId(a), VId(b), fields);
+        }
+        db.write(&commit, s).await.unwrap();
+        let texts = [
+            "MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN r AS first,s AS second,r.p AS bucket,s.q AS amount ORDER BY first,second LIMIT 1000",
+            "MATCH (a)-[r:R]->(b)-[s:S]->(c) WITH r.p AS bucket,SUM(s.q) AS total,COUNT(*) AS copies RETURN bucket,total,copies ORDER BY bucket LIMIT 1000",
+            "MATCH (c)<-[s:S]-(b)<-[r:R]-(a) RETURN r AS first,s AS second,r.p AS bucket,s.q AS amount ORDER BY first,second LIMIT 1000",
+            "MATCH (a)-[r:R]->(b)-[s:S]->(c) WITH r.p AS bucket,SUM(r.q*s.q) AS total,COUNT(DISTINCT s) AS partners RETURN bucket,total,partners ORDER BY total DESC NULLS LAST,bucket LIMIT 2",
+            "MATCH (a)-[r:R]-(b)-[s:S]-(c) RETURN r AS first,s AS second,r.p AS bucket,s.q AS amount ORDER BY first,second,bucket,amount LIMIT 1000",
+            "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN r AS first,s AS second,r.p AS bucket,s.q AS amount ORDER BY first,second LIMIT 1000",
+            "MATCH (a)-[r]->(b)-[s]->(c) RETURN r AS first,s AS second,r.p AS bucket,s.q AS amount ORDER BY first,second LIMIT 1000",
+            "MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN COUNT(r) AS lefts,COUNT(DISTINCT s) AS rights,MIN(r.p) AS smallest,MAX(s.q) AS largest",
+        ];
+        let args = GqlParameters::new();
+        let handles: Vec<_> = texts
+            .iter()
+            .map(|text| {
+                let prepared = PreparedNativeRead::prepare(text, &args, symbols).unwrap();
+                let (_, width) = prepared.subscription_footprint(&cx, &args).unwrap();
+                assert!(width >= 3);
+                prepared
+                    .register_standing(&mut db, &cx, &args, policy())
+                    .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            })
+            .collect();
+        for tick in 0..=8 {
+            let (paths, groups) = oracle(&db);
+            for (index, (text, handle)) in texts.iter().zip(&handles).enumerate() {
+                assert_native(&db, &cx, handle, text, &args);
+                let actual = db.standing_native_query(&cx, handle, delivery()).unwrap().1;
+                if index == 0 || index == 2 {
+                    assert_eq!(actual, paths, "physical edge oracle, tick {tick}");
+                } else if index == 1 {
+                    assert_eq!(actual, groups, "group oracle, tick {tick}");
+                }
+                if tick == 3 || tick == 8 {
+                    db.rebuild_standing_query(&cx, handle, policy()).unwrap();
+                    assert_native(&db, &cx, handle, text, &args);
+                }
+                if tick == 5 {
+                    assert!(
+                        db.standing_query_node_stats(&cx, handle)
+                            .unwrap()
+                            .all(|stats| stats.affected_edges == 0),
+                        "unrequested property does not invalidate: {text}"
+                    );
+                }
+            }
+            if tick == 8 {
+                break;
+            }
+            let mut change = WriteBatch::new(if matches!(tick, 1 | 3 | 7) {
+                RelationId(2)
+            } else {
+                RelationId(1)
+            });
+            match tick {
+                0 => {
+                    // Two affected atoms can belong to one self-join occurrence.
+                    change.set_edge_property(EId(0), Q, Some(CanonicalScalar::Int(4)));
+                    change.set_edge_property(EId(101), P, Some(CanonicalScalar::Int(90)));
+                    change.set_edge_property(EId(102), Q, Some(CanonicalScalar::Int(10)));
+                    change.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(-999)));
+                }
+                1 => {
+                    change.set_edge_property(EId(200), Q, Some(CanonicalScalar::Int(0)));
+                    change.set_edge_property(EId(201), Q, None);
+                    change.set_edge_property(EId(202), Q, Some(CanonicalScalar::Int(19)));
+                }
+                2 => {
+                    change.delete_edge(EId(u128::MAX));
+                    change.add_edge(
+                        EId(500),
+                        VId(1),
+                        VId(2),
+                        vec![(P, CanonicalScalar::Int(10)), (Q, CanonicalScalar::Int(-1))],
+                    );
+                }
+                3 => {
+                    change.add_edge(
+                        EId(501),
+                        VId(3),
+                        VId(1),
+                        vec![(P, CanonicalScalar::Int(10)), (Q, CanonicalScalar::Int(23))],
+                    );
+                }
+                4 => {
+                    change.set_edge_property(
+                        EId(0),
+                        PropertyKeyId(3),
+                        Some(CanonicalScalar::Int(777)),
+                    );
+                }
+                5 => {
+                    change.delete_vertex(VId(2));
+                }
+                6 => {
+                    change.add_edge(
+                        EId(502),
+                        VId(4),
+                        VId(3),
+                        vec![(P, CanonicalScalar::Int(10)), (Q, CanonicalScalar::Int(2))],
+                    );
+                }
+                _ => {
+                    change.set_edge_property(EId(202), Q, None);
+                    change.set_edge_property(EId(501), Q, Some(CanonicalScalar::Null));
+                }
+            }
+            db.write(&commit, change).await.unwrap();
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn multi_hop_edge_field_maintenance_visits_only_affected_join_partners() {
+    let ((), report) = run_async_under_lab(0x6772_3041, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let (cx, commit) = (c.query(), c.commit());
+        let args = GqlParameters::new();
+        let text = "MATCH (a)-[r:R]->(b)-[s:R]->(c) WITH r.p AS bucket,SUM(s.q) AS total,COUNT(*) AS copies RETURN bucket,total,copies ORDER BY bucket LIMIT 1000";
+        let mut measurements = Vec::new();
+        for unrelated in [1, 64] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            for component in 0..=unrelated {
+                let a = 10 * component + 1;
+                for vertex in [a, a + 1, a + 2] {
+                    seed.create_vertex(VId(vertex), vec![], vec![]);
+                }
+                seed.add_edge(
+                    EId(a),
+                    VId(a),
+                    VId(a + 1),
+                    vec![(P, CanonicalScalar::Int(1))],
+                );
+                seed.add_edge(
+                    EId(a + 1),
+                    VId(a + 1),
+                    VId(a + 2),
+                    vec![(Q, CanonicalScalar::Int(3))],
+                );
+            }
+            db.write(&commit, seed).await.unwrap();
+            let handle = db
+                .register_standing_native(&cx, text, &args, symbols, policy())
+                .unwrap();
+            let mut change = WriteBatch::new(RelationId(1));
+            change.set_edge_property(EId(2), Q, Some(CanonicalScalar::Int(7)));
+            db.write(&commit, change).await.unwrap();
+            assert_native(&db, &cx, &handle, text, &args);
+            let stats: Vec<_> = db
+                .standing_query_node_stats(&cx, &handle)
+                .unwrap()
+                .copied()
+                .collect();
+            assert_eq!(
+                stats.iter().map(|stats| stats.affected_edges).max(),
+                Some(1)
+            );
+            measurements.push(stats);
+        }
+        // Both sizes keep the unchanged value row and aggregate group alive;
+        // extra components do not change the source or downstream work.
+        assert_eq!(measurements[0], measurements[1]);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
