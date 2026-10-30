@@ -132,14 +132,10 @@ fn eligible<E>(
     for &(a, b) in keys {
         control(GlaExecutionEvent::Work)?;
         let cell = &row.values()[if right { b } else { a }];
-        // Dynamic Any inputs may carry either graph identity. Lists/paths/maps
-        // are not comparable by this predicate IR; NULL never supplies equality.
-        if cell.is_null()
-            || !matches!(
-                cell,
-                GraphValue::Scalar(_) | GraphValue::Vertex(_) | GraphValue::Edge(_)
-            )
-        {
+        // Dynamic Any inputs may carry either graph identity or a composite,
+        // which equals another composite element by element (fgdb-2npty).
+        // NULL never supplies equality.
+        if cell.is_null() {
             return Ok(false);
         }
     }
@@ -169,7 +165,97 @@ fn compare_key_value<E>(
         (true, true) => left.compare_orderability_with_control(right, control),
         (true, false) => Ok(Ordering::Less),
         (false, true) => Ok(Ordering::Greater),
-        (false, false) => compare_value(left, right, control),
+        (false, false) => match (composite_family(left), composite_family(right)) {
+            (None, None) => compare_value(left, right, control),
+            (None, Some(_)) => Ok(Ordering::Less),
+            (Some(_), None) => Ok(Ordering::Greater),
+            (Some(a), Some(b)) if a != b => Ok(a.cmp(&b)),
+            (Some(_), Some(_)) => compare_composite_key(left, right, control),
+        },
+    }
+}
+
+/// The lookup family of a composite key, after every atomic key. Equality
+/// between composites is element by element (membership::equal), so a list
+/// of graph elements (nodes(p), relationships(p)) shares the list family:
+/// it equals the list holding the same elements.
+fn composite_family(value: &GraphValue) -> Option<u8> {
+    match value {
+        GraphValue::List(_) | GraphValue::Vertices(_) | GraphValue::Edges(_) => Some(0),
+        GraphValue::Path(_) => Some(1),
+        GraphValue::Map { .. } => Some(2),
+        GraphValue::Scalar(_) | GraphValue::Vertex(_) | GraphValue::Edge(_) => None,
+    }
+}
+
+/// A total order on two composites of one family that is Equal whenever
+/// membership::equal could be TRUE: elements compare through
+/// compare_key_value, so Int 1 and Float 1.0 are one key at any depth. It
+/// may also be Equal for pairs that are not TRUE (NaN, nested NULL); the
+/// complete predicate rejects those.
+fn compare_composite_key<E>(
+    left: &GraphValue,
+    right: &GraphValue,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Ordering, E> {
+    // A list's items are borrowed; an element list yields its identities.
+    fn element(value: &GraphValue, at: usize) -> Option<std::borrow::Cow<'_, GraphValue>> {
+        use std::borrow::Cow;
+        match value {
+            GraphValue::List(items) => items.get(at).map(Cow::Borrowed),
+            GraphValue::Vertices(ids) => ids.get(at).map(|id| Cow::Owned(GraphValue::Vertex(*id))),
+            GraphValue::Edges(ids) => ids.get(at).map(|id| Cow::Owned(GraphValue::Edge(*id))),
+            _ => None,
+        }
+    }
+    fn length(value: &GraphValue) -> usize {
+        match value {
+            GraphValue::List(items) => items.len(),
+            GraphValue::Vertices(ids) => ids.len(),
+            GraphValue::Edges(ids) => ids.len(),
+            _ => 0,
+        }
+    }
+    control(GlaExecutionEvent::Work)?;
+    match (left, right) {
+        (
+            GraphValue::Map {
+                keys: left_keys,
+                values: left_values,
+            },
+            GraphValue::Map {
+                keys: right_keys,
+                values: right_values,
+            },
+        ) => {
+            for _ in left_keys.iter().chain(right_keys.iter()) {
+                control(GlaExecutionEvent::Work)?;
+            }
+            let order = left_keys.cmp(right_keys);
+            if order != Ordering::Equal {
+                return Ok(order);
+            }
+            for (left, right) in left_values.iter().zip(right_values.iter()) {
+                let order = compare_key_value(left, right, control)?;
+                if order != Ordering::Equal {
+                    return Ok(order);
+                }
+            }
+            Ok(Ordering::Equal)
+        }
+        (GraphValue::Path(_), GraphValue::Path(_)) => compare_value(left, right, control),
+        _ => {
+            for at in 0..length(left).min(length(right)) {
+                let (Some(left), Some(right)) = (element(left, at), element(right, at)) else {
+                    break;
+                };
+                let order = compare_key_value(&left, &right, control)?;
+                if order != Ordering::Equal {
+                    return Ok(order);
+                }
+            }
+            Ok(length(left).cmp(&length(right)))
+        }
     }
 }
 

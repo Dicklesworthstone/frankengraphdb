@@ -55,24 +55,18 @@ impl<'a> Probe<'a> {
             charge(control, ZSetEvent::Work)?;
             match value {
                 GraphValue::Scalar(CanonicalScalar::Float(number)) => {
-                    // Rust's saturating cast supplies only a candidate. The
-                    // native EXACT comparison must prove equivalence before
-                    // using it. Fractions, infinities, NaN and the rounded 2^63
-                    // boundary therefore remain Float keys, never false Ints.
-                    let candidate = number.get() as i64;
-                    if number.compare_rational(i128::from(candidate), NonZeroU64::MIN)
-                        == Ordering::Equal
-                    {
-                        Some(GraphValue::Scalar(CanonicalScalar::Int(candidate)))
-                    } else {
-                        None
-                    }
+                    integral(number).map(|int| GraphValue::Scalar(CanonicalScalar::Int(int)))
                 }
                 GraphValue::Scalar(_) | GraphValue::Vertex(_) | GraphValue::Edge(_) => None,
-                // This predicate IR cannot equate composite cells carried by
-                // Any. The NULL sentinel selects the caller's SIDE-SPECIFIC
-                // non-witness tag; it is not an output or a dropped input.
-                _ => Some(GraphValue::Scalar(CanonicalScalar::Null)),
+                // A composite equals another element by element (fgdb-2npty,
+                // membership::equal): its key is its normalized form. One
+                // holding a NULL is never TRUE-equal, so the NULL sentinel
+                // selects the caller's SIDE-SPECIFIC non-witness tag; it is not
+                // an output or a dropped input.
+                composite => Some(
+                    normalized(composite, control)?
+                        .unwrap_or(GraphValue::Scalar(CanonicalScalar::Null)),
+                ),
             }
         } else {
             None
@@ -81,6 +75,69 @@ impl<'a> Probe<'a> {
         reserve_cell(value, control)?;
         Ok(value.clone())
     }
+}
+
+/// Rust's saturating cast supplies only a candidate. The native EXACT
+/// comparison must prove equivalence before using it. Fractions, infinities,
+/// NaN and the rounded 2^63 boundary therefore remain Float keys, never false
+/// Ints.
+fn integral(number: &fgdb_types::CanonicalF64) -> Option<i64> {
+    let candidate = number.get() as i64;
+    (number.compare_rational(i128::from(candidate), NonZeroU64::MIN) == Ordering::Equal)
+        .then_some(candidate)
+}
+
+/// A composite key in the form two TRUE-equal composites share: integral
+/// Floats as Ints and element lists as lists of elements, at every depth.
+/// Map keys stay as they are, so their canonical order holds. `None` when a
+/// NULL sits anywhere inside: such a composite is never TRUE-equal.
+fn normalized<E>(
+    value: &GraphValue,
+    control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+) -> Result<Option<GraphValue>, ZSetError<E>> {
+    charge(control, ZSetEvent::Work)?;
+    Ok(Some(match value {
+        GraphValue::Scalar(CanonicalScalar::Null) => return Ok(None),
+        GraphValue::Scalar(CanonicalScalar::Float(number)) => match integral(number) {
+            Some(int) => GraphValue::Scalar(CanonicalScalar::Int(int)),
+            None => value.clone(),
+        },
+        GraphValue::Scalar(_)
+        | GraphValue::Vertex(_)
+        | GraphValue::Edge(_)
+        | GraphValue::Path(_) => value.clone(),
+        GraphValue::Vertices(ids) => {
+            GraphValue::List(ids.iter().map(|id| GraphValue::Vertex(*id)).collect())
+        }
+        GraphValue::Edges(ids) => {
+            GraphValue::List(ids.iter().map(|id| GraphValue::Edge(*id)).collect())
+        }
+        GraphValue::List(list) => match normalized_items(list, control)? {
+            Some(list) => GraphValue::List(list),
+            None => return Ok(None),
+        },
+        GraphValue::Map { keys, values } => match normalized_items(values, control)? {
+            Some(values) => GraphValue::Map {
+                keys: keys.clone(),
+                values,
+            },
+            None => return Ok(None),
+        },
+    }))
+}
+
+fn normalized_items<E>(
+    items: &[GraphValue],
+    control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+) -> Result<Option<Box<[GraphValue]>>, ZSetError<E>> {
+    let mut normalized_items = Vec::with_capacity(items.len());
+    for item in items {
+        match normalized(item, control)? {
+            Some(item) => normalized_items.push(item),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(normalized_items.into_boxed_slice()))
 }
 
 #[cfg(test)]
@@ -512,10 +569,11 @@ mod tests {
 
     #[test]
     fn dynamic_non_witness_rows_are_retained_and_outer_padded_independently() {
+        // NULL, and a composite holding a NULL anywhere, are never TRUE-equal.
         for value in [
             null(),
-            GraphValue::List(vec![int(7)].into_boxed_slice()),
-            GraphValue::map(vec![("k".into(), int(7))]).unwrap(),
+            GraphValue::List(vec![int(7), null()].into_boxed_slice()),
+            GraphValue::map(vec![("k".into(), null())]).unwrap(),
         ] {
             let left = row(vec![value.clone(), int(10)]);
             let right = row(vec![value, int(20)]);
@@ -547,6 +605,48 @@ mod tests {
                     RowJoinError::NegativeMultiplicity { side: 1 }
                 );
                 assert_eq!(join, seeded(spec, &l, &r));
+            }
+        }
+    }
+
+    /// A list or map key equals another element by element, Int 7 and Float
+    /// 7.0 alike at any depth, as membership::equal says (fgdb-2npty): the
+    /// probe keys both sides by one normalized form, and a different
+    /// composite stays in its own group.
+    #[test]
+    fn composite_keys_join_element_by_element_across_numeric_peers() {
+        let list = |items: Vec<GraphValue>| GraphValue::List(items.into_boxed_slice());
+        let pairs = [
+            (list(vec![int(7)]), list(vec![float(7.0)])),
+            (
+                GraphValue::map(vec![("k".into(), int(7))]).unwrap(),
+                GraphValue::map(vec![("k".into(), float(7.0))]).unwrap(),
+            ),
+            (
+                list(vec![list(vec![int(1)]), int(2)]),
+                list(vec![list(vec![float(1.0)]), float(2.0)]),
+            ),
+        ];
+        for (left_key, right_key) in pairs {
+            let left = row(vec![left_key, int(10)]);
+            let right = row(vec![right_key, int(20)]);
+            let other = row(vec![list(vec![int(8)]), int(30)]);
+            for kind in [RowJoinKind::Inner, RowJoinKind::Semi, RowJoinKind::Anti] {
+                let join = seeded(
+                    definition(kind, false, true),
+                    &vec![(left.clone(), 2)],
+                    &vec![(right.clone(), 3), (other.clone(), 1)],
+                );
+                let expected = match kind {
+                    RowJoinKind::Inner => {
+                        let mut cells = left.values().to_vec();
+                        cells.extend_from_slice(right.values());
+                        vec![(row(cells), 6)]
+                    }
+                    RowJoinKind::Semi => vec![(left.clone(), 2)],
+                    _ => Vec::new(),
+                };
+                assert_eq!(join.rows(), &bag(&expected), "{kind:?}");
             }
         }
     }

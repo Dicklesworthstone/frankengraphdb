@@ -599,12 +599,51 @@ fn row_keyed_property_matches_admit_only_the_posted_roots() {
         );
         assert!(db.query(&cx, unkeyed, &params, names, tight).is_err());
         // A list row may equal a stored list, which no scalar posting names,
-        // so seeding declines and the read keeps the scan. (The set predicate
-        // IR equates no two composites yet, so the scan's answer is not
-        // pinned here; fgdb-2npty notes the gap.)
-        let params = rows(vec![Some(GraphValue::List(Box::new([int(1), int(2)])))]);
-        db.query(&cx, vertex, &params, names, policy()).unwrap();
+        // so seeding declines and the read keeps the scan. The scan joins
+        // the list element by element (fgdb-2npty): [1, 2] and [1.0, 2] find
+        // vertex 401, while [1, null] is never TRUE-equal and finds nothing.
+        let list = |items: Vec<GraphValue>| GraphValue::List(items.into_boxed_slice());
+        let params = rows(vec![Some(list(vec![int(1), int(2)]))]);
+        assert_eq!(
+            xs(db.query(&cx, vertex, &params, names, policy()).unwrap()),
+            [4010]
+        );
         assert!(db.query(&cx, vertex, &params, names, tight).is_err());
+        let filtered =
+            "UNWIND $rows AS row MATCH (a:Node) WHERE a.id = row.id RETURN a.x AS x ORDER BY x";
+        for (key, expected) in [
+            (list(vec![float(1.0), int(2)]), vec![4010]),
+            (
+                list(vec![int(1), GraphValue::Scalar(CanonicalScalar::Null)]),
+                vec![],
+            ),
+            (list(vec![int(2), int(1)]), vec![]),
+        ] {
+            let params = rows(vec![Some(key)]);
+            for statement in [vertex, filtered] {
+                assert_eq!(
+                    xs(db.query(&cx, statement, &params, names, policy()).unwrap()),
+                    expected,
+                    "{statement}"
+                );
+            }
+        }
+        // A bare key list mixes a list key with a scalar one.
+        let keyed = GqlParameters::new()
+            .with_list("keys", vec![list(vec![int(1), int(2)]), int(3)])
+            .unwrap();
+        assert_eq!(
+            xs(db
+                .query(
+                    &cx,
+                    "UNWIND $keys AS key MATCH (a:Node {id: key}) RETURN a.x AS x ORDER BY x",
+                    &keyed,
+                    names,
+                    policy(),
+                )
+                .unwrap()),
+            [30, 4010]
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

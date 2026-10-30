@@ -124,7 +124,7 @@ impl GraphSetPredicateOp {
                             crate::algebra_exec::charge_payload(value, control)?;
                         }
                     }
-                    compare(left, right, *comparison)
+                    compare(left, right, *comparison, control)?
                 }
                 GraphSetPredicateOp::IsNull { operand, is_null } => Some(
                     resolve(operand, left_cells, right_cells, columns, control)?.is_null()
@@ -261,20 +261,10 @@ impl RowPredicate {
                                 | GraphSetColumnType::List
                         )
                     };
-                    // This IR does not equate two composites. A composite is
-                    // unequal to a scalar or an element (fgdb-v6ku6), which
-                    // can never hold one; it has no order.
-                    let atomic = |domain| {
-                        matches!(
-                            domain,
-                            GraphSetColumnType::Scalar
-                                | GraphSetColumnType::Vertex
-                                | GraphSetColumnType::Edge
-                        )
-                    };
-                    if (composite(left) && !(equality && atomic(right)))
-                        || (composite(right) && !(equality && atomic(left)))
-                    {
+                    // A composite equals another composite as the value
+                    // language says (fgdb-2npty) and is unequal to a scalar
+                    // or an element (fgdb-v6ku6); only (in)equality applies.
+                    if (composite(left) || composite(right)) && !equality {
                         return Err(Error::InvalidValueComparison { instruction });
                     }
                     // Relationships compare by EId, never endpoints or the
@@ -376,7 +366,7 @@ enum Cell<'a> {
     Vertex(fgdb_types::VId),
     Edge(fgdb_types::EId),
     /// A path, list, map or list of graph elements in a dynamic column.
-    Composite,
+    Composite(&'a GraphValue),
 }
 impl Cell<'_> {
     fn is_null(self) -> bool {
@@ -403,40 +393,56 @@ fn resolve<'a, E>(
                 GraphValue::Vertex(value) => Cell::Vertex(*value),
                 GraphValue::Edge(value) => Cell::Edge(*value),
                 GraphValue::Scalar(value) => Cell::Scalar(value),
-                GraphValue::Path(_)
+                composite @ (GraphValue::Path(_)
                 | GraphValue::Vertices(_)
                 | GraphValue::Edges(_)
                 | GraphValue::List(_)
-                | GraphValue::Map { .. } => Cell::Composite,
+                | GraphValue::Map { .. }) => Cell::Composite(composite),
             }
         }
         GraphSetOperand::Literal(value) => Cell::Scalar(value.value()),
     })
 }
-fn compare(left: Cell<'_>, right: Cell<'_>, comparison: IntegerComparison) -> Option<bool> {
+fn compare<E>(
+    left: Cell<'_>,
+    right: Cell<'_>,
+    comparison: IntegerComparison,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Option<bool>, E> {
     if left.is_null() || right.is_null() {
-        return None;
+        return Ok(None);
     }
-    match (left, right) {
+    Ok(match (left, right) {
         (Cell::Vertex(left), Cell::Vertex(right)) => Some(match comparison {
             IntegerComparison::Equal => left == right,
             IntegerComparison::NotEqual => left != right,
-            _ => return None,
+            _ => return Ok(None),
         }),
         (Cell::Edge(left), Cell::Edge(right)) => Some(match comparison {
             IntegerComparison::Equal => left == right,
             IntegerComparison::NotEqual => left != right,
-            _ => return None,
+            _ => return Ok(None),
         }),
         (Cell::Scalar(left), Cell::Scalar(right)) => {
             comparison.evaluate_scalar_pair(Some(left), Some(right))
         }
-        // This IR does not equate two composites: the private join probes
-        // and equality lookups key them as non-witnesses. It stays UNKNOWN.
-        (Cell::Composite, Cell::Composite) => None,
+        // Two composites compare as the value language compares them
+        // (fgdb-2npty): element by element, numeric peers equal, and a nested
+        // NULL makes an otherwise equal pair UNKNOWN. The join indexes key
+        // composites consistently (selected_cross, row_join's probe).
+        (Cell::Composite(left), Cell::Composite(right)) => {
+            use super::projection::membership;
+            return match comparison {
+                IntegerComparison::Equal => membership::equal(left, right, control),
+                IntegerComparison::NotEqual => {
+                    membership::equal(left, right, control).map(|equal| equal.map(|equal| !equal))
+                }
+                _ => membership::order(comparison, left, right, control),
+            };
+        }
         // Values of different domains are unequal and unordered (fgdb-v6ku6).
         _ => comparison.across_domains(),
-    }
+    })
 }
 fn append_operand(operand: &GraphSetOperand, bytes: &mut Vec<u8>) {
     match operand {

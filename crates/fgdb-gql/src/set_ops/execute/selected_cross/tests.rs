@@ -210,16 +210,69 @@ fn dynamic_scalar_vertex_and_incompatible_keys_use_the_same_predicate_equality_l
     let code = [equal(0, 1)];
     validate(2, &code);
     let actual = collect(&left, &right, &code, None, &mut allow).unwrap();
+    // Every non-NULL value equals exactly its identical counterpart: values
+    // of different domains are unequal, and a list equals a list element by
+    // element (fgdb-2npty), so the composite row is indexed and joins too.
     let expected: Vec<_> = left
         .iter()
-        .filter(|row| {
-            !row.values()[0].is_null()
-                && matches!(
-                    &row.values()[0],
-                    GraphValue::Scalar(_) | GraphValue::Vertex(_)
-                )
-        })
+        .filter(|row| !row.values()[0].is_null())
         .map(|row| GraphValueRow::from_owned_values(vec![row.values()[0].clone(); 2]))
+        .collect();
+    assert_eq!(actual, expected);
+}
+
+/// Composite keys join as the value language compares them (fgdb-2npty):
+/// element by element, Int and Float peers alike at any depth, an element
+/// list equal to the list of the same elements. A composite holding a NULL is
+/// never TRUE-equal, and a reordered list is a different key.
+#[test]
+fn composite_keys_join_element_by_element_across_numeric_peers() {
+    use fgdb_types::CanonicalF64;
+    let list = |items: Vec<GraphValue>| GraphValue::List(items.into_boxed_slice());
+    let float = |value: f64| GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(value)));
+    let map = |value: GraphValue| GraphValue::map(vec![("k".into(), value)]).unwrap();
+    let pairs = [
+        (
+            list(vec![scalar(Some(1)), scalar(Some(2))]),
+            list(vec![float(1.0), scalar(Some(2))]),
+        ),
+        (
+            list(vec![list(vec![scalar(Some(3))])]),
+            list(vec![list(vec![float(3.0)])]),
+        ),
+        (map(scalar(Some(4))), map(float(4.0))),
+        (
+            GraphValue::Vertices(vec![VId(5), VId(6)].into_boxed_slice()),
+            list(vec![GraphValue::Vertex(VId(5)), GraphValue::Vertex(VId(6))]),
+        ),
+    ];
+    let unmatched = [
+        list(vec![scalar(Some(1)), scalar(None)]),
+        list(vec![scalar(Some(2)), scalar(Some(1))]),
+        map(scalar(None)),
+    ];
+    let row = |value: GraphValue| GraphValueRow::from_owned_values(vec![value]);
+    let left: Vec<_> = pairs
+        .iter()
+        .map(|(left, _)| left.clone())
+        .chain(unmatched.iter().cloned())
+        .map(row)
+        .collect();
+    // The right side holds every peer, in reverse, plus the NULL-holding
+    // composites themselves, which still must not join.
+    let right: Vec<_> = pairs
+        .iter()
+        .rev()
+        .map(|(_, right)| right.clone())
+        .chain([unmatched[0].clone(), unmatched[2].clone()])
+        .map(row)
+        .collect();
+    let code = [equal(0, 1)];
+    validate(2, &code);
+    let actual = collect(&left, &right, &code, None, &mut allow).unwrap();
+    let expected: Vec<_> = pairs
+        .iter()
+        .map(|(left, right)| GraphValueRow::from_owned_values(vec![left.clone(), right.clone()]))
         .collect();
     assert_eq!(actual, expected);
 }
