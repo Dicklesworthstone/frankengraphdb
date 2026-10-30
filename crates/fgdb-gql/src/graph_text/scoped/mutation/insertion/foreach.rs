@@ -190,10 +190,55 @@ impl PreparedGraphForeachText {
                     steps.push(ChainTextStep::Mutation(Box::new((step, returning))));
                     next = after;
                 }
+                TokenKind::Word(word) if word.eq_ignore_ascii_case("MERGE") => {
+                    if PreparedGraphWriteChainText::named_merge_pattern(lexer.clone())? {
+                        lexer.next()?; // path name
+                        lexer.next()?; // equals
+                    }
+                    if PreparedGraphWriteChainText::relationship_merge(lexer)? {
+                        let (merge, returning, after) =
+                            crate::PreparedGraphEdgeMergeText::prepare_chained(
+                                body_text,
+                                declarations,
+                                resolve,
+                                from,
+                            )?;
+                        match (returning, after) {
+                            (Some(returning), Some((_, after))) => {
+                                steps.push(ChainTextStep::EdgeMerge(Box::new((
+                                    merge,
+                                    Some(returning),
+                                ))));
+                                next = Some(after);
+                            }
+                            (None, Some((keep, after))) => {
+                                steps.push(ChainTextStep::EdgeMergeRows(Box::new((merge, keep))));
+                                next = Some(after);
+                            }
+                            (returning, None) => {
+                                steps.push(ChainTextStep::EdgeMerge(Box::new((merge, returning))));
+                                next = None;
+                            }
+                        }
+                    } else {
+                        let (merge, after) =
+                            crate::mutation_text::PreparedGraphVertexMergeRowsText::prepare_step(
+                                body_text,
+                                relation,
+                                declarations,
+                                resolve,
+                                Some(from),
+                            )?;
+                        steps.push(ChainTextStep::VertexMerge(Box::new(merge)));
+                        next = after;
+                    }
+                }
                 _ => {
-                    return Err(
-                        expected(from.at, "CREATE, INSERT, SET or REMOVE in FOREACH").into(),
-                    );
+                    return Err(expected(
+                        from.at,
+                        "CREATE, INSERT, MERGE, SET or REMOVE in FOREACH",
+                    )
+                    .into());
                 }
             }
         }
@@ -417,16 +462,16 @@ impl Parser<'_> {
                     if brackets.is_empty()
                         && !matches!(previous, Some(TokenKind::Punct(b'.' | b':')))
                         && !matches!(previous, Some(TokenKind::Word(prior))
-                        if ["AS", "STARTS", "ENDS"].iter().any(|word| prior.eq_ignore_ascii_case(word))) =>
+                        if ["AS", "STARTS", "ENDS", "ON"].iter().any(|word| prior.eq_ignore_ascii_case(word))) =>
                 {
-                    if ["CREATE", "INSERT", "SET", "REMOVE"]
+                    if ["CREATE", "INSERT", "MERGE", "SET", "REMOVE"]
                         .iter()
                         .any(|clause| word.eq_ignore_ascii_case(clause))
                     {
                         clauses += 1;
                     } else if [
-                        "FOREACH", "MERGE", "DELETE", "DETACH", "MATCH", "OPTIONAL", "WITH",
-                        "RETURN", "UNWIND", "CALL", "UNION",
+                        "FOREACH", "DELETE", "DETACH", "MATCH", "OPTIONAL", "WITH", "RETURN",
+                        "UNWIND", "CALL", "UNION",
                     ]
                     .iter()
                     .any(|clause| word.eq_ignore_ascii_case(clause))
@@ -434,7 +479,7 @@ impl Parser<'_> {
                         return Err(error(
                             token.at,
                             GraphPatternTextErrorKind::Expected(
-                                "CREATE, INSERT, SET or REMOVE in FOREACH",
+                                "CREATE, INSERT, MERGE, SET or REMOVE in FOREACH",
                             ),
                         ));
                     }
@@ -454,13 +499,36 @@ mod tests {
         GqlListParameter, GqlParameterValue, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
         GraphIntegerError, GraphWriteChainCursor, GraphWriteChainStep, GraphWriteChainTask,
     };
+    use fgdb_delta_types::ElementId;
+    use fgdb_types::{CanonicalPropertyValue, CanonicalScalar, VId};
 
     fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         match (kind, name) {
             (GraphSymbolKind::Label, "F") => Some(GraphSymbol::Label(LabelId(1))),
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
             (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
             (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
             _ => None,
+        }
+    }
+
+    #[test]
+    fn merge_bodies_keep_native_vertex_relationship_and_on_clause_compilers() {
+        for text in [
+            "FOREACH (x IN [1,1,2] | MERGE (:F {p:x}))",
+            "FOREACH (row IN [{p:1},{p:1},{p:2}] | MERGE (n:F {p:row.p}) ON CREATE SET n.q=1 ON MATCH SET n.q=n.q+1)",
+            "FOREACH (x IN [1,2] | MERGE (a:F {p:x}) MERGE (b:F {p:x+1}) MERGE (a)-[r:R]->(b) ON MATCH SET r.q=r.q+1 ON CREATE SET r.q=1)",
+            "MATCH (a:F),(b:F) FOREACH (x IN [1,2] | MERGE route=(a)-[r:R {p:x}]->(b) CREATE (:F {p:length(route)})) RETURN a,b",
+            "MATCH (a:F),(b:F) FOREACH (x IN [1,2] | MERGE (a)-[r:R {p:a.p+x}]->(b) SET a.q=x)",
+            "MATCH (a:F) FOREACH (x IN [1,2] | MERGE (a)-[:R {p:a.p+x}]->(b:F {q:a.p+2}))",
+            "WITH 7 AS local FOREACH (x IN [1,2] | MERGE (n:F {p:x}) CREATE (n)-[:R]->(:F)) RETURN local",
+            "FOREACH (x IN [] | MERGE (n:F)) MATCH (m:F) RETURN m",
+        ] {
+            let template = PreparedGraphWriteChainText::prepare(text, RelationId(1), symbols)
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            template
+                .bind_parameters(&GqlParameters::new())
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
         }
     }
 
@@ -496,7 +564,11 @@ mod tests {
             "FOREACH (x IN [] | SET missing.p=1)",
             "FOREACH (x IN [] |)",
             "FOREACH (x IN [] | FOREACH (y IN [] | CREATE (:F)))",
-            "FOREACH (x IN [] | MERGE (:F))",
+            "FOREACH (x IN [] | MERGE (local:F)) RETURN local",
+            "FOREACH (x IN [] | MERGE (a:F)-[r:R]->(b:F)) RETURN a",
+            "FOREACH (x IN [] | MERGE path=(a:F)-[r:R]->(b:F)) RETURN path",
+            "FOREACH (x IN [] | MERGE (n:F {p:missing}))",
+            "FOREACH (x IN [] | MERGE (n:F) MATCH (m:F) SET m.p=1)",
             "MATCH (n:F) FOREACH (x IN [] | DELETE n)",
             "MATCH (n:F) FOREACH (x IN [] | DETACH DELETE n)",
             "FOREACH (x IN [] | CREATE (:F) WITH x CREATE (:F))",
@@ -560,6 +632,24 @@ mod tests {
         reused
             .bind_parameters(&GqlParameters::new().with_int64("x", 7).unwrap())
             .unwrap();
+
+        let merged = PreparedGraphWriteChainText::prepare_with_parameter_types(
+            "FOREACH (x IN $xs | MERGE (n:F {p:x}) ON CREATE SET n.q=$seed ON MATCH SET n.q=n.q+$step) RETURN $seed AS seed, $step AS step",
+            RelationId(1),
+            &[("seed", GqlParameterType::Int64), ("step", GqlParameterType::Int64)],
+            symbols,
+        )
+        .unwrap();
+        assert_eq!(merged.parameter_schema().len(), 3);
+        arguments
+            .insert(
+                "seed",
+                GqlParameterValue::Scalar(
+                    crate::GqlScalarParameter::new(CanonicalScalar::Int(4)).unwrap(),
+                ),
+            )
+            .unwrap();
+        merged.bind_parameters(&arguments).unwrap();
     }
 
     fn no_patterns(
@@ -567,6 +657,250 @@ mod tests {
         _: GqlQueryPolicy,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<(), ()>> {
         panic!("source-free FOREACH must not request graph patterns")
+    }
+
+    #[test]
+    fn repeated_map_keys_and_merge_local_rows_use_the_native_scheduler() {
+        let text = "WITH 99 AS outer FOREACH (row IN [{p:1},{p:1},{p:2}] | MERGE (n:F {p:row.p}) ON CREATE SET n.q=1 ON MATCH SET n.q=n.q+1 CREATE (n)-[:R]->(:F)) RETURN outer";
+        let chain = PreparedGraphWriteChainText::prepare(text, RelationId(1), symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let policy = GqlQueryPolicy::new(1_000, 1_000, 1_000_000, 1_000_000);
+        let mut cursor = GraphWriteChainCursor::new(&chain, true);
+        let mut rows = None;
+        let mut keys = Vec::new();
+        let mut creates = 0;
+        while let Some(task) = cursor
+            .next(&mut rows, &mut |_| Ok::<_, GraphIntegerError>(()))
+            .unwrap()
+        {
+            match task {
+                GraphWriteChainTask::ForeachInput { foreach } => {
+                    rows = Some(
+                        foreach
+                            .execute_input_governed(rows.take(), policy, no_patterns, || Ok(()))
+                            .unwrap()
+                            .value,
+                    );
+                }
+                GraphWriteChainTask::ForeachCollection { foreach } => {
+                    rows = Some(
+                        foreach
+                            .execute_collection_governed(
+                                rows.take(),
+                                policy,
+                                no_patterns,
+                                || Ok(()),
+                            )
+                            .unwrap()
+                            .value,
+                    );
+                }
+                GraphWriteChainTask::Write {
+                    step,
+                    continues,
+                    delivers,
+                } => {
+                    assert!(!delivers);
+                    match step {
+                        GraphWriteChainStep::VertexMerge(merge) => {
+                            assert!(continues);
+                            let actions = merge.actions().unwrap();
+                            assert_eq!(actions.on_create.len(), 1);
+                            assert_eq!(actions.on_match.len(), 1);
+                            let selected = merge
+                                .select_governed::<(), (), ()>(
+                                    rows.take(),
+                                    policy,
+                                    no_patterns,
+                                    || Ok(()),
+                                )
+                                .unwrap()
+                                .value;
+                            assert_eq!(selected.len(), 1);
+                            keys.push(
+                                merge
+                                    .tuple::<(), (), ()>(0, &selected[0], &mut |_| Ok(()))
+                                    .unwrap(),
+                            );
+                            let mut carried = selected[0].values()[..merge.keep].to_vec();
+                            carried.push(GraphValue::Vertex(VId(7)));
+                            rows = Some(vec![GraphValueRow::from_owned_values(carried)]);
+                        }
+                        GraphWriteChainStep::Insert(_) => {
+                            assert!(!continues);
+                            let local = rows.take().unwrap();
+                            assert_eq!(local[0].len(), 3);
+                            assert_eq!(local[0].values()[2], GraphValue::Vertex(VId(7)));
+                            creates += 1;
+                        }
+                        other => panic!("unexpected local step: {other:?}"),
+                    }
+                }
+                GraphWriteChainTask::ForeachOutput { foreach, delivers } => {
+                    assert!(delivers);
+                    rows = Some(
+                        foreach
+                            .execute_output_governed(rows.take(), policy, no_patterns, || Ok(()))
+                            .unwrap()
+                            .value,
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            keys,
+            vec![
+                vec![CanonicalScalar::Int(1)],
+                vec![CanonicalScalar::Int(1)],
+                vec![CanonicalScalar::Int(2)],
+            ]
+        );
+        assert_eq!(creates, 3);
+        assert_eq!(
+            rows.unwrap()[0].values(),
+            &[GraphValue::Scalar(CanonicalScalar::Int(99))]
+        );
+    }
+
+    struct CurrentProperty {
+        value: i64,
+        reads: usize,
+    }
+
+    impl crate::GraphSetSource<(), ()> for CurrentProperty {
+        fn pattern(
+            &mut self,
+            pattern: &PreparedGraphPattern<GraphValueRow>,
+            policy: GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<(), ()>> {
+            no_patterns(pattern, policy)
+        }
+
+        fn element_property(
+            &mut self,
+            element: ElementId,
+            key: PropertyKeyId,
+        ) -> Option<Result<Option<CanonicalPropertyValue>, ()>> {
+            assert_eq!(element, ElementId::Vertex(VId(7)));
+            assert_eq!(key, PropertyKeyId(1));
+            self.reads += 1;
+            Some(Ok(Some(CanonicalPropertyValue::Scalar(
+                CanonicalScalar::Int(self.value),
+            ))))
+        }
+    }
+
+    #[test]
+    fn merge_pattern_properties_use_each_iterations_governed_input_cut() {
+        for text in [
+            "MATCH (n:F) FOREACH (x IN [1,2] | MERGE (m:F {p:n.p+x}))",
+            "MATCH (n:F) FOREACH (x IN [1,2] | MERGE (n)-[:R {p:n.p+x}]->(m:F {q:n.p+2}))",
+        ] {
+            let chain = PreparedGraphWriteChainText::prepare(text, RelationId(1), symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            let [GraphWriteChainStep::Foreach(foreach)] = chain.steps() else {
+                panic!("one native FOREACH step")
+            };
+            let mut source = CurrentProperty { value: 0, reads: 0 };
+            let policy = GqlQueryPolicy::new(1_000, 1_000, 1_000_000, 1_000_000);
+            for current in [10, 20] {
+                source.value = current;
+                let input = Some(vec![GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(7)),
+                    GraphValue::Scalar(CanonicalScalar::Int(1)),
+                ])]);
+                match &foreach.body().steps()[0] {
+                    GraphWriteChainStep::VertexMerge(merge) => {
+                        let rows = merge
+                            .select_governed_with_source::<(), (), ()>(
+                                input,
+                                policy,
+                                &mut source,
+                                || Ok(()),
+                            )
+                            .unwrap()
+                            .value;
+                        assert_eq!(
+                            merge
+                                .tuple::<(), (), ()>(0, &rows[0], &mut |_| Ok(()),)
+                                .unwrap(),
+                            vec![CanonicalScalar::Int(current + 1)]
+                        );
+                    }
+                    GraphWriteChainStep::EdgeUpsert(upsert) => {
+                        let merge = upsert.merge();
+                        let rows = merge
+                            .select_governed_with_source::<(), (), ()>(
+                                input,
+                                policy,
+                                &mut source,
+                                || Ok(()),
+                            )
+                            .unwrap()
+                            .value;
+                        assert_eq!(merge.destination_column(), 2);
+                        assert_eq!(
+                            rows[0].values()[2],
+                            GraphValue::Scalar(CanonicalScalar::Null)
+                        );
+                        assert_eq!(
+                            merge
+                                .row_values::<(), (), ()>(0, &rows[0], &mut |_| Ok(()),)
+                                .unwrap()
+                                .0,
+                            vec![(
+                                PropertyKeyId(1),
+                                CanonicalPropertyValue::Scalar(CanonicalScalar::Int(current + 1),)
+                            )]
+                        );
+                        assert_eq!(
+                            rows[0].values().last(),
+                            Some(&GraphValue::Scalar(CanonicalScalar::Int(current + 2),))
+                        );
+                    }
+                    other => panic!("unexpected MERGE step: {other:?}"),
+                }
+            }
+            assert!(source.reads >= 2);
+        }
+    }
+
+    #[test]
+    fn merge_input_projection_does_not_evaluate_on_branch_values() {
+        let chain = PreparedGraphWriteChainText::prepare(
+            "MATCH (n:F) FOREACH (x IN [1] | MERGE (m:F {p:x}) ON CREATE SET m.q=n.p)",
+            RelationId(1),
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let [GraphWriteChainStep::Foreach(foreach)] = chain.steps() else {
+            panic!("one native FOREACH step")
+        };
+        let GraphWriteChainStep::VertexMerge(merge) = &foreach.body().steps()[0] else {
+            panic!("one native vertex MERGE")
+        };
+        let mut source = CurrentProperty { value: 5, reads: 0 };
+        let rows = merge
+            .select_governed_with_source::<(), (), ()>(
+                Some(vec![GraphValueRow::from_owned_values(vec![
+                    GraphValue::Vertex(VId(7)),
+                    GraphValue::Scalar(CanonicalScalar::Int(1)),
+                ])]),
+                GqlQueryPolicy::new(1_000, 1_000, 1_000_000, 1_000_000),
+                &mut source,
+                || Ok(()),
+            )
+            .unwrap()
+            .value;
+        assert_eq!(rows[0].len(), 2);
+        assert_eq!(source.reads, 0);
+        assert_eq!(merge.actions().unwrap().on_create.len(), 1);
     }
 
     #[test]

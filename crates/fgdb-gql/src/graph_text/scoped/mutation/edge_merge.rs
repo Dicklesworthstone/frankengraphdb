@@ -824,6 +824,10 @@ impl PreparedGraphEdgeMergeText {
             .with_zones(resolve.time_zones())
             .resume_after(from.boundary, &from.parameters, from.at)?;
         parser.chain_write = true;
+        // Owned FOREACH rows carry identities directly. Their pattern fields
+        // use the governed native projection assembled after endpoint padding
+        // in bind_values, before this occurrence selects or creates a pattern.
+        parser.call_element_reads = true;
         let (source, schema) = if parser.is_word("MATCH") {
             let (source, row) = parser.owned_match_row_prefix(statement, from.row)?;
             (Some(source), row)
@@ -1481,6 +1485,21 @@ impl PreparedGraphEdgeMergeText {
                 kind: crate::GraphSetTextErrorKind::ProjectionBuild(source),
             }.into())
         };
+        let mut prepare_input = |input: crate::PreparedGraphSet| -> Result<
+            crate::PreparedGraphSet,
+            GraphEdgeMergeTextError,
+        > {
+            Ok(super::merge::project_merge_input(
+                pad(input)?,
+                row_properties
+                    .iter_mut()
+                    .map(|(_, value)| value)
+                    .chain(unbound.iter_mut().flat_map(|(_, _, fields)| {
+                        fields.iter_mut().map(|(_, value)| value)
+                    })),
+                self.input.return_at(),
+            )?)
+        };
         // A NULL argument refuses as NullProperty: it can neither match nor
         // be created.
         let merge = match &self.input {
@@ -1492,7 +1511,7 @@ impl PreparedGraphEdgeMergeText {
                 properties,
             ),
             EdgeMergeTextInput::Row { input, .. } => PreparedGraphEdgeMerge::prepare_relation(
-                pad(input.bind_values(values)?)?,
+                prepare_input(input.bind_values(values)?)?,
                 self.relation,
                 self.source,
                 self.destination,
@@ -1500,7 +1519,7 @@ impl PreparedGraphEdgeMergeText {
             ),
             EdgeMergeTextInput::Multipart { input, .. } => {
                 PreparedGraphEdgeMerge::prepare_relation(
-                    pad(input.bind_values(values)?)?,
+                    prepare_input(input.bind_values(values)?)?,
                     self.relation,
                     self.source,
                     self.destination,

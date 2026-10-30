@@ -30,6 +30,59 @@ pub(super) struct MergeProperty<'a> {
     pub(super) value: VertexMergeValueTemplate,
 }
 
+/// Pattern values that can dereference an input identity belong to the
+/// governed input relation, before the MERGE collector can allocate anything.
+/// Its ordinary projection preserves occurrences and the original row prefix;
+/// only the private tuple slots are appended. ON actions stay branch-local.
+pub(super) fn project_merge_input<'a>(
+    input: crate::PreparedGraphSet,
+    values: impl Iterator<Item = &'a mut crate::vertex_merge::GraphVertexMergeRowValue>,
+    at: usize,
+) -> Result<crate::PreparedGraphSet, crate::GraphSetTextError> {
+    use crate::vertex_merge::GraphVertexMergeRowValue;
+
+    let width = input.column_types().len();
+    let mut projection: Vec<_> = input
+        .columns()
+        .iter()
+        .enumerate()
+        .map(|(column, name)| {
+            GraphSetProjection::new(name.clone(), crate::GraphSetValue::Column(column))
+        })
+        .collect();
+    for value in values {
+        if !matches!(value, GraphVertexMergeRowValue::Computed(expression)
+            if expression.may_read_element_properties())
+        {
+            continue;
+        }
+        let column = projection.len();
+        let GraphVertexMergeRowValue::Computed(expression) =
+            core::mem::replace(value, GraphVertexMergeRowValue::Column(column))
+        else {
+            unreachable!("only computed MERGE values enter the input projection")
+        };
+        let mut suffix = column;
+        let name = loop {
+            let name = format!("__fg_merge_value_{suffix}");
+            if projection.iter().all(|item| item.name() != name) {
+                break name;
+            }
+            suffix += 1;
+        };
+        projection.push(GraphSetProjection::new(name, expression));
+    }
+    if projection.len() == width {
+        return Ok(input);
+    }
+    input
+        .project_ordered_output(projection)
+        .map_err(|source| crate::GraphSetTextError {
+            offset: at,
+            kind: crate::GraphSetTextErrorKind::ProjectionBuild(source),
+        })
+}
+
 /// A MERGE property map refusal, mapped by each MERGE form onto its own
 /// error type: too many fields, a repeated key, or a malformed value.
 pub(super) enum MergeMapError {
@@ -3009,6 +3062,10 @@ impl PreparedGraphVertexMergeRowsText {
             }
         };
         parser.chain_write = true;
+        // A direct owned row, including a FOREACH member, may carry identities
+        // without hidden property cells. Computed pattern reads are projected
+        // by bind_parameters through the host's current governed input source.
+        parser.call_element_reads = true;
         let keep = parser.visible_width(&row);
         let (variable, parsed_labels, parsed_properties) = parser.vertex_merge_row_pattern(&row)?;
         // ON MATCH SET, ON CREATE SET and SET name the MERGE vertex; their
@@ -3358,10 +3415,29 @@ impl PreparedGraphVertexMergeRowsText {
         let input = match &self.input {
             VertexMergeRowsTextInput::Unit => GraphVertexMergeRowsInput::Unit,
             VertexMergeRowsTextInput::Owned(types) => {
-                GraphVertexMergeRowsInput::Owned(types.clone())
+                let input = crate::PreparedGraphSet::owned(
+                    (0..types.len())
+                        .map(|column| format!("__fg_merge_input_{column}"))
+                        .collect(),
+                    types.clone(),
+                );
+                let input = project_merge_input(
+                    input,
+                    properties.iter_mut().map(|(_, value)| value),
+                    self.end,
+                )?;
+                if input.reads_elements() {
+                    GraphVertexMergeRowsInput::Relation(Box::new(input))
+                } else {
+                    GraphVertexMergeRowsInput::Owned(types.clone())
+                }
             }
             VertexMergeRowsTextInput::Relation(input) => {
-                GraphVertexMergeRowsInput::Relation(Box::new(input.bind_values(&values)?))
+                GraphVertexMergeRowsInput::Relation(Box::new(project_merge_input(
+                    input.bind_values(&values)?,
+                    properties.iter_mut().map(|(_, value)| value),
+                    self.end,
+                )?))
             }
         };
         let bind_actions =

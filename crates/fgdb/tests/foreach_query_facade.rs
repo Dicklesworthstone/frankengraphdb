@@ -1,7 +1,7 @@
 //! Public write dispatch keeps FOREACH binding, scope and atomicity intact.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, QueryResult, QueryValue};
+use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, QueryValue};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
@@ -13,6 +13,7 @@ use std::convert::Infallible;
 const R: RelationId = RelationId(1);
 const L: LabelId = LabelId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
+const Q: PropertyKeyId = PropertyKeyId(2);
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
@@ -26,6 +27,7 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Label, "F") => Some(GraphSymbol::Label(L)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+        (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
         _ => None,
     }
 }
@@ -346,6 +348,74 @@ fn body_create_fields_read_the_current_staged_element_before_each_allocation() {
                 .map(|value| vec![(P, CanonicalScalar::Int(value).into())])
                 .collect::<Vec<_>>()
         );
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn parameterized_merge_upserts_publish_once_and_survive_reopen() {
+    let ((), report) = run_async_under_lab(0xf0ec_1010, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&contexts.commit(), vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let pinned = db.read_session().unwrap();
+        let basis = db.frontier().unwrap();
+        let parameters = GqlParameters::new()
+            .with_list(
+                "rows",
+                [(1, 2), (2, 4), (1, 5)]
+                    .into_iter()
+                    .map(|(key, delta)| {
+                        GraphValue::map(vec![
+                            ("key".into(), int(key)),
+                            ("delta".into(), int(delta)),
+                        ])
+                        .unwrap()
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let original = parameters.canonical_bytes();
+        let mut next = 100_u128;
+        let result = db
+            .query_write(
+                &contexts.txn(),
+                &contexts.query(),
+                &contexts.commit(),
+                "FOREACH (row IN $rows | MERGE (n:F {p:row.key}) \
+                 ON CREATE SET n.q=0 SET n.q=n.q+row.delta) \
+                 MATCH (n:F) RETURN n.p AS key, n.q AS total ORDER BY key",
+                &parameters,
+                symbols,
+                R,
+                policy(2),
+                |_| {
+                    next += 1;
+                    Ok::<_, Infallible>(ElementId::Vertex(VId(next)))
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows(result, &["key", "total"]),
+            vec![vec![int(1), int(7)], vec![int(2), int(4)]]
+        );
+        assert_eq!(next, 102, "a repeated map key must reuse the staged vertex");
+        assert_eq!(parameters.canonical_bytes(), original);
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(db.delta_since(basis).unwrap().count(), 1);
+        assert!(pinned.vertices().unwrap().is_empty());
+        let expected = db.vertices().unwrap();
+        assert_eq!(expected.len(), 2);
+        drop(db);
+        let reopened = Database::open_with_vfs(&contexts.commit(), vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(reopened.vertices().unwrap(), expected);
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
