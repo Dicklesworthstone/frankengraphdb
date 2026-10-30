@@ -130,6 +130,7 @@ fn prepare_root(
             | Op::Concat
             | Op::Power
             | Op::Atan2
+            | Op::RoundTo
             | Op::StartsWith
             | Op::EndsWith
             | Op::Contains
@@ -164,7 +165,7 @@ fn prepare_root(
                 }
                 continue;
             }
-            if matches!(op, Op::Numeric(_)) {
+            if matches!(op, Op::Numeric(_)) || (matches!(op, Op::RoundTo) && position == 0) {
                 if !matches!(
                     nodes[child].kind,
                     Kind::Null | Kind::Integer | Kind::Float | Kind::Dynamic
@@ -201,6 +202,7 @@ fn prepare_root(
                 } else {
                     Kind::Integer
                 }),
+                Op::RoundTo if position == 1 => Some(Kind::Integer),
                 _ => None,
             };
             if expected.is_some_and(|expected| !expected.accepts(nodes[child].kind)) {
@@ -332,7 +334,7 @@ fn prepare_root(
             | Op::Concat
             | Op::ToText => Kind::Text,
             Op::Numeric(GraphNumericFunction::Sign) => Kind::Integer,
-            Op::Numeric(_) | Op::Power | Op::Atan2 => Kind::Float,
+            Op::Numeric(_) | Op::Power | Op::Atan2 | Op::RoundTo => Kind::Float,
             _ => Kind::Integer,
         };
         let numeric_arithmetic = !integer_root
@@ -358,7 +360,7 @@ fn prepare_root(
                     | CanonicalScalar::Duration(_)
             ),
             Op::Numeric(GraphNumericFunction::Sign) => false,
-            Op::Numeric(_) | Op::Power | Op::Atan2 => true,
+            Op::Numeric(_) | Op::Power | Op::Atan2 | Op::RoundTo => true,
             Op::Binary(GraphIntegerBinary::NullIf) => nodes[children[0]].may_float,
             Op::Unary(_) | Op::Binary(_) => numeric_arithmetic,
             Op::Coalesce => children.iter().any(|&child| nodes[child].may_float),
@@ -519,6 +521,7 @@ fn prepare_root(
                     Op::Concat => Some(Instruction::Concat),
                     Op::Power => Some(Instruction::Power),
                     Op::Atan2 => Some(Instruction::Atan2),
+                    Op::RoundTo => Some(Instruction::RoundTo),
                     Op::StartsWith => Some(Instruction::StartsWith),
                     Op::EndsWith => Some(Instruction::EndsWith),
                     Op::Contains => Some(Instruction::Contains),
@@ -596,6 +599,7 @@ fn prepare_root(
                     | Op::Concat
                     | Op::Power
                     | Op::Atan2
+                    | Op::RoundTo
                     | Op::StartsWith
                     | Op::EndsWith
                     | Op::Contains

@@ -186,6 +186,10 @@ pub enum GraphIntegerOp {
     /// openCypher `atan2(y, x)`: the angle of the point (x, y), a float in
     /// (-pi, pi]; NULL when either operand is. The pinned kernel's.
     Atan2,
+    /// Neo4j's `round(value, precision)`: the value's shortest decimal
+    /// spelling rounded half away from zero to `precision` fraction digits,
+    /// a float; NULL when either operand is. See `round_to`.
+    RoundTo,
     /// An openCypher one-operand numeric function over a number.
     Numeric(GraphNumericFunction),
     /// openCypher `text =~ pattern`: a whole-string match of a pattern
@@ -318,6 +322,7 @@ impl GraphIntegerOp {
             Self::ToBoolean => bytes.push(37),
             Self::Power => bytes.push(38),
             Self::Atan2 => bytes.push(39),
+            Self::RoundTo => bytes.push(49),
             Self::Numeric(function) => bytes.extend_from_slice(&[34, function.tag()]),
             Self::Matches(regex) => {
                 bytes.push(32);
@@ -386,6 +391,7 @@ impl core::fmt::Debug for GraphIntegerOp {
             Self::ToBoolean => f.write_str("ToBoolean"),
             Self::Power => f.write_str("Power"),
             Self::Atan2 => f.write_str("Atan2"),
+            Self::RoundTo => f.write_str("RoundTo"),
             Self::Numeric(function) => write!(f, "{function:?}"),
             Self::Matches(_) => f.write_str("Matches([REDACTED])"),
             Self::Substring => f.write_str("Substring"),
@@ -708,6 +714,7 @@ enum Instruction {
     ToBoolean,
     Power,
     Atan2,
+    RoundTo,
     Numeric(GraphNumericFunction),
     Matches(Box<crate::regex::CompiledRegex>),
     Substring,
@@ -1289,6 +1296,14 @@ impl GraphIntegerExpression {
                     let result = atan2(y, &x).map_err(failure)?;
                     *y = result.into();
                 }
+                Instruction::RoundTo => {
+                    let precision = stack.pop().expect("validated round precision operand");
+                    let value = stack.last_mut().expect("validated round value operand");
+                    control(GlaExecutionEvent::Work)
+                        .map_err(GraphIntegerEvaluationError::Control)?;
+                    let result = round_to(value, &precision, at, control)?;
+                    *value = result.into();
+                }
                 Instruction::Numeric(function) => {
                     let value = stack.last_mut().expect("validated numeric operand");
                     let result = numeric(value, *function, at, control)?;
@@ -1681,6 +1696,7 @@ impl GraphIntegerExpression {
                 Instruction::ToBoolean => bytes.push(37),
                 Instruction::Power => bytes.push(38),
                 Instruction::Atan2 => bytes.push(39),
+                Instruction::RoundTo => bytes.push(49),
                 Instruction::Numeric(function) => bytes.extend_from_slice(&[34, function.tag()]),
                 Instruction::Matches(regex) => {
                     bytes.push(29);
@@ -2092,6 +2108,96 @@ fn float_text(value: fgdb_types::CanonicalF64) -> String {
     } else {
         format!("{value:?}")
     }
+}
+
+/// Neo4j's `round(value, precision)`: the value's shortest decimal spelling
+/// (the digits toString writes) rounded half away from zero to `precision`
+/// fraction digits, read back as the nearest binary64, as
+/// `BigDecimal.valueOf(value).setScale(precision, HALF_UP).doubleValue()`
+/// is. It is decimal rounding: 1.005 rounds to 1.01 although its binary64
+/// lies below the tie. Integers, counts and averages become the nearest
+/// binary64 first, as in the one-operand functions; text refuses. NaN and the
+/// infinities are unchanged, a rounded zero is +0.0, a negative precision is
+/// NumberOutOfRange, and NULL in either operand is NULL.
+fn round_to<E>(
+    cell: &ExpressionCell<'_>,
+    precision: &ExpressionCell<'_>,
+    instruction: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<CanonicalScalar, GraphIntegerEvaluationError<E>> {
+    use fgdb_types::CanonicalF64;
+    let failure =
+        |kind| GraphIntegerEvaluationError::Value(GraphIntegerError { instruction, kind });
+    if let ExpressionCell::Scalar(value) = cell
+        && matches!(value.as_ref(), CanonicalScalar::Text(_))
+    {
+        return Err(failure(GraphIntegerErrorKind::IncompatibleOperands));
+    }
+    let CanonicalScalar::Float(value) =
+        numeric(cell, GraphNumericFunction::ToFloat, instruction, control)?
+    else {
+        return Ok(CanonicalScalar::Null);
+    };
+    let Some(precision) = precision.integer().map_err(failure)? else {
+        return Ok(CanonicalScalar::Null);
+    };
+    if precision < 0 {
+        return Err(failure(GraphIntegerErrorKind::NumberOutOfRange));
+    }
+    let value = value.get();
+    if !value.is_finite() {
+        return Ok(CanonicalScalar::Float(CanonicalF64::new(value)));
+    }
+    if value == 0.0 {
+        // BigDecimal has no negative zero.
+        return Ok(CanonicalScalar::Float(CanonicalF64::new(0.0)));
+    }
+    // `d.ddde±x`: the shortest digits that read back as the value, so the
+    // value is the integer of `digits` times 10^(exponent + 1 - len).
+    control(GlaExecutionEvent::ScratchEntry).map_err(GraphIntegerEvaluationError::Control)?;
+    let spelled = format!("{:e}", value.abs());
+    let (mantissa, exponent) = spelled
+        .split_once('e')
+        .expect("LowerExp writes an exponent");
+    let digits: Vec<u8> = mantissa.bytes().filter(u8::is_ascii_digit).collect();
+    let exponent: i128 = exponent
+        .parse()
+        .expect("LowerExp writes a decimal exponent");
+    // The digits at or above 10^-precision.
+    let kept = (exponent + 1).saturating_add(precision);
+    if kept >= digits.len() as i128 {
+        return Ok(CanonicalScalar::Float(CanonicalF64::new(value)));
+    }
+    let (mut rounded, up) = match usize::try_from(kept) {
+        Ok(kept) => (digits[..kept].to_vec(), digits[kept] >= b'5'),
+        // Every digit lies below 10^-precision, and the first dropped one
+        // is an implicit zero.
+        Err(_) => (Vec::new(), false),
+    };
+    if up {
+        // Half away from zero on the magnitude; a carry may add a digit in
+        // front, which leaves the scale below unchanged.
+        match rounded.iter().rposition(|digit| *digit != b'9') {
+            Some(at) => {
+                rounded[at] += 1;
+                rounded[at + 1..].fill(b'0');
+            }
+            None => {
+                rounded.fill(b'0');
+                rounded.insert(0, b'1');
+            }
+        }
+    }
+    if rounded.iter().all(|digit| *digit == b'0') {
+        return Ok(CanonicalScalar::Float(CanonicalF64::new(0.0)));
+    }
+    let scale = exponent + 1 - kept.max(0);
+    let sign = if value < 0.0 { "-" } else { "" };
+    let rounded = core::str::from_utf8(&rounded).expect("ASCII digits");
+    let result: f64 = format!("{sign}{rounded}e{scale}")
+        .parse()
+        .expect("a finite decimal reads back");
+    Ok(CanonicalScalar::Float(CanonicalF64::new(result)))
 }
 
 /// The one-operand numeric functions. Integers (counts and exact averages

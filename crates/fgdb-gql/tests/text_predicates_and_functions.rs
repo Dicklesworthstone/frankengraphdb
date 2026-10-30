@@ -3460,6 +3460,75 @@ fn numeric_functions_round_once_and_follow_opencypher_ties_and_specials() {
     );
 }
 
+/// Neo4j's `round(value, precision)` rounds the value's shortest decimal
+/// spelling half away from zero, as `BigDecimal.valueOf(value)
+/// .setScale(precision, HALF_UP)` does, then reads it back as binary64. It is
+/// decimal, not binary: 1.005 is 1.01 although its binary64 lies below the
+/// tie. A carry can add a digit, a rounded zero is +0.0, integers convert
+/// first, NaN and the infinities pass through, NULL is NULL, and a negative
+/// precision is refused. One-argument round keeps openCypher's ties toward
+/// positive infinity (round(-2.5) is -2.0); the precision form's HALF_UP
+/// makes round(-2.5, 0) -3.0, as in Neo4j.
+#[test]
+fn round_with_a_precision_rounds_the_shortest_decimal_half_up() {
+    let float = |value: f64| CanonicalScalar::Float(fgdb_types::CanonicalF64::new(value));
+    for (input, expression, expected) in [
+        (float(1.234567), "round(n.text, 3)", float(1.235)),
+        (float(1.005), "round(n.text, 2)", float(1.01)),
+        (float(2.5), "round(n.text, 0)", float(3.0)),
+        (float(-2.5), "round(n.text, 0)", float(-3.0)),
+        (float(-2.5), "round(n.text)", float(-2.0)),
+        (float(1234.5678), "round(n.text, 2)", float(1234.57)),
+        (float(1299.97), "round(n.text, 1)", float(1300.0)),
+        (float(999.96), "round(n.text, 1)", float(1000.0)),
+        (float(0.004), "round(n.text, 2)", float(0.0)),
+        (float(0.005), "round(n.text, 2)", float(0.01)),
+        (float(1e-7), "round(n.text, 3)", float(0.0)),
+        (float(0.1 + 0.2), "round(n.text, 2)", float(0.3)),
+        (float(2.75), "round(n.text, 5)", float(2.75)),
+        (float(1e300), "round(n.text, 2)", float(1e300)),
+        (CanonicalScalar::Int(7), "round(n.text, 2)", float(7.0)),
+        (
+            float(f64::INFINITY),
+            "round(n.text, 2)",
+            float(f64::INFINITY),
+        ),
+        (
+            CanonicalScalar::Null,
+            "round(n.text, 2)",
+            CanonicalScalar::Null,
+        ),
+        (float(1.5), "round(n.text, null)", CanonicalScalar::Null),
+    ] {
+        assert_eq!(
+            scalar(expression, &input),
+            expected,
+            "{expression} over {input:?}"
+        );
+    }
+    // Negative values round to positive zero: BigDecimal has no -0.
+    for input in [float(-0.004), float(-0.0)] {
+        let CanonicalScalar::Float(zero) = scalar("round(n.text, 2)", &input) else {
+            unreachable!("round answers a float")
+        };
+        assert!(
+            zero.get() == 0.0 && zero.get().is_sign_positive(),
+            "{input:?}"
+        );
+    }
+    let query = prepare("MATCH (n) RETURN round(n.text, -1) AS value");
+    assert!(execute(&query, &float(1.5), policy()).is_err());
+    for statement in [
+        "MATCH (n) RETURN round(1.5, 'a') AS value",
+        "MATCH (n) RETURN round('a', 2) AS value",
+    ] {
+        assert!(
+            PreparedGraphSetText::prepare(statement, symbols).is_err(),
+            "{statement}"
+        );
+    }
+}
+
 /// openCypher's math functions run fgdb-types' pinned kernels, so a result
 /// is the same bits on every target: exp, log, log10, sin, cos, tan, cot,
 /// asin, acos, atan, atan2, degrees, radians, haversin, sign, pi() and e().

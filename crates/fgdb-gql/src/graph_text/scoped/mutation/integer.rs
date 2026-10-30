@@ -2352,6 +2352,12 @@ impl<'a> Parser<'a> {
             return emit(program, ParsedOp::Bound(op), at);
         }
         if let Some(numeric) = GraphNumericFunction::named(function) {
+            // Neo4j's round(value, precision).
+            if numeric == GraphNumericFunction::Round && self.take(b',')? {
+                self.scalar_boolean(columns, depth + 1, program)?;
+                self.punct(b')', ")")?;
+                return emit(program, ParsedOp::Bound(GraphIntegerOp::RoundTo), at);
+            }
             self.punct(b')', ")")?;
             return emit(
                 program,
