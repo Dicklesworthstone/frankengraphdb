@@ -878,7 +878,8 @@ fn on_create_map_replacement_sets_the_entries_and_unsets_omitted_pattern_keys() 
             &GqlParameters::new(),
             symbols,
             R,
-            program_policy(10),
+            // program_policy admits no edge creation; this MERGE creates one.
+            GraphWriteProgramPolicy::new(query_policy(), 10, 10, 1),
             |_| Ok::<_, ()>(ElementId::Edge(fgdb_types::EId(500))),
         )
         .await
