@@ -477,11 +477,13 @@ impl PreparedNativeRead {
     /// elements borrow the same pinned generation at its exact cut. Each
     /// reached lookup spends the original snapshot-record allowance, while
     /// history/key searches share the cumulative native evaluator controls.
-    /// Native binary, grouping and correlated Inner/Optional Apply relations
+    /// Native binary, grouping and correlated Inner/Optional/Collect Apply relations
     /// share the recursive external executor. Every body runs once per outer
     /// occurrence with its own argument frame and complete order/window.
-    /// Collected-list Apply, procedures and unsupported physical instructions
-    /// refuse before execution.
+    /// Collected lists retain body order, duplicates and mapped NULLs; a NULL
+    /// input skips its body and produces NULL. Each completed list remains a
+    /// resident value admitted by the cumulative evaluator and memory limits.
+    /// Procedures and unsupported physical instructions refuse before execution.
     ///
     /// Opening binds parameters and pins the exact source synchronously. The
     /// future borrows ONLY cx and the three scratch files; writer/template/params

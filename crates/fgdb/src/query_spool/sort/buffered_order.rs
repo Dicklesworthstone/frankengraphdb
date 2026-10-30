@@ -62,8 +62,12 @@ impl PreparedNativeRead {
     /// body under its own typed argument frame, including nested CALL, EXISTS,
     /// COUNT and lowered OPTIONAL MATCH relations. Duplicate outer occurrences
     /// run independently; grouping, order and windows remain local to a body.
-    /// Empty outer input skips the body, while a final LIMIT zero cannot hide
-    /// a reached body error. Collected-list Apply, procedures, variable-length
+    /// Collected-list Apply preserves each selected body's order, duplicates
+    /// and mapped NULL values. A NULL input list produces NULL without running
+    /// its body; an empty input produces an empty list. The completed list is
+    /// a resident value with cumulative evaluator and memory admission even
+    /// when its body spills. Empty outer input skips the body, while a final
+    /// LIMIT zero cannot hide a reached body error. Procedures, variable-length
     /// graph paths and unlowered optional pattern instructions still refuse.
     /// Terminal exact aggregate results have their own preparation.
     pub fn prepare_buffered_order(&self, params: &GqlParameters) -> Result<PreparedBufferedOrder> {

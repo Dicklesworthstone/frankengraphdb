@@ -25,7 +25,7 @@ use fgdb_delta_types::{ElementId, PropertyKeyId};
 mod apply;
 mod relational_join;
 mod selected_cross;
-pub use apply::{SpillSetApplyKind, SpillSetApplyPlan, SpillSetArgumentsPlan};
+pub use apply::{SpillSetApplyKind, SpillSetApplyPlan, SpillSetArgumentsPlan, SpillSetCollection};
 pub use relational_join::SpillSetJoinPlan;
 
 /// The executing host's pinned, awaitable element-property reader.
@@ -94,7 +94,7 @@ pub trait AsyncSpillElementSource: Send {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpillSetBuildError {
     /// Scope, selection, projection, UNWIND, numeric grouping, Cartesian
-    /// products, correlated inner/optional Apply and binary sets over graph,
+    /// products, correlated inner/optional/collected Apply and binary sets over graph,
     /// singleton or argument leaves are admitted. This ordinal is the depth
     /// from the root, including across binary and correlated operands.
     Unsupported {
@@ -1203,12 +1203,9 @@ fn compile_stages<'a>(
             let kind = match kind {
                 super::ApplyKind::Inner => SpillSetApplyKind::Inner,
                 super::ApplyKind::Optional => SpillSetApplyKind::Optional,
-                // A collected list has its own bounded resident output and
-                // NULL-input short circuit. Never turn it into an ordinary
-                // row extension or admit only part of its body.
-                super::ApplyKind::Collect { .. } => {
-                    return Err(SpillSetBuildError::Unsupported { depth });
-                }
+                super::ApplyKind::Collect { null_input } => SpillSetApplyKind::Collect {
+                    null_input: *null_input,
+                },
             };
             if query.columns.len() > MAX_PATTERN_VERTICES {
                 return Err(SpillSetBuildError::Unsupported { depth });

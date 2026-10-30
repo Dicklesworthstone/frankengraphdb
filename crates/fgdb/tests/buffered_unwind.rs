@@ -253,6 +253,501 @@ async fn contents(
 }
 
 #[test]
+fn collected_graph_lists_keep_selected_order_duplicates_nulls_scope_and_history() {
+    let ((), report) = run_async_under_lab(0xc01d_4801, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let db = Database::open_with_vfs(&commit, vfs.clone(), vfs.database_dir(), keys())
+            .await
+            .unwrap();
+        let resident = db.read_session().unwrap();
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
+        let mut cold = view(&commit, &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        let params = GqlParameters::new()
+            .with_list(
+                "items",
+                vec![
+                    GraphValue::Vertex(VId(2)),
+                    GraphValue::Vertex(VId(1)),
+                    GraphValue::Vertex(VId(2)),
+                    null(),
+                    GraphValue::Vertex(VId(3)),
+                ],
+            )
+            .unwrap();
+        let list = |values: Vec<_>| GraphValue::List(values.into_boxed_slice());
+        // Parallel edges are only witnesses to the predicate. Input positions,
+        // including equal positions, determine the list's order/multiplicity.
+        for (text, cut, expected) in [
+            (
+                "WITH $items AS xs RETURN [x IN xs WHERE (x)-[:R]->() | x.p] AS values",
+                2,
+                vec![vec![list(vec![scalar(2), scalar(1), scalar(2)])]],
+            ),
+            (
+                "WITH $items AS xs RETURN [x IN xs WHERE (x)-[:R]->() | NULL] AS values",
+                2,
+                vec![vec![list(vec![null(), null(), null()])]],
+            ),
+            (
+                "WITH $items AS xs RETURN [x IN xs WHERE (x)-[:R]->() | [x.p,NULL,x.p]] AS values",
+                2,
+                vec![vec![list(vec![
+                    list(vec![scalar(2), null(), scalar(2)]),
+                    list(vec![scalar(1), null(), scalar(1)]),
+                    list(vec![scalar(2), null(), scalar(2)]),
+                ])]],
+            ),
+            (
+                "UNWIND [7,7] AS occurrence WITH occurrence,$items AS xs \
+                 RETURN occurrence,[x IN xs WHERE (x)-[:R]->() | x.p] AS values",
+                2,
+                vec![vec![scalar(7), list(vec![scalar(2), scalar(1), scalar(2)])]; 2],
+            ),
+            (
+                "WITH 7 AS x,$items AS xs,10 AS bias CALL (xs,bias) { \
+                 RETURN [x IN xs WHERE (x)-[:R]->() | x.p+bias] AS values } RETURN x,values",
+                2,
+                vec![vec![
+                    scalar(7),
+                    list(vec![scalar(12), scalar(11), scalar(12)]),
+                ]],
+            ),
+            (
+                "MATCH (anchor) FOR SYSTEM_TIME AS OF SEQ 1 WHERE anchor.p=1 \
+                 WITH $items AS xs RETURN [x IN xs WHERE (x)<-[:R]-() | x.p] AS values",
+                1,
+                vec![vec![list(vec![scalar(2), scalar(2), scalar(3)])]],
+            ),
+            (
+                "MATCH (anchor) WHERE anchor.p=1 WITH $items AS xs \
+                 RETURN [x IN xs WHERE (x)<-[:R]-() | x.p] AS values",
+                2,
+                vec![vec![list(vec![scalar(2), scalar(2), scalar(13)])]],
+            ),
+            (
+                "WITH $items AS xs LIMIT 0 RETURN [x IN xs WHERE (x)-[:R]->() | 1/0] AS values",
+                2,
+                vec![],
+            ),
+        ] {
+            let prepared = PreparedNativeRead::prepare(text, &params, resolve)
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            let fgdb::QueryResult::Rows { rows, .. } = prepared
+                .execute_in_view(&resident, &cx, &params, policy(100))
+                .unwrap_or_else(|error| panic!("resident {text}: {error:?}"))
+            else {
+                panic!("list projection returns rows")
+            };
+            let expected_native = expected
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .cloned()
+                        .map(GraphAggregateValue::Value)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(rows, expected_native, "resident {text}");
+            let buffered = prepared
+                .prepare_buffered_order(&params)
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            for run_rows in [1, 3] {
+                let (mut scratch, _) = file(&cx, &spill_pool).await;
+                let (mut destination, _) = file(&cx, &spill_pool).await;
+                let (mut auxiliary, _) = file(&cx, &spill_pool).await;
+                let (spool, _) = prepared
+                    .spool_ordered_in_view(
+                        &resident,
+                        &cx,
+                        &params,
+                        policy(100),
+                        &mut scratch,
+                        &mut destination,
+                        &mut auxiliary,
+                        2,
+                        512,
+                        run_rows,
+                        512,
+                        127,
+                        32 * 1024,
+                        1000,
+                        WORK,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("resident spill {text}: {error:?}"));
+                assert_eq!(spool.snapshot_seq(), CommitSeq(cut));
+                assert_eq!(contents(&spool, &mut destination, &cx).await, expected);
+                assert_eq!(spill_pool.used(), 0, "resident spill {text}");
+
+                let (mut scratch, _) = file(&cx, &spill_pool).await;
+                let (mut destination, _) = file(&cx, &spill_pool).await;
+                let (mut auxiliary, _) = file(&cx, &spill_pool).await;
+                let (spool, _) = buffered
+                    .spool_in_view(
+                        &mut cold,
+                        &cx,
+                        policy(100),
+                        &mut scratch,
+                        &mut destination,
+                        &mut auxiliary,
+                        2,
+                        512,
+                        run_rows,
+                        512,
+                        127,
+                        32 * 1024,
+                        1000,
+                        WORK,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("buffered {text}: {error:?}"));
+                assert_eq!(spool.snapshot_seq(), CommitSeq(cut));
+                assert_eq!(spool.row_count(), expected.len() as u64);
+                assert_eq!(contents(&spool, &mut destination, &cx).await, expected);
+                assert_eq!(source_pool.used(), baseline, "{text}");
+                assert_eq!(spill_pool.used(), 0, "{text}");
+            }
+        }
+        drop(cold);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn null_and_empty_collected_inputs_skip_graph_reads_and_mapping_errors() {
+    let ((), report) = run_async_under_lab(0xc01d_4802, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
+        let mut cold = view(&commit, &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        let initial = GqlParameters::new()
+            .with_list("items", vec![GraphValue::Vertex(VId(1))])
+            .unwrap();
+        for tail in ["", "LIMIT 0"] {
+            let text = format!(
+                "WITH $items AS xs RETURN [x IN xs WHERE (x)-[:R]->() | 1/0] AS values {tail}"
+            );
+            let template = PreparedNativeRead::prepare(&text, &initial, resolve).unwrap();
+            for (params, value) in [
+                (GqlParameters::new().with_null("items").unwrap(), null()),
+                (
+                    GqlParameters::new().with_list("items", vec![]).unwrap(),
+                    GraphValue::List(vec![].into_boxed_slice()),
+                ),
+            ] {
+                // Rebinding NULL retains the originally prepared List domain.
+                // A zero graph-record allowance makes an accidental body read
+                // fail even if it would otherwise produce an empty relation.
+                let prepared = template.prepare_buffered_order(&params).unwrap();
+                let before = cold.buffer_stats();
+                let (mut scratch, _) = file(&cx, &spill_pool).await;
+                let (mut destination, _) = file(&cx, &spill_pool).await;
+                let (mut auxiliary, _) = file(&cx, &spill_pool).await;
+                let (spool, _) = prepared
+                    .spool_in_view(
+                        &mut cold,
+                        &cx,
+                        GqlQueryPolicy::new(0, 1, WORK, WORK),
+                        &mut scratch,
+                        &mut destination,
+                        &mut auxiliary,
+                        1,
+                        512,
+                        1,
+                        512,
+                        127,
+                        32 * 1024,
+                        1000,
+                        WORK,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+                let expected = if tail.is_empty() {
+                    vec![vec![value]]
+                } else {
+                    vec![]
+                };
+                assert_eq!(contents(&spool, &mut destination, &cx).await, expected);
+                assert_eq!(spool.row_stats().snapshot_records, 0);
+                assert_eq!(cold.buffer_stats(), before);
+                assert_eq!(source_pool.used(), baseline);
+                assert_eq!(spill_pool.used(), 0);
+            }
+        }
+        drop(cold);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn collected_bodies_finish_before_pages_and_keep_cumulative_refusal_boundaries() {
+    let ((), report) = run_async_under_lab(0xc01d_4803, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
+        let mut cold = view(&commit, &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        let params = GqlParameters::new()
+            .with_list(
+                "items",
+                vec![
+                    GraphValue::Vertex(VId(2)),
+                    GraphValue::Vertex(VId(1)),
+                    GraphValue::Vertex(VId(2)),
+                ],
+            )
+            .unwrap();
+        for tail in ["LIMIT 0", "LIMIT 1", "SKIP 1000 LIMIT 1"] {
+            // Mapping the first selected item succeeds. The next item's
+            // division must still fail before an outer page can be returned.
+            let text = format!(
+                "WITH $items AS xs RETURN [x IN xs WHERE (x)-[:R]->() | 1/(x.p-1)] AS values {tail}"
+            );
+            let prepared = prepare(&text, &params);
+            let (mut scratch, _) = file(&cx, &spill_pool).await;
+            let (mut destination, _) = file(&cx, &spill_pool).await;
+            let (mut auxiliary, _) = file(&cx, &spill_pool).await;
+            let error = prepared
+                .spool_in_view(
+                    &mut cold,
+                    &cx,
+                    policy(1),
+                    &mut scratch,
+                    &mut destination,
+                    &mut auxiliary,
+                    1,
+                    512,
+                    1,
+                    512,
+                    127,
+                    32 * 1024,
+                    1000,
+                    WORK,
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&error, NativeSpoolError::SetExecution(
+                    GraphSetExecutionError::Projection { error, .. })
+                    if error.kind == GraphIntegerErrorKind::DivisionByZero),
+                "{text}: {error:?}"
+            );
+            assert_eq!(source_pool.used(), baseline);
+            assert_eq!(spill_pool.used(), 0);
+        }
+
+        let prepared = prepare(
+            "UNWIND [7,7] AS occurrence WITH occurrence,$items AS xs \
+             RETURN [x IN xs WHERE (x)-[:R]->() | x.p] AS values LIMIT 0",
+            &params,
+        );
+        let mut exact = None;
+        for trial in 0..6 {
+            let pool = MemoryPool::new(if trial == 5 { 0 } else { SCRATCH_BYTES }, 0).unwrap();
+            let (mut scratch, _) = file(&cx, &pool).await;
+            let (mut destination, _) = file(&cx, &pool).await;
+            let (mut auxiliary, _) = file(&cx, &pool).await;
+            let mut allowance = policy(0);
+            let mut external = WORK;
+            if let Some((work, entries, sort)) = exact {
+                allowance.evaluator.max_work_units = work - u64::from(trial == 2);
+                allowance.evaluator.max_scratch_entries = entries - u64::from(trial == 3);
+                external = sort - u64::from(trial == 4);
+            }
+            let result = prepared
+                .spool_in_view(
+                    &mut cold,
+                    &cx,
+                    allowance,
+                    &mut scratch,
+                    &mut destination,
+                    &mut auxiliary,
+                    1,
+                    512,
+                    1,
+                    512,
+                    127,
+                    32 * 1024,
+                    1000,
+                    external,
+                )
+                .await;
+            if trial < 2 {
+                let (spool, work) = result.unwrap();
+                assert!(contents(&spool, &mut destination, &cx).await.is_empty());
+                let stats = spool.evaluator_stats();
+                let measured = (stats.work_units, stats.scratch_entries, work);
+                assert!(measured.0 > 0 && measured.1 > 0 && measured.2 > 0);
+                if let Some(previous) = exact {
+                    assert_eq!(measured, previous);
+                }
+                exact = Some(measured);
+            } else {
+                let error = result.unwrap_err();
+                match trial {
+                    2 | 3 => assert!(
+                        matches!(&error, NativeSpoolError::BufferedExecute(inner)
+                            if matches!(**inner, GqlQueryError::Evaluator(_))),
+                        "{error:?}"
+                    ),
+                    4 => assert!(
+                        matches!(error, NativeSpoolError::SortWorkLimit { .. }),
+                        "{error:?}"
+                    ),
+                    5 => assert!(
+                        matches!(
+                            error,
+                            NativeSpoolError::Spill(
+                                fgdb_strata::tiered::memory::SpillError::Memory(_)
+                            )
+                        ),
+                        "{error:?}"
+                    ),
+                    _ => unreachable!(),
+                }
+            }
+            assert_eq!(source_pool.used(), baseline);
+            assert_eq!(pool.used(), 0, "trial {trial}");
+        }
+        drop(cold);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn dropping_suspended_collected_output_refunds_rows_frames_and_list_storage() {
+    use fgdb_gql::spill_set::{AsyncSpillSetPlan, AsyncSpillSetSourcePlan, SpillSetApplyKind};
+
+    let ((), report) = run_async_under_lab(0xc01d_4804, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = fixture(&commit).await;
+        let source_pool = MemoryPool::new(32 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(SCRATCH_BYTES, 0).unwrap();
+        let mut cold = view(&commit, &vfs, &source_pool).await;
+        let baseline = source_pool.used();
+        let items = [2, 1, 2].map(|id| GraphValue::Vertex(VId(id))).to_vec();
+        let input = GraphValue::List(items.clone().into_boxed_slice());
+        let params = GqlParameters::new().with_list("items", items).unwrap();
+        let template = PreparedNativeRead::prepare(
+            "WITH $items AS xs RETURN [x IN xs WHERE (x)-[:R]->() | x.p] AS values",
+            &params,
+            resolve,
+        )
+        .unwrap();
+        let PreparedNativeRead::Set(bound) = &template else {
+            panic!("graph-reading list must use the native relational plan")
+        };
+        let plan = AsyncSpillSetPlan::compile(&bound.bind_parameters(&params).unwrap()).unwrap();
+        let AsyncSpillSetSourcePlan::Apply(collect) = plan.source() else {
+            panic!("expected the compiler's collected Apply source")
+        };
+        // The binder retains xs and a private evaluated copy of the input
+        // list. Derive the raw Apply row from its actual helper/schema, before
+        // the downstream Project removes those two cells.
+        assert_eq!(collect.kind(), SpillSetApplyKind::Collect { null_input: 1 });
+        assert_eq!(collect.left().columns().len(), 2);
+        assert_eq!(collect.left().columns()[0], "xs");
+        let left = GraphValueRow::from_owned_values(vec![input.clone(), input.clone()]);
+        let mut collection = collect
+            .start_collection(0, &mut |_| Ok::<_, ()>(()))
+            .unwrap();
+        for value in [2, 1, 2] {
+            collection = collection
+                .push(
+                    &GraphValueRow::from_owned_values(vec![scalar(value)]),
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .unwrap();
+        }
+        let row = collection.finish(&left, &mut |_| Ok::<_, ()>(())).unwrap();
+        assert_eq!(
+            row.values(),
+            &[
+                input.clone(),
+                input,
+                GraphValue::List(vec![scalar(2), scalar(1), scalar(2)].into_boxed_slice()),
+            ]
+        );
+        let marker = row.canonical_bytes().unwrap();
+        // One outer occurrence starts an empty Apply output. Its eight-byte
+        // length plus this exact raw row fills a page, so write_row must await
+        // its append while the list, imports and outer-row guards are live.
+        // A larger page could defer that I/O until writer.finish, after they
+        // were released; the final one-column row would be too late as well.
+        let page_bytes = std::mem::size_of::<u64>() + marker.len();
+        assert!(page_bytes <= 64 * 1024);
+        let prepared = template.prepare_buffered_order(&params).unwrap();
+        let (mut scratch, a) = file(&cx, &spill_pool).await;
+        let (mut destination, b) = file(&cx, &spill_pool).await;
+        let (mut auxiliary, c) = file(&cx, &spill_pool).await;
+        for backing in [&a, &b, &c] {
+            backing.0.lock().unwrap().suspend_row = Some(marker.clone());
+        }
+        let mut future = prepared.spool_in_view(
+            &mut cold,
+            &cx,
+            policy(1),
+            &mut scratch,
+            &mut destination,
+            &mut auxiliary,
+            1,
+            512,
+            1,
+            512,
+            page_bytes,
+            32 * 1024,
+            1000,
+            WORK,
+        );
+        let blocked = poll_fn(|task| {
+            let result = future.as_mut().poll(task);
+            let suspended = [
+                a.0.lock().unwrap().suspended,
+                b.0.lock().unwrap().suspended,
+                c.0.lock().unwrap().suspended,
+            ];
+            if let Some(index) = suspended.iter().position(|&seen| seen) {
+                assert!(result.is_pending());
+                assert_eq!(suspended.iter().filter(|&&seen| seen).count(), 1);
+                Poll::Ready(index)
+            } else {
+                assert!(
+                    result.is_pending(),
+                    "raw collected Apply append must be reached"
+                );
+                Poll::Pending
+            }
+        })
+        .await;
+        assert!(spill_pool.used() > 0);
+        drop(future);
+        assert!([&scratch, &destination, &auxiliary][blocked].is_poisoned());
+        assert_eq!(source_pool.used(), baseline);
+        assert_eq!(spill_pool.used(), 0);
+        drop(cold);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn element_metadata_matches_bound_values_through_resident_and_cold_spill() {
     use fgdb_delta_types::LabelId;
     use fgdb_gql::{GraphSymbolResolver, ReverseSymbolCatalog};

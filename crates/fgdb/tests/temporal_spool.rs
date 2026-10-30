@@ -1857,7 +1857,140 @@ mod authorized_carried_elements {
     }
 
     #[test]
-    fn external_collected_apply_refuses_before_scratch_and_expiry_closes_correlated_execution() {
+    fn external_collected_graph_lists_keep_scope_masks_full_ids_and_null_values() {
+        let ((), report) = run_async_under_lab(0xc077_0006, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let visible = fixture(&commit, false).await;
+            let mut masked = fixture(&commit, true).await;
+            // These witnesses exist only through a vertex outside the grant.
+            // Neither the hidden source nor its visible endpoint may become
+            // a successful local predicate in the authorized list body.
+            let mut hidden = WriteBatch::new(RelationId(1));
+            hidden.add_edge(EId(99), VId(6), VId(99), vec![]);
+            hidden.add_edge(EId(100), VId(99), VId(1), vec![]);
+            masked.write(&commit, hidden).await.unwrap();
+            let view = visible.read_session().unwrap();
+            let issuer = authority();
+            let pool = MemoryPool::new(512_000, 0).unwrap();
+            let allowance = GqlQueryPolicy::new(10_000, 100, 1_000_000, 1_000_000);
+            let scalar = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+            let null = GraphValue::Scalar(CanonicalScalar::Null);
+            let list = |values: Vec<_>| GraphValue::List(values.into_boxed_slice());
+            let params = GqlParameters::new()
+                .with_list(
+                    "items",
+                    [u128::MAX, 1, u128::MAX, 6, 99, 1]
+                        .map(|id| GraphValue::Vertex(VId(id)))
+                        .into_iter()
+                        .chain([null.clone()])
+                        .collect(),
+                )
+                .unwrap();
+            for (text, expected) in [
+                (
+                    "WITH $items AS xs RETURN [x IN xs WHERE (x)-[:R]->() | x.p] AS mapped",
+                    vec![vec![list(vec![scalar(2), scalar(2)])]],
+                ),
+                (
+                    "WITH $items AS xs RETURN [x IN xs WHERE (x)-[:R]->() | NULL] AS mapped",
+                    vec![vec![list(vec![null.clone(), null.clone()])]],
+                ),
+                (
+                    "WITH $items AS xs RETURN [x IN xs WHERE (x)<-[:R]-() | x] AS mapped",
+                    vec![vec![list(vec![
+                        GraphValue::Vertex(VId(u128::MAX)),
+                        GraphValue::Vertex(VId(u128::MAX)),
+                        GraphValue::Vertex(VId(6)),
+                    ])]],
+                ),
+                (
+                    "MATCH (anchor:L) FOR SYSTEM_TIME AS OF SEQ 1 WHERE anchor.p=2 \
+                     WITH $items AS xs RETURN [x IN xs WHERE (x)<-[:R]-() | x.p] AS mapped",
+                    vec![vec![list(vec![scalar(7), scalar(7), scalar(13)])]],
+                ),
+            ] {
+                let prepared = PreparedNativeRead::prepare(text, &params, resolve).unwrap();
+                let actual = element_spool(&view, &cx, &prepared, &params, allowance, 1)
+                    .await
+                    .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+                assert_eq!(
+                    actual
+                        .rows
+                        .into_iter()
+                        .map(|row| row.values().to_vec())
+                        .collect::<Vec<_>>(),
+                    expected,
+                    "visible owner: {text}"
+                );
+                for db in [&visible, &masked] {
+                    let mut ordered =
+                        session(db, &cx, &issuer, &grant(10_000), &pool, allowance).await;
+                    let prepared = ordered.prepare(&cx, text, &params).unwrap();
+                    let mut cursor = ordered
+                        .execute_ordered(&cx, &prepared, &params)
+                        .unwrap()
+                        .await
+                        .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+                    assert_eq!(rows(&mut cursor).await, expected, "scoped list: {text}");
+                    drop(cursor);
+                    assert!(!ordered.is_closed());
+                    assert_eq!(pool.used(), 0);
+                }
+            }
+            let text = "WITH $items AS xs RETURN \
+                [x IN xs WHERE (x)<-[:R]-() | 1/(x.p-13)] AS mapped LIMIT 0";
+            for db in [&visible, &masked] {
+                let mut ordered = session(db, &cx, &issuer, &grant(10_000), &pool, allowance).await;
+                let prepared = ordered.prepare(&cx, text, &params).unwrap();
+                assert!(
+                    matches!(ordered.execute_ordered(&cx, &prepared, &params).unwrap().await,
+                    Err(NativeSpoolError::Authorized(error))
+                    if matches!(*error, QueryError::Set(GqlQueryError::Source(
+                        GraphSetExecutionError::Projection { error, .. }))
+                        if error.kind == GraphIntegerErrorKind::DivisionByZero))
+                );
+                assert!(!ordered.is_closed());
+                assert_eq!(pool.used(), 0);
+            }
+            let params = GqlParameters::new();
+            for (input, value) in [("null", null), ("[]", list(vec![]))] {
+                let text = format!(
+                    "WITH {input} AS xs RETURN [x IN xs WHERE (x)-[:R]->() | 1/0] AS mapped"
+                );
+                let expected = vec![vec![value]];
+                let prepared = PreparedNativeRead::prepare(&text, &params, resolve).unwrap();
+                let actual = element_spool(&view, &cx, &prepared, &params, allowance, 1)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    actual
+                        .rows
+                        .into_iter()
+                        .map(|row| row.values().to_vec())
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+                assert_eq!(actual.stats.snapshot_records, 0);
+                let mut ordered = session(&masked, &cx, &issuer, &grant(0), &pool, allowance).await;
+                let prepared = ordered.prepare(&cx, &text, &params).unwrap();
+                let mut cursor = ordered
+                    .execute_ordered(&cx, &prepared, &params)
+                    .unwrap()
+                    .await
+                    .unwrap();
+                assert_eq!(rows(&mut cursor).await, expected);
+                drop(cursor);
+                assert!(!ordered.is_closed());
+                assert_eq!(pool.used(), 0);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn expiry_closes_correlated_execution_after_lazy_open() {
         let ((), report) = run_async_under_lab(0xc077_0005, |root| async move {
             use std::sync::{
                 Arc,
@@ -1867,24 +2000,12 @@ mod authorized_carried_elements {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let cx = contexts.query();
             let db = fixture(&contexts.commit(), false).await;
-            let view = db.read_session().unwrap();
             let issuer = authority();
             let pool = MemoryPool::new(256_000, 0).unwrap();
             let params = GqlParameters::new();
-            let text =
-                "WITH null AS xs RETURN [x IN xs WHERE (x)-[:R]->() | 1/0] AS mapped LIMIT 0";
-            let prepared = PreparedNativeRead::prepare(text, &params, resolve).unwrap();
-            let mut source = scratch(&cx, &pool).await;
-            let mut destination = scratch(&cx, &pool).await;
-            let mut auxiliary = scratch(&cx, &pool).await;
-            assert!(matches!(prepared.spool_ordered_in_view(
-                &view, &cx, &params, policy(), &mut source, &mut destination, &mut auxiliary,
-                2, 32, 1, 64, 127, 4096, 100, 1_000_000,
-            ).await, Err(NativeSpoolError::Prepare(error))
-                if matches!(*error, QueryError::StreamingUnsupported { .. })));
-            for stats in [source.stats(), destination.stats(), auxiliary.stats()] {
-                assert_eq!(stats, fgdb_strata::tiered::memory::SpillStats::default());
-            }
+            let source = scratch(&cx, &pool).await;
+            let destination = scratch(&cx, &pool).await;
+            let auxiliary = scratch(&cx, &pool).await;
             let token = issuer.issue_at(&grant(10_000), 100).unwrap();
             let clock = Arc::new(AtomicU64::new(100));
             let time = Arc::clone(&clock);
@@ -1912,11 +2033,6 @@ mod authorized_carried_elements {
                     },
                 )
                 .unwrap();
-            let refused = ordered.prepare(&cx, text, &params).unwrap();
-            assert!(matches!(ordered.execute_ordered(&cx, &refused, &params),
-                Err(NativeSpoolError::Authorized(error))
-                if matches!(*error, QueryError::StreamingUnsupported { .. })));
-            assert!(!ordered.is_closed());
             let prepared = ordered
                 .prepare(
                     &cx,

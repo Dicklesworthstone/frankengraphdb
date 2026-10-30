@@ -2,12 +2,13 @@
 
 use super::*;
 
-/// The admitted native row-extension semantics. A collected-list Apply needs
-/// a separately bounded list builder and is refused during external admission.
+/// The admitted native per-occurrence correlation semantics. Collection keeps
+/// mapped NULLs and duplicates; its saved NULL input skips the complete body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpillSetApplyKind {
     Inner,
     Optional,
+    Collect { null_input: usize },
 }
 
 /// A compiler-owned correlated relation over complete child plans.
@@ -23,6 +24,9 @@ pub enum SpillSetApplyKind {
 /// DISTINCT or aggregate is local to that invocation. No enclosing LIMIT,
 /// including zero, may hide a reached body failure. An empty left input never
 /// executes the body. The enclosing Identity stage owns this Apply's clauses.
+/// Collect emits one bounded list in body occurrence order, including mapped
+/// NULLs; an empty body emits an empty list. Its saved NULL input emits NULL
+/// without preparing arguments or executing the body.
 ///
 /// Hosts keep one cumulative allowance, one pinned read/authority cut, and the
 /// same logical source-ordinal range on every body invocation. They must admit
@@ -56,6 +60,78 @@ impl SpillSetApplyPlan {
     }
     pub fn column_types(&self) -> &[GraphSetColumnType] {
         &self.types
+    }
+
+    /// Test the saved input before preparing arguments or opening a collected
+    /// body. A NULL list is not an empty body and must not observe graph reads,
+    /// arithmetic failures or body work. Static child admission still occurs
+    /// before execution, even when every input will take this short circuit.
+    pub fn collect_input_is_null<E>(
+        &self,
+        left: &GraphValueRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, SpillSetRowError<E>> {
+        validate_row(left, self.left.column_types(), 0, control)?;
+        control(GlaExecutionEvent::Work).map_err(SpillSetRowError::Control)?;
+        let SpillSetApplyKind::Collect { null_input } = self.kind else {
+            return Err(SpillSetRowError::Native(
+                GraphSetExecutionError::InputSchema { operand: 0 },
+            ));
+        };
+        left.get(null_input)
+            .map(GraphValue::is_null)
+            .ok_or(SpillSetRowError::Native(
+                GraphSetExecutionError::InputSchema { operand: 0 },
+            ))
+    }
+
+    /// The single NULL extension for a saved NULL list. No body has executed.
+    /// Reserve the left input and admit a separate output on ScratchEntry;
+    /// retain both guards through encoding. This never charges ResultRow.
+    pub fn null_collect<E>(
+        &self,
+        left: &GraphValueRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<GraphValueRow, SpillSetRowError<E>> {
+        if !self.collect_input_is_null(left, control)? {
+            return Err(SpillSetRowError::Native(
+                GraphSetExecutionError::InputSchema { operand: 0 },
+            ));
+        }
+        control(GlaExecutionEvent::ScratchEntry).map_err(SpillSetRowError::Control)?;
+        let null = GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+            fgdb_types::CanonicalScalar::Null,
+        )]);
+        super::super::execute::copy_cross_pair(left, &null, control)
+            .map_err(SpillSetRowError::Control)
+    }
+
+    /// Start one non-NULL occurrence's private output after its complete body
+    /// has finished. The host owns a growing memory reservation beside this
+    /// collector and retains it across awaited body reads, finish and encoding.
+    /// Every ScratchEntry must be admitted before returning success. An error
+    /// drops the private prefix; a final LIMIT cannot suppress that error.
+    pub fn start_collection<E>(
+        &self,
+        row_index: usize,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<SpillSetCollection<'_>, SpillSetRowError<E>> {
+        control(GlaExecutionEvent::Work).map_err(SpillSetRowError::Control)?;
+        if !matches!(self.kind, SpillSetApplyKind::Collect { .. })
+            || self.right.column_types().len() != 1
+        {
+            return Err(SpillSetRowError::Native(
+                GraphSetExecutionError::InputSchema { operand: 1 },
+            ));
+        }
+        control(GlaExecutionEvent::ScratchEntry).map_err(SpillSetRowError::Control)?;
+        Ok(SpillSetCollection {
+            plan: self,
+            row_index,
+            members: Vec::new(),
+            // The final List itself is one node at depth zero.
+            remaining: GraphValue::MAX_LIST_NODES - 1,
+        })
     }
 
     /// Copy the typed argument projection for one completed left occurrence.
@@ -149,6 +225,154 @@ impl core::fmt::Debug for SpillSetApplyPlan {
             .field("imports", &self.imports.len())
             .finish_non_exhaustive()
     }
+}
+
+/// One private collected result, bounded by the ordinary GraphValue depth and
+/// node limits before any member payload is copied. It owns only the mapped
+/// members, not the body relation. The host supplies their memory reservation.
+/// Consuming push/finish makes every control or value refusal terminal: a
+/// partially built list can neither escape nor be retried as a shorter result.
+pub struct SpillSetCollection<'plan> {
+    plan: &'plan SpillSetApplyPlan,
+    row_index: usize,
+    members: Vec<GraphValue>,
+    remaining: usize,
+}
+
+impl SpillSetCollection<'_> {
+    /// Append one complete one-column body row in its existing occurrence
+    /// order. Mapped NULLs, duplicates and compact element lists are values,
+    /// never absence, deduplication keys or implicit nested-row wrappers.
+    pub fn push<E>(
+        mut self,
+        right: &GraphValueRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Self, SpillSetRowError<E>> {
+        validate_row(right, self.plan.right.column_types(), 1, control)?;
+        let value = right.get(0).ok_or(SpillSetRowError::Native(
+            GraphSetExecutionError::InputSchema { operand: 1 },
+        ))?;
+        admit_collection_value(
+            value,
+            1,
+            &mut self.remaining,
+            self.row_index,
+            self.plan.left.column_types().len(),
+            control,
+        )?;
+        // This entry covers the member slot before vector growth; the native
+        // evaluator separately admits every cell and payload before copying.
+        control(GlaExecutionEvent::ScratchEntry).map_err(SpillSetRowError::Control)?;
+        let value = projection::evaluate_value(
+            &GraphSetValue::Column(0),
+            right,
+            self.plan.left.column_types().len(),
+            control,
+        )
+        .map_err(|error| match error {
+            projection::ProjectionFailure::Control(error) => SpillSetRowError::Control(error),
+            projection::ProjectionFailure::Arithmetic { column, error } => {
+                SpillSetRowError::Native(GraphSetExecutionError::Projection {
+                    row: self.row_index,
+                    column,
+                    error,
+                })
+            }
+        })?;
+        self.members.push(value);
+        Ok(self)
+    }
+
+    /// Complete exactly one non-NULL outer occurrence, after the host verifies
+    /// the complete body row count. Copy the outer cells under controls and
+    /// move the already admitted list into the result without another payload
+    /// clone. Keep the collector and output reservation through final encoding.
+    pub fn finish<E>(
+        self,
+        left: &GraphValueRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<GraphValueRow, SpillSetRowError<E>> {
+        if self.plan.collect_input_is_null(left, control)? {
+            return Err(SpillSetRowError::Native(
+                GraphSetExecutionError::InputSchema { operand: 0 },
+            ));
+        }
+        control(GlaExecutionEvent::ScratchEntry).map_err(SpillSetRowError::Control)?;
+        let mut values = Vec::new();
+        for value in left.values() {
+            values.push(projection::copy_value(value, control).map_err(SpillSetRowError::Control)?);
+        }
+        control(GlaExecutionEvent::ScratchEntry).map_err(SpillSetRowError::Control)?;
+        let collected = GraphValue::List(self.members.into_boxed_slice());
+        debug_assert!(collected.validate_bounds());
+        values.push(collected);
+        control(GlaExecutionEvent::ScratchEntry).map_err(SpillSetRowError::Control)?;
+        Ok(GraphValueRow::from_owned_values(values))
+    }
+}
+
+impl core::fmt::Debug for SpillSetCollection<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("SpillSetCollection([REDACTED])")
+    }
+}
+
+fn collection_overflow<E>(row: usize, column: usize) -> SpillSetRowError<E> {
+    SpillSetRowError::Native(GraphSetExecutionError::Projection {
+        row,
+        column,
+        error: crate::GraphIntegerError {
+            instruction: 0,
+            kind: crate::GraphIntegerErrorKind::Overflow,
+        },
+    })
+}
+
+// The same structural bounds as GraphValue::validate_bounds, with depth one
+// for each member and one node budget shared by the final collected List.
+// This borrowed walk allocates no validation stack and stops before copying
+// an inadmissible member; recursion is bounded by MAX_LIST_DEPTH + 1.
+fn admit_collection_value<E>(
+    value: &GraphValue,
+    depth: usize,
+    remaining: &mut usize,
+    row: usize,
+    column: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<(), SpillSetRowError<E>> {
+    control(GlaExecutionEvent::Work).map_err(SpillSetRowError::Control)?;
+    if depth > GraphValue::MAX_LIST_DEPTH || *remaining == 0 {
+        return Err(collection_overflow(row, column));
+    }
+    *remaining -= 1;
+    match value {
+        GraphValue::List(values) => {
+            for value in values {
+                admit_collection_value(value, depth + 1, remaining, row, column, control)?;
+            }
+        }
+        GraphValue::Map { keys, values } => {
+            if keys.len() != values.len() {
+                return Err(collection_overflow(row, column));
+            }
+            for pair in keys.windows(2) {
+                control(GlaExecutionEvent::Work).map_err(SpillSetRowError::Control)?;
+                if pair[0].as_bytes() >= pair[1].as_bytes() {
+                    return Err(collection_overflow(row, column));
+                }
+            }
+            for value in values {
+                admit_collection_value(value, depth + 1, remaining, row, column, control)?;
+            }
+        }
+        GraphValue::Scalar(scalar) => {
+            scalar
+                .canonical_encoded_len()
+                .map_err(|_| collection_overflow(row, column))?;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// One imported row from the nearest enclosing Apply, under local aliases.

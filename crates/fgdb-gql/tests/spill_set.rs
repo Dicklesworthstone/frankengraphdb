@@ -303,8 +303,21 @@ fn staged_plan_with_arguments(
             let left = staged_plan_with_arguments(graph, apply.left(), arguments)?;
             let mut rows = Vec::new();
             for (index, left) in left.iter().enumerate() {
+                let collected = matches!(apply.kind(), SpillSetApplyKind::Collect { .. });
+                if collected && apply.collect_input_is_null(left, &mut |_| Ok::<_, ()>(()))? {
+                    rows.push(apply.null_collect(left, &mut |_| Ok::<_, ()>(()))?);
+                    continue;
+                }
                 let frame = apply.prepare_arguments(left, index, &mut |_| Ok::<_, ()>(()))?;
                 let right = staged_plan_with_arguments(graph, apply.right(), Some(&frame))?;
+                if collected {
+                    let mut collector = apply.start_collection(index, &mut |_| Ok::<_, ()>(()))?;
+                    for right in &right {
+                        collector = collector.push(right, &mut |_| Ok::<_, ()>(()))?;
+                    }
+                    rows.push(collector.finish(left, &mut |_| Ok::<_, ()>(()))?);
+                    continue;
+                }
                 if apply.kind() == SpillSetApplyKind::Optional && right.is_empty() {
                     rows.push(apply.null_extend(left, &mut |_| Ok::<_, ()>(()))?);
                 }
@@ -481,6 +494,141 @@ fn staged_plan_with_arguments(
             .collect();
     }
     Ok(rows)
+}
+
+#[test]
+fn graph_reading_collections_preserve_member_order_nulls_and_nested_frames() {
+    let graph = Graph::sample();
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    let members = [2, 1, 2].map(|id| GraphValue::Vertex(VId(id)));
+    let mapped = GraphValue::List(members.to_vec().into());
+    let parameters = GqlParameters::new()
+        .with_list(
+            "items",
+            vec![
+                GraphValue::Vertex(VId(2)),
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Vertex(VId(2)),
+                null.clone(),
+                GraphValue::Vertex(VId(3)),
+            ],
+        )
+        .unwrap();
+    for (text, expected) in [
+        (
+            "WITH $items AS xs RETURN [x IN xs WHERE (x)-[:R]->() | x] AS value",
+            vec![row(vec![mapped.clone()])],
+        ),
+        (
+            "WITH $items AS xs RETURN [x IN xs WHERE (x)-[:R]->() | NULL] AS value",
+            vec![row(vec![GraphValue::List(vec![null.clone(); 3].into())])],
+        ),
+        (
+            "WITH $items AS xs RETURN [x IN xs WHERE (x)-[:R]->() | [x,NULL,x]] AS value",
+            vec![row(vec![GraphValue::List(
+                members
+                    .iter()
+                    .map(|member| {
+                        GraphValue::List(vec![member.clone(), null.clone(), member.clone()].into())
+                    })
+                    .collect(),
+            )])],
+        ),
+        (
+            "UNWIND [7,7] AS marker WITH marker,$items AS xs \
+             RETURN marker,[x IN xs WHERE (x)-[:R]->() | x] AS value",
+            vec![
+                row(vec![scalar(7), mapped.clone()]),
+                row(vec![scalar(7), mapped.clone()]),
+            ],
+        ),
+        (
+            "WITH 7 AS x,$items AS xs \
+             CALL (xs) { RETURN [x IN xs WHERE (x)-[:R]->() | x] AS value } RETURN x,value",
+            vec![row(vec![scalar(7), mapped.clone()])],
+        ),
+        (
+            "WITH $items AS xs WITH [x IN xs WHERE (x)-[:R]->() | x] AS active \
+             UNWIND active AS node RETURN node",
+            members
+                .iter()
+                .cloned()
+                .map(|member| row(vec![member]))
+                .collect(),
+        ),
+    ] {
+        let query = PreparedGraphSetText::prepare_with_parameter_types(
+            text,
+            &[("items", fgdb_gql::GqlParameterType::List)],
+            symbols,
+        )
+        .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+        .bind_parameters(&parameters)
+        .unwrap();
+        let transcript = query.canonical_bytes();
+        let plan = AsyncSpillSetPlan::compile(&query).unwrap();
+        assert!(plan.source_count() > 0, "{text}");
+        assert_eq!(staged_plan(&graph, &plan).unwrap(), expected, "{text}");
+        assert_eq!(graph.native(&query).unwrap(), expected, "{text}");
+        assert_eq!(query.canonical_bytes(), transcript);
+    }
+}
+
+#[test]
+fn graph_reading_collections_skip_null_and_empty_inputs_but_keep_late_failures() {
+    let graph = Graph::sample();
+    for (list, expected) in [
+        ("NULL", GraphValue::Scalar(CanonicalScalar::Null)),
+        ("[]", GraphValue::List(Box::new([]))),
+    ] {
+        for suffix in ["", " LIMIT 0"] {
+            let query = prepare(&format!(
+                "WITH {list} AS xs RETURN [x IN xs WHERE (x)-[:R]->() | 1/0] AS value{suffix}"
+            ));
+            let expected = if suffix.is_empty() {
+                vec![row(vec![expected.clone()])]
+            } else {
+                vec![]
+            };
+            assert_eq!(staged(&graph, &query).unwrap(), expected);
+            assert_eq!(graph.native(&query).unwrap(), expected);
+        }
+    }
+    let parameters = GqlParameters::new()
+        .with_list(
+            "items",
+            vec![
+                GraphValue::Vertex(VId(2)),
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Vertex(VId(2)),
+            ],
+        )
+        .unwrap();
+    for suffix in ["", " LIMIT 0"] {
+        let text = format!(
+            "WITH $items AS xs RETURN [x IN xs WHERE (x)-[:R]->() | \
+             CASE WHEN x = xs[1] THEN 1/0 ELSE 1 END] AS value{suffix}"
+        );
+        let query = PreparedGraphSetText::prepare_with_parameter_types(
+            &text,
+            &[("items", fgdb_gql::GqlParameterType::List)],
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&parameters)
+        .unwrap();
+        let GqlQueryError::Source(expected) = graph.native(&query).unwrap_err() else {
+            panic!("the reached division must remain a native source error");
+        };
+        assert!(
+            matches!(&expected, GraphSetExecutionError::Projection { error, .. }
+            if error.kind == GraphIntegerErrorKind::DivisionByZero)
+        );
+        assert_eq!(
+            staged(&graph, &query),
+            Err(SpillSetRowError::Native(expected))
+        );
+    }
 }
 
 #[test]

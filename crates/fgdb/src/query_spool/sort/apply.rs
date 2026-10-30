@@ -1,5 +1,6 @@
 //! Correlated external execution over authenticated, complete child runs.
-//! Only the current outer row, lexical frame and current body row are live.
+//! Row extension keeps the current outer row, lexical frame and body row live.
+//! Collected Apply additionally retains one bounded, charged result list.
 
 use super::*;
 use fgdb_gql::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue};
@@ -237,8 +238,35 @@ where
     while let Some(bytes) = outer_input.next(destination, cx).await? {
         host.checkpoint()?;
         let left = cross::decode(bytes, &pool, &mut work, resolver)?;
-        let mut frame_charge = row_charge(&pool, cx, plan.imports().len())?;
         let row_index = usize::try_from(outer_seen).map_err(|_| SpillError::SizeOverflow)?;
+        let collect = matches!(plan.kind(), SpillSetApplyKind::Collect { .. });
+        // A NULL list skips its correlated body, including argument copying
+        // and every graph/property read. Static body admission already ran.
+        if collect
+            && plan
+                .collect_input_is_null(&left.row, &mut |event| {
+                    host::event(host, cx, policy, &mut outer.evaluator, event)
+                })
+                .map_err(failure)?
+        {
+            let next = rows.checked_add(1).ok_or(SpillError::SizeOverflow)?;
+            admit_rows(limits.max_input_rows, next)?;
+            let mut charge = row_charge(&pool, cx, plan.columns().len())?;
+            let row = plan
+                .null_collect(&left.row, &mut |event| {
+                    copy_event(host, cx, policy, &mut outer.evaluator, &mut charge, event)
+                })
+                .map_err(failure)?;
+            let encoded = codec::encode(&pool, &mut work, &row, limits.max_row_bytes)?;
+            let mut writer = output.resume(cx, scratch)?;
+            write_row(&mut writer, &encoded.0, &mut work).await?;
+            largest = largest.max(encoded.0.len());
+            output = writer.suspend(cx)?;
+            rows = next;
+            outer_seen = outer_seen.checked_add(1).ok_or(SpillError::SizeOverflow)?;
+            continue;
+        }
+        let mut frame_charge = row_charge(&pool, cx, plan.imports().len())?;
         let frame = plan
             .prepare_arguments(&left.row, row_index, &mut |event| {
                 copy_event(
@@ -305,38 +333,73 @@ where
         let mut body_input = cross::position(&body);
         let mut writer = output.resume(cx, scratch)?;
         let mut body_seen = 0_u64;
-        while let Some(bytes) = body_input.next(destination, cx).await? {
-            let right = cross::decode(bytes, &pool, &mut work, resolver)?;
-            let next = rows.checked_add(1).ok_or(SpillError::SizeOverflow)?;
-            admit_rows(limits.max_input_rows, next)?;
+        if collect {
+            // The graph and child relations remain external; one list cell
+            // must fit the existing value/row and shared-memory bounds. Keep
+            // its charge across all body reads and the final awaited append.
             let mut charge = row_charge(&pool, cx, plan.columns().len())?;
-            let row = plan
-                .copy_pair(&left.row, &right.row, &mut |event| {
+            let mut collection = plan
+                .start_collection(row_index, &mut |event| {
                     copy_event(host, cx, policy, &mut outer.evaluator, &mut charge, event)
                 })
                 .map_err(failure)?;
+            while let Some(bytes) = body_input.next(destination, cx).await? {
+                let right = cross::decode(bytes, &pool, &mut work, resolver)?;
+                collection = collection
+                    .push(&right.row, &mut |event| {
+                        copy_event(host, cx, policy, &mut outer.evaluator, &mut charge, event)
+                    })
+                    .map_err(failure)?;
+                body_seen = body_seen.checked_add(1).ok_or(SpillError::SizeOverflow)?;
+            }
+            if body_seen != body.row_count() {
+                return Err(NativeSpoolError::IncompleteCursor);
+            }
+            let row = collection
+                .finish(&left.row, &mut |event| {
+                    copy_event(host, cx, policy, &mut outer.evaluator, &mut charge, event)
+                })
+                .map_err(failure)?;
+            let next = rows.checked_add(1).ok_or(SpillError::SizeOverflow)?;
+            admit_rows(limits.max_input_rows, next)?;
             let encoded = codec::encode(&pool, &mut work, &row, limits.max_row_bytes)?;
             write_row(&mut writer, &encoded.0, &mut work).await?;
             largest = largest.max(encoded.0.len());
             rows = next;
-            body_seen = body_seen.checked_add(1).ok_or(SpillError::SizeOverflow)?;
-        }
-        if body_seen != body.row_count() {
-            return Err(NativeSpoolError::IncompleteCursor);
-        }
-        if body_seen == 0 && plan.kind() == SpillSetApplyKind::Optional {
-            let next = rows.checked_add(1).ok_or(SpillError::SizeOverflow)?;
-            admit_rows(limits.max_input_rows, next)?;
-            let mut charge = row_charge(&pool, cx, plan.columns().len())?;
-            let row = plan
-                .null_extend(&left.row, &mut |event| {
-                    copy_event(host, cx, policy, &mut outer.evaluator, &mut charge, event)
-                })
-                .map_err(failure)?;
-            let encoded = codec::encode(&pool, &mut work, &row, limits.max_row_bytes)?;
-            write_row(&mut writer, &encoded.0, &mut work).await?;
-            largest = largest.max(encoded.0.len());
-            rows = next;
+        } else {
+            while let Some(bytes) = body_input.next(destination, cx).await? {
+                let right = cross::decode(bytes, &pool, &mut work, resolver)?;
+                let next = rows.checked_add(1).ok_or(SpillError::SizeOverflow)?;
+                admit_rows(limits.max_input_rows, next)?;
+                let mut charge = row_charge(&pool, cx, plan.columns().len())?;
+                let row = plan
+                    .copy_pair(&left.row, &right.row, &mut |event| {
+                        copy_event(host, cx, policy, &mut outer.evaluator, &mut charge, event)
+                    })
+                    .map_err(failure)?;
+                let encoded = codec::encode(&pool, &mut work, &row, limits.max_row_bytes)?;
+                write_row(&mut writer, &encoded.0, &mut work).await?;
+                largest = largest.max(encoded.0.len());
+                rows = next;
+                body_seen = body_seen.checked_add(1).ok_or(SpillError::SizeOverflow)?;
+            }
+            if body_seen != body.row_count() {
+                return Err(NativeSpoolError::IncompleteCursor);
+            }
+            if body_seen == 0 && plan.kind() == SpillSetApplyKind::Optional {
+                let next = rows.checked_add(1).ok_or(SpillError::SizeOverflow)?;
+                admit_rows(limits.max_input_rows, next)?;
+                let mut charge = row_charge(&pool, cx, plan.columns().len())?;
+                let row = plan
+                    .null_extend(&left.row, &mut |event| {
+                        copy_event(host, cx, policy, &mut outer.evaluator, &mut charge, event)
+                    })
+                    .map_err(failure)?;
+                let encoded = codec::encode(&pool, &mut work, &row, limits.max_row_bytes)?;
+                write_row(&mut writer, &encoded.0, &mut work).await?;
+                largest = largest.max(encoded.0.len());
+                rows = next;
+            }
         }
         output = writer.suspend(cx)?;
         outer_seen = outer_seen.checked_add(1).ok_or(SpillError::SizeOverflow)?;
