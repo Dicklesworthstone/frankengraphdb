@@ -1561,6 +1561,48 @@ impl PreparedGraphEdgeMergeText {
                             )?),
                         });
                     }
+                    // A copied property map (fgdb-at06q): its names resolve
+                    // through the statement's frozen element catalog.
+                    if let crate::mutation_text::VertexMergeRowActionTemplate::RowProperties {
+                        value,
+                        replace,
+                        catalog,
+                        at,
+                    } = template
+                    {
+                        let catalog = catalog.bind().ok_or_else(|| {
+                            GraphEdgeMergeTextError::from(error(
+                                *at,
+                                GraphPatternTextErrorKind::Expected(
+                                    "a resolved property catalog for the copied map",
+                                ),
+                            ))
+                        })?;
+                        // One name per key, in byte order: an entry finds
+                        // its key by binary search, and a name two keys
+                        // share would make the copy ambiguous.
+                        let mut names: Vec<(Box<str>, fgdb_delta_types::PropertyKeyId)> = catalog
+                            .properties
+                            .iter()
+                            .map(|(key, name)| (name.as_str().into(), *key))
+                            .collect();
+                        names.sort_unstable();
+                        if names.windows(2).any(|names| names[0].0 == names[1].0) {
+                            return Err(GraphEdgeMergeTextError::from(error(
+                                *at,
+                                GraphPatternTextErrorKind::Expected(
+                                    "distinct property names in the copied map's catalog",
+                                ),
+                            )));
+                        }
+                        return Ok(EdgeAction::Properties {
+                            value: crate::GraphEdgeMergeRowComputed(super::merge::bind_row_value(
+                                value, values, *at,
+                            )?),
+                            replace: *replace,
+                            names: names.into(),
+                        });
+                    }
                     let Some(action) =
                         super::merge::bind_row_actions(core::slice::from_ref(template), values)?
                             .pop()

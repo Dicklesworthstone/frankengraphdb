@@ -904,6 +904,36 @@ pub(super) fn execute_actions<V: Vfs + Clone, Clock: FnMut() -> u64>(
                                 action_source,
                             )
                         },
+                        // A copied element's properties (`r = a`): only the
+                        // fields the capability sees, at the input cut.
+                        |element, kind, catalog, control| {
+                            let mut state = state.borrow_mut();
+                            let (transaction, database) = &mut *state;
+                            transaction
+                                .with_prepared_point_read(&input_prepared, |transaction| {
+                                    selection::returning_element_metadata(
+                                        transaction,
+                                        database,
+                                        cx,
+                                        element,
+                                        kind,
+                                        catalog,
+                                        scope,
+                                        &controls,
+                                        control,
+                                    )
+                                })
+                                .map_err(|error| match error {
+                                    fgdb_gql::GraphElementMetadataError::Source(error) => {
+                                        fgdb_gql::GraphElementMetadataError::Source(action_source(
+                                            error,
+                                        ))
+                                    }
+                                    fgdb_gql::GraphElementMetadataError::Interrupted => {
+                                        fgdb_gql::GraphElementMetadataError::Interrupted
+                                    }
+                                })
+                        },
                         |batch| {
                             let mut state = state.borrow_mut();
                             let (transaction, database) = &mut *state;

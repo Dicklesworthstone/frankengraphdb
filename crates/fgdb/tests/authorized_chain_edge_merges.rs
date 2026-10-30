@@ -85,6 +85,38 @@ fn chain_with(text: &str, parameters: &GqlParameters) -> PreparedGraphWriteChain
     result
 }
 
+/// A host resolver that names every property, as a database's does: a
+/// copied map (`r = a`) resolves its entries' names through it.
+#[derive(Clone, Copy)]
+struct Catalog;
+impl fgdb_gql::GraphSymbolResolver for Catalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        symbols(kind, name)
+    }
+    fn reverse_catalog(&self) -> Option<fgdb_gql::ReverseSymbolCatalog> {
+        let mut catalog = fgdb_gql::ReverseSymbolCatalog::new();
+        catalog.insert_label(L, "Visible");
+        catalog.insert_label(HIDDEN, "Hidden");
+        catalog.insert_relation(R, "R");
+        catalog.insert_relation(S, "S");
+        for (key, name) in [(P, "p"), (SECRET, "secret"), (Q, "q")] {
+            catalog.insert_property(key, name);
+        }
+        Some(catalog)
+    }
+}
+
+fn chain_named(text: &str) -> PreparedGraphWriteChain {
+    assert!(
+        PreparedGraphWriteChainText::is_chain(text).unwrap(),
+        "{text}"
+    );
+    PreparedGraphWriteChainText::prepare(text, R, Catalog)
+        .expect(text)
+        .bind_parameters(&GqlParameters::new())
+        .expect(text)
+}
+
 fn authorization(error: &(dyn core::error::Error + 'static)) -> Option<Error> {
     let mut cause = Some(error);
     while let Some(error) = cause {
@@ -285,6 +317,142 @@ fn relationship_map_replacement_freezes_clauses_and_preserves_hidden_fields() {
                 (reopened.vertices().unwrap(), reopened.edges().unwrap()),
                 expected
             );
+        }
+    });
+}
+
+/// `ON CREATE SET r = a` and `ON MATCH SET r = b` copy a node's property
+/// map onto the relationship (TCK Merge6 [6], Merge7 [4]); `r += m` merges a
+/// computed map (fgdb-at06q). An authorized copy reads only the fields the
+/// capability sees and never clears a hidden relationship field; every
+/// actual write spends the effect allowance, and an exhausted one writes
+/// nothing.
+#[test]
+fn relationship_merge_copies_node_property_maps() {
+    lab(0xc4a1_3718, |contexts| async move {
+        let commit = contexts.commit();
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        for authorized in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(
+                VId(1),
+                vec![L],
+                vec![
+                    (P, CanonicalScalar::Int(1)),
+                    (SECRET, CanonicalScalar::Int(99)),
+                    (Q, CanonicalScalar::Int(7)),
+                ],
+            );
+            seed.create_vertex(VId(2), vec![L], vec![(P, CanonicalScalar::Int(2))]);
+            db.write(&commit, seed).await.unwrap();
+            let mut matched = WriteBatch::new(S);
+            matched.add_edge(
+                EId(100),
+                VId(1),
+                VId(2),
+                vec![
+                    (P, CanonicalScalar::Int(5)),
+                    (SECRET, CanonicalScalar::Int(42)),
+                    (Q, CanonicalScalar::Int(8)),
+                ],
+            );
+            db.write(&commit, matched).await.unwrap();
+            let vertices = db.vertices().unwrap();
+            let props = |db: &Database<MemVfs>, relation| {
+                db.edges()
+                    .unwrap()
+                    .into_iter()
+                    .find(|edge| edge.entry.relation == relation)
+                    .map(|edge| edge.props)
+            };
+            // The owner copies a's three fields, the capability two. The
+            // statements never name `secret`: a capability that hides it
+            // refuses a statement naming it, while the copy itself takes its
+            // names from the host catalog.
+            let copies = if authorized { 2 } else { 3 };
+
+            let create = chain_named(
+                "MATCH (a:Visible {p:1}), (b:Visible {p:2}) MERGE (a)-[r:R]->(b) \
+                 ON CREATE SET r = a RETURN r.p, r.q",
+            );
+            let refused = whole_pattern_merge(
+                &contexts,
+                &mut db,
+                authorized,
+                &create,
+                policy(1).with_mutation_limit(copies - 1),
+            )
+            .await
+            .unwrap_err();
+            assert!(refused.contains("ActionLimit"), "{refused}");
+            assert_eq!(props(&db, R), None);
+            let (stats, rows) = whole_pattern_merge(
+                &contexts,
+                &mut db,
+                authorized,
+                &create,
+                policy(1).with_mutation_limit(copies),
+            )
+            .await
+            .unwrap();
+            assert_eq!(stats.created_edges, 1);
+            assert_eq!(rows[0].values(), &[int(1), int(7)]);
+            let mut expected = vec![(P, CanonicalScalar::Int(1).into())];
+            if !authorized {
+                expected.push((SECRET, CanonicalScalar::Int(99).into()));
+            }
+            expected.push((Q, CanonicalScalar::Int(7).into()));
+            assert_eq!(props(&db, R), Some(expected));
+
+            // Replacing removes every visible field b lacks, and keeps a
+            // field the capability cannot see.
+            let replace = chain_named(
+                "MATCH (a:Visible {p:1}), (b:Visible {p:2}) MERGE (a)-[r:S]->(b) \
+                 ON MATCH SET r = b RETURN r.p, r.q",
+            );
+            let (stats, rows) = whole_pattern_merge(
+                &contexts,
+                &mut db,
+                authorized,
+                &replace,
+                policy(1).with_mutation_limit(copies),
+            )
+            .await
+            .unwrap();
+            assert_eq!(stats.created_edges, 0);
+            assert_eq!(rows[0].values(), &[int(2), null.clone()]);
+            let mut expected = vec![(P, CanonicalScalar::Int(2).into())];
+            if authorized {
+                expected.push((SECRET, CanonicalScalar::Int(42).into()));
+            }
+            assert_eq!(props(&db, S), Some(expected));
+
+            // A merged map keeps the relationship's other fields.
+            let merge = chain_named(
+                "MATCH (a:Visible {p:1}), (b:Visible {p:2}) MERGE (a)-[r:S]->(b) \
+                 ON MATCH SET r += properties(a) RETURN r.p, r.q",
+            );
+            let (_, rows) = whole_pattern_merge(
+                &contexts,
+                &mut db,
+                authorized,
+                &merge,
+                policy(1).with_mutation_limit(copies),
+            )
+            .await
+            .unwrap();
+            assert_eq!(rows[0].values(), &[int(1), int(7)]);
+            let secret = if authorized { 42 } else { 99 };
+            assert_eq!(
+                props(&db, S),
+                Some(vec![
+                    (P, CanonicalScalar::Int(1).into()),
+                    (SECRET, CanonicalScalar::Int(secret).into()),
+                    (Q, CanonicalScalar::Int(7).into()),
+                ])
+            );
+            assert_eq!(db.vertices().unwrap(), vertices);
         }
     });
 }

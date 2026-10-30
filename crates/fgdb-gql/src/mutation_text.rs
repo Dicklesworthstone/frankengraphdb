@@ -531,6 +531,15 @@ pub(crate) enum VertexMergeRowActionTemplate {
         value: Box<crate::set_text::ReadValueTemplate>,
         at: usize,
     },
+    /// `r = m` or `r += m` over a map the row computes, which only a
+    /// relationship MERGE step parses (fgdb-at06q). Its names resolve
+    /// through the statement's element catalog when it binds.
+    RowProperties {
+        value: Box<crate::set_text::ReadValueTemplate>,
+        replace: bool,
+        catalog: crate::set_text::ElementCatalogSlot,
+        at: usize,
+    },
 }
 
 /// The ON/SET clauses of a vertex MERGE step, resolved (fgdb-cpny9).

@@ -65,6 +65,31 @@ impl GraphEdgeMergeRowComputed {
         })?;
         Ok(value.to_written_property())
     }
+
+    /// As [`Self::written_with_elements`], keeping the evaluated value: a
+    /// copied property map (`r = a`, `r += m`) is read entry by entry.
+    pub fn value_with_elements<C>(
+        &self,
+        row: &GraphValueRow,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), C>,
+        elements: &mut impl crate::GraphElementReader<C>,
+    ) -> Result<crate::algebra::GraphValue, crate::GraphIntegerEvaluationError<C>> {
+        crate::set_ops::projection::evaluate_value_reading(
+            &self.0.0,
+            row,
+            0,
+            control,
+            &mut crate::set_ops::projection::HostElements(elements),
+        )
+        .map_err(|failure| match failure {
+            crate::set_ops::ProjectionFailure::Control(error) => {
+                crate::GraphIntegerEvaluationError::Control(error)
+            }
+            crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
+                crate::GraphIntegerEvaluationError::Value(error)
+            }
+        })
+    }
 }
 
 /// One assignment in a simultaneous ON or trailing SET clause.
@@ -77,6 +102,18 @@ pub enum GraphEdgeMergeRowAction {
     /// set is sorted and unique and contains every edge assignment in the
     /// same simultaneous clause. Actual removals spend the effect allowance.
     ClearProperties { keep: Vec<PropertyKeyId> },
+    /// `r = m` or `r += m` over a map the row computes; `r = a` reads the
+    /// element `a`'s properties (fgdb-at06q). Each entry is one assignment
+    /// whose name resolves through `names`, the statement catalog's
+    /// injective names in byte order, and NULL unsets. `replace` also unsets
+    /// every visible relationship property the map omits. It is the
+    /// clause's only relationship assignment, so no entry can compete with
+    /// another; every actual write spends the effect allowance.
+    Properties {
+        value: GraphEdgeMergeRowComputed,
+        replace: bool,
+        names: std::sync::Arc<[(Box<str>, PropertyKeyId)]>,
+    },
     Expression {
         key: PropertyKeyId,
         inputs: Vec<GraphEdgeMergeRowInput>,
@@ -104,7 +141,7 @@ impl GraphEdgeMergeRowAction {
             Self::Expression { key, .. }
             | Self::Value { key, .. }
             | Self::RowVertex { key, .. } => Some(*key),
-            Self::ClearProperties { .. } => None,
+            Self::ClearProperties { .. } | Self::Properties { .. } => None,
         }
     }
 
@@ -117,7 +154,8 @@ impl GraphEdgeMergeRowAction {
             Self::Edge(_)
             | Self::Expression { .. }
             | Self::Value { .. }
-            | Self::ClearProperties { .. } => None,
+            | Self::ClearProperties { .. }
+            | Self::Properties { .. } => None,
         }
     }
 }
@@ -127,6 +165,7 @@ impl core::fmt::Debug for GraphEdgeMergeRowAction {
         f.write_str(match self {
             Self::Edge(_) => "Edge([REDACTED])",
             Self::ClearProperties { .. } => "ClearProperties([REDACTED])",
+            Self::Properties { .. } => "Properties([REDACTED])",
             Self::Expression { .. } => "Expression([REDACTED])",
             Self::Value { .. } => "Value([REDACTED])",
             Self::RowVertex { .. } => "RowVertex([REDACTED])",
@@ -185,6 +224,7 @@ impl PreparedGraphEdgeUpsertRows {
             for clause in [selected, &actions.after] {
                 let mut keys = BTreeSet::new();
                 let mut replacement = None;
+                let mut copied = None;
                 for (action, assignment) in clause.iter().enumerate() {
                     if let Some(key) = assignment.key()
                         && !keys.insert((assignment.vertex_column(), key))
@@ -204,6 +244,21 @@ impl PreparedGraphEdgeUpsertRows {
                             }
                             replacement = Some((action, keep));
                             true
+                        }
+                        GraphEdgeMergeRowAction::Properties { value, names, .. } => {
+                            if copied.is_some()
+                                || names.windows(2).any(|names| names[0].0 >= names[1].0)
+                            {
+                                return Err(GraphEdgeUpsertBuildError::PropertyReplacement {
+                                    branch,
+                                    action,
+                                });
+                            }
+                            copied = Some(action);
+                            matches!(
+                                crate::GraphSetProjection::admit_output(&value.0.0, &types, action),
+                                Ok(GraphSetColumnType::Stored | GraphSetColumnType::Any)
+                            )
                         }
                         GraphEdgeMergeRowAction::Edge(action) => matches!(
                             action.value,
@@ -265,7 +320,8 @@ impl PreparedGraphEdgeUpsertRows {
                     // The native schema check above bounds the expression
                     // before the preparation-only provenance walk visits it.
                     if let GraphEdgeMergeRowAction::Value { value, .. }
-                    | GraphEdgeMergeRowAction::RowVertex { value, .. } = assignment
+                    | GraphEdgeMergeRowAction::RowVertex { value, .. }
+                    | GraphEdgeMergeRowAction::Properties { value, .. } = assignment
                         && !provenance::direct_endpoint_reads(&value.0.0, &new_endpoints)
                     {
                         return Err(GraphEdgeUpsertBuildError::InvalidExpressionInput {
@@ -278,6 +334,13 @@ impl PreparedGraphEdgeUpsertRows {
                     && keys
                         .iter()
                         .any(|(vertex, key)| vertex.is_none() && keep.binary_search(key).is_err())
+                {
+                    return Err(GraphEdgeUpsertBuildError::PropertyReplacement { branch, action });
+                }
+                // A copied map's entries are known only per row, so no other
+                // relationship assignment or replacement may share its clause.
+                if let Some(action) = copied
+                    && (replacement.is_some() || keys.iter().any(|(vertex, _)| vertex.is_none()))
                 {
                     return Err(GraphEdgeUpsertBuildError::PropertyReplacement { branch, action });
                 }
@@ -306,7 +369,13 @@ impl PreparedGraphEdgeUpsertRows {
         selected
             .iter()
             .chain(&self.actions.after)
-            .filter(|action| !matches!(action, GraphEdgeMergeRowAction::ClearProperties { .. }))
+            .filter(|action| {
+                !matches!(
+                    action,
+                    GraphEdgeMergeRowAction::ClearProperties { .. }
+                        | GraphEdgeMergeRowAction::Properties { .. }
+                )
+            })
             .count()
     }
 
@@ -335,6 +404,24 @@ impl PreparedGraphEdgeUpsertRows {
                         bytes.push(5);
                         bytes.extend_from_slice(&(keep.len() as u64).to_be_bytes());
                         for key in keep {
+                            bytes.extend_from_slice(&key.0.to_be_bytes());
+                        }
+                    }
+                    // Tag 6 binds the map value and every name it may
+                    // resolve through, since those names decide the keys.
+                    GraphEdgeMergeRowAction::Properties {
+                        value,
+                        replace,
+                        names,
+                    } => {
+                        bytes.push(6);
+                        bytes.push(u8::from(*replace));
+                        let mut encoded = Vec::new();
+                        value.0.0.append_canonical_bytes(&mut encoded);
+                        field(&mut bytes, &encoded);
+                        bytes.extend_from_slice(&(names.len() as u64).to_be_bytes());
+                        for (name, key) in names.iter() {
+                            field(&mut bytes, name.as_bytes());
                             bytes.extend_from_slice(&key.0.to_be_bytes());
                         }
                     }
@@ -955,6 +1042,90 @@ mod tests {
                     }
                 ))
             ));
+        }
+    }
+
+    /// A host resolver that names every property, as a database's does; a
+    /// bare closure names none, so a copied map could resolve no entry.
+    #[derive(Clone, Copy)]
+    struct Catalog;
+    impl crate::GraphSymbolResolver for Catalog {
+        fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+            symbols(kind, name)
+        }
+        fn reverse_catalog(&self) -> Option<crate::ReverseSymbolCatalog> {
+            let mut catalog = crate::ReverseSymbolCatalog::new();
+            catalog.insert_label(LabelId(1), "A");
+            catalog.insert_relation(R, "R");
+            catalog.insert_relation(RelationId(2), "S");
+            for (key, name) in [(P, "p"), (Q, "q"), (PropertyKeyId(3), "secret")] {
+                catalog.insert_property(key, name);
+            }
+            Some(catalog)
+        }
+    }
+
+    fn bound_with_catalog(text: &str) -> PreparedGraphWriteChain {
+        assert!(
+            PreparedGraphWriteChainText::is_chain(text).unwrap(),
+            "{text}"
+        );
+        PreparedGraphWriteChainText::prepare(text, R, Catalog)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+    }
+
+    #[test]
+    fn copied_maps_are_their_clause_only_relationship_assignment() {
+        for prefix in ["MATCH (a:A), (b:A)", "MATCH (a:A), (b:A) WITH a, b"] {
+            let text =
+                |actions: &str| format!("{prefix} MERGE (a)-[r:R]->(b) {actions} RETURN r.p, r.q");
+            let program =
+                bound_with_catalog(&text("ON CREATE SET r = a ON MATCH SET r += properties(b)"));
+            let upsert = definition(program.steps().last().unwrap());
+            let Some(GraphEdgeMergeRowAction::Properties { names, .. }) =
+                upsert.actions().on_create.first()
+            else {
+                panic!("expected a copied map on create");
+            };
+            // The host catalog's names, in byte order, decide each key.
+            assert_eq!(
+                &names[..],
+                &[
+                    ("p".into(), P),
+                    ("q".into(), Q),
+                    ("secret".into(), PropertyKeyId(3))
+                ]
+            );
+            assert!(matches!(
+                &upsert.actions().on_create[..],
+                [GraphEdgeMergeRowAction::Properties { replace: true, .. }]
+            ));
+            assert!(matches!(
+                &upsert.actions().on_match[..],
+                [GraphEdgeMergeRowAction::Properties { replace: false, .. }]
+            ));
+            // Each entry spends its own effect when it runs.
+            assert_eq!(upsert.action_count(GraphEdgeUpsertBranch::Create), 0);
+            let merged = bound_with_catalog(&text(
+                "ON CREATE SET r += a ON MATCH SET r += properties(b)",
+            ));
+            assert_ne!(
+                definition(merged.steps().last().unwrap()).canonical_bytes(),
+                upsert.canonical_bytes()
+            );
+            for actions in [
+                "ON CREATE SET r = a, r.p = 1",
+                "ON CREATE SET r.p = 1, r = a",
+                "ON CREATE SET r = a, r += b",
+                "ON CREATE SET r = properties(r)",
+            ] {
+                assert!(
+                    PreparedGraphWriteChainText::prepare(&text(actions), R, Catalog).is_err(),
+                    "{actions}"
+                );
+            }
         }
     }
 }

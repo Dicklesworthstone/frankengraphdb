@@ -228,6 +228,13 @@ pub enum GraphEdgeUpsertError<E, A> {
         clause: usize,
         action: usize,
     },
+    /// A copied map (`r = a`, `r += m`, fgdb-at06q) that is not a property
+    /// map, names a key the statement's catalog does not resolve, or holds
+    /// an entry no property can store.
+    PropertyMap {
+        clause: usize,
+        action: usize,
+    },
 }
 impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
     for GraphEdgeUpsertError<E, A>
@@ -243,6 +250,11 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
             Self::NonScalarValue { clause, action } => write!(
                 f,
                 "relationship MERGE clause {clause} action {action} produced a non-scalar property"
+            ),
+            Self::PropertyMap { clause, action } => write!(
+                f,
+                "relationship MERGE clause {clause} action {action} copied a value that is not a \
+                 property map of catalogued keys"
             ),
             Self::Expression {
                 clause,
@@ -265,7 +277,9 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
             Self::Merge(error) => Some(error),
             Self::Staging(error) => Some(error),
             Self::Expression { source, .. } => Some(source),
-            Self::ActionLimit { .. } | Self::NonScalarValue { .. } => None,
+            Self::ActionLimit { .. } | Self::NonScalarValue { .. } | Self::PropertyMap { .. } => {
+                None
+            }
         }
     }
 }

@@ -84,6 +84,15 @@ enum ParsedUpsertAction<'a> {
     ClearProperties {
         keep: Vec<Name<'a>>,
     },
+    /// A relationship MERGE step's `r = m` or `r += m` over a map its row
+    /// computes; `r = a` copies the row element `a`'s properties
+    /// (fgdb-at06q). It is the clause's only relationship assignment.
+    RowProperties {
+        value: ReadValueTemplate,
+        replace: bool,
+        catalog: crate::set_text::ElementCatalogSlot,
+        at: usize,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -573,6 +582,15 @@ impl<'a> Parser<'a> {
                 }
                 continue;
             }
+            if let Some(row) = row.filter(|_| row_vertices)
+                && let Some(replace) = self.copied_map_follows(replacement)?
+            {
+                self.upsert_copied_map(variable, target, row, replace)?;
+                if !self.take(b',')? {
+                    break;
+                }
+                continue;
+            }
             let action = if self.take(b':')? {
                 ParsedUpsertAction::Label {
                     label: self.schema_name()?,
@@ -643,6 +661,25 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
+        // A copied map's names are known only per row: it is its clause's
+        // only relationship assignment, so no entry competes with another.
+        if let Some(at) = target.iter().find_map(|action| match action {
+            ParsedUpsertAction::RowProperties { at, .. } => Some(*at),
+            _ => None,
+        }) && target.iter().any(|action| {
+            !matches!(
+                action,
+                ParsedUpsertAction::RowProperties { .. } | ParsedUpsertAction::RowVertex { .. }
+            )
+        }) {
+            return Err(error(
+                at,
+                GraphPatternTextErrorKind::Expected(
+                    "a copied property map as the clause's only relationship assignment",
+                ),
+            )
+            .into());
+        }
         // Additional explicit assignments of this simultaneous clause also
         // survive its replacement; clearing must never propose a competing
         // unset for one of those fields.
@@ -666,6 +703,93 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Whether `= value` or `+= value` over anything but a literal map
+    /// stands here: a copied property map (fgdb-at06q). `Some(true)`
+    /// replaces; a replacement needs a branch that may replace.
+    fn copied_map_follows(
+        &self,
+        replacement: UpsertReplacement<'_, 'a>,
+    ) -> Result<Option<bool>, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        let replace = match self.current.kind {
+            TokenKind::Punct(b'=') if !matches!(replacement, UpsertReplacement::Refuse) => true,
+            TokenKind::Punct(b'+') if matches!(lexer.next()?.kind, TokenKind::Punct(b'=')) => false,
+            _ => return Ok(None),
+        };
+        Ok((!matches!(lexer.next()?.kind, TokenKind::Punct(b'{'))).then_some(replace))
+    }
+
+    /// `r = value` or `r += value` in a relationship MERGE step (fgdb-at06q,
+    /// TCK Merge6 [6], Merge7 [4]): a row element is its property map, as
+    /// `properties(a)` is; any other value must compute a map from the row.
+    /// Its entries are assigned when the step runs, so it must be the
+    /// clause's only relationship assignment.
+    fn upsert_copied_map(
+        &mut self,
+        variable: Name<'a>,
+        target: &mut Vec<ParsedUpsertAction<'a>>,
+        row: &[(Name<'a>, GraphSetColumnType)],
+        replace: bool,
+    ) -> Result<(), GraphVertexUpsertTextError> {
+        let at = self.current.at;
+        if !replace {
+            self.punct(b'+', "+=")?;
+        }
+        self.punct(b'=', "=")?;
+        if !target.is_empty() {
+            return Err(error(
+                at,
+                GraphPatternTextErrorKind::Expected(
+                    "a copied property map as the clause's only relationship assignment",
+                ),
+            )
+            .into());
+        }
+        let catalog = self.syntax.element_catalog.request();
+        let element = match self.current.kind {
+            TokenKind::Word(word)
+                if matches!(
+                    self.lexer.clone().next()?.kind,
+                    TokenKind::End | TokenKind::Punct(b',' | b';') | TokenKind::Word(_)
+                ) =>
+            {
+                row[..self.visible_width(row)]
+                    .iter()
+                    .position(|(name, kind)| {
+                        name.text == word
+                            && matches!(kind, GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+                    })
+            }
+            _ => None,
+        };
+        let value = if let Some(column) = element {
+            self.advance()?;
+            ReadValueTemplate::ElementMetadata {
+                kind: crate::GraphElementMetadata::Properties,
+                value: Box::new(ReadValueTemplate::Column(column)),
+                catalog: catalog.clone(),
+            }
+        } else {
+            if self.value_reads(row, Some(variable.text))?.1 {
+                return Err(error(
+                    self.current.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "a value that does not read the MERGE relationship",
+                    ),
+                )
+                .into());
+            }
+            self.merge_row_value(row)?
+        };
+        target.push(ParsedUpsertAction::RowProperties {
+            value,
+            replace,
+            catalog,
+            at,
+        });
         Ok(())
     }
 
@@ -933,6 +1057,17 @@ fn resolve_row_actions<'a>(
                 value: Box::new(value),
                 at,
             },
+            ParsedUpsertAction::RowProperties {
+                value,
+                replace,
+                catalog,
+                at,
+            } => VertexMergeRowActionTemplate::RowProperties {
+                value: Box::new(value),
+                replace,
+                catalog,
+                at,
+            },
         });
     }
     Ok(actions)
@@ -1000,8 +1135,9 @@ pub(super) fn bind_row_actions(
                     value: bind_row_value(value, values, *at)?,
                 }
             }
-            // Only relationship MERGE parses one, and binds it itself.
-            VertexMergeRowActionTemplate::RowVertex { at, .. } => {
+            // Only relationship MERGE parses these, and binds them itself.
+            VertexMergeRowActionTemplate::RowVertex { at, .. }
+            | VertexMergeRowActionTemplate::RowProperties { at, .. } => {
                 return Err(error(
                     *at,
                     GraphPatternTextErrorKind::Expected("a MERGE vertex property assignment"),
@@ -1509,7 +1645,8 @@ impl PreparedGraphVertexUpsertText {
                         }
                         // A unique MERGE parses with no row to read.
                         ParsedUpsertAction::RowValue { at, .. }
-                        | ParsedUpsertAction::RowVertex { at, .. } => {
+                        | ParsedUpsertAction::RowVertex { at, .. }
+                        | ParsedUpsertAction::RowProperties { at, .. } => {
                             return Err(error(
                                 at,
                                 GraphPatternTextErrorKind::Expected("the MERGE vertex variable"),
@@ -2928,8 +3065,10 @@ impl PreparedGraphVertexMergeRowsText {
                         ParsedUpsertAction::Property { key, .. }
                         | ParsedUpsertAction::Expression { key, .. }
                         | ParsedUpsertAction::RowValue { key, .. } => Some(key.text),
-                        // A vertex MERGE step parses no row-vertex target.
+                        // A vertex MERGE step parses no row-vertex target
+                        // or copied map.
                         ParsedUpsertAction::RowVertex { .. }
+                        | ParsedUpsertAction::RowProperties { .. }
                         | ParsedUpsertAction::Label { .. }
                         | ParsedUpsertAction::ClearProperties { .. } => None,
                     })

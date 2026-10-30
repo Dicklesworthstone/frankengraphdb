@@ -453,11 +453,35 @@ impl PreparedGraphWriteChainText {
                 {
                     return Ok(true);
                 }
+                // `r += a` or `r += m` over anything but a literal map: a
+                // copied property map, which the row actions evaluate per
+                // row (fgdb-at06q). A literal `r += {...}` stays the upsert's.
+                TokenKind::Punct(b'+')
+                    if actions
+                        && depth == 0
+                        && matches!(previous, Some(TokenKind::Word(element))
+                            if Some(element) == relationship)
+                        && !matches!(before, Some(TokenKind::Punct(b'.')))
+                        && Self::copied_map_after(lexer.clone())? =>
+                {
+                    return Ok(true);
+                }
                 _ => {}
             }
             before = previous;
             previous = Some(token.kind);
         }
+    }
+
+    /// Whether `= value` follows a `+`, with a value other than a literal map.
+    fn copied_map_after(mut lexer: Lexer<'_>) -> Result<bool, GraphPatternTextError> {
+        Ok(matches!(
+            script::next_script_token(&mut lexer)?.kind,
+            TokenKind::Punct(b'=')
+        ) && !matches!(
+            script::next_script_token(&mut lexer)?.kind,
+            TokenKind::Punct(b'{')
+        ))
     }
 
     /// The write family owning a read prefix after an earlier write. CREATE
@@ -1447,6 +1471,10 @@ mod tests {
             // ON/SET after a map that reads the MATCH row: only the chain's
             // row MERGE computes the value per row (fgdb-at06q).
             "MATCH (a), (b) MERGE (a)-[r:R {k: a.p}]->(b) ON CREATE SET r.q = 1",
+            // A copied property map, replaced or merged, is evaluated per row
+            // (TCK Merge6 [6], Merge7 [4]).
+            "MATCH (a), (b) MERGE (a)-[r:R]->(b) ON CREATE SET r = a",
+            "MATCH (a), (b) MERGE (a)-[r:R]->(b) ON MATCH SET r += properties(b)",
             // A SET, REMOVE or DELETE after a CREATE writes its rows.
             "CREATE (n) SET n.p = 1",
             "CREATE (n:P {p: 1}) SET n.p = n.p + 1 RETURN n.p",

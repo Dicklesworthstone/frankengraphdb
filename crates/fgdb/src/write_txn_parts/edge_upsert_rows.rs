@@ -205,6 +205,54 @@ where
     }
 }
 
+/// A copied map's reader (fgdb-at06q): the row's point reads, and the
+/// properties of an element the map copies (`r = a`), at the same cut.
+struct EdgeMergeRowMapReader<F, M>(F, M);
+
+impl<E, F, M> fgdb_gql::GraphElementReader<E> for EdgeMergeRowMapReader<F, M>
+where
+    F: FnMut(
+        Option<usize>,
+        ElementId,
+        fgdb_delta_types::PropertyKeyId,
+    ) -> Result<Option<CanonicalPropertyValue>, E>,
+    M: FnMut(
+        ElementId,
+        fgdb_gql::GraphElementMetadata,
+        &fgdb_gql::ReverseSymbolCatalog,
+        &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Result<Option<fgdb_gql::algebra::GraphValue>, fgdb_gql::GraphElementMetadataError<E>>,
+{
+    fn element_property(
+        &mut self,
+        element: ElementId,
+        key: fgdb_delta_types::PropertyKeyId,
+    ) -> Result<Option<CanonicalPropertyValue>, E> {
+        (self.0)(None, element, key)
+    }
+
+    fn element_property_for_column(
+        &mut self,
+        column: usize,
+        element: ElementId,
+        key: fgdb_delta_types::PropertyKeyId,
+    ) -> Result<Option<CanonicalPropertyValue>, E> {
+        (self.0)(Some(column), element, key)
+    }
+
+    fn element_metadata(
+        &mut self,
+        element: ElementId,
+        kind: fgdb_gql::GraphElementMetadata,
+        catalog: &fgdb_gql::ReverseSymbolCatalog,
+        control: &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Option<
+        Result<Option<fgdb_gql::algebra::GraphValue>, fgdb_gql::GraphElementMetadataError<E>>,
+    > {
+        Some((self.1)(element, kind, catalog, control))
+    }
+}
+
 /// Evaluate the selected ON clause and trailing SET for one resolved edge.
 /// The caller admits the cumulative effect count first. Every RHS of one
 /// clause completes before its original assignments reach the staging host.
@@ -230,6 +278,17 @@ pub(crate) fn edge_merge_row_actions_controlled<E, A, C>(
     mut keys: impl FnMut(
         &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> EdgeUpsertActionResult<(), E, A, C>,
     ) -> EdgeUpsertActionResult<Vec<fgdb_delta_types::PropertyKeyId>, E, A, C>,
+    mut metadata: impl FnMut(
+        ElementId,
+        fgdb_gql::GraphElementMetadata,
+        &fgdb_gql::ReverseSymbolCatalog,
+        &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Result<
+        Option<fgdb_gql::algebra::GraphValue>,
+        fgdb_gql::GraphElementMetadataError<
+            fgdb_gql::GqlQueryError<fgdb_gql::GraphEdgeUpsertError<E, A>, C>,
+        >,
+    >,
     mut stage: impl FnMut(WriteBatch) -> EdgeUpsertActionResult<(), E, A, C>,
 ) -> EdgeUpsertActionResult<(), E, A, C> {
     use crate::gql_exec::source::SourceEvent;
@@ -319,6 +378,80 @@ pub(crate) fn edge_merge_row_actions_controlled<E, A, C>(
                         control(GlaExecutionEvent::ScratchEntry)?;
                         *effects = observed as u64;
                         batch.set_edge_property(edge, key, None);
+                    }
+                    continue;
+                }
+                GraphEdgeMergeRowAction::Properties {
+                    value,
+                    replace,
+                    names,
+                } => {
+                    let invalid =
+                        || GqlQueryError::Source(GraphEdgeUpsertError::PropertyMap { clause, action });
+                    // The whole map completes before any of its writes.
+                    let map = {
+                        let controls = std::cell::RefCell::new(&mut control);
+                        value
+                            .value_with_elements(
+                                row,
+                                &mut |event| controls.borrow_mut()(event),
+                                &mut EdgeMergeRowMapReader(
+                                    |column, element, property| {
+                                        read_row(column, element, property, &mut |event| {
+                                            controls.borrow_mut()(event)
+                                        })
+                                    },
+                                    &mut metadata,
+                                ),
+                            )
+                            .map_err(|error| match error {
+                                GraphIntegerEvaluationError::Control(error) => error,
+                                GraphIntegerEvaluationError::Value(error) => expression(error),
+                            })?
+                    };
+                    let Some((entries, values)) = map.as_map() else {
+                        return Err(invalid());
+                    };
+                    let mut written = Vec::with_capacity(entries.len());
+                    for (name, entry) in entries.iter().zip(values) {
+                        control(GlaExecutionEvent::Work)?;
+                        let key = names
+                            .binary_search_by(|(known, _)| (**known).cmp(&**name))
+                            .map(|at| names[at].1)
+                            .map_err(|_| invalid())?;
+                        let value = entry.to_written_property().ok_or_else(invalid)?;
+                        point_payload_admission(&value, &mut |event| control(payload(event)))?;
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        written.push((key, value));
+                    }
+                    let mut charge = |control: &mut dyn FnMut(
+                        GlaExecutionEvent,
+                    )
+                        -> EdgeUpsertActionResult<(), E, A, C>| {
+                        let observed = u128::from(*effects) + 1;
+                        if observed > u128::from(max_effects) {
+                            return Err(GqlQueryError::Source(GraphEdgeUpsertError::ActionLimit {
+                                limit: max_effects,
+                                observed,
+                            }));
+                        }
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        *effects = observed as u64;
+                        Ok(())
+                    };
+                    if *replace {
+                        for key in keys(&mut control)? {
+                            control(GlaExecutionEvent::Work)?;
+                            if written.iter().any(|(entry, _)| *entry == key) {
+                                continue;
+                            }
+                            charge(&mut control)?;
+                            batch.set_edge_property(edge, key, None);
+                        }
+                    }
+                    for (key, value) in written {
+                        charge(&mut control)?;
+                        batch.set_edge_property_value(edge, key, Some(value));
                     }
                     continue;
                 }
@@ -893,6 +1026,31 @@ impl WriteTxn {
                                 control,
                                 |error| GqlQueryError::Source(GraphEdgeUpsertError::Staging(error)),
                             )
+                        },
+                        // A copied element's properties (`r = a`), at the
+                        // carried row's frozen input cut, as its `a.key` reads.
+                        |element, kind, catalog, control| {
+                            let mut state = state.borrow_mut();
+                            let (transaction, database) = &mut *state;
+                            let failure = std::cell::RefCell::new(None);
+                            transaction
+                                .with_prepared_point_read(&input_prepared, |transaction| {
+                                    transaction.element_metadata_with_checkpoint(
+                                        database, cx, &failure, element, kind, catalog, control,
+                                    )
+                                })
+                                .map_err(|error| match error {
+                                    fgdb_gql::GraphElementMetadataError::Source(error) => {
+                                        fgdb_gql::GraphElementMetadataError::Source(
+                                            GqlQueryError::Source(GraphEdgeUpsertError::Staging(
+                                                error,
+                                            )),
+                                        )
+                                    }
+                                    fgdb_gql::GraphElementMetadataError::Interrupted => {
+                                        fgdb_gql::GraphElementMetadataError::Interrupted
+                                    }
+                                })
                         },
                         |batch| {
                             let mut state = state.borrow_mut();
