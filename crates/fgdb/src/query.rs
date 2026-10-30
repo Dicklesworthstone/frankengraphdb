@@ -49,8 +49,8 @@ pub use beacon::{
 pub use explain::{ExplainRow, NativeExplainCertificate, PreparedNativeRead, ReplayRefusal};
 use explain::{explain_prefix, explain_result};
 pub(crate) use prism::{
-    BufferedSealedCache, CooperativeSealedBuild, ImmediateSealedBuild, ProcedureRowSink,
-    ProjectionRequest, SEALED_CACHE_BYTES, SealedBuild, SealedProjectionRequest,
+    BufferedProjectionCache, BufferedSealedCache, CooperativeSealedBuild, ImmediateSealedBuild,
+    PROJECTION_CACHE_BYTES, ProcedureRowSink, ProjectionRequest, SEALED_CACHE_BYTES, SealedBuild, SealedProjectionRequest,
     SealedProjectionSource, bind_procedure, fnx_procedure, fnx_procedure_rows, procedure_failure,
     procedure_options, push_staged as push_prism_staged, source_control as prism_source_control,
 };
