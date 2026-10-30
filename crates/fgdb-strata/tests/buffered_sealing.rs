@@ -299,7 +299,10 @@ fn sealing_interleaved_relation_ranges_preserves_retire_precedence_and_selected_
                 .await
                 .unwrap();
             let faults = view.stats().misses - before.misses;
-            assert!(faults > 0);
+            assert_eq!(
+                faults, 6,
+                "three selected topology blocks and their three patches are each faulted once"
+            );
             if let Some(first) = selected_faults {
                 assert_eq!(faults, first, "foreign relation payloads stay unfaulted");
             } else {
@@ -652,6 +655,7 @@ fn source_family_sealing_fits_below_total_raw_history_and_preserves_exact_images
                 .seal_relation(&cx, root, CommitSeq(floor), R, SealedLimits::default())
                 .await
                 .unwrap();
+            let before = view.stats();
             let image = view
                 .seal_relation(
                     &cx,
@@ -662,6 +666,11 @@ fn source_family_sealing_fits_below_total_raw_history_and_preserves_exact_images
                 )
                 .await
                 .unwrap();
+            assert_eq!(
+                view.stats().misses - before.misses,
+                (4 * FAMILIES) as u64,
+                "two topology statements and two hosted patches per source, without a reread"
+            );
             assert_eq!(image.anchor(), expected.anchor());
             assert_eq!(
                 image.encode(&cx, SealedLimits::default()).unwrap(),

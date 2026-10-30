@@ -11,6 +11,8 @@ use fgdb_codec::elias_fano::{EliasFano, EliasFanoSequentialCursor, EntryLimit};
 use fgdb_codec::identity::{IdentityColumn, IdentityColumnLimits};
 use fgdb_delta_types::RelationId;
 use fgdb_types::{CommitSeq, EId, VId};
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 pub(super) fn reserved<T>(count: usize) -> Result<Vec<T>, SealedError> {
     let mut values = Vec::new();
@@ -508,11 +510,11 @@ impl Image {
     }
 }
 
-pub(super) fn build(
+fn flatten(
     compacted: Compaction,
     limits: SealedLimits,
     checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
-) -> Result<Image, SealedError> {
+) -> Result<Vec<(AdjacencyEntry, EdgePropertyRow)>, SealedError> {
     let count = compacted
         .blocks
         .iter()
@@ -534,6 +536,9 @@ pub(super) fn build(
             return Err(SealedError::NonCanonical);
         }
         for (at, entry) in block.into_iter().enumerate() {
+            if at % 128 == 0 {
+                checkpoint()?;
+            }
             let row = if let Some(props) = props.as_mut() {
                 let locator = props.locators[at];
                 if locator == 0 {
@@ -557,67 +562,182 @@ pub(super) fn build(
         )
     });
     checkpoint()?;
-    let mut destinations = reserved(count)?;
-    destinations.extend(flat.iter().map(|(entry, _)| entry.dst));
-    destinations.sort_unstable();
-    destinations.dedup();
-    let dictionary =
-        IdentityColumn::try_new(&destinations, identity_limits(destinations.len(), limits))
-            .map_err(SealedError::Identity)?;
-    let row_count = flat
-        .iter()
-        .enumerate()
-        .filter(|(at, (entry, _))| {
-            *at == 0
-                || (flat[*at - 1].0.src, flat[*at - 1].0.relation) != (entry.src, entry.relation)
+    Ok(flat)
+}
+
+// Buffered sealing cannot know the final destination dictionary while it is
+// consuming its first source family. Retain only a compressed stable-ID column
+// until that dictionary is merged; every other column is already final.
+enum Neighbors {
+    Ranked(EliasFano),
+    Stable(IdentityColumn<VId>),
+}
+
+struct PendingRun {
+    neighbors: Neighbors,
+    edge_ids: IdentityColumn<EId>,
+    spans: Vec<VisibilityInterval>,
+    locators: Vec<u32>,
+}
+
+/// Private incremental construction of the same FGSI image as resident sealing.
+/// Each push owns complete descriptor families in ascending descriptor order.
+/// No decoded adjacency from a completed push survives. Provisional compressed
+/// destination columns remain until final ordinal translation; this is not a
+/// spillable builder or an allocator/RSS bound on the complete operation.
+pub(super) struct ImageBuilder {
+    limits: SealedLimits,
+    rows: Vec<Row>,
+    inlines: Vec<InlineAdjacency>,
+    runs: Vec<PendingRun>,
+    properties: Vec<EdgePropertyRow>,
+    offsets: Vec<u64>,
+    incidences: usize,
+    property_bytes: usize,
+}
+
+impl ImageBuilder {
+    pub(super) fn new(limits: SealedLimits) -> Result<Self, SealedError> {
+        let mut offsets = reserved(1)?;
+        offsets.push(0);
+        Ok(Self {
+            limits,
+            rows: Vec::new(),
+            inlines: Vec::new(),
+            runs: Vec::new(),
+            properties: Vec::new(),
+            offsets,
+            incidences: 0,
+            property_bytes: 0,
         })
-        .count();
-    check_limit("descriptors", row_count, limits.max_rows)?;
-    let mut rows = reserved(row_count)?;
-    let mut inlines = Vec::new();
-    let mut runs = Vec::new();
-    let mut properties = Vec::new();
-    let mut offsets = reserved(row_count.checked_add(1).ok_or(SealedError::SizeOverflow)?)?;
-    offsets.push(0u64);
-    let mut start = 0;
-    let mut property_bytes = 0usize;
-    while start < flat.len() {
-        checkpoint()?;
-        let first = flat[start].0;
-        let key = DescriptorKey {
-            src: first.src,
-            relation: first.relation,
-            direction: Direction::Outbound,
-        };
-        let mut end = start + 1;
-        while end < flat.len() && (flat[end].0.src, flat[end].0.relation) == (key.src, key.relation)
-        {
-            end += 1;
+    }
+
+    pub(super) fn push(
+        &mut self,
+        compacted: Compaction,
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+    ) -> Result<(), SealedError> {
+        let count = compacted
+            .blocks
+            .iter()
+            .try_fold(self.incidences, |sum, block| sum.checked_add(block.len()))
+            .ok_or(SealedError::SizeOverflow)?;
+        check_limit("incidences", count, self.limits.max_incidences)?;
+        u32::try_from(count).map_err(|_| SealedError::SizeOverflow)?;
+        let flat = flatten(compacted, self.limits, checkpoint)?;
+        self.append(flat, None, checkpoint)
+    }
+
+    fn append(
+        &mut self,
+        mut flat: Vec<(AdjacencyEntry, EdgePropertyRow)>,
+        destinations: Option<&[VId]>,
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+    ) -> Result<(), SealedError> {
+        let mut additional_rows = 0usize;
+        for (at, (entry, _)) in flat.iter().enumerate() {
+            if at % 128 == 0 {
+                checkpoint()?;
+            }
+            if at == 0
+                || (flat[at - 1].0.src, flat[at - 1].0.relation) != (entry.src, entry.relation)
+            {
+                additional_rows = additional_rows
+                    .checked_add(1)
+                    .ok_or(SealedError::SizeOverflow)?;
+            }
         }
-        let count = end - start;
+        let rows = self
+            .rows
+            .len()
+            .checked_add(additional_rows)
+            .ok_or(SealedError::SizeOverflow)?;
+        check_limit("descriptors", rows, self.limits.max_rows)?;
+        self.rows
+            .try_reserve(additional_rows)
+            .map_err(|_| SealedError::AllocationFailed)?;
+        self.offsets
+            .try_reserve(additional_rows)
+            .map_err(|_| SealedError::AllocationFailed)?;
+        let mut start = 0;
+        while start < flat.len() {
+            checkpoint()?;
+            let first = flat[start].0;
+            let key = DescriptorKey {
+                src: first.src,
+                relation: first.relation,
+                direction: Direction::Outbound,
+            };
+            if self.rows.last().is_some_and(|row| row.key >= key) {
+                return Err(SealedError::NonCanonical);
+            }
+            let row_count = self
+                .rows
+                .len()
+                .checked_add(1)
+                .ok_or(SealedError::SizeOverflow)?;
+            check_limit("descriptors", row_count, self.limits.max_rows)?;
+            let mut end = start + 1;
+            while end < flat.len()
+                && (flat[end].0.src, flat[end].0.relation) == (key.src, key.relation)
+            {
+                if end % 128 == 0 {
+                    checkpoint()?;
+                }
+                end += 1;
+            }
+            self.append_row(key, &mut flat[start..end], destinations, checkpoint)?;
+            start = end;
+        }
+        Ok(())
+    }
+
+    fn append_row(
+        &mut self,
+        key: DescriptorKey,
+        entries: &mut [(AdjacencyEntry, EdgePropertyRow)],
+        destinations: Option<&[VId]>,
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+    ) -> Result<(), SealedError> {
+        let count = entries.len();
+        let incidences = self
+            .incidences
+            .checked_add(count)
+            .ok_or(SealedError::SizeOverflow)?;
+        check_limit("incidences", incidences, self.limits.max_incidences)?;
+        u32::try_from(incidences).map_err(|_| SealedError::SizeOverflow)?;
         let mut locators = reserved(count)?;
-        for (_, row) in &mut flat[start..end] {
+        for (at, (_, row)) in entries.iter_mut().enumerate() {
+            if at % 128 == 0 {
+                checkpoint()?;
+            }
             if row.is_empty() {
                 locators.push(0);
             } else {
                 let bytes =
                     usize::try_from(admitted_row_bytes(row).map_err(SealedError::Property)?)
                         .map_err(|_| SealedError::SizeOverflow)?;
-                property_bytes = property_bytes
+                self.property_bytes = self
+                    .property_bytes
                     .checked_add(bytes)
                     .ok_or(SealedError::SizeOverflow)?;
-                check_limit("property bytes", property_bytes, limits.max_property_bytes)?;
-                properties
+                check_limit(
+                    "property bytes",
+                    self.property_bytes,
+                    self.limits.max_property_bytes,
+                )?;
+                self.properties
                     .try_reserve(1)
                     .map_err(|_| SealedError::AllocationFailed)?;
-                properties.push(core::mem::take(row));
-                locators
-                    .push(u32::try_from(properties.len()).map_err(|_| SealedError::SizeOverflow)?);
+                self.properties.push(core::mem::take(row));
+                locators.push(
+                    u32::try_from(self.properties.len()).map_err(|_| SealedError::SizeOverflow)?,
+                );
             }
         }
         let storage = if count <= INLINE_CAPACITY {
             let mut slots = reserved(count)?;
-            for (at, (entry, _)) in flat[start..end].iter().enumerate() {
+            for (at, (entry, _)) in entries.iter().enumerate() {
                 slots.push(InlineIncidence {
                     dst: entry.dst,
                     eid: entry.eid,
@@ -627,25 +747,38 @@ pub(super) fn build(
                 });
             }
             let row = InlineAdjacency::try_new(key, &slots).map_err(SealedError::Inline)?;
-            inlines
+            self.inlines
                 .try_reserve(1)
                 .map_err(|_| SealedError::AllocationFailed)?;
-            let index = inlines.len();
-            inlines.push(row);
+            let index = self.inlines.len();
+            self.inlines.push(row);
             Storage::Inline(index)
         } else {
-            let mut neighbors = reserved(count)?;
+            let mut ranks = if destinations.is_some() {
+                reserved(count)?
+            } else {
+                Vec::new()
+            };
+            let mut stable = if destinations.is_none() {
+                reserved(count)?
+            } else {
+                Vec::new()
+            };
             let mut edge_ids = reserved(count)?;
             let mut spans: Vec<VisibilityInterval> = Vec::new();
-            for (at, (entry, _)) in flat[start..end].iter().enumerate() {
+            for (at, (entry, _)) in entries.iter().enumerate() {
                 if at % 128 == 0 {
                     checkpoint()?;
                 }
-                neighbors.push(
-                    destinations
-                        .binary_search(&entry.dst)
-                        .expect("dictionary built from all entries") as u64,
-                );
+                if let Some(destinations) = destinations {
+                    ranks.push(
+                        destinations
+                            .binary_search(&entry.dst)
+                            .map_err(|_| SealedError::NonCanonical)? as u64,
+                    );
+                } else {
+                    stable.push(entry.dst);
+                }
                 edge_ids.push(entry.eid);
                 if let Some(last) = spans.last_mut().filter(|last| {
                     last.created_at == entry.created_at && last.retired_at == entry.retired_at
@@ -663,14 +796,33 @@ pub(super) fn build(
                     });
                 }
             }
-            let neighbors = EliasFano::try_new(&neighbors, EntryLimit::new(count))
-                .map_err(SealedError::EliasFano)?;
-            let edge_ids = IdentityColumn::try_new(&edge_ids, identity_limits(count, limits))
+            let neighbors = if destinations.is_some() {
+                Neighbors::Ranked(
+                    EliasFano::try_new(&ranks, EntryLimit::new(count))
+                        .map_err(SealedError::EliasFano)?,
+                )
+            } else {
+                // This temporary column is not part of the image-byte bound.
+                // Its worst-case payload is one full-width VId per admitted
+                // incidence, even when final dictionary ranks are much smaller.
+                let bytes = count
+                    .checked_mul(core::mem::size_of::<VId>())
+                    .ok_or(SealedError::SizeOverflow)?;
+                Neighbors::Stable(
+                    IdentityColumn::try_new(
+                        &stable,
+                        IdentityColumnLimits::new(count, count, bytes),
+                    )
+                    .map_err(SealedError::Identity)?,
+                )
+            };
+            let edge_ids = IdentityColumn::try_new(&edge_ids, identity_limits(count, self.limits))
                 .map_err(SealedError::Identity)?;
-            runs.try_reserve(1)
+            self.runs
+                .try_reserve(1)
                 .map_err(|_| SealedError::AllocationFailed)?;
-            let index = runs.len();
-            runs.push(Run {
+            let index = self.runs.len();
+            self.runs.push(PendingRun {
                 neighbors,
                 edge_ids,
                 spans,
@@ -678,23 +830,156 @@ pub(super) fn build(
             });
             Storage::Run(index)
         };
-        rows.push(Row {
+        self.rows
+            .try_reserve(1)
+            .map_err(|_| SealedError::AllocationFailed)?;
+        self.offsets
+            .try_reserve(1)
+            .map_err(|_| SealedError::AllocationFailed)?;
+        self.rows.push(Row {
             key,
             count,
             storage,
         });
-        offsets.push(end as u64);
-        start = end;
+        self.offsets.push(incidences as u64);
+        self.incidences = incidences;
+        Ok(())
     }
-    let offsets = EliasFano::try_new(&offsets, EntryLimit::new(row_count + 1))
-        .map_err(SealedError::EliasFano)?;
-    Ok(Image {
-        dictionary,
-        offsets,
-        rows,
-        inlines,
-        runs,
-        properties,
-        incidences: count,
-    })
+
+    fn destination(&self, row: usize, position: usize) -> Result<VId, SealedError> {
+        let row = self.rows.get(row).ok_or(SealedError::NonCanonical)?;
+        match row.storage {
+            Storage::Inline(index) => self.inlines[index]
+                .slots()
+                .nth(position)
+                .map(|slot| slot.dst),
+            Storage::Run(index) => match &self.runs[index].neighbors {
+                Neighbors::Stable(column) => column.get(position),
+                Neighbors::Ranked(_) => None,
+            },
+        }
+        .ok_or(SealedError::NonCanonical)
+    }
+
+    fn destinations(
+        &self,
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+    ) -> Result<Vec<VId>, SealedError> {
+        // Every row's destinations are sorted already. A k-way merge retains
+        // one cursor per descriptor and one entry per DISTINCT destination,
+        // never an incidence-sized decoded destination array.
+        let mut heap = BinaryHeap::from(reserved(self.rows.len())?);
+        for row in 0..self.rows.len() {
+            checkpoint()?;
+            heap.push(Reverse((self.destination(row, 0)?, row, 0usize)));
+        }
+        let mut destinations = Vec::new();
+        while let Some(Reverse((destination, row, position))) = heap.pop() {
+            checkpoint()?;
+            if destinations.last().copied() != Some(destination) {
+                destinations
+                    .try_reserve(1)
+                    .map_err(|_| SealedError::AllocationFailed)?;
+                destinations.push(destination);
+            }
+            let mut next = position + 1;
+            while next < self.rows[row].count {
+                if next % 128 == 0 {
+                    checkpoint()?;
+                }
+                let candidate = self.destination(row, next)?;
+                if candidate < destination {
+                    return Err(SealedError::NonCanonical);
+                }
+                if candidate != destination {
+                    heap.push(Reverse((candidate, row, next)));
+                    break;
+                }
+                next += 1;
+            }
+        }
+        Ok(destinations)
+    }
+
+    pub(super) fn finish(
+        self,
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+    ) -> Result<Image, SealedError> {
+        checkpoint()?;
+        let destinations = self.destinations(checkpoint)?;
+        let dictionary = IdentityColumn::try_new(
+            &destinations,
+            identity_limits(destinations.len(), self.limits),
+        )
+        .map_err(SealedError::Identity)?;
+        self.finish_with_dictionary(dictionary, Some(&destinations), checkpoint)
+    }
+
+    fn finish_with_dictionary(
+        self,
+        dictionary: IdentityColumn<VId>,
+        destinations: Option<&[VId]>,
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+    ) -> Result<Image, SealedError> {
+        let mut runs = reserved(self.runs.len())?;
+        for pending in self.runs {
+            checkpoint()?;
+            let neighbors = match pending.neighbors {
+                Neighbors::Ranked(neighbors) => neighbors,
+                Neighbors::Stable(stable) => {
+                    let destinations = destinations.ok_or(SealedError::NonCanonical)?;
+                    let mut ranks = reserved(stable.len())?;
+                    for (at, destination) in stable.iter().enumerate() {
+                        if at % 128 == 0 {
+                            checkpoint()?;
+                        }
+                        ranks.push(
+                            destinations
+                                .binary_search(&destination)
+                                .map_err(|_| SealedError::NonCanonical)?
+                                as u64,
+                        );
+                    }
+                    EliasFano::try_new(&ranks, EntryLimit::new(stable.len()))
+                        .map_err(SealedError::EliasFano)?
+                }
+            };
+            runs.push(Run {
+                neighbors,
+                edge_ids: pending.edge_ids,
+                spans: pending.spans,
+                locators: pending.locators,
+            });
+        }
+        let offsets = EliasFano::try_new(&self.offsets, EntryLimit::new(self.offsets.len()))
+            .map_err(SealedError::EliasFano)?;
+        Ok(Image {
+            dictionary,
+            offsets,
+            rows: self.rows,
+            inlines: self.inlines,
+            runs,
+            properties: self.properties,
+            incidences: self.incidences,
+        })
+    }
+}
+
+pub(super) fn build(
+    compacted: Compaction,
+    limits: SealedLimits,
+    checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+) -> Result<Image, SealedError> {
+    let flat = flatten(compacted, limits, checkpoint)?;
+    let count = flat.len();
+    let mut destinations = reserved(count)?;
+    destinations.extend(flat.iter().map(|(entry, _)| entry.dst));
+    destinations.sort_unstable();
+    destinations.dedup();
+    let dictionary =
+        IdentityColumn::try_new(&destinations, identity_limits(destinations.len(), limits))
+            .map_err(SealedError::Identity)?;
+    let mut builder = ImageBuilder::new(limits)?;
+    builder.append(flat, Some(&destinations), checkpoint)?;
+    builder.finish_with_dictionary(dictionary, None, checkpoint)
 }

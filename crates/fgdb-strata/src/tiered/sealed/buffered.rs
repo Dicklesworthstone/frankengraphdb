@@ -42,8 +42,12 @@ impl<V: Vfs> BufferedPartition<V> {
     /// input residency depends on the largest source history. Metadata sorting,
     /// decode and retained inputs share one cumulative source-work allowance.
     /// Compacted output populations and properties are admitted cumulatively
-    /// before appending another family. An output refusal may therefore stop
-    /// before later families are read. No partial image is exposed.
+    /// while each family is encoded, before another family is read. Completed
+    /// families retain final columns and provisional compressed destination IDs,
+    /// not decoded topology. The global dictionary is merged from those columns
+    /// and translated one row at a time without another source payload read.
+    /// An output refusal may stop before later families are read; no partial
+    /// image is exposed.
     ///
     /// The existing in-core compactor and image encoder retain their separate
     /// population/image bounds; this is NOT a spillable compactor or a
@@ -75,15 +79,7 @@ impl<V: Vfs> BufferedPartition<V> {
             let mut sources = self
                 .sealed_relation_sources(cx, floor, relation, max_source_incidences)
                 .map_err(buffered_error)?;
-            let mut compacted = crate::compact::Compaction {
-                blocks: Vec::new(),
-                block_props: Vec::new(),
-                dropped: 0,
-                superseded: 0,
-            };
-            let mut incidences = 0usize;
-            let mut descriptors = 0usize;
-            let mut property_bytes = 0usize;
+            let mut builder = image::ImageBuilder::new(limits)?;
             let mut checkpoint = || cx.checkpoint().map_err(SealedError::Interrupted);
             while let Some(source) = self
                 .next_sealed_relation_source(cx, &mut sources)
@@ -91,65 +87,20 @@ impl<V: Vfs> BufferedPartition<V> {
                 .map_err(buffered_error)?
             {
                 checkpoint()?;
-                let mut family =
+                let family =
                     crate::compact::compact_with_props(&source.blocks, &source.properties, floor)
                         .map_err(SealedError::History)?;
                 drop(source);
                 checkpoint()?;
                 // Complete root admission fixed each EId's source/relation.
-                // Only independent families move here. The image builder
-                // restores canonical adjacency order before encoding.
-                for block in &family.blocks {
-                    checkpoint()?;
-                    incidences = incidences
-                        .checked_add(block.len())
-                        .ok_or(SealedError::SizeOverflow)?;
-                }
-                check_limit("incidences", incidences, limits.max_incidences)?;
-                u32::try_from(incidences).map_err(|_| SealedError::SizeOverflow)?;
-                descriptors = descriptors
-                    .checked_add(usize::from(!family.blocks.is_empty()))
-                    .ok_or(SealedError::SizeOverflow)?;
-                check_limit("descriptors", descriptors, limits.max_rows)?;
-                for props in family.block_props.iter().flatten() {
-                    for row in &props.rows {
-                        checkpoint()?;
-                        if row.is_empty() {
-                            continue;
-                        }
-                        let bytes = usize::try_from(
-                            crate::edge_props::admitted_row_bytes(row)
-                                .map_err(SealedError::Property)?,
-                        )
-                        .map_err(|_| SealedError::SizeOverflow)?;
-                        property_bytes = property_bytes
-                            .checked_add(bytes)
-                            .ok_or(SealedError::SizeOverflow)?;
-                        check_limit("property bytes", property_bytes, limits.max_property_bytes)?;
-                    }
-                }
-                compacted.dropped = compacted
-                    .dropped
-                    .checked_add(family.dropped)
-                    .ok_or(SealedError::SizeOverflow)?;
-                compacted.superseded = compacted
-                    .superseded
-                    .checked_add(family.superseded)
-                    .ok_or(SealedError::SizeOverflow)?;
-                compacted
-                    .blocks
-                    .try_reserve(family.blocks.len())
-                    .map_err(|_| SealedError::AllocationFailed)?;
-                compacted
-                    .block_props
-                    .try_reserve(family.block_props.len())
-                    .map_err(|_| SealedError::AllocationFailed)?;
-                compacted.blocks.append(&mut family.blocks);
-                compacted.block_props.append(&mut family.block_props);
+                // Sources arrive in canonical order; publication precedence
+                // inside a source was resolved by the ordinary compactor.
+                // The builder consumes and drops this family's decoded output.
+                builder.push(family, &mut checkpoint)?;
             }
             drop(sources);
             checkpoint()?;
-            let image = image::build(compacted, limits, &mut checkpoint)?;
+            let image = builder.finish(&mut checkpoint)?;
             SealedPartition::finish_scoped(scope, Some(relation), image, limits, &mut checkpoint)
         })
         .await

@@ -59,6 +59,168 @@ fn bytes(partition: &SealedPartition) -> Vec<u8> {
     wire::encode(&partition.image, SealedLimits::default(), &mut || Ok(())).unwrap()
 }
 
+// Families deliberately contain publication-ordered blocks, sparse full-width
+// identities, duplicate destinations, alternating visibility spans and hosted
+// properties. The hand-built retained rows are the history/property oracle;
+// resident assembly is a separate global-dictionary oracle for FGSI-v1 bytes.
+fn incremental_fixture(
+    degrees: &[usize],
+    floor: u64,
+) -> (
+    Vec<crate::compact::Compaction>,
+    Vec<(AdjacencyEntry, EdgePropertyRow)>,
+) {
+    let destinations = [
+        0,
+        1_u128 << 63,
+        (1_u128 << 80) + 9,
+        (1_u128 << 127) + 1,
+        u128::MAX,
+    ];
+    let mut families = Vec::new();
+    let mut expected = Vec::new();
+    for (source, &degree) in degrees.iter().enumerate() {
+        let src = (1_u128 << 127) | ((source as u128) << 72) | (source as u128 * 31);
+        let mut retained = Vec::new();
+        for at in 0..degree {
+            let retired = match at % 3 {
+                0 => Some(4),
+                1 => Some(7),
+                _ => None,
+            };
+            let edge = entry(
+                src,
+                destinations[(at / 3 + source) % destinations.len()],
+                (1_u128 << 126) | ((source as u128) << 80) | (at as u128 * 257),
+                1 + (at % 3) as u64,
+                retired,
+            );
+            let properties = if at % 4 == 0 {
+                Vec::new()
+            } else {
+                vec![(
+                    PropertyKeyId(1),
+                    fgdb_types::CanonicalList::try_new(vec![
+                        CanonicalScalar::Int((source * 1000 + at) as i64).into(),
+                        CanonicalScalar::Null.into(),
+                    ])
+                    .map(CanonicalPropertyValue::List)
+                    .unwrap(),
+                )]
+            };
+            if retired.is_none_or(|end| end > floor) {
+                retained.push((edge, properties));
+            }
+        }
+        retained.sort_unstable_by_key(|(edge, _)| (edge.dst, edge.eid, edge.created_at));
+        expected.extend(retained.iter().cloned());
+        let mut blocks = Vec::new();
+        let mut block_props = Vec::new();
+        for chunk in retained.chunks(64).rev() {
+            blocks.push(chunk.iter().map(|(edge, _)| *edge).collect());
+            let mut locators = Vec::new();
+            let mut rows = Vec::new();
+            for (_, row) in chunk {
+                if row.is_empty() {
+                    locators.push(0);
+                } else {
+                    rows.push(row.clone());
+                    locators.push(u8::try_from(rows.len()).unwrap());
+                }
+            }
+            block_props.push((!rows.is_empty()).then_some(BlockProps { locators, rows }));
+        }
+        families.push(crate::compact::Compaction {
+            blocks,
+            block_props,
+            dropped: degree - retained.len(),
+            superseded: 0,
+        });
+    }
+    (families, expected)
+}
+
+fn combined_families(families: &[crate::compact::Compaction]) -> crate::compact::Compaction {
+    let mut combined = crate::compact::Compaction {
+        blocks: Vec::new(),
+        block_props: Vec::new(),
+        dropped: 0,
+        superseded: 0,
+    };
+    // The resident oracle must globally reorder these descriptor families.
+    for family in families.iter().rev() {
+        combined.blocks.extend(family.blocks.iter().cloned());
+        combined
+            .block_props
+            .extend(family.block_props.iter().cloned());
+        combined.dropped += family.dropped;
+        combined.superseded += family.superseded;
+    }
+    combined
+}
+
+fn incremental_partition(
+    families: &[crate::compact::Compaction],
+    floor: u64,
+    limits: SealedLimits,
+    checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+) -> Result<SealedPartition, SealedError> {
+    let mut builder = image::ImageBuilder::new(limits)?;
+    for family in families {
+        builder.push(family.clone(), checkpoint)?;
+    }
+    let image = builder.finish(checkpoint)?;
+    SealedPartition::finish(scope(floor), image, limits, checkpoint)
+}
+
+#[test]
+fn incremental_assembly_preserves_exact_images_and_independent_snapshot_rows() {
+    for degrees in [&[0, 1, 8, 9, 33, 129][..], &[0, 0][..]] {
+        for floor in [1, 4, 7] {
+            let (families, expected) = incremental_fixture(degrees, floor);
+            let limits = SealedLimits::default();
+            let image = image::build(combined_families(&families), limits, &mut || Ok(())).unwrap();
+            let resident =
+                SealedPartition::finish(scope(floor), image, limits, &mut || Ok(())).unwrap();
+            let incremental =
+                incremental_partition(&families, floor, limits, &mut || Ok(())).unwrap();
+            assert_eq!(incremental.anchor(), resident.anchor());
+            assert_eq!(incremental.stats(), resident.stats());
+            assert_eq!(bytes(&incremental), bytes(&resident));
+            let reloaded = SealedPartition::reload_inner(
+                incremental.anchor(),
+                &bytes(&incremental),
+                limits,
+                None,
+                &mut || Ok(()),
+            )
+            .unwrap();
+            for source in 0..degrees.len() {
+                let src = (1_u128 << 127) | ((source as u128) << 72) | (source as u128 * 31);
+                for cut in floor..=10 {
+                    for lower in [None, Some(1), Some(1_u128 << 80), Some(u128::MAX)] {
+                        let oracle: Vec<_> = expected
+                            .iter()
+                            .filter(|(edge, _)| {
+                                edge.src == VId(src)
+                                    && edge.visible_at(CommitSeq(cut))
+                                    && lower.is_none_or(|dst| edge.dst.0 >= dst)
+                            })
+                            .cloned()
+                            .collect();
+                        assert_eq!(collect(&incremental, src, cut, lower), oracle);
+                        assert_eq!(collect(&reloaded, src, cut, lower), oracle);
+                    }
+                }
+            }
+            if floor == 1 && degrees.len() == 6 {
+                assert_eq!(incremental.stats().inline_rows, 2);
+                assert_eq!(incremental.stats().sealed_rows, 3);
+            }
+        }
+    }
+}
+
 #[test]
 fn real_compaction_to_mixed_tiers_preserves_every_retained_snapshot() {
     let large: Vec<_> = (0..40)
