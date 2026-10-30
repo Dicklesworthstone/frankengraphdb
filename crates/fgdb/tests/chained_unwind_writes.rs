@@ -467,16 +467,67 @@ fn post_match_nested_lists_keep_row_aliases_duplicates_and_the_entry_overlay() {
                     })
                     .collect(),
             );
+            let update_statement = format!(
+                "UNWIND $rows AS row MATCH (p:Entity {{id:row.id}}) \
+                 {carry}UNWIND row.friends AS fid MATCH (f:Entity {{id:fid}}) \
+                 SET p.id=99, f.score=row.score"
+            );
+            let before = db.frontier().unwrap();
+            let vertices = db.vertices().unwrap();
+            let error = db
+                .query_write(
+                    &contexts.txn(),
+                    &cx,
+                    &commit,
+                    &update_statement,
+                    &updates,
+                    symbols,
+                    R,
+                    writes(),
+                    |_| -> Result<ElementId, Infallible> { panic!("SET allocates no identity") },
+                )
+                .await
+                .unwrap_err();
+            // Simultaneous assignments to one field must agree. Keep the
+            // original conflicting input as an atomic refusal, not last-wins.
+            assert!(matches!(
+                error,
+                QueryWriteError::Execute(fgdb_gql::GraphWriteScriptExecutionError::Program(
+                    fgdb_gql::GraphWriteProgramError::Program(
+                        fgdb_gql::GraphMutationProgramError::Statement {
+                            statement: 0,
+                            source: fgdb_gql::GqlQueryError::Source(
+                                fgdb_gql::GraphMutationError::ConflictingAssignment {
+                                    first_row: 0,
+                                    first_action: 1,
+                                    row: 1,
+                                    action: 1,
+                                }
+                            ),
+                        }
+                    )
+                ))
+            ));
+            assert_eq!(db.frontier().unwrap(), before);
+            assert_eq!(db.vertices().unwrap(), vertices);
+            let distinct_targets = args(
+                [(10, 2), (20, 3)]
+                    .into_iter()
+                    .map(|(score, friend)| {
+                        object(vec![
+                            ("id", int(1)),
+                            ("friends", list(vec![int(friend)])),
+                            ("score", int(score)),
+                        ])
+                    })
+                    .collect(),
+            );
             db.query_write(
                 &contexts.txn(),
                 &cx,
                 &commit,
-                &format!(
-                    "UNWIND $rows AS row MATCH (p:Entity {{id:row.id}}) \
-                     {carry}UNWIND row.friends AS fid MATCH (f:Entity {{id:fid}}) \
-                     SET p.id=99, f.score=row.score"
-                ),
-                &updates,
+                &update_statement,
+                &distinct_targets,
                 symbols,
                 R,
                 writes(),
@@ -486,17 +537,18 @@ fn post_match_nested_lists_keep_row_aliases_duplicates_and_the_entry_overlay() {
             .unwrap();
             // Both original occurrences belong to one MATCH input cut. A
             // row-by-row rematch loses the second root after p.id changes
-            // and would leave score=10 instead of the second row's 20.
+            // and would omit the second target's score of 20.
             assert_eq!(
                 db.query(
                     &cx,
-                    "MATCH (n:Entity {id:2}) RETURN n.score AS score",
+                    "MATCH (n:Entity) WHERE n.id=2 OR n.id=3 \
+                     RETURN n.id AS id,n.score AS score ORDER BY id",
                     &GqlParameters::new(),
                     symbols,
                     reads(),
                 )
                 .unwrap(),
-                integers(&["score"], &[&[20]])
+                integers(&["id", "score"], &[&[2, 10], &[3, 20]])
             );
         }
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
@@ -550,10 +602,30 @@ fn post_match_nested_lists_share_effect_limits_and_roll_back_late_failures() {
                     Ok::<_, Infallible>(ElementId::Edge(EId(next)))
                 })
                 .unwrap_err();
-            assert!(
-                error.to_string().to_ascii_lowercase().contains(expected),
-                "{text}: {error}"
-            );
+            if expected == "limit" {
+                assert!(
+                    matches!(
+                        error,
+                        QueryWriteError::Execute(
+                            fgdb_gql::GraphWriteScriptExecutionError::Program(
+                                fgdb_gql::GraphWriteProgramError::CreationBudget {
+                                    statement: 0,
+                                    dimension:
+                                        fgdb_gql::insertion::GraphInsertLimitDimension::Edges,
+                                    limit: 2,
+                                    observed: 3,
+                                }
+                            )
+                        )
+                    ),
+                    "{text}: {error}"
+                );
+            } else {
+                assert!(
+                    error.to_string().to_ascii_lowercase().contains(expected),
+                    "{text}: {error}"
+                );
+            }
             assert_eq!(
                 txn.query(
                     &db,

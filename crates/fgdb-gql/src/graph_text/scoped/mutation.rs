@@ -2038,8 +2038,16 @@ impl crate::mutation_text::PreparedGraphMutationRowsText {
     where
         R: GraphSymbolResolver + ?Sized,
     {
-        if crate::PreparedGraphInsertText::multipart_source_kind(statement, declarations)?
-            == Some(ReadWriteKind::Mutation)
+        let first = script::next_script_token(&mut Lexer {
+            text: statement,
+            at: 0,
+            tokens: 0,
+        })?;
+        let leading_rows = matches!(first.kind, TokenKind::Word(word)
+            if word.eq_ignore_ascii_case("UNWIND") || word.eq_ignore_ascii_case("WITH"));
+        if leading_rows
+            || crate::PreparedGraphInsertText::multipart_source_kind(statement, declarations)?
+                == Some(ReadWriteKind::Mutation)
         {
             return Self::prepare_multipart(
                 statement,

@@ -53,6 +53,8 @@ impl PreparedGraphWriteChainText {
         {
             return Ok(false);
         }
+        let leading_rows = matches!(first.kind, TokenKind::Word(word)
+            if word.eq_ignore_ascii_case("UNWIND") || word.eq_ignore_ascii_case("WITH"));
         // `written`: a CREATE was seen; `merged`: the first clause is a
         // vertex MERGE; `headed`: a WITH followed the CREATE; `unwound`: the
         // first clause is an UNWIND of a non-parameter source; `matched`: the
@@ -203,8 +205,20 @@ impl PreparedGraphWriteChainText {
                         // A SET, REMOVE or DELETE after a CREATE writes its
                         // rows (`CREATE (n) SET n.p = 1`, fgdb-cpny9).
                         return Ok(true);
-                    } else if clause && matched && mutation()? {
+                    } else if clause
+                        && (matched || parameter_matched || unwound_matched)
+                        && mutation()?
+                    {
                         mutated = true;
+                    } else if clause
+                        && mutated
+                        && leading_rows
+                        && word.eq_ignore_ascii_case("RETURN")
+                    {
+                        // The parameter batch writer returns no rows. Keep
+                        // a mutation over a leading row relation on the
+                        // chain's existing frozen-input and RETURN owner.
+                        return Ok(true);
                     } else if clause
                         && (matched || parameter_matched)
                         && !written
@@ -834,7 +848,8 @@ impl PreparedGraphWriteChainText {
         // it is the first clause or follows only a leading UNWIND, or a
         // leading MATCH and its read stages; otherwise it is a CREATE. A SET,
         // REMOVE or DELETE after a leading MATCH is a first mutation step
-        // (`first_mutation`), which is_chain admits only before another write.
+        // (`first_mutation`), before another write or a RETURN over a leading
+        // row relation.
         let mut first_mutation = !first_foreach
             && PreparedGraphInsertText::multipart_source_kind(body, declarations)?
                 == Some(ReadWriteKind::Mutation);
@@ -1124,7 +1139,16 @@ impl PreparedGraphWriteChainText {
         let unwound_merge = matches!(steps.as_slice(), [ChainTextStep::VertexMerge(merge)]
             if matches!(merge.input, crate::mutation_text::VertexMergeRowsTextInput::Relation(_)));
         let edge_merge = matches!(steps.as_slice(), [ChainTextStep::EdgeMerge(_)]);
-        if steps.len() < 2 && !first_foreach && !unwound_merge && !edge_merge && read.is_none() {
+        let returning_row_mutation = matches!(steps.as_slice(), [ChainTextStep::Mutation(step)]
+            if step.1.is_some())
+            && Self::is_chain(body)?;
+        if steps.len() < 2
+            && !first_foreach
+            && !unwound_merge
+            && !edge_merge
+            && !returning_row_mutation
+            && read.is_none()
+        {
             return Err(expected(body.len(), "another write after the first").into());
         }
         let chain = Self {
@@ -1534,6 +1558,121 @@ mod tests {
     use super::PreparedGraphWriteChainText;
 
     #[test]
+    fn leading_row_mutation_returns_prepare_and_bind_the_existing_query_step() {
+        use crate::algebra::GraphValue;
+        use crate::{
+            GqlParameterType, GqlParameters, GraphSymbol, GraphSymbolKind, GraphWriteChainStep,
+        };
+        use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+        use fgdb_types::CanonicalScalar;
+
+        let symbols = |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Label, "N") => Some(GraphSymbol::Label(LabelId(1))),
+            (GraphSymbolKind::Property, "id") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+            _ => None,
+        };
+        let arguments = GqlParameters::new()
+            .with_list(
+                "rows",
+                vec![
+                    GraphValue::map(vec![(
+                        "id".into(),
+                        GraphValue::Scalar(CanonicalScalar::Int(1)),
+                    )])
+                    .unwrap(),
+                ],
+            )
+            .unwrap();
+        let empty = GqlParameters::new();
+        for (text, parameter) in [
+            (
+                "UNWIND $rows AS row MATCH (n:N {id:row.id}) SET n.p=7 RETURN n.p AS value",
+                true,
+            ),
+            (
+                "UNWIND $rows AS row WITH row.id AS k MATCH (n:N {id:k}) \
+                 SET n.p=7 RETURN n.p AS value",
+                true,
+            ),
+            (
+                "UNWIND [1,1] AS k WITH k MATCH (n:N {id:k}) SET n.p=7 RETURN n.p AS value",
+                false,
+            ),
+            (
+                "UNWIND [1] AS k MATCH (n:N {id:k}) REMOVE n.p RETURN n AS value",
+                false,
+            ),
+            (
+                "WITH 1 AS k MATCH (n:N {id:k}) DELETE n RETURN k AS value",
+                false,
+            ),
+            (
+                "UNWIND [1] AS k MATCH (n:N {id:k}) DETACH DELETE n RETURN k AS value",
+                false,
+            ),
+        ] {
+            assert!(
+                PreparedGraphWriteChainText::is_chain(text).unwrap(),
+                "{text}"
+            );
+            let declarations = if parameter {
+                &[("rows", GqlParameterType::List)][..]
+            } else {
+                &[][..]
+            };
+            let template = PreparedGraphWriteChainText::prepare_with_parameter_types(
+                text,
+                RelationId(1),
+                declarations,
+                symbols,
+            )
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            assert!(template.returns_rows(), "{text}");
+            let bound = template
+                .bind_parameters(if parameter { &arguments } else { &empty })
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            assert!(
+                matches!(bound.steps(), [GraphWriteChainStep::MutationQuery(_)]),
+                "{text}: the native mutation query owns RETURN",
+            );
+            assert_eq!(bound.columns(), &["value"], "{text}");
+            assert!(bound.read_continuation().is_none(), "{text}");
+            if parameter {
+                assert!(template.bind_parameters(&empty).is_err(), "{text}");
+                assert!(
+                    template
+                        .bind_parameters(&GqlParameters::new().with_int64("rows", 1).unwrap())
+                        .is_err(),
+                    "{text}: a scalar cannot replace the row list",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mutation_return_routing_preserves_lexical_boundaries_and_existing_families() {
+        for text in [
+            "MATCH (n:N) SET n.p=7 RETURN n.p",
+            "MATCH (n:N) WITH n SET n.p=7 RETURN n.p",
+            "UNWIND $rows AS row MATCH (n:N {id:row.id}) SET n.p=7",
+            "UNWIND $rows AS row MATCH (n:N {id:row.id}) SET n.return=1",
+            "UNWIND [1] AS k MATCH (n:N {id:k}) SET n.p='RETURN n'",
+            "UNWIND [1] AS k MATCH (n:N {id:k}) SET n.p=7 /* RETURN n */",
+            "UNWIND $rows AS row MATCH (n:N {id:row.id}) SET n.p=7; RETURN 1",
+            "UNWIND $rows AS row MERGE (n:N {id:row.id}) ON CREATE SET n.p=7",
+            "UNWIND $rows AS row MERGE (n:N {id:row.id}) ON MATCH SET n.p=7",
+            "UNWIND $rows AS row MATCH (a:N {id:row.id}),(b:N {id:row.id}) \
+             MERGE (a)-[r:R]->(b) ON CREATE SET r.p=7 ON MATCH SET r.p=r.p+1",
+        ] {
+            assert!(
+                !PreparedGraphWriteChainText::is_chain(text).unwrap(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
     fn foreach_routing_uses_a_real_outer_clause_and_stops_at_statement_boundaries() {
         for text in [
             "FOREACH (x IN [1,2] | CREATE (:F {p:x}))",
@@ -1632,6 +1771,13 @@ mod tests {
             "UNWIND $rows AS row MERGE (n:N {id: row.id}) ON CREATE SET n.name = row.name \
              RETURN n.id AS id, n.name AS name",
             "UNWIND $rows AS row MERGE (n:N {id: row.id}) SET n.name = row.name RETURN n",
+            // A mutation over a leading row relation must retain its RETURN;
+            // the nonreturning parameter batch owner cannot consume it.
+            "UNWIND $rows AS row MATCH (n:N {id:row.id}) SET n.p=7 RETURN n.p",
+            "UNWIND $rows AS row WITH row.id AS k MATCH (n:N {id:k}) SET n.p=7 RETURN n.p",
+            "UNWIND [1,1] AS k WITH k MATCH (n:N {id:k}) SET n.p=7 RETURN n.p",
+            "UNWIND [1] AS k MATCH (n:N {id:k}) REMOVE n.p RETURN n",
+            "WITH 1 AS k MATCH (n:N {id:k}) DELETE n RETURN k",
             "UNWIND $rows AS row MERGE (n:N {id: row.id}) ON CREATE SET n = row",
             "UNWIND $rows AS row MERGE (n:N {id: row.id}) ON MATCH SET n += row",
             // A vertex MERGE after a WITH stage over a parameter UNWIND, RETURN
@@ -1724,6 +1870,9 @@ mod tests {
             "MATCH (n) SET n.p = 1 RETURN n",
             "MATCH (n) SET n.p = 1 WITH n RETURN n.p",
             "MATCH (n) WITH n SET n.p = 1 RETURN n",
+            "UNWIND $rows AS row MATCH (n:N {id:row.id}) SET n.return=1",
+            "UNWIND [1] AS k MATCH (n:N {id:k}) SET n.p='RETURN n'",
+            "UNWIND $rows AS row MATCH (n:N {id:row.id}) SET n.p=7; RETURN 1",
             "MATCH (n {p: 'CREATE (x)'}) DELETE n",
         ] {
             assert!(

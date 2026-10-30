@@ -656,9 +656,38 @@ fn binding_exhaustion_does_not_refresh_the_execution_permit() {
             })
             .unwrap();
         let mut scope = grant();
-        // Original-text admission, post-classification check, then exactly the
-        // controlled binding bill. There is no spare unit for program admission.
+        // One fewer unit stops inside binding, before a batch can exist.
+        // Both lexical classifications have real live checkpoints: native
+        // chain dispatch first, then UNWIND mutation dispatch.
         scope.limits.max_work = text.len() as u64 + 1 + binding_work;
+        let too_small = issuer.issue_at(&scope, NOW).unwrap();
+        let error = db
+            .query_write_authorized(
+                &txcx,
+                &query,
+                &commit,
+                &issuer,
+                &too_small,
+                "main",
+                text,
+                &args,
+                symbols,
+                R,
+                policy(),
+                || NOW,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Fault::Program(_)), "{error:?}");
+        assert_eq!(
+            authorization(&error),
+            Some(Error::LimitExceeded(fgdb_warden::LimitDimension::Work)),
+        );
+        assert_eq!(db.frontier().unwrap(), before);
+        assert!(db.vertices().unwrap().is_empty());
+        // Original text, both classification checks, then exactly the
+        // controlled binding bill. There is no spare unit for program admission.
+        scope.limits.max_work = text.len() as u64 + 2 + binding_work;
         let token = issuer.issue_at(&scope, NOW).unwrap();
         let error = db
             .query_write_authorized(
@@ -680,7 +709,7 @@ fn binding_exhaustion_does_not_refresh_the_execution_permit() {
         assert!(authorization(&error).is_some(), "{error:?}");
         assert!(
             matches!(error, Fault::BatchProgram { location: None, .. }),
-            "binding must finish and the SAME exhausted permit must refuse execution"
+            "binding must finish and the SAME exhausted permit must refuse execution: {error:?}"
         );
         assert_eq!(db.frontier().unwrap(), before);
         assert!(db.vertices().unwrap().is_empty());
