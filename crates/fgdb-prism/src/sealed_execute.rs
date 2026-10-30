@@ -813,8 +813,9 @@ impl FnxCallSpec {
     /// Degree centrality uses the admitted degree directory without opening
     /// rows; core peeling opens each row once with O(|V|) integer workspace.
     /// Eigenvector iteration keeps two score vectors and canonical reductions.
-    /// Closeness and harmonic centrality reuse one FIFO and distance vector
-    /// for all sources; their retained-history work bound applies to every pass.
+    /// Closeness and harmonic centrality reuse FIFO storage, optionally advancing
+    /// 64 sources together on connected low-diameter undirected projections.
+    /// Their retained-history work bound applies to every compressed pass.
     /// Exact betweenness shares source-ordered Brandes arithmetic with the native
     /// kernel and reopens compressed rows for dependencies using O(|V|) workspace.
     /// Every graph pass and row pull is fallible; identities remain stable VIds.

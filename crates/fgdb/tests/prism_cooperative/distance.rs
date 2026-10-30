@@ -758,3 +758,263 @@ fn compressed_distance_centralities_cancel_or_drop_at_every_checkpoint_and_suspe
         }
     });
 }
+
+#[test]
+fn compressed_distance_batches_preserve_native_scores_quanta_and_scalar_allowances() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let n = 129;
+        let mut db = small_database(&contexts.commit(), n, false).await;
+        let mut edges = WriteBatch::new(RelationId(1));
+        // A relabelled hub puts source 0 at eccentricity two. Reciprocal
+        // records exercise the reduced undirected compressed faces.
+        for leaf in 0..n - 1 {
+            edges.add_edge(
+                EId((2 * leaf + 1) as u128),
+                VId(leaf as u128),
+                VId((n - 1) as u128),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(-7))],
+            );
+            edges.add_edge(
+                EId((2 * leaf + 2) as u128),
+                VId((n - 1) as u128),
+                VId(leaf as u128),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(3))],
+            );
+        }
+        db.write(&contexts.commit(), edges).await.unwrap();
+        let opt = options(Directedness::Undirected);
+        let graph = projection(&db, &cx, opt).await;
+        assert_eq!(graph.node_count(), n);
+        let scalar_bytes = n * (2 * size_of::<usize>() + size_of::<f64>());
+        let batch_bytes = scalar_bytes + 3 * n * size_of::<u64>() + 128 * size_of::<usize>();
+        for harmonic in [false, true] {
+            let call = call(harmonic);
+            let expected = call
+                .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                .unwrap();
+            assert_eq!(
+                expected.certificate.execution_kernel,
+                if harmonic {
+                    "fgdb-prism/sealed-harmonic-batch64-v1"
+                } else {
+                    "fgdb-prism/sealed-closeness-batch64-v1"
+                }
+            );
+            assert_eq!(expected.certificate.kernel_workspace_bytes, batch_bytes);
+            assert_eq!(expected.certificate.witness.nodes_touched, n * n);
+            let native = db
+                .read_session()
+                .unwrap()
+                .execute_fnx(&cx, &call, opt)
+                .unwrap()
+                .analytics;
+            assert_eq!(expected.rows, native.rows);
+            assert_eq!(
+                expected.certificate.result_digest,
+                native.certificate.result_digest
+            );
+            let exact = FnxExecutionLimits {
+                max_estimated_work: expected.certificate.estimated_work,
+                ..opt.execution_limits
+            };
+            let mem = FnxMemoryLimits {
+                max_kernel_workspace_bytes: batch_bytes,
+                ..memory()
+            };
+            for q in [1, 7, 65] {
+                let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                let (actual, pending) = drive(
+                    call.execute_sealed_cooperative(
+                        &controlled,
+                        &graph,
+                        exact,
+                        mem,
+                        quantum(q),
+                        yield_now,
+                    ),
+                    &probe,
+                    q,
+                );
+                let actual = actual.unwrap();
+                compare_execution(&actual, &expected);
+                assert_eq!(
+                    actual.certificate.execution_kernel,
+                    if harmonic {
+                        "fgdb-prism/sealed-harmonic-batch64-cooperative-v1"
+                    } else {
+                        "fgdb-prism/sealed-closeness-batch64-cooperative-v1"
+                    }
+                );
+                assert!(pending > n / q);
+            }
+            // Both the original scalar minimum and a one-byte-short optional
+            // allowance stay successful. Neither changes admission or bits.
+            for bytes in [scalar_bytes, batch_bytes - 1] {
+                let mem = FnxMemoryLimits {
+                    max_kernel_workspace_bytes: bytes,
+                    ..memory()
+                };
+                let scalar = call.execute_sealed(&cx, &graph, exact, mem).unwrap();
+                assert_eq!(scalar.rows, expected.rows);
+                assert_eq!(
+                    scalar.certificate.result_digest,
+                    expected.certificate.result_digest
+                );
+                assert_eq!(scalar.certificate.estimated_work, exact.max_estimated_work);
+                assert_eq!(scalar.certificate.kernel_workspace_bytes, scalar_bytes);
+                assert_eq!(
+                    scalar.certificate.execution_kernel,
+                    if harmonic {
+                        "fgdb-prism/sealed-harmonic-fifo-v1"
+                    } else {
+                        "fgdb-prism/sealed-closeness-fifo-v1"
+                    }
+                );
+                assert!(
+                    expected.certificate.witness.edges_scanned * 4
+                        < scalar.certificate.witness.edges_scanned
+                );
+                compare_execution(
+                    &call
+                        .execute_sealed_cooperative(&cx, &graph, exact, mem, quantum(65), yield_now)
+                        .await
+                        .unwrap(),
+                    &scalar,
+                );
+            }
+            let hosted = db
+                .execute_fnx_sealed(&cx, &call, opt, mem, SealedLimits::default())
+                .await
+                .unwrap();
+            assert_eq!(hosted.analytics, expected);
+            let refused = FnxExecutionLimits {
+                max_estimated_work: exact.max_estimated_work - 1,
+                ..exact
+            };
+            assert!(matches!(
+                call.execute_sealed(&cx, &graph, refused, mem),
+                Err(FnxSealedExecutionError::Execution(
+                    FnxExecutionError::LimitExceeded {
+                        resource: "estimated work",
+                        ..
+                    }
+                ))
+            ));
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn compressed_distance_batches_stop_at_scalar_row_and_output_checkpoints() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let n = 65;
+        let mut db = small_database(&contexts.commit(), n, false).await;
+        let mut edges = WriteBatch::new(RelationId(1));
+        for leaf in 1..n {
+            edges.add_edge(
+                EId(leaf as u128),
+                VId(0),
+                VId(leaf as u128),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(1))],
+            );
+        }
+        db.write(&contexts.commit(), edges).await.unwrap();
+        let opt = options(Directedness::Undirected);
+        let graph = projection(&db, &cx, opt).await;
+        let before_root = db.read_session().unwrap().partition_root();
+        for harmonic in [false, true] {
+            let call = call(harmonic);
+            for q in [1, 7, 65] {
+                let mut total = 0;
+                let expected = call
+                    .execute_sealed_cooperative_with_checkpoint(
+                        &cx,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(q),
+                        yield_now,
+                        || {
+                            total += 1;
+                            Ok(())
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert!(expected.certificate.execution_kernel.contains("batch64"));
+                // Private tests sweep every raw/scalar boundary. Here spread
+                // live-guard refusals over the real compressed source, word
+                // setup, bit accumulation, scattering and result conversion.
+                for stop in (1..=total).step_by((total / 31).max(1)).chain([total]) {
+                    let mut seen = 0;
+                    let error = call
+                        .execute_sealed_cooperative_with_checkpoint(
+                            &cx,
+                            &graph,
+                            opt.execution_limits,
+                            memory(),
+                            quantum(q),
+                            yield_now,
+                            || {
+                                seen += 1;
+                                if seen == stop {
+                                    Err(SealedProjectionError::UnknownOrdinal(stop))
+                                } else {
+                                    Ok(())
+                                }
+                            },
+                        )
+                        .await
+                        .unwrap_err();
+                    assert!(matches!(
+                        error,
+                        FnxSealedExecutionError::Source(
+                            SealedProjectionError::UnknownOrdinal(actual)
+                        ) if actual == stop
+                    ));
+                    assert_eq!(seen, stop);
+                }
+                let cancelled = cx.with_checkpoint_probe(Arc::new(SimulationCheckpointProbe::new(
+                    Some(total / 2),
+                )));
+                assert!(matches!(
+                    call.execute_sealed_cooperative(
+                        &cancelled,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(q),
+                        yield_now,
+                    )
+                    .await,
+                    Err(FnxSealedExecutionError::Cancelled(_))
+                ));
+                assert_eq!(
+                    call.execute_sealed_cooperative(
+                        &cx,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(q),
+                        yield_now,
+                    )
+                    .await
+                    .unwrap(),
+                    expected
+                );
+                assert_eq!(db.read_session().unwrap().partition_root(), before_root);
+                assert_eq!(contexts.outstanding_obligations(), 0);
+            }
+        }
+    });
+}

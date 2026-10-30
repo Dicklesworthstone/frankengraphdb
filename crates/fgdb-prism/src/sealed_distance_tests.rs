@@ -402,3 +402,241 @@ fn workspace_overflow_and_malformed_rows_fail_before_a_result() {
     assert!(work(1, usize::MAX, 0, 2).is_err());
     assert!(work(1, 0, 0, usize::MAX).is_err());
 }
+
+fn policy(rows: &[Vec<usize>]) -> BatchPolicy {
+    let nodes = rows.len();
+    let arcs = rows.iter().map(Vec::len).sum();
+    let pass = 2 * nodes + arcs;
+    BatchPolicy {
+        pass,
+        arcs,
+        columns: 2,
+        admitted: work(nodes, arcs, pass, 2).unwrap(),
+    }
+}
+
+#[test]
+fn batch_source_boundaries_relabelled_hubs_and_cliques_match_independent_distances() {
+    for n in [63, 64, 65, 127, 128, 129, 130] {
+        let hub: Vec<_> = (1..n).map(|v| (0, v)).collect();
+        let relabelled: Vec<_> = (0..n - 1).map(|v| (v, n - 1)).collect();
+        let clique: Vec<_> = (0..n)
+            .flat_map(|u| (u + 1..n).map(move |v| (u, v)))
+            .collect();
+        let mut low_diameter = hub.clone();
+        low_diameter.extend((1..n - 1).map(|v| (v, v + 1)));
+        // Depths three and five make repeated reciprocal additions visibly
+        // different from a count-times-reciprocal shortcut in the last bits.
+        let tree: Vec<_> = (1..n).map(|v| ((v - 1) / 3, v)).collect();
+        for edges in [hub, relabelled, clique, low_diameter, tree] {
+            let rows = rows(n, &edges);
+            let independent = distances(&rows);
+            let policy = policy(&rows);
+            for harmonic in [false, true] {
+                let graph = Fixture::new(rows.clone());
+                let mut ticks = 0;
+                let (actual, peak) =
+                    run_with_policy(&graph, harmonic, usize::MAX, Some(policy), &mut || {
+                        ticks += 1;
+                        Ok(())
+                    })
+                    .unwrap();
+                assert_eq!(bits(&actual), score_bits(&independent, harmonic));
+                assert_eq!(actual.witness.nodes_touched, n * n);
+                assert!(ticks + graph.source_steps.get() <= policy.admitted);
+                let baseline = Fixture::new(rows.clone());
+                let (scalar, _) = run(&baseline, harmonic, usize::MAX, &mut || Ok(())).unwrap();
+                assert_eq!(bits(&actual), bits(&scalar));
+                if n < BATCH_SOURCES {
+                    assert_eq!(actual.witness, scalar.witness);
+                    assert_eq!(peak, workspace(n).unwrap());
+                    assert_eq!(graph.source_steps.get(), baseline.source_steps.get());
+                } else {
+                    assert!(actual.witness.algorithm.ends_with("_batch64_cursor_v1"));
+                    assert!(actual.witness.edges_scanned * 4 < scalar.witness.edges_scanned);
+                    assert!(graph.source_steps.get() * 4 < baseline.source_steps.get());
+                    assert_eq!(peak, workspace(n).unwrap() + batch_workspace(n).unwrap());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn batch_selection_preserves_scalar_work_and_memory_fallbacks() {
+    let n = 129;
+    let star: Vec<_> = (1..n).map(|v| (0, v)).collect();
+    let path: Vec<_> = (1..n).map(|v| (v - 1, v)).collect();
+    let disconnected: Vec<_> = (1..n - 1).map(|v| (0, v)).collect();
+    for (edges, constrained_memory, constrained_work) in [
+        (star.clone(), true, false),
+        (star, false, true),
+        (path, false, false),
+        (disconnected, false, false),
+    ] {
+        let rows = rows(n, &edges);
+        let mut policy = policy(&rows);
+        if constrained_work {
+            policy.admitted = 1;
+        }
+        let limit = if constrained_memory {
+            workspace(n).unwrap() + batch_workspace(n).unwrap() - 1
+        } else {
+            usize::MAX
+        };
+        for harmonic in [false, true] {
+            let graph = Fixture::new(rows.clone());
+            let baseline = Fixture::new(rows.clone());
+            let (expected, baseline_peak) =
+                run(&baseline, harmonic, limit, &mut || Ok(())).unwrap();
+            let (actual, peak) =
+                run_with_policy(&graph, harmonic, limit, Some(policy), &mut || Ok(())).unwrap();
+            assert_eq!(bits(&actual), bits(&expected));
+            assert_eq!(actual.witness, expected.witness);
+            assert_eq!(peak, baseline_peak);
+            assert_eq!(graph.source_steps.get(), baseline.source_steps.get());
+        }
+    }
+    let overflowing = BatchPolicy {
+        pass: usize::MAX,
+        arcs: 0,
+        columns: 2,
+        admitted: usize::MAX,
+    };
+    assert!(!overflowing.permits(n, n, 1));
+    assert!(batch_workspace(usize::MAX).is_err());
+}
+
+#[test]
+fn optional_batch_backing_records_partial_peak_and_propagates_real_failures() {
+    let n = 64;
+    let baseline = workspace(n).unwrap();
+    let extra = batch_workspace(n).unwrap();
+    let limit = baseline + extra;
+    let mut peak = baseline;
+    assert!(
+        Batch::reserve_with_seen(n, false, &mut peak, limit, |_| {
+            reserve(extra / size_of::<u64>())
+        })
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(peak, limit, "the temporary oversized first buffer was live");
+    let mut peak = baseline;
+    assert!(matches!(
+        Batch::reserve_with_seen(n, false, &mut peak, limit, |_| {
+            reserve(extra / size_of::<u64>() + 1)
+        }),
+        Err(super::super::Error::Execution(ExecutionError::LimitExceeded {
+            resource: "kernel workspace bytes",
+            requested,
+            limit: actual_limit,
+        })) if requested == limit + size_of::<u64>() && actual_limit == limit
+    ));
+    let mut peak = baseline;
+    assert!(
+        Batch::reserve_with_seen(n, false, &mut peak, limit, |_| {
+            Err(super::super::Error::Execution(
+                ExecutionError::AllocationFailed,
+            ))
+        })
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(peak, baseline);
+    assert!(matches!(
+        Batch::reserve_with_seen(n, false, &mut peak, limit, |_| {
+            Err(super::super::Error::Execution(
+                ExecutionError::InvalidUpstreamResult,
+            ))
+        }),
+        Err(super::super::Error::Execution(
+            ExecutionError::InvalidUpstreamResult
+        ))
+    ));
+}
+
+#[test]
+fn every_batch_scalar_and_source_refusal_discards_partial_scores() {
+    let n = 64;
+    let rows = rows(n, &(1..n).map(|v| (0, v)).collect::<Vec<_>>());
+    let policy = policy(&rows);
+    for harmonic in [false, true] {
+        let graph = Fixture::new(rows.clone());
+        let mut total = 0;
+        let (complete, _) =
+            run_with_policy(&graph, harmonic, usize::MAX, Some(policy), &mut || {
+                total += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert!(complete.witness.algorithm.ends_with("_batch64_cursor_v1"));
+        let source_total = graph.source_steps.get();
+        for stop in 1..=total {
+            let graph = Fixture::new(rows.clone());
+            let mut seen = 0;
+            let error = run_with_policy(&graph, harmonic, usize::MAX, Some(policy), &mut || {
+                seen += 1;
+                if seen == stop {
+                    Err(super::super::Error::Cancelled(
+                        std::io::Error::other("batch distance stop").into(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+            .err()
+            .expect("scalar refusal");
+            assert!(matches!(error, super::super::Error::Cancelled(_)));
+            assert_eq!(seen, stop);
+        }
+        for stop in 1..=source_total {
+            let mut graph = Fixture::new(rows.clone());
+            graph.fail_at = stop;
+            let error = run_with_policy(&graph, harmonic, usize::MAX, Some(policy), &mut || Ok(()))
+                .err()
+                .expect("source refusal");
+            assert!(matches!(error, super::super::Error::Source(
+                SealedProjectionError::UnknownOrdinal(actual)) if actual == stop));
+            assert_eq!(graph.source_steps.get(), stop);
+        }
+    }
+}
+
+#[test]
+fn batch_rows_validate_targets_and_loops_after_optional_selection() {
+    let n = 64;
+    let graph = Fixture::new(rows(n, &(1..n).map(|v| (0, v)).collect::<Vec<_>>()));
+    for harmonic in [false, true] {
+        let mut state = Traversals::new(n, harmonic, usize::MAX).unwrap();
+        state.policy = Some(policy(&graph.rows));
+        // Finish the earned scalar source and all batch initialization using
+        // the real transitions. A source that later corrupts a row still
+        // cannot smuggle an invalid ordinal or loop into the word frontier.
+        while !matches!(state.phase, Phase::Batch) || state.row().is_none() {
+            if let Some(vertex) = state.row() {
+                let mut row = graph.open(vertex).unwrap();
+                while let Some((neighbor, _)) = row.next().unwrap() {
+                    state.visit(neighbor).unwrap();
+                }
+                state.end_row().unwrap();
+            } else {
+                state.scalar_step().unwrap();
+            }
+            assert!(!state.complete());
+        }
+        let source = state.row().unwrap();
+        assert!(matches!(
+            state.visit(n),
+            Err(super::super::Error::Execution(
+                ExecutionError::InvalidUpstreamResult
+            ))
+        ));
+        assert!(matches!(
+            state.visit(source),
+            Err(super::super::Error::Execution(
+                ExecutionError::SelfLoopRefused
+            ))
+        ));
+    }
+}
