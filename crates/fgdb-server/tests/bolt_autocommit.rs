@@ -156,7 +156,15 @@ impl Bolt {
     }
 
     async fn pull_all(&mut self) -> (Vec<Vec<Value>>, Vec<(String, Value)>) {
-        self.send(0x3f, consume()).await;
+        self.pull(-1).await
+    }
+
+    async fn pull(&mut self, count: i64) -> (Vec<Vec<Value>>, Vec<(String, Value)>) {
+        self.send(
+            0x3f,
+            vec![Value::Map(vec![("n".into(), Value::Int(count))])],
+        )
+        .await;
         let mut rows = Vec::new();
         loop {
             match self.receive().await.expect("a response") {
@@ -371,25 +379,32 @@ fn bolt_reset_disconnect_and_read_boundaries_preserve_an_unexecuted_queue() {
             .unwrap();
         observer.select(cx, "social").await.unwrap();
         let read = "MATCH (n:Person) RETURN n.name AS name";
-        let mut client = login(address, &grant(Rights::ReadWrite)).await;
-        for name in ["Reset", "Disconnect"] {
-            client
-                .expect(
-                    0x10,
-                    request(
-                        "CREATE (:Person {name:$name})",
-                        vec![("name".into(), Value::string(name))],
-                        vec![],
-                    ),
-                    SUCCESS,
-                )
-                .await;
-            if name == "Reset" {
-                client.expect(0x0f, vec![], SUCCESS).await;
-            } else {
-                // Raw disconnect, without RESET or GOODBYE, has no effects.
-                drop(client);
-                break;
+        for returning in [false, true] {
+            let mut client = login(address, &grant(Rights::ReadWrite)).await;
+            for name in ["Reset", "Disconnect"] {
+                let statement = if returning {
+                    "CREATE (n:Person {name:$name}) RETURN n.name AS name"
+                } else {
+                    "CREATE (:Person {name:$name})"
+                };
+                client
+                    .expect(
+                        0x10,
+                        request(
+                            statement,
+                            vec![("name".into(), Value::string(name))],
+                            vec![],
+                        ),
+                        SUCCESS,
+                    )
+                    .await;
+                if name == "Reset" {
+                    client.expect(0x0f, vec![], SUCCESS).await;
+                } else {
+                    // Raw disconnect, without RESET or GOODBYE, has no effects.
+                    drop(client);
+                    break;
+                }
             }
         }
         let before = observer
@@ -507,13 +522,15 @@ fn bolt_late_script_failure_rolls_back_every_statement_and_cannot_be_pulled_agai
             .expect(
                 0x10,
                 request(
-                    "CREATE (n:Person {name:'NotReturned'}) RETURN n.name",
+                    "CREATE (n:Person {name:'NotReturned'}) RETURN n",
                     vec![],
                     vec![],
                 ),
-                FAILURE,
+                SUCCESS,
             )
             .await;
+        let failure = client.expect(0x3f, consume(), FAILURE).await;
+        assert!(get(&failure, "bookmark").is_none());
         let after = observer
             .execute(cx, ExecuteMode::Read, read, vec![])
             .await
@@ -830,6 +847,182 @@ fn bolt_write_stats_report_what_the_write_created() {
         }
         client.send(0x02, vec![]).await;
         assert!(client.receive().await.is_none());
+        finish(cx, shutdown, serving).await;
+    });
+}
+
+#[test]
+fn bolt_write_returning_publishes_once_and_streams_the_committed_result() {
+    run(async |cx| {
+        let (fgp, address, shutdown, serving) = start_both(cx, "returning-pages").await;
+        let mut client = login(address, &grant(Rights::ReadWrite)).await;
+        let mut observer = Client::connect(cx, fgp, token(&grant(Rights::Read)))
+            .await
+            .unwrap();
+        observer.select(cx, "social").await.unwrap();
+        let fields = client
+            .expect(
+                0x10,
+                request(
+                    "UNWIND [3,1,2] AS x CREATE (n:Person {name:'Returned',age:x}) \
+                     RETURN n.age AS age,[n.age,NULL] AS values,{age:n.age} AS meta ORDER BY age",
+                    vec![],
+                    vec![],
+                ),
+                SUCCESS,
+            )
+            .await;
+        assert_eq!(
+            get(&fields, "fields"),
+            Some(&Value::List(vec![
+                Value::string("age"),
+                Value::string("values"),
+                Value::string("meta")
+            ]))
+        );
+        let read = "MATCH (n:Person) RETURN n.age AS age ORDER BY age";
+        let before = observer
+            .execute(cx, ExecuteMode::Read, read, vec![])
+            .await
+            .unwrap();
+        assert!(before.rows.is_empty(), "RUN must only queue the write");
+        assert_eq!(before.outcome, Outcome::Rows { seq: 0 });
+        let expected_row = |age| {
+            vec![
+                Value::Int(age),
+                Value::List(vec![Value::Int(age), Value::Null]),
+                Value::Map(vec![("age".into(), Value::Int(age))]),
+            ]
+        };
+        let (rows, more) = client.pull(1).await;
+        assert_eq!(rows, vec![expected_row(1)]);
+        assert_eq!(get(&more, "has_more"), Some(&Value::Bool(true)));
+        assert!(get(&more, "bookmark").is_none());
+        let published = observer
+            .execute(cx, ExecuteMode::Read, read, vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            published.rows,
+            vec![
+                vec![WireValue::Int(1)],
+                vec![WireValue::Int(2)],
+                vec![WireValue::Int(3)]
+            ]
+        );
+        assert_eq!(published.outcome, Outcome::Rows { seq: 1 });
+        let more = client
+            .expect(
+                0x2f,
+                vec![Value::Map(vec![("n".into(), Value::Int(1))])],
+                SUCCESS,
+            )
+            .await;
+        assert_eq!(get(&more, "has_more"), Some(&Value::Bool(true)));
+        let (rows, done) = client.pull(1).await;
+        assert_eq!(rows, vec![expected_row(3)]);
+        assert_eq!(get(&done, "type").and_then(Value::as_str), Some("w"));
+        assert_eq!(
+            get(&done, "bookmark").and_then(Value::as_str),
+            Some("fgdb:social:1")
+        );
+        let Some(Value::Map(stats)) = get(&done, "stats") else {
+            panic!("completed write returns its native counters");
+        };
+        assert_eq!(get(stats, "nodes-created"), Some(&Value::Int(3)));
+        assert_eq!(get(stats, "contains-updates"), Some(&Value::Bool(true)));
+        client.expect(0x3f, consume(), FAILURE).await;
+        client.expect(0x0f, vec![], SUCCESS).await;
+        // DISCARD also executes a returning write, including its complete
+        // result admission, even though no RECORD is sent to this client.
+        client
+            .expect(
+                0x10,
+                request(
+                    "CREATE (n:Person {name:'Discarded',age:4}) RETURN n.age AS age",
+                    vec![],
+                    vec![(
+                        "bookmarks".into(),
+                        Value::List(vec![get(&done, "bookmark").unwrap().clone()]),
+                    )],
+                ),
+                SUCCESS,
+            )
+            .await;
+        let discarded = client.expect(0x2f, consume(), SUCCESS).await;
+        assert_eq!(get(&discarded, "type").and_then(Value::as_str), Some("w"));
+        assert_eq!(
+            get(&discarded, "bookmark").and_then(Value::as_str),
+            Some("fgdb:social:2")
+        );
+        let after = observer
+            .execute(cx, ExecuteMode::Read, read, vec![])
+            .await
+            .unwrap();
+        assert_eq!(after.rows.len(), 4);
+        assert_eq!(
+            after.outcome,
+            Outcome::Rows { seq: 2 },
+            "consumption never replays a write"
+        );
+        client.send(0x02, vec![]).await;
+        assert!(client.receive().await.is_none());
+        observer.close(cx).await.unwrap();
+        finish(cx, shutdown, serving).await;
+    });
+}
+
+#[test]
+fn bolt_write_returning_admits_every_row_before_publication_or_delivery() {
+    run(async |cx| {
+        let (fgp, address, shutdown, serving) = start_both(cx, "returning-rollback").await;
+        let mut client = login(address, &grant(Rights::ReadWrite)).await;
+        let mut observer = Client::connect(cx, fgp, token(&grant(Rights::Read)))
+            .await
+            .unwrap();
+        observer.select(cx, "social").await.unwrap();
+        for (statement, discard) in [
+            (
+                "UNWIND [2,0] AS x CREATE (n:Person {name:'Late',age:x}) RETURN 10/n.age AS value",
+                false,
+            ),
+            (
+                "CREATE (n:Person {name:'NestedList'}) RETURN [n] AS value",
+                false,
+            ),
+            (
+                "CREATE (n:Person {name:'NestedMap'}) RETURN {node:n} AS value",
+                true,
+            ),
+        ] {
+            client
+                .expect(0x10, request(statement, vec![], vec![]), SUCCESS)
+                .await;
+            let failure = client
+                .expect(
+                    if discard { 0x2f } else { 0x3f },
+                    vec![Value::Map(vec![("n".into(), Value::Int(1))])],
+                    FAILURE,
+                )
+                .await;
+            assert!(get(&failure, "bookmark").is_none());
+            client.expect(0x3f, consume(), IGNORED).await;
+            client.expect(0x0f, vec![], SUCCESS).await;
+            let answer = observer
+                .execute(
+                    cx,
+                    ExecuteMode::Read,
+                    "MATCH (n:Person) RETURN n.name AS name",
+                    vec![],
+                )
+                .await
+                .unwrap();
+            assert!(answer.rows.is_empty(), "{statement}");
+            assert_eq!(answer.outcome, Outcome::Rows { seq: 0 }, "{statement}");
+        }
+        client.send(0x02, vec![]).await;
+        assert!(client.receive().await.is_none());
+        observer.close(cx).await.unwrap();
         finish(cx, shutdown, serving).await;
     });
 }

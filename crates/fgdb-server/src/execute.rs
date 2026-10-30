@@ -75,8 +75,8 @@ pub(crate) struct Created {
 
 /// A statement's type-erased future: one `Send` proof here keeps every
 /// connection future shallow enough for the compiler's recursion limit.
-pub(crate) type Execution<'a> =
-    core::pin::Pin<Box<dyn core::future::Future<Output = Result<Answer, Refusal>> + Send + 'a>>;
+pub(crate) type Execution<'a, R = Vec<Vec<WireValue>>> =
+    core::pin::Pin<Box<dyn core::future::Future<Output = Result<Answer<R>, Refusal>> + Send + 'a>>;
 
 /// Run a read statement on a read-only authorized session.
 pub(crate) fn read<'a>(

@@ -150,7 +150,7 @@ fn pending_writes_are_consumed_once_and_committed_rows_survive_real_recovery() {
 }
 
 #[test]
-fn creation_chains_are_deferred_and_consumed_once_without_return_rows() {
+fn creation_chains_defer_both_rowless_and_returning_writes() {
     let ((), report) = run_async_under_lab(0xb017_0011, |root| async move {
         let (server, token, _) = served(&root, "bolt-creation-chain").await;
         let db = &server.databases["test"];
@@ -178,20 +178,31 @@ fn creation_chains_are_deferred_and_consumed_once_without_return_rows() {
                 ((before + 1) * 2) as usize,
             );
         }
-        // The Bolt profile still excludes write RETURN. Recognizing a chain
-        // must not silently discard an explicitly requested public result.
-        assert!(
-            client
-                .run(
-                    &root,
-                    "CREATE (a) WITH a CREATE (b) RETURN 1 AS value",
-                    &vec![],
-                    &extra(),
-                )
-                .await
-                .is_err()
+        let fields = client
+            .run(
+                &root,
+                "CREATE (a) WITH a CREATE (b) RETURN 1 AS value",
+                &vec![],
+                &extra(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            get(&fields, "fields"),
+            Some(&Value::List(vec![Value::string("value")])),
         );
         assert_eq!(frontier(&root, db).await, CommitSeq(2));
+        let done = client.pull(&root, &mut wire, -1, false).await.unwrap();
+        assert_eq!(get(&done, "type").and_then(Value::as_str), Some("w"));
+        assert_eq!(
+            get(&done, "bookmark").and_then(Value::as_str),
+            Some("fgdb:test:3"),
+        );
+        assert_eq!(frontier(&root, db).await, CommitSeq(3));
+        assert_eq!(
+            db.db.read(&root).await.unwrap().vertices().unwrap().len(),
+            6
+        );
         server.join_database_workers(&root).await;
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -200,30 +211,35 @@ fn creation_chains_are_deferred_and_consumed_once_without_return_rows() {
 #[test]
 fn pending_write_is_not_replayed_after_database_reopen() {
     let ((), report) = run_async_under_lab(0xb017_0002, |root| async move {
-        let (server, token, _) = served(&root, "bolt-write-stale-queue").await;
-        let db = &server.databases["test"];
-        let mut client = connection(&server, token);
-        client
-            .run(&root, "CREATE (n)", &vec![], &extra())
-            .await
-            .unwrap();
-        // An idle queue retains no operation permit that could delay recovery.
-        fail_after_marker(&root, db, 42).await;
-        assert!(matches!(
-            settled(db).await,
-            crate::DatabaseStatus::Ready { generation: 2 }
-        ));
-        let mut wire = io();
-        client
-            .handle(&root, &mut wire, Request::Pull { n: -1, qid: -1 })
-            .await;
-        assert!(client.failed);
-        assert!(client.pending.is_none());
-        assert_eq!(frontier(&root, db).await, CommitSeq(1));
-        let guard = db.db.read(&root).await.unwrap();
-        assert_eq!(guard.vertices_at(CommitSeq(1)).unwrap().len(), 1);
-        drop(guard);
-        server.join_database_workers(&root).await;
+        for (name, statement) in [
+            ("bolt-write-stale-queue", "CREATE (n)"),
+            ("bolt-return-stale-queue", "CREATE (n) RETURN 1 AS value"),
+        ] {
+            let (server, token, _) = served(&root, name).await;
+            let db = &server.databases["test"];
+            let mut client = connection(&server, token);
+            client
+                .run(&root, statement, &vec![], &extra())
+                .await
+                .unwrap();
+            // An idle queue retains no operation permit that could delay recovery.
+            fail_after_marker(&root, db, 42).await;
+            assert!(matches!(
+                settled(db).await,
+                crate::DatabaseStatus::Ready { generation: 2 }
+            ));
+            let mut wire = io();
+            client
+                .handle(&root, &mut wire, Request::Pull { n: -1, qid: -1 })
+                .await;
+            assert!(client.failed);
+            assert!(client.pending.is_none());
+            assert_eq!(frontier(&root, db).await, CommitSeq(1));
+            let guard = db.db.read(&root).await.unwrap();
+            assert_eq!(guard.vertices_at(CommitSeq(1)).unwrap().len(), 1);
+            drop(guard);
+            server.join_database_workers(&root).await;
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -231,44 +247,52 @@ fn pending_write_is_not_replayed_after_database_reopen() {
 #[test]
 fn recovery_while_a_pull_waits_for_the_write_lock_cannot_move_it_to_the_new_generation() {
     let ((), report) = run_async_under_lab(0xb017_0003, |root| async move {
-        let (server, token, _) = served(&root, "bolt-write-waiting-generation").await;
-        let db = &server.databases["test"];
-        let mut client = connection(&server, token);
-        client
-            .run(&root, "CREATE (n)", &vec![], &extra())
-            .await
-            .unwrap();
-        let mut held = db.db.write(&root).await.unwrap();
-        let mut wire = io();
-        let mut pull = Box::pin(client.pull(&root, &mut wire, -1, false));
-        assert!(
-            pull.as_mut()
-                .poll(&mut Context::from_waker(Waker::noop()))
-                .is_pending()
-        );
-        let prepared = held.prepare_atomic_writes(vec![vertex(43)]).unwrap();
-        let contexts = PurposeContexts::narrow_runtime_root(&root);
-        assert!(
-            held.commit_prepared_with_crash(
-                &contexts.commit(),
-                prepared,
-                Some(CrashPoint::AfterMarkerBeforeD2),
-            )
-            .await
-            .is_err()
-        );
-        drop(held);
-        assert_eq!(
-            pull.await.unwrap_err().code,
-            "Neo.TransientError.General.DatabaseUnavailable",
-        );
-        assert!(client.pending.is_none());
-        assert!(matches!(
-            settled(db).await,
-            crate::DatabaseStatus::Ready { generation: 2 }
-        ));
-        assert_eq!(frontier(&root, db).await, CommitSeq(1));
-        server.join_database_workers(&root).await;
+        for (name, statement) in [
+            ("bolt-write-waiting-generation", "CREATE (n)"),
+            (
+                "bolt-return-waiting-generation",
+                "CREATE (n) RETURN 1 AS value",
+            ),
+        ] {
+            let (server, token, _) = served(&root, name).await;
+            let db = &server.databases["test"];
+            let mut client = connection(&server, token);
+            client
+                .run(&root, statement, &vec![], &extra())
+                .await
+                .unwrap();
+            let mut held = db.db.write(&root).await.unwrap();
+            let mut wire = io();
+            let mut pull = Box::pin(client.pull(&root, &mut wire, -1, false));
+            assert!(
+                pull.as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+            let prepared = held.prepare_atomic_writes(vec![vertex(43)]).unwrap();
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            assert!(
+                held.commit_prepared_with_crash(
+                    &contexts.commit(),
+                    prepared,
+                    Some(CrashPoint::AfterMarkerBeforeD2),
+                )
+                .await
+                .is_err()
+            );
+            drop(held);
+            assert_eq!(
+                pull.await.unwrap_err().code,
+                "Neo.TransientError.General.DatabaseUnavailable",
+            );
+            assert!(client.pending.is_none());
+            assert!(matches!(
+                settled(db).await,
+                crate::DatabaseStatus::Ready { generation: 2 }
+            ));
+            assert_eq!(frontier(&root, db).await, CommitSeq(1));
+            server.join_database_workers(&root).await;
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -381,4 +405,144 @@ fn write_hint_does_not_let_quotes_inside_block_comments_hide_a_mutation() {
     ));
     assert!(!looks_like_write("/* CREATE (n) */ RETURN 1"));
     assert!(!looks_like_write("RETURN '/* CREATE (n) */' AS text"));
+}
+
+#[test]
+fn returning_temporal_parameters_keep_their_bolt_structures() {
+    let ((), report) = run_async_under_lab(0xb017_0012, |root| async move {
+        let (server, token, _) = served(&root, "bolt-return-temporal").await;
+        let db = &server.databases["test"];
+        let mut client = connection(&server, token);
+        let values = vec![
+            structure::date(-719_692),
+            structure::time(78_032_142_000_000, 3_600),
+            structure::local_date_time(-1, 999_999_999),
+            structure::duration(12, -2, -2, 1_000_000),
+        ];
+        let arguments = ["day", "clock", "local", "span"]
+            .into_iter()
+            .zip(values.iter().cloned())
+            .map(|(name, value)| (name.to_owned(), value))
+            .collect();
+        let fields = client
+            .run(
+                &root,
+                "CREATE (n) RETURN $day AS day,$clock AS clock,$local AS local,$span AS span",
+                &arguments,
+                &extra(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            get(&fields, "fields"),
+            Some(&Value::List(
+                ["day", "clock", "local", "span"]
+                    .map(Value::string)
+                    .to_vec()
+            )),
+        );
+        assert_eq!(frontier(&root, db).await, CommitSeq(0));
+        let mut wire = io();
+        let done = client.pull(&root, &mut wire, 1, false).await.unwrap();
+        assert_eq!(get(&done, "type").and_then(Value::as_str), Some("w"));
+        assert_eq!(frontier(&root, db).await, CommitSeq(1));
+        let mut decoder = Dechunker::new(4096);
+        decoder.push(&wire.out);
+        let record = decoder.next_message().unwrap().unwrap();
+        assert_eq!(
+            fgdb_bolt::packstream::decode(&record).unwrap(),
+            Value::Struct {
+                tag: 0x71,
+                fields: vec![Value::List(values)]
+            },
+        );
+        assert!(decoder.next_message().unwrap().is_none());
+        assert!(client.pending.is_none());
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn a_later_oversized_return_row_refuses_before_the_write_or_first_record() {
+    let ((), report) = run_async_under_lab(0xb017_0013, |root| async move {
+        let (mut server, token, _) = served(&root, "bolt-return-frame-limit").await;
+        server.limits.max_frame_len = 128;
+        let db = &server.databases["test"];
+        let mut client = connection(&server, token);
+        for discard in [false, true] {
+            client
+                .run(
+                    &root,
+                    "UNWIND [1,2] AS x CREATE (n) RETURN range(1,x*100) AS values",
+                    &vec![],
+                    &extra(),
+                )
+                .await
+                .unwrap();
+            let mut wire = io();
+            let error = client.pull(&root, &mut wire, 1, discard).await.unwrap_err();
+            assert_eq!(error.code, "Neo.ClientError.Statement.ExecutionFailed");
+            assert!(
+                wire.out.is_empty(),
+                "no admitted row can escape a later refusal"
+            );
+            assert!(client.pending.is_none());
+            assert_eq!(frontier(&root, db).await, CommitSeq(0));
+            assert!(
+                db.db
+                    .read(&root)
+                    .await
+                    .unwrap()
+                    .vertices()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(client.pull(&root, &mut wire, -1, false).await.is_err());
+        }
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn deferred_return_keeps_preparation_debits_row_limits_and_live_authority() {
+    let ((), report) = run_async_under_lab(0xb017_0014, |root| async move {
+        let statement = "CREATE (n) RETURN 1 AS value";
+        for (name, restriction, retire) in [
+            (
+                "bolt-return-binding-budget",
+                fgdb_warden::Restriction::MaxWork(statement.len() as u64 + 1),
+                false,
+            ),
+            (
+                "bolt-return-row-limit",
+                fgdb_warden::Restriction::MaxRows(0),
+                false,
+            ),
+            (
+                "bolt-return-retired",
+                fgdb_warden::Restriction::MaxRows(10),
+                true,
+            ),
+        ] {
+            let (server, token, _) = served(&root, name).await;
+            let db = &server.databases["test"];
+            let mut client = connection(&server, token.attenuate(restriction).unwrap());
+            client
+                .run(&root, statement, &vec![], &extra())
+                .await
+                .unwrap();
+            if retire {
+                db.authority.retire();
+            }
+            let mut wire = io();
+            assert!(client.pull(&root, &mut wire, 1, false).await.is_err());
+            assert!(wire.out.is_empty());
+            assert!(client.pending.is_none());
+            assert_eq!(frontier(&root, db).await, CommitSeq(0));
+            server.join_database_workers(&root).await;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }

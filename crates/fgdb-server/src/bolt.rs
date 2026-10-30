@@ -2,7 +2,7 @@
 //!
 //! Official Neo4j drivers connect with `bolt://` (or `neo4j://`, answered
 //! by a single-server routing table) and run Cypher/GQL reads and bounded
-//! no-RETURN autocommit writes. Explicit transactions remain read-only. The
+//! autocommit writes. Explicit transactions remain read-only. The
 //! profile is a negotiated downgrade, never a drop-in-Neo4j claim:
 //!
 //! - Authentication is a Warden capability token in HELLO: the hex token as
@@ -10,10 +10,12 @@
 //!   whose token no served database accepts is refused.
 //! - Reads use the same capability-authorized READ session as FGP and HTTP.
 //!   Outside BEGIN and without read mode, a write-capable token may queue a
-//!   no-RETURN native write. PULL or DISCARD consumes it as one atomic program
+//!   native write. PULL or DISCARD consumes it as one atomic program
 //!   through the existing authorized writer; RUN alone publishes nothing.
-//!   RESET/disconnect before consumption drops it. Write RETURN uses FGP/HTTP;
-//!   explicit write transactions remain unsupported by the server.
+//!   RESET/disconnect before consumption drops it. Scalar, temporal, list and
+//!   map RETURN values are converted and admitted before commit. Graph-valued
+//!   write output refuses before publication; it requires workspace hydration.
+//!   Explicit write transactions remain unsupported by the server.
 //!   A lost terminal response never proves rollback and is never auto-replayed.
 //! - An explicit transaction holds one read session from BEGIN to COMMIT,
 //!   so all of its statements read one pinned generation; autocommit read
@@ -323,8 +325,9 @@ struct Pending<'s> {
     /// read from the server's bindings rather than the graph.
     seq: Option<CommitSeq>,
     generation: Generation,
-    /// Unexecuted, no-RETURN autocommit request; mutually exclusive with rows.
-    write: Option<autocommit::DeferredWrite>,
+    /// A deferred autocommit or the summary of its already-admitted rows.
+    /// Only the deferred state can execute; partial delivery retains completion.
+    write: Option<autocommit::PendingWrite>,
 }
 
 /// An explicit transaction: one read session, one pinned generation.
@@ -658,7 +661,9 @@ impl<'s> Connection<'s> {
             return self.schema_rows(cx, extra, column, kind).await;
         }
         let arguments = statement_parameters(parameters)?;
-        if let Some(metadata) = self.queue_autocommit_write(query, parameters, &arguments, extra)? {
+        if let Some(metadata) =
+            self.queue_autocommit_write(cx, query, parameters, &arguments, extra)?
+        {
             return Ok(metadata);
         }
         let parameters = arguments;
@@ -740,14 +745,13 @@ impl<'s> Connection<'s> {
         n: i64,
         discard: bool,
     ) -> Result<Map, Failure> {
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending.write.is_some())
-        {
-            // No output rows: the first valid PULL or DISCARD is terminal.
-            // DISCARD consumes a write; only RESET/disconnect abandons it.
-            return self.finish_autocommit_write(cx).await;
+        if self.pending.as_ref().is_some_and(|pending| {
+            matches!(&pending.write, Some(autocommit::PendingWrite::Deferred(_)))
+        }) {
+            // Execute and admit the complete result once before sending or
+            // discarding any row, even when this request asks for one row.
+            // Only RESET/disconnect before this point abandons the write.
+            self.finish_autocommit_write(cx).await?;
         }
         let Some(pending) = self.pending.as_mut() else {
             return Err(Failure::invalid("no result to PULL or DISCARD"));
@@ -792,6 +796,13 @@ impl<'s> Connection<'s> {
             return Ok(vec![("has_more".to_owned(), Value::Bool(true))]);
         }
         let pending = self.pending.take().expect("checked above");
+        match pending.write {
+            Some(autocommit::PendingWrite::Completed(summary)) => return Ok(summary),
+            Some(autocommit::PendingWrite::Deferred(_)) => {
+                return Err(Failure::invalid("unconsumed write cannot finish as a read"));
+            }
+            None => {}
+        }
         let mut metadata = vec![
             ("type".to_owned(), Value::string("r")),
             ("t_last".to_owned(), Value::Int(0)),
@@ -875,7 +886,7 @@ impl<'s> Connection<'s> {
     }
 
     /// A single-server routing table, so `neo4j://` URIs work: this server
-    /// is every role. Only no-RETURN autocommit writes are admitted here;
+    /// is every role. Only autocommit writes are admitted here;
     /// explicit transactions remain read-only even when routed as WRITE.
     fn route(&mut self, io: &Io, routing: &Map, extra: &Map) -> Result<Map, Failure> {
         let (name, db) = self.database(extra)?;
@@ -963,7 +974,7 @@ fn bookmark(database: &str, seq: CommitSeq) -> String {
 
 /// A dispatch hint and refusal selector, never execution authority. Both
 /// valid native reads and native write definitions are checked before queuing;
-/// only the native no-RETURN binder can execute a mutation under authority.
+/// only a native authorized owner can execute a mutation under authority.
 fn looks_like_write(text: &str) -> bool {
     let bytes = text.as_bytes();
     let mut at = 0;
