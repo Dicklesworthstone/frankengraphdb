@@ -1,10 +1,11 @@
-//! A leading row bag binds a pattern's slot zero by identity (fgdb-2acff).
+//! A leading row bag binds a pattern's slot zero by identity or a visible
+//! property (fgdb-2acff, fgdb-2npty).
 //! Admit its visible closure at the statement's cut, then run the unchanged
 //! pattern and identity join. An identity supplied by a parameter grants no
 //! authority: roots, relations and far endpoints are masked before expansion.
 
 use super::*;
-use fgdb_gql::algebra::{GlaDirection, GlaOperator};
+use fgdb_gql::algebra::{GlaDirection, GlaOperator, IntegerComparison};
 use std::collections::BTreeSet;
 
 /// Decline unsupported definitions before doing any source work. Once this
@@ -19,12 +20,13 @@ pub(super) fn pattern_at<Clock: FnMut() -> u64>(
     execution: &RefCell<Execution<'_, '_, Clock>>,
     policy: GqlQueryPolicy,
 ) -> Option<Governed<GraphValueRow>> {
-    // Property seeds stay unseeded here (fgdb-2npty): postings of a property
-    // the scope hides would decide which roots are admitted and charged, so
-    // hidden data would change the native work (FG-INV-20).
-    let fgdb_gql::GraphSeeds::Identities(seeds) = seeds else {
+    // A hidden field must never choose roots or change native accounting.
+    // Keep the ordinary masked source for that definition, before any read.
+    if let fgdb_gql::GraphSeeds::Property { key, .. } = seeds
+        && !scope.allows_property(key)
+    {
         return None;
-    };
+    }
     let (root, rest) = pattern.plan().operators().split_first()?;
     let steps = match root {
         GlaOperator::ScanVertices => source::bound_edge_steps(rest, 1)?,
@@ -71,17 +73,45 @@ pub(super) fn pattern_at<Clock: FnMut() -> u64>(
         };
         let mut selected = Selection::new();
         let mut roots = BTreeSet::new();
-        for &seed in seeds {
-            if selected.vertex(
-                snapshot,
-                seed,
-                at,
-                scope,
-                &mut node,
-                &mut scan,
-                &mut control,
-            )? {
-                retain(&mut roots, seed, &mut control)?;
+        match seeds {
+            fgdb_gql::GraphSeeds::Identities(seeds) => {
+                for &seed in seeds {
+                    if selected.vertex(
+                        snapshot,
+                        seed,
+                        at,
+                        scope,
+                        &mut node,
+                        &mut scan,
+                        &mut control,
+                    )? {
+                        retain(&mut roots, seed, &mut control)?;
+                    }
+                }
+            }
+            fgdb_gql::GraphSeeds::Property { key, values } => {
+                source::visit_property_seed_candidates(
+                    snapshot,
+                    key,
+                    values,
+                    &mut scan,
+                    |seed, value, scan| {
+                        if selected.property_vertex(
+                            snapshot,
+                            seed,
+                            at,
+                            scope,
+                            key,
+                            value,
+                            &mut node,
+                            scan,
+                            &mut control,
+                        )? {
+                            retain(&mut roots, seed, &mut control)?;
+                        }
+                        Ok(())
+                    },
+                )?;
             }
         }
         let mut slots = vec![roots];
@@ -228,12 +258,61 @@ impl<'a> Selection<'a> {
         if !scope.allows_vertex(&row.labels) {
             return Ok(false);
         }
+        self.admit(row, scope, node, control)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn property_vertex(
+        &mut self,
+        snapshot: &'a Snapshot,
+        vid: VId,
+        at: CommitSeq,
+        scope: &PlannerPredicates,
+        key: PropertyKeyId,
+        value: &CanonicalScalar,
+        node: &mut impl FnMut() -> Result<(), Fault>,
+        scan: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
+    ) -> Result<bool, Fault> {
+        if self.vertices.contains(&vid) {
+            return Ok(true);
+        }
+        let row = source::find_vertex(snapshot, vid, at, &mut |_| Ok::<(), Fault>(()))?;
+        scan(SourceEvent::Work)?;
+        let Some(row) = row else {
+            return Ok(false);
+        };
+        if !scope.allows_vertex(&row.labels) {
+            return Ok(false);
+        }
+        // Historical postings are never authority. A visible vertex whose
+        // old value matched must cost exactly as it does in a database that
+        // only ever stored its current, nonmatching value. Inspect the field
+        // only after both its key and this winning row have been authorized.
+        let current = row
+            .props
+            .binary_search_by_key(&key, |(key, _)| *key)
+            .ok()
+            .and_then(|position| row.props[position].1.as_scalar());
+        if !IntegerComparison::Equal.accepts_scalar_pair(current, Some(value)) {
+            return Ok(false);
+        }
+        self.admit(row, scope, node, control)
+    }
+
+    fn admit(
+        &mut self,
+        row: &'a VertexRow,
+        scope: &PlannerPredicates,
+        node: &mut impl FnMut() -> Result<(), Fault>,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
+    ) -> Result<bool, Fault> {
         // Retain no hidden-identity cache: its size would expose hidden
         // topology through the scratch budget. Visible nodes are admitted
         // immediately, so a large reach cannot defer the signed node limit.
         control(SourceEvent::ScratchEntry)?;
         self.tables.admit_vertex(row, scope, node, control)?;
-        self.vertices.insert(vid);
+        self.vertices.insert(row.vid);
         Ok(true)
     }
 }

@@ -4712,6 +4712,31 @@ pub(crate) fn property_seed_roots<E>(
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
 ) -> Result<Vec<VId>, E> {
     let mut roots = std::collections::BTreeSet::new();
+    visit_property_seed_candidates(snapshot, key, values, control, |vid, _, control| {
+        if !roots.contains(&vid) {
+            control(SourceEvent::ScratchEntry)?;
+            roots.insert(vid);
+        }
+        Ok(())
+    })?;
+    Ok(roots.into_iter().collect())
+}
+
+/// Visit the historical postings without retaining a candidate union. Scoped
+/// sources use a poll-only physical control and admit each current winner
+/// before retaining it, so hidden candidates and stale versions cannot change
+/// their observable work or scratch allowance. `value` is the original query
+/// operand, including when its exact numeric peer supplied the posting.
+pub(crate) fn visit_property_seed_candidates<E, C>(
+    snapshot: &Snapshot,
+    key: PropertyKeyId,
+    values: &[CanonicalScalar],
+    control: &mut C,
+    mut visit: impl FnMut(VId, &CanonicalScalar, &mut C) -> Result<(), E>,
+) -> Result<(), E>
+where
+    C: FnMut(SourceEvent) -> Result<(), E>,
+{
     for value in values {
         control(SourceEvent::Work)?;
         let peers = match value {
@@ -4725,14 +4750,11 @@ pub(crate) fn property_seed_roots<E>(
             control(SourceEvent::Work)?;
             for vid in snapshot.property_index().lookup(key, peer.as_ref()) {
                 control(SourceEvent::Work)?;
-                if !roots.contains(vid) {
-                    control(SourceEvent::ScratchEntry)?;
-                    roots.insert(*vid);
-                }
+                visit(*vid, value, control)?;
             }
         }
     }
-    Ok(roots.into_iter().collect())
+    Ok(())
 }
 
 /// A plan restricted to the slot-0 identities a leading bag carries

@@ -775,10 +775,27 @@ fn seeded_reads_choose_the_historical_winner_before_masking() {
         let prepared = PreparedNativeRead::prepare(text, &old, symbols).unwrap();
         let mut hide = WriteBatch::new(RelationId(1));
         hide.set_vertex_label(VId(1), LabelId(1), false);
+        hide.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(99)));
+        hide.set_vertex_property(VId(4), PropertyKeyId(1), Some(CanonicalScalar::Int(10)));
         let after = db.write(&commit, hide).await.unwrap();
         let current = identity_seed_arguments()
             .with_uint64("at", after.0)
             .unwrap();
+        let keyed_args = |at: CommitSeq| {
+            use fgdb_gql::algebra::GraphValue;
+            GqlParameters::new()
+                .with_list(
+                    "keys",
+                    vec![GraphValue::Scalar(CanonicalScalar::Int(10)); 2],
+                )
+                .unwrap()
+                .with_uint64("at", at.0)
+                .unwrap()
+        };
+        let keyed_old = keyed_args(basis);
+        let keyed_current = keyed_args(after);
+        let keyed_text = "UNWIND $keys AS k MATCH (n {p:k}) FOR SYSTEM_TIME AS OF SEQ $at RETURN n";
+        let keyed = PreparedNativeRead::prepare(keyed_text, &keyed_old, symbols).unwrap();
         let small = GqlQueryPolicy::new(1, 1000, 1_000_000, 1_000_000);
         for compact in [false, true] {
             if compact {
@@ -797,7 +814,342 @@ fn seeded_reads_choose_the_historical_winner_before_masking() {
                 native_rows(&["p"], vec![]),
                 "a hidden successor cannot revive the previously visible root",
             );
+            // One shared historical posting set names both vertices. The
+            // selected cut, followed by visibility, must choose 1 before the
+            // rekey and 4 afterwards, still within one admitted record.
+            for (args, id) in [(&keyed_old, VId(1)), (&keyed_current, VId(4))] {
+                assert_eq!(
+                    keyed
+                        .execute_authorized(&db, &cx, &issuer, &token, BRANCH, args, small, || 100,)
+                        .unwrap(),
+                    native_rows(
+                        &["n"],
+                        vec![vec![QueryValue::Value(fgdb_gql::algebra::GraphValue::Vertex(id))]; 2],
+                    ),
+                    "historical property seeds, compact={compact}",
+                );
+            }
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+fn property_seed_arguments() -> GqlParameters {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::CanonicalF64;
+    GqlParameters::new()
+        .with_list(
+            "keys",
+            vec![
+                GraphValue::Scalar(CanonicalScalar::Int(10)),
+                GraphValue::Scalar(CanonicalScalar::Int(10)),
+                GraphValue::Scalar(CanonicalScalar::Int(20)),
+                GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(30.0))),
+                GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(30.5))),
+                GraphValue::Scalar(CanonicalScalar::Int(999)),
+                GraphValue::Scalar(CanonicalScalar::Null),
+                GraphValue::Scalar(CanonicalScalar::ucs_basic_text("10").unwrap()),
+            ],
+        )
+        .unwrap()
+}
+
+#[test]
+fn authorized_property_seeds_probe_visible_keys_before_expansion_and_aggregation() {
+    let ((), report) = run_async_under_lab(0x5ec0_4025, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let full = identity_seed_database(&c.commit(), true).await;
+        let filtered = identity_seed_database(&c.commit(), false).await;
+        let issuer = authority(425);
+        let mut allowed = grant();
+        allowed.limits.max_nodes = 2;
+        let token = issuer.issue_at(&allowed, 100).unwrap();
+        let args = property_seed_arguments();
+        let expected = native_rows(
+            &["p"],
+            vec![vec![value(10)], vec![value(10)], vec![value(30)]],
+        );
+        let small = GqlQueryPolicy::new(2, 1000, 1_000_000, 1_000_000);
+        for text in [
+            "UNWIND $keys AS k MATCH (n {p:k}) RETURN n.p AS p ORDER BY p",
+            "UNWIND $keys AS k MATCH (n) WHERE n.p = k RETURN n.p AS p ORDER BY p",
+            "UNWIND $keys AS k WITH k MATCH (n {p:k}) RETURN n.p AS p ORDER BY p",
+        ] {
+            assert_eq!(
+                filtered.query(&cx, text, &args, symbols, policy()).unwrap(),
+                expected,
+                "{text}"
+            );
+            for db in [&full, &filtered] {
+                assert_eq!(
+                    db.query_authorized(
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        text,
+                        &args,
+                        symbols,
+                        small,
+                        || 100,
+                    )
+                    .unwrap(),
+                    expected,
+                    "{text}"
+                );
+            }
+        }
+        let text =
+            "UNWIND $keys AS k MATCH (n {p:k}) RETURN count(*) AS n, count(n.hidden) AS hidden";
+        for db in [&full, &filtered] {
+            assert_eq!(
+                db.query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    text,
+                    &args,
+                    symbols,
+                    small,
+                    || 100,
+                )
+                .unwrap(),
+                native_rows(
+                    &["n", "hidden"],
+                    vec![vec![QueryValue::Count(3), QueryValue::Count(0)]],
+                ),
+            );
+        }
+        // The same root probe feeds original parallel edges and both visible
+        // endpoints. The hidden transit vertex and denied relation stay out.
+        let text = "UNWIND $keys AS k MATCH (n {p:k})-[]->(m) RETURN m.p AS p ORDER BY p";
+        let expected = native_rows(
+            &["p"],
+            vec![
+                vec![value(10)],
+                vec![value(30)],
+                vec![value(30)],
+                vec![value(30)],
+                vec![value(30)],
+            ],
+        );
+        for db in [&full, &filtered] {
+            assert_eq!(
+                db.query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    text,
+                    &args,
+                    symbols,
+                    GqlQueryPolicy::new(5, 1000, 1_000_000, 1_000_000),
+                    || 100,
+                )
+                .unwrap(),
+                expected,
+            );
+        }
+        // The optimization retains the original limits. Two distinct roots
+        // cannot fit one record, and an unkeyed range still reads the corpus.
+        for text in [
+            "UNWIND $keys AS k MATCH (n {p:k}) RETURN n.p AS p",
+            "UNWIND $keys AS k MATCH (n) WHERE n.p > k RETURN n.p AS p",
+        ] {
+            assert!(
+                full.query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    text,
+                    &args,
+                    symbols,
+                    GqlQueryPolicy::new(1, 1000, 1_000_000, 1_000_000),
+                    || 100,
+                )
+                .is_err()
+            );
+        }
+        // A hidden field is not eligible to choose candidates. Its values
+        // are NULL in both twins; with a small allowance both keep the same
+        // full-source refusal, even though only one has matching postings.
+        let text = "UNWIND $keys AS k MATCH (n {hidden:k}) RETURN n.p AS p";
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        for db in [&full, &filtered] {
+            assert_eq!(
+                db.query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    text,
+                    &args,
+                    symbols,
+                    policy(),
+                    || 100,
+                )
+                .unwrap(),
+                native_rows(&["p"], vec![]),
+            );
+            assert!(
+                db.query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    text,
+                    &args,
+                    symbols,
+                    small,
+                    || 100,
+                )
+                .is_err()
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn hidden_property_postings_and_stale_winners_do_not_change_admission_limits() {
+    let ((), report) = run_async_under_lab(0x5ec0_4026, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let mut full = identity_seed_database(&c.commit(), true).await;
+        let filtered = identity_seed_database(&c.commit(), false).await;
+        let mut hidden = WriteBatch::new(RelationId(1));
+        for id in 600..856 {
+            hidden.create_vertex(
+                VId(id),
+                vec![LabelId(99)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(10))],
+            );
+        }
+        full.write(&c.commit(), hidden).await.unwrap();
+        // Vertex 4's stale value must not admit a third visible root. Its
+        // latest value is 40 in both twins. Extra hidden-field revisions of
+        // vertex 1 and matching hidden vertices may only add physical polls.
+        for version in 0..8 {
+            let mut change = WriteBatch::new(RelationId(1));
+            change.set_vertex_property(
+                VId(1),
+                PropertyKeyId(2),
+                Some(CanonicalScalar::Int(version)),
+            );
+            change.set_vertex_property(VId(4), PropertyKeyId(1), Some(CanonicalScalar::Int(10)));
+            full.write(&c.commit(), change).await.unwrap();
+        }
+        let mut restore = WriteBatch::new(RelationId(1));
+        restore.set_vertex_property(VId(4), PropertyKeyId(1), Some(CanonicalScalar::Int(40)));
+        full.write(&c.commit(), restore).await.unwrap();
+        let issuer = authority(426);
+        let args = property_seed_arguments();
+        let text = "UNWIND $keys AS k MATCH (n {p:k}) RETURN n.p AS p ORDER BY p";
+        let expected = native_rows(
+            &["p"],
+            vec![vec![value(10)], vec![value(10)], vec![value(30)]],
+        );
+        // Find each observable threshold independently of implementation
+        // event counts: signed work, native work, then native scratch.
+        for dimension in 0..3 {
+            let least = |db: &Database<MemVfs>| {
+                let (mut low, mut high) = (1, 1_000_000);
+                while low < high {
+                    let middle = low + (high - low) / 2;
+                    let mut allowed = grant();
+                    allowed.limits.max_nodes = 2;
+                    let mut bounded = GqlQueryPolicy::new(2, 1000, 1_000_000, 1_000_000);
+                    match dimension {
+                        0 => allowed.limits.max_work = middle,
+                        1 => bounded.evaluator.max_work_units = middle,
+                        _ => bounded.evaluator.max_scratch_entries = middle,
+                    }
+                    let token = issuer.issue_at(&allowed, 100).unwrap();
+                    match db.query_authorized(
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        text,
+                        &args,
+                        symbols,
+                        bounded,
+                        || 100,
+                    ) {
+                        Ok(rows) => {
+                            assert_eq!(rows, expected);
+                            high = middle;
+                        }
+                        Err(_) => low = middle + 1,
+                    }
+                }
+                low
+            };
+            let full_limit = least(&full);
+            assert!(full_limit > 1 && full_limit < 1_000_000);
+            assert_eq!(full_limit, least(&filtered), "dimension {dimension}");
+        }
+        // Every observed live authority boundary can refuse the private
+        // result; a later execution still sees exactly the same complete bag.
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let bounded = GqlQueryPolicy::new(2, 1000, 1_000_000, 1_000_000);
+        let mut calls = 0;
+        assert_eq!(
+            full.query_authorized(
+                &cx,
+                &issuer,
+                &token,
+                BRANCH,
+                text,
+                &args,
+                symbols,
+                bounded,
+                || {
+                    calls += 1;
+                    100
+                },
+            )
+            .unwrap(),
+            expected,
+        );
+        for stop in 1..=calls {
+            let mut seen = 0;
+            assert!(matches!(
+                full.query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    text,
+                    &args,
+                    symbols,
+                    bounded,
+                    || {
+                        seen += 1;
+                        if seen == stop { 1000 } else { 100 }
+                    },
+                ),
+                Err(QueryError::Authorization(Error::Expired))
+            ));
+        }
+        assert_eq!(
+            full.query_authorized(
+                &cx,
+                &issuer,
+                &token,
+                BRANCH,
+                text,
+                &args,
+                symbols,
+                bounded,
+                || 100,
+            )
+            .unwrap(),
+            expected,
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
