@@ -168,10 +168,10 @@ fn seed_component_row_omission_matches_stored_and_cooperative_results() {
             })
             .collect();
         disconnected.push((64, 64));
-        for (edges, opened, scanned) in [
+        for (case, (edges, opened, scanned)) in [
             (star, 1, n - 1),
             (disconnected, 1 + 32 + 1, 31 + 32 * 31 + 1),
-        ] {
+        ].into_iter().enumerate() {
             let db = stored(&contexts.commit(), n, &edges).await;
             let opt = options(Directedness::Undirected);
             let graph = projection(&db, &cx, opt).await;
@@ -191,7 +191,7 @@ fn seed_component_row_omission_matches_stored_and_cooperative_results() {
             for q in [1, 7, 64] {
                 let probe = Arc::new(SimulationCheckpointProbe::new(None));
                 let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
-                let (actual, _) = drive(
+                let (actual, pending) = drive(
                     call.execute_sealed_cooperative(
                         &controlled,
                         &graph,
@@ -203,7 +203,31 @@ fn seed_component_row_omission_matches_stored_and_cooperative_results() {
                     &probe,
                     q,
                 );
-                compare_execution(&actual.unwrap(), &sync);
+                let actual = actual.unwrap();
+                compare_execution(&actual, &sync);
+                let labels = |rows: &[Vec<FnxValue>]| -> Vec<String> {
+                    rows.iter().map(|row| match row[1] {
+                        FnxValue::Vertex(id) => id.0.to_string(),
+                        other => panic!("component label must be a vertex: {other:?}"),
+                    }).collect()
+                };
+                println!(
+                    "{{\"schema\":\"fgdb.component.public.v1\",\"source_kind\":\"authenticated-stored-sealed\",\"source_root\":\"{:?}\",\"seq\":{},\"projection_digest\":\"{}\",\"case\":{},\"seed\":null,\"law\":\"undirected-canonical-components\",\"vertices\":{},\"projected_edges\":{},\"input_edges\":{},\"opened_rows\":{},\"skipped_rows\":{},\"scanned_incidences\":{},\"quantum\":{},\"suspensions\":{},\"expected_labels\":{:?},\"actual_labels\":{:?},\"result_equal\":true}}",
+                    sync.certificate.snapshot.root,
+                    sync.certificate.snapshot.as_of.0,
+                    sync.certificate.projection_digest.to_hex(),
+                    case,
+                    sync.certificate.vertices,
+                    sync.certificate.edges,
+                    sync.certificate.input_edges,
+                    sync.certificate.witness.nodes_touched,
+                    n - sync.certificate.witness.nodes_touched,
+                    sync.certificate.witness.edges_scanned,
+                    q,
+                    pending,
+                    labels(&expected),
+                    labels(&actual.rows),
+                );
             }
         }
         assert_eq!(contexts.outstanding_obligations(), 0);

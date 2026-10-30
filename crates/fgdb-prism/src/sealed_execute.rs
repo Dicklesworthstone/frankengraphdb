@@ -3040,7 +3040,7 @@ mod tests {
         fn new(graph: &'a SnapshotGraphView, fail_at: usize) -> Result<Self> {
             let n = graph.node_count();
             let mut degrees = Vec::new();
-            let mut occurrences = std::collections::BTreeMap::new();
+            let mut occurrences = std::collections::BTreeMap::<(usize, usize), usize>::new();
             for source in 0..n {
                 let (targets, weights) = graph
                     .projected_row(source)
@@ -3056,7 +3056,7 @@ mod tests {
                         return Err(ExecutionError::InvalidUpstreamResult.into());
                     }
                     degree = add(degree, 1)?;
-                    let count = occurrences.entry((source, target)).or_insert(0usize);
+                    let count = occurrences.entry((source, target)).or_default();
                     *count = add(*count, 1)?;
                 }
                 degrees.push(degree);
