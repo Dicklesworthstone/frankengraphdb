@@ -3,6 +3,8 @@
 //! This is a checked physical input to the ordinary aggregate finalizer, not
 //! a cached result. Source admission stays the host's responsibility. Only
 //! plans with filterless input or one metadata-proven vertex label qualify.
+//! Exact metadata also admits COUNT of a proven nonnull vertex or edge identity;
+//! property values, nullable bindings and DISTINCT still need their real input.
 //! The scan-summary path preserves the original evaluator event order. An
 //! exact-metadata input spends only its own lookup and finalization work.
 
@@ -10,7 +12,7 @@ use super::*;
 use crate::algebra::{EdgeRelation, GlaDirection};
 use fgdb_delta_types::LabelId;
 
-/// The live source whose exact cardinality a checked COUNT(*) can use.
+/// The live source whose exact cardinality a checked count can use.
 /// A typed edge count examines every admitted edge, including other relations,
 /// but only occurrences of the named relation contribute to its value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,15 +46,15 @@ pub struct PreparedGraphCount<'query> {
 }
 
 impl PreparedGraphAggregate {
-    fn count_shape(&self) -> Option<Shape> {
+    fn count_shape(&self, metadata: bool) -> Option<Shape> {
         if self.computed_input.is_some()
             || self.relational_input.is_some()
             || !self.keys.is_empty()
             || self.aggregates.is_empty()
-            || self
-                .aggregates
-                .iter()
-                .any(|aggregate| aggregate.function != GraphAggregateFunction::CountRows)
+            || self.aggregates.iter().any(|aggregate| {
+                aggregate.function != GraphAggregateFunction::CountRows
+                    && (!metadata || aggregate.function != GraphAggregateFunction::Count)
+            })
         {
             return None;
         }
@@ -73,6 +75,7 @@ impl PreparedGraphAggregate {
             _ => return None,
         };
         let mut columns = None;
+        let mut edge_captures = Vec::new();
         for operator in &operators[1..] {
             match operator {
                 GlaOperator::Select { slot, predicates }
@@ -86,10 +89,36 @@ impl PreparedGraphAggregate {
                     };
                     source = GraphCountSource::Label(*label);
                 }
+                GlaOperator::CapturePath {
+                    capture,
+                    start,
+                    segments,
+                } if metadata
+                    && columns.is_none()
+                    && matches!(
+                        source,
+                        GraphCountSource::Edges | GraphCountSource::Relation(_)
+                    )
+                    && start.ordinal() == 0
+                    && matches!(segments.as_slice(), [end] if end.ordinal() == 1)
+                    && !edge_captures.contains(capture) =>
+                {
+                    // A directed edge root binds one existing relationship per
+                    // occurrence. Its one-edge capture cannot be null, filter a
+                    // row, or collapse parallel edges. No expansion or OPTIONAL
+                    // is admitted by this shape, so captures cannot refer to a
+                    // different path or a null-extended relationship.
+                    edge_captures.push(*capture);
+                }
                 GlaOperator::ProjectValues { columns: output }
                     if columns.is_none()
-                        && output.iter().all(|column| {
-                            matches!(column, ValueProjection::Vertex { slot } if slot.ordinal() < slots)
+                        && output.iter().all(|column| match column {
+                            ValueProjection::Vertex { slot } => slot.ordinal() < slots,
+                            ValueProjection::Path {
+                                capture,
+                                function: crate::algebra::GraphPathFunction::Edge,
+                            } => metadata && edge_captures.contains(capture),
+                            _ => false,
                         }) =>
                 {
                     columns = Some(output.len());
@@ -104,10 +133,17 @@ impl PreparedGraphAggregate {
                 _ => return None,
             }
         }
-        Some(Shape {
-            source,
-            columns: columns?,
-        })
+        let columns = columns?;
+        // COUNT(expr) ignores NULL, unlike COUNT(*). Every admitted projection
+        // above is a present identity, and preparation already bounds columns;
+        // retain that proof explicitly at this physical-input boundary.
+        if self.aggregates.iter().any(|aggregate| {
+            aggregate.function == GraphAggregateFunction::Count
+                && aggregate.column.is_none_or(|column| column >= columns)
+        }) {
+            return None;
+        }
+        Some(Shape { source, columns })
     }
 
     /// Whether exact live-source counts can replace this definition's input
@@ -116,20 +152,24 @@ impl PreparedGraphAggregate {
     /// `None`. Wildcard edges have a different ordinary visitor transcript.
     #[must_use]
     pub fn count_summary_source(&self) -> Option<GraphCountSource> {
-        self.count_shape().and_then(|shape| match shape.source {
-            GraphCountSource::Edges | GraphCountSource::Label(_) => None,
-            source => Some(source),
-        })
+        self.count_shape(false)
+            .and_then(|shape| match shape.source {
+                GraphCountSource::Edges | GraphCountSource::Label(_) => None,
+                source => Some(source),
+            })
     }
 
     /// The exact current-snapshot cardinality this definition may consume.
     /// Filterless directed edges may name one relation or match every type;
-    /// one vertex-label predicate also qualifies. Multiple labels, property
+    /// one vertex-label predicate also qualifies. COUNT of the root vertex,
+    /// either edge endpoint, or the captured one-hop edge is equivalent to
+    /// COUNT(*) because each admitted occurrence has that identity. Multiple
+    /// labels, property
     /// predicates and label-filtered edge counts do
     /// not: independent populations cannot prove an intersection's size.
     #[must_use]
     pub fn count_metadata_source(&self) -> Option<GraphCountSource> {
-        self.count_shape().map(|shape| shape.source)
+        self.count_shape(true).map(|shape| shape.source)
     }
 
     /// Bind a trusted source's exact, already admitted counts to this query.
@@ -146,7 +186,7 @@ impl PreparedGraphAggregate {
         examined: u64,
         matching: u64,
     ) -> Option<PreparedGraphCount<'_>> {
-        let shape = self.count_shape()?;
+        let shape = self.count_shape(false)?;
         if shape.source != source
             || matches!(source, GraphCountSource::Edges | GraphCountSource::Label(_))
             || matching > examined
@@ -175,7 +215,7 @@ impl PreparedGraphAggregate {
         source: GraphCountSource,
         matching: u64,
     ) -> Option<PreparedGraphCount<'_>> {
-        let shape = self.count_shape()?;
+        let shape = self.count_shape(true)?;
         (shape.source == source).then_some(PreparedGraphCount {
             query: self,
             shape,
@@ -268,7 +308,7 @@ impl PreparedGraphCount<'_> {
         let visited = charges.work(work).map(|()| {
             for cell in &mut state {
                 let Accumulator::Count(count) = cell else {
-                    unreachable!("the checked definition contains only COUNT(*)")
+                    unreachable!("the checked definition contains only nonnull counts")
                 };
                 *count = self.matching;
             }

@@ -484,10 +484,17 @@ fn maintained_authorized_counts_admit_one_metadata_record_independent_of_graph_s
             let mut observed = Vec::new();
             for (text, expected) in [
                 (VERTICES, total),
+                ("MATCH (n) RETURN COUNT(n) AS n", total),
                 (R_EDGES, total),
+                ("MATCH (a)-[r:R]->(b) RETURN COUNT(r) AS n", total),
+                ("MATCH (a)<-[r:R]-(b) RETURN COUNT(r) AS n", total),
+                ("MATCH (a)-[:R]->(b) RETURN COUNT(b) AS n", total),
                 (ALL_EDGES, total),
+                ("MATCH (a)-[r]->(b) RETURN COUNT(r) AS n", total),
                 (A_VERTICES, total),
+                ("MATCH (n:A) RETURN COUNT(n) AS n", total),
                 (S_EDGES, 0),
+                ("MATCH (a)-[r:S]->(b) RETURN COUNT(r) AS n", 0),
                 ("MATCH (n:B) RETURN COUNT(*) AS n", 0),
             ] {
                 let query = prepare(text);
@@ -519,17 +526,120 @@ fn maintained_authorized_counts_admit_one_metadata_record_independent_of_graph_s
                             exact,
                             || 100,
                         ),
-                        Err(QueryError::Authorization(fgdb_warden::Error::LimitExceeded(
-                            fgdb_warden::LimitDimension::Nodes
-                        )))
+                        Err(QueryError::Authorization(
+                            fgdb_warden::Error::LimitExceeded(fgdb_warden::LimitDimension::Nodes)
+                        ))
                     ),
                     "{text}, {total} vertices"
                 );
             }
             if let Some(expected) = &baseline {
-                assert_eq!(&observed, expected, "metadata work grew with {total} vertices");
+                assert_eq!(
+                    &observed, expected,
+                    "metadata work grew with {total} vertices"
+                );
             } else {
                 baseline = Some(observed);
+            }
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn captured_identity_counts_keep_scoped_sources_and_historical_cuts() {
+    let ((), report) = run_async_under_lab(0xc161_0008, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = database(&c.commit()).await;
+        let authority = issuer();
+        let full = authority.issue_at(&grant(), 100).unwrap();
+        let small = GqlQueryPolicy::new(1, 100, 1_000_000, 100_000);
+        for text in [
+            "MATCH (a)-[r:R]->(b) RETURN COUNT(r) AS n",
+            "MATCH (a)<-[r:R]-(b) RETURN COUNT(r) AS n",
+            "MATCH (a)-[r]->(b) RETURN COUNT(r) AS n",
+        ] {
+            let query = prepare(text);
+            let owner = db
+                .execute_graph_aggregate_governed(&cx, &query, small)
+                .unwrap();
+            assert_eq!(owner.rows.snapshot_records, 1);
+            assert_eq!(
+                db.execute_graph_aggregate_authorized(
+                    &cx,
+                    &authority,
+                    &full,
+                    "main",
+                    &query,
+                    small,
+                    || 100,
+                )
+                .unwrap(),
+                owner.value
+            );
+            for restriction in [
+                Restriction::Labels(Scope::only([A])),
+                Restriction::Relations(Scope::only([R])),
+                Restriction::Properties(Scope::only([])),
+            ] {
+                let scoped = full.attenuate(restriction).unwrap();
+                assert!(
+                    db.execute_graph_aggregate_authorized(
+                        &cx,
+                        &authority,
+                        &scoped,
+                        "main",
+                        &query,
+                        small,
+                        || 100,
+                    )
+                    .is_err(),
+                    "restricted capture used a full-population metadata count: {text}"
+                );
+                let star = prepare(&text.replace("COUNT(r)", "COUNT(*)"));
+                let expected = db
+                    .execute_graph_aggregate_authorized(
+                        &cx,
+                        &authority,
+                        &scoped,
+                        "main",
+                        &star,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap();
+                let actual = db
+                    .execute_graph_aggregate_authorized(
+                        &cx,
+                        &authority,
+                        &scoped,
+                        "main",
+                        &query,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap();
+                assert_eq!(actual, expected, "{text}");
+            }
+            for at in [CommitSeq(1), CommitSeq(2)] {
+                let expected = db
+                    .execute_graph_aggregate_governed_at(&cx, &query, at, policy())
+                    .unwrap();
+                let actual = db
+                    .execute_graph_aggregate_authorized_at(
+                        &cx,
+                        &authority,
+                        &full,
+                        "main",
+                        &query,
+                        at,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap();
+                assert_eq!(actual, expected.value, "{text}, {at:?}");
             }
         }
         assert_eq!(c.outstanding_obligations(), 0);
@@ -553,7 +663,13 @@ fn exact_metadata_keeps_scope_history_and_live_permit_fences() {
             let query = prepare(text);
             let current = db
                 .execute_graph_aggregate_authorized(
-                    &cx, &authority, &full, "main", &query, one_record, || 100,
+                    &cx,
+                    &authority,
+                    &full,
+                    "main",
+                    &query,
+                    one_record,
+                    || 100,
                 )
                 .unwrap();
             assert_eq!(
@@ -580,7 +696,13 @@ fn exact_metadata_keeps_scope_history_and_live_permit_fences() {
                 );
                 let rows = db
                     .execute_graph_aggregate_authorized(
-                        &cx, &authority, &scoped, "main", &query, policy(), || 100,
+                        &cx,
+                        &authority,
+                        &scoped,
+                        "main",
+                        &query,
+                        policy(),
+                        || 100,
                     )
                     .unwrap();
                 assert_eq!(count(&rows), expected[at], "scoped {text}");
@@ -598,8 +720,14 @@ fn exact_metadata_keeps_scope_history_and_live_permit_fences() {
             );
             let history = db
                 .execute_graph_aggregate_authorized_at(
-                    &cx, &authority, &full, "main", &query, CommitSeq(1),
-                    policy(), || 100,
+                    &cx,
+                    &authority,
+                    &full,
+                    "main",
+                    &query,
+                    CommitSeq(1),
+                    policy(),
+                    || 100,
                 )
                 .unwrap();
             assert_eq!(count(&history), [6, 6, 6, 5][at], "historical {text}");
@@ -624,7 +752,13 @@ fn exact_metadata_keeps_scope_history_and_live_permit_fences() {
             assert!(
                 matches!(
                     db.execute_graph_aggregate_authorized(
-                        &cx, &authority, &full, "main", &query, one_record, || {
+                        &cx,
+                        &authority,
+                        &full,
+                        "main",
+                        &query,
+                        one_record,
+                        || {
                             clocks += 1;
                             if clocks == 1 { 100 } else { 10_000 }
                         },
@@ -634,13 +768,17 @@ fn exact_metadata_keeps_scope_history_and_live_permit_fences() {
                 "metadata bypassed a live expiry check: {text}"
             );
         }
-        let fallible = prepare(
-            "MATCH (n) RETURN 1 / (COUNT(*) - COUNT(*)) AS n LIMIT 0",
-        );
+        let fallible = prepare("MATCH (n) RETURN 1 / (COUNT(*) - COUNT(*)) AS n LIMIT 0");
         assert!(
             matches!(
                 db.execute_graph_aggregate_authorized(
-                    &cx, &authority, &full, "main", &fallible, one_record, || 100,
+                    &cx,
+                    &authority,
+                    &full,
+                    "main",
+                    &fallible,
+                    one_record,
+                    || 100,
                 ),
                 Err(QueryError::Aggregate(_))
             ),

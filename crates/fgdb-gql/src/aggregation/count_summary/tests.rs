@@ -368,7 +368,7 @@ fn only_plain_filterless_counts_admit_source_summaries() {
         "MATCH (n) WHERE n.p = 1 RETURN COUNT(*) AS n",
         "MATCH (n) WHERE 1 / n.p = 1 RETURN COUNT(*) AS n",
         "MATCH (n) RETURN n, COUNT(*) AS nrows GROUP BY n",
-        "MATCH (n) RETURN COUNT(n) AS n",
+        "MATCH (n) RETURN COUNT(n.p) AS n",
         "MATCH (n) RETURN COUNT(DISTINCT n) AS n",
         "MATCH (n) RETURN SUM(n.p) AS n",
         "MATCH (a)-[:R]-(b) RETURN COUNT(*) AS n",
@@ -442,7 +442,7 @@ fn only_one_vertex_label_can_supply_exact_metadata() {
     for text in [
         "MATCH (n:L:M) RETURN COUNT(*) AS n",
         "MATCH (n:L) WHERE n.p = 1 RETURN COUNT(*) AS n",
-        "MATCH (n:L) RETURN COUNT(n) AS n",
+        "MATCH (n:L) RETURN COUNT(n.p) AS n",
         "MATCH (n:L) RETURN n.p, COUNT(*) AS n GROUP BY n.p",
         "MATCH (n:L)-[:R]->(m) RETURN COUNT(*) AS n",
     ] {
@@ -463,7 +463,10 @@ fn wildcard_directed_counts_admit_only_exact_metadata() {
         "MATCH (a)<-[r]-(b) RETURN COUNT(*) AS n",
     ] {
         let wildcard = query(text);
-        assert_eq!(wildcard.count_metadata_source(), Some(GraphCountSource::Edges));
+        assert_eq!(
+            wildcard.count_metadata_source(),
+            Some(GraphCountSource::Edges)
+        );
         assert_eq!(wildcard.count_summary_source(), None);
         assert!(
             wildcard
@@ -503,6 +506,114 @@ fn wildcard_directed_counts_admit_only_exact_metadata() {
     }
 }
 
+#[test]
+fn identity_counts_require_a_proven_nonnull_occurrence() {
+    for (text, source) in [
+        ("MATCH (n) RETURN COUNT(n) AS n", GraphCountSource::Vertices),
+        (
+            "MATCH (n:L) RETURN COUNT(n) AS n",
+            GraphCountSource::Label(LabelId(1)),
+        ),
+        (
+            "MATCH (a)-[:R]->(b) RETURN COUNT(a) AS n, COUNT(b) AS m",
+            GraphCountSource::Relation(RelationId(1)),
+        ),
+        (
+            "MATCH (a)<-[r:R]-(b) RETURN COUNT(r) AS n, COUNT(*) AS m",
+            GraphCountSource::Relation(RelationId(1)),
+        ),
+        (
+            "MATCH (a)-[r]->(b) RETURN COUNT(r) AS n, COUNT(a) AS m",
+            GraphCountSource::Edges,
+        ),
+    ] {
+        let query = query(text);
+        assert_eq!(query.count_metadata_source(), Some(source), "{text}");
+        // Historical/scoped scan summaries have a different evaluator
+        // transcript and must continue through the ordinary counted input.
+        assert_eq!(query.count_summary_source(), None, "{text}");
+        assert!(query.prepare_count_summary(source, 10, 10).is_none());
+        for count in [0, 1, 900_000, u64::MAX] {
+            let result = run_metadata::<false>(
+                &query,
+                count,
+                GqlQueryPolicy::new(1, 10, 10_000, 10_000),
+                None,
+            )
+            .0
+            .unwrap();
+            for value in result.value[0].values() {
+                assert_eq!(value.as_count(), Some(count), "{text}");
+            }
+        }
+    }
+    for text in [
+        "MATCH (n) RETURN COUNT(n.p) AS n",
+        "MATCH (n) RETURN COUNT(DISTINCT n) AS n",
+        "MATCH (n:L:M) RETURN COUNT(n) AS n",
+        "MATCH (n) WHERE n.p = 1 RETURN COUNT(n) AS n",
+        "MATCH (a)-[r:R]->(b) RETURN COUNT(r.p) AS n",
+        "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r) AS n",
+        "MATCH (a)-[r:R]->(a) RETURN COUNT(r) AS n",
+        "MATCH (a)-[r:R]-(b) RETURN COUNT(r) AS n",
+        "MATCH (a:L)-[r:R]->(b) RETURN COUNT(r) AS n",
+        "MATCH (a)-[r:R]->(b)-[:R]->(c) RETURN COUNT(r) AS n",
+        "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b) RETURN COUNT(r) AS n",
+    ] {
+        let query = query(text);
+        assert_eq!(query.count_metadata_source(), None, "{text}");
+    }
+}
+
+#[test]
+fn edge_identity_metadata_matches_real_parallel_and_loop_occurrences() {
+    let vertices = [VId(0), VId(7), VId(u128::MAX)];
+    let edges = [
+        (EId(0), vertices[0], RelationId(1), vertices[1]),
+        (EId(u128::MAX), vertices[0], RelationId(1), vertices[1]),
+        (EId(9), vertices[1], RelationId(1), vertices[1]),
+        (EId(10), vertices[2], RelationId(2), vertices[0]),
+    ];
+    let policy = GqlQueryPolicy::new(100, 100, 1_000_000, 100_000);
+    for text in [
+        "MATCH (a)-[r:R]->(b) RETURN COUNT(r) AS n, COUNT(a) AS m, COUNT(*) AS k",
+        "MATCH (a)<-[r:R]-(b) RETURN COUNT(r) AS n",
+        "MATCH (a)-[r]->(b) RETURN COUNT(r) AS n",
+        "MATCH (a)-[r:T]->(b) RETURN COUNT(r) AS n",
+        "MATCH (a)-[r:R]->(b) RETURN COUNT(r) + 1 AS n HAVING n > 2 ORDER BY n DESC LIMIT 1",
+        "MATCH (a)-[r:R]->(b) RETURN 1 / (COUNT(r) - COUNT(*)) AS n LIMIT 0",
+    ] {
+        let query = query(text);
+        for source_edges in [edges.as_slice(), &[]] {
+            let expected = query.execute_governed_with_identified_properties(
+                (vertices.len() + source_edges.len()) as u64,
+                vertices,
+                source_edges.iter().copied(),
+                |_, _| -> Result<bool, ()> { panic!("no vertex predicate") },
+                |_, _| -> Result<Option<&CanonicalPropertyValue>, ()> {
+                    panic!("identity counts cannot read a property")
+                },
+                policy,
+                || Ok::<(), usize>(()),
+            );
+            let matching = match query.count_metadata_source().unwrap() {
+                GraphCountSource::Edges => source_edges.len() as u64,
+                GraphCountSource::Relation(relation) => source_edges
+                    .iter()
+                    .filter(|(_, _, actual, _)| *actual == relation)
+                    .count() as u64,
+                _ => panic!("single-edge fixture"),
+            };
+            let actual = run_metadata::<false>(&query, matching, policy, None).0;
+            assert_eq!(
+                actual.as_ref().map(|result| &result.value),
+                expected.as_ref().map(|result| &result.value),
+                "{text}"
+            );
+        }
+    }
+}
+
 fn run_metadata<const RUNS: bool>(
     query: &PreparedGraphAggregate,
     matching: u64,
@@ -531,7 +642,10 @@ fn exact_metadata_keeps_the_native_finalizer_and_has_cardinality_independent_wor
         let policy = GqlQueryPolicy::new(100_000, 100, 10_000_000, 1_000_000);
         for text in [
             "MATCH (n) RETURN COUNT(*) AS n",
+            "MATCH (n) RETURN COUNT(n) AS n",
+            "MATCH (n) RETURN COUNT(n) AS n, COUNT(*) AS m",
             "MATCH (n:L) RETURN COUNT(*) AS n",
+            "MATCH (n:L) RETURN COUNT(n) AS n",
             "MATCH (n:L) RETURN COUNT(*) + 1 AS n HAVING n > 2 ORDER BY n DESC LIMIT 1",
             "MATCH (n:L) RETURN 1 / (COUNT(*) - COUNT(*)) AS n LIMIT 0",
             "MATCH (n) RETURN COUNT(*) AS n, COUNT(*) AS m",
@@ -540,6 +654,7 @@ fn exact_metadata_keeps_the_native_finalizer_and_has_cardinality_independent_wor
             "MATCH (n) RETURN COUNT(*) AS n SKIP 1 LIMIT 0",
             "MATCH (n) RETURN 1 / (COUNT(*) - COUNT(*)) AS n LIMIT 0",
             "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n",
+            "MATCH (a)-[:R]->(b) RETURN COUNT(a) AS n, COUNT(b) AS m",
             "MATCH (a)<-[:R]-(b) RETURN COUNT(*) AS n",
             "MATCH (a)-[:T]->(b) RETURN COUNT(*) AS n",
             "MATCH (a)-[r]->(b) RETURN COUNT(*) AS n",

@@ -66,16 +66,7 @@ pub(super) fn graph_execution_at<Clock: FnMut() -> u64>(
     // relational inputs deliberately retain their own completed-row semantics.
     // Identified-edge plans materialize unless the visitor answers them exactly
     // from topology, as the owner path routes them (fgdb-xtsw3).
-    let result = if query.input_relation().is_none()
-        && query.input_projection().is_none()
-        && (!query.input_pattern().plan().requires_identified_edges()
-            || query.answers_identified_edges_from_topology())
-        && query.input_pattern().value_columns().iter().all(|column| {
-            matches!(
-                column,
-                ValueProjection::Vertex { .. } | ValueProjection::Property { .. }
-            )
-        }) {
+    let result = if visits_bindings(query) || query.count_metadata_source().is_some() {
         visit_at(
             snapshot,
             at,
@@ -86,52 +77,88 @@ pub(super) fn graph_execution_at<Clock: FnMut() -> u64>(
             policy,
         )
     } else {
-        query.execute_with_element_source_governed(
+        materialize_at(
+            snapshot,
+            at,
+            query,
+            scope,
+            execution,
+            &element_failure,
             policy,
-            fgdb_gql::with_element_metadata(
-                fgdb_gql::WithElementReads {
-                    source: |pattern: &PreparedGraphPattern<GraphValueRow>, remaining| {
-                        pattern_at(snapshot, at, pattern, scope, execution, remaining)
-                            .map_err(|error| error.map_source(GqlError::Read))
-                    },
-                    elements: |element, key| {
-                        scoped_element_property(
-                            snapshot,
-                            at,
-                            scope,
-                            execution,
-                            &element_failure,
-                            element,
-                            key,
-                        )
-                    },
-                },
-                |element, kind, catalog, control| {
-                    scoped_element_metadata(
-                        snapshot,
-                        at,
-                        scope,
-                        execution,
-                        &element_failure,
-                        element,
-                        kind,
-                        catalog,
-                        control,
-                    )
-                },
-            ),
-            || {
-                if let Some(error) = element_failure.borrow_mut().take() {
-                    return Err(error);
-                }
-                execution.borrow_mut().checkpoint()
-            },
         )
     };
     match element_failure.into_inner() {
         Some(error) => Err(GqlQueryError::Interrupted(error)),
         None => result,
     }
+}
+
+fn visits_bindings(query: &PreparedGraphAggregate) -> bool {
+    query.input_relation().is_none()
+        && query.input_projection().is_none()
+        && (!query.input_pattern().plan().requires_identified_edges()
+            || query.answers_identified_edges_from_topology())
+        && query.input_pattern().value_columns().iter().all(|column| {
+            matches!(
+                column,
+                ValueProjection::Vertex { .. } | ValueProjection::Property { .. }
+            )
+        })
+}
+
+fn materialize_at<Clock: FnMut() -> u64>(
+    snapshot: &Arc<Snapshot>,
+    at: CommitSeq,
+    query: &PreparedGraphAggregate,
+    scope: &PlannerPredicates,
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    element_failure: &RefCell<Option<QueryError>>,
+    policy: GqlQueryPolicy,
+) -> Result<
+    fgdb_gql::GqlQueryExecution<GraphAggregateRow>,
+    GqlQueryError<GraphAggregateError<GqlError>, QueryError>,
+> {
+    query.execute_with_element_source_governed(
+        policy,
+        fgdb_gql::with_element_metadata(
+            fgdb_gql::WithElementReads {
+                source: |pattern: &PreparedGraphPattern<GraphValueRow>, remaining| {
+                    pattern_at(snapshot, at, pattern, scope, execution, remaining)
+                        .map_err(|error| error.map_source(GqlError::Read))
+                },
+                elements: |element, key| {
+                    scoped_element_property(
+                        snapshot,
+                        at,
+                        scope,
+                        execution,
+                        element_failure,
+                        element,
+                        key,
+                    )
+                },
+            },
+            |element, kind, catalog, control| {
+                scoped_element_metadata(
+                    snapshot,
+                    at,
+                    scope,
+                    execution,
+                    element_failure,
+                    element,
+                    kind,
+                    catalog,
+                    control,
+                )
+            },
+        ),
+        || {
+            if let Some(error) = element_failure.borrow_mut().take() {
+                return Err(error);
+            }
+            execution.borrow_mut().checkpoint()
+        },
+    )
 }
 
 // Reuse the SAME source admission and masking as pattern_at, then the ordinary
@@ -171,9 +198,7 @@ fn visit_at<Clock: FnMut() -> u64>(
                         usage.observe::<ReadError, QueryError>(policy, event)
                     })
                     .map_err(|error| {
-                        error.map_source(|error| {
-                            GraphAggregateError::Source(GqlError::Read(error))
-                        })
+                        error.map_source(|error| GraphAggregateError::Source(GqlError::Read(error)))
                     })?;
                 if let Some((vertices, matching)) = counts {
                     execution
@@ -332,6 +357,22 @@ fn visit_at<Clock: FnMut() -> u64>(
             if let Some(error) = element_failure.borrow_mut().take() {
                 return Err(GqlQueryError::Interrupted(error));
             }
+            return usage.finish(policy, result);
+        }
+        if !visits_bindings(query) {
+            // A COUNT of a captured edge can use exact metadata, but its
+            // scoped, historical or cold fallback still needs real EIds and
+            // the original materialized source. Never feed its capture a
+            // topology-only triple visitor or widen a scoped population.
+            let result = materialize_at(
+                snapshot,
+                at,
+                query,
+                scope,
+                execution,
+                element_failure,
+                usage.remaining(policy),
+            );
             return usage.finish(policy, result);
         }
         // A graph aggregate reads its edges as triples alone.

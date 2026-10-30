@@ -455,6 +455,94 @@ fn exact_current_counts_do_not_grow_with_graph_and_reopen_rebuilds_before_reuse(
 }
 
 #[test]
+fn identity_counts_use_exact_metadata_and_preserve_historical_multiplicity() {
+    let ((), report) = run_async_under_lab(0xc017_0024, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let first = history(&mut db, &contexts.commit()).await;
+        let params = GqlParameters::new();
+        let small = GqlQueryPolicy::new(1, 100, 1_000_000, 100_000);
+        for (text, current, old) in [
+            ("MATCH (n) RETURN COUNT(n) AS total", 4, 4),
+            ("MATCH (a)-[r:R]->(b) RETURN COUNT(r) AS total", 3, 4),
+            ("MATCH (a)<-[r:R]-(b) RETURN COUNT(r) AS total", 3, 4),
+            ("MATCH (a)-[r]->(b) RETURN COUNT(r) AS total", 4, 4),
+            ("MATCH (a)-[:R]->(b) RETURN COUNT(b) AS total", 3, 4),
+            ("MATCH (a)-[r:T]->(b) RETURN COUNT(r) AS total", 0, 0),
+        ] {
+            let query = aggregate(text);
+            assert!(query.count_metadata_source().is_some(), "{text}");
+            let result = db
+                .execute_graph_aggregate_governed(&contexts.query(), &query, small)
+                .unwrap();
+            assert_eq!(result.rows.snapshot_records, 1, "{text}");
+            assert_eq!(result.value[0].values()[0].as_count(), Some(current));
+            assert_eq!(
+                db.query(&contexts.query(), text, &params, symbols, small)
+                    .unwrap(),
+                count_result(current)
+            );
+            let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
+            let view = db.read_session().unwrap();
+            assert_eq!(
+                prepared
+                    .execute_in_view_with_snapshot(&view, &contexts.query(), &params, small)
+                    .unwrap(),
+                (count_result(current), CommitSeq(3))
+            );
+            // This old generation remains current for its own immutable pin.
+            assert_eq!(
+                first
+                    .execute_graph_aggregate_governed(&contexts.query(), &query, small)
+                    .unwrap()
+                    .value[0]
+                    .values()[0]
+                    .as_count(),
+                Some(old)
+            );
+            let historical = db
+                .execute_graph_aggregate_governed_at(
+                    &contexts.query(),
+                    &query,
+                    CommitSeq(1),
+                    policy(),
+                )
+                .unwrap();
+            assert_eq!(historical.value[0].values()[0].as_count(), Some(old));
+            assert!(historical.rows.snapshot_records > 1);
+        }
+
+        // A missing property, repeated endpoint, and null-extended edge have
+        // different counts from their source population; all keep real input.
+        for (text, expected) in [
+            ("MATCH (n) RETURN COUNT(n.p) AS total", 3),
+            ("MATCH (a)-[:R]->(b) RETURN COUNT(DISTINCT b) AS total", 2),
+            (
+                "MATCH (a) OPTIONAL MATCH (a)-[r:T]->(b) RETURN COUNT(r) AS total",
+                0,
+            ),
+        ] {
+            assert!(aggregate(text).count_metadata_source().is_none());
+            assert_eq!(
+                db.query(&contexts.query(), text, &params, symbols, policy())
+                    .unwrap(),
+                count_result(expected)
+            );
+        }
+        let fallible = "MATCH (a)-[r:R]->(b) RETURN 1 / (COUNT(r) - COUNT(*)) AS total LIMIT 0";
+        assert!(
+            db.query(&contexts.query(), fallible, &params, symbols, small)
+                .is_err(),
+            "empty delivery cannot suppress a finalizer error"
+        );
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn exact_label_counts_track_membership_without_graph_sized_query_admission() {
     let ((), report) = run_async_under_lab(0xc017_0031, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
