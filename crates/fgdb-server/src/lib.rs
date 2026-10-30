@@ -71,6 +71,7 @@
 // future-incompatibility lint (rust-lang/rust#159228) rejects under -D warnings.
 #![recursion_limit = "256"]
 
+mod beacon;
 mod bolt;
 mod commits;
 mod connection;
@@ -85,6 +86,7 @@ mod shutdown;
 mod symbols;
 mod tls;
 
+pub use beacon::{BeaconIndexConfig, BeaconIndexStatus};
 pub use keys::{KeyFileError, parse_key_lines, read_database_keys, read_issuer_key};
 pub use maintenance::{MaintenanceEvent, MaintenanceSchedule, MaintenanceScheduleError};
 pub use ordered::OrderedReadConfig;
@@ -186,6 +188,10 @@ pub struct DatabaseConfig {
     /// Retained read-acceleration budgets for this served database. Other
     /// databases have independent owners; recovery preserves this policy.
     pub read_cache_limits: fgdb::ReadCacheLimits,
+    /// Operator-declared, commit-maintained text/vector indexes. Definitions
+    /// are rebuilt before startup and authoritative recovery admit readers;
+    /// they are bounded process configuration, not a durable schema catalog.
+    pub beacon_indexes: Vec<BeaconIndexConfig>,
     pub write_policy: GraphWriteProgramPolicy,
     /// Host ceiling on expanded statements per write program.
     pub max_statements: usize,
@@ -224,6 +230,7 @@ impl DatabaseConfig {
             write_relation: RelationId(1),
             query_policy,
             read_cache_limits: fgdb::ReadCacheLimits::default(),
+            beacon_indexes: Vec::new(),
             write_policy: GraphWriteProgramPolicy::new(query_policy, 100_000, 100_000, 100_000),
             max_statements: 64,
             max_subscriptions: 64,
@@ -286,6 +293,14 @@ pub enum ServerError {
     InvalidDatabaseName,
     Open(fgdb::OpenError),
     ReadCache(Box<asupersync::error::Error>),
+    BeaconConfig {
+        name: String,
+        reason: String,
+    },
+    BeaconIndex {
+        name: String,
+        source: fgdb::MaintainedBeaconError,
+    },
     Issuer(fgdb_warden::Error),
     OrderedScratch(std::io::Error),
     Spawn,
@@ -301,6 +316,12 @@ impl core::fmt::Display for ServerError {
             }
             Self::Open(error) => write!(f, "cannot open database: {error}"),
             Self::ReadCache(error) => write!(f, "cannot configure read-cache retention: {error}"),
+            Self::BeaconConfig { name, reason } => {
+                write!(f, "invalid Beacon index {name:?}: {reason}")
+            }
+            Self::BeaconIndex { name, source } => {
+                write!(f, "cannot build Beacon index {name:?}: {source}")
+            }
             Self::Issuer(error) => write!(f, "invalid issuer: {error}"),
             Self::OrderedScratch(error) => write!(f, "cannot configure ordered scratch: {error}"),
             Self::Spawn => f.write_str("the runtime refused to spawn a connection task"),
@@ -472,6 +493,7 @@ impl Server {
         if self.databases.contains_key(name) {
             return Err(ServerError::DuplicateDatabase(name.clone()));
         }
+        beacon::validate(&config.beacon_indexes)?;
         let authority = issuer(config.issuer_key, &config.keys, config.policy_epoch)
             .map_err(ServerError::Issuer)?;
         let ordered_reads = match config.ordered_reads {
@@ -480,11 +502,15 @@ impl Server {
         };
         let namespace = config.keys.namespace.0;
         let contexts = PurposeContexts::narrow_runtime_root(cx);
-        let db = Database::open(&contexts.commit(), path, config.keys)
+        let mut db = Database::open(&contexts.commit(), path, config.keys)
             .await
             .map_err(ServerError::Open)?;
         db.set_read_cache_limits(&contexts.query(), config.read_cache_limits)
             .map_err(ServerError::ReadCache)?;
+        let beacon = beacon::ConfiguredIndexes {
+            handles: beacon::register(&contexts.query(), &mut db, &config.beacon_indexes)?,
+            definitions: config.beacon_indexes,
+        };
         let mut incarnation_input = b"fgdb-server:incarnation:v1".to_vec();
         incarnation_input.extend_from_slice(&namespace);
         let incarnation = fgdb_crypto::keyed_hash(&self.secret, &incarnation_input).0;
@@ -494,8 +520,13 @@ impl Server {
         let authority_commitment = fgdb_crypto::hash(&commitment_input).0;
         let commits = Arc::new(commits::CommitSignal::default());
         let subscriptions = Arc::new(AtomicUsize::new(0));
-        let db =
-            recovery::DatabaseSlot::new(cx, db, Arc::clone(&commits), Arc::clone(&subscriptions))?;
+        let db = recovery::DatabaseSlot::new(
+            cx,
+            db,
+            Arc::clone(&commits),
+            Arc::clone(&subscriptions),
+            beacon,
+        )?;
         self.databases.insert(
             config.name,
             Arc::new(Served {
@@ -535,6 +566,17 @@ impl Server {
         self.databases
             .get(name)
             .map(|database| database.db.status())
+    }
+
+    /// Inspect configured retrieval-index freshness and maintenance failures
+    /// without reading their corpus. This is a trusted-host diagnostic. An
+    /// unavailable database, unknown name or cancelled admission returns None.
+    pub async fn database_beacon_status(
+        &self,
+        cx: &Cx,
+        name: &str,
+    ) -> Option<Vec<BeaconIndexStatus>> {
+        self.databases.get(name)?.db.beacon_status(cx).await.ok()
     }
 
     /// Inspect retained read-cache bytes and limits beside lifecycle status.

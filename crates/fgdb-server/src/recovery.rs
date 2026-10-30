@@ -48,6 +48,7 @@ struct State {
     published: Option<WeakEmbeddedReadView>,
     retired: Option<Box<subscriptions::Retirement>>,
     released_subscriptions: u64,
+    beacon_indexes: Vec<(String, fgdb::MaintainedBeaconIndex)>,
 }
 
 struct Gate {
@@ -172,6 +173,7 @@ struct Shared {
     database: RwLock<Option<Database>>,
     gate: Arc<Gate>,
     subscriptions: Arc<AtomicUsize>,
+    beacon_definitions: Vec<crate::BeaconIndexConfig>,
 }
 
 impl Shared {
@@ -233,6 +235,7 @@ impl DatabaseSlot {
         database: Database,
         signal: Arc<CommitSignal>,
         subscriptions: Arc<AtomicUsize>,
+        beacon: crate::beacon::ConfiguredIndexes,
     ) -> Result<Self, crate::ServerError> {
         let published = database
             .pinned_read_view()
@@ -250,10 +253,12 @@ impl DatabaseSlot {
                     published: Some(published),
                     retired: None,
                     released_subscriptions: 0,
+                    beacon_indexes: beacon.handles,
                 }),
                 signal,
             }),
             subscriptions,
+            beacon_definitions: beacon.definitions,
         });
         let task_shared = Arc::clone(&shared);
         // Construct this before spawn, not on the child's first poll: a
@@ -288,6 +293,41 @@ impl DatabaseSlot {
             gate: Arc::clone(&self.shared.gate),
             value: state.generation,
         })
+    }
+
+    pub(crate) async fn beacon_status(
+        &self,
+        cx: &Cx,
+    ) -> Result<Vec<crate::BeaconIndexStatus>, Unavailable> {
+        let operation = self.enter()?;
+        let database = self
+            .shared
+            .database
+            .read(cx)
+            .await
+            .map_err(|_| Unavailable::Stopping)?;
+        let state = self
+            .shared
+            .gate
+            .state
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        current(&state, operation.generation.value)?;
+        let database = database.as_ref().ok_or(Unavailable::Fenced)?;
+        let contexts = PurposeContexts::narrow_runtime_root(cx);
+        state
+            .beacon_indexes
+            .iter()
+            .map(|(name, handle)| {
+                database
+                    .beacon_index_status(&contexts.query(), handle)
+                    .map(|status| crate::BeaconIndexStatus {
+                        name: name.clone(),
+                        status,
+                    })
+                    .map_err(|_| Unavailable::Fenced)
+            })
+            .collect()
     }
 
     pub(crate) fn enter(&self) -> Result<Operation, Unavailable> {
@@ -624,13 +664,36 @@ async fn recover(cx: &Cx, shared: Arc<Shared>, mut exit: WorkerExit) {
             return;
         };
         let contexts = PurposeContexts::narrow_runtime_root(cx);
-        let recovered = match candidate.recover_authoritatively(&contexts.commit()).await {
+        let rebuild_indexes = !matches!(candidate.state(), DatabaseState::Healthy { .. });
+        let mut recovered = match candidate.recover_authoritatively(&contexts.commit()).await {
             Ok(database) => database,
             Err(error) => {
                 shared.failed(error.to_string());
                 exit.finished = true;
                 return;
             }
+        };
+        let beacon_indexes = if rebuild_indexes {
+            match crate::beacon::register(
+                &contexts.query(),
+                &mut recovered,
+                &shared.beacon_definitions,
+            ) {
+                Ok(handles) => handles,
+                Err(error) => {
+                    shared.failed(error.to_string());
+                    exit.finished = true;
+                    return;
+                }
+            }
+        } else {
+            shared
+                .gate
+                .state
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .beacon_indexes
+                .clone()
         };
         let Ok(mut guard) = shared.database.write(cx).await else {
             return;
@@ -652,6 +715,7 @@ async fn recover(cx: &Cx, shared: Arc<Shared>, mut exit: WorkerExit) {
             state.released_subscriptions =
                 state.released_subscriptions.saturating_add(released as u64);
             let retired = state.retired.take();
+            state.beacon_indexes = beacon_indexes;
             state.phase = Phase::Ready;
             let previous = if state.stopping {
                 state.published.take()

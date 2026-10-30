@@ -118,13 +118,13 @@ impl asupersync::io::AsyncWrite for WireIo {
 }
 
 pub(crate) async fn served(cx: &Cx, name: &str) -> (Server, CapabilityToken, PathBuf) {
-    served_with_cache_limits(cx, name, fgdb::ReadCacheLimits::default()).await
+    served_with_config(cx, name, |_| {}).await
 }
 
-async fn served_with_cache_limits(
+async fn served_with_config(
     cx: &Cx,
     name: &str,
-    limits: fgdb::ReadCacheLimits,
+    configure: impl FnOnce(&mut DatabaseConfig),
 ) -> (Server, CapabilityToken, PathBuf) {
     let path = std::env::temp_dir().join(format!(
         "fgdb-server-recovery-{}-{name}",
@@ -143,7 +143,7 @@ async fn served_with_cache_limits(
     );
     let mut server = Server::new(cx, ServerLimits::default()).unwrap();
     let mut config = DatabaseConfig::new("test", keys, AuthKey::from_seed(791));
-    config.read_cache_limits = limits;
+    configure(&mut config);
     server.open_database(cx, &path, config).await.unwrap();
     let db = &server.databases["test"];
     let token = db
@@ -220,7 +220,10 @@ fn served_cache_limits_and_retained_bytes_follow_authoritative_recovery() {
             authorized_projection_bytes: 1 << 19,
             sealed_projection_bytes: 1 << 18,
         };
-        let (server, token, _) = served_with_cache_limits(&root, "read-cache-owner", limits).await;
+        let (server, token, _) = served_with_config(&root, "read-cache-owner", |config| {
+            config.read_cache_limits = limits;
+        })
+        .await;
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let db = &server.databases["test"];
         {
@@ -1015,4 +1018,254 @@ fn cancelled_shutdown_waits_for_worker_handoff_and_drains_the_worker() {
             });
         assert!(report.lab_test_passed(), "{report:?}");
     }
+}
+
+fn configure_beacon(config: &mut DatabaseConfig) {
+    use fgdb_beacon::read::ReadOptions;
+    use fgdb_beacon::{DistanceMetric, HnswConfig};
+    use fgdb_delta_types::{LabelId, PropertyKeyId};
+    use fgdb_gql::GraphSymbolKind;
+
+    config
+        .symbols
+        .bind(GraphSymbolKind::Property, "body", 1)
+        .unwrap();
+    config
+        .symbols
+        .bind(GraphSymbolKind::Property, "x", 2)
+        .unwrap();
+    let mut options = ReadOptions::<PropertyKeyId, LabelId>::text(PropertyKeyId(1));
+    options.projection.vector = vec![PropertyKeyId(2)];
+    options.index.vector = Some(HnswConfig::new(1, DistanceMetric::SquaredEuclidean).exact_only());
+    config
+        .beacon_indexes
+        .push(crate::BeaconIndexConfig::new("documents", options));
+}
+
+fn beacon_document(id: u128, text: &str) -> WriteBatch {
+    use fgdb_delta_types::PropertyKeyId;
+    use fgdb_types::CanonicalScalar;
+
+    let mut batch = WriteBatch::new(RelationId(1));
+    batch.create_vertex(
+        VId(id),
+        vec![],
+        vec![
+            (
+                PropertyKeyId(1),
+                CanonicalScalar::ucs_basic_text(text).unwrap(),
+            ),
+            (PropertyKeyId(2), CanonicalScalar::Int(id as i64)),
+        ],
+    );
+    batch
+}
+
+#[test]
+fn configured_beacon_reuses_published_pins_and_rebuilds_before_recovery_admission() {
+    let ((), report) = run_async_under_lab(0x79a0_be01, |root| async move {
+        let (server, token, _) =
+            served_with_config(&root, "beacon-recovery", configure_beacon).await;
+        let (cold_server, _, _) = served_with_config(&root, "beacon-cold", |config| {
+            configure_beacon(config);
+            config.beacon_indexes.clear();
+        })
+        .await;
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = &server.databases["test"];
+        let cold_db = &cold_server.databases["test"];
+        let initial = server.database_beacon_status(&root, "test").await.unwrap();
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].name, "documents");
+        assert_eq!(initial[0].status.source_sequence, CommitSeq(0));
+        assert!(initial[0].status.failure.is_none());
+        assert!(
+            server
+                .database_beacon_status(&root, "unknown")
+                .await
+                .is_none()
+        );
+
+        for served in [db, cold_db] {
+            let mut writer = served.db.write(&root).await.unwrap();
+            for id in 1..=8 {
+                writer
+                    .write(
+                        &contexts.commit(),
+                        beacon_document(id, if id == 1 { "needle" } else { "background" }),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        let (warm, generation) = db.db.read_view(&root).await.unwrap();
+        let (cold, _) = cold_db.db.read_view(&root).await.unwrap();
+        let statement = "CALL hybrid.search(text => 'needle', text_property => 'body', \
+            candidates => 1, k => 1) YIELD node RETURN node.x AS x";
+        let parameters = fgdb_gql::GqlParameters::new();
+        let ordinary = fgdb_gql::GqlQueryPolicy::new(100, 10, 100_000, 100_000);
+        let one_record = fgdb_gql::GqlQueryPolicy::new(1, 10, 100_000, 100_000);
+        let expected = cold
+            .query(
+                &contexts.query(),
+                statement,
+                &parameters,
+                cold_db.symbols.clone(),
+                ordinary,
+            )
+            .unwrap();
+        // Only the returned vertex is admitted. The same unregistered source
+        // cannot build its eight-document corpus under a one-record allowance.
+        assert_eq!(
+            warm.query(
+                &contexts.query(),
+                statement,
+                &parameters,
+                db.symbols.clone(),
+                one_record,
+            )
+            .unwrap(),
+            expected,
+        );
+        assert!(
+            cold.query(
+                &contexts.query(),
+                statement,
+                &parameters,
+                cold_db.symbols.clone(),
+                one_record,
+            )
+            .is_err()
+        );
+        let request = Execute {
+            mode: ExecuteMode::Read,
+            statement: statement.into(),
+            parameters: vec![],
+        };
+        let answer = crate::execute::read(&root, db, &token, &request)
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(answer.columns, ["x"]);
+        assert_eq!(answer.rows.len(), 1);
+
+        {
+            let mut writer = db.db.write(&root).await.unwrap();
+            assert!(matches!(
+                writer
+                    .write_with_publication_failure(
+                        &contexts.commit(),
+                        beacon_document(9, "background"),
+                        DerivedPublicationStage::FoldCommittedTemplate,
+                    )
+                    .await,
+                Err(WriteError::CommittedNeedsRecovery { .. })
+            ));
+        }
+        assert_eq!(settled(db).await, DatabaseStatus::Ready { generation: 2 });
+        assert!(generation.check().is_err());
+        let rebuilt = server.database_beacon_status(&root, "test").await.unwrap();
+        assert_eq!(rebuilt.len(), 1);
+        assert_eq!(rebuilt[0].status.source_sequence, CommitSeq(9));
+        assert_eq!(rebuilt[0].status.database_sequence, CommitSeq(9));
+        assert_eq!(rebuilt[0].status.last_refresh.commits, 0);
+        assert!(rebuilt[0].status.failure.is_none());
+        let (reopened, _) = db.db.read_view(&root).await.unwrap();
+        assert_eq!(
+            reopened
+                .query(
+                    &contexts.query(),
+                    statement,
+                    &parameters,
+                    db.symbols.clone(),
+                    one_record,
+                )
+                .unwrap(),
+            expected,
+        );
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), beacon_document(10, "background"))
+            .await
+            .unwrap();
+        let advanced = server.database_beacon_status(&root, "test").await.unwrap();
+        assert_eq!(advanced[0].status.source_sequence, CommitSeq(10));
+        assert_eq!(advanced[0].status.last_refresh.commits, 1);
+        assert!(advanced[0].status.failure.is_none());
+        server.finish_shutdown(&root).await;
+        cold_server.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn configured_beacon_failure_preserves_commits_and_fences_unbuildable_recovery() {
+    let ((), report) = run_async_under_lab(0x79a0_be02, |root| async move {
+        let (server, token, _) = served_with_config(&root, "beacon-rebuild-failure", |config| {
+            configure_beacon(config);
+            let index = &mut config.beacon_indexes[0];
+            // The empty initial graph is buildable. Any later populated graph
+            // exceeds the configured staging ceiling on an authoritative reopen.
+            index.options.policy.max_staging_rows = 0;
+            index.maintenance.max_work_units = 0;
+        })
+        .await;
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = &server.databases["test"];
+        db.db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), beacon_document(1, "needle"))
+            .await
+            .unwrap();
+        assert_eq!(
+            server.database_status(&root, "test"),
+            Some(DatabaseStatus::Ready { generation: 1 })
+        );
+        let failed = server.database_beacon_status(&root, "test").await.unwrap();
+        assert_eq!(failed[0].status.source_sequence, CommitSeq(0));
+        assert_eq!(failed[0].status.database_sequence, CommitSeq(1));
+        assert_eq!(failed[0].status.failure.as_ref().unwrap().at, CommitSeq(1));
+
+        let statement = Execute {
+            mode: ExecuteMode::Read,
+            statement: "MATCH (n) RETURN n".into(),
+            parameters: vec![],
+        };
+        assert_eq!(
+            crate::execute::read(&root, db, &token, &statement)
+                .await
+                .unwrap_or_else(|error| panic!("{}", error.message))
+                .rows
+                .len(),
+            1,
+        );
+        {
+            let mut writer = db.db.write(&root).await.unwrap();
+            assert!(matches!(
+                writer
+                    .write_with_publication_failure(
+                        &contexts.commit(),
+                        beacon_document(2, "background"),
+                        DerivedPublicationStage::FoldCommittedTemplate,
+                    )
+                    .await,
+                Err(WriteError::CommittedNeedsRecovery { .. })
+            ));
+        }
+        assert!(matches!(
+            settled(db).await,
+            DatabaseStatus::Fenced { generation: 2, reason } if reason.contains("documents")
+        ));
+        assert!(server.database_beacon_status(&root, "test").await.is_none());
+        let refusal = crate::execute::read(&root, db, &token, &statement)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(refusal.code, ErrorCode::DatabaseUnavailable);
+        server.finish_shutdown(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
