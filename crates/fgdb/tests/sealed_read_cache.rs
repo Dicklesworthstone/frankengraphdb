@@ -1002,16 +1002,29 @@ fn readonly_sealed_native_templates_preserve_pages_group_slots_and_typed_refusal
             ),
             Err(fgdb::SealedQueryError::Query(fgdb::QueryError::SetText(_))),
         ));
-        for text in [
-            "MATCH (n:L) RETURN n.p",
-            "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n.p AS p UNION ALL MATCH (m:L) RETURN m.p AS p",
-        ] {
+        let text = "MATCH (n:L) RETURN n.p";
+        let prepared =
+            fgdb::PreparedNativeRead::prepare(text, &empty, sealed_sql_symbols).unwrap();
+        assert_eq!(
+            view.execute_prepared(&cx, &prepared, &empty, sealed_sql_policy(), memory())
+                .unwrap(),
+            database
+                .query(&cx, text, &empty, sealed_sql_symbols, sealed_sql_policy())
+                .unwrap(),
+        );
+        for requested in [1, 4] {
+            let text = format!(
+                "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ {requested} \
+                 RETURN n.p AS p UNION ALL MATCH (m:L) RETURN m.p AS p LIMIT 0"
+            );
             let prepared =
-                fgdb::PreparedNativeRead::prepare(text, &empty, sealed_sql_symbols).unwrap();
-            let expected = prepared.facade_class();
+                fgdb::PreparedNativeRead::prepare(&text, &empty, sealed_sql_symbols).unwrap();
             assert!(matches!(
                 view.execute_prepared(&cx, &prepared, &empty, sealed_sql_policy(), memory()),
-                Err(fgdb::SealedQueryError::Unsupported { facade }) if facade == expected,
+                Err(fgdb::SealedQueryError::SnapshotMismatch {
+                    requested: actual,
+                    retained: CommitSeq(3),
+                }) if actual == CommitSeq(requested),
             ));
         }
         let wrong_relation = fgdb::PreparedNativeRead::prepare(
@@ -1051,6 +1064,190 @@ fn readonly_sealed_native_templates_preserve_pages_group_slots_and_typed_refusal
             ),
             Err(fgdb::SealedQueryError::Query(fgdb::QueryError::Set(_))),
         ));
+    });
+}
+
+#[test]
+fn sealed_owners_execute_every_native_class_at_current_and_historical_cuts() {
+    use fgdb::NativeReadClass as Class;
+
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let vfs = MemVfs::new().unwrap();
+        let mut database = seed(&commit, &vfs).await;
+        let cases = [
+            (Class::Pattern, "MATCH (n:L) RETURN n.p"),
+            (Class::Aggregate, "MATCH (n:L) RETURN COUNT(*) AS n"),
+            (
+                Class::PipelineAggregate,
+                "MATCH (n:L) WITH n.p AS p RETURN COUNT(*) AS n",
+            ),
+            (
+                Class::Set,
+                "MATCH (n:L) RETURN n AS id UNION ALL MATCH (m:L) RETURN m AS id",
+            ),
+            (
+                Class::TemporalPattern,
+                "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $at RETURN n.p",
+            ),
+            (
+                Class::TemporalAggregate,
+                "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $at RETURN COUNT(*) AS n",
+            ),
+            (
+                Class::TemporalSet,
+                "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $at \
+                 RETURN n AS id UNION ALL MATCH (m:L) RETURN m AS id",
+            ),
+        ];
+        let mut retained = Vec::new();
+        for selected in [CommitSeq(1), CommitSeq(3)] {
+            let view = database
+                .prepare_sealed_read(
+                    &cx,
+                    Some(selected),
+                    R,
+                    SealedLimits::default(),
+                    RootReadLimits::default(),
+                )
+                .await
+                .unwrap();
+            let params = GqlParameters::new().with_uint64("at", selected.0).unwrap();
+            let mut results = Vec::new();
+            for (class, text) in cases {
+                let prepared =
+                    fgdb::PreparedNativeRead::prepare(text, &params, sealed_sql_symbols).unwrap();
+                assert_eq!(prepared.facade_class(), class, "{text}");
+                let oracle = if text.contains("FOR SYSTEM_TIME") {
+                    text.to_owned()
+                } else {
+                    text.replacen(
+                        "MATCH (n:L)",
+                        "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $at",
+                        1,
+                    )
+                };
+                let expected = database
+                    .query(&cx, &oracle, &params, sealed_sql_symbols, sealed_sql_policy())
+                    .unwrap();
+                let actual = view
+                    .execute_prepared(&cx, &prepared, &params, sealed_sql_policy(), memory())
+                    .unwrap();
+                assert_eq!(actual, expected, "{class:?} at {selected:?}");
+                if class == Class::Aggregate || class == Class::TemporalAggregate {
+                    assert_eq!(
+                        actual,
+                        fgdb::QueryResult::Rows {
+                            columns: vec!["n".into()],
+                            rows: vec![vec![fgdb::QueryValue::Count(4)]],
+                        },
+                    );
+                }
+                results.push((prepared, expected));
+            }
+            retained.push((view, params, results));
+        }
+        let mut update = WriteBatch::new(R);
+        update.create_vertex(VId(4), vec![L], vec![(P, CanonicalScalar::Int(99))]);
+        database.write(&commit, update).await.unwrap();
+        drop(database);
+        for (view, params, results) in retained {
+            for (prepared, expected) in results {
+                assert_eq!(
+                    view.execute_prepared(&cx, &prepared, &params, sealed_sql_policy(), memory())
+                        .unwrap(),
+                    expected,
+                    "retained {:?} after writer advancement and drop",
+                    prepared.facade_class(),
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn historical_sealed_native_parameters_and_temporal_calls_keep_the_exact_source() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let database = seed(&contexts.commit(), &vfs).await;
+        let view = database
+            .prepare_sealed_read(
+                &cx,
+                Some(CommitSeq(1)),
+                R,
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+        let params = GqlParameters::new().with_int64("maximum", 1).unwrap();
+        let prepared = fgdb::PreparedNativeRead::prepare(
+            "MATCH (a:L)-[e:R]->(b:L) WHERE e.p <= $maximum RETURN e.p AS p",
+            &params,
+            sealed_sql_symbols,
+        )
+        .unwrap();
+        assert_eq!(prepared.facade_class(), fgdb::NativeReadClass::Pattern);
+        let expected = fgdb::QueryResult::Rows {
+            columns: vec!["p".into()],
+            rows: vec![
+                vec![fgdb::QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(1)))];
+                16
+            ],
+        };
+        assert_eq!(
+            view.execute_prepared(&cx, &prepared, &params, sealed_sql_policy(), memory())
+                .unwrap(),
+            expected,
+        );
+        let empty = GqlParameters::new().with_int64("maximum", 0).unwrap();
+        assert!(matches!(
+            view.execute_prepared(&cx, &prepared, &empty, sealed_sql_policy(), memory()).unwrap(),
+            fgdb::QueryResult::Rows { rows, .. } if rows.is_empty(),
+        ));
+        assert!(matches!(
+            view.execute_prepared(&cx, &prepared, &GqlParameters::new(), sealed_sql_policy(), memory()),
+            Err(fgdb::SealedQueryError::Query(fgdb::QueryError::PatternText(_))),
+        ));
+        let temporal = "MATCH (n:L) FOR SYSTEM_TIME AS OF SEQ $at WITH n \
+            CALL fnx.weakly_connected_components(label => 'L', relation => 'R', \
+            parallel => 'collapse', self_loops => 'drop') YIELD vertex, component \
+            WHERE vertex = n RETURN vertex, component ORDER BY vertex";
+        let at = GqlParameters::new().with_uint64("at", 1).unwrap();
+        let call = fgdb::PreparedNativeRead::prepare(temporal, &at, sealed_sql_symbols).unwrap();
+        assert_eq!(call.facade_class(), fgdb::NativeReadClass::TemporalSet);
+        let expected = database
+            .query(&cx, temporal, &at, sealed_sql_symbols, sealed_sql_policy())
+            .unwrap();
+        assert_eq!(
+            view.execute_prepared(&cx, &call, &at, sealed_sql_policy(), memory()).unwrap(),
+            expected,
+        );
+        assert!(matches!(
+            view.execute_prepared(&cx, &call, &at, sealed_sql_policy(), FnxMemoryLimits {
+                max_kernel_workspace_bytes: 0,
+                ..memory()
+            }),
+            Err(fgdb::SealedQueryError::Query(fgdb::QueryError::Set(_))),
+        ));
+        for requested in [0, 2, 4] {
+            let at = GqlParameters::new().with_uint64("at", requested).unwrap();
+            assert!(matches!(
+                view.execute_prepared(&cx, &call, &at, sealed_sql_policy(), memory()),
+                Err(fgdb::SealedQueryError::SnapshotMismatch {
+                    requested: actual,
+                    retained: CommitSeq(1),
+                }) if actual == CommitSeq(requested),
+            ));
+        }
     });
 }
 
