@@ -1,4 +1,4 @@
-//! Owner-private reuse of completed compressed projections. No result, live
+//! Owner-private reuse of completed decoded and compressed projections. No result, live
 //! permit, unverified source claim or partial build is retained here.
 //!
 //! Standalone and buffered construction allowances remain exact keys. Composed
@@ -10,12 +10,12 @@
 //! APIs carry no capability charge transcript and are not authorized hosts.
 
 use super::cache::Request as ProjectionRequest;
-use super::{FnxSourceLimits, RootReadLimits, SealedGraphView, SealedLimits};
+use super::{FnxSourceLimits, RootReadLimits, SealedGraphView, SealedLimits, SnapshotGraphView};
 use crate::ReadCacheUsage;
 use crate::gql_exec::AdmissionUsage;
 use crate::query::read_cache::live::{CACHE_ENTRIES, LiveCache};
 use fgdb_gql::GqlQueryPolicy;
-use fgdb_strata::tiered::memory::{MemoryCharge, MemoryPool};
+use fgdb_strata::tiered::memory::{MemoryCharge, MemoryError, MemoryPool};
 use fgdb_strata::tiered::sealed::SealedAnchor;
 use fgdb_types::QueryCx;
 use std::sync::Arc;
@@ -136,9 +136,25 @@ impl SealedProjectionCache {
     }
 }
 
-struct BufferedEntry {
-    request: Request,
-    graph: SealedGraphView,
+pub(crate) trait RetainedProjection: Clone {
+    fn retained_bytes(&self) -> usize;
+}
+
+impl RetainedProjection for SealedGraphView {
+    fn retained_bytes(&self) -> usize {
+        self.charged_resident_bytes()
+    }
+}
+
+impl RetainedProjection for SnapshotGraphView {
+    fn retained_bytes(&self) -> usize {
+        self.charged_resident_bytes()
+    }
+}
+
+struct BufferedEntry<Key, Graph> {
+    request: Key,
+    graph: Graph,
     charge: MemoryCharge,
 }
 
@@ -146,12 +162,15 @@ struct BufferedEntry {
 /// no mutex or process-global owner. Retained values use a separate explicit
 /// pool, never the source extent pool. Source admission, caller-held graph
 /// clones and active build peaks remain governed by their existing allowances.
-pub(crate) struct BufferedCache {
+pub(crate) struct BufferedCache<Key, Graph> {
     pool: MemoryPool,
-    entries: [Option<BufferedEntry>; CACHE_ENTRIES],
+    entries: [Option<BufferedEntry<Key, Graph>>; CACHE_ENTRIES],
 }
 
-impl BufferedCache {
+pub(crate) type BufferedSealedCache = BufferedCache<Request, SealedGraphView>;
+pub(crate) type BufferedProjectionCache = BufferedCache<ProjectionRequest, SnapshotGraphView>;
+
+impl<Key: PartialEq, Graph: RetainedProjection> BufferedCache<Key, Graph> {
     pub(crate) fn new(pool: MemoryPool) -> Self {
         Self {
             pool,
@@ -181,7 +200,15 @@ impl BufferedCache {
         cx: &QueryCx,
         pool: MemoryPool,
     ) -> Result<ReadCacheUsage, Box<asupersync::error::Error>> {
-        cx.checkpoint()?;
+        self.replace_pool_controlled(pool, || cx.checkpoint())
+    }
+
+    fn replace_pool_controlled<E>(
+        &mut self,
+        pool: MemoryPool,
+        mut checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<ReadCacheUsage, E> {
+        checkpoint()?;
         // Explicit host policy replacement releases this cache's old ownership.
         // Any caller-held graph clones remain valid under their own allowance.
         *self = Self::new(pool);
@@ -191,25 +218,48 @@ impl BufferedCache {
     pub(crate) fn lookup(
         &self,
         cx: &QueryCx,
-        request: Request,
-    ) -> Result<Option<SealedGraphView>, Box<asupersync::error::Error>> {
-        cx.checkpoint()?;
+        request: Key,
+    ) -> Result<Option<Graph>, Box<asupersync::error::Error>> {
+        self.lookup_controlled(request, || cx.checkpoint())
+    }
+
+    fn lookup_controlled<E>(
+        &self,
+        request: Key,
+        mut checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<Graph>, E> {
+        checkpoint()?;
         let graph = self
             .entries
             .iter()
             .flatten()
             .find_map(|entry| (entry.request == request).then(|| entry.graph.clone()));
-        cx.checkpoint()?;
+        checkpoint()?;
         Ok(graph)
     }
 
     pub(crate) fn remember(
         &mut self,
         cx: &QueryCx,
-        request: Request,
-        graph: &SealedGraphView,
+        request: Key,
+        graph: &Graph,
     ) -> Result<(), Box<asupersync::error::Error>> {
-        cx.checkpoint()?;
+        self.remember_controlled(
+            request,
+            graph,
+            || cx.checkpoint(),
+            |pool, bytes| pool.reserve(cx, bytes),
+        )
+    }
+
+    fn remember_controlled<E>(
+        &mut self,
+        request: Key,
+        graph: &Graph,
+        mut checkpoint: impl FnMut() -> Result<(), E>,
+        reserve: impl FnOnce(&MemoryPool, usize) -> Result<MemoryCharge, MemoryError>,
+    ) -> Result<(), E> {
+        checkpoint()?;
         if self
             .entries
             .iter()
@@ -221,10 +271,10 @@ impl BufferedCache {
         let Some(slot) = self.entries.iter_mut().find(|entry| entry.is_none()) else {
             return Ok(());
         };
-        // Transfer an already-completed caller-owned image into retained-cache
+        // Transfer an already-completed caller-owned graph into retained-cache
         // ownership only after admission. A full/disabled pool merely declines
         // this optional extra owner; it never evicts a live entry or a frame.
-        let Ok(charge) = self.pool.reserve(cx, graph.charged_resident_bytes()) else {
+        let Ok(charge) = reserve(&self.pool, graph.retained_bytes()) else {
             return Ok(());
         };
         *slot = Some(BufferedEntry {

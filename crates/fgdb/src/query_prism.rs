@@ -43,7 +43,7 @@ pub(crate) use cache::{
 };
 pub(crate) use projection::{bind_procedure, procedure_options};
 pub(crate) use sealed_cache::{
-    BufferedCache as BufferedSealedCache, CACHE_BYTES as SEALED_CACHE_BYTES,
+    BufferedProjectionCache, BufferedSealedCache, CACHE_BYTES as SEALED_CACHE_BYTES,
     Request as SealedProjectionRequest, SealedProjectionCache, Source as SealedProjectionSource,
 };
 pub(crate) use sealed_prepare::{CooperativeSealedBuild, ImmediateSealedBuild, SealedBuild};

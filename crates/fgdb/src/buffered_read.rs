@@ -97,6 +97,7 @@ impl From<MemoryError> for BufferedOpenError {
 pub struct BufferedReadView<V: Vfs = UnixVfs> {
     partition: BufferedPartition<V>,
     manifest: ManifestVersion,
+    projection_cache: crate::query::BufferedProjectionCache,
     sealed_cache: crate::query::BufferedSealedCache,
 }
 
@@ -125,6 +126,31 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
 
     pub fn memory_pool(&self) -> &MemoryPool {
         self.partition.pool()
+    }
+
+    /// Retention for completed decoded analytics projections. It uses the
+    /// resident projection cache's default allowance and at most eight entries,
+    /// independently of source extents and compressed projection retention.
+    /// Charges cover retained vertex, name, adjacency and weight capacities,
+    /// not build peaks, allocator metadata, caller-held clones or process RSS.
+    pub fn projection_read_cache_pool(&self) -> &MemoryPool {
+        self.projection_cache.pool()
+    }
+
+    pub fn projection_read_cache_usage(&self) -> ReadCacheUsage {
+        self.projection_cache.usage()
+    }
+
+    /// Replace decoded-projection retention and release this cache's owners.
+    /// A zero-limit pool disables reuse without disabling analytics. A child
+    /// pool also charges its host's ancestor ceilings. Previously returned
+    /// immutable graphs remain valid under their caller-owned allowances.
+    pub fn set_projection_read_cache_pool(
+        &mut self,
+        cx: &QueryCx,
+        pool: MemoryPool,
+    ) -> Result<ReadCacheUsage, Box<asupersync::error::Error>> {
+        self.projection_cache.replace_pool(cx, pool)
     }
 
     /// Retention for completed compressed analytics projections. This pool is
@@ -340,6 +366,10 @@ impl<V: Vfs + Clone> Database<V> {
         Ok(BufferedReadView {
             partition,
             manifest: self.snapshot.manifest,
+            projection_cache: crate::query::BufferedProjectionCache::new(MemoryPool::new(
+                crate::query::PROJECTION_CACHE_BYTES,
+                0,
+            )?),
             sealed_cache: crate::query::BufferedSealedCache::new(MemoryPool::new(
                 crate::query::SEALED_CACHE_BYTES,
                 0,
@@ -404,6 +434,10 @@ impl<V: Vfs + Clone> Database<V> {
         Ok(BufferedReadView {
             partition,
             manifest,
+            projection_cache: crate::query::BufferedProjectionCache::new(MemoryPool::new(
+                crate::query::PROJECTION_CACHE_BYTES,
+                0,
+            )?),
             sealed_cache: crate::query::BufferedSealedCache::new(MemoryPool::new(
                 crate::query::SEALED_CACHE_BYTES,
                 0,

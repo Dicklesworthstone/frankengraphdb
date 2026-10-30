@@ -399,6 +399,12 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// The builder takes ownership of the bounded selected buffers. Its returned
     /// clone-shared CSR may outlive the buffered view and its source pool; its
     /// decoded allocations belong to the explicit projection workspace budget.
+    /// Completed exact requests may share this view's separately bounded decoded
+    /// cache. Root/cut, selection, graph laws and every construction allowance
+    /// remain key dimensions. A hit skips physical source I/O, staging and build
+    /// checkpoints, but checks live cancellation before returning. Kernel and
+    /// result admissions still apply to every CALL; this is not an authorized
+    /// host or a replay of capability work charges.
     /// No complete property table, edge-winner map, resident Snapshot, silent
     /// fallback or cross-process retention lease is constructed here.
     #[allow(clippy::too_many_arguments)]
@@ -413,10 +419,30 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     ) -> Result<SnapshotGraphView, FnxReadError<BufferedReadError, Cancel>> {
         cx.with_restriction_async(async {
             cx.checkpoint().map_err(FnxReadError::Cancelled)?;
+            if as_of > self.frontier() {
+                return Err(read_failure(BufferedReadError::BeyondPublication {
+                    requested: as_of,
+                    publication: self.frontier(),
+                }));
+            }
             let binding = SnapshotBinding {
                 root: self.partition_root().0,
                 as_of,
             };
+            let request = ProjectionRequest {
+                binding,
+                selection,
+                projection: spec,
+                projection_limits: limits,
+                source_limits,
+            };
+            if let Some(graph) = self
+                .projection_cache
+                .lookup(cx, request)
+                .map_err(FnxReadError::Cancelled)?
+            {
+                return Ok(graph);
+            }
             let mut control = prism_source_control(cx, source_limits);
             let mut staged_bytes = 0;
             let vertices = self
@@ -544,6 +570,9 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                 ProjectionBuildError::Projection(error) => FnxReadError::Projection(error),
             })?;
             cx.checkpoint().map_err(FnxReadError::Cancelled)?;
+            self.projection_cache
+                .remember(cx, request, &graph)
+                .map_err(FnxReadError::Cancelled)?;
             Ok(graph)
         })
         .await

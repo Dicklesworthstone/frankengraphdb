@@ -15,7 +15,7 @@ use fgdb_prism::{
 };
 use fgdb_types::context::SimulationCheckpointProbe;
 use fgdb_types::{
-    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+    CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
 };
 use std::sync::Arc;
 
@@ -94,6 +94,23 @@ async fn cold(
     )
     .await
     .unwrap()
+}
+
+async fn project_buffered(
+    view: &mut BufferedReadView<MemVfs>,
+    cx: &QueryCx,
+    options: FnxReadOptions,
+) -> Result<SnapshotGraphView, FnxReadError<BufferedReadError, Box<asupersync::error::Error>>> {
+    let at = options.as_of.unwrap_or(view.frontier());
+    view.prism_projection_at(
+        cx,
+        at,
+        options.selection,
+        options.projection,
+        options.projection_limits,
+        options.source_limits,
+    )
+    .await
 }
 
 async fn seed(contexts: &PurposeContexts, vfs: &MemVfs) -> Database<MemVfs> {
@@ -853,6 +870,369 @@ fn every_buffered_analytics_checkpoint_cancels_without_publishing_a_partial_proj
                 drop(view);
                 assert_eq!(source_pool.used(), 0, "cut {stop}, {weight:?}");
             }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn decoded_reuse_skips_source_faults_across_calls_and_keeps_its_exact_generation() {
+    let ((), report) = run_async_under_lab(0x6270_7210, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let mut writer = seed(&contexts, &vfs).await;
+        let source = pool();
+        let mut view = cold(&contexts, &vfs, source.clone()).await;
+        let retained = view.projection_read_cache_pool().clone();
+        let first = project_buffered(&mut view, &cx, options()).await.unwrap();
+        let expected = oracle(first.binding(), options());
+        assert_eq!(first.digest(), expected.digest());
+        assert_eq!(retained.used(), first.charged_resident_bytes());
+        assert_eq!(view.projection_read_cache_usage().entries, 1);
+        assert_eq!(view.sealed_read_cache_usage().entries, 0);
+        let faults = view.buffer_stats();
+        assert!(
+            first.shares_cache_with(&project_buffered(&mut view, &cx, options()).await.unwrap())
+        );
+        let params = FnxParameters::new();
+        for text in [RANK, DIJKSTRA] {
+            let call = FnxCallSpec::bind(text, &params).unwrap();
+            assert_eq!(
+                view.call_fnx(&cx, text, &params, options())
+                    .await
+                    .unwrap()
+                    .analytics,
+                call.execute(&expected, options().execution_limits, || cx.checkpoint())
+                    .unwrap(),
+            );
+            assert_eq!(
+                view.buffer_stats(),
+                faults,
+                "cached CALL must not rescan source"
+            );
+        }
+        // Independently opened owners do not share a graph even at equal roots.
+        let mut separate = cold(&contexts, &vfs, pool()).await;
+        let other = project_buffered(&mut separate, &cx, options())
+            .await
+            .unwrap();
+        assert_eq!(first.digest(), other.digest());
+        assert!(!first.shares_cache_with(&other));
+        let mut change = WriteBatch::new(R);
+        change.set_edge_property(EId(0), P, Some(CanonicalScalar::Int(9)));
+        writer.write(&contexts.commit(), change).await.unwrap();
+        assert!(
+            first.shares_cache_with(&project_buffered(&mut view, &cx, options()).await.unwrap())
+        );
+        assert_eq!(view.buffer_stats(), faults);
+        let mut current = cold(&contexts, &vfs, pool()).await;
+        let newer = project_buffered(&mut current, &cx, options())
+            .await
+            .unwrap();
+        assert_ne!(first.binding().root, newer.binding().root);
+        assert_ne!(first.digest(), newer.digest());
+        assert!(!first.shares_cache_with(&newer));
+        drop(view);
+        assert_eq!(source.used(), 0);
+        assert_eq!(retained.used(), 0);
+        // Caller-owned graphs remain usable after their cache/source owner drops.
+        let call = FnxCallSpec::bind(DIJKSTRA, &params).unwrap();
+        assert_eq!(
+            call.execute(&first, options().execution_limits, || cx.checkpoint())
+                .unwrap(),
+            call.execute(&expected, options().execution_limits, || cx.checkpoint())
+                .unwrap(),
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn decoded_retention_obeys_exact_ancestor_caps_and_refunds_on_replacement_and_drop() {
+    let ((), report) = run_async_under_lab(0x6270_7211, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let _writer = seed(&contexts, &vfs).await;
+        let mut view = cold(&contexts, &vfs, pool()).await;
+        let initial = project_buffered(&mut view, &cx, options()).await.unwrap();
+        let bytes = initial.charged_resident_bytes();
+        assert!(bytes > 1);
+        let parent = MemoryPool::new(bytes, 0).unwrap();
+        let child = parent.child(bytes * 2, 0).unwrap();
+        view.set_projection_read_cache_pool(&cx, child.clone())
+            .unwrap();
+        let first = project_buffered(&mut view, &cx, options()).await.unwrap();
+        assert_eq!(view.projection_read_cache_usage().max_bytes, bytes);
+        assert_eq!(view.projection_read_cache_usage().retained_bytes, bytes);
+        assert_eq!((parent.used(), child.used()), (bytes, bytes));
+        assert!(
+            first.shares_cache_with(&project_buffered(&mut view, &cx, options()).await.unwrap())
+        );
+        assert_eq!(parent.used(), bytes, "a hit does not charge another owner");
+        let mut second = cold(&contexts, &vfs, pool()).await;
+        second
+            .set_projection_read_cache_pool(&cx, parent.child(bytes * 2, 0).unwrap())
+            .unwrap();
+        let declined = project_buffered(&mut second, &cx, options()).await.unwrap();
+        assert_eq!(declined.digest(), first.digest());
+        assert_eq!(second.projection_read_cache_usage().entries, 0);
+        assert!(
+            !declined
+                .shares_cache_with(&project_buffered(&mut second, &cx, options()).await.unwrap())
+        );
+        assert_eq!(parent.used(), bytes);
+        let probe = Arc::new(SimulationCheckpointProbe::new(Some(1)));
+        assert!(
+            view.set_projection_read_cache_pool(
+                &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                MemoryPool::new(0, 0).unwrap(),
+            )
+            .is_err()
+        );
+        assert_eq!(probe.calls(), 1);
+        assert_eq!(
+            (view.projection_read_cache_usage().entries, parent.used()),
+            (1, bytes)
+        );
+        for limit in [bytes - 1, 0] {
+            let replacement = MemoryPool::new(limit, 0).unwrap();
+            view.set_projection_read_cache_pool(&cx, replacement.clone())
+                .unwrap();
+            assert_eq!((parent.used(), child.used()), (0, 0));
+            let a = project_buffered(&mut view, &cx, options()).await.unwrap();
+            let faults = view.buffer_stats();
+            let b = project_buffered(&mut view, &cx, options()).await.unwrap();
+            assert_eq!(a.digest(), initial.digest());
+            assert_eq!(a.digest(), b.digest());
+            assert!(!a.shares_cache_with(&b));
+            assert_ne!(
+                view.buffer_stats(),
+                faults,
+                "declined retention still scans normally"
+            );
+            assert_eq!(
+                (
+                    view.projection_read_cache_usage().entries,
+                    replacement.used()
+                ),
+                (0, 0)
+            );
+        }
+        let exact = MemoryPool::new(bytes, 0).unwrap();
+        view.set_projection_read_cache_pool(&cx, exact.clone())
+            .unwrap();
+        let kept = project_buffered(&mut view, &cx, options()).await.unwrap();
+        assert_eq!(exact.used(), bytes);
+        drop(view);
+        assert_eq!(exact.used(), 0);
+        assert_eq!(kept.digest(), initial.digest());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn decoded_reuse_keys_every_construction_dimension_and_preserves_kernel_refusals() {
+    let ((), report) = run_async_under_lab(0x6270_7212, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let _writer = seed(&contexts, &vfs).await;
+        let mut view = cold(&contexts, &vfs, pool()).await;
+        let retention = pool();
+        // Even a harmless relaxation is a distinct construction request.
+        for dimension in 0..14 {
+            view.set_projection_read_cache_pool(&cx, retention.clone())
+                .unwrap();
+            let first = project_buffered(&mut view, &cx, options()).await.unwrap();
+            let mut opt = options();
+            match dimension {
+                0 => opt.source_limits.max_work_units += 1,
+                1 => opt.source_limits.max_scratch_entries += 1,
+                2 => opt.source_limits.max_staging_bytes += 1,
+                3 => opt.projection_limits.max_vertices += 1,
+                4 => opt.projection_limits.max_input_edges += 1,
+                5 => opt.projection_limits.max_adjacency_entries += 1,
+                6 => opt.projection_limits.max_workspace_bytes += 1,
+                7 => opt.as_of = Some(CommitSeq(1)),
+                8 => opt.selection.vertex_label = Some(LabelId(11)),
+                9 => opt.selection.relation = Some(RelationId(9)),
+                10 => opt.selection.weight = FnxWeightSpec::Unit,
+                11 => {
+                    opt.selection.weight = FnxWeightSpec::Property {
+                        key: P,
+                        missing: MissingWeightPolicy::Zero,
+                    }
+                }
+                12 => opt.projection.directedness = Directedness::Reversed,
+                13 => opt.projection.parallel_edges = ParallelEdgePolicy::Minimum,
+                _ => unreachable!(),
+            }
+            let different = project_buffered(&mut view, &cx, opt).await.unwrap();
+            assert!(
+                !first.shares_cache_with(&different),
+                "dimension {dimension}"
+            );
+            assert_eq!(view.projection_read_cache_usage().entries, 2);
+            assert!(
+                different.shares_cache_with(&project_buffered(&mut view, &cx, opt).await.unwrap())
+            );
+            assert!(
+                first
+                    .shares_cache_with(&project_buffered(&mut view, &cx, options()).await.unwrap())
+            );
+        }
+        view.set_projection_read_cache_pool(&cx, retention.clone())
+            .unwrap();
+        let first = project_buffered(&mut view, &cx, options()).await.unwrap();
+        for dimension in 0..10 {
+            let mut opt = options();
+            match dimension {
+                0 => opt.source_limits.max_work_units = 0,
+                1 => opt.source_limits.max_scratch_entries = 0,
+                2 => opt.source_limits.max_staging_bytes = 0,
+                3 => opt.projection_limits.max_vertices = 0,
+                4 => opt.projection_limits.max_input_edges = 0,
+                5 => opt.projection_limits.max_adjacency_entries = 0,
+                6 => opt.projection_limits.max_workspace_bytes = 0,
+                7 => {
+                    opt.selection.weight = FnxWeightSpec::Property {
+                        key: PropertyKeyId(999),
+                        missing: MissingWeightPolicy::Reject,
+                    }
+                }
+                8 => opt.projection.self_loops = SelfLoopPolicy::Reject,
+                9 => opt.as_of = Some(CommitSeq(view.frontier().0 + 1)),
+                _ => unreachable!(),
+            }
+            assert!(
+                project_buffered(&mut view, &cx, opt).await.is_err(),
+                "dimension {dimension}"
+            );
+            assert_eq!(view.projection_read_cache_usage().entries, 1);
+            assert!(
+                first
+                    .shares_cache_with(&project_buffered(&mut view, &cx, options()).await.unwrap())
+            );
+        }
+        let faults = view.buffer_stats();
+        for dimension in 0..3 {
+            let mut opt = options();
+            match dimension {
+                0 => opt.execution_limits.max_iterations = 0,
+                1 => opt.execution_limits.max_result_rows = 0,
+                2 => opt.execution_limits.max_estimated_work = 0,
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                view.call_fnx(&cx, RANK, &FnxParameters::new(), opt).await,
+                Err(FnxReadError::Execution(
+                    FnxExecutionError::LimitExceeded { .. }
+                ))
+            ));
+            assert_eq!(view.buffer_stats(), faults);
+        }
+        // Full retention declines the ninth request without displacing any live entry.
+        view.set_projection_read_cache_pool(&cx, retention).unwrap();
+        let mut kept = Vec::new();
+        for extra in 0..8 {
+            let mut opt = options();
+            opt.source_limits.max_work_units += extra;
+            kept.push(project_buffered(&mut view, &cx, opt).await.unwrap());
+        }
+        assert_eq!(view.projection_read_cache_usage().entries, 8);
+        let mut ninth = options();
+        ninth.source_limits.max_work_units += 8;
+        let a = project_buffered(&mut view, &cx, ninth).await.unwrap();
+        let b = project_buffered(&mut view, &cx, ninth).await.unwrap();
+        assert_eq!(a.digest(), b.digest());
+        assert!(!a.shares_cache_with(&b));
+        for (extra, graph) in kept.iter().enumerate() {
+            let mut opt = options();
+            opt.source_limits.max_work_units += extra as u64;
+            assert!(graph.shares_cache_with(&project_buffered(&mut view, &cx, opt).await.unwrap()));
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn decoded_cache_hits_and_last_build_checkpoints_keep_live_cancellation() {
+    let ((), report) = run_async_under_lab(0x6270_7213, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let _writer = seed(&contexts, &vfs).await;
+        let mut view = cold(&contexts, &vfs, pool()).await;
+        let observe = Arc::new(SimulationCheckpointProbe::new(None));
+        let first = project_buffered(
+            &mut view,
+            &cx.with_checkpoint_probe(Arc::clone(&observe)),
+            options(),
+        )
+        .await
+        .unwrap();
+        let cold_checks = observe.calls();
+        let observe = Arc::new(SimulationCheckpointProbe::new(None));
+        let hit = project_buffered(
+            &mut view,
+            &cx.with_checkpoint_probe(Arc::clone(&observe)),
+            options(),
+        )
+        .await
+        .unwrap();
+        let warm_checks = observe.calls();
+        assert!(first.shares_cache_with(&hit));
+        assert!(cold_checks > warm_checks && warm_checks > 0);
+        let faults = view.buffer_stats();
+        for stop in 1..=warm_checks {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            assert!(matches!(
+                project_buffered(
+                    &mut view,
+                    &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                    options()
+                )
+                .await,
+                Err(FnxReadError::Cancelled(_))
+            ));
+            assert_eq!(probe.calls(), stop);
+            assert_eq!(view.buffer_stats(), faults);
+            assert_eq!(view.projection_read_cache_usage().entries, 1);
+        }
+        for stop in [1, 2, cold_checks / 2, cold_checks - 1, cold_checks] {
+            let source = pool();
+            let mut fresh = cold(&contexts, &vfs, source.clone()).await;
+            let retention = fresh.projection_read_cache_pool().clone();
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            assert!(matches!(
+                project_buffered(
+                    &mut fresh,
+                    &cx.with_checkpoint_probe(Arc::clone(&probe)),
+                    options()
+                )
+                .await,
+                Err(FnxReadError::Cancelled(_))
+            ));
+            assert_eq!(probe.calls(), stop);
+            assert_eq!(
+                (
+                    fresh.projection_read_cache_usage().entries,
+                    retention.used()
+                ),
+                (0, 0)
+            );
+            assert_eq!(
+                project_buffered(&mut fresh, &cx, options())
+                    .await
+                    .unwrap()
+                    .digest(),
+                first.digest()
+            );
+            assert_eq!(fresh.projection_read_cache_usage().entries, 1);
+            drop(fresh);
+            assert_eq!((source.used(), retention.used()), (0, 0));
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
