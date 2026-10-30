@@ -381,6 +381,85 @@ impl<V: Vfs> BlockStore<V> {
         Ok((partition, vertices))
     }
 
+    /// Seal one relation while retaining the complete authenticated source for
+    /// ordinary pattern/property reads. Both owners use the SAME bounded root
+    /// walk; unrelated relations still undergo every integrity/history check
+    /// and remain available to the decoded read view. The sealer borrows its
+    /// selected block/property slices instead of cloning those source rows.
+    ///
+    /// The decoded tuple is ordinary data, not an authority receipt. Only this
+    /// complete authenticated walk can mint the image's opaque source anchor.
+    /// Keeping the complete source during sealing can increase its overlap
+    /// with the derived image; this is not an RSS or external-memory bound.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn seal_relation_with_read_source(
+        &self,
+        cx: &QueryCx,
+        root_id: PartitionRootVersion,
+        floor: CommitSeq,
+        relation: RelationId,
+        limits: SealedLimits,
+        source: crate::store::RootReadLimits,
+    ) -> Result<
+        (
+            SealedPartition,
+            crate::store::ReopenedAdjacency,
+            Vec<crate::vertex::VertexPatchRows>,
+        ),
+        SealedError,
+    > {
+        let (adjacency, vertices) = self
+            .reopen_with_vertices_bounded(cx, root_id, floor, source)
+            .await
+            .map_err(sealed_source_error)?;
+        let (root, blocks, properties) = &adjacency;
+        let mut count = 0usize;
+        for block in blocks {
+            cx.checkpoint().map_err(SealedError::Interrupted)?;
+            if block
+                .first()
+                .is_some_and(|entry| entry.relation == relation)
+            {
+                count = count.checked_add(1).ok_or(SealedError::SizeOverflow)?;
+            }
+        }
+        let mut selected_blocks = Vec::new();
+        let mut selected_properties = Vec::new();
+        selected_blocks
+            .try_reserve_exact(count)
+            .map_err(|_| SealedError::AllocationFailed)?;
+        selected_properties
+            .try_reserve_exact(count)
+            .map_err(|_| SealedError::AllocationFailed)?;
+        for (block, props) in blocks.iter().zip(properties) {
+            cx.checkpoint().map_err(SealedError::Interrupted)?;
+            // Whole-root admission already proved each block's immutable
+            // relation family and its aligned hosted properties.
+            if block
+                .first()
+                .is_some_and(|entry| entry.relation == relation)
+            {
+                selected_blocks.push(block.as_slice());
+                selected_properties.push(props.as_ref());
+            }
+        }
+        let compacted =
+            crate::compact::compact_with_props(&selected_blocks, &selected_properties, floor)
+                .map_err(SealedError::History)?;
+        drop(selected_blocks);
+        drop(selected_properties);
+        let scope = SealedScope {
+            source_root: root_id,
+            graph: root.graph,
+            branch: root.branch,
+            partition: root.partition,
+            floor,
+            publication: root.published_at,
+        };
+        let partition = seal_compacted_adjacency(cx, scope, Some(relation), limits, compacted)?;
+        Ok((partition, adjacency, vertices))
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn seal_selected_adjacency(
         &self,
@@ -430,6 +509,16 @@ fn seal_admitted_adjacency(
         floor,
         publication: root.published_at,
     };
+    seal_compacted_adjacency(cx, scope, relation, limits, compacted)
+}
+
+fn seal_compacted_adjacency(
+    cx: &QueryCx,
+    scope: SealedScope,
+    relation: Option<RelationId>,
+    limits: SealedLimits,
+    compacted: crate::compact::Compaction,
+) -> Result<SealedPartition, SealedError> {
     let mut checkpoint = || cx.checkpoint().map_err(SealedError::Interrupted);
     let image = image::build(compacted, limits, &mut checkpoint)?;
     SealedPartition::finish_scoped(scope, relation, image, limits, &mut checkpoint)

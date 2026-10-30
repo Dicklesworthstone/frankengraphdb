@@ -540,6 +540,21 @@ impl<V: Vfs> BlockStore<V> {
             .await
     }
 
+    /// Retain the complete admitted source for a composed read owner. Its
+    /// ordinary pattern/property reads need every relation, while the sealer
+    /// can borrow just its selected relation from this same authenticated walk.
+    /// Returned rows remain ordinary data, not an authority receipt.
+    pub(crate) async fn reopen_with_vertices_bounded(
+        &self,
+        cx: &QueryCx,
+        id: crate::PartitionRootVersion,
+        requested_cut: CommitSeq,
+        limits: RootReadLimits,
+    ) -> Result<(ReopenedAdjacency, Vec<crate::vertex::VertexPatchRows>), RootReadError> {
+        self.reopen_selected_adjacency_bounded(cx, id, requested_cut, limits, None, true)
+            .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn reopen_selected_adjacency_bounded(
         &self,

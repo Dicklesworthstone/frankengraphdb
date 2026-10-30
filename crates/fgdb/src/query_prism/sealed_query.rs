@@ -94,9 +94,10 @@ impl Database<UnixVfs> {
     /// property/pattern source come from that same selected immutable root.
     ///
     /// `None` selects its publication; an explicit cut is exact. Source and
-    /// image construction have separate admission limits. The native source
-    /// is also decoded for GQL pattern/property access, so this is neither a
-    /// single source traversal nor an external-memory read owner.
+    /// image construction have separate admission limits. One authenticated
+    /// source traversal supplies both the compressed relation and decoded GQL
+    /// pattern/property source. Both representations remain resident; this is
+    /// not an external-memory read owner or an RSS bound.
     #[allow(clippy::too_many_arguments)]
     pub async fn open_sealed_read(
         cx: &CommitCx,
@@ -125,8 +126,8 @@ impl Database<UnixVfs> {
 
 impl<V: Vfs + Clone> Database<V> {
     /// Injected-filesystem equivalent of `open_sealed_read`. A writer may
-    /// publish during either source read: both still address the one pinned
-    /// root, and the finished owner survives writer advancement and drop.
+    /// publish during the source read: it still addresses the one pinned root,
+    /// and the finished owner survives writer advancement and drop.
     #[allow(clippy::too_many_arguments)]
     pub async fn open_sealed_read_with_vfs(
         cx: &CommitCx,
@@ -174,7 +175,7 @@ impl<V: Vfs + Clone> Database<V> {
                 // Keep the sealer's deep Send proof behind the same explicit
                 // future boundary as the existing read-only Prism opener.
                 let sealing: crate::SendFuture<'_, _> =
-                    Box::pin(published.store.seal_relation_with_source_limits(
+                    Box::pin(published.store.seal_relation_with_read_source(
                         query_cx,
                         published.root_id,
                         as_of,
@@ -182,14 +183,30 @@ impl<V: Vfs + Clone> Database<V> {
                         sealing,
                         source_limits,
                     ));
-                let partition = sealing.await.map_err(SealedReadError::Seal)?;
+                let (partition, (root, blocks, block_props), patches) =
+                    sealing.await.map_err(SealedReadError::Seal)?;
                 query_cx
                     .checkpoint()
                     .map_err(Error::Cancelled)
                     .map_err(SealedReadError::from)?;
-                // Do not open a second generation: its pattern rows could
-                // otherwise race ahead of the already-sealed analytics cut.
-                let view = Self::read_published(cx, &keys, published).await?;
+                // Reuse the complete admitted source, including unselected
+                // relations needed by ordinary GQL patterns and properties.
+                // This is the same snapshot construction as read_published,
+                // without rereading or decoding any immutable payload.
+                let mut snapshot = crate::current_generation(
+                    published.manifest,
+                    published.root_id,
+                    &root,
+                    blocks,
+                    block_props,
+                    patches,
+                );
+                snapshot.delta_index = crate::LocalDeltaBatchIndex::empty_at(snapshot.frontier);
+                let view = EmbeddedReadView {
+                    snapshot: std::sync::Arc::new(snapshot),
+                    namespace: keys.namespace,
+                    beacon_indexes: crate::query::BeaconQueryIndexes::default(),
+                };
                 view.check_sealed_source(&partition, as_of)?;
                 partition
                     .anchor()

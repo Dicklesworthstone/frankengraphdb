@@ -740,6 +740,14 @@ fn composed_sealed_open_is_read_only_and_pins_kernel_pattern_and_property_reads(
         let mut writer = spokes(&commit, &vfs, 6).await;
         let root_id = writer.read_session().unwrap().partition_root();
         vfs.take_writes();
+        vfs.take_object_paths();
+        let decoded = Database::open_read_view_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let ordinary_reads = read_counts(vfs.take_object_paths());
+        let root_path = object_path(&path, root_id.0);
+        assert_eq!(decoded.partition_root(), root_id);
+        drop(decoded);
         let view = Database::open_sealed_read_with_vfs(
             &commit,
             &query,
@@ -753,6 +761,20 @@ fn composed_sealed_open_is_read_only_and_pins_kernel_pattern_and_property_reads(
         )
         .await
         .unwrap();
+        let composed_reads = read_counts(vfs.take_object_paths());
+        assert_eq!(
+            composed_reads, ordinary_reads,
+            "the composed owner must reuse one complete authenticated source walk"
+        );
+        assert!(
+            composed_reads.len() > 6,
+            "the fixture must span multiple source objects"
+        );
+        for (object, count) in &composed_reads {
+            if *object != root_path {
+                assert_eq!(*count, 1, "payload or manifest was reread: {object:?}");
+            }
+        }
         assert!(vfs.take_writes().is_empty(), "no writer lease or repair");
         assert_eq!(view.snapshot_seq(), CommitSeq(3));
         assert_eq!(view.frontier(), CommitSeq(6));
@@ -812,6 +834,161 @@ fn composed_sealed_open_is_read_only_and_pins_kernel_pattern_and_property_reads(
         assert!(
             vfs.take_object_paths().is_empty(),
             "execution reuses the pinned owner"
+        );
+        assert!(vfs.take_writes().is_empty());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn composed_sealed_open_retains_unselected_history_and_rejects_its_corruption() {
+    let ((), report) = run_async_under_lab(0x7669_6615, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let vfs = RecordingVfs::new();
+        let path = vfs.memory.database_dir();
+        let mut writer = spokes(&commit, &vfs, 3).await;
+        let other = RelationId(99);
+        let target = VId((1u128 << 100) + 9);
+        let edge = EId((1u128 << 96) + 1);
+        let mut initial = WriteBatch::new(other);
+        initial.create_vertex(target, vec![], vec![(PROPERTY, CanonicalScalar::Int(9))]);
+        initial.add_edge(
+            edge,
+            VId(1),
+            target,
+            vec![(PROPERTY, CanonicalScalar::Int(71))],
+        );
+        writer.write(&commit, initial).await.unwrap();
+        let old_cut = writer.frontier().unwrap();
+        let mut change = WriteBatch::new(other);
+        change.set_vertex_property(target, PROPERTY, Some(CanonicalScalar::Int(109)));
+        change.set_edge_property(edge, PROPERTY, Some(CanonicalScalar::Int(72)));
+        writer.write(&commit, change).await.unwrap();
+        let current_cut = writer.frontier().unwrap();
+        let root_id = writer.read_session().unwrap().partition_root();
+        let params = fgdb_gql::GqlParameters::new();
+        let prepared = fgdb::PreparedNativeRead::prepare(
+            "CALL fnx.single_source_shortest_path_length(args => [1], relation => 'R', \
+             parallel => 'collapse') YIELD vertex AS n, distance \
+             MATCH (n)-[e:OTHER]->(m) \
+             RETURN n.p AS source, m.p AS target, e.p AS weight, distance",
+            &params,
+            |kind, name: &str| match (kind, name) {
+                (fgdb_gql::GraphSymbolKind::Relation, "R") => {
+                    Some(fgdb_gql::GraphSymbol::Relation(RELATION))
+                }
+                (fgdb_gql::GraphSymbolKind::Relation, "OTHER") => {
+                    Some(fgdb_gql::GraphSymbol::Relation(other))
+                }
+                (fgdb_gql::GraphSymbolKind::Property, "p") => {
+                    Some(fgdb_gql::GraphSymbol::Property(PROPERTY))
+                }
+                _ => None,
+            },
+        )
+        .unwrap();
+        let policy = fgdb_gql::GqlQueryPolicy::new(100_000, 1000, 10_000_000, 1_000_000);
+        for (cut, target_property, edge_property) in [(old_cut, 9, 71), (current_cut, 109, 72)] {
+            vfs.take_writes();
+            let view = Database::open_sealed_read_with_vfs(
+                &commit,
+                &query,
+                vfs.clone(),
+                &path,
+                keys(),
+                Some(cut),
+                RELATION,
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(view.partition_root(), root_id);
+            assert_eq!(view.snapshot_seq(), cut);
+            let expected = fgdb::QueryResult::Rows {
+                columns: vec![
+                    "source".into(),
+                    "target".into(),
+                    "weight".into(),
+                    "distance".into(),
+                ],
+                rows: vec![
+                    [1, target_property, edge_property, 0]
+                        .into_iter()
+                        .map(|value| {
+                            fgdb::QueryValue::Value(fgdb_gql::algebra::GraphValue::Scalar(
+                                CanonicalScalar::Int(value),
+                            ))
+                        })
+                        .collect(),
+                ],
+            };
+            assert_eq!(
+                view.execute_prepared(&query, &prepared, &params, policy, sealed_memory())
+                    .unwrap(),
+                expected,
+                "ordinary patterns and properties must retain unselected relation history"
+            );
+            assert!(vfs.take_writes().is_empty());
+        }
+
+        let store = fgdb_strata::store::BlockStore::open_existing_for_read_with_vfs(
+            &commit,
+            vfs.clone(),
+            &path,
+            [0xc1; 32],
+            keys().namespace,
+        )
+        .await
+        .unwrap();
+        let membership = store.get_root(&commit, root_id).await.unwrap();
+        let damaged = membership
+            .blocks
+            .iter()
+            .find(|entry| entry.last_seq == current_cut)
+            .unwrap();
+        let rows = store
+            .get(&commit, fgdb_strata::DeltaBlockVersion(damaged.block_id))
+            .await
+            .unwrap();
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|entry| entry.relation == other));
+        let damaged_path = store.path(damaged.block_id);
+        let mut corrupted = vfs.memory.read(&damaged_path).await.unwrap();
+        corrupted[0] ^= 0x40;
+        vfs.memory.write(&damaged_path, &corrupted).await.unwrap();
+        vfs.take_object_paths();
+        vfs.take_writes();
+        // A historical cut and a different retained relation do not authorize
+        // skipping any untrusted block from the selected immutable root.
+        let result = Database::open_sealed_read_with_vfs(
+            &commit,
+            &query,
+            vfs.clone(),
+            &path,
+            keys(),
+            Some(old_cut),
+            RELATION,
+            SealedLimits::default(),
+            RootReadLimits::default(),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(SealedProjectionOpenError::Read(
+                fgdb_prism::FnxSealedReadError::Seal(
+                    fgdb_strata::tiered::sealed::SealedError::Store(_)
+                )
+            ))
+        ));
+        assert!(vfs.take_object_paths().contains(&damaged_path));
+        assert!(
+            Database::open_read_view_with_vfs(&commit, vfs.clone(), &path, keys())
+                .await
+                .is_err(),
+            "the ordinary read oracle must independently reject the same corrupt source"
         );
         assert!(vfs.take_writes().is_empty());
     });
