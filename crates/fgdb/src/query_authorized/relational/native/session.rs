@@ -29,6 +29,10 @@ mod beacon;
 pub use beacon::AuthorizedBeaconIndex;
 #[path = "session/diff.rs"]
 mod diff;
+#[path = "session/sealed.rs"]
+mod sealed;
+pub use sealed::AuthorizedSealedReadSession;
+use sealed::{check_selected_cut, selected_cut};
 
 struct State<'a, Resolver, Clock> {
     view: Option<EmbeddedReadView>,
@@ -38,6 +42,7 @@ struct State<'a, Resolver, Clock> {
     policy: GqlQueryPolicy,
     clock: Clock,
     last_now_ms: u64,
+    sealed: Option<Arc<crate::query::authorized::analytics::sealed::Source>>,
 }
 
 /// A narrowed, read-only embedded session. Obtain it from
@@ -236,6 +241,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                 policy,
                 clock,
                 last_now_ms,
+                sealed,
             } = &mut state;
             let now = clock();
             if now < *last_now_ms {
@@ -265,6 +271,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                 ))
             })?;
             execution.borrow_mut().beacon_indexes = Some(view.beacon_indexes.clone());
+            execution.borrow_mut().sealed = sealed.clone();
             let result = cx.with_restriction(|| {
                 action(
                     view,
@@ -467,7 +474,7 @@ fn text_at<R: GraphSymbolResolver>(
                 BorrowedResolver(resolver),
                 || execution.borrow_mut().checkpoint(),
             )?,
-            view.frontier(),
+            selected_cut(view, execution),
         );
     }
     let prepared = PreparedNativeRead::prepare(
@@ -477,7 +484,8 @@ fn text_at<R: GraphSymbolResolver>(
     );
     execution.borrow_mut().checkpoint()?;
     let prepared = prepared?;
-    let at = prepared.bound_snapshot_seq(selected.parameters(), view.frontier())?;
+    let at = prepared.bound_snapshot_seq(selected.parameters(), selected_cut(view, execution))?;
+    check_selected_cut(execution, at)?;
     result_rows(
         native_at(
             &prepared,
@@ -516,7 +524,8 @@ fn prepared_at(
     let params = prepared.parameters(selected.parameters())?;
     let at = prepared
         .native
-        .bound_snapshot_seq(&params, view.frontier())?;
+        .bound_snapshot_seq(&params, selected_cut(view, execution))?;
+    check_selected_cut(execution, at)?;
     result_rows(
         native_at(
             &prepared.native,
@@ -716,6 +725,7 @@ fn admit_read_session<'a, R: GraphSymbolResolver, C: FnMut() -> u64>(
             policy,
             clock,
             last_now_ms,
+            sealed: None,
         }),
         owner: Arc::new(()),
     })

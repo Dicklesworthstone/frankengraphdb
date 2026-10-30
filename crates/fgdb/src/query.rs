@@ -32,8 +32,9 @@ pub use authorized::{
     AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedBeaconIndex,
     AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,
     AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall, AuthorizedPreparedRead,
-    AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSendAggregateCursor,
-    AuthorizedSendRowCursor, AuthorizedSortLimits, AuthorizedSpoolCursor,
+    AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSealedReadSession,
+    AuthorizedSendAggregateCursor, AuthorizedSendRowCursor, AuthorizedSortLimits,
+    AuthorizedSpoolCursor,
 };
 pub(crate) use beacon::procedure::{
     EndpointFilter, HybridSearch, is_hybrid, privileged as hybrid_procedure,

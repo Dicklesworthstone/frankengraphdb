@@ -51,8 +51,9 @@ pub use relational::{
     AuthorizedAggregateCursor, AuthorizedAsyncAggregateCursor, AuthorizedBeaconIndex,
     AuthorizedDifferenceCursor, AuthorizedDifferenceExecution, AuthorizedOrderExecution,
     AuthorizedOrderedReadSession, AuthorizedPreparedFnxCall, AuthorizedPreparedRead,
-    AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSendAggregateCursor,
-    AuthorizedSendRowCursor, AuthorizedSortLimits, AuthorizedSpoolCursor,
+    AuthorizedReadSession, AuthorizedRowCursor, AuthorizedSealedReadSession,
+    AuthorizedSendAggregateCursor, AuthorizedSendRowCursor, AuthorizedSortLimits,
+    AuthorizedSpoolCursor,
 };
 
 pub(crate) use admission::{ADMITTED_BYTES, AdmittedCache};
@@ -104,6 +105,10 @@ struct Execution<'cx, 'permit, Clock> {
     // frontier and definition equality before using any entry. Transaction
     // overlays and pull owners that do not supply pins retain ordinary reads.
     beacon_indexes: Option<crate::query::beacon::BeaconQueryIndexes>,
+    // A trusted host may retain a compressed source beside the same read pin.
+    // It is not authority: analytics proves complete visibility and request
+    // compatibility under this fresh permit before inspecting the image.
+    sealed: Option<Arc<analytics::sealed::Source>>,
 }
 
 /// Signed work units charged in one Warden call while the allowance covers
@@ -131,6 +136,7 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
             run_left: 0,
             in_runs: false,
             beacon_indexes: None,
+            sealed: None,
         }
     }
     fn tracking(

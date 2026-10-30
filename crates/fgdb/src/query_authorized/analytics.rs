@@ -1,9 +1,11 @@
 //! Prism consumes the capability's induced graph, never a post-filtered answer.
 //!
 //! Reuse the authenticated historical visitors, the owned projection builder,
-//! and the registered native kernels. This path is explicitly DECODED_CACHE:
-//! it does not confer authority on raw sealed images or publish a reusable view
-//! that could outlive the single live Warden execution allowance.
+//! and the registered native kernels. The default and every restricted scope
+//! use DECODED_CACHE. An owning sealed session may supply its retained image
+//! for compatible calls only after complete incidence/field visibility is
+//! proved; that path keeps the same live permit and final delivery boundary.
+//! Neither path publishes a reusable graph or treats an image as authority.
 //!
 //! Projections are retained in a trusted-host sidecar keyed by the live
 //! snapshot allocation and exact request (fgdb-0tbrz), never handed to a token
@@ -30,6 +32,9 @@ use fgdb_warden::{Authority, CapabilityToken, PlannerPredicates};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
+
+#[path = "analytics/sealed.rs"]
+pub(super) mod sealed;
 
 type Error = FnxReadError<ReadError, QueryError>;
 
@@ -407,6 +412,17 @@ fn execute_with_sink<Clock: FnMut() -> u64>(
     observe: impl Observe,
     sink: ResultSink<'_>,
 ) -> Result<Vec<Vec<FnxValue>>, Error> {
+    // The owning sealed session fixes this context; request code cannot add
+    // an image. Restricted or incompatible calls keep the ordinary masked
+    // source, including its exact cache key and observable admission law.
+    let retained = execution.borrow().sealed.clone();
+    if let Some(retained) = retained
+        && retained.eligible(snapshot, binding, call, options, scope)
+    {
+        return sealed::execute(
+            &retained, snapshot, binding, call, options, scope, execution, observe, sink,
+        );
+    }
     let observe = RefCell::new(observe);
     let checkpoint = || {
         execution.borrow_mut().checkpoint()?;

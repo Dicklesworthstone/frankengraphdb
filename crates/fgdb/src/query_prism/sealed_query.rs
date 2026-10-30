@@ -87,6 +87,16 @@ pub struct SealedReadView {
     relation: RelationId,
 }
 
+impl SealedReadView {
+    // Only the trusted authorized-session constructor receives these parts.
+    // No capability response can acquire a raw read view or image anchor.
+    pub(crate) fn authorized_parts(
+        &self,
+    ) -> (&EmbeddedReadView, &SealedPartition, CommitSeq, RelationId) {
+        (&self.view, &self.partition, self.as_of, self.relation)
+    }
+}
+
 impl core::fmt::Debug for SealedReadView {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("SealedReadView([REDACTED])")
