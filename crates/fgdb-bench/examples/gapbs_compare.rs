@@ -66,6 +66,15 @@
 //! Release covers the native result, projection and resident writer. Canonical
 //! verification rows remain until the paired check; constructing and encoding
 //! that comparison copy is timed, while paired verification and logging are not.
+//!
+//! The same `--sealed` trials also measure `open_sealed_read` followed by a
+//! prepared native `CALL ... YIELD ... MATCH (vertex) RETURN ... ORDER BY vertex`.
+//! This composed query alternates before/after the three participants above.
+//! Statement preparation, the complete decoded+compressed read owner, ordinary
+//! pattern matching, execution, full output encoding and release are timed
+//! separately. Every emitted value matches both the direct sealed result and
+//! the same trial's live GAPBS output. This is a distinct GQL request workload,
+//! not a before/after speedup, bare-kernel comparison, or authorization benchmark.
 
 #![forbid(unsafe_code)]
 
@@ -427,6 +436,62 @@ fn canonical_rows(result: &FnxResult, algorithm: &str, vertices: usize) -> Resul
     }
     if algorithm != "bfs" && result.rows.len() != vertices {
         return Err("analytics result omitted vertices".into());
+    }
+    Ok(values)
+}
+
+/// Normalize the actual public GQL rows, without an alternate graph evaluator.
+/// Missing BFS rows are unreachable; WCC and TC must retain the full population.
+fn canonical_query_rows(
+    result: &fgdb::QueryResult,
+    algorithm: &str,
+    vertices: usize,
+) -> Result<Vec<i64>> {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::CanonicalScalar;
+
+    let fgdb::QueryResult::Rows { columns, rows } = result else {
+        return Err("composed query did not produce native rows".into());
+    };
+    let value_column = match algorithm {
+        "bfs" => "distance",
+        "wcc" => "component",
+        "tc" => "triangles",
+        _ => return Err("unknown composed result algorithm".into()),
+    };
+    if columns
+        .iter()
+        .map(String::as_str)
+        .ne(["vertex", value_column])
+    {
+        return Err("composed result has the wrong column schema".into());
+    }
+    let mut values = vec![-1; vertices];
+    let mut previous = None;
+    for row in rows {
+        let [fgdb::QueryValue::Value(GraphValue::Vertex(vertex)), value] = row.as_slice() else {
+            return Err("composed result has the wrong row schema".into());
+        };
+        let vertex = usize::try_from(vertex.0)?;
+        if vertex >= vertices || previous.is_some_and(|previous| vertex <= previous) {
+            return Err("composed rows contain unknown, duplicate or unsorted vertices".into());
+        }
+        previous = Some(vertex);
+        values[vertex] = match (algorithm, value) {
+            (
+                "bfs" | "tc",
+                fgdb::QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value))),
+            ) if *value >= 0 => *value,
+            ("wcc", fgdb::QueryValue::Value(GraphValue::Vertex(component)))
+                if component.0 < vertices as u128 =>
+            {
+                i64::try_from(component.0)?
+            }
+            _ => return Err("composed result has the wrong value type".into()),
+        };
+    }
+    if algorithm != "bfs" && rows.len() != vertices {
+        return Err("composed analytics result omitted vertices".into());
     }
     Ok(values)
 }
@@ -819,6 +884,115 @@ async fn sealed_sample(
     })
 }
 
+/// Time the public compressed GQL owner and its ordinary pattern composition.
+/// The row adapter only consumes typed results; the production executor owns
+/// every graph operation, including canonical ordering and identity correlation.
+#[allow(clippy::too_many_arguments)]
+async fn composed_sample(
+    config: &Config,
+    commit: &CommitCx,
+    query: &QueryCx,
+    database_path: &Path,
+    algorithm: &str,
+    prefix: &str,
+    expected: (fgdb_types::ids::ObjectId, fgdb_types::CommitSeq),
+    log: &mut impl Write,
+) -> Result<(Vec<i64>, u128)> {
+    let all_started = Instant::now();
+    let started = Instant::now();
+    let (name, field, arguments, direction) = match algorithm {
+        "bfs" => (
+            "single_source_shortest_path_length",
+            "distance",
+            format!("args => [{}], ", config.source),
+            "directed",
+        ),
+        "wcc" => (
+            "weakly_connected_components",
+            "component",
+            String::new(),
+            "directed",
+        ),
+        "tc" => ("triangles", "triangles", String::new(), "undirected"),
+        _ => return Err("unknown composed algorithm".into()),
+    };
+    let text = format!(
+        "CALL fnx.{name}({arguments}relation => 'R', direction => '{direction}', \
+         parallel => 'collapse', self_loops => 'drop') YIELD vertex,{field} \
+         MATCH (vertex) RETURN vertex,{field} ORDER BY vertex"
+    );
+    let params = fgdb_gql::GqlParameters::new();
+    let prepared = fgdb::PreparedNativeRead::prepare(&text, &params, |kind, name: &str| {
+        (kind == fgdb_gql::GraphSymbolKind::Relation && name == "R")
+            .then_some(fgdb_gql::GraphSymbol::Relation(KNOWS))
+    })?;
+    let statement_ns = started.elapsed().as_nanos();
+    let started = Instant::now();
+    let view = Database::open_sealed_read(
+        commit,
+        query,
+        database_path,
+        keys(),
+        Some(expected.1),
+        KNOWS,
+        Default::default(),
+        Default::default(),
+    )
+    .await?;
+    let open_ns = started.elapsed().as_nanos();
+    if view.partition_root().0 != expected.0
+        || view.snapshot_seq() != expected.1
+        || view.frontier() != expected.1
+        || view.relation() != KNOWS
+    {
+        return Err("composed sample changed the source generation or relation".into());
+    }
+    let policy = fgdb_gql::GqlQueryPolicy::new(100_000_000, 10_000_000, 1 << 40, 10_000_000);
+    let memory = FnxMemoryLimits {
+        max_kernel_workspace_bytes: 64 * 1024 * 1024,
+        max_result_bytes: 64 * 1024 * 1024,
+    };
+    let started = Instant::now();
+    let result = view.execute_prepared(query, &prepared, &params, policy, memory)?;
+    let execute_ns = started.elapsed().as_nanos();
+    let started = Instant::now();
+    let values = canonical_query_rows(&result, algorithm, config.vertices)?;
+    write_rows(&config.output.join(format!("{prefix}.rows")), &values)?;
+    let encoding_ns = started.elapsed().as_nanos();
+    let started = Instant::now();
+    drop(result);
+    drop(view);
+    drop(prepared);
+    drop(params);
+    let release_ns = started.elapsed().as_nanos();
+    let total_ns = all_started.elapsed().as_nanos();
+    save(
+        &config.output.join(format!("{prefix}.gql")),
+        text.as_bytes(),
+    )?;
+    emit(
+        log,
+        "composed_sealed_query_sample",
+        &[
+            ("sample", prefix.to_owned()),
+            ("algorithm", algorithm.to_owned()),
+            ("scope", "trusted-embedded-compressed-CALL-plus-native-MATCH-and-order".to_owned()),
+            ("statement_prepare_ns", statement_ns.to_string()),
+            ("open_and_prepare_ns", open_ns.to_string()),
+            ("execute_query_ns", execute_ns.to_string()),
+            ("complete_result_encoding_ns", encoding_ns.to_string()),
+            ("release_ns", release_ns.to_string()),
+            ("prepare_through_release_ns", total_ns.to_string()),
+            ("source_root", format!("{:?}", expected.0)),
+            ("as_of", expected.1.0.to_string()),
+            ("budgets", "production default source/image/projection; GQL 100M records, 10M rows, 2^40 work, 10M scratch entries; 64 MiB kernel and result each".to_owned()),
+            ("release_scope", "native result, decoded+compressed owner and prepared statement; canonical verification rows retained for paired check".to_owned()),
+            ("correctness", "pending direct-sealed and live-GAPBS comparison".to_owned()),
+        ],
+    )?;
+    Ok((values, total_ns))
+}
+
 async fn sealed_trials(
     config: &Config,
     commit: &CommitCx,
@@ -839,11 +1013,18 @@ async fn sealed_trials(
         let mut read_only_times = Vec::new();
         let mut writable_times = Vec::new();
         let mut gapbs_times = Vec::new();
+        let mut composed_times = Vec::new();
         for trial in 0..config.trials {
-            let order = ORDERS[trial % ORDERS.len()];
+            let triplet_order = ORDERS[trial % ORDERS.len()];
+            let order = if trial.is_multiple_of(2) {
+                [3, triplet_order[0], triplet_order[1], triplet_order[2]]
+            } else {
+                [triplet_order[0], triplet_order[1], triplet_order[2], 3]
+            };
             let mut read_only = None;
             let mut writable = None;
             let mut oracle = None;
+            let mut composed = None;
             let oracle_prefix = format!("{algorithm}-{trial}-sealed-series-gapbs");
             for participant in order {
                 match participant {
@@ -871,7 +1052,22 @@ async fn sealed_trials(
                             read_only = Some(sample);
                         }
                     }
-                    _ => oracle = Some(run_oracle(config, algorithm, &oracle_prefix, false)?),
+                    2 => oracle = Some(run_oracle(config, algorithm, &oracle_prefix, false)?),
+                    _ => {
+                        composed = Some(
+                            composed_sample(
+                                config,
+                                commit,
+                                query,
+                                database_path,
+                                algorithm,
+                                &format!("{algorithm}-{trial}-composed-sealed-query"),
+                                expected,
+                                log,
+                            )
+                            .await?,
+                        );
+                    }
                 }
             }
             let read_only = read_only.ok_or("read-only sample missing")?;
@@ -884,6 +1080,10 @@ async fn sealed_trials(
                 return Err("read-only and writable sealed preparations disagree".into());
             }
             let (oracle, rows) = oracle.ok_or("live GAPBS sample missing")?;
+            let (composed_values, composed_ns) = composed.ok_or("composed query missing")?;
+            if composed_values != read_only.values {
+                return Err("composed native query and direct sealed result disagree".into());
+            }
             let metrics =
                 oracle_metrics(&String::from_utf8(oracle.stdout)?, oracle.status.success())?;
             if metrics["vertices"] != config.vertices as u128
@@ -893,7 +1093,11 @@ async fn sealed_trials(
             }
             compare_rows(
                 &oracle_rows(&read_only.values, algorithm)?,
-                BufReader::new(File::open(rows)?),
+                BufReader::new(File::open(&rows)?),
+            )?;
+            compare_rows(
+                &oracle_rows(&composed_values, algorithm)?,
+                BufReader::new(File::open(&rows)?),
             )?;
             let gapbs_ns = metrics["input_ns"]
                 + metrics["csr_ns"]
@@ -905,7 +1109,7 @@ async fn sealed_trials(
                 &[
                     ("algorithm", algorithm.to_owned()),
                     ("trial", trial.to_string()),
-                    ("order", order.map(|actor| ["readonly", "writable", "gapbs"][actor]).join(",")),
+                    ("order", triplet_order.map(|actor| ["readonly", "writable", "gapbs"][actor]).join(",")),
                     ("correctness", format!("sealed rows, populations and identities match; {}", comparison_scope(algorithm))),
                     ("read_only_open_through_release_ns", read_only.total_ns.to_string()),
                     ("writable_open_through_release_ns", writable.total_ns.to_string()),
@@ -914,9 +1118,23 @@ async fn sealed_trials(
                     ("comparison_scope", "old/new sealed is maintenance; live GAPBS has independently reported phases".to_owned()),
                 ],
             )?;
+            emit(
+                log,
+                "composed_sealed_query_verification",
+                &[
+                    ("algorithm", algorithm.to_owned()),
+                    ("trial", trial.to_string()),
+                    ("order", order.map(|actor| ["readonly", "writable", "gapbs", "composed"][actor]).join(",")),
+                    ("correctness", format!("complete native query rows match direct sealed execution; {}", comparison_scope(algorithm))),
+                    ("prepare_through_release_ns", composed_ns.to_string()),
+                    ("gapbs_input_through_result_ns", gapbs_ns.to_string()),
+                    ("comparison_scope", "composed GQL request and live GAPBS have separate workload scopes; no before/after speedup claim".to_owned()),
+                ],
+            )?;
             read_only_times.push(read_only.total_ns);
             writable_times.push(writable.total_ns);
             gapbs_times.push(gapbs_ns);
+            composed_times.push(composed_ns);
         }
         summary(
             log,
@@ -932,6 +1150,11 @@ async fn sealed_trials(
             log,
             &format!("{algorithm}:sealed-series-gapbs-input-through-result"),
             &mut gapbs_times,
+        )?;
+        summary(
+            log,
+            &format!("{algorithm}:composed-sealed-query-prepare-through-release"),
+            &mut composed_times,
         )?;
     }
     Ok(())
