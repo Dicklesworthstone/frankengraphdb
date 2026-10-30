@@ -3,8 +3,9 @@
 //! This is a checked physical input to the ordinary aggregate finalizer, not
 //! a cached result. Source admission stays the host's responsibility. Only
 //! plans with filterless input or one metadata-proven vertex label qualify.
-//! Exact metadata also admits COUNT of a proven nonnull vertex or edge identity;
-//! property values, nullable bindings and DISTINCT still need their real input.
+//! Exact metadata also admits COUNT of a proven nonnull vertex or edge identity,
+//! and DISTINCT when that identity occurs exactly once in the admitted source.
+//! Property values, nullable bindings and repeated endpoints need real input.
 //! The scan-summary path preserves the original evaluator event order. An
 //! exact-metadata input spends only its own lookup and finalization work.
 
@@ -51,10 +52,16 @@ impl PreparedGraphAggregate {
             || self.relational_input.is_some()
             || !self.keys.is_empty()
             || self.aggregates.is_empty()
-            || self.aggregates.iter().any(|aggregate| {
-                aggregate.function != GraphAggregateFunction::CountRows
-                    && (!metadata || aggregate.function != GraphAggregateFunction::Count)
-            })
+            || self
+                .aggregates
+                .iter()
+                .any(|aggregate| match aggregate.function {
+                    GraphAggregateFunction::CountRows => false,
+                    GraphAggregateFunction::Count | GraphAggregateFunction::CountDistinct => {
+                        !metadata
+                    }
+                    _ => true,
+                })
         {
             return None;
         }
@@ -75,6 +82,7 @@ impl PreparedGraphAggregate {
             _ => return None,
         };
         let mut columns = None;
+        let mut unique_columns = Vec::new();
         let mut edge_captures = Vec::new();
         for operator in &operators[1..] {
             match operator {
@@ -122,6 +130,20 @@ impl PreparedGraphAggregate {
                         }) =>
                 {
                     columns = Some(output.len());
+                    unique_columns = output
+                        .iter()
+                        .map(|column| match column {
+                            // A vertex scan visits each identity once, even
+                            // with a label filter. An edge scan can repeat
+                            // either endpoint through parallel edges, loops,
+                            // or different incident relationships.
+                            ValueProjection::Vertex { .. } => slots == 1,
+                            // Every admitted one-edge capture names the root
+                            // edge's distinct EId, not its endpoint pair.
+                            ValueProjection::Path { .. } => true,
+                            _ => false,
+                        })
+                        .collect();
                 }
                 GlaOperator::OrderByValues if columns.is_some() => {}
                 GlaOperator::Limit {
@@ -135,11 +157,18 @@ impl PreparedGraphAggregate {
         }
         let columns = columns?;
         // COUNT(expr) ignores NULL, unlike COUNT(*). Every admitted projection
-        // above is a present identity, and preparation already bounds columns;
-        // retain that proof explicitly at this physical-input boundary.
+        // above is a present identity. DISTINCT additionally requires one
+        // unique identity per source occurrence; nonnull endpoints alone are
+        // insufficient. Retain both proofs at this physical-input boundary.
         if self.aggregates.iter().any(|aggregate| {
-            aggregate.function == GraphAggregateFunction::Count
-                && aggregate.column.is_none_or(|column| column >= columns)
+            matches!(
+                aggregate.function,
+                GraphAggregateFunction::Count | GraphAggregateFunction::CountDistinct
+            ) && aggregate.column.is_none_or(|column| {
+                column >= columns
+                    || (aggregate.function == GraphAggregateFunction::CountDistinct
+                        && !unique_columns[column])
+            })
         }) {
             return None;
         }
@@ -163,7 +192,9 @@ impl PreparedGraphAggregate {
     /// Filterless directed edges may name one relation or match every type;
     /// one vertex-label predicate also qualifies. COUNT of the root vertex,
     /// either edge endpoint, or the captured one-hop edge is equivalent to
-    /// COUNT(*) because each admitted occurrence has that identity. Multiple
+    /// COUNT(*) because each admitted occurrence has that identity. DISTINCT
+    /// also qualifies for the root vertex or captured edge, whose identities
+    /// are unique per occurrence; repeated edge endpoints do not. Multiple
     /// labels, property
     /// predicates and label-filtered edge counts do
     /// not: independent populations cannot prove an intersection's size.
@@ -307,10 +338,15 @@ impl PreparedGraphCount<'_> {
         };
         let visited = charges.work(work).map(|()| {
             for cell in &mut state {
-                let Accumulator::Count(count) = cell else {
-                    unreachable!("the checked definition contains only nonnull counts")
-                };
-                *count = self.matching;
+                // A checked unique identity count needs no retained set.
+                // Count is also the ordinary finalized representation of a
+                // DISTINCT count; output expressions and HAVING still run
+                // through the unchanged aggregate finalizer below.
+                debug_assert!(matches!(
+                    cell,
+                    Accumulator::Count(_) | Accumulator::Distinct(_)
+                ));
+                *cell = Accumulator::Count(self.matching);
             }
         });
         let finished = visited.and_then(|()| {

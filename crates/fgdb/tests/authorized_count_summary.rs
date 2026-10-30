@@ -485,16 +485,21 @@ fn maintained_authorized_counts_admit_one_metadata_record_independent_of_graph_s
             for (text, expected) in [
                 (VERTICES, total),
                 ("MATCH (n) RETURN COUNT(n) AS n", total),
+                ("MATCH (n) RETURN COUNT(DISTINCT n) AS n", total),
                 (R_EDGES, total),
                 ("MATCH (a)-[r:R]->(b) RETURN COUNT(r) AS n", total),
+                ("MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r) AS n", total),
                 ("MATCH (a)<-[r:R]-(b) RETURN COUNT(r) AS n", total),
                 ("MATCH (a)-[:R]->(b) RETURN COUNT(b) AS n", total),
                 (ALL_EDGES, total),
                 ("MATCH (a)-[r]->(b) RETURN COUNT(r) AS n", total),
+                ("MATCH (a)-[r]->(b) RETURN COUNT(DISTINCT r) AS n", total),
                 (A_VERTICES, total),
                 ("MATCH (n:A) RETURN COUNT(n) AS n", total),
+                ("MATCH (n:A) RETURN COUNT(DISTINCT n) AS n", total),
                 (S_EDGES, 0),
                 ("MATCH (a)-[r:S]->(b) RETURN COUNT(r) AS n", 0),
+                ("MATCH (a)-[r:S]->(b) RETURN COUNT(DISTINCT r) AS n", 0),
                 ("MATCH (n:B) RETURN COUNT(*) AS n", 0),
             ] {
                 let query = prepare(text);
@@ -558,8 +563,11 @@ fn captured_identity_counts_keep_scoped_sources_and_historical_cuts() {
         let small = GqlQueryPolicy::new(1, 100, 1_000_000, 100_000);
         for text in [
             "MATCH (a)-[r:R]->(b) RETURN COUNT(r) AS n",
+            "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r) AS n",
             "MATCH (a)<-[r:R]-(b) RETURN COUNT(r) AS n",
+            "MATCH (a)<-[r:R]-(b) RETURN COUNT(DISTINCT r) AS n",
             "MATCH (a)-[r]->(b) RETURN COUNT(r) AS n",
+            "MATCH (a)-[r]->(b) RETURN COUNT(DISTINCT r) AS n",
         ] {
             let query = prepare(text);
             let owner = db
@@ -598,7 +606,11 @@ fn captured_identity_counts_keep_scoped_sources_and_historical_cuts() {
                     .is_err(),
                     "restricted capture used a full-population metadata count: {text}"
                 );
-                let star = prepare(&text.replace("COUNT(r)", "COUNT(*)"));
+                let star = prepare(
+                    &text
+                        .replace("COUNT(r)", "COUNT(*)")
+                        .replace("COUNT(DISTINCT r)", "COUNT(*)"),
+                );
                 let expected = db
                     .execute_graph_aggregate_authorized(
                         &cx,
@@ -656,10 +668,16 @@ fn exact_metadata_keeps_scope_history_and_live_permit_fences() {
         let authority = issuer();
         let full = authority.issue_at(&grant(), 100).unwrap();
         let one_record = GqlQueryPolicy::new(1, 100, 1_000_000, 100_000);
-        for (at, text) in [VERTICES, R_EDGES, ALL_EDGES, A_VERTICES]
-            .into_iter()
-            .enumerate()
-        {
+        for (text, at) in [
+            (VERTICES, 0),
+            (R_EDGES, 1),
+            (ALL_EDGES, 2),
+            (A_VERTICES, 3),
+            ("MATCH (n) RETURN COUNT(DISTINCT n) AS n", 0),
+            ("MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r) AS n", 1),
+            ("MATCH (a)-[r]->(b) RETURN COUNT(DISTINCT r) AS n", 2),
+            ("MATCH (n:A) RETURN COUNT(DISTINCT n) AS n", 3),
+        ] {
             let query = prepare(text);
             let current = db
                 .execute_graph_aggregate_authorized(

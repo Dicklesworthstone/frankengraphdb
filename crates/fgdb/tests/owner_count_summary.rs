@@ -466,11 +466,28 @@ fn identity_counts_use_exact_metadata_and_preserve_historical_multiplicity() {
         let small = GqlQueryPolicy::new(1, 100, 1_000_000, 100_000);
         for (text, current, old) in [
             ("MATCH (n) RETURN COUNT(n) AS total", 4, 4),
+            ("MATCH (n) RETURN COUNT(DISTINCT n) AS total", 4, 4),
             ("MATCH (a)-[r:R]->(b) RETURN COUNT(r) AS total", 3, 4),
+            (
+                "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r) AS total",
+                3,
+                4,
+            ),
             ("MATCH (a)<-[r:R]-(b) RETURN COUNT(r) AS total", 3, 4),
+            (
+                "MATCH (a)<-[r:R]-(b) RETURN COUNT(DISTINCT r) AS total",
+                3,
+                4,
+            ),
             ("MATCH (a)-[r]->(b) RETURN COUNT(r) AS total", 4, 4),
+            ("MATCH (a)-[r]->(b) RETURN COUNT(DISTINCT r) AS total", 4, 4),
             ("MATCH (a)-[:R]->(b) RETURN COUNT(b) AS total", 3, 4),
             ("MATCH (a)-[r:T]->(b) RETURN COUNT(r) AS total", 0, 0),
+            (
+                "MATCH (a)-[r:T]->(b) RETURN COUNT(DISTINCT r) AS total",
+                0,
+                0,
+            ),
         ] {
             let query = aggregate(text);
             assert!(query.count_metadata_source().is_some(), "{text}");

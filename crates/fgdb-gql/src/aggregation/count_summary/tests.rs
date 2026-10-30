@@ -369,7 +369,7 @@ fn only_plain_filterless_counts_admit_source_summaries() {
         "MATCH (n) WHERE 1 / n.p = 1 RETURN COUNT(*) AS n",
         "MATCH (n) RETURN n, COUNT(*) AS nrows GROUP BY n",
         "MATCH (n) RETURN COUNT(n.p) AS n",
-        "MATCH (n) RETURN COUNT(DISTINCT n) AS n",
+        "MATCH (n) RETURN COUNT(DISTINCT n.p) AS n",
         "MATCH (n) RETURN SUM(n.p) AS n",
         "MATCH (a)-[:R]-(b) RETURN COUNT(*) AS n",
         "MATCH (a)-[:R|S]->(b) RETURN COUNT(*) AS n",
@@ -511,7 +511,15 @@ fn identity_counts_require_a_proven_nonnull_occurrence() {
     for (text, source) in [
         ("MATCH (n) RETURN COUNT(n) AS n", GraphCountSource::Vertices),
         (
+            "MATCH (n) RETURN COUNT(DISTINCT n) AS n, COUNT(n) AS m, COUNT(*) AS k",
+            GraphCountSource::Vertices,
+        ),
+        (
             "MATCH (n:L) RETURN COUNT(n) AS n",
+            GraphCountSource::Label(LabelId(1)),
+        ),
+        (
+            "MATCH (n:L) RETURN COUNT(DISTINCT n) AS n",
             GraphCountSource::Label(LabelId(1)),
         ),
         (
@@ -524,6 +532,18 @@ fn identity_counts_require_a_proven_nonnull_occurrence() {
         ),
         (
             "MATCH (a)-[r]->(b) RETURN COUNT(r) AS n, COUNT(a) AS m",
+            GraphCountSource::Edges,
+        ),
+        (
+            "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r) AS n, COUNT(a) AS m",
+            GraphCountSource::Relation(RelationId(1)),
+        ),
+        (
+            "MATCH (a)<-[r:R]-(b) RETURN COUNT(DISTINCT r) AS n",
+            GraphCountSource::Relation(RelationId(1)),
+        ),
+        (
+            "MATCH (a)-[r]->(b) RETURN COUNT(DISTINCT r) AS n, COUNT(r) AS m",
             GraphCountSource::Edges,
         ),
     ] {
@@ -549,16 +569,19 @@ fn identity_counts_require_a_proven_nonnull_occurrence() {
     }
     for text in [
         "MATCH (n) RETURN COUNT(n.p) AS n",
-        "MATCH (n) RETURN COUNT(DISTINCT n) AS n",
+        "MATCH (n) RETURN COUNT(DISTINCT n.p) AS n",
         "MATCH (n:L:M) RETURN COUNT(n) AS n",
         "MATCH (n) WHERE n.p = 1 RETURN COUNT(n) AS n",
         "MATCH (a)-[r:R]->(b) RETURN COUNT(r.p) AS n",
-        "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r) AS n",
+        "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT a) AS n",
+        "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT b) AS n",
+        "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r) AS n, COUNT(DISTINCT b) AS m",
         "MATCH (a)-[r:R]->(a) RETURN COUNT(r) AS n",
         "MATCH (a)-[r:R]-(b) RETURN COUNT(r) AS n",
         "MATCH (a:L)-[r:R]->(b) RETURN COUNT(r) AS n",
         "MATCH (a)-[r:R]->(b)-[:R]->(c) RETURN COUNT(r) AS n",
         "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b) RETURN COUNT(r) AS n",
+        "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r) AS n",
     ] {
         let query = query(text);
         assert_eq!(query.count_metadata_source(), None, "{text}");
@@ -577,11 +600,17 @@ fn edge_identity_metadata_matches_real_parallel_and_loop_occurrences() {
     let policy = GqlQueryPolicy::new(100, 100, 1_000_000, 100_000);
     for text in [
         "MATCH (a)-[r:R]->(b) RETURN COUNT(r) AS n, COUNT(a) AS m, COUNT(*) AS k",
+        "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r) AS n, COUNT(r) AS m, COUNT(*) AS k",
         "MATCH (a)<-[r:R]-(b) RETURN COUNT(r) AS n",
+        "MATCH (a)<-[r:R]-(b) RETURN COUNT(DISTINCT r) AS n",
         "MATCH (a)-[r]->(b) RETURN COUNT(r) AS n",
+        "MATCH (a)-[r]->(b) RETURN COUNT(DISTINCT r) AS n",
         "MATCH (a)-[r:T]->(b) RETURN COUNT(r) AS n",
+        "MATCH (a)-[r:T]->(b) RETURN COUNT(DISTINCT r) AS n",
         "MATCH (a)-[r:R]->(b) RETURN COUNT(r) + 1 AS n HAVING n > 2 ORDER BY n DESC LIMIT 1",
+        "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r) + 1 AS n HAVING n > 2 ORDER BY n DESC LIMIT 1",
         "MATCH (a)-[r:R]->(b) RETURN 1 / (COUNT(r) - COUNT(*)) AS n LIMIT 0",
+        "MATCH (a)-[r:R]->(b) RETURN 1 / (COUNT(DISTINCT r) - COUNT(*)) AS n LIMIT 0",
     ] {
         let query = query(text);
         for source_edges in [edges.as_slice(), &[]] {
@@ -644,8 +673,12 @@ fn exact_metadata_keeps_the_native_finalizer_and_has_cardinality_independent_wor
             "MATCH (n) RETURN COUNT(*) AS n",
             "MATCH (n) RETURN COUNT(n) AS n",
             "MATCH (n) RETURN COUNT(n) AS n, COUNT(*) AS m",
+            "MATCH (n) RETURN COUNT(DISTINCT n) AS n, COUNT(n) AS m, COUNT(*) AS k",
             "MATCH (n:L) RETURN COUNT(*) AS n",
             "MATCH (n:L) RETURN COUNT(n) AS n",
+            "MATCH (n:L) RETURN COUNT(DISTINCT n) AS n",
+            "MATCH (n:L) RETURN COUNT(DISTINCT n) + 1 AS n HAVING n > COUNT(*) ORDER BY n DESC LIMIT 1",
+            "MATCH (n:L) RETURN 1 / (COUNT(DISTINCT n) - COUNT(*)) AS n LIMIT 0",
             "MATCH (n:L) RETURN COUNT(*) + 1 AS n HAVING n > 2 ORDER BY n DESC LIMIT 1",
             "MATCH (n:L) RETURN 1 / (COUNT(*) - COUNT(*)) AS n LIMIT 0",
             "MATCH (n) RETURN COUNT(*) AS n, COUNT(*) AS m",
@@ -700,7 +733,9 @@ fn exact_metadata_keeps_the_native_finalizer_and_has_cardinality_independent_wor
         // multiplicity or floating-point value is permitted.
         for text in [
             "MATCH (n) RETURN COUNT(*) AS n",
+            "MATCH (n) RETURN COUNT(DISTINCT n) AS n",
             "MATCH (a)-[r]->(b) RETURN COUNT(*) AS n",
+            "MATCH (a)-[r]->(b) RETURN COUNT(DISTINCT r) AS n",
         ] {
             let query = query(text);
             let mut work = None;
@@ -898,6 +933,10 @@ fn computed_having_checks_input_columns_and_refuses_unowned_element_reads() {
 fn exact_metadata_checks_every_budget_and_cancellation_boundary() {
     for text in [
         "MATCH (n) RETURN COUNT(*) AS n",
+        "MATCH (n) RETURN COUNT(DISTINCT n) AS n, COUNT(*) AS m",
+        "MATCH (n:L) RETURN COUNT(DISTINCT n) + 1 AS n HAVING n > 2 ORDER BY n DESC LIMIT 1",
+        "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r) AS n, COUNT(a) AS m",
+        "MATCH (a)<-[r]-(b) RETURN COUNT(DISTINCT r) AS n SKIP 1 LIMIT 0",
         "MATCH (n:L) RETURN COUNT(*) AS n",
         "MATCH (n:L) RETURN COUNT(*) + 1 AS n HAVING n > 2 ORDER BY n DESC LIMIT 1",
         "MATCH (n:L) RETURN COUNT(*) + 1 AS n HAVING n + 1 > COUNT(*) ORDER BY n DESC LIMIT 1",
