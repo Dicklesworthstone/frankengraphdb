@@ -202,7 +202,7 @@ impl PreparedGraphWriteChainText {
                     } else if clause && matched && mutation()? {
                         mutated = true;
                     } else if clause
-                        && matched
+                        && (matched || parameter_matched)
                         && !written
                         && (word.eq_ignore_ascii_case("WITH")
                             || word.eq_ignore_ascii_case("UNWIND"))
@@ -289,7 +289,9 @@ impl PreparedGraphWriteChainText {
                                     lookahead.clone(),
                                     Self::named_merge_pattern(lexer.clone())?,
                                     staged,
-                                    parameter_matched,
+                                    // A later row stage is outside the flat
+                                    // parameter-batch adapter's profile.
+                                    parameter_matched && !staged,
                                 )?
                             {
                                 return Ok(true);

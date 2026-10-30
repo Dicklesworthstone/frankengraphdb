@@ -211,6 +211,105 @@ fn prepare_admitted<Clock: FnMut() -> u64>(
     prepared.map_err(Fault::Binding)
 }
 
+/// Bind one native chain without lowering whole-map values or replacing the
+/// live preparation permit. Pattern-map arguments keep their original offsets.
+#[allow(clippy::result_large_err)]
+fn bind_chain_admitted<Clock: FnMut() -> u64>(
+    cx: &QueryCx,
+    execution: &mut Execution<'_, '_, Clock>,
+    text: &str,
+    params: &GqlParameters,
+    relation: RelationId,
+    mut resolver: impl GraphSymbolResolver,
+) -> Result<fgdb_gql::PreparedGraphWriteChain, Fault> {
+    cx.with_restriction(|| {
+        let lowered = GqlMapArgumentText::lower_fields(text, params);
+        let (text, params) = lowered
+            .as_ref()
+            .map_or((text, params), |(lowered, derived)| {
+                (lowered.text(), derived)
+            });
+        let lowered = lowered.as_ref().map(|(lowered, _)| lowered);
+        let mut declarations = Vec::new();
+        for (name, kind) in params.parameter_types() {
+            checkpoint(cx, execution).map_err(admission)?;
+            if matches!(
+                kind,
+                GqlParameterType::Scalar(_) | GqlParameterType::List | GqlParameterType::Map
+            ) {
+                declarations.push((name, kind));
+            }
+        }
+        let mut failure = None;
+        let prepared = {
+            let mut control = || checkpoint(cx, execution);
+            fgdb_gql::PreparedGraphWriteChainText::prepare_with_parameter_types(
+                text,
+                relation,
+                &declarations,
+                ControlledCatalog {
+                    resolver: &mut resolver,
+                    control: &mut control,
+                    failure: &mut failure,
+                },
+            )
+        };
+        if let Some(error) = failure {
+            return Err(admission(error));
+        }
+        checkpoint(cx, execution).map_err(admission)?;
+        let prepared = prepared.map_err(|error| restored(lowered, Fault::ChainBinding(error)))?;
+        // A chain is one native statement. Its clauses and input occurrences
+        // spend their cumulative execution allowance in the existing owner.
+        execution.work(1).map_err(admission)?;
+        let bound = prepared.bind_parameters(params);
+        checkpoint(cx, execution).map_err(admission)?;
+        bound.map_err(|error| restored(lowered, Fault::ChainBinding(error)))
+    })
+}
+
+/// Build the public representation while the chain still owns its rollback
+/// workspace. No allocation or fallible value conversion follows publication.
+fn chain_result(
+    chain: &fgdb_gql::PreparedGraphWriteChain,
+    stats: fgdb_gql::GraphWriteProgramStats,
+    rows: &[fgdb_gql::algebra::GraphValueRow],
+    work: &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+) -> Result<QueryResult, WriteTxnError> {
+    work(1)?;
+    if !chain.returns_rows() {
+        // Private identities are not an implicit RETURN. The public receipt
+        // reports the complete statement's measured effects and creation counts.
+        return Ok(QueryResult::Write {
+            receipt: GraphWriteProgramReceipt::new(stats, Vec::new()),
+            completion: None,
+        });
+    }
+    let mut columns = Vec::new();
+    for name in chain.columns() {
+        let bytes = u64::try_from(name.len())
+            .map_err(|_| WriteTxnError::Authorization(Error::TooLarge))?;
+        work(1)?;
+        work(bytes)?;
+        columns.push(name.clone());
+    }
+    let mut output = Vec::new();
+    for row in rows {
+        work(1)?;
+        let mut cells = Vec::new();
+        for value in row.values() {
+            work(1)?;
+            let copied = value.copy_with_control(&mut |_| work(1))?;
+            cells.push(crate::QueryValue::Value(copied));
+        }
+        output.push(cells);
+    }
+    Ok(QueryResult::Rows {
+        columns,
+        rows: output,
+    })
+}
+
 /// A script fault of a lowered statement, at the caller's bytes.
 #[allow(clippy::result_large_err)]
 fn restored(lowered: Option<&GqlMapArgumentText>, mut fault: Fault) -> Fault {
@@ -223,6 +322,7 @@ fn restored(lowered: Option<&GqlMapArgumentText>, mut fault: Fault) -> Fault {
             source: error,
             ..
         }) => lowered.restore(error),
+        Fault::ChainBinding(error) => lowered.restore(error),
         _ => {}
     }
     fault
@@ -268,6 +368,33 @@ fn bind_native<Clock: FnMut() -> u64>(
 ) -> Result<super::Bound<'static>, Fault> {
     cx.with_restriction(|| {
         reserve_text(cx, execution, text)?;
+        bind_native_admitted(
+            cx,
+            execution,
+            text,
+            params,
+            relation,
+            scope,
+            max_statements,
+            resolver,
+        )
+    })
+}
+
+// Native dispatch has already paid for the original bytes. Prepared sessions
+// continue through bind_native and reserve their own text exactly once.
+#[allow(clippy::too_many_arguments, clippy::result_large_err)]
+fn bind_native_admitted<Clock: FnMut() -> u64>(
+    cx: &QueryCx,
+    execution: &mut Execution<'_, '_, Clock>,
+    text: &str,
+    params: &GqlParameters,
+    relation: RelationId,
+    scope: &PlannerPredicates,
+    max_statements: usize,
+    resolver: impl GraphSymbolResolver,
+) -> Result<super::Bound<'static>, Fault> {
+    cx.with_restriction(|| {
         let classified =
             GraphUnwindWriteText::requires_computed_map_input(text).and_then(|computed_maps| {
                 if computed_maps {
@@ -466,7 +593,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// Computed whole-map MATCH updates use one complete relational mutation:
     /// row-specific keys and all RHS values are frozen before any staging.
     /// Their one statement shares the ordinary query/effect limits and signed
-    /// permit, and every actual map key passes native field admission.
+    /// permit, and every actual map key passes native field admission. Native
+    /// write chains use the same live permit for preparation, typed chain
+    /// admission and completion. Explicit RETURN produces admitted rows;
+    /// no-RETURN chains expose a statistics receipt without private identities.
     ///
     /// The existing typed program checks ReadWrite requirements, relation scope,
     /// masked selection, original attempted fields and before/after images.
@@ -513,7 +643,53 @@ impl<V: Vfs + Clone> Database<V> {
         };
         commit_cx
             .with_restriction_async(async {
-                let bound = bind_native(
+                let chain = query_cx.with_restriction(|| {
+                    reserve_text(query_cx, &mut execution, text)?;
+                    let classified = fgdb_gql::PreparedGraphWriteChainText::is_chain(text);
+                    checkpoint(query_cx, &mut execution).map_err(admission)?;
+                    classified.map_err(|error| {
+                        Fault::ChainBinding(fgdb_gql::GraphWriteChainTextError::Insert(error))
+                    })
+                })?;
+                if chain {
+                    let chain = bind_chain_admitted(
+                        query_cx,
+                        &mut execution,
+                        text,
+                        params,
+                        relation,
+                        resolver,
+                    )?;
+                    let mut result = None;
+                    let (_, _, completion) = self
+                        .complete_authorized_chain(
+                            txn_cx,
+                            query_cx,
+                            commit_cx,
+                            &chain,
+                            None,
+                            policy.insertion_policy(),
+                            verified.predicates(),
+                            execution,
+                            |stats, rows, work| {
+                                result = Some(chain_result(&chain, stats, rows, work)?);
+                                Ok(())
+                            },
+                        )
+                        .await
+                        .map_err(Fault::Chain)?;
+                    let mut result =
+                        result.expect("chain representation was admitted before completion");
+                    if let QueryResult::Write {
+                        completion: written,
+                        ..
+                    } = &mut result
+                    {
+                        *written = Some(completion);
+                    }
+                    return Ok(result);
+                }
+                let bound = bind_native_admitted(
                     query_cx,
                     &mut execution,
                     text,

@@ -164,6 +164,10 @@ impl GraphWriteScriptError {
 pub enum GraphWriteScriptExecutionError<E, A, C> {
     Binding(GraphWriteScriptError),
     Program(crate::GraphWriteProgramError<E, A, C>),
+    /// Native chain preparation or parameter binding, before execution.
+    ChainBinding(crate::GraphWriteChainTextError),
+    /// Retain the chain's native source, control and publication failure.
+    Chain(crate::GqlQueryError<crate::GraphWriteChainError<E, A>, C>),
     /// The entire batch was refused before any execution began.
     BatchBinding(GraphWriteScriptBatchError),
     /// Native UNWIND syntax, row admission or binding failed before execution.
@@ -185,6 +189,8 @@ impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display> core::
         match self {
             Self::Binding(source) => source.fmt(f),
             Self::Program(source) => source.fmt(f),
+            Self::ChainBinding(source) => source.fmt(f),
+            Self::Chain(source) => source.fmt(f),
             Self::BatchBinding(source) => source.fmt(f),
             Self::UnwindBinding(source) => source.fmt(f),
             Self::BatchProgram { location, source } => {
@@ -213,6 +219,8 @@ impl<
         match self {
             Self::Binding(source) => Some(source),
             Self::Program(source) => Some(source),
+            Self::ChainBinding(source) => Some(source),
+            Self::Chain(source) => Some(source),
             Self::BatchBinding(source) => Some(source),
             Self::UnwindBinding(source) => Some(source),
             Self::BatchProgram { source, .. } => Some(source),

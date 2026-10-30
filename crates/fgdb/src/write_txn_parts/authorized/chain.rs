@@ -522,12 +522,44 @@ impl<V: Vfs + Clone> Database<V> {
         let permit = verified
             .begin_write_at(branch, now)
             .map_err(|error| source(WriteTxnError::Authorization(error)))?;
-        let mut execution = Execution {
+        let execution = Execution {
             cx: commit_cx,
             permit,
             clock,
         };
-        let scope = verified.predicates();
+        self.complete_authorized_chain(
+            txn_cx,
+            query_cx,
+            commit_cx,
+            chain,
+            continuation,
+            policy,
+            verified.predicates(),
+            execution,
+            |_, rows, work| admit(rows, work),
+        )
+        .await
+    }
+
+    /// Continue native text admission with its existing live permit. The same
+    /// preflight, workspace, output admission and completion own every chain.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn complete_authorized_chain<Clock: FnMut() -> u64>(
+        &mut self,
+        txn_cx: &TxnCx,
+        query_cx: &QueryCx,
+        commit_cx: &CommitCx,
+        chain: &PreparedGraphWriteChain,
+        continuation: Option<&fgdb_gql::PreparedGraphSet>,
+        policy: GraphInsertPolicy,
+        scope: &PlannerPredicates,
+        mut execution: Execution<'_, '_, Clock>,
+        admit: impl FnOnce(
+            fgdb_gql::GraphWriteProgramStats,
+            &[GraphValueRow],
+            &mut dyn FnMut(u64) -> Result<(), WriteTxnError>,
+        ) -> Result<(), WriteTxnError>,
+    ) -> Result<Receipt, Fault> {
         let continuation = continuation.or_else(|| chain.read_continuation());
         if continuation.is_some_and(|read| !chain.accepts_read_continuation(read)) {
             return Err(GqlQueryError::Source(GraphWriteChainError::Read(
@@ -1099,10 +1131,23 @@ impl<V: Vfs + Clone> Database<V> {
                     .map_err(|error| source(WriteTxnError::Authorization(error)))?;
                 query_cx
                     .with_restriction(|| {
-                        admit(&result.value, &mut |work| {
-                            query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
-                            execution.work(work)
-                        })
+                        admit(
+                            fgdb_gql::GraphWriteProgramStats {
+                                completed_statements: 1,
+                                selection: used.selection,
+                                evaluator: used.evaluator,
+                                target_vertex_visits: 0,
+                                target_edge_visits: 0,
+                                mutation_effects,
+                                created_vertices: used.created_vertices,
+                                created_edges: used.created_edges,
+                            },
+                            &result.value,
+                            &mut |work| {
+                                query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                                execution.work(work)
+                            },
+                        )
                     })
                     .map_err(source)?;
                 execution.bind_decision(workspace.transaction());
