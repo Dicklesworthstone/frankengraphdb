@@ -312,9 +312,10 @@ retired staging branch or local integration worktree was used.
 
 The following terminal outcomes retain their actual source and proof class.
 No whole-engine test or complete mandatory gate passed during this audit.
-No Bead was closed, no engine implementation was changed, and this report
-remains uncommitted alongside preserved peer work. Qualification and tracker
-publication remain open; a disclosure cannot substitute for either gate.
+No Bead was closed and no engine implementation was changed during the audit.
+The subsequent authorized implementation is recorded in the execution section
+below. Qualification and tracker publication remain open; a disclosure cannot
+substitute for either gate.
 
 | Fresh completed probe | Outcome | Scope |
 |---|---|---|
@@ -391,7 +392,20 @@ tracks that work; checked investigation is not delivered capability.
   the full sealed-cache integration target passed nineteen tests. Connect
   missing facade re-exports for the concurrently integrated buffered cache;
   its nine public integration tests also passed.
-- [ ] Complete the CLI binary/unit and real-process robot test targets.
+- [x] Complete the CLI binary/unit and real-process robot targets: 280 passed
+  (two ignored) and 52 passed. Historical composed sealed CLI rows and their
+  reported sequence match ordinary historical execution across fresh processes.
+  A stale cooperative-CDLP preflight expectation was corrected from query
+  refusal to read-only open; live decoded/cooperative comparisons now cover
+  four iteration counts and two quanta. Existing independent graph-vote,
+  cancellation, malformed-argument and missing-database controls remain.
+- [x] Recover all 107 canonical-only records through token-bound native
+  additive import, first verified on a preserved copy. The plan created 107,
+  updated/deleted zero, remapped 136 incoming comment IDs and retained every
+  original issue, label, dependency, comment and audit-event row exactly.
+  The live DB now has 1,360 records (the 1,357 canonical IDs plus three local
+  children); canonical JSONL is byte-identical. This is partial recovery,
+  not resolution of the remaining shared-row/relation drift.
 - [ ] Resolve formatting and complete the mandatory chain on a stable source.
 - [ ] Reconcile tracker publication without dropping JSONL-only records or
   peer changes; export only the attributable exact set through `br_sync.sh`.
