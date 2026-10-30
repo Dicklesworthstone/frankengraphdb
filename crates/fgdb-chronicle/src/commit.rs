@@ -33,7 +33,9 @@ use crate::capsule::{
     CapsuleError, CapsuleKeys, MAX_CAPSULE_CONTAINER_BYTES_V1, decode_container, encode_container,
 };
 use crate::identity::CryptoVerificationSink;
-use crate::marker::{ChainError, CommitMarker, EffectSource, MarkerChain};
+use crate::marker::{
+    CHAIN_ORIGIN, ChainError, CommitMarker, EffectSource, MarkerChain, MarkerPrefix,
+};
 use crate::scrub::{
     CapsuleScrubSummary, LostCapsule, LostReason, ScrubCrashPoint, ScrubVerdict, scrub_object,
 };
@@ -96,6 +98,111 @@ const ENTRY_TRAILER_BYTES: usize = 8;
 /// entry after it. A marker is a bounded record — `head_updates` is the only
 /// variable part — so a body beyond this is not a marker this code wrote.
 pub const MAX_ENTRY_BODY: usize = 64 * 1024;
+
+/// A verified complete marker prefix and the commitment at one requested cut.
+///
+/// This is produced only by [`CommitCoordinator::scan_committed_prefix`]. The
+/// scan validates every complete entry, including entries after the requested
+/// checkpoint. It retains no marker bodies or branch-head table on return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitScanSummary {
+    frontier: CommitSeq,
+    chain_value: Digest,
+    requested: CommitSeq,
+    commitment: Option<Digest>,
+}
+
+impl CommitScanSummary {
+    /// The last complete verified commit, or the origin for an empty log.
+    pub fn frontier(&self) -> CommitSeq {
+        self.frontier
+    }
+
+    /// The commitment to the complete verified prefix, not merely the
+    /// requested checkpoint's prefix.
+    pub fn chain_value(&self) -> Digest {
+        self.chain_value
+    }
+
+    /// The commitment at the cut requested when this summary was scanned.
+    ///
+    /// A future cut returns `None`. A different cut also returns `None`: the
+    /// summary is deliberately not a retained random-access marker history.
+    pub fn checkpoint_commitment(&self, at: CommitSeq) -> Option<Digest> {
+        (at == self.requested).then_some(self.commitment).flatten()
+    }
+}
+
+/// Both history recovery and checkpoint-only selection use the same framed
+/// scanner and marker admission law; only the retained output differs.
+trait ScanCollector: Send {
+    fn chain_value(&self) -> Digest;
+    fn next_commit_seq(&self) -> Result<CommitSeq, ChainError>;
+    fn append_marker(&mut self, marker: CommitMarker) -> Result<(), ChainError>;
+}
+
+impl ScanCollector for MarkerChain {
+    fn chain_value(&self) -> Digest {
+        self.chain_value()
+    }
+
+    fn next_commit_seq(&self) -> Result<CommitSeq, ChainError> {
+        self.next_commit_seq()
+    }
+
+    fn append_marker(&mut self, marker: CommitMarker) -> Result<(), ChainError> {
+        self.append(marker).map(|_| ())
+    }
+}
+
+struct PrefixScan {
+    prefix: MarkerPrefix,
+    requested: CommitSeq,
+    commitment: Option<Digest>,
+}
+
+impl PrefixScan {
+    fn new(requested: CommitSeq) -> Self {
+        Self {
+            prefix: MarkerPrefix::default(),
+            requested,
+            commitment: (requested == CommitSeq::ORIGIN).then_some(CHAIN_ORIGIN),
+        }
+    }
+
+    fn finish(self) -> CommitScanSummary {
+        CommitScanSummary {
+            frontier: self.prefix.frontier(),
+            chain_value: self.prefix.chain_value(),
+            requested: self.requested,
+            commitment: self.commitment,
+        }
+    }
+}
+
+impl ScanCollector for PrefixScan {
+    fn chain_value(&self) -> Digest {
+        self.prefix.chain_value()
+    }
+
+    fn next_commit_seq(&self) -> Result<CommitSeq, ChainError> {
+        self.prefix.next_commit_seq()
+    }
+
+    fn append_marker(&mut self, marker: CommitMarker) -> Result<(), ChainError> {
+        self.prefix.append(marker)?;
+        if self.prefix.frontier() == self.requested {
+            self.commitment = Some(self.prefix.chain_value());
+        }
+        Ok(())
+    }
+}
+
+fn scan_checkpoint(cx: &CommitCx) -> Result<(), CommitError> {
+    cx.checkpoint().map_err(|error| {
+        CommitError::Io(std::io::Error::new(std::io::ErrorKind::Interrupted, error))
+    })
+}
 
 async fn read_bounded_capsule_container<R: AsyncRead + Unpin>(
     reader: R,
@@ -465,6 +572,28 @@ impl<V: Vfs> CommitCoordinator<V> {
         Self::recover_chain(cx, vfs, database_dir.as_ref(), false)
             .await
             .map(|(chain, _)| chain)
+    }
+
+    /// Verify the complete committed prefix without retaining its history.
+    ///
+    /// Like [`Self::scan_committed_chain`], this takes no writer lease, writes
+    /// nothing, ignores only a genuinely torn final entry, and refuses damage
+    /// to any complete entry. Finding `requested` does not stop the scan: a
+    /// checkpoint selector must still detect later commits and corrupt suffixes.
+    ///
+    /// Working memory is bounded by one maximum frame and the current head for
+    /// each distinct graph/branch, rather than by the number of commits. The
+    /// returned summary retains just the verified frontier and two commitments;
+    /// origin is a valid requested cut, and a future cut has no commitment.
+    pub async fn scan_committed_prefix(
+        cx: &CommitCx,
+        vfs: &V,
+        database_dir: impl AsRef<Path>,
+        requested: CommitSeq,
+    ) -> Result<CommitScanSummary, CommitError> {
+        let mut scan = PrefixScan::new(requested);
+        Self::scan_chain_into(cx, vfs, database_dir.as_ref(), false, &mut scan).await?;
+        Ok(scan.finish())
     }
 
     /// Install the steps-2–3 validator every subsequent commit is judged by.
@@ -1182,17 +1311,30 @@ impl<V: Vfs> CommitCoordinator<V> {
         dir: &Path,
         repair_tail: bool,
     ) -> Result<(MarkerChain, usize), CommitError> {
+        let mut chain = MarkerChain::new();
+        let discarded_tail_bytes =
+            Self::scan_chain_into(cx, vfs, dir, repair_tail, &mut chain).await?;
+        Ok((chain, discarded_tail_bytes))
+    }
+
+    async fn scan_chain_into<C: ScanCollector>(
+        cx: &CommitCx,
+        vfs: &V,
+        dir: &Path,
+        repair_tail: bool,
+        chain: &mut C,
+    ) -> Result<usize, CommitError> {
         cx.with_restriction_async(async {
+            scan_checkpoint(cx)?;
             let path = dir.join(COMMIT_LOG_NAME);
             let mut file = match vfs.open_read(&path).await {
                 Ok(file) => file,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    return Ok((MarkerChain::new(), 0));
+                    return Ok(0);
                 }
                 Err(error) => return Err(error.into()),
             };
 
-            let mut chain = MarkerChain::new();
             let mut cursor = 0usize;
             // One bounded entry buffer replaces whole-log materialization. A valid
             // writer entry is at most MAX_ENTRY_BODY plus its fixed framing, so a
@@ -1201,7 +1343,11 @@ impl<V: Vfs> CommitCoordinator<V> {
             let mut entry = Vec::with_capacity(
                 ENTRY_HEADER_BYTES + MAX_ENTRY_BODY + CHAIN_HASH_BYTES + ENTRY_TRAILER_BYTES,
             );
-            while let Some(decoded) = Self::read_next_entry(&mut file, &mut entry).await? {
+            loop {
+                scan_checkpoint(cx)?;
+                let Some(decoded) = Self::read_next_entry(&mut file, &mut entry).await? else {
+                    break;
+                };
                 let (marker, stored_chain_hash, consumed) = match decoded {
                     Ok(decoded) => decoded,
                     // Reachable only when the remaining bytes run out, which by
@@ -1225,7 +1371,7 @@ impl<V: Vfs> CommitCoordinator<V> {
                 }
                 let seq = marker.commit_seq;
                 chain
-                    .append(marker)
+                    .append_marker(marker)
                     .map_err(|_| CommitError::CorruptLogEntry { commit_seq: seq })?;
                 cursor = cursor.checked_add(consumed).ok_or_else(|| {
                     CommitError::Io(std::io::Error::new(
@@ -1234,6 +1380,7 @@ impl<V: Vfs> CommitCoordinator<V> {
                     ))
                 })?;
             }
+            scan_checkpoint(cx)?;
             let valid_len = u64::try_from(cursor).map_err(|_| {
                 CommitError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -1241,6 +1388,7 @@ impl<V: Vfs> CommitCoordinator<V> {
                 ))
             })?;
             let file_len = file.metadata().await?.len();
+            scan_checkpoint(cx)?;
             let discarded_tail_bytes =
                 usize::try_from(file_len.checked_sub(valid_len).ok_or_else(|| {
                     CommitError::Io(std::io::Error::new(
@@ -1266,7 +1414,7 @@ impl<V: Vfs> CommitCoordinator<V> {
                     .set_len(valid_len)
                     .await?;
             }
-            Ok((chain, discarded_tail_bytes))
+            Ok(discarded_tail_bytes)
         })
         .await
     }
@@ -1484,14 +1632,17 @@ fn decode_hex_oid(hex: &str) -> Option<ObjectId> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommitCoordinator, ENTRY_HEADER_BYTES, EntryDefect, UnixVfs,
-        read_bounded_capsule_container_with_limit,
+        COMMIT_LOG_NAME, CommitCoordinator, CommitError, ENTRY_HEADER_BYTES, EntryDefect,
+        PrefixScan, ScanCollector, UnixVfs, read_bounded_capsule_container_with_limit,
     };
     use crate::capsule::{CapsuleError, CapsuleKeys, CapsuleProfile};
+    use crate::marker::{ChainError, CommitMarker, EffectSource, MarkerChain};
     use asupersync::io::{AsyncRead, ReadBuf};
     use asupersync::lab::run_async_under_lab;
+    use fgdb_crypto::Digest;
+    use fgdb_types::CommitSeq;
     use fgdb_types::context::PurposeContexts;
-    use fgdb_types::ids::DatabaseSecurityNamespaceId;
+    use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
     use std::future::Future;
     use std::io;
     use std::pin::{Pin, pin};
@@ -1603,6 +1754,103 @@ mod tests {
             LIMIT + 1,
             "the hostile suffix must not be consumed past the proof byte"
         );
+    }
+
+    #[test]
+    fn prefix_scan_observes_cancellation_after_the_requested_marker_was_verified() {
+        struct CancelAfterFirst {
+            scan: PrefixScan,
+            cancel: asupersync::Cx,
+        }
+
+        impl ScanCollector for CancelAfterFirst {
+            fn chain_value(&self) -> Digest {
+                self.scan.chain_value()
+            }
+
+            fn next_commit_seq(&self) -> Result<CommitSeq, ChainError> {
+                self.scan.next_commit_seq()
+            }
+
+            fn append_marker(&mut self, marker: CommitMarker) -> Result<(), ChainError> {
+                self.scan.append_marker(marker)?;
+                self.cancel
+                    .set_cancel_reason(asupersync::CancelReason::user(
+                        "cancel after checkpoint commitment was found",
+                    ));
+                Ok(())
+            }
+        }
+
+        let ((), report) = run_async_under_lab(0x5052_4342, |root| async move {
+            let dir = std::env::temp_dir().join(format!(
+                "fgdb-prefix-mid-scan-cancel-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut chain = MarkerChain::new();
+            let mut bytes = Vec::new();
+            for seq in 1..=3 {
+                let marker = CommitMarker {
+                    logical_command_seq: seq,
+                    commit_seq: seq,
+                    effect_source: EffectSource::Local {
+                        capsule_ref: ObjectId([0x11; 32]),
+                        logical_delta_template_digest: Digest([0x22; 32]),
+                    },
+                    prev_global: None,
+                    head_updates: Vec::new(),
+                    merge_record_oid: None,
+                    coordinate_schema_transition_digest: Digest([0x33; 32]),
+                    topology_epoch: 1,
+                    policy_epoch: 1,
+                    revocation_index: 1,
+                    txn_token: [0x44; 16],
+                    commit_hlc: seq,
+                    final_effect_digest: Digest([0x55; 32]),
+                    authorization_decision_digest: Digest([0x66; 32]),
+                    resource_effect_digest: Digest([0x77; 32]),
+                    payload_availability_certificate_oid: None,
+                    flags: 0,
+                    identity_counters: None,
+                };
+                let accepted = chain.append(marker).unwrap();
+                bytes.extend(
+                    CommitCoordinator::<UnixVfs>::encode_entry(
+                        &accepted.marker,
+                        accepted.chain_hash,
+                    )
+                    .unwrap(),
+                );
+            }
+            std::fs::write(dir.join(COMMIT_LOG_NAME), &bytes).unwrap();
+            let mut child = root
+                .spawn(move |child| async move {
+                    let contexts = PurposeContexts::narrow_runtime_root(&child);
+                    let mut collector = CancelAfterFirst {
+                        scan: PrefixScan::new(CommitSeq::FIRST),
+                        cancel: child,
+                    };
+                    let result = CommitCoordinator::scan_chain_into(
+                        &contexts.commit(),
+                        &UnixVfs::new(),
+                        &dir,
+                        false,
+                        &mut collector,
+                    )
+                    .await;
+                    assert!(matches!(
+                        result,
+                        Err(CommitError::Io(ref error)) if error.kind() == io::ErrorKind::Interrupted
+                    ));
+                    assert_eq!(collector.scan.prefix.frontier(), CommitSeq::FIRST);
+                    assert!(collector.scan.commitment.is_some());
+                    assert_eq!(std::fs::read(dir.join(COMMIT_LOG_NAME)).unwrap(), bytes);
+                })
+                .unwrap();
+            assert_eq!(child.join(&root).await, Ok(()));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 
     #[test]

@@ -51,7 +51,7 @@ pub mod symbolize;
 pub mod transfer;
 pub mod validate;
 
-pub use commit::{CommitCoordinator, CommitError, CrashPoint};
+pub use commit::{CommitCoordinator, CommitError, CommitScanSummary, CrashPoint};
 pub use identity::{
     CipherDescriptor, CryptoVerificationEvent, CryptoVerificationSink, EncodedObject,
     EncodingDescriptor, IdentifiedObject, IdentityMismatch, LocationForm, PlacedObject,

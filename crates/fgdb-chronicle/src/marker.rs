@@ -395,6 +395,156 @@ pub struct MarkerChain {
     heads: Vec<((GraphId, BranchId), MarkerRef)>,
 }
 
+/// The sufficient state for validating the next marker, without retaining any
+/// prior marker body. Read-only checkpoint selection needs this state while it
+/// scans, but never the complete history a writer or history reader owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MarkerFrontier {
+    commit_seq: CommitSeq,
+    logical_command_seq: u64,
+    chain_hash: Digest,
+}
+
+impl From<&ChainedMarker> for MarkerFrontier {
+    fn from(chained: &ChainedMarker) -> Self {
+        Self {
+            commit_seq: CommitSeq(chained.marker.commit_seq),
+            logical_command_seq: chained.marker.logical_command_seq,
+            chain_hash: chained.chain_hash,
+        }
+    }
+}
+
+/// Streaming verification state. Its only growing collection is the current
+/// head per distinct graph/branch, which is necessary to verify later CASes.
+#[derive(Debug, Default)]
+pub(crate) struct MarkerPrefix {
+    frontier: Option<MarkerFrontier>,
+    heads: Vec<((GraphId, BranchId), MarkerRef)>,
+}
+
+impl MarkerPrefix {
+    pub(crate) fn frontier(&self) -> CommitSeq {
+        self.frontier
+            .map_or(CommitSeq::ORIGIN, |last| last.commit_seq)
+    }
+
+    pub(crate) fn chain_value(&self) -> Digest {
+        self.frontier.map_or(CHAIN_ORIGIN, |last| last.chain_hash)
+    }
+
+    pub(crate) fn next_commit_seq(&self) -> Result<CommitSeq, ChainError> {
+        next_commit_seq(self.frontier)
+    }
+
+    pub(crate) fn append(&mut self, marker: CommitMarker) -> Result<(), ChainError> {
+        let chain_hash = validate_marker(&marker, self.frontier, &self.heads)?;
+        let chained = ChainedMarker {
+            marker,
+            marker_oid: ObjectId(chain_hash.0),
+            chain_hash,
+        };
+        self.frontier = Some(adopt_marker(&chained, self.frontier, &mut self.heads)?);
+        Ok(())
+    }
+}
+
+fn next_commit_seq(frontier: Option<MarkerFrontier>) -> Result<CommitSeq, ChainError> {
+    match frontier {
+        None => Ok(CommitSeq::FIRST),
+        Some(last) => Ok(last.commit_seq.checked_successor()?),
+    }
+}
+
+fn branch_head(
+    heads: &[((GraphId, BranchId), MarkerRef)],
+    graph: GraphId,
+    branch: BranchId,
+) -> Option<MarkerRef> {
+    heads
+        .iter()
+        .find(|((g, b), _)| *g == graph && *b == branch)
+        .map(|(_, marker)| *marker)
+}
+
+/// The single structural/hash admission law for retained and streaming scans.
+/// Refusal happens before either representation changes its frontier or heads.
+fn validate_marker(
+    marker: &CommitMarker,
+    frontier: Option<MarkerFrontier>,
+    heads: &[((GraphId, BranchId), MarkerRef)],
+) -> Result<Digest, ChainError> {
+    let expected_seq = next_commit_seq(frontier)?;
+    if marker.commit_seq != expected_seq.0 {
+        return Err(ChainError::NonContiguousCommitSeq {
+            expected: expected_seq.0,
+            found: marker.commit_seq,
+        });
+    }
+    if let Some(last) = frontier {
+        if last.logical_command_seq == u64::MAX {
+            return Err(ChainError::LogicalCommandSeqExhausted {
+                frontier: last.logical_command_seq,
+            });
+        }
+        if marker.logical_command_seq <= last.logical_command_seq {
+            return Err(ChainError::NonMonotonicCommandSeq {
+                previous: last.logical_command_seq,
+                found: marker.logical_command_seq,
+            });
+        }
+    }
+    if !marker.head_updates_are_canonical() {
+        return Err(ChainError::NonCanonicalHeadUpdates);
+    }
+
+    // All CASes are checked before any is applied: advancing several branches
+    // must remain atomic even when an earlier update would have succeeded.
+    for update in &marker.head_updates {
+        let actual = branch_head(heads, update.graph, update.branch);
+        if actual != update.expected_previous {
+            return Err(ChainError::HeadCasMismatch(Box::new(HeadCasMismatch {
+                graph: update.graph,
+                branch: update.branch,
+                expected: update.expected_previous,
+                actual,
+            })));
+        }
+    }
+
+    marker.chain_hash(frontier.map_or(CHAIN_ORIGIN, |last| last.chain_hash))
+}
+
+/// The head index has exactly one writer in both representations. As on the
+/// durable path, a previously validated marker is refused if it became stale.
+fn adopt_marker(
+    chained: &ChainedMarker,
+    frontier: Option<MarkerFrontier>,
+    heads: &mut Vec<((GraphId, BranchId), MarkerRef)>,
+) -> Result<MarkerFrontier, ChainError> {
+    let expected_seq = next_commit_seq(frontier)?;
+    if chained.marker.commit_seq != expected_seq.0 {
+        return Err(ChainError::NonContiguousCommitSeq {
+            expected: expected_seq.0,
+            found: chained.marker.commit_seq,
+        });
+    }
+    for update in &chained.marker.head_updates {
+        let new_head = MarkerRef {
+            marker_oid: chained.marker_oid,
+            commit_seq: CommitSeq(chained.marker.commit_seq),
+        };
+        match heads
+            .iter_mut()
+            .find(|((g, b), _)| *g == update.graph && *b == update.branch)
+        {
+            Some((_, head)) => *head = new_head,
+            None => heads.push(((update.graph, update.branch), new_head)),
+        }
+    }
+    Ok(MarkerFrontier::from(chained))
+}
+
 impl MarkerChain {
     pub fn new() -> Self {
         Self::default()
@@ -411,10 +561,7 @@ impl MarkerChain {
     /// 0 can never be a valid commit and an uninitialised field cannot look
     /// like the first commit.
     pub fn next_commit_seq(&self) -> Result<CommitSeq, ChainError> {
-        match self.entries.last() {
-            None => Ok(CommitSeq::FIRST),
-            Some(entry) => Ok(CommitSeq(entry.marker.commit_seq).checked_successor()?),
-        }
+        next_commit_seq(self.entries.last().map(MarkerFrontier::from))
     }
 
     pub fn len(&self) -> usize {
@@ -427,28 +574,6 @@ impl MarkerChain {
 
     pub fn entries(&self) -> &[ChainedMarker] {
         &self.entries
-    }
-
-    /// Fold one entry's head updates into the head index.
-    ///
-    /// Extracted so the head index has exactly ONE writer. A second copy in a
-    /// constructor would be a duplicated law, and duplicated laws drift — the same
-    /// reason `verify` below re-uses `validate` rather than restating its checks.
-    fn advance_heads(&mut self, chained: &ChainedMarker) {
-        for update in &chained.marker.head_updates {
-            let new_head = MarkerRef {
-                marker_oid: chained.marker_oid,
-                commit_seq: CommitSeq(chained.marker.commit_seq),
-            };
-            match self
-                .heads
-                .iter_mut()
-                .find(|((g, b), _)| *g == update.graph && *b == update.branch)
-            {
-                Some((_, head)) => *head = new_head,
-                None => self.heads.push(((update.graph, update.branch), new_head)),
-            }
-        }
     }
 
     /// Reconstruct a chain from stored entries, validating the complete prefix.
@@ -493,10 +618,7 @@ impl MarkerChain {
 
     /// A branch's current head, if it has one.
     pub fn head(&self, graph: GraphId, branch: BranchId) -> Option<MarkerRef> {
-        self.heads
-            .iter()
-            .find(|((g, b), _)| *g == graph && *b == branch)
-            .map(|(_, marker)| *marker)
+        branch_head(&self.heads, graph, branch)
     }
 
     /// Append one marker, enforcing every structural law before anything is
@@ -518,47 +640,11 @@ impl MarkerChain {
     /// and it is what lets the coordinator avoid cloning the whole chain per
     /// commit just to have something safe to validate against.
     pub fn validate(&self, marker: &CommitMarker) -> Result<ChainedMarker, ChainError> {
-        let expected_seq = self.next_commit_seq()?;
-        if marker.commit_seq != expected_seq.0 {
-            return Err(ChainError::NonContiguousCommitSeq {
-                expected: expected_seq.0,
-                found: marker.commit_seq,
-            });
-        }
-        if let Some(last) = self.entries.last() {
-            if last.marker.logical_command_seq == u64::MAX {
-                return Err(ChainError::LogicalCommandSeqExhausted {
-                    frontier: last.marker.logical_command_seq,
-                });
-            }
-            if marker.logical_command_seq <= last.marker.logical_command_seq {
-                return Err(ChainError::NonMonotonicCommandSeq {
-                    previous: last.marker.logical_command_seq,
-                    found: marker.logical_command_seq,
-                });
-            }
-        }
-        if !marker.head_updates_are_canonical() {
-            return Err(ChainError::NonCanonicalHeadUpdates);
-        }
-
-        // Every head compare-and-swap is checked BEFORE any is applied: a
-        // marker that advances three branches must advance all three or none,
-        // or a partial failure would leave the stream describing a state that
-        // never existed.
-        for update in &marker.head_updates {
-            let actual = self.head(update.graph, update.branch);
-            if actual != update.expected_previous {
-                return Err(ChainError::HeadCasMismatch(Box::new(HeadCasMismatch {
-                    graph: update.graph,
-                    branch: update.branch,
-                    expected: update.expected_previous,
-                    actual,
-                })));
-            }
-        }
-
-        let chain_hash = marker.chain_hash(self.chain_value())?;
+        let chain_hash = validate_marker(
+            marker,
+            self.entries.last().map(MarkerFrontier::from),
+            &self.heads,
+        )?;
         // The marker's identity is its own canonical bytes under the chain
         // value, so two markers with identical content at different points in
         // history are distinct objects — which is what makes a MarkerRef a
@@ -580,15 +666,11 @@ impl MarkerChain {
     /// hash was computed over a history that has since moved — and adopting it
     /// would silently fork the chain value.
     pub(crate) fn adopt(&mut self, chained: ChainedMarker) -> Result<&ChainedMarker, ChainError> {
-        let expected_seq = self.next_commit_seq()?;
-        if chained.marker.commit_seq != expected_seq.0 {
-            return Err(ChainError::NonContiguousCommitSeq {
-                expected: expected_seq.0,
-                found: chained.marker.commit_seq,
-            });
-        }
-
-        self.advance_heads(&chained);
+        adopt_marker(
+            &chained,
+            self.entries.last().map(MarkerFrontier::from),
+            &mut self.heads,
+        )?;
         self.entries.push(chained);
         Ok(self.entries.last().expect("just pushed"))
     }
@@ -841,8 +923,14 @@ mod commit_seq_exhaustion_tests {
             }],
             heads: Vec::new(),
         };
+        let mut prefix = MarkerPrefix {
+            frontier: chain.entries.last().map(MarkerFrontier::from),
+            heads: Vec::new(),
+        };
 
         assert_eq!(chain.next_commit_seq(), Ok(CommitSeq(u64::MAX)));
+        assert_eq!(prefix.next_commit_seq(), chain.next_commit_seq());
+        prefix.append(marker(u64::MAX)).unwrap();
         chain
             .append(marker(u64::MAX))
             .expect("the final representable sequence is assignable");
@@ -853,6 +941,8 @@ mod commit_seq_exhaustion_tests {
 
         for _ in 0..2 {
             assert_eq!(chain.next_commit_seq(), Err(exhausted.clone()));
+            assert_eq!(prefix.next_commit_seq(), Err(exhausted.clone()));
+            assert_eq!(prefix.append(marker(u64::MAX)), Err(exhausted.clone()));
             assert_eq!(
                 chain.append(marker(u64::MAX)).err(),
                 Some(exhausted.clone())
@@ -861,7 +951,129 @@ mod commit_seq_exhaustion_tests {
                 chain.entries, settled,
                 "an exhausted refusal changes no state"
             );
+            assert_eq!(prefix.chain_value(), chain.chain_value());
+            assert_eq!(prefix.frontier(), CommitSeq(u64::MAX));
         }
+    }
+
+    #[test]
+    fn streaming_prefix_matches_history_without_retaining_prior_marker_bodies() {
+        let mut chain = MarkerChain::new();
+        let mut prefix = MarkerPrefix::default();
+        let mut head_capacity = None;
+        for seq in 1..=4096 {
+            let mut next = marker(seq);
+            // Alternate graphs and branches, including high identity bits.
+            // Every third commit advances all three heads atomically.
+            let coordinates = [
+                (GraphId(1), BranchId(1)),
+                (GraphId(1), BranchId(1u128 << 96)),
+                (GraphId(1u128 << 96), BranchId(1)),
+            ];
+            next.head_updates = coordinates
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| seq % 3 == 0 || *i == (seq % 3) as usize)
+                .map(|(_, (graph, branch))| HeadUpdate {
+                    graph,
+                    branch,
+                    expected_previous: chain.head(graph, branch),
+                })
+                .collect();
+            next.prev_global = chain.entries.last().map(|last| MarkerRef {
+                marker_oid: last.marker_oid,
+                commit_seq: CommitSeq(last.marker.commit_seq),
+            });
+            prefix.append(next.clone()).unwrap();
+            chain.append(next).unwrap();
+            assert_eq!(prefix.frontier(), CommitSeq(seq));
+            assert_eq!(prefix.chain_value(), chain.chain_value());
+            assert_eq!(prefix.next_commit_seq(), chain.next_commit_seq());
+            assert_eq!(prefix.heads, chain.heads);
+            if seq >= 3 {
+                assert_eq!(prefix.heads.len(), 3);
+                assert_eq!(
+                    *head_capacity.get_or_insert(prefix.heads.capacity()),
+                    prefix.heads.capacity(),
+                    "streaming retention grows with distinct heads, not commits"
+                );
+            }
+        }
+        assert_eq!(chain.entries.len(), 4096);
+        assert_eq!(prefix.heads.len(), 3);
+    }
+
+    #[test]
+    fn streaming_prefix_refuses_every_structural_defect_without_advancing_heads() {
+        let mut chain = MarkerChain::new();
+        let mut prefix = MarkerPrefix::default();
+        let mut first = marker(1);
+        first.head_updates = [BranchId(1), BranchId(2)]
+            .into_iter()
+            .map(|branch| HeadUpdate {
+                graph: GraphId(1),
+                branch,
+                expected_previous: None,
+            })
+            .collect();
+        prefix.append(first.clone()).unwrap();
+        chain.append(first).unwrap();
+        let mut good = marker(2);
+        good.head_updates = [BranchId(1), BranchId(2)]
+            .into_iter()
+            .map(|branch| HeadUpdate {
+                graph: GraphId(1),
+                branch,
+                expected_previous: chain.head(GraphId(1), branch),
+            })
+            .collect();
+
+        let mut defects = Vec::new();
+        let mut bad = good.clone();
+        bad.commit_seq = 3;
+        defects.push(bad);
+        let mut bad = good.clone();
+        bad.logical_command_seq = 1;
+        defects.push(bad);
+        let mut bad = good.clone();
+        bad.head_updates.reverse();
+        defects.push(bad);
+        let mut bad = good.clone();
+        bad.head_updates[1] = bad.head_updates[0];
+        defects.push(bad);
+        for wrong_head in 0..2 {
+            let mut bad = good.clone();
+            bad.head_updates[wrong_head].expected_previous = None;
+            defects.push(bad);
+        }
+        let mut bad = good.clone();
+        bad.flags = MARKER_FLAG_IDENTITY_COUNTERS;
+        defects.push(bad);
+
+        let settled_frontier = prefix.frontier;
+        let settled_heads = prefix.heads.clone();
+        for bad in defects {
+            let expected = chain.append(bad.clone()).unwrap_err();
+            assert_eq!(prefix.append(bad), Err(expected));
+            assert_eq!(chain.len(), 1);
+            assert_eq!(prefix.frontier, settled_frontier);
+            assert_eq!(prefix.heads, settled_heads);
+            assert_eq!(prefix.heads, chain.heads);
+        }
+        // Refusals do not consume the next sequence or partially advance the
+        // first head when only the second CAS was wrong.
+        good.logical_command_seq = u64::MAX;
+        prefix.append(good.clone()).unwrap();
+        chain.append(good).unwrap();
+        let bad = marker(3);
+        let expected = chain.append(bad.clone()).unwrap_err();
+        assert!(matches!(
+            expected,
+            ChainError::LogicalCommandSeqExhausted { .. }
+        ));
+        assert_eq!(prefix.append(bad), Err(expected));
+        assert_eq!(prefix.heads, chain.heads);
+        assert_eq!(prefix.chain_value(), chain.chain_value());
     }
 
     #[test]

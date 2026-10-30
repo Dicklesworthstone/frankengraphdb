@@ -81,9 +81,11 @@ impl From<MemoryError> for BufferedOpenError {
 /// commits or compaction cannot change its selected root.
 ///
 /// The metadata and graph read allowances belong to the supplied MemoryPool.
-/// Chronicle recovery and its marker-chain metadata remain outside that pool,
-/// as in the ordinary opener. A cold open verifies every named graph object
-/// and can refuse when its bounded identity/history metadata does not fit.
+/// Chronicle's read-only scan remains outside that pool: it retains one bounded
+/// frame and the current head per distinct graph/branch while verifying the
+/// complete prefix, then releases them before graph admission. A cold open
+/// verifies every named graph object and can refuse when its bounded
+/// identity/history metadata does not fit.
 /// Database::buffered_read_view reuses the live handle's complete admission,
 /// reading only descriptors before queries fault the extents they touch.
 /// The governed query methods execute native ordered vertex and single-edge
@@ -415,14 +417,19 @@ impl<V: Vfs + Clone> Database<V> {
         // Scanned after the slot was read: a writer appends a marker before
         // it publishes the root that names it, so this chain reaches the
         // slot's frontier.
-        let chain = CommitCoordinator::scan_committed_chain(cx, &vfs, path)
+        let requested = resolved
+            .first()
+            .map_or(CommitSeq::ORIGIN, |(_, root)| root.published_at);
+        let scan = CommitCoordinator::scan_committed_prefix(cx, &vfs, path, requested)
             .await
             .map_err(OpenError::Commit)?;
-        let checkpoint = checkpoint_from_manifest(&chain, manifest, &resolved, path)?;
-        let chain_frontier = chain.entries().last().map_or(CommitSeq::ORIGIN, |entry| {
-            CommitSeq(entry.marker.commit_seq)
-        });
-        if checkpoint.published_at != chain_frontier {
+        let checkpoint = checkpoint_from_manifest_commitment(
+            |at| scan.checkpoint_commitment(at),
+            manifest,
+            &resolved,
+            path,
+        )?;
+        if checkpoint.published_at != scan.frontier() {
             return Err(BufferedOpenError::RecoveryRequired);
         }
         drop(resolved);

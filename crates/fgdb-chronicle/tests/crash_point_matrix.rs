@@ -176,6 +176,40 @@ fn log_bytes(dir: &Path) -> Vec<u8> {
     std::fs::read(dir.join(COMMIT_LOG_NAME)).unwrap_or_default()
 }
 
+async fn assert_prefix_summaries_match_history(cx: &CommitCx, dir: &Path, chain: &MarkerChain) {
+    let frontier = chain.entries().last().map_or(CommitSeq::ORIGIN, |entry| {
+        CommitSeq(entry.marker.commit_seq)
+    });
+    for requested in (0..=frontier.0 + 1).chain(std::iter::once(u64::MAX)) {
+        let requested = CommitSeq(requested);
+        let summary = CommitCoordinator::scan_committed_prefix(cx, &UnixVfs::new(), dir, requested)
+            .await
+            .expect("a summary validates the same complete prefix");
+        assert_eq!(summary.frontier(), frontier);
+        assert_eq!(summary.chain_value(), chain.chain_value());
+        let expected = if requested == CommitSeq::ORIGIN {
+            Some(fgdb_chronicle::marker::CHAIN_ORIGIN)
+        } else {
+            chain
+                .entries()
+                .iter()
+                .find(|entry| entry.marker.commit_seq == requested.0)
+                .map(|entry| entry.chain_hash)
+        };
+        assert_eq!(summary.checkpoint_commitment(requested), expected);
+        let other = if requested == CommitSeq::ORIGIN {
+            CommitSeq::FIRST
+        } else {
+            CommitSeq::ORIGIN
+        };
+        assert_eq!(
+            summary.checkpoint_commitment(other),
+            None,
+            "a summary cannot stand in for unrequested history"
+        );
+    }
+}
+
 fn write_log(dir: &Path, bytes: &[u8]) {
     std::fs::write(dir.join(COMMIT_LOG_NAME), bytes).expect("rewrite log");
 }
@@ -1463,6 +1497,29 @@ fn truncation_anywhere_in_the_final_entry_recovers_the_prefix() {
         let mut failures: Vec<String> = Vec::new();
         for cut in committed_len..full.len() {
             write_log(&dir, &full[..cut]);
+            // The compact selector must admit the same complete prefix at
+            // every tear offset, without taking the writer's repair path.
+            match CommitCoordinator::scan_committed_prefix(cx, &UnixVfs::new(), &dir, CommitSeq(2))
+                .await
+            {
+                Ok(summary) => {
+                    if summary.frontier() != CommitSeq(3)
+                        || summary.chain_value() != chain_snapshot.chain_value()
+                        || summary.checkpoint_commitment(CommitSeq(2))
+                            != Some(chain_snapshot.entries()[1].chain_hash)
+                    {
+                        failures.push(format!(
+                            "cut at {cut}: compact selection disagrees with the committed prefix"
+                        ));
+                    }
+                }
+                Err(error) => failures.push(format!(
+                    "cut at {cut}: compact selection refused the torn suffix ({error})"
+                )),
+            }
+            if log_bytes(&dir) != full[..cut] {
+                failures.push(format!("cut at {cut}: compact selection changed the log"));
+            }
             match CommitCoordinator::open(cx, &dir, keys()).await {
                 Ok(reopened) => {
                     if reopened.chain().len() != 3 {
@@ -2128,6 +2185,7 @@ fn a_lease_free_scan_reads_committed_entries_and_never_repairs_a_torn_tail() {
         let mut coordinator = CommitCoordinator::open(cx, &dir, keys())
             .await
             .expect("open");
+        assert_prefix_summaries_match_history(cx, &dir, coordinator.chain()).await;
         commit_ok(&mut coordinator, cx, 1).await;
         commit_ok(&mut coordinator, cx, 2).await;
         let committed = log_bytes(&dir);
@@ -2136,6 +2194,7 @@ fn a_lease_free_scan_reads_committed_entries_and_never_repairs_a_torn_tail() {
             .await
             .expect("scan beside a live writer");
         assert_eq!(scanned.entries(), coordinator.chain().entries());
+        assert_prefix_summaries_match_history(cx, &dir, &scanned).await;
 
         let chain_snapshot = coordinator.chain().clone();
         let crashed = coordinator
@@ -2165,6 +2224,7 @@ fn a_lease_free_scan_reads_committed_entries_and_never_repairs_a_torn_tail() {
             .map(|entry| entry.marker.commit_seq)
             .collect();
         assert_eq!(sequences, vec![1, 2]);
+        assert_prefix_summaries_match_history(cx, &dir, &scanned).await;
         assert_eq!(log_bytes(&dir), torn, "a read-only scan repairs nothing");
 
         drop(coordinator);
@@ -2174,4 +2234,94 @@ fn a_lease_free_scan_reads_committed_entries_and_never_repairs_a_torn_tail() {
         assert_eq!(recovered.discarded_tail_bytes(), 4);
         assert_eq!(log_bytes(&dir), committed);
     });
+}
+
+#[test]
+fn prefix_selection_refuses_complete_corruption_after_the_requested_checkpoint() {
+    let dir = scratch_dir("prefix-summary-corrupt-suffix");
+    under_lab(0x5052_4658, move |cx| async move {
+        let (original, first_len) = three_commit_log(&dir, &cx).await;
+        let second_body_len =
+            u32::from_be_bytes(original[first_len + 4..first_len + 8].try_into().unwrap()) as usize;
+        for damage in 0..5 {
+            let mut bytes = original.clone();
+            match damage {
+                0 => bytes[first_len] ^= 0xff,
+                1 => bytes[first_len + 4..first_len + 8].copy_from_slice(&u32::MAX.to_be_bytes()),
+                2 => bytes[first_len + 8 + 16] = 0x7f,
+                3 => bytes[first_len + 8 + second_body_len] ^= 1,
+                4 => *bytes.last_mut().unwrap() ^= 1,
+                _ => unreachable!(),
+            }
+            write_log(&dir, &bytes);
+            let history_error = CommitCoordinator::scan_committed_chain(&cx, &UnixVfs::new(), &dir)
+                .await
+                .unwrap_err();
+            let summary_error = CommitCoordinator::scan_committed_prefix(
+                &cx,
+                &UnixVfs::new(),
+                &dir,
+                CommitSeq::FIRST,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(history_error.to_string(), summary_error.to_string());
+            assert!(
+                match damage {
+                    3 => matches!(summary_error, CommitError::ChainDiverged { commit_seq: 2 }),
+                    4 => matches!(
+                        summary_error,
+                        CommitError::CorruptLogEntry { commit_seq: 3 }
+                    ),
+                    _ => matches!(
+                        summary_error,
+                        CommitError::CorruptLogEntry { commit_seq: 2 }
+                    ),
+                },
+                "damage {damage}: {summary_error:?}"
+            );
+            assert_eq!(log_bytes(&dir), bytes, "read-only refusal repairs nothing");
+        }
+        write_log(&dir, &original);
+        let history = CommitCoordinator::scan_committed_chain(&cx, &UnixVfs::new(), &dir)
+            .await
+            .unwrap();
+        assert_prefix_summaries_match_history(&cx, &dir, &history).await;
+    });
+}
+
+#[test]
+fn a_cancelled_read_only_scan_returns_no_checkpoint_or_history_and_writes_nothing() {
+    let dir = scratch_dir("prefix-summary-cancelled");
+    let ((), report) = run_async_under_lab(0x5052_4341, move |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (bytes, _) = three_commit_log(&dir, &contexts.commit()).await;
+        let mut child = root
+            .spawn(move |child| async move {
+                let contexts = PurposeContexts::narrow_runtime_root(&child);
+                child.set_cancel_reason(asupersync::CancelReason::user("prefix scan cancelled"));
+                let summary = CommitCoordinator::scan_committed_prefix(
+                    &contexts.commit(),
+                    &UnixVfs::new(),
+                    &dir,
+                    CommitSeq::FIRST,
+                )
+                .await;
+                assert!(matches!(
+                    summary,
+                    Err(CommitError::Io(ref error)) if error.kind() == std::io::ErrorKind::Interrupted
+                ));
+                let history =
+                    CommitCoordinator::scan_committed_chain(&contexts.commit(), &UnixVfs::new(), &dir)
+                        .await;
+                assert!(matches!(
+                    history,
+                    Err(CommitError::Io(ref error)) if error.kind() == std::io::ErrorKind::Interrupted
+                ));
+                assert_eq!(log_bytes(&dir), bytes);
+            })
+            .expect("spawn cancellable reader");
+        assert_eq!(child.join(&root).await, Ok(()));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }

@@ -3101,19 +3101,23 @@ impl<V: Vfs + Clone> Database<V> {
         else {
             return Ok(ReadGeneration::Unselected);
         };
-        let chain = CommitCoordinator::scan_committed_chain(cx, vfs, path).await?;
-        let checkpoint = checkpoint_from_manifest(&chain, claimed, &resolved, path)?;
-        let chain_frontier = chain
-            .entries()
-            .last()
-            .map_or(0, |entry| entry.marker.commit_seq);
+        let requested = resolved
+            .first()
+            .map_or(CommitSeq::ORIGIN, |(_, root)| root.published_at);
+        let scan = CommitCoordinator::scan_committed_prefix(cx, vfs, path, requested).await?;
+        let checkpoint = checkpoint_from_manifest_commitment(
+            |at| scan.checkpoint_commitment(at),
+            claimed,
+            &resolved,
+            path,
+        )?;
         let published = PublishedRead {
             store,
             root_id: checkpoint.root_id,
             manifest: checkpoint.manifest,
             published_at: checkpoint.published_at,
         };
-        Ok(if chain_frontier == checkpoint.published_at.0 {
+        Ok(if scan.frontier() == checkpoint.published_at {
             ReadGeneration::Current(published)
         } else {
             ReadGeneration::Lagging(published)
@@ -6622,6 +6626,20 @@ fn checkpoint_from_manifest(
     resolved: &[(ManifestRecord, fgdb_strata::root::PartitionRoot)],
     path: &Path,
 ) -> Result<SelectedCheckpoint, OpenError> {
+    checkpoint_from_manifest_commitment(
+        |at| chain_commitment_at(chain, at),
+        claimed,
+        resolved,
+        path,
+    )
+}
+
+fn checkpoint_from_manifest_commitment(
+    commitment_at: impl FnOnce(CommitSeq) -> Option<Digest>,
+    claimed: ManifestVersion,
+    resolved: &[(ManifestRecord, fgdb_strata::root::PartitionRoot)],
+    path: &Path,
+) -> Result<SelectedCheckpoint, OpenError> {
     let disagrees = || OpenError::SlotDisagreesWithStream {
         path: path.to_path_buf(),
         slot_manifest: claimed.0,
@@ -6642,7 +6660,7 @@ fn checkpoint_from_manifest(
     // history hashes differently; a lagging root matches at its own seq and
     // heals in bind. WHAT was published stays the equivalence law's question —
     // this binding answers WHO published it.
-    let bound = chain_commitment_at(chain, root.published_at)
+    let bound = commitment_at(root.published_at)
         .is_some_and(|expected| expected == record.published_chain_hash);
     if !describes_spine || !bound {
         return Err(disagrees());

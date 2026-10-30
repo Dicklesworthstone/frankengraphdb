@@ -9,8 +9,9 @@
 use asupersync::fs::{Metadata, OpenOptions, Permissions, ReadDir, Vfs};
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
-    BufferLimits, BufferedReadLimits, Database, DatabaseKeys, DerivedPublicationStage, MemVfs,
-    MemVfsFile, MemoryPool, SealedProjectionOpenError, WriteBatch, WriteError,
+    BufferLimits, BufferedOpenError, BufferedReadLimits, Database, DatabaseKeys,
+    DerivedPublicationStage, MemVfs, MemVfsFile, MemoryPool, OpenError, SealedProjectionOpenError,
+    WriteBatch, WriteError,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_prism::{
@@ -239,6 +240,156 @@ fn read_only_opens_beside_a_live_writer_create_write_or_sync_nothing() {
             "buffered read view"
         );
         drop(writer);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn read_only_prefix_selection_refuses_future_and_foreign_checkpoint_histories() {
+    let ((), report) = run_async_under_lab(0x7669_6630, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let vfs = RecordingVfs::new();
+        let path = vfs.memory.database_dir();
+        let writer = spokes(&commit, &vfs, 2).await;
+        let frontier = writer.frontier().unwrap();
+        drop(writer);
+        let log_path = path.join(fgdb_chronicle::commit::COMMIT_LOG_NAME);
+        let original = vfs.memory.read(&log_path).await.unwrap();
+        let first_body_len = u32::from_be_bytes(original[4..8].try_into().unwrap()) as usize;
+        let first_frame_len = 8 + first_body_len + 32 + 8;
+
+        // This is another authentic history under the SAME namespace and keys,
+        // at the SAME frontier. Object identity and sequence alone cannot bind
+        // our checkpoint to its chain.
+        let foreign_vfs = RecordingVfs::new();
+        let foreign_path = foreign_vfs.memory.database_dir();
+        let mut foreign =
+            Database::create_with_vfs(&commit, foreign_vfs.clone(), &foreign_path, keys())
+                .await
+                .unwrap();
+        for id in [999, 1000] {
+            let mut batch = WriteBatch::new(RELATION);
+            batch.create_vertex(VId(id), vec![], vec![]);
+            foreign.write(&commit, batch).await.unwrap();
+        }
+        assert_eq!(foreign.frontier().unwrap(), frontier);
+        drop(foreign);
+        let foreign_log = foreign_vfs
+            .memory
+            .read(&foreign_path.join(fgdb_chronicle::commit::COMMIT_LOG_NAME))
+            .await
+            .unwrap();
+        assert_ne!(foreign_log, original);
+
+        for (case, log) in [
+            ("future checkpoint", &original[..first_frame_len]),
+            ("foreign history", foreign_log.as_slice()),
+        ] {
+            vfs.memory.write(&log_path, log).await.unwrap();
+            vfs.take_writes();
+            assert!(
+                matches!(
+                    Database::open_read_view_with_vfs(&commit, vfs.clone(), &path, keys()).await,
+                    Err(OpenError::SlotDisagreesWithStream { .. })
+                ),
+                "resident selector: {case}"
+            );
+            let pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+            assert!(
+                matches!(
+                    Database::open_buffered_read_view_with_vfs(
+                        &commit,
+                        vfs.clone(),
+                        &path,
+                        keys(),
+                        pool.clone(),
+                        buffered_limits(),
+                    )
+                    .await,
+                    Err(BufferedOpenError::Open(
+                        OpenError::SlotDisagreesWithStream { .. }
+                    ))
+                ),
+                "buffered selector: {case}"
+            );
+            assert_eq!(pool.used(), 0, "refused selection releases metadata");
+            assert!(vfs.take_writes().is_empty(), "{case} must not heal");
+            assert_eq!(vfs.memory.read(&log_path).await.unwrap(), log);
+        }
+
+        vfs.memory.write(&log_path, &original).await.unwrap();
+        let resident = Database::open_read_view_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let buffered = Database::open_buffered_read_view_with_vfs(
+            &commit,
+            vfs.clone(),
+            &path,
+            keys(),
+            MemoryPool::new(16 * 1024 * 1024, 0).unwrap(),
+            buffered_limits(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resident.frontier(), frontier);
+        assert_eq!(buffered.frontier(), frontier);
+        assert!(vfs.take_writes().is_empty());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn read_only_prefix_selection_checks_complete_entries_after_a_lagging_root() {
+    let ((), report) = run_async_under_lab(0x7669_6631, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let vfs = RecordingVfs::new();
+        let path = vfs.memory.database_dir();
+        let mut writer = spokes(&commit, &vfs, 1).await;
+        let slot_path = path.join("manifest.root");
+        let old_slot = vfs.memory.read(&slot_path).await.unwrap();
+        let log_path = path.join(fgdb_chronicle::commit::COMMIT_LOG_NAME);
+        let first_len = vfs.memory.read(&log_path).await.unwrap().len();
+        writer.write(&commit, spoke(2)).await.unwrap();
+        writer.write(&commit, spoke(3)).await.unwrap();
+        drop(writer);
+        vfs.memory.write(&slot_path, &old_slot).await.unwrap();
+
+        // The selected cut (1) is fully valid, but the second complete frame's
+        // stored commitment is damaged. Returning as soon as cut 1 was found
+        // would incorrectly admit it or enter a healing path.
+        let mut log = vfs.memory.read(&log_path).await.unwrap();
+        let second_body_len =
+            u32::from_be_bytes(log[first_len + 4..first_len + 8].try_into().unwrap()) as usize;
+        log[first_len + 8 + second_body_len] ^= 1;
+        vfs.memory.write(&log_path, &log).await.unwrap();
+        vfs.take_writes();
+        assert!(matches!(
+            Database::open_read_view_with_vfs(&commit, vfs.clone(), &path, keys()).await,
+            Err(OpenError::Commit(
+                fgdb_chronicle::CommitError::ChainDiverged { commit_seq: 2 }
+            ))
+        ));
+        let pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        assert!(matches!(
+            Database::open_buffered_read_view_with_vfs(
+                &commit,
+                vfs.clone(),
+                &path,
+                keys(),
+                pool.clone(),
+                buffered_limits(),
+            )
+            .await,
+            Err(BufferedOpenError::Open(OpenError::Commit(
+                fgdb_chronicle::CommitError::ChainDiverged { commit_seq: 2 }
+            )))
+        ));
+        assert_eq!(pool.used(), 0);
+        assert!(vfs.take_writes().is_empty());
+        assert_eq!(vfs.memory.read(&log_path).await.unwrap(), log);
+        assert_eq!(vfs.memory.read(&slot_path).await.unwrap(), old_slot);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
