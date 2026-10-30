@@ -239,6 +239,7 @@ fn composite_write_matches_preserve_overlay_bags_and_rollback_on_late_failure() 
                 [20, 20, 90, 90]
             );
             txn.finish(&mut db, &commit).await.unwrap();
+            // The writer handle must close before the database reopens.
             drop(db);
             let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
                 .await

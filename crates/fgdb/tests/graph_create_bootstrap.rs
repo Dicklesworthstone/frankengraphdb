@@ -79,14 +79,12 @@ fn verify_bootstrap(db: &Database<MemVfs>, base: u128, seed: i64) {
     for (offset, value) in [(0, Some(seed)), (1, Some(seed + 1)), (2, None)] {
         let vertex = db.vertex(VId(base + offset)).unwrap().unwrap();
         assert_eq!(vertex.labels, vec![NODE]);
+        // A top-level NULL is no stored value (fgdb-e26tv).
         assert_eq!(
             vertex.props,
-            vec![(
-                P,
-                value
-                    .map_or(CanonicalScalar::Null, CanonicalScalar::Int)
-                    .into()
-            )]
+            (value.into_iter())
+                .map(|value| (P, CanonicalScalar::Int(value).into()))
+                .collect::<Vec<_>>()
         );
     }
     for (offset, source, destination) in [(0, base, base + 1), (1, base + 1, base), (2, base, base)]

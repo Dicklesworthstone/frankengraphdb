@@ -385,7 +385,7 @@ fn plain_and_detaching_deletes_do_not_mix() {
 /// A leading OPTIONAL MATCH (openCypher Delete1, Remove1, Remove2, Set1) is
 /// the unit row left-joined with its pattern: no match leaves one all-NULL
 /// row, whose writes are ignored and whose RETURN reads NULL; a match writes
-/// as MATCH would. A required MATCH may not follow it.
+/// as MATCH would. A required MATCH after it joins each of its rows.
 #[test]
 fn a_leading_optional_match_writes_its_witnesses_or_returns_one_null_row() {
     run(async |commit, cx, txcx| {
@@ -426,18 +426,24 @@ fn a_leading_optional_match_writes_its_witnesses_or_returns_one_null_row() {
             ),
             vec![vec![int(2), int(5)], vec![int(4), int(10)]]
         );
+        // A required MATCH after it joins each of its rows: here the one
+        // all-NULL row, so every Item is written and returned once.
+        let mut txn = db.begin(txcx).unwrap();
+        let (_, result) = txn
+            .execute_graph_mutation_query_governed(
+                &mut db,
+                cx,
+                &prepare("OPTIONAL MATCH (a:Seen) MATCH (b:Item) SET b.p = 1 RETURN b.p AS p"),
+                policy(),
+            )
+            .unwrap();
+        assert_eq!(result.value, rows(vec![vec![int(1)]; 4]));
+        txn.finish(&mut db, commit).await.unwrap();
+        assert_eq!(
+            read(&db, cx, "MATCH (n:Item) RETURN n.p AS p"),
+            vec![vec![int(1)]; 4]
+        );
     });
-    let mut calls = 0;
-    let refused = PreparedGraphMutationQueryText::prepare(
-        "OPTIONAL MATCH (a:Seen) MATCH (b:Item) SET b.p = 1 RETURN b",
-        R,
-        |kind, name: &str| {
-            calls += 1;
-            symbols(kind, name)
-        },
-    );
-    assert!(refused.is_err());
-    assert_eq!(calls, 0);
 }
 
 /// `labels(n)` after the statement's own label actions (openCypher Set3,

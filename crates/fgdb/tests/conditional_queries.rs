@@ -391,9 +391,10 @@ fn selected_branch_failure_and_refusals_preserve_the_complete_prior_workspace() 
                 "CASE WHEN n.p=3 THEN 9223372036854775807+1 ELSE 0 END",
                 GraphIntegerErrorKind::Overflow,
             ),
+            // `+` meeting a text is concatenation, which refuses the integer.
             (
                 "CASE WHEN n.p=3 THEN n.q+1 ELSE 0 END",
-                GraphIntegerErrorKind::NonInteger,
+                GraphIntegerErrorKind::NonText,
             ),
         ] {
             let query = PreparedGraphMutationText::prepare(
