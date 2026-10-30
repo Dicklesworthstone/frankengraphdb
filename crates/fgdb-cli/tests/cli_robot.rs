@@ -3583,8 +3583,8 @@ fn sealed_prism_cli_preflights_before_writable_open() {
                 "1",
                 "CALL fnx.cdlp(max_iter => 2) YIELD vertex,component",
             ],
-            3,
-            "query",
+            4,
+            "open",
         ),
         (
             &[
@@ -4863,6 +4863,38 @@ fn search_lanes_equal_the_library_and_pin_history() {
 }
 
 #[test]
+fn buffered_cooperative_cdlp_cli_matches_live_decoded_results() {
+    let db = TestDb::new("prism-cooperative-cdlp-cli");
+    db.create();
+    db.write(&["INSERT (a:Person),(b:Person),(c:Person),(:Person),\
+         (a)-[:KNOWS]->(b),(b)-[:KNOWS]->(a),(b)-[:KNOWS]->(c),(c)-[:KNOWS]->(b)"]);
+    for iterations in [0, 1, 2, 5] {
+        let call = format!("CALL fnx.cdlp(max_iter => {iterations}) YIELD vertex,component");
+        let expected = db.command("query", &["--graph-relation", "KNOWS", &call]);
+        expected.success();
+        for quantum in ["1", "7"] {
+            let actual = db.command(
+                "query",
+                &[
+                    "--buffered",
+                    "--sealed",
+                    "--sealed-quantum",
+                    quantum,
+                    "--graph-relation",
+                    "KNOWS",
+                    &call,
+                ],
+            );
+            actual.success();
+            assert_eq!(
+                actual.events, expected.events,
+                "iterations={iterations}, quantum={quantum}"
+            );
+        }
+    }
+}
+
+#[test]
 fn historical_composed_sealed_calls_select_one_cut_across_processes() {
     let db = TestDb::new("prism-temporal-composed-sealed");
     db.create();
@@ -4878,7 +4910,10 @@ fn historical_composed_sealed_calls_select_one_cut_across_processes() {
         parallel => 'collapse', self_loops => 'drop') YIELD vertex, component \
         WHERE vertex = n RETURN n.name AS name ORDER BY name";
     let expected = db.command("query", &["--param", &at, text]);
-    assert_rows(&expected, r#"[[{"type":"text","value":"A"}],[{"type":"text","value":"B"}],[{"type":"text","value":"C"}]]"#);
+    assert_rows(
+        &expected,
+        r#"[[{"type":"text","value":"A"}],[{"type":"text","value":"B"}],[{"type":"text","value":"C"}]]"#,
+    );
     for explicit in [false, true] {
         let mut args = vec!["--sealed", "--graph-relation", "KNOWS", "--param", &at];
         if explicit {
@@ -4891,15 +4926,35 @@ fn historical_composed_sealed_calls_select_one_cut_across_processes() {
     }
     let refused = db.command(
         "query",
-        &["--sealed", "--graph-relation", "KNOWS", "--as-of", "0", "--param", &at, text],
+        &[
+            "--sealed",
+            "--graph-relation",
+            "KNOWS",
+            "--as-of",
+            "0",
+            "--param",
+            &at,
+            text,
+        ],
     );
     refused.failure(3, "query");
     assert_eq!(refused.terminal().get("code").string(), "invalid_value");
     let missing = TestDb::new("prism-temporal-conflict-no-open");
-    missing.command(
-        "query",
-        &["--sealed", "--graph-relation", "KNOWS", "--as-of", "0", "--param", &at, text],
-    ).failure(3, "query");
+    missing
+        .command(
+            "query",
+            &[
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "--as-of",
+                "0",
+                "--param",
+                &at,
+                text,
+            ],
+        )
+        .failure(3, "query");
     assert!(!std::path::Path::new(&missing.db).exists());
 }
 
