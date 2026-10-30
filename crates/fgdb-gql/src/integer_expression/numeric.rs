@@ -39,11 +39,24 @@ fn operand(cell: &ExpressionCell<'_>) -> Result<Option<CanonicalF64>, GraphInteg
             CanonicalScalar::Int(value) => Ok(Some(CanonicalF64::from_i64_rounded(*value))),
             _ => Err(GraphIntegerErrorKind::IncompatibleOperands),
         },
-        // Counts and wide sums are not ordinary scalar Ints. Reject mixing
-        // them with Float rather than silently losing precision. (An exact
-        // average arrives here already rounded to binary64, fgdb-y255t.)
-        _ => Err(GraphIntegerErrorKind::IncompatibleOperands),
+        // An exact count or wide sum paired with a Float is the binary64
+        // nearest it, rounded once, as an Int is here and as the one-operand
+        // numeric functions read it (fgdb-y255t, option C). Integer-only
+        // arithmetic keeps the exact path: only a Float operand gets here.
+        ExpressionCell::Count(value) => Ok(Some(nearest(i128::from(*value)))),
+        ExpressionCell::Integer(value) => Ok(Some(nearest(*value))),
+        // An exact average arrives here already rounded to binary64.
+        ExpressionCell::Average(_) | ExpressionCell::Composite(_) => {
+            Err(GraphIntegerErrorKind::IncompatibleOperands)
+        }
     }
+}
+
+/// The binary64 nearest an exact integer, rounded once, ties to even.
+fn nearest(value: i128) -> CanonicalF64 {
+    let mut exact = fgdb_types::ExactBinary64Sum::new();
+    exact.add_integer(value);
+    exact.sum()
 }
 
 pub(super) fn check(cell: &ExpressionCell<'_>) -> Result<(), GraphIntegerErrorKind> {
@@ -325,14 +338,14 @@ mod tests {
         ] {
             assert_eq!(run(&ops), Ok(expected), "{ops:?}");
         }
-        // Counts and wide sums keep refusing to mix with a Float.
+        // A count beside the rounded average is its own nearest binary64.
         let sum = GraphIntegerExpression::prepare_scalar(&[
             column,
             Op::ScalarColumn(1),
             Op::Binary(GraphIntegerBinary::Add),
         ])
         .unwrap();
-        let refused = sum.evaluate_loaded_with_control(
+        let joined = sum.evaluate_loaded_with_control(
             2,
             |at| {
                 Ok(if at == 0 {
@@ -344,9 +357,98 @@ mod tests {
             |_| Err(GraphIntegerErrorKind::NonScalar),
             &mut |_| Ok::<_, ()>(()),
         );
-        assert!(
-            matches!(refused, Err(GraphIntegerEvaluationError::Value(error))
-            if error.kind == GraphIntegerErrorKind::IncompatibleOperands)
+        let Ok(ExpressionCell::Scalar(joined)) = joined else {
+            panic!("an average beside a count joins as a float")
+        };
+        assert_eq!(joined.into_owned(), f(mean + 3.0));
+    }
+
+    /// fgdb-y255t, option C for the other exact aggregate cells: a count or a
+    /// wide sum that meets a Float is the binary64 nearest it, rounded once
+    /// with ties to even, as an Int column is. Without a Float the exact
+    /// integer path is unchanged.
+    #[test]
+    fn counts_and_wide_sums_meet_a_float_as_their_nearest_binary64() {
+        #[derive(Clone, Copy, Debug)]
+        enum Exact {
+            Count(u64),
+            Wide(i128),
+        }
+        let two_63 = 1_i128 << 63;
+        // A scalar result, or Err with an exact integer cell's value.
+        let run = |exact: Exact, ops: &[Op]| {
+            GraphIntegerExpression::prepare_scalar(ops)
+                .unwrap()
+                .evaluate_loaded_with_control(
+                    1,
+                    |_| {
+                        Ok(match exact {
+                            Exact::Count(count) => ExpressionCell::Count(count),
+                            Exact::Wide(wide) => ExpressionCell::Integer(wide),
+                        })
+                    },
+                    |_| Err(GraphIntegerErrorKind::NonScalar),
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .map(|cell| match cell {
+                    ExpressionCell::Scalar(value) => Ok(value.into_owned()),
+                    ExpressionCell::Integer(value) => Err(value),
+                    _ => panic!("an exact integer operand yields a scalar or an integer"),
+                })
+                .map_err(|error| match error {
+                    GraphIntegerEvaluationError::Value(error) => error.kind,
+                    GraphIntegerEvaluationError::Control(()) => unreachable!(),
+                })
+        };
+        let column = Op::ScalarColumn(0);
+        let times = |factor: f64| {
+            vec![
+                column.clone(),
+                literal(f(factor)),
+                Op::Binary(GraphIntegerBinary::Multiply),
+            ]
+        };
+        for (exact, ops, expected) in [
+            (Exact::Count(3), times(1.5), f(4.5)),
+            (
+                Exact::Count(3),
+                vec![
+                    column.clone(),
+                    literal(f(100.0)),
+                    Op::Binary(GraphIntegerBinary::Multiply),
+                    Op::Literal(Some(4)),
+                    Op::Binary(GraphIntegerBinary::Divide),
+                ],
+                f(75.0),
+            ),
+            (Exact::Wide(two_63), times(1.0), f(9.223_372_036_854_776e18)),
+            // 2^63 + 1 lies between 2^63 and its successor 2^63 + 2048: the
+            // nearest binary64 is 2^63. Past the midpoint, -(2^63 + 1025)
+            // rounds away to -(2^63 + 2048).
+            (
+                Exact::Wide(two_63 + 1),
+                times(1.0),
+                f(9.223_372_036_854_776e18),
+            ),
+            (
+                Exact::Wide(-two_63 - 1025),
+                times(1.0),
+                f(-9.223_372_036_854_778e18),
+            ),
+        ] {
+            assert_eq!(run(exact, &ops), Ok(Ok(expected)), "{exact:?} {ops:?}");
+        }
+        // Without a Float operand a count stays on the exact integer path.
+        assert_eq!(
+            run(
+                Exact::Count(u64::MAX),
+                &[
+                    column,
+                    Op::Literal(Some(1)),
+                    Op::Binary(GraphIntegerBinary::Add)
+                ],
+            ),
+            Ok(Err(i128::from(u64::MAX) + 1))
         );
     }
 
