@@ -972,6 +972,156 @@ fn authorized_with_matches_probe_roots_and_the_current_write_overlay() {
 }
 
 #[test]
+fn authorized_computed_root_traversals_use_indexed_overlay_closures() {
+    let ((), report) = run_async_under_lab(0x5c73_2a82, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in 1..=400_i64 {
+            seed.create_vertex(
+                VId(id as u128),
+                vec![PERSON],
+                vec![(ID, Scalar::Int(id)), (COUNT, Scalar::Int(0))],
+            );
+        }
+        for (eid, src, dst) in [(1, 1, 2), (2, 1, 2), (3, 2, 3), (4, 20, 21)] {
+            seed.add_edge(fgdb_types::EId(eid), VId(src), VId(dst), vec![]);
+        }
+        for id in 100..300 {
+            seed.add_edge(fgdb_types::EId(id), VId(id), VId(id + 1), vec![]);
+        }
+        db.write(&commit, seed).await.unwrap();
+        let issuer = authority();
+        let mut full = grant();
+        full.labels = Scope::All;
+        full.relations = Scope::All;
+        full.properties = Scope::All;
+        full.limits.max_rows = 100;
+        let token = issuer.issue_at(&full, 100).unwrap();
+        let tight = GraphWriteProgramPolicy::new(
+            GqlQueryPolicy::new(80, 100, 2_000_000, 2_000_000),
+            100,
+            10,
+            10,
+        );
+        for (text, ids, count) in [
+            (
+                "UNWIND [1,1,20,NULL] AS key WITH key AS k \
+                 MATCH (a:Person {id:k})-[r:KNOWS]->(b) SET b.count=7 \
+                 RETURN b.id AS id,b.count AS count ORDER BY id",
+                vec![2, 2, 2, 2, 21],
+                7,
+            ),
+            (
+                "UNWIND [2,2,21] AS key WITH key AS k \
+                 MATCH (a:Person {id:k})<-[r:KNOWS]-(b) SET b.count=8 \
+                 RETURN b.id AS id,b.count AS count ORDER BY id",
+                vec![1, 1, 1, 1, 20],
+                8,
+            ),
+            (
+                "UNWIND [1,20] AS key WITH key AS k \
+                 MATCH WALK (a:Person {id:k})-[:KNOWS*1..2]->(b) SET b.count=9 \
+                 RETURN b.id AS id,b.count AS count ORDER BY id",
+                vec![2, 2, 3, 3, 21],
+                9,
+            ),
+            (
+                "MATCH (a:Person {id:1}) WITH a MATCH (a)-[:KNOWS]->(b) \
+                 SET b.count=10 RETURN b.id AS id,b.count AS count ORDER BY id",
+                vec![2, 2],
+                10,
+            ),
+            (
+                "CREATE (a:Person {id:1001,count:0})-[:KNOWS]->(b:Person {id:1002,count:0}) \
+                 WITH a.id AS k MATCH (n:Person {id:k})-[:KNOWS]->(m) SET m.count=11 \
+                 RETURN m.id AS id,m.count AS count ORDER BY id",
+                vec![1002],
+                11,
+            ),
+        ] {
+            let result = db
+                .query_write_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    text,
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    tight,
+                    || 100,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            let fgdb::QueryResult::Rows { rows, .. } = result else {
+                panic!("RETURN must preserve the matched edge bag");
+            };
+            let expected: Vec<_> = ids
+                .into_iter()
+                .map(|id| {
+                    [id, count]
+                        .into_iter()
+                        .map(|value| {
+                            fgdb::QueryValue::Value(GraphValue::Scalar(Scalar::Int(value)))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            assert_eq!(rows, expected, "{text}");
+        }
+
+        let before = db.frontier().unwrap();
+        let vertices = db.vertices().unwrap();
+        let text = "UNWIND [1] AS key WITH key AS k \
+                    MATCH (a:Person {id:k})-[:KNOWS]->(b) SET b.count=99 \
+                    RETURN b.id AS id";
+        for restriction in 0..2 {
+            let mut limited = full.clone();
+            if restriction == 0 {
+                limited.limits.max_nodes = 0;
+            } else {
+                // A restricted incidence domain still uses the ordinary
+                // masked source, whose 400 visible vertices exceed this cap.
+                limited.relations = Scope::only([R]);
+            }
+            let token = issuer.issue_at(&limited, 100).unwrap();
+            let error = db
+                .query_write_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    text,
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    tight,
+                    || 100,
+                )
+                .await
+                .unwrap_err();
+            let expected = if restriction == 0 {
+                "Authorization"
+            } else {
+                "SnapshotRecords"
+            };
+            assert!(format!("{error:?}").contains(expected), "{error:?}");
+            assert_eq!(db.frontier().unwrap(), before);
+            assert_eq!(db.vertices().unwrap(), vertices);
+        }
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn authorized_seeded_matches_keep_signed_limits_and_scoped_fallback() {
     let ((), report) = run_async_under_lab(0x5c73_2a81, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

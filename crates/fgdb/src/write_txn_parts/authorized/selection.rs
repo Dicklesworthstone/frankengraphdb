@@ -683,7 +683,7 @@ pub(super) fn select_seeded_overlay<V: Vfs + Clone, Clock: FnMut() -> u64>(
 ) -> Option<Selected<fgdb_gql::algebra::GraphValueRow>> {
     if !scope.sees_all_incidence()
         || !scope.sees_all_fields()
-        || !WriteTxn::supports_seeded_vertex_query(pattern.plan())
+        || !WriteTxn::supports_seeded_query(pattern.plan())
     {
         return None;
     }
@@ -691,7 +691,7 @@ pub(super) fn select_seeded_overlay<V: Vfs + Clone, Clock: FnMut() -> u64>(
         transaction,
         database,
         cx,
-        false,
+        pattern.plan().reads_edges(),
         true,
         execution,
         |overlay| {

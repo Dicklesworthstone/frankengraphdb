@@ -214,7 +214,10 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
         scope: &PlannerPredicates,
         control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
     ) -> Result<Option<BoundOverlayCandidates>, E> {
-        if !scope.sees_all_incidence() || !scope.sees_all_fields() {
+        if !scope.sees_all_incidence()
+            || !scope.sees_all_fields()
+            || (plan.reads_edges() && self.edges.is_none())
+        {
             return Ok(None);
         }
         self.transaction
