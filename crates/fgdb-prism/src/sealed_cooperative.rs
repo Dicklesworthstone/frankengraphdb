@@ -516,7 +516,7 @@ impl FnxCallSpec {
                 }
             }
             let pass = execution_pass_work(self, graph)?;
-            let (kernel, estimated_work, workspace, source) = match self.algorithm() {
+            let (kernel, estimated_work, mut workspace, source) = match self.algorithm() {
                 FnxAlgorithm::InDegreeCentrality | FnxAlgorithm::OutDegreeCentrality => {
                     admission.rows(n)?;
                     let incoming = matches!(self.algorithm(), FnxAlgorithm::InDegreeCentrality);
@@ -602,7 +602,7 @@ impl FnxCallSpec {
                     let strong = matches!(algorithm, FnxAlgorithm::StronglyConnectedComponents);
                     (
                         if strong {
-                            "fgdb-prism/sealed-tarjan-cooperative-v1"
+                            "fgdb-prism/sealed-tarjan-depth-workspace-cooperative-v2"
                         } else {
                             "fgdb-prism/sealed-union-find-seed-component-cooperative-v3"
                         },
@@ -669,7 +669,12 @@ impl FnxCallSpec {
                 FnxAlgorithm::ConnectedComponents | FnxAlgorithm::WeaklyConnectedComponents => {
                     weak(graph, &mut control).await?
                 }
-                FnxAlgorithm::StronglyConnectedComponents => strong(graph, &mut control).await?,
+                FnxAlgorithm::StronglyConnectedComponents => {
+                    let (output, actual_workspace) =
+                        strong(graph, memory.max_kernel_workspace_bytes, &mut control).await?;
+                    workspace = actual_workspace;
+                    output
+                }
                 other => return Err(Error::UnsupportedCooperativeAlgorithm(other)),
             };
             control.tick().await?;
@@ -1065,22 +1070,24 @@ where
 // discovery and both canonical-label passes share the same scheduling fuel.
 async fn strong<Yield, YieldFuture>(
     graph: &SealedGraphView,
+    max_workspace: usize,
     control: &mut Cooperate<'_, Yield>,
-) -> Result<KernelOutput>
+) -> Result<(KernelOutput, usize)>
 where
     Yield: FnMut() -> YieldFuture,
     YieldFuture: Future<Output = ()>,
 {
     use super::SealedRow;
-    use super::components::Frame;
+    use super::components::{Frame, FrameStack, reserved};
 
     let n = graph.node_count();
-    let mut indices = reserve(n)?;
-    let mut lowlinks = reserve(n)?;
-    let mut on_stack = reserve(n)?;
-    let mut labels = reserve(n)?;
-    let mut members = reserve(n)?;
-    let mut frames: Vec<Frame<SealedRow<'_>>> = reserve(n)?;
+    let mut workspace = 0;
+    let mut indices = reserved(n, &mut workspace, max_workspace)?;
+    let mut lowlinks = reserved(n, &mut workspace, max_workspace)?;
+    let mut on_stack = reserved(n, &mut workspace, max_workspace)?;
+    let mut labels = reserved(n, &mut workspace, max_workspace)?;
+    let mut members = reserved(n, &mut workspace, max_workspace)?;
+    let mut frames: FrameStack<SealedRow<'_>> = FrameStack::new(n, workspace, max_workspace)?;
     for _ in 0..n {
         control.tick().await?;
         indices.push(usize::MAX);
@@ -1090,7 +1097,7 @@ where
     }
     let mut next_index = 0usize;
     let mut witness = ComplexityWitness {
-        algorithm: "strongly_connected_components_iterative_tarjan_cursor".to_owned(),
+        algorithm: frames.algorithm().to_owned(),
         complexity_claim: "O(|V| * (1+log(1+H)) + H log(1+|V|)) compressed row visits".to_owned(),
         nodes_touched: 0,
         edges_scanned: 0,
@@ -1110,7 +1117,7 @@ where
         next_index = add(next_index, 1)?;
         on_stack[seed] = true;
         members.push(seed);
-        frames.push(Frame { vertex: seed, row });
+        frames.push(Frame { vertex: seed, row })?;
         witness.nodes_touched = add(witness.nodes_touched, 1)?;
         witness.queue_peak = witness.queue_peak.max(frames.len());
         while let Some(frame) = frames.last_mut() {
@@ -1136,7 +1143,7 @@ where
                         frames.push(Frame {
                             vertex: target,
                             row,
-                        });
+                        })?;
                         witness.nodes_touched = add(witness.nodes_touched, 1)?;
                         witness.queue_peak = witness.queue_peak.max(frames.len());
                     } else if on_stack[target] {
@@ -1182,11 +1189,14 @@ where
         }
     }
     control.tick().await?;
-    Ok(KernelOutput {
-        values: KernelValues::Components(labels),
-        row_count: n,
-        witness,
-    })
+    Ok((
+        KernelOutput {
+            values: KernelValues::Components(labels),
+            row_count: n,
+            witness,
+        },
+        frames.workspace(),
+    ))
 }
 
 async fn bfs<Yield, YieldFuture>(

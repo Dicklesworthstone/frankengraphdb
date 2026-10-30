@@ -603,6 +603,221 @@ fn deep_dfs_and_whole_graph_scc_labeling_preserve_frames_across_actual_pending_p
     });
 }
 
+#[test]
+fn shallow_stored_scc_uses_depth_workspace_in_sync_cooperative_and_database_calls() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let call = FnxCallSpec::strongly_connected_components();
+        let opt = options(Directedness::Directed);
+        let single = stored(&contexts.commit(), 1, &[]).await;
+        let one = projection(&single, &cx, opt).await;
+        let singleton = call
+            .execute_sealed(&cx, &one, opt.execution_limits, memory())
+            .unwrap();
+        let array_width = 4 * size_of::<usize>() + size_of::<bool>();
+        let frame_width = singleton.certificate.kernel_workspace_bytes - array_width;
+        let n = 513;
+        for pairs in [false, true] {
+            let edges: Vec<_> = (0..n)
+                .filter(|&source| pairs && (source ^ 1) < n)
+                .map(|source| (source, source ^ 1))
+                .collect();
+            let db = stored(&contexts.commit(), n, &edges).await;
+            let graph = projection(&db, &cx, opt).await;
+            let sync = call
+                .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                .unwrap();
+            let old_full_depth = n * (array_width + frame_width);
+            let expected_peak =
+                n * array_width + n.div_ceil(64) * size_of::<Vec<usize>>() + 64 * frame_width;
+            assert_eq!(sync.certificate.kernel_workspace_bytes, expected_peak);
+            assert!(expected_peak < old_full_depth);
+            assert!(sync.certificate.witness.algorithm.ends_with("_slabs64"));
+            assert_eq!(sync.certificate.witness.nodes_touched, n);
+            assert_eq!(sync.certificate.witness.edges_scanned, edges.len());
+            assert_eq!(
+                sync.certificate.witness.queue_peak,
+                if pairs { 2 } else { 1 }
+            );
+            let expected: Vec<_> = (0..n)
+                .map(|vertex| {
+                    vec![
+                        FnxValue::Vertex(identity(vertex, n)),
+                        FnxValue::Vertex(identity(
+                            if pairs { vertex - vertex % 2 } else { vertex },
+                            n,
+                        )),
+                    ]
+                })
+                .collect();
+            assert_eq!(sync.rows, expected);
+            let limits = FnxExecutionLimits {
+                max_estimated_work: sync.certificate.estimated_work,
+                ..opt.execution_limits
+            };
+            let bounded = FnxMemoryLimits {
+                max_kernel_workspace_bytes: expected_peak,
+                ..memory()
+            };
+            for q in [1, 7, 65] {
+                let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                let (actual, pending) = drive(
+                    call.execute_sealed_cooperative(
+                        &controlled,
+                        &graph,
+                        limits,
+                        bounded,
+                        quantum(q),
+                        yield_now,
+                    ),
+                    &probe,
+                    q,
+                );
+                compare_execution(&actual.unwrap(), &sync);
+                assert!(pending > 0);
+            }
+            let hosted = db
+                .execute_fnx_sealed_cooperative(
+                    &cx,
+                    &call,
+                    opt,
+                    bounded,
+                    SealedLimits::default(),
+                    quantum(7),
+                )
+                .await
+                .unwrap();
+            compare_execution(&hosted.analytics, &sync);
+            let denied = FnxMemoryLimits {
+                max_kernel_workspace_bytes: expected_peak - 1,
+                ..bounded
+            };
+            let error = call
+                .execute_sealed_cooperative(
+                    &cx,
+                    &graph,
+                    limits,
+                    denied,
+                    quantum(1),
+                    || -> std::future::Ready<()> {
+                        panic!("initial frame admission must precede kernel polling")
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                FnxSealedExecutionError::Execution(FnxExecutionError::LimitExceeded {
+                    resource: "kernel workspace bytes",
+                    ..
+                })
+            ));
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn deep_scc_slab_boundaries_preserve_old_full_depth_budgets_and_control() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let call = FnxCallSpec::strongly_connected_components();
+        let single = stored(&contexts.commit(), 1, &[]).await;
+        let single_opt = options(Directedness::Directed);
+        let one = projection(&single, &cx, single_opt).await;
+        let one_bytes = call
+            .execute_sealed(&cx, &one, single_opt.execution_limits, memory())
+            .unwrap()
+            .certificate
+            .kernel_workspace_bytes;
+        for n in [63, 64, 65, 127, 128, 129] {
+            let edges: Vec<_> = (0..n).map(|source| (source, (source + 1) % n)).collect();
+            let db = stored(&contexts.commit(), n, &edges).await;
+            for direction in [Directedness::Directed, Directedness::Reversed] {
+                let opt = options(direction);
+                let graph = projection(&db, &cx, opt).await;
+                let unconstrained = call
+                    .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                    .unwrap();
+                let bounded = FnxMemoryLimits {
+                    max_kernel_workspace_bytes: n * one_bytes,
+                    ..memory()
+                };
+                let flat = call
+                    .execute_sealed(&cx, &graph, opt.execution_limits, bounded)
+                    .unwrap();
+                assert_eq!(flat.rows, unconstrained.rows);
+                assert_eq!(
+                    flat.certificate.result_digest,
+                    unconstrained.certificate.result_digest
+                );
+                assert_eq!(flat.certificate.witness.queue_peak, n);
+                assert!(flat.certificate.witness.algorithm.ends_with("_flat"));
+                assert_eq!(flat.certificate.kernel_workspace_bytes, n * one_bytes);
+                for (vertex, row) in flat.rows.iter().enumerate() {
+                    assert_eq!(
+                        row,
+                        &vec![
+                            FnxValue::Vertex(identity(vertex, n)),
+                            FnxValue::Vertex(identity(0, n)),
+                        ]
+                    );
+                }
+                for (limit, expected) in [(memory(), &unconstrained), (bounded, &flat)] {
+                    for q in [1, 7, 65] {
+                        let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                        let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                        let (actual, pending) = drive(
+                            call.execute_sealed_cooperative(
+                                &controlled,
+                                &graph,
+                                opt.execution_limits,
+                                limit,
+                                quantum(q),
+                                yield_now,
+                            ),
+                            &probe,
+                            q,
+                        );
+                        compare_execution(&actual.unwrap(), expected);
+                        assert!(pending > 0);
+                    }
+                }
+                let too_small = FnxMemoryLimits {
+                    max_kernel_workspace_bytes: n * one_bytes - 1,
+                    ..memory()
+                };
+                let error = call
+                    .execute_sealed_cooperative(
+                        &cx,
+                        &graph,
+                        opt.execution_limits,
+                        too_small,
+                        quantum(1),
+                        yield_now,
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(matches!(
+                    error,
+                    FnxSealedExecutionError::Execution(FnxExecutionError::LimitExceeded {
+                        resource: "kernel workspace bytes",
+                        ..
+                    })
+                ));
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
 // A deliberately dense histogram oracle. It observes only the previous round,
 // counts reciprocal directed arcs twice and resolves ties by the complete VId.
 fn community_reference(

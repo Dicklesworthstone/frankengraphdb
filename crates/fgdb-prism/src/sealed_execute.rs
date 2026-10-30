@@ -954,7 +954,7 @@ impl FnxCallSpec {
             return load::execute(self, cx, graph, limits, memory, &admission);
         }
         let pass = execution_pass_work(self, graph)?;
-        let (kernel, estimated_work, workspace, source) = match self.algorithm() {
+        let (kernel, estimated_work, mut workspace, source) = match self.algorithm() {
             FnxAlgorithm::InDegreeCentrality | FnxAlgorithm::OutDegreeCentrality => {
                 admission.rows(n)?;
                 let incoming = matches!(self.algorithm(), FnxAlgorithm::InDegreeCentrality);
@@ -1035,7 +1035,7 @@ impl FnxCallSpec {
                 admission.rows(n)?;
                 let strong = matches!(algorithm, FnxAlgorithm::StronglyConnectedComponents);
                 let kernel = if strong {
-                    "fgdb-prism/sealed-tarjan-v1"
+                    "fgdb-prism/sealed-tarjan-depth-workspace-v2"
                 } else {
                     "fgdb-prism/sealed-union-find-seed-component-v3"
                 };
@@ -1092,7 +1092,14 @@ impl FnxCallSpec {
                 components::weak(&rows, &admission, &mut control)?
             }
             FnxAlgorithm::StronglyConnectedComponents => {
-                components::strong(&rows, &admission, &mut control)?
+                let (output, actual_workspace) = components::strong(
+                    &rows,
+                    &admission,
+                    memory.max_kernel_workspace_bytes,
+                    &mut control,
+                )?;
+                workspace = actual_workspace;
+                output
             }
             other => return Err(Error::UnsupportedAlgorithm(other)),
         };
@@ -2663,7 +2670,7 @@ mod tests {
         checkpoint: &mut impl FnMut() -> Result<()>,
     ) -> Result<KernelOutput> {
         if strong {
-            components::strong(graph, admission, checkpoint)
+            components::strong(graph, admission, usize::MAX, checkpoint).map(|(output, _)| output)
         } else {
             components::weak(graph, admission, checkpoint)
         }

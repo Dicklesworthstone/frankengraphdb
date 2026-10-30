@@ -1,6 +1,8 @@
 //! Connectivity without incoming rows or a decoded adjacency cache.
 //! WCC uses union-by-size; SCC retains one resumable cursor per active DFS
-//! frame. Both publish the minimum snapshot-local ordinal of each component,
+//! frame. Cursor backing follows the maximum DFS depth in fixed-size slabs,
+//! so a shallow graph does not reserve a fat compressed cursor for every
+//! vertex. Both publish the minimum snapshot-local ordinal of each component,
 //! which the CALL boundary maps back to the full stable VId.
 //! WCC over fully admitted adjacency stops reading once unions prove the
 //! entire population connected. Unknown providers are scanned completely so
@@ -15,7 +17,7 @@
 
 use super::{
     ComplexityWitness, Cursor, ExecutionError, KernelOutput, KernelValues, Result, ResultAdmission,
-    Rows, SealedRow, add, mul, reserve,
+    Rows, SealedRow, add, admit, mul, reserve,
 };
 use std::mem::size_of;
 
@@ -26,15 +28,160 @@ pub(super) struct Frame<C> {
     pub(super) row: C,
 }
 
+const FRAME_SLAB: usize = 64;
+
+fn strong_arrays(n: usize) -> Result<usize> {
+    // Discovery indices, lowlinks, component stack, labels and on-stack flags.
+    mul(n, 4 * size_of::<usize>() + size_of::<bool>())
+}
+
+fn frame_minimum<C>(n: usize) -> Result<usize> {
+    let directory = mul(n.div_ceil(FRAME_SLAB), size_of::<Vec<Frame<C>>>())?;
+    let first = mul(n.min(FRAME_SLAB), size_of::<Frame<C>>())?;
+    let slabs = add(directory, first)?;
+    Ok(n.checked_mul(size_of::<Frame<C>>())
+        .map_or(slabs, |flat| flat.min(slabs)))
+}
+
 pub(super) fn workspace(n: usize, strong: bool) -> Result<usize> {
-    let per_vertex = if strong {
-        // Discovery indices, lowlinks, component stack, labels, on-stack flags,
-        // and the actual concrete Strata cursor frame (not just its ordinal).
-        4 * size_of::<usize>() + size_of::<bool>() + size_of::<Frame<SealedRow<'_>>>()
+    if strong {
+        // Admit the base arrays and the cheapest viable frame backing. Deeper
+        // traversal admits each additional slab before allocating it.
+        add(strong_arrays(n)?, frame_minimum::<SealedRow<'_>>(n)?)
     } else {
-        2 * size_of::<usize>() // parents/output labels and sizes/minimum scratch
-    };
-    mul(n, per_vertex)
+        mul(n, 2 * size_of::<usize>()) // parents and sizes/minimum scratch
+    }
+}
+
+/// Reserve once, counting actual capacity before it can be retained or used.
+/// None of these buffers grows implicitly, so successful runs have no hidden
+/// reallocation peak beyond the sum of their retained backing allocations.
+pub(super) fn reserved<T>(length: usize, workspace: &mut usize, limit: usize) -> Result<Vec<T>> {
+    admit(
+        "kernel workspace bytes",
+        add(*workspace, mul(length, size_of::<T>())?)?,
+        limit,
+    )?;
+    let values = reserve(length)?;
+    let actual = add(*workspace, mul(values.capacity(), size_of::<T>())?)?;
+    admit("kernel workspace bytes", actual, limit)?;
+    *workspace = actual;
+    Ok(values)
+}
+
+enum FrameBacking<C> {
+    Flat(Vec<Frame<C>>),
+    Slabs(Vec<Vec<Frame<C>>>),
+}
+
+/// A resumable DFS stack whose cursor backing follows observed depth. The
+/// fixed directory is admitted before use; empty slabs stay allocated for
+/// later roots, avoiding allocation churn while preserving the high-water
+/// accounting. A contiguous fallback preserves the old full-depth admission
+/// when the small slab directory would be the only reason to exceed a limit.
+pub(super) struct FrameStack<C> {
+    backing: FrameBacking<C>,
+    len: usize,
+    nodes: usize,
+    workspace: usize,
+    limit: usize,
+}
+
+impl<C> FrameStack<C> {
+    pub(super) fn new(n: usize, mut workspace: usize, limit: usize) -> Result<Self> {
+        let directory = mul(n.div_ceil(FRAME_SLAB), size_of::<Vec<Frame<C>>>())?;
+        let first = add(directory, mul(n.min(FRAME_SLAB), size_of::<Frame<C>>())?)?;
+        let flat = n
+            .checked_mul(size_of::<Frame<C>>())
+            .and_then(|bytes| workspace.checked_add(bytes));
+        let use_flat = flat.is_some_and(|bytes| {
+            bytes - workspace <= first
+                || (bytes <= limit && bytes.checked_add(directory).is_none_or(|full| full > limit))
+        });
+        let backing = if use_flat {
+            FrameBacking::Flat(reserved(n, &mut workspace, limit)?)
+        } else {
+            // The first slab is included in the initial admission, but is
+            // allocated only on the first push, after cancellation checks.
+            admit("kernel workspace bytes", add(workspace, first)?, limit)?;
+            FrameBacking::Slabs(reserved(n.div_ceil(FRAME_SLAB), &mut workspace, limit)?)
+        };
+        Ok(Self {
+            backing,
+            len: 0,
+            nodes: n,
+            workspace,
+            limit,
+        })
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.len
+    }
+
+    pub(super) fn workspace(&self) -> usize {
+        self.workspace
+    }
+
+    pub(super) fn algorithm(&self) -> &'static str {
+        match &self.backing {
+            FrameBacking::Flat(_) => "strongly_connected_components_iterative_tarjan_cursor_flat",
+            FrameBacking::Slabs(_) => {
+                "strongly_connected_components_iterative_tarjan_cursor_slabs64"
+            }
+        }
+    }
+
+    pub(super) fn last(&self) -> Option<&Frame<C>> {
+        let index = self.len.checked_sub(1)?;
+        match &self.backing {
+            FrameBacking::Flat(frames) => frames.last(),
+            FrameBacking::Slabs(slabs) => slabs.get(index / FRAME_SLAB)?.last(),
+        }
+    }
+
+    pub(super) fn last_mut(&mut self) -> Option<&mut Frame<C>> {
+        let index = self.len.checked_sub(1)?;
+        match &mut self.backing {
+            FrameBacking::Flat(frames) => frames.last_mut(),
+            FrameBacking::Slabs(slabs) => slabs.get_mut(index / FRAME_SLAB)?.last_mut(),
+        }
+    }
+
+    pub(super) fn push(&mut self, frame: Frame<C>) -> Result<()> {
+        if self.len >= self.nodes {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        }
+        match &mut self.backing {
+            FrameBacking::Flat(frames) => frames.push(frame),
+            FrameBacking::Slabs(slabs) => {
+                let block = self.len / FRAME_SLAB;
+                if block == slabs.len() {
+                    let slab = reserved(
+                        FRAME_SLAB.min(self.nodes - self.len),
+                        &mut self.workspace,
+                        self.limit,
+                    )?;
+                    // The directory already has capacity for every possible
+                    // block, and each slab already has room for this frame.
+                    slabs.push(slab);
+                }
+                slabs[block].push(frame);
+            }
+        }
+        self.len += 1;
+        Ok(())
+    }
+
+    pub(super) fn pop(&mut self) -> Option<Frame<C>> {
+        let index = self.len.checked_sub(1)?;
+        let frame = match &mut self.backing {
+            FrameBacking::Flat(frames) => frames.pop(),
+            FrameBacking::Slabs(slabs) => slabs.get_mut(index / FRAME_SLAB)?.pop(),
+        }?;
+        self.len = index;
+        Some(frame)
+    }
 }
 
 pub(super) fn work(n: usize, edges: usize, pass: usize, strong: bool) -> Result<usize> {
@@ -206,17 +353,19 @@ pub(super) fn weak(
 pub(super) fn strong<G: Rows>(
     graph: &G,
     admission: &ResultAdmission,
+    max_workspace: usize,
     checkpoint: &mut impl FnMut() -> Result<()>,
-) -> Result<KernelOutput> {
+) -> Result<(KernelOutput, usize)> {
     checkpoint()?;
     let n = graph.node_count();
     admission.rows(n)?;
-    let mut indices = reserve(n)?;
-    let mut lowlinks = reserve(n)?;
-    let mut on_stack = reserve(n)?;
-    let mut labels = reserve(n)?;
-    let mut members = reserve(n)?;
-    let mut frames: Vec<Frame<G::Cursor<'_>>> = reserve(n)?;
+    let mut workspace = 0;
+    let mut indices = reserved(n, &mut workspace, max_workspace)?;
+    let mut lowlinks = reserved(n, &mut workspace, max_workspace)?;
+    let mut on_stack = reserved(n, &mut workspace, max_workspace)?;
+    let mut labels = reserved(n, &mut workspace, max_workspace)?;
+    let mut members = reserved(n, &mut workspace, max_workspace)?;
+    let mut frames: FrameStack<G::Cursor<'_>> = FrameStack::new(n, workspace, max_workspace)?;
     for _ in 0..n {
         checkpoint()?;
         indices.push(usize::MAX);
@@ -226,7 +375,7 @@ pub(super) fn strong<G: Rows>(
     }
     let mut next_index = 0usize;
     let mut witness = ComplexityWitness {
-        algorithm: "strongly_connected_components_iterative_tarjan_cursor".to_owned(),
+        algorithm: frames.algorithm().to_owned(),
         complexity_claim: "O(|V| * (1+log(1+H)) + H log(1+|V|)) compressed row visits".to_owned(),
         // queue_peak records active resumable DFS frames, not a BFS queue.
         nodes_touched: 0,
@@ -244,7 +393,7 @@ pub(super) fn strong<G: Rows>(
         next_index = add(next_index, 1)?;
         on_stack[seed] = true;
         members.push(seed);
-        frames.push(Frame { vertex: seed, row });
+        frames.push(Frame { vertex: seed, row })?;
         witness.nodes_touched = add(witness.nodes_touched, 1)?;
         witness.queue_peak = witness.queue_peak.max(frames.len());
         while let Some(frame) = frames.last_mut() {
@@ -267,7 +416,7 @@ pub(super) fn strong<G: Rows>(
                         frames.push(Frame {
                             vertex: target,
                             row,
-                        });
+                        })?;
                         witness.nodes_touched = add(witness.nodes_touched, 1)?;
                         witness.queue_peak = witness.queue_peak.max(frames.len());
                     } else if on_stack[target] {
@@ -314,11 +463,14 @@ pub(super) fn strong<G: Rows>(
         }
     }
     checkpoint()?;
-    Ok(KernelOutput {
-        values: KernelValues::Components(labels),
-        row_count: n,
-        witness,
-    })
+    Ok((
+        KernelOutput {
+            values: KernelValues::Components(labels),
+            row_count: n,
+            witness,
+        },
+        frames.workspace(),
+    ))
 }
 
 #[cfg(test)]
@@ -692,6 +844,370 @@ mod tests {
                     assert_eq!(graph.visited.get(), 2 * (n - 1), "center={center}");
                 }
             }
+        }
+    }
+
+    fn strong_admission(n: usize) -> ResultAdmission {
+        ResultAdmission {
+            row_bytes: 0,
+            column_bytes: 0,
+            max_rows: n,
+            max_bytes: 0,
+            delivery: super::super::Delivery::Collected,
+        }
+    }
+
+    // A separate reachability closure establishes mutual reachability without
+    // using discovery indices, lowlinks or Tarjan stack membership.
+    fn strong_reference(rows: &[Vec<usize>]) -> Vec<usize> {
+        let n = rows.len();
+        let mut reach = vec![vec![false; n]; n];
+        for (source, reachable) in reach.iter_mut().enumerate() {
+            reachable[source] = true;
+            let mut queue = std::collections::VecDeque::from([source]);
+            while let Some(vertex) = queue.pop_front() {
+                for &target in &rows[vertex] {
+                    if !reachable[target] {
+                        reachable[target] = true;
+                        queue.push_back(target);
+                    }
+                }
+            }
+        }
+        (0..n)
+            .map(|vertex| {
+                (0..n)
+                    .find(|&other| reach[vertex][other] && reach[other][vertex])
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn scc_slab_boundaries_match_independent_mutual_reachability() {
+        for n in [0, 1, 2, 63, 64, 65, 127, 128, 129, 257] {
+            for shape in ["isolates", "pairs", "path", "cycle", "bridged_cycles"] {
+                let mut rows = vec![Vec::new(); n];
+                for (source, row) in rows.iter_mut().enumerate() {
+                    match shape {
+                        "pairs" if (source ^ 1) < n => row.push(source ^ 1),
+                        "path" | "cycle" if source + 1 < n => row.push(source + 1),
+                        "cycle" => row.push(0),
+                        "bridged_cycles" => {
+                            row.push(source - source % 3);
+                            if source + 1 < n {
+                                row.push(source + 1);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                // Reversal changes DFS depth and ordering, but not the SCCs.
+                let mut reversed = vec![Vec::new(); n];
+                for (source, row) in rows.iter().enumerate() {
+                    for &target in row {
+                        reversed[target].push(source);
+                    }
+                }
+                let expected = strong_reference(&rows);
+                for rows in [rows, reversed] {
+                    let graph = counted(rows, false);
+                    let (output, peak) =
+                        strong(&graph, &strong_admission(n), usize::MAX, &mut || Ok(())).unwrap();
+                    let KernelValues::Components(actual) = output.values else {
+                        panic!("components")
+                    };
+                    assert_eq!(actual, expected, "n={n}, shape={shape}");
+                    assert_eq!(output.witness.nodes_touched, n);
+                    assert_eq!(graph.opened.get(), n, "SCC still opens every source row");
+                    assert_eq!(output.witness.edges_scanned, graph.visited.get());
+                    let frames = size_of::<Frame<CountedRow<'_>>>();
+                    let directory =
+                        n.div_ceil(FRAME_SLAB) * size_of::<Vec<Frame<CountedRow<'_>>>>();
+                    let slots = output.witness.queue_peak.div_ceil(FRAME_SLAB) * FRAME_SLAB;
+                    let backing = if output.witness.algorithm.ends_with("_slabs64") {
+                        directory + slots.min(n) * frames
+                    } else {
+                        n * frames
+                    };
+                    assert_eq!(peak, strong_arrays(n).unwrap() + backing);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shallow_scc_fits_a_budget_below_full_cursor_reservation() {
+        let n = 4_097;
+        for pairs in [false, true] {
+            let rows: Vec<Vec<_>> = (0..n)
+                .map(|source| {
+                    if pairs && (source ^ 1) < n {
+                        vec![source ^ 1]
+                    } else {
+                        vec![]
+                    }
+                })
+                .collect();
+            let graph = counted(rows, false);
+            let minimum = strong_arrays(n).unwrap() + frame_minimum::<CountedRow<'_>>(n).unwrap();
+            let old = strong_arrays(n).unwrap() + n * size_of::<Frame<CountedRow<'_>>>();
+            assert!(minimum < old);
+            let (output, peak) =
+                strong(&graph, &strong_admission(n), minimum, &mut || Ok(())).unwrap();
+            assert_eq!(peak, minimum);
+            assert_eq!(output.witness.queue_peak, if pairs { 2 } else { 1 });
+            let KernelValues::Components(labels) = output.values else {
+                panic!("components")
+            };
+            assert_eq!(
+                labels,
+                (0..n)
+                    .map(|vertex| if pairs { vertex - vertex % 2 } else { vertex })
+                    .collect::<Vec<_>>()
+            );
+            graph.opened.set(0);
+            assert!(matches!(
+                strong(&graph, &strong_admission(n), minimum - 1, &mut || Ok(())),
+                Err(super::super::FnxSealedExecutionError::Execution(
+                    ExecutionError::LimitExceeded {
+                        resource: "kernel workspace bytes",
+                        ..
+                    }
+                ))
+            ));
+            assert_eq!(
+                graph.opened.get(),
+                0,
+                "initial workspace refusal precedes row opens"
+            );
+        }
+    }
+
+    #[test]
+    fn frame_slabs_reuse_backing_across_roots_and_round_depth_only() {
+        let n = 1_025;
+        let base = 117;
+        let mut frames = FrameStack::<usize>::new(n, base, usize::MAX).unwrap();
+        assert!(frames.algorithm().ends_with("_slabs64"));
+        let directory = n.div_ceil(FRAME_SLAB) * size_of::<Vec<Frame<usize>>>();
+        assert_eq!(frames.workspace(), base + directory);
+        let mut high_water = 0;
+        for depth in [1, 63, 64, 65, 2, 127, 128, 129, 1, n] {
+            for vertex in 0..depth {
+                frames
+                    .push(Frame {
+                        vertex,
+                        row: vertex,
+                    })
+                    .unwrap();
+                assert_eq!(frames.len(), vertex + 1);
+                assert_eq!(frames.last_mut().unwrap().row, vertex);
+            }
+            high_water = high_water.max(depth);
+            let slots = (high_water.div_ceil(FRAME_SLAB) * FRAME_SLAB).min(n);
+            let peak = base + directory + slots * size_of::<Frame<usize>>();
+            assert_eq!(frames.workspace(), peak);
+            for vertex in (0..depth).rev() {
+                assert_eq!(frames.last().unwrap().vertex, vertex);
+                assert_eq!(frames.pop().unwrap().row, vertex);
+            }
+            assert!(frames.pop().is_none());
+            assert!(frames.last_mut().is_none());
+            assert_eq!(
+                frames.workspace(),
+                peak,
+                "empty slabs are reused at later roots"
+            );
+        }
+    }
+
+    #[test]
+    fn full_depth_flat_fallback_preserves_old_budget_and_slab_growth_refuses_exactly() {
+        let n = 129;
+        let base = 41;
+        let width = size_of::<Frame<[u8; 512]>>();
+        let old = base + n * width;
+        let mut flat = FrameStack::new(n, base, old).unwrap();
+        assert!(flat.algorithm().ends_with("_flat"));
+        for vertex in 0..n {
+            flat.push(Frame {
+                vertex,
+                row: [0u8; 512],
+            })
+            .unwrap();
+        }
+        assert_eq!(flat.workspace(), old);
+        assert_eq!(flat.len(), n);
+        assert!(
+            flat.push(Frame {
+                vertex: n,
+                row: [0u8; 512]
+            })
+            .is_err()
+        );
+        assert_eq!(flat.len(), n);
+        let mut slabs = FrameStack::new(n, base, old - 1).unwrap();
+        assert!(slabs.algorithm().ends_with("_slabs64"));
+        for vertex in 0..128 {
+            slabs
+                .push(Frame {
+                    vertex,
+                    row: [0u8; 512],
+                })
+                .unwrap();
+        }
+        let peak = slabs.workspace();
+        assert!(matches!(
+            slabs.push(Frame {
+                vertex: 128,
+                row: [0u8; 512]
+            }),
+            Err(super::super::FnxSealedExecutionError::Execution(
+                ExecutionError::LimitExceeded {
+                    resource: "kernel workspace bytes",
+                    ..
+                }
+            ))
+        ));
+        assert_eq!(slabs.len(), 128);
+        assert_eq!(slabs.last().unwrap().vertex, 127);
+        assert_eq!(
+            slabs.workspace(),
+            peak,
+            "refusal cannot retain an unadmitted slab"
+        );
+        for vertex in (0..128).rev() {
+            assert_eq!(slabs.pop().unwrap().vertex, vertex);
+        }
+        // A shallower subsequent root still fits the existing backing.
+        slabs
+            .push(Frame {
+                vertex: 0,
+                row: [0u8; 512],
+            })
+            .unwrap();
+        assert_eq!(slabs.workspace(), peak);
+    }
+
+    #[test]
+    fn slab_scc_preserves_every_checkpoint_refusal_across_deep_resumptions() {
+        let n = 129;
+        let rows: Vec<_> = (0..n)
+            .map(|vertex| vec![(vertex + 1) % n, vertex])
+            .collect();
+        let mut count = 0;
+        let (output, _) = strong(
+            &counted(rows.clone(), false),
+            &strong_admission(n),
+            usize::MAX,
+            &mut || {
+                count += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(output.witness.algorithm.ends_with("_slabs64"));
+        assert_eq!(output.witness.queue_peak, n);
+        for stop in 1..=count {
+            let mut seen = 0;
+            let result = strong(
+                &counted(rows.clone(), false),
+                &strong_admission(n),
+                usize::MAX,
+                &mut || {
+                    seen += 1;
+                    if seen == stop {
+                        Err(ExecutionError::InvalidUpstreamResult.into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert!(result.is_err(), "stop={stop}");
+            assert_eq!(seen, stop, "no checkpoint after refusal");
+        }
+    }
+
+    #[test]
+    fn slab_scc_stops_at_every_row_open_pull_and_eof_failure() {
+        struct FaultRows<'a> {
+            graph: &'a CountedRows,
+            calls: Cell<usize>,
+            stop: usize,
+        }
+        struct FaultRow<'a> {
+            row: CountedRow<'a>,
+            calls: &'a Cell<usize>,
+            stop: usize,
+        }
+        fn event(calls: &Cell<usize>, stop: usize) -> Result<()> {
+            calls.set(calls.get() + 1);
+            if calls.get() == stop {
+                Err(ExecutionError::InvalidUpstreamResult.into())
+            } else {
+                Ok(())
+            }
+        }
+        impl Cursor for FaultRow<'_> {
+            fn next(&mut self) -> Result<Option<(usize, f64)>> {
+                event(self.calls, self.stop)?;
+                self.row.next()
+            }
+        }
+        impl Rows for FaultRows<'_> {
+            type Cursor<'a>
+                = FaultRow<'a>
+            where
+                Self: 'a;
+            fn node_count(&self) -> usize {
+                self.graph.node_count()
+            }
+            fn degree(&self, source: usize) -> Option<usize> {
+                self.graph.degree(source)
+            }
+            fn open(&self, source: usize) -> Result<FaultRow<'_>> {
+                event(&self.calls, self.stop)?;
+                Ok(FaultRow {
+                    row: self.graph.open(source)?,
+                    calls: &self.calls,
+                    stop: self.stop,
+                })
+            }
+        }
+        let n = 129;
+        let rows: Vec<_> = (0..n)
+            .map(|vertex| vec![(vertex + 1) % n, vertex])
+            .collect();
+        let graph = counted(rows, false);
+        let source = FaultRows {
+            graph: &graph,
+            calls: Cell::new(0),
+            stop: usize::MAX,
+        };
+        let (output, _) =
+            strong(&source, &strong_admission(n), usize::MAX, &mut || Ok(())).unwrap();
+        assert!(output.witness.algorithm.ends_with("_slabs64"));
+        let operations = source.calls.get();
+        assert_eq!(operations, 4 * n, "one open, two edges and EOF per row");
+        for stop in 1..=operations {
+            let source = FaultRows {
+                graph: &graph,
+                calls: Cell::new(0),
+                stop,
+            };
+            let result = strong(&source, &strong_admission(n), usize::MAX, &mut || Ok(()));
+            assert!(matches!(
+                result,
+                Err(super::super::FnxSealedExecutionError::Execution(
+                    ExecutionError::InvalidUpstreamResult
+                ))
+            ));
+            assert_eq!(
+                source.calls.get(),
+                stop,
+                "no source access after a failed open/pull"
+            );
         }
     }
 
