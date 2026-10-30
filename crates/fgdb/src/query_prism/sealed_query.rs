@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::gql_exec::AdmissionUsage;
-use crate::{NativeReadClass, PreparedNativeRead, QueryError, QueryResult};
+use crate::{PreparedNativeRead, QueryError, QueryResult};
 use fgdb_delta_types::RelationId;
 use fgdb_gql::{
     GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension, GqlParameters, GraphAggregateError,
@@ -25,21 +25,24 @@ type AggregateResult = Result<
     GqlQueryError<GraphAggregateError<GqlError>, Cancel>,
 >;
 
-/// A native template cannot silently select a decoded analytics source when
-/// execution was requested through a compressed read view. Supported native
-/// classes retain their original binding, budget and source errors.
+/// Every native class retains its original binding, budget and source errors.
+/// A temporal template cannot silently select another source cut, and CALLs
+/// always retain the compressed analytics source.
 #[derive(Debug)]
 pub enum SealedQueryError {
-    Unsupported { facade: NativeReadClass },
+    SnapshotMismatch {
+        requested: CommitSeq,
+        retained: CommitSeq,
+    },
     Query(QueryError),
 }
 
 impl core::fmt::Display for SealedQueryError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Unsupported { facade } => write!(
+            Self::SnapshotMismatch { requested, retained } => write!(
                 f,
-                "native {facade:?} read has no supported compressed execution; use a set or relational aggregate at the sealed view's selected cut",
+                "native read selects {requested:?}, but the sealed owner retains {retained:?}",
             ),
             Self::Query(error) => error.fmt(f),
         }
@@ -49,7 +52,7 @@ impl core::fmt::Display for SealedQueryError {
 impl core::error::Error for SealedQueryError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
-            Self::Unsupported { .. } => None,
+            Self::SnapshotMismatch { .. } => None,
             Self::Query(error) => Some(error),
         }
     }
@@ -298,11 +301,12 @@ impl SealedReadView {
         self.relation
     }
 
-    /// Execute a prepared native set or relational aggregate using the
-    /// existing result schema and lossless aggregate slot mapping. Every
-    /// pattern and CALL uses this owner's exact `snapshot_seq()`; temporal
-    /// templates and other native classes refuse rather than selecting a
-    /// different cut or falling back to a decoded analytics projection.
+    /// Execute every prepared native read class using the existing engines,
+    /// result schema and lossless aggregate slot mapping. Ordinary pattern and
+    /// property reads use the resident view; CALLs use the compressed source.
+    /// Every operand uses this owner's exact `snapshot_seq()`. Temporal reads
+    /// must bind that same cut, even for empty results; they cannot switch to
+    /// another cut or a decoded analytics projection.
     pub fn execute_prepared(
         &self,
         cx: &QueryCx,
@@ -311,6 +315,13 @@ impl SealedReadView {
         policy: GqlQueryPolicy,
         memory: FnxMemoryLimits,
     ) -> Result<QueryResult, SealedQueryError> {
+        let requested = prepared.bound_snapshot_seq(params, self.as_of)?;
+        if requested != self.as_of {
+            return Err(SealedQueryError::SnapshotMismatch {
+                requested,
+                retained: self.as_of,
+            });
+        }
         match prepared {
             PreparedNativeRead::Set(prepared) => {
                 let query = prepared
@@ -318,6 +329,18 @@ impl SealedReadView {
                     .map_err(QueryError::SetText)?;
                 let result = self
                     .execute_graph_set_governed(cx, &query, policy, memory)
+                    .map_err(QueryError::Set)?;
+                Ok(crate::query::values(
+                    prepared.columns().to_vec(),
+                    result.value,
+                ))
+            }
+            PreparedNativeRead::TemporalSet(prepared) => {
+                let query = prepared
+                    .bind_parameters(params)
+                    .map_err(QueryError::TemporalSetText)?;
+                let result = self
+                    .execute_graph_set_governed(cx, query.query(), policy, memory)
                     .map_err(QueryError::Set)?;
                 Ok(crate::query::values(
                     prepared.columns().to_vec(),
@@ -339,9 +362,13 @@ impl SealedReadView {
                     result.value,
                 ))
             }
-            other => Err(SealedQueryError::Unsupported {
-                facade: other.facade_class(),
-            }),
+            PreparedNativeRead::Pattern(_)
+            | PreparedNativeRead::Aggregate(_)
+            | PreparedNativeRead::PipelineAggregate(_)
+            | PreparedNativeRead::TemporalPattern(_)
+            | PreparedNativeRead::TemporalAggregate(_) => prepared
+                .execute_in_view_at_seq(&self.view, cx, params, policy, self.as_of)
+                .map_err(SealedQueryError::Query),
         }
     }
 
