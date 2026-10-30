@@ -83,7 +83,12 @@ pub(super) fn binding_contributions(
     output: &mut Vec<Contribution>,
     meter: &mut Meter<'_>,
 ) -> Result<(), StandingQueryFailure> {
-    if !keeps(query.input_pattern().plan().operators(), binding, meter)? {
+    if !keeps(
+        query.input_pattern().plan().operators(),
+        binding,
+        edge,
+        meter,
+    )? {
         return Ok(());
     }
     project_contributions(
@@ -107,6 +112,7 @@ pub(super) fn binding_contributions(
 pub(super) fn keeps(
     operators: &[GlaOperator],
     binding: &[(VId, &VertexState)],
+    edge: EdgeBindings<'_>,
     meter: &mut Meter<'_>,
 ) -> Result<bool, StandingQueryFailure> {
     for op in operators {
@@ -184,7 +190,7 @@ pub(super) fn keeps(
                 }
             }
             GlaOperator::SelectBoolean { expression } => {
-                if !super::boolean::keeps(expression, binding, meter)? {
+                if !super::boolean::keeps(expression, binding, edge, meter)? {
                     return Ok(false);
                 }
             }

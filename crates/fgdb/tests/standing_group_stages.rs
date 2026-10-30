@@ -992,6 +992,8 @@ fn multi_hop_edge_field_maintenance_visits_only_affected_join_partners() {
         for text in [
             "MATCH (a)-[r:R]->(b)-[s:R]->(c) WITH r.p AS bucket,SUM(s.q) AS total,COUNT(*) AS copies RETURN bucket,total,copies ORDER BY bucket LIMIT 1000",
             "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b)-[s:R]->(c) WITH r.p AS bucket,SUM(s.q) AS total,COUNT(*) AS copies RETURN bucket,total,copies ORDER BY bucket LIMIT 1000",
+            "MATCH (a)-[r:R]->(b)-[s:R]->(c) WHERE r.p+5<s.q WITH r.p AS bucket,COUNT(*) AS copies RETURN bucket,copies ORDER BY bucket LIMIT 1000",
+            "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b)-[s:R]->(c) WHERE r.p+5<s.q WITH r.p AS bucket,COUNT(*) AS copies RETURN bucket,copies ORDER BY bucket LIMIT 1000",
         ] {
             let mut measurements = Vec::new();
             for unrelated in [1, 64] {
@@ -1055,7 +1057,7 @@ fn optional_multi_hop_edge_fields_follow_complete_witnesses_and_null_transitions
     }
     // Independent physical-occurrence oracle. A reachable prefix contributes
     // no relationship fields when the whole OPTIONAL pattern has no witness.
-    fn oracle(db: &Database<MemVfs>) -> (QueryResult, QueryResult) {
+    fn oracle(db: &Database<MemVfs>, filtered: bool) -> (QueryResult, QueryResult) {
         let edges = db.edges().unwrap();
         let mut vertices = db.vertices().unwrap();
         vertices.sort_unstable_by_key(|vertex| vertex.vid);
@@ -1076,6 +1078,12 @@ fn optional_multi_hop_edge_fields_follow_complete_witnesses_and_null_transitions
                     edge.entry.relation == RelationId(2) && edge.entry.src == r.entry.dst
                 }) {
                     let amount = field(s, Q);
+                    if filtered
+                        && (!matches!(field(r, P), QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value))) if value > 0)
+                            || !matches!(&amount, QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value))) if *value > 0))
+                    {
+                        continue;
+                    }
                     if let QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value))) =
                         &amount
                     {
@@ -1164,21 +1172,37 @@ fn optional_multi_hop_edge_fields_follow_complete_witnesses_and_null_transitions
             "MATCH (a) OPTIONAL MATCH (a)-[r]->(b)-[s]->(c) RETURN a AS root,r AS first,s AS second,r.p AS bucket,s.q AS amount ORDER BY root,first,second LIMIT 1000",
             "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b)-[s:S]->(c)-[t:R]->(d) RETURN a AS root,r AS first,s AS second,t AS third,r.p AS bucket,s.q AS amount,t.p AS last ORDER BY root,first,second,third LIMIT 1000",
             "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b)-[s:S]->(c) WITH a AS root,r.p AS bucket,SUM(r.p*s.q) AS total,COUNT(DISTINCT r) AS starts RETURN root,bucket,total,starts ORDER BY root,bucket LIMIT 1000",
+            "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b)-[s:S]->(c) WHERE r.p>0 AND s.q>0 RETURN a AS root,r AS first,s AS second,r.p AS bucket,s.q AS amount ORDER BY root,first,second LIMIT 1000",
+            "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b)-[s:S]->(c) WHERE r.p>0 AND s.q>0 WITH a AS root,SUM(s.q) AS total,COUNT(*) AS copies,COUNT(r) AS starts,COUNT(DISTINCT s) AS ends RETURN root,total,copies,starts,ends ORDER BY root LIMIT 1000",
+            "MATCH (a)-[r:R]->(b) WHERE r.p<a.p RETURN a AS root,COUNT(*) AS copies ORDER BY root LIMIT 1000",
+            "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b) WHERE NOT(r.p<=10) OR r.p IS NULL RETURN a AS root,COUNT(*) AS copies,COUNT(r) AS starts ORDER BY root LIMIT 1000",
+            "MATCH (a)-[r:R]->(b)-[s:S]->(c) WHERE r.p+s.q>50 OR r.p IS NULL RETURN r AS first,s AS second ORDER BY first,second LIMIT 1000",
+            "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b)-[s:S]->(c) WHERE r.p>0 AND s.q>0 RETURN a AS root,COUNT(*) AS copies,COUNT(r) AS starts ORDER BY root LIMIT 1000",
+            "MATCH (a) OPTIONAL MATCH (a)<-[r:R]-(b)<-[s:S]-(c) WHERE r.p>s.q RETURN a AS root,r AS first,s AS second ORDER BY root,first,second LIMIT 1000",
+            "MATCH (a) OPTIONAL MATCH (a)-[r]-(b)-[s]-(c) WHERE r<>s AND r.p>s.q RETURN a AS root,COUNT(*) AS copies,COUNT(r) AS starts ORDER BY root LIMIT 1000",
+            "MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b)-[s:S]->(c)-[t:R]->(d) WHERE t.p>r.p OR s.q IS NULL RETURN a AS root,r AS first,s AS second,t AS third ORDER BY root,first,second,third LIMIT 1000",
         ];
         let args = GqlParameters::new();
         let handles: Vec<_> = texts
             .iter()
-            .map(|text| {
+            .enumerate()
+            .map(|(index, text)| {
                 let prepared = PreparedNativeRead::prepare(text, &args, symbols).unwrap();
                 let (_, width) = prepared.subscription_footprint(&cx, &args).unwrap();
-                assert!(width >= 4, "{text}");
+                let minimum_width = match index {
+                    10 => 2,
+                    11 | 12 => 3,
+                    _ => 4,
+                };
+                assert!(width >= minimum_width, "{text}");
                 prepared
                     .register_standing(&mut db, &cx, &args, policy())
                     .unwrap_or_else(|error| panic!("{text}: {error:?}"))
             })
             .collect();
-        for tick in 0..=9 {
-            let (paths, groups) = oracle(&db);
+        for tick in 0..=10 {
+            let (paths, groups) = oracle(&db, false);
+            let (filtered_paths, filtered_groups) = oracle(&db, true);
             for (index, (text, handle)) in texts.iter().zip(&handles).enumerate() {
                 assert_native(&db, &cx, handle, text, &args);
                 let actual = db.standing_native_query(&cx, handle, delivery()).unwrap().1;
@@ -1186,6 +1210,16 @@ fn optional_multi_hop_edge_fields_follow_complete_witnesses_and_null_transitions
                     assert_eq!(actual, paths, "physical OPTIONAL oracle, tick {tick}");
                 } else if index == 1 {
                     assert_eq!(actual, groups, "nullable aggregate oracle, tick {tick}");
+                } else if index == 8 {
+                    assert_eq!(
+                        actual, filtered_paths,
+                        "filtered physical oracle, tick {tick}"
+                    );
+                } else if index == 9 {
+                    assert_eq!(
+                        actual, filtered_groups,
+                        "filtered aggregate oracle, tick {tick}"
+                    );
                 }
                 if tick == 2 || tick == 9 {
                     db.rebuild_standing_query(&cx, handle, policy()).unwrap();
@@ -1200,7 +1234,7 @@ fn optional_multi_hop_edge_fields_follow_complete_witnesses_and_null_transitions
                     );
                 }
             }
-            if tick == 9 {
+            if tick == 10 {
                 break;
             }
             let mut r = WriteBatch::new(RelationId(1));
@@ -1248,6 +1282,12 @@ fn optional_multi_hop_edge_fields_follow_complete_witnesses_and_null_transitions
                 7 => {
                     s.set_edge_property(EId(24), PropertyKeyId(3), Some(CanonicalScalar::Int(77)));
                     db.write(&commit, s).await.unwrap();
+                }
+                8 => {
+                    // A hidden endpoint threshold changes a one-hop WHERE
+                    // without changing topology or any projected edge field.
+                    r.set_vertex_property(VId(4), P, Some(CanonicalScalar::Int(0)));
+                    db.write(&commit, r).await.unwrap();
                 }
                 _ => {
                     r.delete_vertex(VId(5));

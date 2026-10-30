@@ -547,3 +547,180 @@ fn optional_edge_fields_refuse_atomically_and_retry_across_witness_transitions()
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn hidden_edge_predicates_change_optional_witnesses_atomically() {
+    fn definition() -> PreparedGraphAggregate {
+        with_predicate("r.p<=s.q")
+    }
+    fn with_predicate(predicate: &str) -> PreparedGraphAggregate {
+        use fgdb_gql::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText};
+        PreparedGraphAggregateText::prepare(
+            &format!("MATCH (a) OPTIONAL MATCH (a)-[r:R]->(b)-[s:S]->(c) WHERE {predicate} RETURN a AS root,COUNT(*) AS copies,COUNT(r) AS starts,COUNT(s) AS ends"),
+            |kind, name| match (kind, name) {
+                (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+                (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(2))),
+                (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+                (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+                _ => None,
+            },
+        ).unwrap().bind_parameters(&GqlParameters::new()).unwrap()
+    }
+    let ((), report) = run_async_under_lab(0x6ab9, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut r = WriteBatch::new(RelationId(1));
+        for id in 1..=5 {
+            r.create_vertex(VId(id), vec![], vec![]);
+        }
+        for (eid, src, dst, value) in [(0, 1, 2, 1), (u128::MAX, 1, 2, 2), (20, 3, 4, 8)] {
+            r.add_edge(
+                EId(eid),
+                VId(src),
+                VId(dst),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(value))],
+            );
+        }
+        let mut s = WriteBatch::new(RelationId(2));
+        for (eid, src, dst, value) in [(10, 2, 3, 3), (11, 4, 5, 7)] {
+            s.add_edge(
+                EId(eid),
+                VId(src),
+                VId(dst),
+                vec![(PropertyKeyId(2), CanonicalScalar::Int(value))],
+            );
+        }
+        let at = db.write_atomic(&commit, vec![r, s]).await.unwrap();
+        let initial = db.delta_index().unwrap().get(at).unwrap().clone();
+        let mut r = WriteBatch::new(RelationId(1));
+        r.set_edge_property(EId(0), PropertyKeyId(1), Some(CanonicalScalar::Int(9)));
+        r.set_edge_property(EId(u128::MAX), PropertyKeyId(1), None);
+        let mut s = WriteBatch::new(RelationId(2));
+        s.set_edge_property(EId(11), PropertyKeyId(2), Some(CanonicalScalar::Int(10)));
+        // Topology and every returned field are unchanged. Hidden WHERE inputs
+        // remove root 1's last two witnesses and admit root 3's first witness.
+        let at = db.write_atomic(&commit, vec![s, r]).await.unwrap();
+        let delta = db.delta_index().unwrap().get(at).unwrap().clone();
+        let make = || seeded_definition(core::slice::from_ref(&initial), definition());
+        let before = make();
+        assert!(needs_edge_property(&before.definition, PropertyKeyId(1)));
+        assert!(needs_edge_property(&before.definition, PropertyKeyId(2)));
+        assert!(!needs_edge_property(&before.definition, PropertyKeyId(99)));
+        assert_eq!(row(&before, 1).unwrap().get(1).unwrap().as_count(), Some(2));
+        assert_eq!(row(&before, 3).unwrap().get(1).unwrap().as_count(), Some(0));
+        let mut success = make();
+        let mut calls = 0;
+        let stats = advance(&mut success, &delta, &mut || {
+            calls += 1;
+            Ok(())
+        })
+        .unwrap();
+        for (root, expected) in [(1, [1, 0, 0]), (3, [1, 1, 1])] {
+            let actual = row(&success, root).unwrap();
+            for (column, expected) in expected.into_iter().enumerate() {
+                assert_eq!(actual.get(column).unwrap().as_count(), Some(expected));
+            }
+        }
+        assert_eq!(stats.affected_edges, 3);
+        same(
+            &success,
+            &db.prepare_standing_query(&cx, definition(), policy())
+                .unwrap(),
+        );
+        for stop in 1..=calls {
+            let mut candidate = make();
+            let mut seen = 0;
+            assert_eq!(
+                advance(&mut candidate, &delta, &mut || {
+                    seen += 1;
+                    if seen == stop {
+                        Err(StandingQueryFailure::Interrupted)
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(StandingQueryFailure::Interrupted)
+            );
+            assert_eq!(seen, stop);
+            same(&candidate, &before);
+            assert_eq!(candidate.last_delta, before.last_delta);
+            advance(&mut candidate, &delta, &mut || Ok(())).unwrap();
+            same(&candidate, &success);
+            assert_eq!(candidate.last_delta, success.last_delta);
+        }
+        for reason in [
+            StandingQueryFailure::WorkBudget,
+            StandingQueryFailure::ScratchBudget,
+            StandingQueryFailure::ResultBudget,
+        ] {
+            let mut candidate = make();
+            match reason {
+                StandingQueryFailure::WorkBudget => {
+                    candidate.policy.evaluator.max_work_units = stats.work_units - 1
+                }
+                StandingQueryFailure::ScratchBudget => {
+                    candidate.policy.evaluator.max_scratch_entries = stats.scratch_entries - 1
+                }
+                _ => candidate.policy = GqlQueryPolicy::new(100_000, 0, 10_000_000, 10_000_000),
+            }
+            assert_eq!(advance(&mut candidate, &delta, &mut || Ok(())), Err(reason));
+            same(&candidate, &before);
+            candidate.policy = policy();
+            advance(&mut candidate, &delta, &mut || Ok(())).unwrap();
+            same(&candidate, &success);
+        }
+        let mut entries = delta.coordinate_entries().to_vec();
+        let before_image = entries
+            .iter_mut()
+            .flat_map(|entry| &mut entry.rows)
+            .find_map(|row| {
+                if let DeltaRow::Property { before, .. } = row {
+                    Some(before)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        *before_image = Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(999)));
+        let malformed = LogicalDeltaBatch::from_parts_for_test(
+            entries,
+            *delta.source_template_digest(),
+            delta.commit_marker_identity(),
+            delta.commit_seq(),
+            delta.frontier(),
+        );
+        let mut candidate = make();
+        assert_eq!(
+            advance(&mut candidate, &malformed, &mut || Ok(())),
+            Err(StandingQueryFailure::InvalidDelta)
+        );
+        same(&candidate, &before);
+        advance(&mut candidate, &delta, &mut || Ok(())).unwrap();
+        same(&candidate, &success);
+
+        // A true OR still evaluates its other operand. A hidden-property tick
+        // that introduces division by zero must not publish partial witnesses,
+        // aggregate rows, input fields, or the tick frontier.
+        let make_division = || {
+            seeded_definition(
+                &[initial.clone(), delta.clone()],
+                with_predicate("TRUE OR r.p/s.q>0"),
+            )
+        };
+        let division_before = make_division();
+        let mut division = make_division();
+        let mut change = WriteBatch::new(RelationId(2));
+        change.set_edge_property(EId(10), PropertyKeyId(2), Some(CanonicalScalar::Int(0)));
+        let at = db.write(&commit, change).await.unwrap();
+        let arithmetic = db.delta_index().unwrap().get(at).unwrap().clone();
+        assert!(matches!(
+            advance(&mut division, &arithmetic, &mut || Ok(())),
+            Err(StandingQueryFailure::PredicateExpression(error)) if error.kind.is_arithmetic_exception()
+        ));
+        same(&division, &division_before);
+        assert_eq!(division.last_delta, division_before.last_delta);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

@@ -1,8 +1,8 @@
 //! Boolean WHERE over one affected binding, using the shared GLA evaluator.
 //!
-//! The lookup below contains only the current binding's borrowed vertex states,
+//! The lookup contains only this occurrence's borrowed vertex/edge states,
 //! not a graph snapshot or another expression interpreter. Prepared dependency
-//! discovery in the parent retains every hidden Boolean/scalar input property.
+//! discovery retains every hidden Boolean/scalar input property.
 
 use super::*;
 use fgdb_gql::GlaExecutionEvent;
@@ -11,6 +11,7 @@ use fgdb_gql::algebra::{BoundBooleanExpression, MAX_PATTERN_BINDINGS};
 pub(super) fn keeps(
     expression: &BoundBooleanExpression,
     binding: &[(VId, &VertexState)],
+    edge: EdgeBindings<'_>,
     meter: &mut Meter<'_>,
 ) -> Result<bool, StandingQueryFailure> {
     if binding.len() > MAX_PATTERN_BINDINGS {
@@ -27,30 +28,72 @@ pub(super) fn keeps(
             entry.insert(state);
         }
     }
+    let mut captures = Vec::new();
+    let mut edge_source = BTreeMap::new();
+    for capture in expression.referenced_edge_captures() {
+        meter.charge(ZSetEvent::Work)?;
+        let mut present = false;
+        for &(previous, _) in &captures {
+            meter.charge(ZSetEvent::Work)?;
+            if previous == capture {
+                present = true;
+                break;
+            }
+        }
+        if present {
+            continue;
+        }
+        let binding = edge
+            .get(capture, meter)?
+            .ok_or(StandingQueryFailure::InvalidDelta)?;
+        if captures.is_empty() {
+            meter.charge(ZSetEvent::ScratchEntry)?;
+        }
+        meter.charge(ZSetEvent::ScratchEntry)?;
+        captures.push((capture, binding.id));
+        if let Some(eid) = binding.id
+            && let std::collections::btree_map::Entry::Vacant(entry) = edge_source.entry(eid)
+        {
+            meter.charge(ZSetEvent::ScratchEntry)?;
+            entry.insert(binding.props);
+        }
+    }
     // Multiple slots may name one vertex (correlations, cycles, self-loops).
     // They borrow the same canonical old OR final source generation supplied
     // by the caller. Never resolve a staged deletion against the old state.
-    expression
-        .evaluate_vertex_binding(
+    let mut property = |vid, key| {
+        source
+            .get(&vid)
+            .map(|state| state.props.get(&key))
+            .ok_or(StandingQueryFailure::InvalidDelta)
+    };
+    let mut control = |event| {
+        // GLA charges work for every event. Scratch growth consumes both
+        // counters, and every charge remains cancellation-aware.
+        meter.charge(ZSetEvent::Work)?;
+        match event {
+            GlaExecutionEvent::Work => Ok(()),
+            GlaExecutionEvent::ScratchEntry => meter.charge(ZSetEvent::ScratchEntry),
+            GlaExecutionEvent::ResultRow => Err(StandingQueryFailure::InvalidDelta),
+        }
+    };
+    let result = if captures.is_empty() {
+        expression.evaluate_vertex_binding(&identities, &mut property, &mut control)
+    } else {
+        expression.evaluate_element_binding(
             &identities,
-            &mut |vid, key| {
-                source
-                    .get(&vid)
-                    .map(|state| state.props.get(&key))
+            &captures,
+            &mut property,
+            &mut |eid, key| {
+                edge_source
+                    .get(&eid)
+                    .map(|props| props.and_then(|props| props.get(&key)))
                     .ok_or(StandingQueryFailure::InvalidDelta)
             },
-            &mut |event| {
-                // GLA charges work for every event. Scratch growth consumes
-                // both counters, and every charge remains cancellation-aware.
-                meter.charge(ZSetEvent::Work)?;
-                match event {
-                    GlaExecutionEvent::Work => Ok(()),
-                    GlaExecutionEvent::ScratchEntry => meter.charge(ZSetEvent::ScratchEntry),
-                    GlaExecutionEvent::ResultRow => Err(StandingQueryFailure::InvalidDelta),
-                }
-            },
-        )?
-        .ok_or(StandingQueryFailure::InvalidDelta)
+            &mut control,
+        )
+    };
+    result?.ok_or(StandingQueryFailure::InvalidDelta)
 }
 
 #[cfg(test)]

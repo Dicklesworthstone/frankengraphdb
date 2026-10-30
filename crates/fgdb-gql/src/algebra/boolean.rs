@@ -760,7 +760,7 @@ impl<'a> Value<'a> {
 fn resolve<'source: 'borrow, 'borrow, E>(
     operand: &'borrow Operand<BindingSlot>,
     bindings: &[Option<VId>],
-    paths: &[Option<super::GraphPath>],
+    edges: EdgeFrame<'_>,
     property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'source CanonicalPropertyValue>, E>,
     edge_property: &mut impl FnMut(
         EId,
@@ -779,9 +779,9 @@ fn resolve<'source: 'borrow, 'borrow, E>(
                 None => None,
             },
         ),
-        Operand::Edge(slot) => Value::Edge(captured_edge(paths, *slot)),
+        Operand::Edge(slot) => Value::Edge(edges.identity(*slot, control)?),
         Operand::EdgeProperty { variable, key } => {
-            Value::property(match captured_edge(paths, *variable) {
+            Value::property(match edges.identity(*variable, control)? {
                 Some(edge) => edge_property(edge, *key)?,
                 None => None,
             })
@@ -798,6 +798,43 @@ fn captured_edge(paths: &[Option<super::GraphPath>], slot: BindingSlot) -> Optio
         unreachable!("edge captures contain exactly one relationship")
     };
     Some(*edge)
+}
+
+/// Only identity lookup varies between snapshot paths and borrowed maintained
+/// occurrences. Both sources run the same Boolean/scalar instruction loop.
+#[derive(Clone, Copy)]
+enum EdgeFrame<'a> {
+    Paths(&'a [Option<super::GraphPath>]),
+    Captures(&'a [(u32, Option<EId>)]),
+}
+
+impl EdgeFrame<'_> {
+    fn identity<E>(
+        self,
+        slot: BindingSlot,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Option<EId>, E> {
+        match self {
+            Self::Paths(paths) => Ok(captured_edge(paths, slot)),
+            Self::Captures(captures) => {
+                Ok(capture_binding(captures, slot.ordinal(), control)?.flatten())
+            }
+        }
+    }
+}
+
+fn capture_binding<E>(
+    captures: &[(u32, Option<EId>)],
+    requested: u32,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Option<Option<EId>>, E> {
+    for &(capture, identity) in captures {
+        control(GlaExecutionEvent::Work)?;
+        if capture == requested {
+            return Ok(Some(identity));
+        }
+    }
+    Ok(None)
 }
 fn compare<E: From<crate::GraphIntegerError>>(
     left: &Value<'_>,
@@ -909,6 +946,26 @@ impl BoundBooleanExpression {
         ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<bool, E> {
+        self.evaluate_frame(
+            bindings,
+            EdgeFrame::Paths(paths),
+            property,
+            edge_property,
+            control,
+        )
+    }
+
+    fn evaluate_frame<'a, E: From<crate::GraphIntegerError>>(
+        &self,
+        bindings: &[Option<VId>],
+        edges: EdgeFrame<'_>,
+        property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        edge_property: &mut impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
         let mut stack = [Truth::Unknown; MAX_PATTERN_PREDICATES];
         let mut depth = 0_usize;
         for instruction in self.program.iter() {
@@ -919,8 +976,8 @@ impl BoundBooleanExpression {
                     comparison,
                     right,
                 } => {
-                    let left = resolve(left, bindings, paths, property, edge_property, control)?;
-                    let right = resolve(right, bindings, paths, property, edge_property, control)?;
+                    let left = resolve(left, bindings, edges, property, edge_property, control)?;
+                    let right = resolve(right, bindings, edges, property, edge_property, control)?;
                     for value in [&left, &right] {
                         if let Value::Scalar(Some(value)) = value {
                             crate::algebra_exec::charge_payload(value, control)?;
@@ -929,7 +986,7 @@ impl BoundBooleanExpression {
                     compare(&left, &right, *comparison, control)?
                 }
                 Instruction::IsNull { operand, is_null } => Truth::from(Some(
-                    resolve(operand, bindings, paths, property, edge_property, control)?.is_null()
+                    resolve(operand, bindings, edges, property, edge_property, control)?.is_null()
                         == *is_null,
                 )),
                 Instruction::Expression {
@@ -945,7 +1002,7 @@ impl BoundBooleanExpression {
                         let value = match resolve(
                             column,
                             bindings,
-                            paths,
+                            edges,
                             property,
                             edge_property,
                             control,
@@ -1134,12 +1191,25 @@ impl BoundBooleanExpression {
     /// as missing properties. Nullable entries inside the frame are legal.
     #[must_use]
     pub fn supports_vertex_bindings(&self, width: usize) -> bool {
+        self.supports_element_bindings(width, |_| false)
+    }
+
+    /// Whether a vertex frame and its proved single-edge captures cover every
+    /// operand. Capture IDs occupy their own domain, never vertex slot space.
+    #[must_use]
+    pub fn supports_element_bindings(
+        &self,
+        width: usize,
+        mut capture: impl FnMut(u32) -> bool,
+    ) -> bool {
         self.operands().all(|operand| match operand {
             Operand::Vertex(slot) | Operand::Property { variable: slot, .. } => {
                 (slot.ordinal() as usize) < width
             }
             Operand::Literal(_) | Operand::StoredLiteral(_) => true,
-            Operand::Edge(_) | Operand::EdgeProperty { .. } => false,
+            Operand::Edge(slot) | Operand::EdgeProperty { variable: slot, .. } => {
+                capture(slot.ordinal())
+            }
         })
     }
 
@@ -1159,7 +1229,7 @@ impl BoundBooleanExpression {
 
     /// Captured-edge properties are a separate domain from vertex properties,
     /// including eager scalar inputs that do not determine the final truth.
-    pub(crate) fn referenced_edge_properties(
+    pub fn referenced_edge_properties(
         &self,
     ) -> impl Iterator<Item = (BindingSlot, PropertyKeyId)> + '_ {
         self.operands().filter_map(|operand| match operand {
@@ -1170,6 +1240,74 @@ impl BoundBooleanExpression {
             | Operand::Literal(_)
             | Operand::StoredLiteral(_) => None,
         })
+    }
+
+    /// Every captured relationship read, including identity comparisons and
+    /// eager scalar inputs. Repetitions are intentional; this borrows the
+    /// program and allocates nothing. Callers may retain one entry per ID.
+    pub fn referenced_edge_captures(&self) -> impl Iterator<Item = u32> + '_ {
+        self.operands().filter_map(|operand| match operand {
+            Operand::Edge(slot) | Operand::EdgeProperty { variable: slot, .. } => {
+                Some(slot.ordinal())
+            }
+            _ => None,
+        })
+    }
+
+    /// Evaluate a borrowed vertex/relationship occurrence through snapshot
+    /// GLA's Boolean/scalar engine. Captures contain unique explicit IDs;
+    /// `(id, None)` is a legal NULL extension, while an absent or duplicate ID
+    /// refuses the frame with None. Vertex slots have the same distinction:
+    /// an in-frame None is NULL, an out-of-frame slot is a profile refusal.
+    ///
+    /// Admission, capture searches and execution are all checkpointed. Every
+    /// eager operand retains its ordinary source and arithmetic error behavior,
+    /// including operands after true OR/false AND. No graph scan or GraphPath
+    /// allocation occurs, and neither the definition nor the frame is mutated.
+    pub fn evaluate_element_binding<'a, E: From<crate::GraphIntegerError>>(
+        &self,
+        bindings: &[Option<VId>],
+        captures: &[(u32, Option<EId>)],
+        property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        edge_property: &mut impl FnMut(
+            EId,
+            PropertyKeyId,
+        ) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Option<bool>, E> {
+        control(GlaExecutionEvent::Work)?;
+        for (at, &(capture, _)) in captures.iter().enumerate() {
+            control(GlaExecutionEvent::Work)?;
+            for &(previous, _) in &captures[..at] {
+                control(GlaExecutionEvent::Work)?;
+                if previous == capture {
+                    return Ok(None);
+                }
+            }
+        }
+        for operand in self.operands() {
+            control(GlaExecutionEvent::Work)?;
+            let supported = match operand {
+                Operand::Vertex(slot) | Operand::Property { variable: slot, .. } => {
+                    (slot.ordinal() as usize) < bindings.len()
+                }
+                Operand::Edge(slot) | Operand::EdgeProperty { variable: slot, .. } => {
+                    capture_binding(captures, slot.ordinal(), control)?.is_some()
+                }
+                Operand::Literal(_) | Operand::StoredLiteral(_) => true,
+            };
+            if !supported {
+                return Ok(None);
+            }
+        }
+        self.evaluate_frame(
+            bindings,
+            EdgeFrame::Captures(captures),
+            property,
+            edge_property,
+            control,
+        )
+        .map(Some)
     }
 
     /// Evaluate a complete caller-owned vertex frame through the SAME engine
@@ -2083,6 +2221,254 @@ mod tests {
             None
         );
         assert_eq!(reads, 0);
+    }
+
+    #[test]
+    fn maintained_edge_frames_preserve_sparse_captures_nulls_and_hidden_inputs() {
+        let program = GraphBooleanExpression::prepare(&[
+            Op::Compare {
+                left: Arg::Edge("r"),
+                comparison: IntegerComparison::NotEqual,
+                right: Arg::Edge("s"),
+            },
+            Op::Compare {
+                left: Arg::EdgeProperty {
+                    variable: "r",
+                    key: PropertyKeyId(7),
+                },
+                comparison: IntegerComparison::Greater,
+                right: Arg::Property {
+                    variable: "a",
+                    key: PropertyKeyId(8),
+                },
+            },
+            Op::And,
+        ])
+        .unwrap()
+        .bind(
+            |_| Ok(0),
+            |name| match name {
+                "r" => Ok(3),
+                "s" => Ok(9),
+                _ => Err(PatternBuildError::UnknownVariable),
+            },
+        )
+        .unwrap();
+        let template = program.template_bytes();
+        assert!(!program.supports_vertex_bindings(1));
+        assert!(program.supports_element_bindings(1, |capture| [3, 9].contains(&capture)));
+        assert!(!program.supports_element_bindings(1, |capture| capture == 3));
+        assert!(!program.supports_element_bindings(0, |_| true));
+        assert_eq!(
+            program.referenced_edge_captures().collect::<Vec<_>>(),
+            [3, 9, 3]
+        );
+        assert_eq!(
+            program
+                .referenced_edge_properties()
+                .map(|(capture, key)| (capture.ordinal(), key))
+                .collect::<Vec<_>>(),
+            [(3, PropertyKeyId(7))]
+        );
+        let threshold = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
+        for (actual, expected) in [
+            (None, false),
+            (Some(CanonicalScalar::Null), false),
+            (Some(CanonicalScalar::Bool(true)), false),
+            (Some(CanonicalScalar::Int(7)), false),
+            (Some(CanonicalScalar::Int(8)), true),
+        ] {
+            let actual = actual.map(CanonicalPropertyValue::from);
+            let captures = [(9, Some(EId(u128::MAX))), (3, Some(EId(0)))];
+            let mut paths = vec![None; 10];
+            for &(capture, edge) in &captures {
+                paths[capture as usize] = edge.map(|edge| {
+                    super::super::GraphPath::new(VId(1), vec![(edge, VId(2))].into_boxed_slice())
+                });
+            }
+            assert_eq!(
+                program
+                    .evaluate_elements(
+                        &[Some(VId(1))],
+                        &paths,
+                        &mut |_, key| {
+                            assert_eq!(key, PropertyKeyId(8));
+                            Ok::<_, Failure<()>>(Some(&threshold))
+                        },
+                        &mut |eid, key| {
+                            assert_eq!((eid, key), (EId(0), PropertyKeyId(7)));
+                            Ok(actual.as_ref())
+                        },
+                        &mut |_| Ok(())
+                    )
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(
+                program
+                    .evaluate_element_binding(
+                        &[Some(VId(1))],
+                        &captures,
+                        &mut |_, _| Ok::<_, Failure<()>>(Some(&threshold)),
+                        &mut |_, _| Ok(actual.as_ref()),
+                        &mut |_| Ok(())
+                    )
+                    .unwrap(),
+                Some(expected)
+            );
+        }
+        for captures in [
+            vec![(3, Some(EId(0)))],
+            vec![(3, Some(EId(0))), (9, Some(EId(1))), (3, Some(EId(2)))],
+        ] {
+            assert_eq!(
+                program
+                    .evaluate_element_binding(
+                        &[Some(VId(1))],
+                        &captures,
+                        &mut |_, _| Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source(
+                            "unexpected read"
+                        )),
+                        &mut |_, _| Err(Failure::Source("unexpected edge read")),
+                        &mut |_| Ok(())
+                    )
+                    .unwrap(),
+                None
+            );
+        }
+        for captures in [
+            // Different capture IDs may name the same physical relationship.
+            [(3, Some(EId(0))), (9, Some(EId(0)))],
+            [(3, None), (9, Some(EId(0)))],
+        ] {
+            let greater = CanonicalPropertyValue::from(CanonicalScalar::Int(8));
+            assert_eq!(
+                program
+                    .evaluate_element_binding(
+                        &[Some(VId(1))],
+                        &captures,
+                        &mut |_, _| Ok::<_, Failure<()>>(Some(&threshold)),
+                        &mut |_, _| Ok(Some(&greater)),
+                        &mut |_| Ok(()),
+                    )
+                    .unwrap(),
+                Some(false)
+            );
+        }
+        let nullable = bound(&[Op::IsNull {
+            operand: Arg::Edge("a"),
+            is_null: true,
+        }]);
+        assert_eq!(
+            nullable
+                .evaluate_element_binding(
+                    &[],
+                    &[(0, None)],
+                    &mut |_, _| Err::<Option<&CanonicalPropertyValue>, _>(Failure::Source(
+                        "unexpected read"
+                    )),
+                    &mut |_, _| Err(Failure::Source("unexpected edge read")),
+                    &mut |_| Ok(())
+                )
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(program.template_bytes(), template);
+    }
+
+    #[test]
+    fn maintained_edge_programs_keep_eager_errors_and_every_checkpoint() {
+        let scalar = crate::GraphIntegerExpression::prepare_scalar(&[
+            crate::GraphIntegerOp::ScalarColumn(0),
+            crate::GraphIntegerOp::Literal(Some(0)),
+            crate::GraphIntegerOp::Binary(crate::GraphIntegerBinary::Divide),
+        ])
+        .unwrap();
+        let columns = [Arg::EdgeProperty {
+            variable: "a",
+            key: PropertyKeyId(7),
+        }];
+        let division = bound(&[
+            Op::Truth(Some(true)),
+            Op::Expression {
+                expression: &scalar,
+                columns: &columns,
+            },
+            Op::Or,
+        ]);
+        assert_eq!(division.referenced_edge_captures().collect::<Vec<_>>(), [0]);
+        assert_eq!(
+            division.referenced_edge_properties().next().unwrap().1,
+            PropertyKeyId(7)
+        );
+        let value = CanonicalPropertyValue::from(CanonicalScalar::Int(8));
+        let result = division.evaluate_element_binding(
+            &[],
+            &[(0, Some(EId(0)))],
+            &mut |_, _| Ok::<_, Failure<()>>(None),
+            &mut |_, _| Ok(Some(&value)),
+            &mut |_| Ok(()),
+        );
+        assert!(
+            matches!(result, Err(Failure::Data(error)) if error.kind.is_arithmetic_exception())
+        );
+        for truth in [true, false] {
+            let program = bound(&[
+                Op::Truth(Some(truth)),
+                Op::IsNull {
+                    operand: columns[0],
+                    is_null: true,
+                },
+                if truth { Op::Or } else { Op::And },
+            ]);
+            assert_eq!(
+                program.evaluate_element_binding(
+                    &[],
+                    &[(0, Some(EId(0)))],
+                    &mut |_, _| Ok::<_, Failure<usize>>(None),
+                    &mut |_, _| Err(Failure::Source(0)),
+                    &mut |_| Ok(()),
+                ),
+                Err(Failure::Source(0))
+            );
+            let mut calls = 0;
+            assert_eq!(
+                program
+                    .evaluate_element_binding(
+                        &[],
+                        &[(0, Some(EId(0)))],
+                        &mut |_, _| Ok::<_, Failure<usize>>(None),
+                        &mut |_, _| Ok(Some(&value)),
+                        &mut |_| {
+                            calls += 1;
+                            Ok(())
+                        },
+                    )
+                    .unwrap(),
+                Some(truth)
+            );
+            for stop in 1..=calls {
+                let mut seen = 0;
+                assert_eq!(
+                    program.evaluate_element_binding(
+                        &[],
+                        &[(0, Some(EId(0)))],
+                        &mut |_, _| Ok::<_, Failure<usize>>(None),
+                        &mut |_, _| Ok(Some(&value)),
+                        &mut |_| {
+                            seen += 1;
+                            if seen == stop {
+                                Err(Failure::Source(stop))
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    ),
+                    Err(Failure::Source(stop))
+                );
+                assert_eq!(seen, stop);
+            }
+        }
     }
 
     #[test]

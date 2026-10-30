@@ -202,6 +202,7 @@ fn eligible_flat_input(query: &PreparedGraphAggregate) -> bool {
     };
     let mut scans = 0;
     let mut projections = 0;
+    let mut captures = Vec::new();
     for (position, op) in operators.iter().enumerate() {
         match op {
             GlaOperator::ScanVertices | GlaOperator::ScanEdges { .. } if position == 0 => {
@@ -230,13 +231,21 @@ fn eligible_flat_input(query: &PreparedGraphAggregate) -> bool {
             GlaOperator::CompareProperties { left, right, .. }
                 if left.ordinal() < width && right.ordinal() < width => {}
             GlaOperator::SelectBoolean { expression }
-                if expression.supports_vertex_bindings(width as usize) => {}
+                if expression.supports_element_bindings(width as usize, |capture| {
+                    captures.contains(&capture)
+                }) => {}
             GlaOperator::CapturePath {
-                start, segments, ..
+                capture,
+                start,
+                segments,
             } if width == 2
                 && start.ordinal() == 0
                 && segments.len() == 1
-                && segments[0].ordinal() == 1 => {}
+                && segments[0].ordinal() == 1
+                && !captures.contains(capture) =>
+            {
+                captures.push(*capture);
+            }
             GlaOperator::ProjectValues { columns } => {
                 projections += 1;
                 if columns.iter().any(|column| match column {
@@ -291,10 +300,30 @@ fn needs_property(query: &PreparedGraphAggregate, key: PropertyKeyId) -> bool {
             _ => false,
         })
 }
+fn edge_property_keys(query: &PreparedGraphAggregate) -> impl Iterator<Item = PropertyKeyId> + '_ {
+    query
+        .input_pattern()
+        .value_columns()
+        .iter()
+        .filter_map(|column| match column {
+            ValueProjection::EdgeProperty { key, .. } => Some(*key),
+            _ => None,
+        })
+        .chain(
+            query
+                .input_pattern()
+                .plan()
+                .operators()
+                .iter()
+                .filter_map(|op| match op {
+                    GlaOperator::SelectBoolean { expression } => Some(expression),
+                    _ => None,
+                })
+                .flat_map(|expression| expression.referenced_edge_properties().map(|(_, key)| key)),
+        )
+}
 fn needs_edge_property(query: &PreparedGraphAggregate, key: PropertyKeyId) -> bool {
-    query.input_pattern().value_columns().iter().any(|column| {
-        matches!(column, ValueProjection::EdgeProperty { key: actual, .. } if *actual == key)
-    })
+    edge_property_keys(query).any(|actual| actual == key)
 }
 fn needs_label(query: &PreparedGraphAggregate, label: LabelId) -> bool {
     query.input_pattern().plan().operators().iter().any(|op| matches!(op, GlaOperator::Select { predicates, .. } if predicates.iter().any(|p| matches!(p, VertexPredicate::HasLabel(actual) if *actual == label))))

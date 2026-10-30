@@ -159,12 +159,7 @@ fn retained_properties<'a>(
     properties: impl IntoIterator<Item = (&'a PropertyKeyId, &'a CanonicalPropertyValue)>,
     meter: &mut Meter<'_>,
 ) -> Result<Option<EdgeProperties>, StandingQueryFailure> {
-    if !query
-        .input_pattern()
-        .value_columns()
-        .iter()
-        .any(|column| matches!(column, ValueProjection::EdgeProperty { .. }))
-    {
+    if edge_property_keys(query).next().is_none() {
         return Ok(None);
     }
     // Reserve the retained edge binding even when every requested key is absent.

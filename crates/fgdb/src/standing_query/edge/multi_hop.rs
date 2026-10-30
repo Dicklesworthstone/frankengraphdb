@@ -209,7 +209,10 @@ impl Shape {
                         && (left.ordinal() as usize) < width
                         && (right.ordinal() as usize) < width => {}
                 GlaOperator::SelectBoolean { expression }
-                    if !projected && expression.supports_vertex_bindings(width) => {}
+                    if !projected
+                        && expression.supports_element_bindings(width, |capture| {
+                            captures.iter().any(|(actual, _)| *actual == capture)
+                        }) => {}
                 GlaOperator::DifferentEdges { segments } if !projected => {
                     different_edges.push(Self::constraint(segments, &atoms)?);
                 }

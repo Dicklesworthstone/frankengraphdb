@@ -23,16 +23,15 @@ pub(super) struct Shape {
     width: u32,
 }
 
-fn predicate(op: &GlaOperator, width: u32) -> bool {
+fn predicate(op: &GlaOperator, width: u32, captures: &[u32]) -> bool {
     match op {
         GlaOperator::Select { slot, .. } => slot.ordinal() < width,
         GlaOperator::VertexIdentity { left, right, .. }
         | GlaOperator::CompareProperties { left, right, .. } => {
             left.ordinal() < width && right.ordinal() < width
         }
-        GlaOperator::SelectBoolean { expression } => {
-            expression.supports_vertex_bindings(width as usize)
-        }
+        GlaOperator::SelectBoolean { expression } => expression
+            .supports_element_bindings(width as usize, |capture| captures.contains(&capture)),
         _ => false,
     }
 }
@@ -68,7 +67,7 @@ impl Shape {
             return None;
         }
         let mut start = 1;
-        while ops.get(start).is_some_and(|op| predicate(op, 1)) {
+        while ops.get(start).is_some_and(|op| predicate(op, 1, &[])) {
             start += 1;
         }
         let (mode, group, end, slots) = match ops.get(start)? {
@@ -102,6 +101,7 @@ impl Shape {
         let mut expansion = None;
         let mut width = 2_u32;
         let mut hops = 0;
+        let mut captures = Vec::new();
         for op in &ops[start + 2..end] {
             match op {
                 GlaOperator::Expand {
@@ -126,13 +126,19 @@ impl Shape {
                             .iter()
                             .all(|slot| slot.ordinal() >= 2 && slot.ordinal() < width) => {}
                 GlaOperator::CapturePath {
-                    start, segments, ..
+                    capture,
+                    start,
+                    segments,
                 } if mode == Mode::Optional
                     && start.ordinal() >= 1
                     && segments.len() == 1
                     && start.ordinal() < segments[0].ordinal()
-                    && segments[0].ordinal() < width => {}
-                op if predicate(op, width) => {}
+                    && segments[0].ordinal() < width
+                    && !captures.contains(capture) =>
+                {
+                    captures.push(*capture);
+                }
+                op if predicate(op, width, &captures) => {}
                 _ => return None,
             }
         }
@@ -194,6 +200,7 @@ impl Shape {
         grouped::keeps(
             &query.input_pattern().plan().operators()[1..self.start],
             &[(vid, state)],
+            EdgeBindings::None,
             meter,
         )
     }
@@ -220,7 +227,7 @@ impl Shape {
         if !self.keep_root(query, root, state, meter)? {
             return Ok(());
         }
-        if !grouped::keeps(self.body(query), binding, meter)? {
+        if !grouped::keeps(self.body(query), binding, edge, meter)? {
             return Ok(());
         }
         change(counts, root, sign, meter)?;
