@@ -495,3 +495,271 @@ fn source_pool_exhaustion_returns_no_image_and_refunds_every_transient_owner() {
         assert_eq!(pool.used(), 0);
     });
 }
+
+fn family_vid(source: usize) -> VId {
+    VId((1u128 << 127) | ((source as u128) << 64) | source as u128)
+}
+
+fn family_property(source: usize, payload_bytes: usize) -> CanonicalPropertyValue {
+    CanonicalScalar::bytes(vec![source as u8; payload_bytes])
+        .unwrap()
+        .into()
+}
+
+async fn family_fixture(
+    contexts: &PurposeContexts,
+    path: &Path,
+    families: usize,
+    payload_bytes: usize,
+) -> (BlockStore, PartitionRootVersion) {
+    let cx = contexts.commit();
+    let store = BlockStore::open(
+        &cx,
+        path,
+        [0x53; 32],
+        DatabaseSecurityNamespaceId([0x35; 32]),
+    )
+    .await
+    .unwrap();
+    // Reverse source order at birth, then interleave retirements in a different
+    // order. Every family keeps its complete immutable-EId publication chain.
+    let mut publications: Vec<_> = (1..=families).rev().map(|source| (source, None)).collect();
+    for retirement in [3, 4] {
+        publications.extend(
+            (1..=families)
+                .filter(|&source| (if source % 2 == 0 { 3 } else { 4 }) == retirement)
+                .map(|source| (source, Some(retirement))),
+        );
+    }
+    let mut previous = vec![None; families];
+    let mut blocks = Vec::new();
+    for (source, retired) in publications {
+        let entries = [AdjacencyEntry {
+            src: family_vid(source),
+            dst: VId(0),
+            relation: R,
+            eid: EId((1u128 << 126) | source as u128),
+            created_at: CommitSeq(1),
+            retired_at: retired.map(CommitSeq),
+        }];
+        let props = vec![vec![(P, family_property(source, payload_bytes))]];
+        let patch = store
+            .put_edge_property_patch(&cx, &encode_property_patch(&props).unwrap())
+            .await
+            .unwrap();
+        let bytes =
+            encode_block_with_properties(0, previous[source - 1], &entries, patch.0, &[1], &props)
+                .unwrap();
+        let id = store.put(&cx, &bytes).await.unwrap();
+        previous[source - 1] = Some(id);
+        blocks.push(BlockRef {
+            block_id: id.0,
+            first_seq: CommitSeq(1),
+            last_seq: CommitSeq(retired.unwrap_or(1)),
+        });
+    }
+    let vertices: Vec<_> = (0..=families)
+        .map(|source| VertexRow {
+            vid: if source == 0 {
+                VId(0)
+            } else {
+                family_vid(source)
+            },
+            birth_ordinal: source as u64,
+            created_at: CommitSeq(1),
+            retired_at: None,
+            labels: vec![LabelId(7)],
+            props: Vec::new(),
+        })
+        .collect();
+    let mut patches = Vec::new();
+    for rows in vertices.chunks(64) {
+        let patch = store
+            .put_patch(&cx, &encode_patch(rows).unwrap())
+            .await
+            .unwrap();
+        patches.push(PatchRef {
+            patch_id: patch.0,
+            first_seq: CommitSeq(1),
+            last_seq: CommitSeq(1),
+        });
+    }
+    let root = store
+        .put_root(
+            &cx,
+            &PartitionRoot {
+                graph: GraphId(1),
+                branch: BranchId(2),
+                partition: 0,
+                published_at: CommitSeq(4),
+                blocks,
+                vertex_patches: patches,
+            },
+        )
+        .await
+        .unwrap();
+    (store, root)
+}
+
+fn family_limits() -> BufferedReadLimits {
+    BufferedReadLimits {
+        max_root_bytes: 64 * 1024,
+        max_source_bytes: 8 * 1024 * 1024,
+        max_blocks: 512,
+        max_work: 1_000_000,
+        ..limits()
+    }
+}
+
+#[test]
+fn source_family_sealing_fits_below_total_raw_history_and_preserves_exact_images() {
+    run(|contexts, path| async move {
+        const FAMILIES: usize = 128;
+        const PAYLOAD: usize = 8192;
+        const HEADROOM: usize = 1536 * 1024;
+        let (store, root) = family_fixture(&contexts, &path, FAMILIES, PAYLOAD).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(MEMORY, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, root, pool.clone(), family_limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        let held = pool.reserve(&cx, MEMORY - baseline - HEADROOM).unwrap();
+        // This is a lower bound on the old all-family source's OWNED payloads,
+        // excluding every vector, routing entry, row and decoder workspace.
+        // Retaining all statements cannot fit in this admitted source pool.
+        assert!(2 * FAMILIES * PAYLOAD > HEADROOM);
+        let before = view.stats();
+        assert!(matches!(
+            view.seal_relation(
+                &cx,
+                CommitSeq(1),
+                R,
+                SealedLimits::default(),
+                2 * FAMILIES - 1,
+            )
+            .await,
+            Err(SealedError::Limit {
+                resource: "sealed source incidences",
+                ..
+            })
+        ));
+        assert_eq!(view.stats(), before);
+        assert_eq!(pool.used(), baseline + held.bytes());
+        for floor in [1, 3, 4] {
+            let expected = store
+                .seal_relation(&cx, root, CommitSeq(floor), R, SealedLimits::default())
+                .await
+                .unwrap();
+            let image = view
+                .seal_relation(
+                    &cx,
+                    CommitSeq(floor),
+                    R,
+                    SealedLimits::default(),
+                    2 * FAMILIES,
+                )
+                .await
+                .unwrap();
+            assert_eq!(image.anchor(), expected.anchor());
+            assert_eq!(
+                image.encode(&cx, SealedLimits::default()).unwrap(),
+                expected.encode(&cx, SealedLimits::default()).unwrap()
+            );
+            for cut in floor..=4 {
+                for source in 1..=FAMILIES {
+                    let retirement = if source % 2 == 0 { 3 } else { 4 };
+                    let mut cursor = image
+                        .row(&cx, family_vid(source), R, CommitSeq(cut))
+                        .unwrap();
+                    match cursor.next(&cx).unwrap() {
+                        Some(row) => {
+                            assert!(cut < retirement);
+                            assert_eq!(row.entry.eid, EId((1u128 << 126) | source as u128));
+                            assert_eq!(row.properties, &[(P, family_property(source, PAYLOAD))]);
+                            assert!(cursor.next(&cx).unwrap().is_none());
+                        }
+                        None => assert!(cut >= retirement),
+                    }
+                }
+            }
+            assert!(pool.used() <= baseline + held.bytes());
+        }
+        // An aggregate output refusal after many completed families releases
+        // every private output and source owner; the view can build again.
+        assert!(matches!(
+            view.seal_relation(
+                &cx,
+                CommitSeq(1),
+                R,
+                SealedLimits {
+                    max_rows: FAMILIES - 1,
+                    ..SealedLimits::default()
+                },
+                2 * FAMILIES,
+            )
+            .await,
+            Err(SealedError::Limit {
+                resource: "descriptors",
+                ..
+            })
+        ));
+        assert!(pool.used() <= baseline + held.bytes());
+        assert_eq!(
+            view.seal_relation(&cx, CommitSeq(1), R, SealedLimits::default(), 2 * FAMILIES,)
+                .await
+                .unwrap()
+                .stats()
+                .rows,
+            FAMILIES
+        );
+        drop(held);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn each_source_family_sealing_checkpoint_refunds_and_keeps_the_reader_usable() {
+    use fgdb_types::context::SimulationCheckpointProbe;
+    use std::sync::Arc;
+
+    run(|contexts, path| async move {
+        let (store, root) = family_fixture(&contexts, &path, 3, 8).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(MEMORY, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, root, pool.clone(), family_limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        let observed = Arc::new(SimulationCheckpointProbe::new(None));
+        let measuring = cx.with_checkpoint_probe(Arc::clone(&observed));
+        let expected = view
+            .seal_relation(&measuring, CommitSeq(1), R, SealedLimits::default(), 6)
+            .await
+            .unwrap();
+        let checkpoints = observed.calls();
+        assert!(checkpoints > 3);
+        for stop in 1..=checkpoints {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let cancelled = cx.with_checkpoint_probe(Arc::clone(&probe));
+            assert!(
+                view.seal_relation(&cancelled, CommitSeq(1), R, SealedLimits::default(), 6)
+                    .await
+                    .is_err(),
+                "checkpoint {stop}"
+            );
+            assert_eq!(probe.calls(), stop);
+            assert!(pool.used() <= baseline, "checkpoint {stop}");
+            let retry = view
+                .seal_relation(&cx, CommitSeq(1), R, SealedLimits::default(), 6)
+                .await
+                .unwrap();
+            assert_eq!(retry.anchor(), expected.anchor(), "checkpoint {stop}");
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}

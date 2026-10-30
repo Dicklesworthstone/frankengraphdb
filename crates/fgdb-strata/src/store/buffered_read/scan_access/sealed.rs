@@ -1,4 +1,4 @@
-//! Transfer already-admitted relation history with its existing input charges.
+//! Transfer one already-admitted source family with its existing input charges.
 //! No root reopen, vertex payload scan, or uncharged source clone is needed.
 
 use super::*;
@@ -12,6 +12,15 @@ pub(crate) struct SealedSource {
     _charges: Vec<MemoryCharge>,
 }
 
+/// Charged routing metadata only. Within a source, publication ordinals stay
+/// ascending; no decoded history from another family has to remain resident.
+pub(crate) struct SealedSources {
+    blocks: Vec<(VId, usize)>,
+    next: usize,
+    work: usize,
+    _charge: MemoryCharge,
+}
+
 fn source_error(error: BufferedScanError<Infallible>) -> BufferedReadError {
     match error {
         BufferedScanError::Read(error) => error,
@@ -20,15 +29,16 @@ fn source_error(error: BufferedScanError<Infallible>) -> BufferedReadError {
 }
 
 impl<V: Vfs> BufferedPartition<V> {
-    /// Preserve publication order: equal-version restatements must not acquire
-    /// a different precedence merely because another relation was omitted.
-    pub(crate) async fn sealed_relation_source(
+    /// Admit the complete raw population before faulting any payload. Sorting
+    /// authenticated descriptors changes only the order of independent source
+    /// families, never the publication precedence inside a family's history.
+    pub(crate) fn sealed_relation_sources(
         &mut self,
         cx: &QueryCx,
         floor: CommitSeq,
         relation: RelationId,
         max_incidences: usize,
-    ) -> Result<SealedSource, BufferedReadError> {
+    ) -> Result<SealedSources, BufferedReadError> {
         self.begin(cx, floor)?;
         let maximum = self.limits.max_work;
         let mut work = 0;
@@ -48,8 +58,69 @@ impl<V: Vfs> BufferedPartition<V> {
                 .ok_or(BufferedReadError::SizeOverflow)?;
             limit("sealed source incidences", incidences, max_incidences)?;
         }
-        // Count and reserve the three owner vectors before any allocation or
-        // payload fault. Decoded images keep their own per-block reservations.
+        let bytes = count
+            .checked_mul(size_of::<(VId, usize)>())
+            .ok_or(BufferedReadError::SizeOverflow)?;
+        let charge = self.reserve_scan_bytes(cx, bytes)?;
+        let mut blocks = Vec::new();
+        blocks
+            .try_reserve_exact(count)
+            .map_err(|_| MemoryError::AllocationFailed { requested: bytes })?;
+        let allocated = blocks
+            .capacity()
+            .checked_mul(size_of::<(VId, usize)>())
+            .ok_or(BufferedReadError::SizeOverflow)?;
+        limit("sealed source routing bytes", allocated, bytes)?;
+        let mut selected = selected;
+        while let Some(at) = self.block_directory.next_relation(&mut selected, &mut || {
+            cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+            advance(&mut work, 1, maximum)
+        })? {
+            let summary = self.blocks[at].summary.ok_or(BufferError::InvalidLoad)?;
+            blocks.push((summary.source, at));
+        }
+        // The in-place heap sort spends this same cumulative work allowance
+        // and observes cancellation; it allocates no second routing vector.
+        crate::tiered::edge_scan::sort(&mut blocks, &mut || {
+            cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+            advance(&mut work, 1, maximum)
+        })?;
+        Ok(SealedSources {
+            blocks,
+            next: 0,
+            work,
+            _charge: charge,
+        })
+    }
+
+    /// Load one complete source/relation history. The caller consumes it with
+    /// the ordinary compactor and drops its charges before asking for another.
+    /// Complete initial admission already proved EId topology across families.
+    pub(crate) async fn next_sealed_relation_source(
+        &mut self,
+        cx: &QueryCx,
+        sources: &mut SealedSources,
+    ) -> Result<Option<SealedSource>, BufferedReadError> {
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+        let maximum = self.limits.max_work;
+        advance(&mut sources.work, 1, maximum)?;
+        let start = sources.next;
+        let Some(&(vertex, _)) = sources.blocks.get(start) else {
+            return Ok(None);
+        };
+        let mut end = start;
+        while sources
+            .blocks
+            .get(end)
+            .is_some_and(|&(source, _)| source == vertex)
+        {
+            cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+            advance(&mut sources.work, 1, maximum)?;
+            end += 1;
+        }
+        let count = end - start;
+        // Reserve the three owner vectors before any allocation or payload
+        // fault. Decoded images keep their own per-block reservations.
         let bytes = count
             .checked_mul(
                 size_of::<Vec<AdjacencyEntry>>()
@@ -101,17 +172,16 @@ impl<V: Vfs> BufferedPartition<V> {
         limit("sealed source owner bytes", allocated, bytes)?;
         source._charges.push(charge);
 
-        let mut selected = selected;
-        while let Some(at) = self.block_directory.next_relation(&mut selected, &mut || {
+        for position in start..end {
             cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-            advance(&mut work, 1, maximum)
-        })? {
+            advance(&mut sources.work, 1, maximum)?;
+            let at = sources.blocks[position].1;
             let descriptor = self.blocks[at];
-            advance(&mut work, descriptor.rows, maximum)?;
+            advance(&mut sources.work, descriptor.rows, maximum)?;
             let charge = self.reserve_scan_workspace(cx)?;
             let mut observe = || -> Result<(), BufferedScanError<Infallible>> {
                 cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-                advance(&mut work, 1, maximum)?;
+                advance(&mut sources.work, 1, maximum)?;
                 Ok(())
             };
             let image = self
@@ -128,6 +198,7 @@ impl<V: Vfs> BufferedPartition<V> {
             source._charges.push(_charge);
         }
         cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
-        Ok(source)
+        sources.next = end;
+        Ok(Some(source))
     }
 }

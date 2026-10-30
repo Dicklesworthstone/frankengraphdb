@@ -38,6 +38,10 @@ workspace = true
 [dev-dependencies.fgdb-delta-types]
 path = "../fgdb-delta-types"
 
+[dev-dependencies.fgdb-types]
+path = "../fgdb-types"
+features = ["simulation-checkpoints"]
+
 # TESTS ONLY, AND DELIBERATELY NOT A REAL DEPENDENCY YET. `fgdb-codec::identity`
 # is the registered identity-column codec §6.2 requires for block entries, and
 # this crate does not use it — the byte-economy witnesses in
