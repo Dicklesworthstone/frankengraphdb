@@ -16,6 +16,7 @@
 //! GET  /v1/databases/<name>/schema         (the names the token may see)
 //! POST /v1/databases/<name>/query          (read)
 //! POST /v1/databases/<name>/query-diff     (finite historical result changes)
+//! POST /v1/databases/<name>/query-batch    (up to 32 reads, one pinned generation)
 //! POST /v1/databases/<name>/write          (write)
 //! POST /v1/databases/<name>/write-if-current (exact-frontier conditional write)
 //! POST /v1/databases/<name>/write-batch    (one atomic ingestion program)
@@ -27,7 +28,15 @@
 //! ```
 //!
 //! A query answers `{"v":1,"columns":[...],"rows":[[cell,...],...],"seq":N}`
-//! with the CLI robot contract's cells; a write answers
+//! with the CLI robot contract's cells. A query-batch takes the same
+//! statement/argument_sets body as a write-batch and answers
+//! {"v":1,"results":[{"columns":[...],"rows":[...],"seq":N},...]}.
+//! Its 1–32 reads share one pinned generation and one cumulative signed
+//! allowance; each result names its own selected historical cut. Any failure
+//! returns one refusal with no successful prefix. Native host limits still
+//! apply per statement. Unsigned parameters such as an AS OF SEQ cut use
+//! `{"$uint64":"1"}`; ordinary JSON integers retain their signed type.
+//! A write answers
 //! `{"v":1,"seq":N,"statements":M,"committed":true|false}`, with `columns`
 //! and `rows` first when it is a `CREATE/INSERT ... RETURN`. A refusal answers
 //! `{"v":1,"error":{"code":"<class>","message":"..."}}` under a status that
@@ -45,8 +54,8 @@ mod studio;
 use crate::Server;
 use crate::commits::CommitWatcher;
 use crate::execute::{
-    Answer, DifferenceAnswer, Refusal, authorize_write, read, read_difference, write, write_batch,
-    write_if_current,
+    Answer, DifferenceAnswer, ReadBatchAnswer, Refusal, authorize_write, read, read_batch,
+    read_difference, write, write_batch, write_if_current,
 };
 use crate::recovery::Generation;
 use asupersync::Cx;
@@ -617,6 +626,33 @@ fn answer_response(answer: &Answer) -> Response {
     }
 }
 
+fn read_batch_response(answer: &ReadBatchAnswer) -> Response {
+    let results = answer
+        .results
+        .iter()
+        .map(|result| {
+            let columns = result
+                .columns
+                .iter()
+                .map(|column| quote(column))
+                .collect::<Vec<_>>()
+                .join(",");
+            let rows = result
+                .rows
+                .iter()
+                .map(|row| format!("[{}]", row.iter().map(cell).collect::<Vec<_>>().join(",")))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                r#"{{"columns":[{columns}],"rows":[{rows}],"seq":{}}}"#,
+                result.seq,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    json_response(200, format!(r#"{{"v":1,"results":[{results}]}}"#))
+}
+
 fn difference_response(answer: &DifferenceAnswer) -> Response {
     let columns = answer
         .columns
@@ -858,7 +894,7 @@ pub(crate) async fn respond<'s>(
     let mode = match verb {
         "query" => Some(ExecuteMode::Read),
         "write" => Some(ExecuteMode::Write),
-        "write-batch" | "query-diff" | "write-if-current" => None,
+        "write-batch" | "query-batch" | "query-diff" | "write-if-current" => None,
         _ => {
             return json_response(
                 404,
@@ -891,6 +927,34 @@ pub(crate) async fn respond<'s>(
     };
     if !output.protected(cx, &db.authority, verified) {
         return refusal_response(ErrorCode::Execution, "connection unavailable");
+    }
+    if verb == "query-batch" {
+        // As with historical differences, read rights precede body parsing.
+        // The same generation fences adaptation, execution and every send.
+        let generation = match crate::execute::ordered::ordered_generation(db, &token) {
+            Ok(generation) => generation,
+            Err(Refusal { code, message }) => return refusal_response(code, &message),
+        };
+        let statement = match batch_statement(&request) {
+            Ok(statement) => statement,
+            Err(response) => return response,
+        };
+        let answer = read_batch(cx, db, &token, &statement).await;
+        if let Err(error) = generation.check() {
+            return refusal_response(error.code(), error.message());
+        }
+        return match answer {
+            Ok(answer) => {
+                if let Err(error) = answer.generation.check() {
+                    return refusal_response(error.code(), error.message());
+                }
+                if !output.pin_generation(answer.generation.clone()) {
+                    return refusal_response(ErrorCode::Execution, "connection unavailable");
+                }
+                read_batch_response(&answer)
+            }
+            Err(Refusal { code, message }) => refusal_response(code, &message),
+        };
     }
     if verb == "query-diff" {
         // Read rights precede even body inspection. Keep the admitted history

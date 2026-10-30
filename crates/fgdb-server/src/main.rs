@@ -127,9 +127,12 @@ http/1.1. Bolt clients use bolt+s:// or neo4j+s:// with normal certificate
 verification. Warden capability authentication still applies inside TLS.
 
 --http-listen adds the HTTP/1.1 JSON adapter: POST /v1/databases/<name>/query,
-/write, or /write-batch with `Authorization: Bearer <hex token>` and a JSON
+/write, /write-batch, or /query-batch with `Authorization: Bearer <hex token>` and a JSON
 body {\"statement\": \"<gql>\", \"parameters\": {...}} (or \"argument_sets\" for
-/write-batch); GET /v1/databases/<name>/schema; GET /v1/health. Requests must
+/write-batch and /query-batch); GET /v1/databases/<name>/schema; GET /v1/health.
+query-batch runs 1..=32 parameterized reads atomically over one pinned generation
+and one cumulative signed allowance. It returns ordered results with each read's
+actual selected sequence; a failed read refuses the whole batch. Requests must
 name an allowed Host (default localhost, 127.0.0.1, [::1] and the listen IP;
 --http-allow-host replaces that list).
 

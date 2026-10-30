@@ -16,6 +16,9 @@ fn admit(count: usize, execution: &Live<'_, '_, '_>) -> Result<(), QueryError> {
 }
 
 impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {
+    /// Maximum number of native reads admitted by one atomic batch.
+    pub const MAX_BATCH_STATEMENTS: usize = MAX_STATEMENTS;
+
     /// Execute up to 32 native reads as one atomically delivered batch.
     ///
     /// All statements use this session's immutable generation and fixed host
@@ -43,12 +46,25 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         cx: &QueryCx,
         statements: &[(&str, &GqlParameters)],
     ) -> Result<Vec<QueryResult>, QueryError> {
+        self.query_batch_with_snapshots(cx, statements)
+            .map(|results| results.into_iter().map(|(result, _)| result).collect())
+    }
+
+    /// Execute the same atomic batch and retain each result's selected cut.
+    /// A temporal selector may choose an earlier sequence than the session's
+    /// pinned frontier. These sequences come from each actual execution;
+    /// transport adapters must not replace them with the current frontier.
+    pub fn query_batch_with_snapshots(
+        &mut self,
+        cx: &QueryCx,
+        statements: &[(&str, &GqlParameters)],
+    ) -> Result<Vec<(QueryResult, CommitSeq)>, QueryError> {
         self.run(cx, |view, branch, scope, resolver, policy, execution| {
             admit(statements.len(), execution)?;
             let mut results = Vec::new();
             for &(text, params) in statements {
                 execution.borrow_mut().checkpoint()?;
-                let ((result, _), rows) = text_at(
+                let (result, rows) = text_at(
                     view, branch, scope, resolver, policy, execution, text, params,
                 )?;
                 // Reservation and fresh validity checks precede retention.
@@ -74,6 +90,18 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         cx: &QueryCx,
         statements: &[(&AuthorizedPreparedRead, &GqlParameters)],
     ) -> Result<Vec<QueryResult>, QueryError> {
+        self.execute_batch_with_snapshots(cx, statements)
+            .map(|results| results.into_iter().map(|(result, _)| result).collect())
+    }
+
+    /// Execute frozen templates atomically with their exact selected cuts.
+    /// Ownership, shared allowances and late-failure behavior are identical
+    /// to execute_batch, including when one template is repeated.
+    pub fn execute_batch_with_snapshots(
+        &mut self,
+        cx: &QueryCx,
+        statements: &[(&AuthorizedPreparedRead, &GqlParameters)],
+    ) -> Result<Vec<(QueryResult, CommitSeq)>, QueryError> {
         let owner = Arc::clone(&self.owner);
         self.run(cx, |view, branch, scope, _, policy, execution| {
             admit(statements.len(), execution)?;
@@ -93,7 +121,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             let mut results = Vec::new();
             for &(prepared, params) in statements {
                 execution.borrow_mut().checkpoint()?;
-                let ((result, _), rows) = prepared_at(
+                let (result, rows) = prepared_at(
                     view, branch, scope, policy, execution, &owner, prepared, params,
                 )?;
                 execution.borrow_mut().deliver(rows)?;

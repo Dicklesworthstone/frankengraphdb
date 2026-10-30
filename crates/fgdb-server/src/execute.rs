@@ -7,6 +7,7 @@ mod difference;
 mod edge_upsert_output;
 pub(crate) mod ordered;
 mod prepared;
+mod read_batch;
 mod subscription;
 pub(crate) use conditional::{authorize_write, write_if_current};
 pub(crate) use difference::{DifferenceAnswer, read_difference, read_prepared_difference};
@@ -16,6 +17,7 @@ pub(crate) use prepared::{
 };
 #[cfg(test)]
 pub(crate) use prepared::{prepare_read, read_prepared};
+pub(crate) use read_batch::{ReadBatchAnswer, read_batch};
 pub(crate) use subscription::{poll, subscribe};
 
 use crate::recovery::{Generation, Unavailable};

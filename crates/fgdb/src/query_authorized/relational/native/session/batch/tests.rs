@@ -437,3 +437,67 @@ fn every_batch_expiry_cut_keeps_all_results_private_and_closes_the_session() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn text_and_prepared_batches_report_selected_cuts_from_their_pinned_generation() {
+    let ((), report) = run_async_under_lab(0x5ec0_6108, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = database(&commit).await;
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(99)));
+        db.write(&commit, change).await.unwrap();
+
+        let issuer = issuer(708);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let mut session = db
+            .authorized_read_session(&cx, &issuer, &token, BRANCH, symbols, policy(), || 100)
+            .unwrap();
+        let empty = GqlParameters::new();
+        let first = GqlParameters::new().with_uint64("cut", 1).unwrap();
+        let second = GqlParameters::new().with_uint64("cut", 2).unwrap();
+        let historical = "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $cut RETURN n.p AS p ORDER BY p";
+        let prepared = session.prepare(&cx, historical, &first).unwrap();
+
+        // Both ordinary reads and a repeated prepared template keep the
+        // captured generation after the writer publishes and compacts.
+        let mut later = WriteBatch::new(RelationId(1));
+        later.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(150)));
+        db.write(&commit, later).await.unwrap();
+        db.compact(&commit).await.unwrap();
+        let current = rows(&["p"], vec![vec![value(30)], vec![value(99)]]);
+        let expected = vec![(visible(), CommitSeq(1)), (current.clone(), CommitSeq(2))];
+        assert_eq!(
+            session
+                .query_batch_with_snapshots(&cx, &[(historical, &first), (historical, &second)])
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            session
+                .execute_batch_with_snapshots(&cx, &[(&prepared, &first), (&prepared, &second)])
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            session
+                .query_batch_with_snapshots(
+                    &cx,
+                    &[("MATCH (n) RETURN n.p AS p ORDER BY p", &empty)],
+                )
+                .unwrap(),
+            [(current, CommitSeq(2))]
+        );
+        let future = GqlParameters::new().with_uint64("cut", 3).unwrap();
+        assert!(matches!(
+            session
+                .query_batch_with_snapshots(&cx, &[(historical, &first), (historical, &future)],),
+            Err(QueryError::Read(ReadError::BeyondFrontier {
+                asked: CommitSeq(3),
+                frontier: CommitSeq(2)
+            }))
+        ));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
