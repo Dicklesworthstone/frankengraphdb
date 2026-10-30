@@ -387,7 +387,7 @@ fn a_tape_replays_every_live_call_of_its_build_in_order() {
                     }
                     built += 1;
                     let tape = tape.into_inner().finish();
-                    assert!(tape.runs.len() <= recorded.len());
+                    assert!(tape.runs().count() <= recorded.len());
                     tape.replay(poll, spend).unwrap();
                     assert_eq!(log.take(), recorded, "cut {at} {variant:?}");
                 }
@@ -404,7 +404,8 @@ fn a_tape_replays_every_live_call_of_its_build_in_order() {
 
 /// Over a single-version graph the tape is a handful of runs however many
 /// records it admits, unless a retained overlay index charges each edge's
-/// actual descent: then at most one run per overlay edge more.
+/// actual descent. Those irregular edge runs now cost one byte each while
+/// preserving the full sequence, so the fixed staging allowance admits reuse.
 #[test]
 fn a_single_version_tape_is_constant_size() {
     let ((), report) = run_async_under_lab(0x0b7b_0002, |root| async move {
@@ -435,14 +436,18 @@ fn a_single_version_tape_is_constant_size() {
             "the write extended the index"
         );
         let flat = crate::gql_exec::source::AdjacencyIndex::build(&db.snapshot.blocks);
-        for (adjacency, max_runs) in [
-            (std::sync::OnceLock::new(), 12),
-            (std::sync::OnceLock::from(Arc::new(flat)), 12),
-            (db.snapshot.adjacency.clone(), 12 + 400),
+        for (adjacency, max_runs, encoded_bytes) in [
+            (std::sync::OnceLock::new(), 12, 12 * 16),
+            (std::sync::OnceLock::from(Arc::new(flat)), 12, 12 * 16),
+            (db.snapshot.adjacency.clone(), 12 + 400, 12 * 16 + 400),
         ] {
             let mut snapshot = (*db.snapshot).clone();
             snapshot.adjacency = adjacency;
-            let tape = RefCell::new(Tape::default());
+            // Allow one byte per irregular edge and at most sixteen bytes
+            // per non-edge run (all three u32 values at their maximum width).
+            // The previous full-width tuple tape could not fit the overlay.
+            let byte_limit = std::mem::size_of::<Tape>() + encoded_bytes;
+            let tape = RefCell::new(Tape::bounded(byte_limit));
             build(
                 &snapshot,
                 SnapshotBinding {
@@ -457,7 +462,9 @@ fn a_single_version_tape_is_constant_size() {
             )
             .unwrap();
             let tape = tape.into_inner().finish();
-            assert!(tape.runs.len() <= max_runs, "{:?}", tape.runs);
+            assert!(tape.is_complete(), "a complete tape must remain reusable");
+            assert!(tape.runs().count() <= max_runs, "{tape:?}");
+            assert!(tape.bytes() <= byte_limit, "{tape:?}");
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

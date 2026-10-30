@@ -589,7 +589,7 @@ fn a_single_version_scan_retains_a_constant_size_tape() {
             .lookup(&db.snapshot, AdmissionKey { at, edges: true })
             .unwrap();
         assert_eq!((core.vertices.len(), core.edges.len()), (400, 400));
-        assert!(core.tape.runs.len() <= 12, "{:?}", core.tape.runs);
+        assert!(core.tape.runs().count() <= 12, "{:?}", core.tape);
         assert_eq!(c.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
