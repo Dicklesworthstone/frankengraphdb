@@ -654,6 +654,8 @@ fn csv_initial_relations_match_list_oracle_through_native_and_authorized_hosts()
             "UNWIND $rows AS row MATCH (seed:Visible {p:row.p}) MERGE (a:Visible {p:row.q}) MERGE (seed)-[:R]->(a)",
             "UNWIND $rows AS row CREATE (a:Visible {p:row.p}) WITH row,a CREATE (b:Visible {p:row.q}), (a)-[:R]->(b)",
             "UNWIND $rows AS row MATCH (a:Visible {p:row.p}), (b:Visible {p:row.q}) MERGE (a)-[:R]->(b) MERGE (a)-[:S]->(b)",
+            "UNWIND $rows AS row FOREACH (x IN [row.p,row.q] | CREATE (:Visible {p:x}))",
+            "UNWIND $rows AS row WITH row FOREACH (x IN [row.p,row.q] | CREATE (:Visible {p:x}))",
         ] {
             assert!(
                 PreparedGraphWriteChainText::is_chain(text).unwrap(),

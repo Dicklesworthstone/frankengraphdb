@@ -168,6 +168,49 @@ fn remaining_with_and_unwind_stages_keep_source_occurrence_order() {
 }
 
 #[test]
+fn a_foreach_unit_prefix_consumes_the_streamed_relation_in_source_order() {
+    for prefix in ["", "WITH row "] {
+        let template = PreparedGraphWriteChainText::prepare_with_parameter_types(
+            &format!(
+                "UNWIND $rows AS row {prefix}FOREACH (x IN [row.src,row.dst] | \
+                 CREATE (:N {{id:x}})) RETURN row.src AS src"
+            ),
+            RelationId(1),
+            &[("rows", GqlParameterType::List)],
+            symbols,
+        )
+        .unwrap();
+        let (chain, count) = bind(
+            &template,
+            &schema(GqlParameterType::Int64),
+            b"src,dst\n3,30\n1,10\n2,20\n",
+            1,
+            CsvParameterLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(count, 3);
+        let initial = chain
+            .initial_rows_governed::<(), ()>(policy(), || Ok(()))
+            .unwrap()
+            .unwrap();
+        let expected = initial.value.clone();
+        let GraphWriteChainStep::Foreach(foreach) = &chain.steps()[0] else {
+            panic!("a leading FOREACH owns the native CSV source");
+        };
+        let selected = foreach.execute_input_governed(
+            Some(initial.value),
+            policy(),
+            |_: &crate::algebra::PreparedGraphPattern<GraphValueRow>, _: GqlQueryPolicy|
+                -> Result<crate::GqlQueryExecution<GraphValueRow>, GqlQueryError<(), ()>> {
+                    panic!("streamed FOREACH source must not open a graph pattern")
+                },
+            || Ok(()),
+        ).unwrap();
+        assert_eq!(selected.value, expected, "{prefix}");
+    }
+}
+
+#[test]
 fn input_copy_spends_cumulative_work_and_scratch_before_rows_are_exposed() {
     let (chain, _) = bind(
         &template(""),

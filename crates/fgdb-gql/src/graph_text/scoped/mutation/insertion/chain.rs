@@ -706,7 +706,7 @@ impl PreparedGraphWriteChainText {
     /// before selecting the relationship compiler. A named path has the same
     /// owner. Do not reduce this to `(name)`: whole-pattern endpoints may be
     /// anonymous or newly declared with their own labels and properties.
-    fn relationship_merge(mut lexer: Lexer<'_>) -> Result<bool, GraphPatternTextError> {
+    pub(super) fn relationship_merge(mut lexer: Lexer<'_>) -> Result<bool, GraphPatternTextError> {
         let mut depth = 0_usize;
         loop {
             match script::next_script_token(&mut lexer)?.kind {
@@ -1256,11 +1256,25 @@ impl PreparedGraphWriteChainText {
             },
             _ => return Err(refused().into()),
         };
+        // A multipart unit prefix (including FOREACH) stores its first
+        // UNWIND in the ordinary pipeline. Other write owners keep the same
+        // source expansion in `leading`. Both are a unit followed by exactly
+        // one external row-source expansion; never replace a graph-backed or
+        // already projected input with caller rows.
+        let stages = if input.leading.is_empty()
+            && input.singleton
+            && input.selection.is_none()
+            && input.projection.is_none()
+        {
+            &mut input.pipeline
+        } else {
+            &mut input.leading
+        };
         let Some(ReadStageTemplate::Unwind {
             name,
             value: ReadValueTemplate::Parameter { index, .. },
             ..
-        }) = input.leading.first()
+        }) = stages.first()
         else {
             return Err(refused().into());
         };
@@ -1273,7 +1287,7 @@ impl PreparedGraphWriteChainText {
         {
             return Err(refused().into());
         }
-        input.leading[0] = ReadStageTemplate::InputRows { name: name.clone() };
+        stages[0] = ReadStageTemplate::InputRows { name: name.clone() };
         let arguments = GqlParameters::new()
             .with_list(parameter, Vec::new())
             .map_err(|_| refused())?;
