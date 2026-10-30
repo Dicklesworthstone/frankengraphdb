@@ -48,21 +48,7 @@ impl GraphEdgeMergeRowComputed {
         elements: &mut impl crate::GraphElementReader<C>,
     ) -> Result<Option<fgdb_types::CanonicalPropertyValue>, crate::GraphIntegerEvaluationError<C>>
     {
-        let value = crate::set_ops::projection::evaluate_value_reading(
-            &self.0.0,
-            row,
-            0,
-            control,
-            &mut crate::set_ops::projection::HostElements(elements),
-        )
-        .map_err(|failure| match failure {
-            crate::set_ops::ProjectionFailure::Control(error) => {
-                crate::GraphIntegerEvaluationError::Control(error)
-            }
-            crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
-                crate::GraphIntegerEvaluationError::Value(error)
-            }
-        })?;
+        let value = self.0.value_with_elements(row, control, elements)?;
         Ok(value.to_written_property())
     }
 
@@ -74,21 +60,7 @@ impl GraphEdgeMergeRowComputed {
         control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), C>,
         elements: &mut impl crate::GraphElementReader<C>,
     ) -> Result<crate::algebra::GraphValue, crate::GraphIntegerEvaluationError<C>> {
-        crate::set_ops::projection::evaluate_value_reading(
-            &self.0.0,
-            row,
-            0,
-            control,
-            &mut crate::set_ops::projection::HostElements(elements),
-        )
-        .map_err(|failure| match failure {
-            crate::set_ops::ProjectionFailure::Control(error) => {
-                crate::GraphIntegerEvaluationError::Control(error)
-            }
-            crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
-                crate::GraphIntegerEvaluationError::Value(error)
-            }
-        })
+        self.0.value_with_elements(row, control, elements)
     }
 }
 
@@ -1127,5 +1099,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn vertex_copied_maps_bind_the_same_catalog_and_clause_boundaries() {
+        use crate::GraphVertexMergeRowAction;
+        for prefix in ["MATCH (a:A)", "MATCH (a:A) WITH a"] {
+            let text =
+                |actions: &str| format!("{prefix} MERGE (n:A {{p:2}}) {actions} RETURN n.p, n.q");
+            let program =
+                bound_with_catalog(&text("ON CREATE SET n = a ON MATCH SET n += properties(a)"));
+            let Some(GraphWriteChainStep::VertexMergeQuery(query)) = program.steps().last() else {
+                panic!("expected a vertex MERGE with copied maps");
+            };
+            let actions = query.merge().actions().unwrap();
+            let [
+                GraphVertexMergeRowAction::Properties {
+                    replace: true,
+                    names,
+                    ..
+                },
+            ] = &actions.on_create[..]
+            else {
+                panic!("expected replacement from the carried vertex");
+            };
+            assert_eq!(
+                &names[..],
+                &[
+                    ("p".into(), P),
+                    ("q".into(), Q),
+                    ("secret".into(), PropertyKeyId(3))
+                ]
+            );
+            assert!(matches!(
+                &actions.on_match[..],
+                [GraphVertexMergeRowAction::Properties { replace: false, .. }]
+            ));
+            for actions in [
+                "ON MATCH SET n = a, n.p = 1",
+                "ON MATCH SET n.p = 1, n = a",
+                "ON MATCH SET n = a, n += a",
+                "ON MATCH SET n = properties(n)",
+            ] {
+                assert!(
+                    PreparedGraphWriteChainText::prepare(&text(actions), R, Catalog).is_err(),
+                    "{actions}"
+                );
+            }
+        }
+        let program = bound_with_catalog(
+            "MATCH (a:A) WITH a, {p:7,q:[1,2]} AS m MERGE (n:A {p:2}) \
+             ON MATCH SET n = m RETURN n.p",
+        );
+        let Some(GraphWriteChainStep::VertexMergeQuery(query)) = program.steps().last() else {
+            panic!("expected row-map vertex MERGE");
+        };
+        assert!(matches!(
+            &query.merge().actions().unwrap().on_match[..],
+            [GraphVertexMergeRowAction::Properties { replace: true, .. }]
+        ));
     }
 }

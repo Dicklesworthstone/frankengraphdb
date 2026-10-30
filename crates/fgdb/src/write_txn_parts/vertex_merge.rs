@@ -235,7 +235,14 @@ fn frozen_chain(chain: &fgdb_gql::PreparedGraphWriteChain) -> bool {
                 // which the chain holds. ON MATCH and a trailing SET update
                 // vertices the chain did not create.
                 if merge.actions().is_some_and(|actions| {
-                    !actions.on_match.is_empty() || !actions.after.is_empty()
+                    !actions.on_match.is_empty()
+                        || !actions.after.is_empty()
+                        || actions.on_create.iter().any(|action| {
+                            matches!(
+                                action,
+                                fgdb_gql::GraphVertexMergeRowAction::Properties { .. }
+                            )
+                        })
                 }) {
                     return false;
                 }
@@ -690,6 +697,9 @@ impl WriteTxn {
                 live,
             }));
         }
+        // Carried identities in action values keep the same input cut even
+        // when an earlier occurrence updates that very vertex.
+        let input_prepared = self.prepared.clone();
         cx.with_restriction(|| {
             // A MATCH input may also read a carried element it does not
             // rematch. Both callbacks borrow this same entry overlay until
@@ -1011,6 +1021,7 @@ impl WriteTxn {
                             &mut used,
                             (max_effects, &mut *effects),
                             frozen.as_deref_mut(),
+                            &input_prepared,
                         )?;
                     }
                 }
@@ -1046,6 +1057,7 @@ impl WriteTxn {
         used: &mut fgdb_gql::GraphVertexMergeStats,
         effects: (u64, &mut u64),
         held: Option<&mut FrozenCreations>,
+        input_prepared: &Option<std::sync::Arc<PreparedWrite>>,
     ) -> Result<(), TxnGqlError<fgdb_gql::GraphVertexMergeError<WriteTxnError, A>>> {
         use fgdb_gql::algebra::GraphValue;
         use fgdb_gql::{GqlQueryError, GraphVertexMergeError};
@@ -1082,6 +1094,21 @@ impl WriteTxn {
                     ),
                 }
             },
+            |_, element, key, control| {
+                let mut state = state.borrow_mut();
+                let (transaction, database, _) = &mut *state;
+                transaction.with_prepared_point_read(input_prepared, |transaction| {
+                    merge_row_property_with(
+                        transaction,
+                        database,
+                        element,
+                        key,
+                        control,
+                        source,
+                        |value| Ok(value.cloned()),
+                    )
+                })
+            },
             |control| {
                 let state = state.borrow();
                 // A whole-map replacement is never admitted by frozen_chain:
@@ -1098,6 +1125,25 @@ impl WriteTxn {
                     control,
                     source,
                 )
+            },
+            |element, kind, catalog, control| {
+                let mut state = state.borrow_mut();
+                let (transaction, database, _) = &mut *state;
+                let failure = std::cell::RefCell::new(None);
+                transaction
+                    .with_prepared_point_read(input_prepared, |transaction| {
+                        transaction.element_metadata_with_checkpoint(
+                            database, cx, &failure, element, kind, catalog, control,
+                        )
+                    })
+                    .map_err(|error| match error {
+                        fgdb_gql::GraphElementMetadataError::Source(error) => {
+                            fgdb_gql::GraphElementMetadataError::Source(source(error))
+                        }
+                        fgdb_gql::GraphElementMetadataError::Interrupted => {
+                            fgdb_gql::GraphElementMetadataError::Interrupted
+                        }
+                    })
             },
             |batch| {
                 let mut state = state.borrow_mut();
@@ -1128,7 +1174,7 @@ fn vertex_merge_known_effects(actions: &[fgdb_gql::GraphVertexMergeRowAction]) -
                 action,
                 fgdb_gql::GraphVertexMergeRowAction::Vertex(
                     fgdb_gql::GraphVertexUpsertAction::ClearProperties { .. }
-                )
+                ) | fgdb_gql::GraphVertexMergeRowAction::Properties { .. }
             )
         })
         .count()
@@ -1158,6 +1204,12 @@ pub(crate) fn vertex_merge_row_actions_controlled<E, A, C>(
         fgdb_gql::algebra::GraphValue,
         fgdb_gql::GqlQueryError<fgdb_gql::GraphVertexMergeError<E, A>, C>,
     >,
+    mut read_row: impl FnMut(
+        Option<usize>,
+        ElementId,
+        fgdb_delta_types::PropertyKeyId,
+        &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), VertexMergeFault<E, A, C>>,
+    ) -> Result<Option<CanonicalPropertyValue>, VertexMergeFault<E, A, C>>,
     mut keys: impl FnMut(
         &mut dyn FnMut(
             fgdb_gql::GlaExecutionEvent,
@@ -1168,6 +1220,15 @@ pub(crate) fn vertex_merge_row_actions_controlled<E, A, C>(
     ) -> Result<
         Vec<fgdb_delta_types::PropertyKeyId>,
         fgdb_gql::GqlQueryError<fgdb_gql::GraphVertexMergeError<E, A>, C>,
+    >,
+    mut metadata: impl FnMut(
+        ElementId,
+        fgdb_gql::GraphElementMetadata,
+        &fgdb_gql::ReverseSymbolCatalog,
+        &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), ()>,
+    ) -> Result<
+        Option<fgdb_gql::algebra::GraphValue>,
+        fgdb_gql::GraphElementMetadataError<VertexMergeFault<E, A, C>>,
     >,
     mut stage: impl FnMut(
         WriteBatch,
@@ -1268,6 +1329,63 @@ pub(crate) fn vertex_merge_row_actions_controlled<E, A, C>(
                         batch.set_vertex_property(vertex, key, None);
                     }
                 }
+                GraphVertexMergeRowAction::Properties {
+                    value,
+                    replace,
+                    names,
+                } => {
+                    let map = {
+                        let mut control = |event| charge(used, event);
+                        let controls = std::cell::RefCell::new(&mut control);
+                        value
+                            .value_with_elements(
+                                row,
+                                &mut |event| controls.borrow_mut()(event),
+                                &mut MergeRowMapReader(
+                                    |column, element, key| {
+                                        read_row(column, element, key, &mut |event| {
+                                            controls.borrow_mut()(event)
+                                        })
+                                    },
+                                    &mut metadata,
+                                ),
+                            )
+                            .map_err(|error| match error {
+                                GraphIntegerEvaluationError::Control(error) => error,
+                                GraphIntegerEvaluationError::Value(source) => {
+                                    GqlQueryError::Source(GraphVertexMergeError::RowAction {
+                                        row: at,
+                                        clause,
+                                        action,
+                                        source,
+                                    })
+                                }
+                            })?
+                    };
+                    for (key, value) in merge_row_property_map(
+                        &map,
+                        names,
+                        *replace,
+                        &mut keys,
+                        (max_effects, effects),
+                        &mut |event| charge(used, event),
+                        || {
+                            GqlQueryError::Source(GraphVertexMergeError::PropertyMap {
+                                row: at,
+                                clause,
+                                action,
+                            })
+                        },
+                        |observed| {
+                            GqlQueryError::Source(GraphVertexMergeError::EffectLimit {
+                                limit: max_effects,
+                                observed,
+                            })
+                        },
+                    )? {
+                        batch.set_vertex_property_value(vertex, key, value);
+                    }
+                }
                 // The step compiler builds every expression as a row
                 // expression; a vertex-only one is the unique MERGE's.
                 GraphVertexMergeRowAction::Vertex(GraphVertexUpsertAction::SetExpression {
@@ -1341,7 +1459,9 @@ pub(crate) fn vertex_merge_row_actions_controlled<E, A, C>(
         // No right-hand side observes a sibling assignment; the next
         // clause sees the host's completed original-intent staging.
         checkpoint.borrow_mut()().map_err(GqlQueryError::Interrupted)?;
-        stage(batch)?;
+        if !batch.is_empty() {
+            stage(batch)?;
+        }
     }
     Ok(())
 }

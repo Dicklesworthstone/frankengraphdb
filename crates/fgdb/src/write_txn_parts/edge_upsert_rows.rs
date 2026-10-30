@@ -206,10 +206,11 @@ where
 }
 
 /// A copied map's reader (fgdb-at06q): the row's point reads, and the
-/// properties of an element the map copies (`r = a`), at the same cut.
-struct EdgeMergeRowMapReader<F, M>(F, M);
+/// properties of an element the map copies (`n = a`, `r = a`), at the same
+/// cut. Vertex and relationship MERGE use this same reader adapter.
+struct MergeRowMapReader<F, M>(F, M);
 
-impl<E, F, M> fgdb_gql::GraphElementReader<E> for EdgeMergeRowMapReader<F, M>
+impl<E, F, M> fgdb_gql::GraphElementReader<E> for MergeRowMapReader<F, M>
 where
     F: FnMut(
         Option<usize>,
@@ -221,7 +222,10 @@ where
         fgdb_gql::GraphElementMetadata,
         &fgdb_gql::ReverseSymbolCatalog,
         &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), ()>,
-    ) -> Result<Option<fgdb_gql::algebra::GraphValue>, fgdb_gql::GraphElementMetadataError<E>>,
+    ) -> Result<
+        Option<fgdb_gql::algebra::GraphValue>,
+        fgdb_gql::GraphElementMetadataError<E>,
+    >,
 {
     fn element_property(
         &mut self,
@@ -246,11 +250,84 @@ where
         kind: fgdb_gql::GraphElementMetadata,
         catalog: &fgdb_gql::ReverseSymbolCatalog,
         control: &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), ()>,
-    ) -> Option<
-        Result<Option<fgdb_gql::algebra::GraphValue>, fgdb_gql::GraphElementMetadataError<E>>,
-    > {
+    ) -> Option<Result<Option<fgdb_gql::algebra::GraphValue>, fgdb_gql::GraphElementMetadataError<E>>>
+    {
         Some((self.1)(element, kind, catalog, control))
     }
+}
+
+/// Admit one copied map completely before staging any of its entries.
+/// The host supplies the target's visible keys at this clause's cut; both
+/// vertex and relationship actions use the same catalog, payload and
+/// cumulative effect accounting. NULL entries retain ordinary unset intent.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn merge_row_property_map<E>(
+    map: &fgdb_gql::algebra::GraphValue,
+    names: &[(Box<str>, fgdb_delta_types::PropertyKeyId)],
+    replace: bool,
+    mut keys: impl FnMut(
+        &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Vec<fgdb_delta_types::PropertyKeyId>, E>,
+    (max_effects, effects): (u64, &mut u64),
+    control: &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), E>,
+    invalid: impl Fn() -> E,
+    exceeded: impl Fn(u128) -> E,
+) -> Result<
+    Vec<(
+        fgdb_delta_types::PropertyKeyId,
+        Option<CanonicalPropertyValue>,
+    )>,
+    E,
+> {
+    use crate::gql_exec::source::SourceEvent;
+    use fgdb_gql::GlaExecutionEvent;
+    let Some((entries, values)) = map.as_map() else {
+        return Err(invalid());
+    };
+    let mut written = Vec::new();
+    for (name, entry) in entries.iter().zip(values) {
+        control(GlaExecutionEvent::Work)?;
+        let key = names
+            .binary_search_by(|(known, _)| (**known).cmp(&**name))
+            .map(|at| names[at].1)
+            .map_err(|_| invalid())?;
+        let value = entry.to_written_property().ok_or_else(&invalid)?;
+        point_payload_admission(&value, &mut |event| {
+            control(match event {
+                SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                _ => GlaExecutionEvent::Work,
+            })
+        })?;
+        control(GlaExecutionEvent::ScratchEntry)?;
+        written.push((key, value));
+    }
+    // Charge before allocating every removal. Entry assignments also count
+    // when their value is NULL or already equals the stored value.
+    let mut charge = |control: &mut dyn FnMut(GlaExecutionEvent) -> Result<(), E>| {
+        let observed = u128::from(*effects) + 1;
+        if observed > u128::from(max_effects) {
+            return Err(exceeded(observed));
+        }
+        control(GlaExecutionEvent::ScratchEntry)?;
+        *effects = observed as u64;
+        Ok(())
+    };
+    let mut proposals = Vec::new();
+    if replace {
+        for key in keys(control)? {
+            control(GlaExecutionEvent::Work)?;
+            if written.iter().any(|(entry, _)| *entry == key) {
+                continue;
+            }
+            charge(control)?;
+            proposals.push((key, None));
+        }
+    }
+    for (key, value) in written {
+        charge(control)?;
+        proposals.push((key, Some(value)));
+    }
+    Ok(proposals)
 }
 
 /// Evaluate the selected ON clause and trailing SET for one resolved edge.
@@ -386,8 +463,9 @@ pub(crate) fn edge_merge_row_actions_controlled<E, A, C>(
                     replace,
                     names,
                 } => {
-                    let invalid =
-                        || GqlQueryError::Source(GraphEdgeUpsertError::PropertyMap { clause, action });
+                    let invalid = || {
+                        GqlQueryError::Source(GraphEdgeUpsertError::PropertyMap { clause, action })
+                    };
                     // The whole map completes before any of its writes.
                     let map = {
                         let controls = std::cell::RefCell::new(&mut control);
@@ -395,7 +473,7 @@ pub(crate) fn edge_merge_row_actions_controlled<E, A, C>(
                             .value_with_elements(
                                 row,
                                 &mut |event| controls.borrow_mut()(event),
-                                &mut EdgeMergeRowMapReader(
+                                &mut MergeRowMapReader(
                                     |column, element, property| {
                                         read_row(column, element, property, &mut |event| {
                                             controls.borrow_mut()(event)
@@ -409,49 +487,22 @@ pub(crate) fn edge_merge_row_actions_controlled<E, A, C>(
                                 GraphIntegerEvaluationError::Value(error) => expression(error),
                             })?
                     };
-                    let Some((entries, values)) = map.as_map() else {
-                        return Err(invalid());
-                    };
-                    let mut written = Vec::with_capacity(entries.len());
-                    for (name, entry) in entries.iter().zip(values) {
-                        control(GlaExecutionEvent::Work)?;
-                        let key = names
-                            .binary_search_by(|(known, _)| (**known).cmp(&**name))
-                            .map(|at| names[at].1)
-                            .map_err(|_| invalid())?;
-                        let value = entry.to_written_property().ok_or_else(invalid)?;
-                        point_payload_admission(&value, &mut |event| control(payload(event)))?;
-                        control(GlaExecutionEvent::ScratchEntry)?;
-                        written.push((key, value));
-                    }
-                    let mut charge = |control: &mut dyn FnMut(
-                        GlaExecutionEvent,
-                    )
-                        -> EdgeUpsertActionResult<(), E, A, C>| {
-                        let observed = u128::from(*effects) + 1;
-                        if observed > u128::from(max_effects) {
-                            return Err(GqlQueryError::Source(GraphEdgeUpsertError::ActionLimit {
+                    for (key, value) in merge_row_property_map(
+                        &map,
+                        names,
+                        *replace,
+                        &mut keys,
+                        (max_effects, effects),
+                        &mut control,
+                        invalid,
+                        |observed| {
+                            GqlQueryError::Source(GraphEdgeUpsertError::ActionLimit {
                                 limit: max_effects,
                                 observed,
-                            }));
-                        }
-                        control(GlaExecutionEvent::ScratchEntry)?;
-                        *effects = observed as u64;
-                        Ok(())
-                    };
-                    if *replace {
-                        for key in keys(&mut control)? {
-                            control(GlaExecutionEvent::Work)?;
-                            if written.iter().any(|(entry, _)| *entry == key) {
-                                continue;
-                            }
-                            charge(&mut control)?;
-                            batch.set_edge_property(edge, key, None);
-                        }
-                    }
-                    for (key, value) in written {
-                        charge(&mut control)?;
-                        batch.set_edge_property_value(edge, key, Some(value));
+                            })
+                        },
+                    )? {
+                        batch.set_edge_property_value(edge, key, value);
                     }
                     continue;
                 }
@@ -588,8 +639,29 @@ fn edge_upsert_row_property_with<V: Vfs + Clone, A, C, T>(
     ) -> EdgeUpsertActionResult<(), WriteTxnError, A, C>,
     copy: impl FnOnce(Option<&CanonicalPropertyValue>) -> EdgeUpsertActionResult<T, WriteTxnError, A, C>,
 ) -> EdgeUpsertActionResult<T, WriteTxnError, A, C> {
+    merge_row_property_with(
+        transaction,
+        database,
+        element,
+        key,
+        control,
+        |error| fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphEdgeUpsertError::Staging(error)),
+        copy,
+    )
+}
+
+/// One governed row-element field, shared by vertex and relationship MERGE.
+fn merge_row_property_with<V: Vfs + Clone, E, T>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    element: ElementId,
+    key: fgdb_delta_types::PropertyKeyId,
+    control: &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), E>,
+    source: impl Fn(WriteTxnError) -> E,
+    copy: impl FnOnce(Option<&CanonicalPropertyValue>) -> Result<T, E>,
+) -> Result<T, E> {
     use crate::gql_exec::source::SourceEvent;
-    use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GraphEdgeUpsertError};
+    use fgdb_gql::GlaExecutionEvent;
     control(GlaExecutionEvent::Work)?;
     let field = PointReadField::Property(key);
     let mut attempt = ProjectionReadAttempt {
@@ -608,7 +680,7 @@ fn edge_upsert_row_property_with<V: Vfs + Clone, A, C, T>(
         element,
         field,
         &mut source_control,
-        &|error| GqlQueryError::Source(GraphEdgeUpsertError::Staging(error)),
+        &source,
     )?;
     if let Some(value) = projected.property {
         point_payload_admission(value, &mut source_control)?;

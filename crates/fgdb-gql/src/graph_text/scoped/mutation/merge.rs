@@ -582,7 +582,7 @@ impl<'a> Parser<'a> {
                 }
                 continue;
             }
-            if let Some(row) = row.filter(|_| row_vertices)
+            if let Some(row) = row
                 && let Some(replace) = self.copied_map_follows(replacement)?
             {
                 self.upsert_copied_map(variable, target, row, replace)?;
@@ -662,7 +662,7 @@ impl<'a> Parser<'a> {
             }
         }
         // A copied map's names are known only per row: it is its clause's
-        // only relationship assignment, so no entry competes with another.
+        // only target assignment, so no entry competes with another.
         if let Some(at) = target.iter().find_map(|action| match action {
             ParsedUpsertAction::RowProperties { at, .. } => Some(*at),
             _ => None,
@@ -675,7 +675,7 @@ impl<'a> Parser<'a> {
             return Err(error(
                 at,
                 GraphPatternTextErrorKind::Expected(
-                    "a copied property map as the clause's only relationship assignment",
+                    "a copied property map as the clause's only target assignment",
                 ),
             )
             .into());
@@ -722,11 +722,11 @@ impl<'a> Parser<'a> {
         Ok((!matches!(lexer.next()?.kind, TokenKind::Punct(b'{'))).then_some(replace))
     }
 
-    /// `r = value` or `r += value` in a relationship MERGE step (fgdb-at06q,
+    /// `n = value` or `n += value` in a MERGE step (fgdb-at06q,
     /// TCK Merge6 [6], Merge7 [4]): a row element is its property map, as
     /// `properties(a)` is; any other value must compute a map from the row.
     /// Its entries are assigned when the step runs, so it must be the
-    /// clause's only relationship assignment.
+    /// clause's only target assignment.
     fn upsert_copied_map(
         &mut self,
         variable: Name<'a>,
@@ -743,7 +743,7 @@ impl<'a> Parser<'a> {
             return Err(error(
                 at,
                 GraphPatternTextErrorKind::Expected(
-                    "a copied property map as the clause's only relationship assignment",
+                    "a copied property map as the clause's only target assignment",
                 ),
             )
             .into());
@@ -777,7 +777,7 @@ impl<'a> Parser<'a> {
                 return Err(error(
                     self.current.at,
                     GraphPatternTextErrorKind::Expected(
-                        "a value that does not read the MERGE relationship",
+                        "a value that does not read the MERGE target",
                     ),
                 )
                 .into());
@@ -1135,9 +1135,43 @@ pub(super) fn bind_row_actions(
                     value: bind_row_value(value, values, *at)?,
                 }
             }
-            // Only relationship MERGE parses these, and binds them itself.
-            VertexMergeRowActionTemplate::RowVertex { at, .. }
-            | VertexMergeRowActionTemplate::RowProperties { at, .. } => {
+            VertexMergeRowActionTemplate::RowProperties {
+                value,
+                replace,
+                catalog,
+                at,
+            } => {
+                let catalog = catalog.bind().ok_or_else(|| {
+                    error(
+                        *at,
+                        GraphPatternTextErrorKind::Expected(
+                            "a resolved property catalog for the copied map",
+                        ),
+                    )
+                })?;
+                let mut names: Vec<(Box<str>, fgdb_delta_types::PropertyKeyId)> = catalog
+                    .properties
+                    .iter()
+                    .map(|(key, name)| (name.as_str().into(), *key))
+                    .collect();
+                names.sort_unstable();
+                if names.windows(2).any(|names| names[0].0 == names[1].0) {
+                    return Err(error(
+                        *at,
+                        GraphPatternTextErrorKind::Expected(
+                            "distinct property names in the copied map's catalog",
+                        ),
+                    )
+                    .into());
+                }
+                crate::GraphVertexMergeRowAction::Properties {
+                    value: bind_row_value(value, values, *at)?,
+                    replace: *replace,
+                    names: names.into(),
+                }
+            }
+            // Only relationship MERGE parses carried-vertex assignments.
+            VertexMergeRowActionTemplate::RowVertex { at, .. } => {
                 return Err(error(
                     *at,
                     GraphPatternTextErrorKind::Expected("a MERGE vertex property assignment"),
@@ -3065,8 +3099,8 @@ impl PreparedGraphVertexMergeRowsText {
                         ParsedUpsertAction::Property { key, .. }
                         | ParsedUpsertAction::Expression { key, .. }
                         | ParsedUpsertAction::RowValue { key, .. } => Some(key.text),
-                        // A vertex MERGE step parses no row-vertex target
-                        // or copied map.
+                        // Dynamic map keys resolve at execution. Metadata
+                        // reads below retain the same post-action rules.
                         ParsedUpsertAction::RowVertex { .. }
                         | ParsedUpsertAction::RowProperties { .. }
                         | ParsedUpsertAction::Label { .. }

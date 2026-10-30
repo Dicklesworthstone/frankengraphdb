@@ -137,6 +137,9 @@ fn admit_actions(
                     return Err(denied());
                 }
             }
+            // Dynamic entries are admitted individually by original-intent
+            // staging after the scoped reader has produced the whole map.
+            GraphVertexMergeRowAction::Properties { .. } => {}
             GraphVertexMergeRowAction::Vertex(GraphVertexUpsertAction::SetExpression {
                 ..
             }) => {
@@ -440,6 +443,7 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
         return Err(chained(invalid()));
     }
     let merge = definition(step).ok_or_else(|| chained(invalid()))?;
+    let input_prepared = transaction.prepared.clone();
     // Intermediate matches and input occurrences never spend final row limits.
     let private = GraphVertexMergePolicy::new(GqlQueryPolicy::new(
         policy.query.rows.max_snapshot_records().unwrap_or(u64::MAX),
@@ -714,6 +718,23 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
                                 control,
                             )
                         },
+                        |_, element, key, control| {
+                            let mut state = state.borrow_mut();
+                            let (transaction, database, _) = &mut *state;
+                            transaction.with_prepared_point_read(&input_prepared, |transaction| {
+                                selection::mutation_element_property_controlled(
+                                    transaction,
+                                    database,
+                                    cx,
+                                    element,
+                                    key,
+                                    scope,
+                                    &controls,
+                                    control,
+                                    source,
+                                )
+                            })
+                        },
                         |control| {
                             let state = state.borrow();
                             if state.2.is_some() {
@@ -736,6 +757,32 @@ pub(super) fn execute<V: Vfs + Clone, Clock: FnMut() -> u64>(
                                 control,
                                 source,
                             )
+                        },
+                        |element, kind, catalog, control| {
+                            let mut state = state.borrow_mut();
+                            let (transaction, database, _) = &mut *state;
+                            transaction
+                                .with_prepared_point_read(&input_prepared, |transaction| {
+                                    selection::returning_element_metadata(
+                                        transaction,
+                                        database,
+                                        cx,
+                                        element,
+                                        kind,
+                                        catalog,
+                                        scope,
+                                        &controls,
+                                        control,
+                                    )
+                                })
+                                .map_err(|error| match error {
+                                    fgdb_gql::GraphElementMetadataError::Source(error) => {
+                                        fgdb_gql::GraphElementMetadataError::Source(source(error))
+                                    }
+                                    fgdb_gql::GraphElementMetadataError::Interrupted => {
+                                        fgdb_gql::GraphElementMetadataError::Interrupted
+                                    }
+                                })
                         },
                         |batch| {
                             let mut state = state.borrow_mut();

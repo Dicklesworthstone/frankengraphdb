@@ -273,6 +273,16 @@ impl PreparedGraphWriteChainText {
                             if parameter_unwound && projected && vertex {
                                 return Ok(true);
                             }
+                            // A whole row map supplies dynamic property keys;
+                            // the chain's catalog-bound action owner evaluates
+                            // it even when this ingestion statement has no
+                            // WITH or RETURN (fgdb-at06q).
+                            if parameter_unwound
+                                && vertex
+                                && Self::vertex_copied_maps_need_rows(lexer.clone())?
+                            {
+                                return Ok(true);
+                            }
                             if !vertex
                                 && (matched || parameter_matched)
                                 && Self::edge_actions_need_rows(
@@ -461,6 +471,60 @@ impl PreparedGraphWriteChainText {
                         && depth == 0
                         && matches!(previous, Some(TokenKind::Word(element))
                             if Some(element) == relationship)
+                        && !matches!(before, Some(TokenKind::Punct(b'.')))
+                        && Self::copied_map_after(lexer.clone())? =>
+                {
+                    return Ok(true);
+                }
+                _ => {}
+            }
+            before = previous;
+            previous = Some(token.kind);
+        }
+    }
+
+    /// A vertex MERGE over a parameter UNWIND normally uses the batch writer.
+    /// Copying a nonliteral map needs the row-action owner and its frozen
+    /// catalog. Property assignments and literal maps keep their existing
+    /// dispatch; quoted text and nested expressions cannot impersonate SET.
+    fn vertex_copied_maps_need_rows(mut lexer: Lexer<'_>) -> Result<bool, GraphPatternTextError> {
+        if !matches!(
+            script::next_script_token(&mut lexer)?.kind,
+            TokenKind::Punct(b'(')
+        ) {
+            return Ok(false);
+        }
+        let vertex = match script::next_script_token(&mut lexer)?.kind {
+            TokenKind::Word(name) => Some(name),
+            _ => None,
+        };
+        let (mut depth, mut actions) = (1_usize, false);
+        let (mut previous, mut before) = (None, None);
+        loop {
+            let token = script::next_script_token(&mut lexer)?;
+            match token.kind {
+                TokenKind::End | TokenKind::Punct(b';') => return Ok(false),
+                TokenKind::Punct(b'(' | b'[' | b'{') => depth += 1,
+                TokenKind::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                TokenKind::Word(word) if depth == 0 && word.eq_ignore_ascii_case("SET") => {
+                    actions = true;
+                }
+                TokenKind::Punct(b'=')
+                    if actions
+                        && depth == 0
+                        && matches!(previous, Some(TokenKind::Word(name)) if Some(name) == vertex)
+                        && !matches!(before, Some(TokenKind::Punct(b'.')))
+                        && !matches!(
+                            script::next_script_token(&mut lexer.clone())?.kind,
+                            TokenKind::Punct(b'{')
+                        ) =>
+                {
+                    return Ok(true);
+                }
+                TokenKind::Punct(b'+')
+                    if actions
+                        && depth == 0
+                        && matches!(previous, Some(TokenKind::Word(name)) if Some(name) == vertex)
                         && !matches!(before, Some(TokenKind::Punct(b'.')))
                         && Self::copied_map_after(lexer.clone())? =>
                 {
@@ -1450,6 +1514,8 @@ mod tests {
             "UNWIND $rows AS row MERGE (n:N {id: row.id}) ON CREATE SET n.name = row.name \
              RETURN n.id AS id, n.name AS name",
             "UNWIND $rows AS row MERGE (n:N {id: row.id}) SET n.name = row.name RETURN n",
+            "UNWIND $rows AS row MERGE (n:N {id: row.id}) ON CREATE SET n = row",
+            "UNWIND $rows AS row MERGE (n:N {id: row.id}) ON MATCH SET n += row",
             // A vertex MERGE after a WITH stage over a parameter UNWIND, RETURN
             // or not: the batch writer declines the stage (fgdb-2npty).
             "UNWIND $rows AS row WITH row, toInteger(row.s) AS k MERGE (n:N {id: k})",
@@ -1523,6 +1589,8 @@ mod tests {
             // unless a RETURN follows.
             "UNWIND $rows AS row MERGE (n:Entity {id: row.id})",
             "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n.name = row.name",
+            "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n += {name: row.name}",
+            "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n.name = 'SET n = row'",
             "UNWIND $pairs AS row MATCH (a {id: row.a}), (b {id: row.b}) MERGE (a)-[:R]->(b)",
             // It binds each row itself, so actions reading `row.k` stay its own;
             // only a whole-map replacement of the relationship is the chain's.

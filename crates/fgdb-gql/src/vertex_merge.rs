@@ -158,6 +158,13 @@ pub enum GraphVertexMergeError<E, A> {
         action: usize,
         source: crate::GraphIntegerError,
     },
+    /// A copied property map is not a map, names an unknown property, or
+    /// contains a value outside the stored-property domain.
+    PropertyMap {
+        row: usize,
+        clause: usize,
+        action: usize,
+    },
     /// A property value a MERGE over input rows computes from its row (in
     /// property-key order) raised an arithmetic exception.
     RowExpression {
@@ -209,6 +216,14 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
             } => write!(
                 f,
                 "MERGE row {row} clause {clause} action {action}: {source}"
+            ),
+            Self::PropertyMap {
+                row,
+                clause,
+                action,
+            } => write!(
+                f,
+                "MERGE row {row} clause {clause} action {action} is not a writable property map"
             ),
             Self::RowExpression {
                 row,
@@ -491,6 +506,16 @@ pub enum GraphVertexMergeRowAction {
         key: fgdb_delta_types::PropertyKeyId,
         value: GraphVertexMergeRowComputed,
     },
+    /// `n = m` or `n += m` over a row map, including `n = a` and
+    /// `n += properties(a)`. The statement's frozen catalog resolves map
+    /// names in byte order. A replacement also removes visible properties
+    /// the map omits. It is the clause's only assignment; every actual
+    /// assignment and removal spends the enclosing mutation allowance.
+    Properties {
+        value: GraphVertexMergeRowComputed,
+        replace: bool,
+        names: std::sync::Arc<[(Box<str>, fgdb_delta_types::PropertyKeyId)]>,
+    },
 }
 impl core::fmt::Debug for GraphVertexMergeRowAction {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -503,6 +528,10 @@ impl core::fmt::Debug for GraphVertexMergeRowAction {
                 .finish(),
             Self::Value { .. } => f
                 .debug_struct("Value")
+                .field("definition", &"[REDACTED]")
+                .finish(),
+            Self::Properties { .. } => f
+                .debug_struct("Properties")
                 .field("definition", &"[REDACTED]")
                 .finish(),
         }
@@ -537,6 +566,32 @@ impl GraphVertexMergeRowComputed {
                 }
             })?;
         Ok(value.to_written_property())
+    }
+
+    /// Evaluate a row value using the host's element reader at the frozen
+    /// input cut. Copied maps keep their entries until their property names
+    /// and stored values have all been admitted.
+    pub fn value_with_elements<C>(
+        &self,
+        row: &GraphValueRow,
+        control: &mut impl FnMut(crate::GlaExecutionEvent) -> Result<(), C>,
+        elements: &mut impl crate::GraphElementReader<C>,
+    ) -> Result<crate::algebra::GraphValue, crate::GraphIntegerEvaluationError<C>> {
+        crate::set_ops::projection::evaluate_value_reading(
+            &self.0,
+            row,
+            0,
+            control,
+            &mut crate::set_ops::projection::HostElements(elements),
+        )
+        .map_err(|failure| match failure {
+            crate::set_ops::ProjectionFailure::Control(error) => {
+                crate::GraphIntegerEvaluationError::Control(error)
+            }
+            crate::set_ops::ProjectionFailure::Arithmetic { error, .. } => {
+                crate::GraphIntegerEvaluationError::Value(error)
+            }
+        })
     }
 }
 

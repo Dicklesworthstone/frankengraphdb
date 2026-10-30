@@ -328,6 +328,384 @@ fn relationship_map_replacement_freezes_clauses_and_preserves_hidden_fields() {
 /// actual write spends the effect allowance, and an exhausted one writes
 /// nothing.
 #[test]
+fn vertex_merge_copies_property_maps_with_exact_effects_and_scoped_replacement() {
+    lab(0xc4a1_3720, |contexts| async move {
+        let commit = contexts.commit();
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        for authorized in [false, true] {
+            for mode in ["create", "replace", "merge"] {
+                let vfs = MemVfs::new().unwrap();
+                let path = vfs.database_dir();
+                let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+                    .await
+                    .unwrap();
+                let mut seed = WriteBatch::new(R);
+                seed.create_vertex(
+                    VId(1),
+                    vec![L],
+                    vec![
+                        (P, CanonicalScalar::Int(1)),
+                        (SECRET, CanonicalScalar::Int(99)),
+                    ],
+                );
+                seed.create_vertex(
+                    VId(2),
+                    vec![L],
+                    vec![
+                        (P, CanonicalScalar::Int(2)),
+                        (SECRET, CanonicalScalar::Int(42)),
+                        (Q, CanonicalScalar::Int(8)),
+                    ],
+                );
+                db.write(&commit, seed).await.unwrap();
+                let before = db.vertices().unwrap();
+                let actions = match mode {
+                    "create" => "MERGE (n:Visible {p:3}) ON CREATE SET n = a",
+                    "replace" => "MERGE (n:Visible {p:2}) ON MATCH SET n = a",
+                    _ => "MERGE (n:Visible {p:2}) ON MATCH SET n += properties(a)",
+                };
+                let program = chain_named(&format!(
+                    "MATCH (a:Visible {{p:1}}) {actions} RETURN n, n.p, n.q"
+                ));
+                let copies = if authorized { 1 } else { 2 };
+                let effects = copies + u64::from(mode == "replace");
+                let refusal = whole_pattern_merge(
+                    &contexts,
+                    &mut db,
+                    authorized,
+                    &program,
+                    policy(1).with_mutation_limit(effects - 1),
+                )
+                .await
+                .unwrap_err();
+                assert!(refusal.contains("EffectLimit"), "{refusal}");
+                assert_eq!(db.vertices().unwrap(), before);
+                let (stats, rows) = whole_pattern_merge(
+                    &contexts,
+                    &mut db,
+                    authorized,
+                    &program,
+                    policy(1).with_mutation_limit(effects),
+                )
+                .await
+                .unwrap();
+                assert_eq!(stats.created_vertices, u64::from(mode == "create"));
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].values()[1], int(1));
+                assert_eq!(
+                    rows[0].values()[2],
+                    if mode == "merge" {
+                        int(8)
+                    } else {
+                        null.clone()
+                    }
+                );
+                let GraphValue::Vertex(vertex) = rows[0].values()[0] else {
+                    panic!("MERGE must return its vertex");
+                };
+                let mut expected = vec![(P, CanonicalScalar::Int(1).into())];
+                if !authorized || mode != "create" {
+                    expected.push((
+                        SECRET,
+                        CanonicalScalar::Int(if authorized { 42 } else { 99 }).into(),
+                    ));
+                }
+                if mode == "merge" {
+                    expected.push((Q, CanonicalScalar::Int(8).into()));
+                }
+                let stored = db
+                    .vertices()
+                    .unwrap()
+                    .into_iter()
+                    .find(|row| row.vid == vertex)
+                    .unwrap();
+                assert_eq!(stored.props, expected, "{mode}, authorized={authorized}");
+                assert_eq!(stored.labels, vec![L]);
+                assert_eq!(
+                    db.vertices()
+                        .unwrap()
+                        .into_iter()
+                        .find(|row| row.vid == VId(1))
+                        .unwrap(),
+                    before[0]
+                );
+                let expected = db.vertices().unwrap();
+                drop(db);
+                let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+                    .await
+                    .unwrap();
+                assert_eq!(reopened.vertices().unwrap(), expected);
+            }
+        }
+    });
+}
+
+#[test]
+fn vertex_copied_maps_keep_the_input_cut_across_aliases_and_parallel_matches() {
+    lab(0xc4a1_3721, |contexts| async move {
+        let commit = contexts.commit();
+        for authorized in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            for (vertex, p, q) in [(VId(1), 1, 10), (VId(2), 2, 20)] {
+                seed.create_vertex(
+                    vertex,
+                    vec![L],
+                    vec![(P, CanonicalScalar::Int(p)), (Q, CanonicalScalar::Int(q))],
+                );
+            }
+            db.write(&commit, seed).await.unwrap();
+            let before = db.vertices().unwrap();
+            let program = chain_named(
+                "MATCH (a:Visible) WITH a ORDER BY a.p MERGE (n:Visible) \
+                 ON MATCH SET n = a RETURN n.p, n.q",
+            );
+            let refused = whole_pattern_merge(
+                &contexts,
+                &mut db,
+                authorized,
+                &program,
+                policy(4).with_mutation_limit(7),
+            )
+            .await
+            .unwrap_err();
+            assert!(refused.contains("EffectLimit"), "{refused}");
+            assert_eq!(db.vertices().unwrap(), before);
+            let (stats, rows) = whole_pattern_merge(
+                &contexts,
+                &mut db,
+                authorized,
+                &program,
+                policy(4).with_mutation_limit(8),
+            )
+            .await
+            .unwrap();
+            assert_eq!(stats.created_vertices, 0);
+            assert_eq!(rows.len(), 4);
+            for row in rows {
+                // The first occurrence overwrites both a identities. The
+                // second still copies a2's original p=2, q=20 input map.
+                assert_eq!(row.values(), &[int(2), int(20)]);
+            }
+            for row in db.vertices().unwrap() {
+                assert_eq!(
+                    row.props,
+                    vec![
+                        (P, CanonicalScalar::Int(2).into()),
+                        (Q, CanonicalScalar::Int(20).into())
+                    ]
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn vertex_row_maps_preserve_lists_nulls_and_atomic_late_refusals() {
+    lab(0xc4a1_3722, |contexts| async move {
+        let commit = contexts.commit();
+        for authorized in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(1))]);
+            seed.create_vertex(
+                VId(2),
+                vec![L],
+                vec![(P, CanonicalScalar::Int(2)), (Q, CanonicalScalar::Int(8))],
+            );
+            db.write(&commit, seed).await.unwrap();
+            let before = db.vertices().unwrap();
+            for maps in [
+                "[{p:2,q:7},42]",
+                "[{p:2,q:7},{p:2,q:{p:8}}]",
+                "[{p:2,q:7},{unknown:8}]",
+            ] {
+                let program = chain_named(&format!(
+                    "UNWIND {maps} AS m MERGE (n:Visible {{p:2}}) ON MATCH SET n += m RETURN n.p"
+                ));
+                let refused =
+                    whole_pattern_merge(&contexts, &mut db, authorized, &program, policy(2))
+                        .await
+                        .unwrap_err();
+                assert!(refused.contains("PropertyMap"), "{refused}");
+                assert_eq!(db.vertices().unwrap(), before);
+            }
+            // A map carried through WITH is bound to the host catalog once,
+            // then its bounded list payload uses ordinary property storage.
+            let list = chain_named(
+                "MATCH (a:Visible {p:1}) WITH a, {p:2,q:[7,8]} AS m \
+                 MERGE (n:Visible {p:2}) ON MATCH SET n = m RETURN n.p, n.q",
+            );
+            let (_, rows) = whole_pattern_merge(
+                &contexts,
+                &mut db,
+                authorized,
+                &list,
+                policy(1).with_mutation_limit(2),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                rows[0].values(),
+                &[int(2), GraphValue::List(vec![int(7), int(8)].into())]
+            );
+            let unset = chain_named(
+                "MATCH (a:Visible {p:1}) WITH a, {q:null} AS m \
+                 MERGE (n:Visible {p:2}) ON MATCH SET n += m RETURN n.p, n.q",
+            );
+            let (_, rows) = whole_pattern_merge(
+                &contexts,
+                &mut db,
+                authorized,
+                &unset,
+                policy(1).with_mutation_limit(1),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                rows[0].values(),
+                &[int(2), GraphValue::Scalar(CanonicalScalar::Null)]
+            );
+            let empty = chain_named(
+                "MATCH (a:Visible {p:1}) WITH a, {} AS m \
+                 MERGE (n:Visible {p:2}) ON MATCH SET n += m RETURN n.p",
+            );
+            let (_, rows) = whole_pattern_merge(
+                &contexts,
+                &mut db,
+                authorized,
+                &empty,
+                policy(1).with_mutation_limit(0),
+            )
+            .await
+            .unwrap();
+            assert_eq!(rows[0].values(), &[int(2)]);
+        }
+    });
+}
+
+#[test]
+fn creating_vertex_chain_copies_the_preceding_vertices_properties() {
+    lab(0xc4a1_3723, |contexts| async move {
+        let commit = contexts.commit();
+        for authorized in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let program = chain_named(
+                "MERGE (a:Visible {p:1,q:7}) MERGE (n:Visible {p:2}) ON CREATE SET n = a",
+            );
+            let (stats, rows) = whole_pattern_merge(
+                &contexts,
+                &mut db,
+                authorized,
+                &program,
+                policy(0).with_mutation_limit(2),
+            )
+            .await
+            .unwrap();
+            assert_eq!(stats.created_vertices, 2);
+            assert!(rows.is_empty());
+            for row in db.vertices().unwrap() {
+                assert_eq!(
+                    row.props,
+                    vec![
+                        (P, CanonicalScalar::Int(1).into()),
+                        (Q, CanonicalScalar::Int(7).into())
+                    ]
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn public_parameter_ingestion_copies_vertex_maps_without_return() {
+    lab(0xc4a1_3724, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let text = "UNWIND $rows AS row MERGE (n:Visible {p:row.p}) \
+                    ON CREATE SET n = row ON MATCH SET n += row";
+        assert!(PreparedGraphWriteChainText::is_chain(text).unwrap());
+        let parameters = GqlParameters::new()
+            .with_list(
+                "rows",
+                vec![
+                    GraphValue::map(vec![
+                        ("p".into(), int(1)),
+                        ("q".into(), GraphValue::List(Box::new([int(7)]))),
+                    ])
+                    .unwrap(),
+                    GraphValue::map(vec![
+                        ("p".into(), int(1)),
+                        ("q".into(), GraphValue::List(Box::new([int(8), int(9)]))),
+                    ])
+                    .unwrap(),
+                ],
+            )
+            .unwrap();
+        // The public dispatcher and explicit binder must agree on the same
+        // parameter-fed chain, including its no-RETURN form.
+        let bound = PreparedGraphWriteChainText::prepare(text, R, Catalog)
+            .unwrap()
+            .bind_parameters(&parameters)
+            .unwrap();
+        assert!(!bound.returns_rows());
+        let budget = fgdb_gql::GraphWriteProgramPolicy::new(
+            GqlQueryPolicy::new(10_000, 0, 1_000_000, 100_000),
+            100,
+            100,
+            100,
+        );
+        for authorized in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            if authorized {
+                let issuer = authority();
+                let token = issuer
+                    .issue_at(&grant(Rights::ReadWrite, 100_000), NOW)
+                    .unwrap();
+                db.query_write_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    text,
+                    &parameters,
+                    Catalog,
+                    R,
+                    budget,
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            } else {
+                db.query_write_engine(&txn, &query, &commit, text, &parameters, Catalog, R, budget)
+                    .await
+                    .unwrap();
+            }
+            let vertices = db.vertices().unwrap();
+            assert_eq!(vertices.len(), 1);
+            assert_eq!(
+                vertices[0].props,
+                vec![
+                    (P, CanonicalScalar::Int(1).into()),
+                    (
+                        Q,
+                        CanonicalPropertyValue::List(
+                            fgdb_types::CanonicalList::try_new(vec![
+                                CanonicalScalar::Int(8).into(),
+                                CanonicalScalar::Int(9).into()
+                            ])
+                            .unwrap()
+                        )
+                    ),
+                ]
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
 fn relationship_merge_copies_node_property_maps() {
     lab(0xc4a1_3718, |contexts| async move {
         let commit = contexts.commit();
