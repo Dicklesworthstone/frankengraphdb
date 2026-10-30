@@ -1780,6 +1780,11 @@ mod tests {
         fn degree(&self, source: usize) -> Option<usize> {
             self.0.neighbors_indices(source).map(<[usize]>::len)
         }
+        fn has_validated_adjacency(&self) -> bool {
+            // SnapshotGraphView owns a fully admitted immutable projection,
+            // just as SealedGraphView does; FaultRows deliberately does not.
+            true
+        }
         fn is_undirected(&self) -> bool {
             !self.0.is_directed()
         }
@@ -2779,6 +2784,11 @@ mod tests {
                 return None;
             }
             Some(usize::from(source + 1 < self.n || self.cycle))
+        }
+        fn has_validated_adjacency(&self) -> bool {
+            // This immutable generator can produce only the next in-range
+            // vertex, or ordinal zero for a nonempty cycle's final row.
+            true
         }
         fn open(&self, source: usize) -> Result<PathRow> {
             if source >= self.n {
