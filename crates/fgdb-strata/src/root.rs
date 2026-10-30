@@ -2029,6 +2029,9 @@ pub fn merge_edge_with_props(
 /// history in publication order, which a keyed EId permutation makes random
 /// key order: on a packed web-google (5.1M edges) that was about a quarter of
 /// a writable open (fgdb-e8gr4).
+/// With no hosted columns there is no property winner to locate. Keep no
+/// per-statement positions in that case; callers still validate and collapse
+/// the complete edge history before asking for any row.
 pub(crate) struct WinningEdgeRows<'a, P> {
     /// Ascending by statement, one position per statement.
     positions: Vec<((EId, CommitSeq), usize, usize)>,
@@ -2041,6 +2044,23 @@ impl<'a, P: Borrow<crate::edge_props::BlockProps>> WinningEdgeRows<'a, P> {
         blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
         block_props: &'a [Option<P>],
     ) -> Self {
+        if block_props.iter().all(Option::is_none) {
+            return Self {
+                positions: Vec::new(),
+                next: 0,
+                block_props,
+            };
+        }
+        Self::new_indexed(blocks, block_props)
+    }
+
+    fn new_indexed(
+        blocks: &[impl AsRef<[crate::AdjacencyEntry]>],
+        block_props: &'a [Option<P>],
+    ) -> Self {
+        // Absence is a whole-column proof, not a per-block filter. In a
+        // mixed history a later propertyless statement must still override
+        // an earlier hosted row, including when it adds a retirement.
         let mut positions: Vec<_> = blocks
             .iter()
             .zip(block_props)

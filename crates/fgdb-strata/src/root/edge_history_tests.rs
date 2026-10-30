@@ -450,6 +450,223 @@ fn winning_rows_answer_exactly_as_the_publication_order_map() {
     assert!(restated > 10_000, "restated copies: {restated}");
 }
 
+fn property_history() -> Vec<Vec<AdjacencyEntry>> {
+    let mut first = entry(1, 1, 2, 1, None);
+    first.eid = EId((1 << 100) | 7);
+    let mut second = entry(2, 1, 3, 1, None);
+    second.eid = EId((1 << 127) | 3);
+    vec![
+        vec![first, second],
+        vec![entry(3, 2, 1, 2, None)],
+        vec![AdjacencyEntry {
+            retired_at: Some(CommitSeq(4)),
+            ..first
+        }],
+        vec![AdjacencyEntry {
+            created_at: CommitSeq(4),
+            ..first
+        }],
+        vec![AdjacencyEntry {
+            retired_at: Some(CommitSeq(6)),
+            ..second
+        }],
+    ]
+}
+
+#[test]
+fn absent_property_columns_need_no_statement_positions() {
+    use crate::edge_props::BlockProps;
+
+    let blocks = property_history();
+    let absent: Vec<Option<BlockProps>> = vec![None; blocks.len()];
+    let empty: Vec<_> = blocks
+        .iter()
+        .map(|block| {
+            Some(BlockProps {
+                locators: vec![0; block.len()],
+                rows: Vec::new(),
+            })
+        })
+        .collect();
+    let mut absent_rows = super::WinningEdgeRows::new(&blocks, &absent);
+    let mut empty_rows = super::WinningEdgeRows::new(&blocks, &empty);
+    assert_eq!(absent_rows.positions.capacity(), 0);
+    assert!(!empty_rows.positions.is_empty());
+    for block in blocks.iter().rev() {
+        for entry in block {
+            let key = (entry.eid, entry.created_at);
+            assert_eq!(absent_rows.row(key), empty_rows.row(key));
+        }
+    }
+    assert!(absent_rows.row((EId(u128::MAX), CommitSeq(99))).is_empty());
+    assert_eq!(absent_rows.positions.capacity(), 0);
+    let mut no_blocks = super::WinningEdgeRows::new(&[] as &[Vec<AdjacencyEntry>], &absent[..0]);
+    assert!(no_blocks.row((EId(1), CommitSeq(1))).is_empty());
+}
+
+#[test]
+fn property_absence_keeps_visibility_compaction_and_last_copy_precedence() {
+    use crate::compact::compact_with_props;
+    use crate::edge_props::BlockProps;
+    use fgdb_delta_types::PropertyKeyId;
+    use fgdb_types::CanonicalScalar;
+
+    let blocks = property_history();
+    let absent = vec![None; blocks.len()];
+    let empty: Vec<_> = blocks
+        .iter()
+        .map(|block| {
+            Some(BlockProps {
+                locators: vec![0; block.len()],
+                rows: Vec::new(),
+            })
+        })
+        .collect();
+    let row = |value| vec![(PropertyKeyId(1), CanonicalScalar::Int(value).into())];
+    let mixed = vec![
+        Some(BlockProps {
+            locators: vec![1, 2],
+            rows: vec![row(11), row(22)],
+        }),
+        Some(BlockProps {
+            locators: vec![1],
+            rows: vec![row(33)],
+        }),
+        None, // The retirement restatement clears the first statement's row.
+        Some(BlockProps {
+            locators: vec![1],
+            rows: vec![row(44)],
+        }),
+        None, // The other retirement must not resurrect the earlier row.
+    ];
+    let mut reference = GlobalMapValidator::default();
+    for (at, block) in blocks.iter().enumerate() {
+        reference.observe_block(at, block).unwrap();
+    }
+    for props in [&absent, &empty, &mixed] {
+        let winners = winning_rows_by_map(&blocks, props);
+        for floor in 0..=7 {
+            let compacted = compact_with_props(&blocks, props, CommitSeq(floor)).unwrap();
+            for at in floor..=7 {
+                let at = CommitSeq(at);
+                let expected: Vec<_> = reference
+                    .statements
+                    .iter()
+                    .filter(|(_, entry)| entry.visible_at(at))
+                    .map(|(key, entry)| (*entry, winners[key].clone()))
+                    .collect();
+                assert_eq!(
+                    super::merge_all_edges_with_props(&blocks, props, at).unwrap(),
+                    expected,
+                );
+                assert_eq!(
+                    super::merge_all_edges_with_props(
+                        &compacted.blocks,
+                        &compacted.block_props,
+                        at,
+                    )
+                    .unwrap(),
+                    expected,
+                );
+            }
+        }
+    }
+    let early = super::merge_all_edges_with_props(&blocks, &mixed, CommitSeq(1)).unwrap();
+    assert_eq!(early.len(), 2);
+    assert!(early.iter().all(|(_, row)| row.is_empty()));
+    let current = super::merge_all_edges_with_props(&blocks, &mixed, CommitSeq(6)).unwrap();
+    assert_eq!(current.len(), 2);
+    assert_eq!(current[0].1, row(33));
+    assert_eq!(current[1].1, row(44));
+
+    // The no-property proof must never precede the full history validator.
+    let mut corrupt = blocks;
+    corrupt[2][0].src = VId(9);
+    let expected = super::collapse_edge_history(&corrupt).unwrap_err();
+    assert_eq!(
+        super::merge_all_edges_with_props(&corrupt, &absent, CommitSeq(6)),
+        Err(expected.clone()),
+    );
+    assert_eq!(
+        compact_with_props(&corrupt, &absent, CommitSeq(6)),
+        Err(expected),
+    );
+}
+
+/// Same-process maintenance comparison of the actual admitted whole-graph
+/// read, using the unchanged indexed constructor for the incumbent. History
+/// admission, storage I/O and compacted block packing are outside this timer.
+/// Run with `cargo test -p fgdb-strata --release
+/// benchmark_propertyless_admitted_edge_reads -- --ignored --nocapture`.
+#[test]
+#[ignore = "manual paired read-path measurement; no wall-clock threshold"]
+fn benchmark_propertyless_admitted_edge_reads() {
+    use crate::edge_props::BlockProps;
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    for count in [16_384usize, 131_072] {
+        let mut blocks = Vec::new();
+        for source in 0..count / 32 {
+            let mut block = Vec::new();
+            for offset in 0..32 {
+                let ordinal = source * 32 + offset;
+                let mut edge = entry(
+                    0,
+                    source as u64 + 1,
+                    ((source + offset + 1) % (count / 32)) as u64 + 1,
+                    1,
+                    None,
+                );
+                edge.eid =
+                    EId((ordinal as u128 + 1).wrapping_mul(0x9e3779b97f4a7c15_bf58476d1ce4e5b9));
+                block.push(edge);
+            }
+            block.sort_unstable_by_key(|edge| (edge.dst, edge.eid));
+            blocks.push(block);
+        }
+        let props: Vec<Option<BlockProps>> = vec![None; blocks.len()];
+        let (statements, _) = super::collapse_edge_history(&blocks).unwrap();
+        let incumbent = || {
+            // The same constructor the mixed/propertyful product path uses.
+            let mut rows = super::WinningEdgeRows::new_indexed(&blocks, &props);
+            statements
+                .iter()
+                .filter(|(_, entry)| entry.visible_at(CommitSeq(1)))
+                .map(|(key, entry)| (*entry, rows.row(*key)))
+                .collect::<Vec<_>>()
+        };
+        let candidate = || {
+            super::merge_admitted_edges_with_props(&statements, &blocks, &props, CommitSeq(1))
+                .unwrap()
+        };
+        assert_eq!(candidate(), incumbent());
+        let mut samples = [Vec::new(), Vec::new()];
+        for trial in 0..9 {
+            let mut outputs = [None, None];
+            for which in [trial % 2, 1 - trial % 2] {
+                let start = Instant::now();
+                let rows = black_box(if which == 0 { incumbent() } else { candidate() });
+                samples[which].push(start.elapsed().as_nanos());
+                outputs[which] = Some(rows);
+            }
+            assert_eq!(outputs[0], outputs[1]);
+        }
+        eprintln!(
+            "propertyless_admitted_read edges={count} trials=9 incumbent_samples_ns={:?} candidate_samples_ns={:?}",
+            samples[0], samples[1],
+        );
+        for sample in &mut samples {
+            sample.sort_unstable();
+        }
+        let position_bytes = count * std::mem::size_of::<((EId, CommitSeq), usize, usize)>();
+        eprintln!(
+            "propertyless_admitted_read edges={count} incumbent_median_ns={} candidate_median_ns={} eliminated_position_bytes={position_bytes}",
+            samples[0][4], samples[1][4],
+        );
+    }
+}
+
 /// The reconstruction index observes the same accepted statements as the
 /// independent map, including a refused block's accepted prefix. Its pointer
 /// always names the last copy of the newest content statement, which need not
