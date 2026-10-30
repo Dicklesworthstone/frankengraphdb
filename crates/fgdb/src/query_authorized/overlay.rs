@@ -24,6 +24,27 @@ impl<V: Vfs + Clone> Database<V> {
         pattern: &PreparedGraphPattern<Row>,
         scope: &PlannerPredicates,
         policy: GqlQueryPolicy,
+        node: impl FnMut() -> Result<(), QueryError>,
+        poll: impl FnMut() -> Result<(), QueryError>,
+        checkpoint: impl FnMut() -> Result<(), QueryError>,
+    ) -> Governed<Row> {
+        self.select_for_authorized_overlay_with_seeds(
+            cx, overlay, pattern, None, scope, policy, node, poll, checkpoint,
+        )
+    }
+
+    /// A relational root restriction shares the ordinary scoped table and
+    /// signed-node admission. The write adapter checks definition eligibility
+    /// before entering; no alternate evaluator or capability is introduced.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn select_for_authorized_overlay_with_seeds<Row: GlaOutput>(
+        &self,
+        cx: &QueryCx,
+        overlay: &OverlayRows<'_, V>,
+        pattern: &PreparedGraphPattern<Row>,
+        seeds: Option<fgdb_gql::GraphSeeds<'_>>,
+        scope: &PlannerPredicates,
+        policy: GqlQueryPolicy,
         mut node: impl FnMut() -> Result<(), QueryError>,
         mut poll: impl FnMut() -> Result<(), QueryError>,
         mut checkpoint: impl FnMut() -> Result<(), QueryError>,
@@ -35,6 +56,7 @@ impl<V: Vfs + Clone> Database<V> {
             let (tables, bound) = admit_overlay_tables(
                 overlay,
                 pattern,
+                seeds,
                 scope,
                 policy,
                 &mut usage,
@@ -72,6 +94,7 @@ impl<V: Vfs + Clone> Database<V> {
             let (tables, bound) = admit_overlay_tables(
                 overlay,
                 request.original(),
+                None,
                 scope,
                 policy,
                 &mut usage,
@@ -95,6 +118,7 @@ impl<V: Vfs + Clone> Database<V> {
 fn admit_overlay_tables<'a, V: Vfs + Clone, Row: GlaOutput>(
     overlay: &'a OverlayRows<'_, V>,
     pattern: &PreparedGraphPattern<Row>,
+    seeds: Option<fgdb_gql::GraphSeeds<'_>>,
     scope: &PlannerPredicates,
     policy: GqlQueryPolicy,
     usage: &mut AdmissionUsage,
@@ -113,7 +137,10 @@ fn admit_overlay_tables<'a, V: Vfs + Clone, Row: GlaOutput>(
     // Every retained winner still crosses the ordinary signed/native charge
     // boundary, and all statements continue sharing one permit and allowance.
     let mut scan = |_| poll().map_err(GqlQueryError::Interrupted);
-    let bound = overlay.bound_candidates(pattern.plan(), scope, &mut scan)?;
+    let bound = match seeds {
+        Some(seeds) => overlay.seeded_candidates(pattern.plan(), seeds, scope, &mut scan)?,
+        None => overlay.bound_candidates(pattern.plan(), scope, &mut scan)?,
+    };
     let mut admit_vertex = |row: &'a crate::VertexRow, _: &mut _| {
         tables
             .admit_vertex(

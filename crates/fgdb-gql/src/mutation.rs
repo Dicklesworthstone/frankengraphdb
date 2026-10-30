@@ -1125,6 +1125,51 @@ impl PreparedGraphMutation {
         .map(|(batch, _)| batch)
     }
 
+    /// Reusable multipart selection with both indexed relational roots and
+    /// admission of every actual computed-map field. `None` disables seed
+    /// construction entirely for a host whose authority cannot use the index.
+    /// A seeded reader returning an error never retries the ordinary source.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_governed_over_reading_with_seeded_source_and_field_admission<E, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GraphMutationPolicy,
+        source: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        seeded: Option<
+            impl FnMut(
+                &PreparedGraphPattern<GraphValueRow>,
+                crate::GraphSeeds<'_>,
+                GqlQueryPolicy,
+            )
+                -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>>,
+        >,
+        mut elements: impl crate::GraphElementReader<E>,
+        mut admit: impl FnMut(PropertyKeyId) -> Result<(), GqlQueryError<E, C>>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
+        let source = match seeded {
+            Some(seeded) => collect::ErasedSource::Seeded {
+                patterns: Box::new(source),
+                seeded: Box::new(seeded),
+            },
+            None => collect::ErasedSource::Reusable(Box::new(source)),
+        };
+        collect::execute_erased(
+            self,
+            policy,
+            None,
+            owned,
+            source,
+            Some(&mut crate::set_ops::projection::HostElements(&mut elements)),
+            Some(&mut admit),
+            &mut checkpoint,
+        )
+        .map(|(batch, _)| batch)
+    }
+
     /// Application transcript, not a durable format or authorization permit.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {

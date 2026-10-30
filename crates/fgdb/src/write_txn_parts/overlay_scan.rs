@@ -204,6 +204,23 @@ impl<'a, V: Vfs + Clone> OverlayRows<'a, V> {
             .bound_overlay_candidates(&self.database.snapshot, plan, control)
     }
 
+    /// Relational seeds use the same native candidate and read-witness owner.
+    /// They are never an authority grant: a restricted scope declines before
+    /// probing a property posting or retaining any candidate identity.
+    pub(crate) fn seeded_candidates<E, Row: GlaOutput>(
+        &self,
+        plan: &GlaPlan<Row>,
+        seeds: fgdb_gql::GraphSeeds<'_>,
+        scope: &PlannerPredicates,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<Option<BoundOverlayCandidates>, E> {
+        if !scope.sees_all_incidence() || !scope.sees_all_fields() {
+            return Ok(None);
+        }
+        self.transaction
+            .seeded_overlay_candidates(&self.database.snapshot, plan, seeds, control)
+    }
+
     pub(crate) fn accept_bound_observations(&self, bound: &BoundOverlayCandidates) {
         for &observation in &bound.root_observations {
             self.transaction

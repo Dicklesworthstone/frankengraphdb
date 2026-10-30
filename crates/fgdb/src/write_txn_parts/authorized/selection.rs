@@ -617,6 +617,7 @@ pub(super) fn select_overlay_factors<V: Vfs + Clone, Clock: FnMut() -> u64>(
         database,
         cx,
         request.original().plan().reads_edges(),
+        false,
         execution,
         |overlay| {
             controlled(cx, execution, |node, poll, checkpoint| match overlay {
@@ -652,6 +653,7 @@ pub(super) fn select_overlay<V: Vfs + Clone, Row: GlaOutput, Clock: FnMut() -> u
         database,
         cx,
         pattern.plan().reads_edges(),
+        false,
         execution,
         |overlay| match overlay {
             None => select(database, cx, pattern, scope, policy, execution),
@@ -664,13 +666,62 @@ pub(super) fn select_overlay<V: Vfs + Clone, Row: GlaOutput, Clock: FnMut() -> u
     )
 }
 
+/// A joined MATCH can admit only its relational roots when the capability
+/// hides no field or incidence. Unsupported definitions and restricted scopes
+/// decline before source work; accepted attempts never retry on a fresh meter.
+/// Each retained winner still spends the existing signed node allowance.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn select_seeded_overlay<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    cx: &QueryCx,
+    pattern: &PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
+    seeds: fgdb_gql::GraphSeeds<'_>,
+    scope: &PlannerPredicates,
+    policy: GqlQueryPolicy,
+    execution: &RefCell<&mut Execution<'_, '_, Clock>>,
+) -> Option<Selected<fgdb_gql::algebra::GraphValueRow>> {
+    if !scope.sees_all_incidence()
+        || !scope.sees_all_fields()
+        || !WriteTxn::supports_seeded_vertex_query(pattern.plan())
+    {
+        return None;
+    }
+    Some(with_overlay(
+        transaction,
+        database,
+        cx,
+        false,
+        true,
+        execution,
+        |overlay| {
+            let overlay = overlay.expect("seeded admission retains even an empty overlay");
+            controlled(cx, execution, |node, poll, checkpoint| {
+                database.select_for_authorized_overlay_with_seeds(
+                    cx,
+                    overlay,
+                    pattern,
+                    Some(seeds),
+                    scope,
+                    policy,
+                    node,
+                    poll,
+                    checkpoint,
+                )
+            })
+        },
+    ))
+}
+
 // One lifetime owner and identical preflight/error ordering for both physical
 // forms. No borrowed source escapes the exclusively borrowed statement phase.
+#[allow(clippy::too_many_arguments)]
 fn with_overlay<V: Vfs + Clone, T, Clock: FnMut() -> u64>(
     transaction: &WriteTxn,
     database: &Database<V>,
     cx: &QueryCx,
     reads_edges: bool,
+    retain_empty: bool,
     execution: &RefCell<&mut Execution<'_, '_, Clock>>,
     evaluate: impl FnOnce(
         Option<&OverlayRows<'_, V>>,
@@ -689,7 +740,7 @@ fn with_overlay<V: Vfs + Clone, T, Clock: FnMut() -> u64>(
             live,
         }));
     }
-    if transaction.staged.is_empty() {
+    if transaction.staged.is_empty() && !retain_empty {
         return evaluate(None);
     }
     cx.with_restriction(|| {

@@ -770,6 +770,327 @@ fn computed_keys_probe_the_property_index_below_one_scan() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+#[test]
+fn authorized_with_matches_probe_roots_and_the_current_write_overlay() {
+    let ((), report) = run_async_under_lab(0x5c73_2a80, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in 1..=400_i64 {
+            seed.create_vertex(
+                VId(id as u128),
+                vec![PERSON],
+                vec![(ID, Scalar::Int(id)), (COUNT, Scalar::Int(0))],
+            );
+        }
+        db.write(&commit, seed).await.unwrap();
+        let issuer = authority();
+        let mut full = grant();
+        full.labels = Scope::All;
+        full.relations = Scope::All;
+        full.properties = Scope::All;
+        full.limits.max_rows = 100;
+        let token = issuer.issue_at(&full, 100).unwrap();
+        let tight = GraphWriteProgramPolicy::new(
+            GqlQueryPolicy::new(50, 100, 2_000_000, 2_000_000),
+            100,
+            10,
+            10,
+        );
+        let arguments = GqlParameters::new()
+            .with_list(
+                "rows",
+                ["9", "19", "19", "not an integer"]
+                    .into_iter()
+                    .map(|value| {
+                        GraphValue::map(vec![(
+                            "s".into(),
+                            GraphValue::Scalar(Scalar::ucs_basic_text(value).unwrap()),
+                        )])
+                        .unwrap()
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        for (text, count) in [
+            (
+                "UNWIND $rows AS row WITH toInteger(row.s) + 1 AS k \
+                 MATCH (n:Person {id:k}) SET n.count=7 \
+                 RETURN n.id AS id, n.count AS count ORDER BY id",
+                7,
+            ),
+            (
+                "UNWIND $rows AS row WITH toInteger(row.s) + 1 AS k \
+                 MATCH (n:Person) WHERE n.id=k SET n.count=8 \
+                 RETURN n.id AS id, n.count AS count ORDER BY id",
+                8,
+            ),
+        ] {
+            let result = db
+                .query_write_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    text,
+                    &arguments,
+                    symbols,
+                    R,
+                    tight,
+                    || 100,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            let fgdb::QueryResult::Rows { rows, .. } = result else {
+                panic!("RETURN must preserve the input bag");
+            };
+            let expected: Vec<_> = [10, 20, 20]
+                .into_iter()
+                .map(|id| {
+                    [id, count]
+                        .into_iter()
+                        .map(|value| {
+                            fgdb::QueryValue::Value(GraphValue::Scalar(Scalar::Int(value)))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            assert_eq!(rows, expected, "{text}");
+            assert_eq!(scalar(&db, VId(10), COUNT), Scalar::Int(count));
+            assert_eq!(scalar(&db, VId(20), COUNT), Scalar::Int(count));
+        }
+        // The same collector without RETURN must retain indexed selection.
+        db.query_write_authorized(
+            &txn,
+            &query,
+            &commit,
+            &issuer,
+            &token,
+            "main",
+            "UNWIND $rows AS row WITH toInteger(row.s) + 1 AS k \
+             MATCH (n:Person {id:k}) SET n.count=9",
+            &arguments,
+            symbols,
+            R,
+            tight,
+            || 100,
+        )
+        .await
+        .unwrap();
+        assert_eq!(scalar(&db, VId(10), COUNT), Scalar::Int(9));
+        // Changed keys and creations belong to the canonical transaction
+        // overlay even though the committed property postings cannot find them.
+        for (text, expected) in [
+            (
+                "MATCH (a:Person {id:10}) SET a.id=1001 WITH 1001 AS k \
+                 MATCH (n:Person {id:k}) SET n.count=21 RETURN n.count AS count",
+                21,
+            ),
+            (
+                "CREATE (a:Person {id:1002,count:0}) WITH a.id AS k \
+                 MATCH (n:Person {id:k}) SET n.count=22 RETURN n.count AS count",
+                22,
+            ),
+        ] {
+            let fgdb::QueryResult::Rows { rows, .. } = db
+                .query_write_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    text,
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    tight,
+                    || 100,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            else {
+                panic!("RETURN must produce the staged value");
+            };
+            assert_eq!(
+                rows,
+                [vec![fgdb::QueryValue::Value(GraphValue::Scalar(
+                    Scalar::Int(expected)
+                ))]]
+            );
+        }
+        let before = db.frontier().unwrap();
+        let original = db.vertices().unwrap();
+        let empty = GqlParameters::new();
+        // An unkeyed control cannot fit even one graph scan at this allowance.
+        // A late expression failure also discards its already-staged key edit.
+        for (text, parameters, expected_error) in [
+            (
+                "UNWIND $rows AS row WITH toInteger(row.s) + 1 AS k \
+                 MATCH (n:Person) WHERE n.id + 0=k SET n.count=99",
+                &arguments,
+                "SnapshotRecords",
+            ),
+            (
+                "MATCH (a:Person {id:20}) SET a.id=2001 WITH 2001 AS k \
+                 MATCH (n:Person {id:k}) SET n.count=23 \
+                 RETURN 1/(n.count-23) AS failed LIMIT 0",
+                &empty,
+                "DivisionByZero",
+            ),
+        ] {
+            let error = db
+                .query_write_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    text,
+                    parameters,
+                    symbols,
+                    R,
+                    tight,
+                    || 100,
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{error:?}").contains(expected_error),
+                "{text}: {error:?}"
+            );
+            assert_eq!(db.frontier().unwrap(), before);
+            assert_eq!(db.vertices().unwrap(), original);
+        }
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authorized_seeded_matches_keep_signed_limits_and_scoped_fallback() {
+    let ((), report) = run_async_under_lab(0x5c73_2a81, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in 1..=100_i64 {
+            seed.create_vertex(
+                VId(id as u128),
+                vec![PERSON],
+                vec![(ID, Scalar::Int(id)), (COUNT, Scalar::Int(0))],
+            );
+        }
+        seed.create_vertex(
+            VId(101),
+            vec![LabelId(9)],
+            vec![(ID, Scalar::Int(1)), (COUNT, Scalar::Int(999))],
+        );
+        db.write(&commit, seed).await.unwrap();
+        let issuer = authority();
+        let text = "UNWIND [1,2] AS k WITH k MATCH (n:Person {id:k}) \
+                    SET n.count=7 RETURN n.count AS count";
+        let tight = GraphWriteProgramPolicy::new(
+            GqlQueryPolicy::new(20, 100, 2_000_000, 2_000_000),
+            100,
+            0,
+            0,
+        );
+        let original = db.vertices().unwrap();
+        let before = db.frontier().unwrap();
+        for (nodes, rows) in [(0, 100), (100_000, 0)] {
+            let mut full = grant();
+            full.labels = Scope::All;
+            full.relations = Scope::All;
+            full.properties = Scope::All;
+            full.limits.max_nodes = nodes;
+            full.limits.max_rows = rows;
+            let token = issuer.issue_at(&full, 100).unwrap();
+            let error = db
+                .query_write_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    text,
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    tight,
+                    || 100,
+                )
+                .await
+                .unwrap_err();
+            let mut cause: Option<&(dyn core::error::Error + 'static)> = Some(&error);
+            let mut signed = false;
+            while let Some(error) = cause {
+                if let Some(fgdb::WriteTxnError::Authorization(
+                    fgdb_warden::Error::LimitExceeded(_),
+                )) = error.downcast_ref::<fgdb::WriteTxnError>()
+                {
+                    signed = true;
+                }
+                cause = error.source();
+            }
+            assert!(signed, "the same signed permit must refuse: {error:?}");
+            assert_eq!(db.frontier().unwrap(), before);
+            assert_eq!(db.vertices().unwrap(), original);
+        }
+        let mut scoped = grant();
+        scoped.limits.max_rows = 100;
+        let token = issuer.issue_at(&scoped, 100).unwrap();
+        // Restricted predicates decline the index before probing or retaining
+        // hidden candidates. Their unchanged masked scan needs its real budget.
+        assert!(
+            db.query_write_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                text,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                tight,
+                || 100,
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(db.frontier().unwrap(), before);
+        assert_eq!(db.vertices().unwrap(), original);
+        db.query_write_authorized(
+            &txn,
+            &query,
+            &commit,
+            &issuer,
+            &token,
+            "main",
+            text,
+            &GqlParameters::new(),
+            symbols,
+            R,
+            program_policy(100),
+            || 100,
+        )
+        .await
+        .unwrap();
+        assert_eq!(scalar(&db, VId(1), COUNT), Scalar::Int(7));
+        assert_eq!(scalar(&db, VId(2), COUNT), Scalar::Int(7));
+        assert_eq!(scalar(&db, VId(101), COUNT), Scalar::Int(999));
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// fgdb-at06q: `ON CREATE SET n = {map}` replaces the created vertex's map.
 /// The vertex holds exactly the MERGE pattern's keys, so the replacement
 /// assigns each entry and unsets each pattern key the map omits. ON MATCH

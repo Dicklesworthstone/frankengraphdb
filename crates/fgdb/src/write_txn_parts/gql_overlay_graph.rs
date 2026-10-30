@@ -1232,6 +1232,54 @@ mod query_source {
             }))
         }
 
+        /// One vertex root and no topology-changing operator is a complete
+        /// candidate domain for the relational equality's seeds. Both owner
+        /// and authorized overlay readers use this same definition-only test.
+        pub(crate) fn supports_seeded_vertex_query<Row>(logical: &GlaPlan<Row>) -> bool {
+            let [GlaOperator::ScanVertices, rest @ ..] = logical.operators() else {
+                return false;
+            };
+            rest.iter().all(|operator| match operator {
+                GlaOperator::Select { slot, .. } => slot.ordinal() == 0,
+                GlaOperator::Project { .. }
+                | GlaOperator::ProjectBindings { .. }
+                | GlaOperator::ProjectValues { .. }
+                | GlaOperator::Distinct
+                | GlaOperator::OrderByVertexId
+                | GlaOperator::OrderByBindings
+                | GlaOperator::OrderByValues
+                | GlaOperator::OrderByValueColumns { .. }
+                | GlaOperator::Limit { .. } => true,
+                _ => false,
+            })
+        }
+
+        /// Candidate and phantom-witness half of the existing seeded owner
+        /// reader. A caller with its own authorized row-admission boundary
+        /// resolves these identities from the same canonical overlay and
+        /// completes the observations only after successful evaluation.
+        pub(super) fn seeded_overlay_candidates<E, Row: GlaOutput>(
+            &self,
+            snapshot: &Snapshot,
+            logical: &GlaPlan<Row>,
+            seeds: fgdb_gql::GraphSeeds<'_>,
+            control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+        ) -> Result<Option<super::overlay_scan::BoundOverlayCandidates>, E> {
+            if !Self::supports_seeded_vertex_query(logical) {
+                return Ok(None);
+            }
+            let bound = self.seeded_vertex_source(snapshot, seeds, control)?;
+            let mut observed = BTreeSet::new();
+            for &vid in &bound.vertices {
+                self.note_query_read(&mut observed, ElementId::Vertex(vid), control)?;
+            }
+            Ok(Some(super::overlay_scan::BoundOverlayCandidates {
+                vertices: bound.vertices,
+                edges: Vec::new(),
+                root_observations: bound.root_observations,
+            }))
+        }
+
         pub(super) fn query_snapshot<'a, V: Vfs + Clone>(
             &self,
             database: &'a Database<V>,
@@ -1293,22 +1341,7 @@ mod query_source {
                 TxnGqlError<WriteTxnError>,
             >,
         > {
-            let [GlaOperator::ScanVertices, rest @ ..] = pattern.plan().operators() else {
-                return None;
-            };
-            if !rest.iter().all(|operator| match operator {
-                GlaOperator::Select { slot, .. } => slot.ordinal() == 0,
-                GlaOperator::Project { .. }
-                | GlaOperator::ProjectBindings { .. }
-                | GlaOperator::ProjectValues { .. }
-                | GlaOperator::Distinct
-                | GlaOperator::OrderByVertexId
-                | GlaOperator::OrderByBindings
-                | GlaOperator::OrderByValues
-                | GlaOperator::OrderByValueColumns { .. }
-                | GlaOperator::Limit { .. } => true,
-                _ => false,
-            }) {
+            if !Self::supports_seeded_vertex_query(pattern.plan()) {
                 return None;
             }
             Some(self.execute_graph_pattern_with_seeds_governed(

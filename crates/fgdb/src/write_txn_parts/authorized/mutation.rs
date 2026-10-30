@@ -5,6 +5,7 @@ use super::{Authority, CapabilityToken, Database, Error, Execution, Vfs};
 use super::{Workspace, WriteBatch, WriteTxn, WriteTxnError, selection, stage};
 use crate::write_txn::MutationProjectionTail;
 use fgdb_delta_types::ElementId;
+use fgdb_gql::algebra::{GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::{
     GqlQueryError, GraphMutationError, GraphMutationIntent, GraphMutationPolicy,
     GraphMutationQueryError, GraphMutationStats, PreparedGraphMutation, PreparedGraphMutationQuery,
@@ -215,7 +216,7 @@ impl<V: Vfs + Clone> Database<V> {
                     let transaction: &WriteTxn = workspace.transaction();
                     let element_failure = RefCell::new(None);
                     let result = query
-                        .execute_governed_over_reading_with_source_and_field_admission(
+                        .execute_governed_over_reading_with_seeded_source_and_field_admission(
                             None,
                             policy,
                             |pattern, allowance| {
@@ -229,6 +230,24 @@ impl<V: Vfs + Clone> Database<V> {
                                     &controls,
                                 )
                             },
+                            (verified.predicates().sees_all_incidence()
+                                && verified.predicates().sees_all_fields())
+                            .then_some(
+                                |pattern: &PreparedGraphPattern<GraphValueRow>,
+                                 seeds: fgdb_gql::GraphSeeds<'_>,
+                                 allowance| {
+                                    selection::select_seeded_overlay(
+                                        transaction,
+                                        self,
+                                        query_cx,
+                                        pattern,
+                                        seeds,
+                                        verified.predicates(),
+                                        allowance,
+                                        &controls,
+                                    )
+                                },
+                            ),
                             scoped_element_reader(
                                 transaction,
                                 self,
@@ -494,7 +513,7 @@ fn select_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
         // before any await. No RefCell or query result escapes.
         let execution = RefCell::new(&mut *execution);
         let element_failure = RefCell::new(None);
-        let result = mutation.execute_governed_over_reading_with_source_and_field_admission(
+        let result = mutation.execute_governed_over_reading_with_seeded_source_and_field_admission(
             None,
             policy,
             |pattern, allowance| {
@@ -508,6 +527,22 @@ fn select_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
                     &execution,
                 )
             },
+            (scope.sees_all_incidence() && scope.sees_all_fields()).then_some(
+                |pattern: &PreparedGraphPattern<GraphValueRow>,
+                 seeds: fgdb_gql::GraphSeeds<'_>,
+                 allowance| {
+                    selection::select_seeded_overlay(
+                        transaction,
+                        database,
+                        cx,
+                        pattern,
+                        seeds,
+                        scope,
+                        allowance,
+                        &execution,
+                    )
+                },
+            ),
             scoped_element_reader(
                 transaction,
                 database,
