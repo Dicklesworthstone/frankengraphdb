@@ -16,6 +16,7 @@ type Labels = Option<IndexMap<LabelId, u64>>;
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ExactCounts {
     vertices: OnceLock<u64>,
+    edges: OnceLock<u64>,
     relations: OnceLock<Relations>,
     labels: OnceLock<Labels>,
 }
@@ -25,6 +26,7 @@ impl ExactCounts {
         if empty {
             Self {
                 vertices: OnceLock::from(0),
+                edges: OnceLock::from(0),
                 relations: OnceLock::from(Some(IndexMap::new())),
                 labels: OnceLock::from(Some(IndexMap::new())),
             }
@@ -40,6 +42,7 @@ impl ExactCounts {
     ) -> Result<Option<u64>, E> {
         let value = match source {
             GraphCountSource::Vertices => self.vertices.get().copied(),
+            GraphCountSource::Edges => self.edges.get().copied(),
             GraphCountSource::Label(label) => {
                 let Some(Some(index)) = self.labels.get() else {
                     return Ok(None);
@@ -77,6 +80,10 @@ impl ExactCounts {
         let _ = self.vertices.set(count);
     }
 
+    pub(super) fn publish_edges(&self, count: u64) {
+        let _ = self.edges.set(count);
+    }
+
     pub(super) fn publish_relations(&self, counts: Relations) {
         let _ = self.relations.set(counts);
     }
@@ -101,6 +108,7 @@ impl ExactCounts {
             };
             self.vertices = next.map_or_else(OnceLock::new, OnceLock::from);
         }
+        self.apply_edges_before(writer, row);
         self.apply_labels_before(writer, row);
         let Some(Some(counts)) = self.relations.get_mut() else {
             // A topology change can bring an oversized relation population
@@ -137,6 +145,32 @@ impl ExactCounts {
             // Unknown, never zero. A later successful source scan may rebuild.
             self.relations = OnceLock::new();
         }
+    }
+
+    fn apply_edges_before(&mut self, writer: &BlockWriter, row: &DeltaRow) {
+        let Some(previous) = self.edges.get().copied() else {
+            return;
+        };
+        let next = match row {
+            DeltaRow::CreateEdge { .. } => previous.checked_add(1),
+            DeltaRow::DeleteEdge { eid, .. } => writer
+                .live_edge(*eid)
+                .and_then(|_| previous.checked_sub(1)),
+            DeltaRow::DeleteVertex {
+                vid,
+                sorted_retired_incident_edges,
+                ..
+            } if writer.is_vertex_live(*vid) => sorted_retired_incident_edges
+                .iter()
+                .try_fold(previous, |count, eid| {
+                    writer.live_edge(*eid).and_then(|_| count.checked_sub(1))
+                }),
+            DeltaRow::DeleteVertex { .. } => None,
+            _ => Some(previous),
+        };
+        // Total cardinality has no distinct-relation bound. It remains exact
+        // even when the separately retained per-type counters are unavailable.
+        self.edges = next.map_or_else(OnceLock::new, OnceLock::from);
     }
 
     fn apply_labels_before(&mut self, writer: &BlockWriter, row: &DeltaRow) {

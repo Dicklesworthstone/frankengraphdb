@@ -189,10 +189,10 @@ fn run<const RUNS: bool>(
     let source = query.count_metadata_source().expect("checked count shape");
     let examined = match source {
         GraphCountSource::Vertices | GraphCountSource::Label(_) => vertices.len() as u64,
-        GraphCountSource::Relation(_) => edges.len() as u64,
+        GraphCountSource::Edges | GraphCountSource::Relation(_) => edges.len() as u64,
     };
     let matching = match source {
-        GraphCountSource::Vertices => examined,
+        GraphCountSource::Vertices | GraphCountSource::Edges => examined,
         GraphCountSource::Label(_) => vertices.iter().filter(|vid| vid.0 % 3 == 0).count() as u64,
         GraphCountSource::Relation(relation) => edges
             .iter()
@@ -455,6 +455,54 @@ fn only_one_vertex_label_can_supply_exact_metadata() {
     }
 }
 
+#[test]
+fn wildcard_directed_counts_admit_only_exact_metadata() {
+    for text in [
+        "MATCH ()-[r]->() RETURN COUNT(*) AS n",
+        "MATCH (a)-[r]->(b) RETURN COUNT(*) AS n",
+        "MATCH (a)<-[r]-(b) RETURN COUNT(*) AS n",
+    ] {
+        let wildcard = query(text);
+        assert_eq!(wildcard.count_metadata_source(), Some(GraphCountSource::Edges));
+        assert_eq!(wildcard.count_summary_source(), None);
+        assert!(
+            wildcard
+                .prepare_count_summary(GraphCountSource::Edges, 9, 9)
+                .is_none()
+        );
+        assert!(
+            wildcard
+                .prepare_count_metadata(GraphCountSource::Edges, 9)
+                .is_some()
+        );
+        for other in [
+            GraphCountSource::Vertices,
+            GraphCountSource::Label(LabelId(1)),
+            GraphCountSource::Relation(RelationId(1)),
+        ] {
+            assert!(wildcard.prepare_count_metadata(other, 9).is_none());
+        }
+    }
+    for text in [
+        "MATCH (a)-[r]-(b) RETURN COUNT(*) AS n",
+        "MATCH (a)-[:R|S]->(b) RETURN COUNT(*) AS n",
+        "MATCH (a)-[r]->(b:L) RETURN COUNT(*) AS n",
+        "MATCH (a)-[r]->(b) WHERE a.p IS NULL RETURN COUNT(*) AS n",
+        "MATCH (a)-[r]->(b) RETURN COUNT(a.p) AS n",
+        "MATCH (a)-[r]->(b) RETURN COUNT(DISTINCT a) AS n",
+        "MATCH (a)-[r]->(b) RETURN a, COUNT(*) AS n GROUP BY a",
+    ] {
+        let prepared = query(text);
+        assert_eq!(prepared.count_metadata_source(), None, "{text}");
+        assert!(
+            prepared
+                .prepare_count_metadata(GraphCountSource::Edges, 9)
+                .is_none(),
+            "{text}"
+        );
+    }
+}
+
 fn run_metadata<const RUNS: bool>(
     query: &PreparedGraphAggregate,
     matching: u64,
@@ -494,6 +542,10 @@ fn exact_metadata_keeps_the_native_finalizer_and_has_cardinality_independent_wor
             "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n",
             "MATCH (a)<-[:R]-(b) RETURN COUNT(*) AS n",
             "MATCH (a)-[:T]->(b) RETURN COUNT(*) AS n",
+            "MATCH (a)-[r]->(b) RETURN COUNT(*) AS n",
+            "MATCH (a)<-[r]-(b) RETURN COUNT(*) AS n",
+            "MATCH (a)-[r]->(b) RETURN COUNT(*) + 1 AS n HAVING n > 2 ORDER BY n DESC LIMIT 1",
+            "MATCH (a)-[r]->(b) RETURN 1 / (COUNT(*) - COUNT(*)) AS n LIMIT 0",
         ] {
             let query = query(text);
             for size in [0, 1, 7, 4097] {
@@ -509,6 +561,7 @@ fn exact_metadata_keeps_the_native_finalizer_and_has_cardinality_independent_wor
                     .collect();
                 let matching = match query.count_metadata_source().unwrap() {
                     GraphCountSource::Vertices => size as u64,
+                    GraphCountSource::Edges => edges.len() as u64,
                     GraphCountSource::Label(_) => {
                         vertices.iter().filter(|vid| vid.0 % 3 == 0).count() as u64
                     }
@@ -530,18 +583,23 @@ fn exact_metadata_keeps_the_native_finalizer_and_has_cardinality_independent_wor
         }
         // Full u64 cardinality is exact; no conversion through a signed row
         // multiplicity or floating-point value is permitted.
-        let query = query("MATCH (n) RETURN COUNT(*) AS n");
-        let mut work = None;
-        for matching in [0, 1, 900_000, u64::MAX] {
-            let result = run_metadata::<RUNS>(&query, matching, policy, None)
-                .0
-                .unwrap();
-            assert_eq!(result.value[0].values()[0].as_count(), Some(matching));
-            let observed = (
-                result.evaluator.work_units,
-                result.evaluator.scratch_entries,
-            );
-            assert_eq!(*work.get_or_insert(observed), observed);
+        for text in [
+            "MATCH (n) RETURN COUNT(*) AS n",
+            "MATCH (a)-[r]->(b) RETURN COUNT(*) AS n",
+        ] {
+            let query = query(text);
+            let mut work = None;
+            for matching in [0, 1, 900_000, u64::MAX] {
+                let result = run_metadata::<RUNS>(&query, matching, policy, None)
+                    .0
+                    .unwrap();
+                assert_eq!(result.value[0].values()[0].as_count(), Some(matching));
+                let observed = (
+                    result.evaluator.work_units,
+                    result.evaluator.scratch_entries,
+                );
+                assert_eq!(*work.get_or_insert(observed), observed);
+            }
         }
     }
     compare_metadata::<false>();
@@ -731,6 +789,8 @@ fn exact_metadata_checks_every_budget_and_cancellation_boundary() {
         "MATCH (n:L) RETURN [COUNT(*)][0] AS n HAVING n + 1 > COUNT(*) ORDER BY n DESC LIMIT 1",
         "MATCH (n:L) RETURN COUNT(*) AS n HAVING COUNT(*) + 1 > n ORDER BY n DESC LIMIT 1",
         "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n, COUNT(*) AS m",
+        "MATCH (a)-[r]->(b) RETURN COUNT(*) AS n, COUNT(*) AS m",
+        "MATCH (a)<-[r]-(b) RETURN COUNT(*) AS n SKIP 1 LIMIT 0",
         "MATCH (n) RETURN COUNT(*) AS n SKIP 1 LIMIT 0",
     ] {
         let query = query(text);

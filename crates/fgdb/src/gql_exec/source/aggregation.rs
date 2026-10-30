@@ -191,10 +191,11 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
         },
     );
     // Exact metadata is available only on the private unrestricted source at
-    // its own frontier. A label count has a separate cold path: its predicate
-    // still runs through the ordinary executor, preserving source errors and
-    // interleaved scratch/work events when no exact cardinality is available.
+    // its own frontier. Label and wildcard-edge counts keep their ordinary
+    // cold evaluators, preserving source errors and interleaved scratch/work
+    // events when no exact cardinality is available.
     let mut label_builder = None;
+    let mut rebuild_edges = false;
     if let (Some(snapshot), Some(source)) = (admitted.snapshot, aggregate.count_metadata_source())
         && as_of == snapshot.frontier
     {
@@ -220,6 +221,7 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
         if matches!(source, GraphCountSource::Label(_)) {
             label_builder = snapshot.exact_counts.label_builder();
         }
+        rebuild_edges = source == GraphCountSource::Edges;
     }
     // The same MVCC visitors can admit a plain count without retaining their
     // winning rows a second time. Shape admission excludes every input reader,
@@ -267,6 +269,10 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
         if result.is_ok() && current {
             if source == GraphCountSource::Vertices {
                 snapshot.exact_counts.publish_vertices(matching);
+            } else {
+                // Typed admission examines every live edge, including other
+                // types. Its complete population also proves wildcard COUNT.
+                snapshot.exact_counts.publish_edges(examined);
             }
             if let Some(relations) = relations {
                 snapshot.exact_counts.publish_relations(relations);
@@ -345,9 +351,20 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
     );
     let result = usage.finish(policy, result);
     if result.is_ok()
-        && let (Some(snapshot), Some(labels)) = (admitted.snapshot, labels)
+        && let Some(snapshot) = admitted.snapshot
     {
-        snapshot.exact_counts.publish_labels(labels);
+        if let Some(labels) = labels {
+            snapshot.exact_counts.publish_labels(labels);
+        }
+        if rebuild_edges {
+            // This is the complete ordinary, current-cut wildcard source.
+            // Publish only after output expressions and final delivery succeed.
+            let tables = admitted
+                .borrowed
+                .as_ref()
+                .expect("exact edge metadata requires the private snapshot source");
+            snapshot.exact_counts.publish_edges(tables.edges.len() as u64);
+        }
     }
     result
 }
@@ -393,8 +410,8 @@ fn count_input_with_builder<E>(
             })?;
             matching = examined;
         }
-        GraphCountSource::Label(_) => {
-            unreachable!("label predicates use ordinary admission when metadata is unavailable")
+        GraphCountSource::Edges | GraphCountSource::Label(_) => {
+            unreachable!("this input uses ordinary admission when metadata is unavailable")
         }
         GraphCountSource::Relation(relation) => {
             super::visit_edges(&snapshot.blocks, as_of, control, |entry, control| {

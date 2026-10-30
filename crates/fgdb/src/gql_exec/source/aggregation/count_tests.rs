@@ -58,7 +58,9 @@ fn source_run(
                     assert_eq!(tables.snapshot_records, count);
                     (count, count)
                 }
-                GraphCountSource::Label(_) => panic!("labels do not admit scan summaries"),
+                GraphCountSource::Edges | GraphCountSource::Label(_) => {
+                    panic!("this input does not admit scan summaries")
+                }
                 GraphCountSource::Relation(relation) => {
                     let examined = tables.edges.len() as u64;
                     let matching = tables
@@ -185,6 +187,10 @@ fn fallible_owned_readers_keep_their_source_errors_and_preceding_checkpoint() {
             "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS total",
             CommitSeq(12),
         ),
+        (
+            "MATCH (a)-[r]->(b) RETURN COUNT(*) AS total",
+            CommitSeq(12),
+        ),
     ] {
         let aggregate = query(text);
         let policy = GqlQueryPolicy::new(0, 0, 0, 0);
@@ -231,9 +237,13 @@ fn cold_counts_publish_only_after_complete_output_and_survive_every_cancellation
         db.write(&contexts.commit(), batch).await.unwrap();
         let policy = GqlQueryPolicy::new(100, 10, 100_000, 100_000);
         let at = db.snapshot.frontier;
-        for (pattern, matching, records) in
-            [("(n)", 4, 4), ("(n:L)", 2, 4), ("(a)-[:R]->(b)", 5, 5)]
-        {
+        for (pattern, matching, records) in [
+            ("(n)", 4, 4),
+            ("(n:L)", 2, 4),
+            ("(a)-[:R]->(b)", 5, 5),
+            ("(a)-[r]->(b)", 5, 5),
+            ("(a)<-[r]-(b)", 5, 5),
+        ] {
             let plain = query(&format!("MATCH {pattern} RETURN COUNT(*) AS total"));
             let source = plain.count_metadata_source().unwrap();
             let bad = query(&format!(
@@ -303,6 +313,102 @@ fn cold_counts_publish_only_after_complete_output_and_survive_every_cancellation
                 );
             }
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn wildcard_counts_follow_commits_pins_failed_writes_and_reopen() {
+    let ((), report) = run_async_under_lab(0xc017_0031, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let keys = DatabaseKeys::new(
+            [0x51; 32],
+            DatabaseSecurityNamespaceId([0x52; 32]),
+            [0x53; 32],
+        );
+        let vfs = crate::MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db =
+            Database::create_with_vfs(&contexts.commit(), vfs.clone(), &path, keys.clone())
+                .await
+                .unwrap();
+        let queries = [
+            query("MATCH ()-[r]->() RETURN COUNT(*) AS total"),
+            query("MATCH (a)<-[r]-(b) RETURN COUNT(*) AS total"),
+        ];
+        let tight = GqlQueryPolicy::new(1, 1, 100, 100);
+        let wide = GqlQueryPolicy::new(100, 10, 100_000, 100_000);
+        for aggregate in &queries {
+            let result = execute_at(&db, aggregate, db.snapshot.frontier, tight, || Ok::<_, ()>(()))
+                .unwrap();
+            assert_eq!(result.value[0].values()[0].as_count(), Some(0));
+        }
+        let mut first = WriteBatch::new(RelationId(1));
+        for id in 1..=3 {
+            first.create_vertex(VId(id), vec![], vec![]);
+        }
+        for (eid, source, destination) in [(1, 1, 2), (2, 1, 2), (3, 2, 2)] {
+            first.add_edge(EId(eid), VId(source), VId(destination), vec![]);
+        }
+        db.write(&contexts.commit(), first).await.unwrap();
+        let mut second = WriteBatch::new(RelationId(u64::MAX));
+        second.add_edge(EId(4), VId(3), VId(1), vec![]);
+        db.write(&contexts.commit(), second).await.unwrap();
+        let pinned = db.pinned_read_view().unwrap();
+        let pinned_at = db.snapshot.frontier;
+        for aggregate in &queries {
+            let result = execute_at(&db, aggregate, pinned_at, tight, || Ok::<_, ()>(())).unwrap();
+            assert_eq!(result.value[0].values()[0].as_count(), Some(4));
+            assert_eq!(result.rows.snapshot_records, 1);
+        }
+        let mut properties = WriteBatch::new(RelationId(1));
+        properties.set_edge_property(EId(2), PropertyKeyId(1), Some(CanonicalScalar::Int(9)));
+        properties.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(7)));
+        db.write(&contexts.commit(), properties).await.unwrap();
+        let before_failure = db.snapshot.frontier;
+        let mut failed = WriteBatch::new(RelationId(1));
+        failed.add_edge(EId(5), VId(1), VId(2), vec![]);
+        failed.add_edge(EId(6), VId(1), VId(999), vec![]);
+        assert!(db.write(&contexts.commit(), failed).await.is_err());
+        assert_eq!(db.snapshot.frontier, before_failure);
+        for aggregate in &queries {
+            let result = execute_at(&db, aggregate, before_failure, tight, || Ok::<_, ()>(()))
+                .unwrap();
+            assert_eq!(result.value[0].values()[0].as_count(), Some(4));
+        }
+        let mut delete = WriteBatch::new(RelationId(1));
+        delete.delete_edge(EId(1));
+        db.write(&contexts.commit(), delete).await.unwrap();
+        let mut detach = WriteBatch::new(RelationId(1));
+        detach.delete_vertex(VId(1));
+        db.write(&contexts.commit(), detach).await.unwrap();
+        let latest = db.snapshot.frontier;
+        for aggregate in &queries {
+            let current = execute_at(&db, aggregate, latest, tight, || Ok::<_, ()>(())).unwrap();
+            assert_eq!(current.value[0].values()[0].as_count(), Some(1));
+            let old = execute_at(&pinned, aggregate, pinned_at, tight, || Ok::<_, ()>(())).unwrap();
+            assert_eq!(old.value[0].values()[0].as_count(), Some(4));
+            let historical =
+                execute_at(&db, aggregate, pinned_at, wide, || Ok::<_, ()>(())).unwrap();
+            assert_eq!(historical.value, old.value);
+        }
+        drop(db);
+        let reopened = Database::open_with_vfs(&contexts.commit(), vfs, &path, keys)
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .snapshot
+                .exact_counts
+                .lookup(GraphCountSource::Edges, &mut |_| Ok::<_, ()>(()))
+                .unwrap(),
+            None
+        );
+        let cold = execute_at(&reopened, &queries[0], latest, wide, || Ok::<_, ()>(())).unwrap();
+        assert_eq!(cold.value[0].values()[0].as_count(), Some(1));
+        let warm = execute_at(&reopened, &queries[1], latest, tight, || Ok::<_, ()>(())).unwrap();
+        assert_eq!(warm.value, cold.value);
+        assert_eq!(warm.rows.snapshot_records, 1);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

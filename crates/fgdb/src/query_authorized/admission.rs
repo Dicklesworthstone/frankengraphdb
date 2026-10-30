@@ -175,9 +175,9 @@ impl AdmittedCore {
                 let count = u64::try_from(self.vertices.len()).ok()?;
                 Some((count, count))
             }
-            // Label metadata belongs only to the unrestricted owner path.
-            // This core preserves ordinary scoped admission and predicates.
-            fgdb_gql::GraphCountSource::Label(_) => None,
+            // Labels and wildcard edges use exact metadata, never this
+            // scan-summary transcript. Scoped admission keeps its predicates.
+            fgdb_gql::GraphCountSource::Label(_) | fgdb_gql::GraphCountSource::Edges => None,
             fgdb_gql::GraphCountSource::Relation(relation) => {
                 if self.edges.is_empty() {
                     return Some((0, 0));

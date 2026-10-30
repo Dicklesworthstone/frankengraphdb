@@ -9,6 +9,7 @@ fn read(counts: &ExactCounts, source: GraphCountSource) -> Option<u64> {
 fn cold_unknown_is_never_zero_and_relation_builder_preserves_multiplicity() {
     let counts = ExactCounts::default();
     assert_eq!(read(&counts, GraphCountSource::Vertices), None);
+    assert_eq!(read(&counts, GraphCountSource::Edges), None);
     assert_eq!(
         read(&counts, GraphCountSource::Relation(RelationId(8))),
         None
@@ -28,6 +29,7 @@ fn cold_unknown_is_never_zero_and_relation_builder_preserves_multiplicity() {
     }
     assert!(counts.relation_builder().is_none());
     assert_eq!(read(&counts, GraphCountSource::Vertices), None);
+    assert_eq!(read(&counts, GraphCountSource::Edges), None);
 }
 
 #[test]
@@ -42,7 +44,19 @@ fn cold_builder_has_a_fixed_relation_bound_and_refuses_before_allocation() {
             .unwrap();
     }
     assert!(builder.rows.capacity() <= MAX_COUNTERS);
-    assert!(builder.finish(&mut |_| Ok::<_, ()>(())).unwrap().is_none());
+    let relations = builder.finish(&mut |_| Ok::<_, ()>(())).unwrap();
+    assert!(relations.is_none());
+    let counts = ExactCounts::default();
+    counts.publish_relations(relations);
+    counts.publish_edges(MAX_COUNTERS as u64 + 1);
+    assert_eq!(
+        read(&counts, GraphCountSource::Relation(RelationId(1))),
+        None
+    );
+    assert_eq!(
+        read(&counts, GraphCountSource::Edges),
+        Some(MAX_COUNTERS as u64 + 1)
+    );
 }
 
 #[test]
@@ -128,6 +142,7 @@ fn committed_deltas_and_pinned_generations_agree_with_independent_maps() {
                 read(&counts, GraphCountSource::Vertices),
                 Some(vertices.len() as u64)
             );
+            assert_eq!(read(&counts, GraphCountSource::Edges), Some(edges.len() as u64));
             for relation in 1..=3 {
                 let relation = RelationId(relation);
                 let expected = edges.values().filter(|&&(_, r, _)| r == relation).count() as u64;
@@ -209,6 +224,7 @@ fn committed_deltas_and_pinned_generations_agree_with_independent_maps() {
         .unwrap();
     edges.retain(|_, (source, _, target)| *source != vertex && *target != vertex);
     assert_eq!(read(&counts, GraphCountSource::Vertices), Some(19));
+    assert_eq!(read(&counts, GraphCountSource::Edges), Some(edges.len() as u64));
     for relation in 1..=3 {
         let relation = RelationId(relation);
         assert_eq!(
@@ -221,6 +237,7 @@ fn committed_deltas_and_pinned_generations_agree_with_independent_maps() {
             read(&pinned, GraphCountSource::Vertices),
             Some(vertex_count)
         );
+        assert_eq!(read(&pinned, GraphCountSource::Edges), Some(edges.len() as u64));
         for relation in 1..=3 {
             let relation = RelationId(relation);
             assert_eq!(
@@ -258,6 +275,52 @@ fn overflow_or_missing_delete_image_discards_counts_instead_of_manufacturing_zer
         read(&counts, GraphCountSource::Relation(RelationId(1))),
         None
     );
+    assert_eq!(read(&counts, GraphCountSource::Edges), None);
+    counts.edges = OnceLock::from(u64::MAX);
+    counts.apply_before(
+        &writer,
+        &DeltaRow::CreateEdge {
+            eid: EId(1),
+            birth_ordinal: 2,
+            src: VId(1),
+            relation: RelationId(1),
+            dst: VId(1),
+            canonical_key: None,
+            props: vec![],
+            valid_time: None,
+        },
+    );
+    assert_eq!(read(&counts, GraphCountSource::Edges), None);
+}
+
+#[test]
+fn wildcard_lookup_is_constant_work_and_every_event_can_refuse() {
+    for total in [0, 1, MAX_COUNTERS as u64 + 1, u64::MAX] {
+        let counts = ExactCounts::default();
+        counts.publish_edges(total);
+        let mut events = Vec::new();
+        assert_eq!(
+            counts
+                .lookup(GraphCountSource::Edges, &mut |event| {
+                    events.push(event);
+                    Ok::<_, ()>(())
+                })
+                .unwrap(),
+            Some(total)
+        );
+        assert_eq!(events, vec![SourceEvent::Work, SourceEvent::SnapshotRecord]);
+        for stop in 1..=events.len() {
+            let mut seen = 0;
+            assert_eq!(
+                counts.lookup(GraphCountSource::Edges, &mut |_| {
+                    seen += 1;
+                    if seen == stop { Err(stop) } else { Ok(()) }
+                }),
+                Err(stop)
+            );
+            assert_eq!(seen, stop);
+        }
+    }
 }
 
 #[test]
