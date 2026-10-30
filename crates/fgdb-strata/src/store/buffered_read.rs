@@ -79,22 +79,52 @@ pub struct BufferedReadLimits {
 }
 
 impl BufferedReadLimits {
-    /// Reserve before decoding a manifest/root. This covers simultaneous
-    /// encoded frames, V4 segment vectors, flattened references, descriptors,
-    /// and bounded cache-policy bookkeeping. Payload and history use separate
-    /// reservations. The allowance intentionally remains attached to the view.
+    /// Reserve before decoding a manifest/root. This opening allowance covers
+    /// simultaneous encoded frames, V4 segment vectors, flattened references,
+    /// descriptors, and bounded cache-policy bookkeeping. Payload and history
+    /// use separate reservations. After admission, only retained metadata
+    /// capacities and the cache-policy allowance remain charged to the view.
     pub fn metadata_bytes(self) -> Result<usize, BufferedReadError> {
+        let policy = self.metadata_policy_bytes()?;
         self.max_root_bytes
             .checked_mul(16)
-            .and_then(|bytes| {
-                self.buffer
-                    .max_frames
-                    .checked_add(self.buffer.max_ghost_entries)
-                    .and_then(|entries| entries.checked_mul(512))
-                    .and_then(|policy| bytes.checked_add(policy))
-            })
+            .and_then(|bytes| bytes.checked_add(policy))
+            .ok_or(BufferedReadError::SizeOverflow)
+    }
+
+    fn metadata_policy_bytes(self) -> Result<usize, BufferedReadError> {
+        self.buffer
+            .max_frames
+            .checked_add(self.buffer.max_ghost_entries)
+            .and_then(|entries| entries.checked_mul(512))
             .and_then(|bytes| bytes.checked_add(4096))
             .ok_or(BufferedReadError::SizeOverflow)
+    }
+
+    fn retained_metadata_bytes(
+        self,
+        root: &PartitionRoot,
+        block_capacity: usize,
+        patch_capacity: usize,
+    ) -> Result<usize, BufferedReadError> {
+        // All four element types contain only fixed-width fields. Account the
+        // allocations' capacities, including any spare decoder capacity.
+        let mut bytes = self.metadata_policy_bytes()?;
+        for (capacity, width) in [
+            (root.blocks.capacity(), size_of::<crate::root::BlockRef>()),
+            (
+                root.vertex_patches.capacity(),
+                size_of::<crate::root::PatchRef>(),
+            ),
+            (block_capacity, size_of::<BlockDescriptor>()),
+            (patch_capacity, size_of::<PatchDescriptor>()),
+        ] {
+            bytes = capacity
+                .checked_mul(width)
+                .and_then(|allocated| bytes.checked_add(allocated))
+                .ok_or(BufferedReadError::SizeOverflow)?;
+        }
+        Ok(bytes)
     }
 }
 
@@ -472,7 +502,7 @@ impl<V: Vfs + Clone> BlockStore<V> {
         cx.buffered_checkpoint()
             .map_err(BufferedReadError::Interrupted)?;
         let buffer = ExtentBuffer::new(pool.clone(), limits.buffer)?;
-        let metadata = pool.reserve(cx, limits.metadata_bytes()?)?;
+        let mut metadata = pool.reserve(cx, limits.metadata_bytes()?)?;
         let (root, mut segments) = self
             .get_root_and_segments_limited(
                 cx,
@@ -648,6 +678,28 @@ impl<V: Vfs + Clone> BlockStore<V> {
                 advance(&mut work, 1, limits.max_work)?;
             }
         }
+        // Published descriptors are temporary admission evidence; their copies
+        // must die before releasing the opening allowance. The root-segment
+        // vectors and cold history validators have already been dropped.
+        drop(untrusted);
+        let retained =
+            limits.retained_metadata_bytes(&root, blocks.capacity(), patches.capacity())?;
+        let excess =
+            metadata
+                .bytes()
+                .checked_sub(retained)
+                .ok_or(MemoryError::ResourceExhausted {
+                    requested: retained,
+                    available: metadata.bytes(),
+                    limit: metadata.bytes(),
+                })?;
+        // Keep the original, early-declared owner so later failures drop the
+        // decoded vectors before their charge. Directories charge themselves.
+        drop(
+            metadata
+                .split_off(excess)
+                .ok_or(BufferedReadError::SizeOverflow)?,
+        );
         let patch_directory =
             patch_directory::PatchDirectory::new(&patches, cx, &pool, &mut || {
                 cx.buffered_checkpoint()
@@ -1268,6 +1320,62 @@ mod tests {
     };
 
     #[test]
+    fn retained_metadata_accounts_capacity_and_preserves_opening_peak() {
+        let limits = BufferedReadLimits {
+            max_root_bytes: 64 * 1024,
+            max_source_bytes: 4 * 1024 * 1024,
+            max_blocks: 32,
+            max_vertex_patches: 32,
+            max_work: 10_000,
+            buffer: BufferLimits {
+                max_frames: 1,
+                max_ghost_entries: 2,
+                max_extent_bytes: 16 * 1024,
+            },
+        };
+        let root = PartitionRoot {
+            graph: GraphId(1),
+            branch: BranchId(1),
+            partition: 0,
+            published_at: CommitSeq(0),
+            blocks: Vec::with_capacity(3),
+            vertex_patches: Vec::with_capacity(7),
+        };
+        let policy = 3 * 512 + 4096;
+        assert_eq!(limits.metadata_bytes().unwrap(), 16 * 64 * 1024 + policy);
+        let expected = policy
+            + root.blocks.capacity() * size_of::<crate::root::BlockRef>()
+            + root.vertex_patches.capacity() * size_of::<crate::root::PatchRef>()
+            + 11 * size_of::<BlockDescriptor>()
+            + 13 * size_of::<PatchDescriptor>();
+        assert_eq!(
+            limits.retained_metadata_bytes(&root, 11, 13).unwrap(),
+            expected
+        );
+        assert!(root.blocks.is_empty() && root.vertex_patches.is_empty());
+        assert!(expected > policy, "spare capacity remains charged");
+        let larger_ceiling = BufferedReadLimits {
+            max_root_bytes: 128 * 1024,
+            ..limits
+        };
+        assert_eq!(
+            larger_ceiling.metadata_bytes().unwrap(),
+            16 * 128 * 1024 + policy
+        );
+        assert_eq!(
+            larger_ceiling
+                .retained_metadata_bytes(&root, 11, 13)
+                .unwrap(),
+            expected,
+            "a ceiling is not a retained allocation"
+        );
+        assert!(matches!(
+            limits.retained_metadata_bytes(&root, usize::MAX, 0),
+            Err(BufferedReadError::SizeOverflow)
+        ));
+    }
+
+    #[test]
     fn reads_admit_complete_decode_and_property_work_before_their_cache_pins() {
         let dir = std::env::temp_dir().join(format!("fgdb-cold-work-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1348,6 +1456,17 @@ mod tests {
                 .open_buffered_root(&query, id, pool.clone(), limits)
                 .await
                 .unwrap();
+            assert_eq!(
+                view._metadata.bytes(),
+                limits
+                    .retained_metadata_bytes(
+                        &view.root,
+                        view.blocks.capacity(),
+                        view.patches.capacity(),
+                    )
+                    .unwrap()
+            );
+            assert!(view._metadata.bytes() < limits.metadata_bytes().unwrap());
             // Admission proves the whole source first. Lower only the private
             // read allowance to exercise each boundary independently of open.
             view.limits.max_work = 1;

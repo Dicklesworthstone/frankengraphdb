@@ -1523,11 +1523,11 @@ fn propertied_durable_source_can_exceed_the_shared_resident_ceiling() {
         };
         let id = store.put_root(&commit, &root).await.unwrap();
         // The V6 root carries a 205-byte descriptor beside each 48-byte block
-        // reference, so its 240 blocks need the 64 KiB root ceiling
-        // (21aa87137). The view keeps that ceiling's metadata charge (16x,
-        // 1,054,208 bytes) and the 46,080-byte descriptor directory, and a
-        // propertied edge_at holds two 1,114,112-byte object workspaces (its
-        // result and the property read): 3,328,512 bytes, over 3 MiB.
+        // reference, so its 240 blocks need the 64 KiB root ceiling. Preserve
+        // this 3.5 MiB source-pool witness below the durable payload size:
+        // admission still reserves the full opening allowance, while later
+        // propertied reads retain actual metadata plus their result and object
+        // workspaces.
         let cap = 3 * 1024 * 1024 + 512 * 1024;
         assert!(source_bytes > cap);
         let pool = MemoryPool::new(cap, 0).unwrap();
@@ -2013,9 +2013,18 @@ fn vertex_property_history_larger_than_the_resident_cap_opens_and_refaults() {
             .open_buffered_root(&query, id, pool.clone(), bounded)
             .await
             .unwrap();
-        assert_eq!(
-            pool.used(),
-            bounded.metadata_bytes().unwrap() + directory_bytes
+        let retained_floor = directory_bytes
+            + 512 * (bounded.buffer.max_frames + bounded.buffer.max_ghost_entries)
+            + 4096
+            + view.root().blocks.capacity() * size_of::<BlockRef>()
+            + view.root().vertex_patches.capacity() * size_of::<PatchRef>();
+        assert!(
+            pool.used() >= retained_floor,
+            "retained root and cache-policy metadata remains charged"
+        );
+        assert!(
+            pool.used() < bounded.metadata_bytes().unwrap() + directory_bytes,
+            "temporary root decoding capacity is refunded after admission"
         );
         for index in [1, COUNT, 1] {
             let found = view
@@ -2121,9 +2130,18 @@ fn vertex_restatements_bound_residency_and_meter_every_authenticated_birth_refau
             .open_buffered_root(&query, id, pool.clone(), bounded)
             .await
             .unwrap();
-        assert_eq!(
-            pool.used(),
-            bounded.metadata_bytes().unwrap() + directory_bytes
+        let retained_floor = directory_bytes
+            + 512 * (bounded.buffer.max_frames + bounded.buffer.max_ghost_entries)
+            + 4096
+            + view.root().blocks.capacity() * size_of::<BlockRef>()
+            + view.root().vertex_patches.capacity() * size_of::<PatchRef>();
+        assert!(
+            pool.used() >= retained_floor,
+            "retained root and cache-policy metadata remains charged"
+        );
+        assert!(
+            pool.used() < bounded.metadata_bytes().unwrap() + directory_bytes,
+            "temporary root decoding capacity is refunded after admission"
         );
         let found = view
             .vertex_at(&query, VId(1), CommitSeq(1))

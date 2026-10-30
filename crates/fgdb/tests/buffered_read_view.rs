@@ -675,3 +675,189 @@ fn buffered_gql_reports_arithmetic_failure_after_its_delivered_prefix() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn buffered_views_release_opening_metadata_for_shared_pool_history_reads() {
+    let ((), report) = run_async_under_lab(0x6275_6608, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, reference) = history(&commit).await;
+        let path = vfs.database_dir();
+        let writer = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let parent = MemoryPool::new(3 * 1024 * 1024, 0).unwrap();
+        let cold_pool = parent.child(parent.limit(), 0).unwrap();
+        let trusted_pool = parent.child(parent.limit(), 0).unwrap();
+        let opening_bytes = limits().metadata_bytes().unwrap();
+        let mut cold = Database::open_buffered_read_view_with_vfs(
+            &commit,
+            vfs,
+            &path,
+            keys(),
+            cold_pool.clone(),
+            limits(),
+        )
+        .await
+        .unwrap();
+        let mut trusted = writer
+            .buffered_read_view(&cx, trusted_pool.clone(), limits())
+            .await
+            .unwrap();
+        drop(writer);
+        assert!(cold_pool.used() < opening_bytes);
+        assert!(trusted_pool.used() < opening_bytes);
+        assert_eq!(parent.used(), cold_pool.used() + trusted_pool.used());
+
+        // Both sources keep their original root-byte admission ceiling. Its
+        // temporary decode allowance now leaves room for property-bearing
+        // reads, whose result and object workspaces coexist in this same pool.
+        for view in [&mut cold, &mut trusted] {
+            for seq in 0..=3 {
+                let cut = CommitSeq(seq);
+                for vid in [1, 3, 4, 999] {
+                    let expected = reference.vertex_at(VId(vid), cut).unwrap();
+                    let actual = view.vertex_at(&cx, VId(vid), cut).await.unwrap();
+                    assert_eq!(
+                        actual.as_deref(),
+                        expected.as_ref(),
+                        "vertex {vid} at {seq}"
+                    );
+                }
+                for eid in [101, 102, 104, 105, 999] {
+                    let expected = reference.edge_at(EId(eid), cut).unwrap();
+                    let actual = view.edge_at(&cx, EId(eid), cut).await.unwrap();
+                    assert_eq!(
+                        actual.as_ref().map(|row| (&row.entry, &row.props)),
+                        expected.as_ref().map(|row| (&row.entry, &row.props)),
+                        "edge {eid} at {seq}"
+                    );
+                }
+                for incoming in [false, true] {
+                    let mut expected: Vec<_> = reference
+                        .edges_at(cut)
+                        .unwrap()
+                        .into_iter()
+                        .map(|row| row.entry)
+                        .filter(|row| (if incoming { row.dst } else { row.src }) == VId(1))
+                        .collect();
+                    expected.sort_unstable_by_key(|row| (row.src, row.relation, row.dst, row.eid));
+                    let actual = view
+                        .adjacency_at(&cx, VId(1), None, incoming, cut, 32)
+                        .await
+                        .unwrap();
+                    assert_eq!(actual.as_ref(), &expected);
+                }
+            }
+        }
+        assert_eq!(parent.used(), cold_pool.used() + trusted_pool.used());
+        let retained = cold
+            .edge_at(&cx, EId(101), CommitSeq(1))
+            .await
+            .unwrap()
+            .unwrap();
+        drop(cold);
+        drop(trusted);
+        assert_eq!(trusted_pool.used(), 0);
+        assert_eq!(parent.used(), cold_pool.used());
+        assert!(parent.used() > 0, "the returned edge keeps its own charge");
+        assert_eq!(retained.props, [(PROPERTY, CanonicalScalar::Int(7).into())]);
+        drop(retained);
+        assert_eq!(cold_pool.used(), 0);
+        assert_eq!(parent.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn buffered_metadata_keeps_peak_admission_and_refunds_every_interrupted_open() {
+    use fgdb_types::context::SimulationCheckpointProbe;
+    use std::sync::Arc;
+
+    let ((), report) = run_async_under_lab(0x6275_6609, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let (vfs, _) = history(&commit).await;
+        let path = vfs.database_dir();
+        let writer = Database::open_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let opening_bytes = limits().metadata_bytes().unwrap();
+        for trusted in [false, true] {
+            let parent = MemoryPool::new(opening_bytes - 1, 0).unwrap();
+            let child = parent.child(3 * 1024 * 1024, 0).unwrap();
+            let failure = if trusted {
+                writer
+                    .buffered_read_view(&cx, child.clone(), limits())
+                    .await
+            } else {
+                Database::open_buffered_read_view_with_vfs(
+                    &commit,
+                    vfs.clone(),
+                    &path,
+                    keys(),
+                    child.clone(),
+                    limits(),
+                )
+                .await
+            }
+            .unwrap_err();
+            assert!(matches!(
+                failure,
+                BufferedOpenError::Memory(fgdb::MemoryError::ResourceExhausted {
+                    requested, available, limit,
+                })
+                | BufferedOpenError::Read(BufferedReadError::Memory(
+                    fgdb::MemoryError::ResourceExhausted { requested, available, limit }
+                )) if requested == opening_bytes
+                    && available == opening_bytes - 1
+                    && limit == opening_bytes - 1
+            ));
+            assert_eq!(child.used(), 0);
+            assert_eq!(parent.used(), 0);
+        }
+
+        let parent = MemoryPool::new(3 * 1024 * 1024, 0).unwrap();
+        let child = parent.child(parent.limit(), 0).unwrap();
+        let trace = Arc::new(SimulationCheckpointProbe::new(None));
+        let complete = writer
+            .buffered_read_view(
+                &cx.with_checkpoint_probe(Arc::clone(&trace)),
+                child.clone(),
+                limits(),
+            )
+            .await
+            .unwrap();
+        let checkpoints = trace.calls();
+        assert!(checkpoints > 3);
+        drop(complete);
+        assert_eq!(child.used(), 0);
+        assert_eq!(parent.used(), 0);
+        // Includes directory construction and the final checkpoint after the
+        // transient root/descriptor allowance has already been refunded.
+        for stop in 1..=checkpoints {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+            assert!(
+                writer
+                    .buffered_read_view(&controlled, child.clone(), limits())
+                    .await
+                    .is_err(),
+                "checkpoint {stop}"
+            );
+            assert_eq!(probe.calls(), stop);
+            assert_eq!(child.used(), 0, "checkpoint {stop}");
+            assert_eq!(parent.used(), 0, "checkpoint {stop}");
+        }
+        let retry = writer
+            .buffered_read_view(&cx, child.clone(), limits())
+            .await
+            .unwrap();
+        drop(retry);
+        assert_eq!(child.used(), 0);
+        assert_eq!(parent.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
