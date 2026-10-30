@@ -27,6 +27,7 @@ use fgdb_prism::{
     ProjectionBuildError, ProjectionEdge, ProjectionError, SelfLoopPolicy, SnapshotBinding,
     SnapshotGraphView, SortedVertexLookup,
 };
+use fgdb_strata::tiered::sealed::SealedAnchor;
 use fgdb_types::{QueryCx, VId};
 use fgdb_warden::{Authority, CapabilityToken, PlannerPredicates};
 use std::cell::{Cell, RefCell};
@@ -41,7 +42,16 @@ type Error = FnxReadError<ReadError, QueryError>;
 /// Projections reused across authorized calls on one live snapshot
 /// allocation, each with the live calls its build made (fgdb-0tbrz).
 pub(crate) type AuthorizedProjectionCache =
-    LiveCache<Snapshot, ProjectionKey, (SnapshotGraphView, Arc<Tape>)>;
+    LiveCache<Snapshot, ProjectionKey, (AuthorizedProjection, Arc<Tape>)>;
+
+/// Both representations spend the same opened database's retention allowance.
+/// Neither carries a permit; every lookup replays its complete admission under
+/// the current execution. The key keeps the two physical sources distinct.
+#[derive(Clone)]
+pub(crate) enum AuthorizedProjection {
+    Decoded(SnapshotGraphView),
+    Sealed(fgdb_prism::SealedGraphView),
+}
 
 /// Serializes tests that change shared simulation instrumentation. Production
 /// reuse belongs to each database and does not depend on this test lock.
@@ -60,6 +70,7 @@ pub(crate) fn reuse_test_turn() -> std::sync::MutexGuard<'static, ()> {
 pub(crate) struct ProjectionKey {
     request: ProjectionRequest,
     predicates: Option<Vec<u8>>,
+    sealed: Option<SealedAnchor>,
 }
 
 impl ProjectionKey {
@@ -72,6 +83,7 @@ impl ProjectionKey {
         Some(Self {
             request,
             predicates,
+            sealed: None,
         })
     }
 
@@ -81,7 +93,7 @@ impl ProjectionKey {
 }
 
 fn remember_projection_controlled<Owner, E>(
-    cache: &LiveCache<Owner, ProjectionKey, (SnapshotGraphView, Arc<Tape>)>,
+    cache: &LiveCache<Owner, ProjectionKey, (AuthorizedProjection, Arc<Tape>)>,
     owner: &Arc<Owner>,
     key: ProjectionKey,
     graph: &SnapshotGraphView,
@@ -93,6 +105,7 @@ fn remember_projection_controlled<Owner, E>(
     // build can never seed a different request's reusable entry.
     if graph.binding() != key.request.binding
         || graph.spec() != key.request.projection
+        || key.sealed.is_some()
         || !tape.is_complete()
     {
         return Ok(());
@@ -102,7 +115,13 @@ fn remember_projection_controlled<Owner, E>(
         .checked_add(tape.bytes())
         .and_then(|bytes| bytes.checked_add(key.retained_bytes()))
     {
-        cache.remember(owner, key, (graph.clone(), Arc::new(tape)), bytes, poll)?;
+        cache.remember(
+            owner,
+            key,
+            (AuthorizedProjection::Decoded(graph.clone()), Arc::new(tape)),
+            bytes,
+            poll,
+        )?;
     }
     Ok(())
 }
@@ -496,11 +515,11 @@ fn execute_with_sink<Clock: FnMut() -> u64>(
             None => None,
         };
         Ok::<_, Error>(match retained {
-            Some((graph, tape)) => {
+            Some((AuthorizedProjection::Decoded(graph), tape)) => {
                 replay(&tape, execution, &observe, &work, options, poll, spend)?;
                 graph
             }
-            None => {
+            None | Some((AuthorizedProjection::Sealed(_), _)) => {
                 // A fragmented masked history may not run-length encode
                 // compactly. Bound temporary replay metadata by both the
                 // source staging ceiling and this cache's allowance. If

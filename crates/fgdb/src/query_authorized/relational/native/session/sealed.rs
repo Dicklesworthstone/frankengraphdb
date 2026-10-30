@@ -100,10 +100,12 @@ impl SealedReadView {
     /// before cloning the compressed source. The host fixes the catalog,
     /// branch, memory policy and monotone clock; query code cannot replace them.
     ///
-    /// The source image is reused across statements. Projection construction,
-    /// kernel execution and completed cursor pulls still spend each statement's
-    /// fresh signed and host allowances. No raw anchor, source root, certificate
-    /// or privileged session is returned to the capability holder.
+    /// The source image and compatible completed projections are reused across
+    /// statements. Projections share the opened database's authorized cache
+    /// allowance; a hit replays construction's exact live checks and charges.
+    /// Kernel execution and completed cursor pulls spend each statement's fresh
+    /// signed and host allowances. No raw anchor, source root, certificate or
+    /// privileged session is returned to the capability holder.
     #[allow(clippy::too_many_arguments)]
     pub fn authorized_read_session<'a, R: GraphSymbolResolver, C: FnMut() -> u64>(
         &self,

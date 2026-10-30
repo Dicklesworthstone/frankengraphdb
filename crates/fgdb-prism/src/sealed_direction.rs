@@ -60,11 +60,16 @@ impl<'a> Incidences<'a> {
             None
         } else {
             cx.checkpoint()?;
-            Some(
-                partition
-                    .row_from(cx.query, source, relation, config.as_of, lower)
-                    .map_err(SealedProjectionError::Read)?,
-            )
+            let row = partition
+                .row_from(cx.query, source, relation, config.as_of, lower)
+                .map_err(SealedProjectionError::Read)?;
+            // row_from owns an independent QueryCx checkpoint. Pair that
+            // successful source check with the live guard before lending the
+            // cursor, while preserving the guard before descriptor access.
+            // Authorized construction transcripts can then replay every raw
+            // checkpoint; a failed open never publishes a reusable projection.
+            cx.guard()?;
+            Some(row)
         };
         let incoming = if direction == Directedness::Directed {
             None
@@ -81,11 +86,13 @@ impl<'a> Incidences<'a> {
                 ));
             }
             cx.checkpoint()?;
-            Some(
-                index
-                    .row_from(cx.query, source, relation, config.as_of, lower)
-                    .map_err(SealedProjectionError::Read)?,
-            )
+            let row = index
+                .row_from(cx.query, source, relation, config.as_of, lower)
+                .map_err(SealedProjectionError::Read)?;
+            // Keep the incoming row's own QueryCx-first check in the same
+            // live admission transcript as its outgoing counterpart.
+            cx.guard()?;
+            Some(row)
         };
         Ok(Self {
             outgoing,

@@ -43,7 +43,7 @@ fn builds() -> usize {
 }
 
 fn remember_projection<Owner>(
-    cache: &LiveCache<Owner, ProjectionKey, (SnapshotGraphView, Arc<Tape>)>,
+    cache: &LiveCache<Owner, ProjectionKey, (AuthorizedProjection, Arc<Tape>)>,
     owner: &Arc<Owner>,
     key: ProjectionKey,
     graph: &SnapshotGraphView,
@@ -149,6 +149,7 @@ fn scoped_entries_charge_key_capacity_and_keep_weak_exact_source_ownership() {
         ProjectionKey {
             request,
             predicates: Some(predicates),
+            sealed: None,
         }
     };
     let tape = || {
@@ -170,7 +171,9 @@ fn scoped_entries_charge_key_capacity_and_keep_weak_exact_source_ownership() {
     remember_projection(&cache, &owner, key(), &graph, tape());
     let same = key();
     let stored = cache.lookup(&owner, &same).unwrap();
-    assert!(stored.0.shares_cache_with(&graph));
+    assert!(
+        matches!(stored.0, AuthorizedProjection::Decoded(stored) if stored.shares_cache_with(&graph))
+    );
     let mut changed = key();
     changed.predicates = Some(vec![1, 2, 4]);
     assert!(cache.lookup(&owner, &changed).is_none());

@@ -4,6 +4,11 @@
 //! Therefore it is usable here only after the current predicates prove that
 //! no incidence or field is hidden. Every other scope stays on the ordinary
 //! pre-masked source; filtering raw image endpoints would not prove that law.
+//!
+//! Completed projections share the existing authorized retention allowance.
+//! Reuse removes source traversal, directory construction and validation, but
+//! replays every live poll and charge before using the retained graph. Neither
+//! the image nor a completed admission can substitute for the current permit.
 
 use super::*;
 use crate::EmbeddedReadView;
@@ -75,6 +80,29 @@ impl Source {
 thread_local! {
     /// Physical compressed selections, never returned as authorized metadata.
     pub(crate) static EXECUTIONS: Cell<usize> = const { Cell::new(0) };
+    /// Completed-source construction attempts, excluding exact tape replay.
+    pub(crate) static BUILDS: Cell<usize> = const { Cell::new(0) };
+}
+
+fn projection_key(retained: &Source, options: FnxReadOptions) -> ProjectionKey {
+    // Only the ordered source counters may differ. Replay applies every fresh
+    // allowance at the original event, including its first refusal. Staging
+    // and projection bounds remain exact because allocation admission is not
+    // represented by the live tape.
+    let mut source_limits = options.source_limits;
+    source_limits.max_work_units = u64::MAX;
+    source_limits.max_scratch_entries = u64::MAX;
+    ProjectionKey {
+        request: ProjectionRequest {
+            binding: retained.binding,
+            selection: options.selection,
+            projection: options.projection,
+            projection_limits: options.projection_limits,
+            source_limits,
+        },
+        predicates: None,
+        sealed: Some(retained.partition.anchor()),
+    }
 }
 
 fn invalid_source() -> Error {
@@ -163,6 +191,7 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
     }
     #[cfg(test)]
     EXECUTIONS.with(|count| count.set(count.get() + 1));
+    let poll = || poll_live(&mut execution.borrow_mut()).map_err(control_error);
     let observe = RefCell::new(observe);
     let work = Cell::new(0u64);
     let control = |event| -> Result<(), Error> {
@@ -177,8 +206,6 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
             u128::from(options.source_limits.max_work_units),
         )
     };
-    let mut vertices = Vec::new();
-    let mut staged_bytes = 0;
     let scratch = Cell::new(0u64);
     let record = || -> Result<(), Error> {
         observe
@@ -197,63 +224,128 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
             u128::from(options.source_limits.max_scratch_entries),
         )
     };
-    // Even an unselected vertex spends the signed node allowance, matching
-    // ordinary authorized source admission before the user's label selector.
-    source::visit_vertices(
-        &snapshot.patches,
-        binding.as_of,
-        &mut |_| poll_live(&mut execution.borrow_mut()).map_err(control_error),
-        |row, _| {
-            control(SourceEvent::Work)?;
-            for _ in &row.labels {
+    let spend = |step| -> Result<(), Error> {
+        match step {
+            Step::Vertex(labels) => {
                 control(SourceEvent::Work)?;
+                for _ in 0..labels {
+                    control(SourceEvent::Work)?;
+                }
+                execution.borrow_mut().node().map_err(control_error)?;
             }
-            execution.borrow_mut().node().map_err(control_error)?;
-            record()?;
-            if options
-                .selection
-                .vertex_label
-                .is_some_and(|label| row.labels.binary_search(&label).is_err())
-            {
-                return Ok(());
-            }
-            push_staged(
-                &mut vertices,
-                row.vid,
-                "vertices",
-                options.projection_limits.max_vertices,
-                &mut staged_bytes,
-                options.source_limits.max_staging_bytes,
-            )
-        },
-    )?;
-    // Full visibility was proved before reading this count. Old versions and
-    // query-excluded endpoints still consume the compressed source's admission;
-    // masked scopes cannot enter this path or observe that population.
-    poll_live(&mut execution.borrow_mut()).map_err(control_error)?;
-    for _ in 0..retained.partition.incidence_count() {
-        control(SourceEvent::Work)?;
-        record()?;
-    }
-    let failure = RefCell::new(None);
+            Step::Edge => control(SourceEvent::Work)?,
+            Step::Checkpoint => return control(SourceEvent::Work),
+        }
+        record()
+    };
+    let key = projection_key(retained, options);
+    let cache = &snapshot.read_caches.authorized;
     let cx = execution.borrow().cx;
-    let built = SealedGraphView::build_with_checkpoint(
-        cx,
-        &retained.partition,
-        &vertices,
-        SealedProjectionSpec {
-            as_of: binding.as_of,
-            selection: options.selection,
-            projection: options.projection,
-        },
-        SealedProjectionMask::UNMASKED,
-        options.projection_limits,
-        || guard(&failure, control(SourceEvent::Work)),
-    );
-    if let Some(error) = failure.borrow_mut().take() {
-        return Err(error);
-    }
-    let graph = built.map_err(projection_error)?;
+    let graph = match cache.lookup_controlled(snapshot, &key, &mut || poll())? {
+        Some((AuthorizedProjection::Sealed(graph), tape)) => {
+            tape.replay(poll, |step| {
+                if step == Step::Checkpoint {
+                    // Compressed Control and Strata both check QueryCx before
+                    // invoking the recorded guard. Preserve that independent
+                    // cancellation point, not just the guard's live checks.
+                    cx.checkpoint()
+                        .map_err(SealedError::Interrupted)
+                        .map_err(|error| projection_error(error.into()))?;
+                }
+                spend(step)
+            })?;
+            graph
+        }
+        None | Some((AuthorizedProjection::Decoded(_), _)) => {
+            #[cfg(test)]
+            BUILDS.with(|count| count.set(count.get() + 1));
+            let tape = RefCell::new(Tape::bounded(
+                options
+                    .source_limits
+                    .max_staging_bytes
+                    .min(cache.max_bytes()),
+            ));
+            let scan = || {
+                tape.borrow_mut().poll();
+                poll()
+            };
+            let admit = |step| {
+                tape.borrow_mut().emit(Some(step));
+                spend(step)
+            };
+            let mut vertices = Vec::new();
+            let mut staged_bytes = 0;
+            // Even an unselected vertex spends the signed node allowance,
+            // matching admission before the user's label selector.
+            source::visit_vertices(
+                &snapshot.patches,
+                binding.as_of,
+                &mut |_| scan(),
+                |row, _| {
+                    let labels =
+                        u32::try_from(row.labels.len()).map_err(|_| Error::SizeOverflow)?;
+                    admit(Step::Vertex(labels))?;
+                    if options
+                        .selection
+                        .vertex_label
+                        .is_some_and(|label| row.labels.binary_search(&label).is_err())
+                    {
+                        return Ok(());
+                    }
+                    push_staged(
+                        &mut vertices,
+                        row.vid,
+                        "vertices",
+                        options.projection_limits.max_vertices,
+                        &mut staged_bytes,
+                        options.source_limits.max_staging_bytes,
+                    )
+                },
+            )?;
+            // Full visibility was proved before reading this count. Old
+            // versions and query-excluded endpoints still consume admission.
+            // Restricted scopes cannot inspect this population or its tape.
+            scan()?;
+            for _ in 0..retained.partition.incidence_count() {
+                admit(Step::Edge)?;
+            }
+            let failure = RefCell::new(None);
+            let built = SealedGraphView::build_with_checkpoint(
+                cx,
+                &retained.partition,
+                &vertices,
+                SealedProjectionSpec {
+                    as_of: binding.as_of,
+                    selection: options.selection,
+                    projection: options.projection,
+                },
+                SealedProjectionMask::UNMASKED,
+                options.projection_limits,
+                || guard(&failure, admit(Step::Checkpoint)),
+            );
+            if let Some(error) = failure.borrow_mut().take() {
+                return Err(error);
+            }
+            let graph = built.map_err(projection_error)?;
+            let tape = tape.into_inner().finish();
+            if tape.is_complete()
+                && graph.binding() == key.request.binding
+                && graph.selection() == key.request.selection
+                && graph.spec() == key.request.projection
+                && let Some(bytes) = graph.charged_resident_bytes().checked_add(tape.bytes())
+            {
+                cache.remember(
+                    snapshot,
+                    key,
+                    (AuthorizedProjection::Sealed(graph.clone()), Arc::new(tape)),
+                    bytes,
+                    &mut || poll(),
+                )?;
+            }
+            graph
+        }
+    };
+    let failure = RefCell::new(None);
     let signed_rows = scope.limits().max_rows;
     let mut limits = options.execution_limits;
     limits.max_result_rows = limits

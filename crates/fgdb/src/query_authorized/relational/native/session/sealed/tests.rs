@@ -1,11 +1,14 @@
 //! Real sealed owners exercise the existing session's source and lifetime laws.
 use super::*;
-use crate::{DatabaseKeys, MemVfs, NativeReadClass, QueryValue, WriteBatch};
+use crate::{DatabaseKeys, MemVfs, NativeReadClass, QueryValue, ReadCacheLimits, WriteBatch};
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb_delta_types::{LabelId, PropertyKeyId, SchemaEpoch};
 use fgdb_gql::algebra::GraphValue;
-use fgdb_prism::{FnxCallSpec, FnxParameters, FnxReadError, FnxReadOptions, SnapshotBinding};
+use fgdb_prism::{
+    Directedness, FnxCallSpec, FnxParameters, FnxReadError, FnxReadOptions, SealedGraphView,
+    SealedProjectionMask, SealedProjectionSpec, SnapshotBinding,
+};
 use fgdb_strata::store::RootReadLimits;
 use fgdb_strata::tiered::sealed::SealedLimits;
 use fgdb_types::context::SimulationCheckpointProbe;
@@ -123,6 +126,22 @@ async fn retained(db: &Database<MemVfs>, cx: &QueryCx, cut: Option<CommitSeq>) -
 }
 fn compressed_calls() -> usize {
     crate::query::authorized::analytics::sealed::EXECUTIONS.with(Cell::get)
+}
+fn compressed_builds() -> usize {
+    crate::query::authorized::analytics::sealed::BUILDS.with(Cell::get)
+}
+fn retention(owner: &SealedReadView, cx: &QueryCx, bytes: usize) -> crate::ReadCacheStatus {
+    owner
+        .authorized_parts()
+        .0
+        .set_read_cache_limits(
+            cx,
+            ReadCacheLimits {
+                authorized_projection_bytes: bytes,
+                ..ReadCacheLimits::default()
+            },
+        )
+        .unwrap()
 }
 fn refusal<T>(result: Result<T, QueryError>, expected: AuthorizationError) {
     assert!(matches!(result, Err(QueryError::Authorization(actual)) if actual == expected));
@@ -377,6 +396,14 @@ fn measured<Rs: GraphSymbolResolver, C: FnMut() -> u64>(
     session: &mut AuthorizedSealedReadSession<'_, Rs, C>,
     cx: &QueryCx,
 ) -> Result<(Vec<Vec<fgdb_prism::FnxValue>>, u64, u64, u64), QueryError> {
+    measured_options(session, cx, FnxReadOptions::whole_graph(None))
+}
+
+fn measured_options<Rs: GraphSymbolResolver, C: FnMut() -> u64>(
+    session: &mut AuthorizedSealedReadSession<'_, Rs, C>,
+    cx: &QueryCx,
+    mut options: FnxReadOptions,
+) -> Result<(Vec<Vec<fgdb_prism::FnxValue>>, u64, u64, u64), QueryError> {
     session
         .inner
         .run(cx, |view, _, scope, _, policy, execution| {
@@ -386,7 +413,7 @@ fn measured<Rs: GraphSymbolResolver, C: FnMut() -> u64>(
             )
             .unwrap();
             let at = selected_cut(view, execution);
-            let mut options = FnxReadOptions::whole_graph(Some(at));
+            options.as_of = Some(at);
             options.selection.relation = Some(R);
             let mut usage = crate::gql_exec::AdmissionUsage::default();
             let rows = crate::query::authorized::analytics::execute(
@@ -558,6 +585,15 @@ fn every_expiry_boundary_closes_the_owner_and_retirement_is_live_inside_compress
         session.execute(&cx, &prepared, &args).unwrap();
         let boundaries = calls.get();
         assert!(boundaries > 20);
+        calls.set(0);
+        let before = compressed_builds();
+        session.execute(&cx, &prepared, &args).unwrap();
+        assert_eq!(
+            calls.get(),
+            boundaries,
+            "warm replay preserves every clock sample"
+        );
+        assert_eq!(compressed_builds(), before);
         session.close();
         let baseline = Arc::strong_count(&owner.authorized_parts().0.snapshot);
         for stop in 1..=boundaries {
@@ -661,13 +697,25 @@ fn cancellation_at_every_checkpoint_discards_output_and_compressed_memory_limits
         let expected = session.execute(&observed, &prepared, &args).unwrap();
         let calls = probe.calls();
         assert!(calls > 20);
+        let warm_probe = Arc::new(SimulationCheckpointProbe::new(None));
+        let warm = c.query().with_checkpoint_probe(Arc::clone(&warm_probe));
+        let before = compressed_builds();
+        assert_eq!(session.execute(&warm, &prepared, &args).unwrap(), expected);
+        assert_eq!(
+            warm_probe.calls(),
+            calls,
+            "no raw source checkpoint disappears on reuse"
+        );
+        assert_eq!(compressed_builds(), before);
         for at in 1..=calls {
             let probe = Arc::new(SimulationCheckpointProbe::new(Some(at)));
-            let controlled = c.query().with_checkpoint_probe(probe);
+            let controlled = c.query().with_checkpoint_probe(Arc::clone(&probe));
             assert!(
                 session.execute(&controlled, &prepared, &args).is_err(),
                 "checkpoint {at}"
             );
+            // The session's mandatory final gate may checkpoint again after
+            // this injected failure; no completed result may escape it.
             assert!(
                 !session.is_closed(),
                 "cancellation is not credential retirement"
@@ -712,6 +760,247 @@ fn cancellation_at_every_checkpoint_discards_output_and_compressed_memory_limits
                     .collect(),
             },
         );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn prepared_and_composed_calls_reuse_one_bounded_compressed_projection() {
+    let _turn = crate::query::authorized::analytics::reuse_test_turn();
+    let ((), report) = run_async_under_lab(0xa115_ea06, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = database(&c.commit(), false).await;
+        let owner = retained(&db, &cx, None).await;
+        let authority = issuer(7);
+        let token = authority.issue_at(&grant(false), NOW).unwrap();
+        let mut session = owner
+            .authorized_read_session(
+                &cx,
+                &authority,
+                &token,
+                "main",
+                catalog,
+                policy(),
+                memory(),
+                || NOW,
+            )
+            .unwrap();
+        let args = GqlParameters::new();
+        let before = compressed_builds();
+        let expected = session.query(&cx, BFS, &args).unwrap();
+        assert_eq!(compressed_builds(), before + 1);
+        let prepared = session.prepare(&cx, BFS, &args).unwrap();
+        assert_eq!(session.execute(&cx, &prepared, &args).unwrap(), expected);
+        assert_eq!(session.query(&cx, BFS, &args).unwrap(), expected);
+        assert_eq!(compressed_builds(), before + 1);
+
+        let composed = "CALL fnx.single_source_shortest_path_length(args => [1], relation => 'R') \
+            YIELD vertex AS reached, distance AS first_distance WITH reached, first_distance \
+            CALL fnx.single_source_shortest_path_length(args => [1], relation => 'R') \
+            YIELD vertex, distance WHERE vertex = reached RETURN vertex, distance ORDER BY vertex";
+        let calls = compressed_calls();
+        assert_eq!(
+            session.query(&cx, composed, &args).unwrap(),
+            db.query(&cx, composed, &args, catalog, policy()).unwrap(),
+        );
+        assert!(compressed_calls() >= calls + 2);
+        assert_eq!(
+            compressed_builds(),
+            before + 1,
+            "different remaining source counters still replay the same projection",
+        );
+        let status = db.read_cache_status(&cx).unwrap().authorized_projections;
+        assert_eq!(status.entries, 1);
+        assert!(status.retained_bytes > 0);
+        assert!(status.retained_bytes <= status.max_bytes);
+
+        // Both representations share the existing explicit host quota. A
+        // limit below this complete image/directory/tape cost releases it;
+        // ordinary execution then succeeds without retaining a partial entry.
+        assert_eq!(
+            retention(&owner, &cx, status.retained_bytes - 1)
+                .authorized_projections
+                .entries,
+            0,
+        );
+        let before = compressed_builds();
+        for _ in 0..2 {
+            assert_eq!(session.query(&cx, BFS, &args).unwrap(), expected);
+        }
+        assert_eq!(compressed_builds(), before + 2);
+        assert_eq!(
+            db.read_cache_status(&cx)
+                .unwrap()
+                .authorized_projections
+                .entries,
+            0
+        );
+        retention(&owner, &cx, status.retained_bytes);
+        let before = compressed_builds();
+        for _ in 0..2 {
+            assert_eq!(session.execute(&cx, &prepared, &args).unwrap(), expected);
+        }
+        assert_eq!(compressed_builds(), before + 1);
+        assert_eq!(
+            db.read_cache_status(&cx)
+                .unwrap()
+                .authorized_projections
+                .retained_bytes,
+            status.retained_bytes,
+        );
+
+        // Keeping the cache owner alive must not pin its decoded generation.
+        let caches = Arc::clone(&owner.authorized_parts().0.snapshot.read_caches);
+        let weak = Arc::downgrade(&owner.authorized_parts().0.snapshot);
+        session.close();
+        drop(owner);
+        drop(db);
+        assert!(weak.upgrade().is_none());
+        let mut entries = caches.authorized.try_lock().unwrap();
+        let retired = crate::query::read_cache::live::LiveCache::prune(&mut entries);
+        assert_eq!(caches.authorized.usage(&entries).entries, 0);
+        drop(entries);
+        drop(retired);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn every_compressed_construction_query_checkpoint_has_one_live_guard() {
+    let ((), report) = run_async_under_lab(0xa115_ea07, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let db = database(&c.commit(), false).await;
+        let owner = retained(&db, &c.query(), None).await;
+        let (_, partition, as_of, _) = owner.authorized_parts();
+        for direction in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let cx = c.query().with_checkpoint_probe(Arc::clone(&probe));
+            let mut options = FnxReadOptions::whole_graph(Some(as_of));
+            options.selection.relation = Some(R);
+            options.projection.directedness = direction;
+            let mut observed = Vec::new();
+            let graph = SealedGraphView::build_with_checkpoint(
+                &cx,
+                partition,
+                &[VId(1), VId(2), VId(3)],
+                SealedProjectionSpec {
+                    as_of,
+                    selection: options.selection,
+                    projection: options.projection,
+                },
+                SealedProjectionMask::UNMASKED,
+                options.projection_limits,
+                || {
+                    observed.push(probe.calls());
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(graph.node_count(), 3);
+            assert!(probe.calls() > 10);
+            assert_eq!(
+                observed,
+                (1..=probe.calls()).collect::<Vec<_>>(),
+                "{direction:?}: raw row opens, incoming construction and pulls must all enter the tape",
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+fn compressed_footprint(
+    owner: &SealedReadView,
+    cx: &QueryCx,
+    authority: &Authority,
+    token: &CapabilityToken,
+    host: GqlQueryPolicy,
+    options: FnxReadOptions,
+) -> (String, usize, usize) {
+    let probe = Arc::new(SimulationCheckpointProbe::new(None));
+    let observed = cx.with_checkpoint_probe(Arc::clone(&probe));
+    let clock_calls = Cell::new(0);
+    let result = owner
+        .authorized_read_session(
+            &observed,
+            authority,
+            token,
+            "main",
+            catalog,
+            host,
+            memory(),
+            || {
+                clock_calls.set(clock_calls.get() + 1);
+                NOW
+            },
+        )
+        .and_then(|mut session| measured_options(&mut session, &observed, options));
+    (format!("{result:?}"), probe.calls(), clock_calls.get())
+}
+
+#[test]
+fn compressed_reuse_matches_cold_rows_statistics_and_each_fresh_allowance() {
+    let _turn = crate::query::authorized::analytics::reuse_test_turn();
+    let ((), report) = run_async_under_lab(0xa115_ea08, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let cold_db = database(&c.commit(), false).await;
+        let warm_db = database(&c.commit(), false).await;
+        let cold = retained(&cold_db, &cx, None).await;
+        let warm = retained(&warm_db, &cx, None).await;
+        retention(&cold, &cx, 0);
+        let authority = issuer(8);
+        let open = grant(false);
+        let token = authority.issue_at(&open, NOW).unwrap();
+        let options = FnxReadOptions::whole_graph(None);
+        let seeded = compressed_footprint(&warm, &cx, &authority, &token, policy(), options);
+        assert!(seeded.0.starts_with("Ok("), "{seeded:?}");
+        assert_eq!(
+            compressed_footprint(&cold, &cx, &authority, &token, policy(), options),
+            seeded,
+        );
+        let mut cases = vec![(open.clone(), policy(), options)];
+        for limit in [0, 3, 20, 100_000] {
+            let mut changed = options;
+            changed.source_limits.max_work_units = limit;
+            cases.push((open.clone(), policy(), changed));
+        }
+        for limit in [0, 2, 4, 100] {
+            let mut changed = options;
+            changed.source_limits.max_scratch_entries = limit;
+            cases.push((open.clone(), policy(), changed));
+        }
+        for limit in [0, 15, 100, 1_000_000] {
+            let mut signed = open.clone();
+            signed.limits.max_work = limit;
+            cases.push((signed, policy(), options));
+            let mut host = policy();
+            host.evaluator.max_work_units = limit;
+            cases.push((open.clone(), host, options));
+        }
+        for limit in [0, 2, 3, 100] {
+            let mut signed = open.clone();
+            signed.limits.max_nodes = limit;
+            cases.push((signed, policy(), options));
+            let mut signed = open.clone();
+            signed.limits.max_rows = limit;
+            cases.push((signed, policy(), options));
+        }
+        for (index, (signed, host, options)) in cases.into_iter().enumerate() {
+            let token = authority.issue_at(&signed, NOW).unwrap();
+            let before = compressed_builds();
+            let reused = compressed_footprint(&warm, &cx, &authority, &token, host, options);
+            assert_eq!(compressed_builds(), before, "case {index} must replay");
+            assert_eq!(
+                compressed_footprint(&cold, &cx, &authority, &token, host, options),
+                reused,
+                "case {index}: rows/refusal, admitted statistics, QueryCx and clock ordering",
+            );
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
