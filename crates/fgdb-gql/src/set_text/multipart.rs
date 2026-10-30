@@ -255,8 +255,8 @@ pub(crate) fn optional_where_at(tokens: &[TextToken<'_>], offset: usize) -> Opti
 }
 
 fn imported_where_at(tokens: &[TextToken<'_>], offset: usize, optional: bool) -> Option<usize> {
-    const CLAUSES: [&str; 10] = [
-        "WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "UNION", "CALL", "ORDER", "SKIP", "OFFSET",
+    const CLAUSES: [&str; 9] = [
+        "WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "UNION", "CALL", "ORDER", "SKIP",
     ];
     let mut depth = 0_usize;
     let mut with = tokens.first().is_some_and(|token| token.word("UNWIND"));
@@ -303,8 +303,8 @@ fn imported_where_at(tokens: &[TextToken<'_>], offset: usize, optional: bool) ->
 /// one): the row filter there reads each existence predicate from a hidden
 /// column of that boundary (hoist_existence_reads). Lookahead only.
 pub(crate) fn existence_where_at(tokens: &[TextToken<'_>], offset: usize) -> Option<usize> {
-    const CLAUSES: [&str; 10] = [
-        "WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "UNION", "CALL", "ORDER", "SKIP", "OFFSET",
+    const CLAUSES: [&str; 9] = [
+        "WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "UNION", "CALL", "ORDER", "SKIP",
     ];
     let mut depth = 0_usize;
     let mut eligible = false;
@@ -363,8 +363,8 @@ pub(crate) fn existence_where_at(tokens: &[TextToken<'_>], offset: usize) -> Opt
 /// `WITH *` when it read a name its child scope cannot see. An OPTIONAL
 /// clause starts at its OPTIONAL keyword.
 pub(crate) fn implicit_with_at(tokens: &[TextToken<'_>], offset: usize) -> Option<usize> {
-    const CLAUSES: [&str; 10] = [
-        "WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "UNION", "CALL", "ORDER", "SKIP", "OFFSET",
+    const CLAUSES: [&str; 9] = [
+        "WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "UNION", "CALL", "ORDER", "SKIP",
     ];
     let mut depth = 0_usize;
     // The open clause's start and whether it follows a MATCH clause.

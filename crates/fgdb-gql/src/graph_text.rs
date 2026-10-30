@@ -604,6 +604,8 @@ impl<'a> Lexer<'a> {
                     TokenKind::Parameter(name)
                 } else if self.names_schema(at, name) {
                     TokenKind::DelimitedKeyword(name)
+                } else if self.pages_offset(at, name) {
+                    TokenKind::Word("SKIP")
                 } else {
                     TokenKind::Word(name)
                 },
@@ -694,6 +696,36 @@ impl<'a> Lexer<'a> {
             Some(b'.') => true,
             Some(b':') => after != Some(&b'('),
             _ => after == Some(&b':'),
+        }
+    }
+
+    /// Whether `word` at `at` (the lexer just past it) is ISO GQL's OFFSET
+    /// page: OFFSET followed by what starts a page expression (a number, a
+    /// parameter, `(` or a call), and not a key after `.` or `:`. That OFFSET
+    /// lexes as SKIP, the one clause both languages spell, so every parser
+    /// and clause lookahead that reads SKIP reads it. Any other `offset` is a
+    /// plain name: `WITH 1 AS offset RETURN offset`, `d.offset`.
+    fn pages_offset(&self, at: usize, word: &str) -> bool {
+        if !word.eq_ignore_ascii_case("OFFSET") {
+            return false;
+        }
+        let before = self.text.as_bytes()[..at]
+            .iter()
+            .rev()
+            .find(|byte| !byte.is_ascii_whitespace());
+        if matches!(before, Some(b'.' | b':')) {
+            return false;
+        }
+        let mut lexer = self.clone();
+        match lexer.next().map(|token| token.kind) {
+            Ok(TokenKind::Digits(_) | TokenKind::Parameter(_) | TokenKind::Punct(b'(')) => true,
+            Ok(TokenKind::Word(_)) => {
+                matches!(
+                    lexer.next().map(|token| token.kind),
+                    Ok(TokenKind::Punct(b'('))
+                )
+            }
+            _ => false,
         }
     }
 }
@@ -2181,8 +2213,7 @@ impl<'a> Parser<'a> {
         Ok(name)
     }
     fn parse_pagination(&mut self) -> Result<(), GraphPatternTextError> {
-        // GQL's OFFSET and openCypher's SKIP are one clause.
-        if self.take_word("SKIP")? || self.take_word("OFFSET")? {
+        if self.take_word("SKIP")? {
             self.syntax.offset = self.page_number()?;
         }
         if self.take_word("LIMIT")? {

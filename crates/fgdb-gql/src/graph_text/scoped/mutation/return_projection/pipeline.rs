@@ -192,11 +192,10 @@ fn later_with_items<'a>(
     mut lexer: Lexer<'a>,
     carried: &[&'a str],
 ) -> Result<(Vec<&'a str>, bool), GraphPatternTextError> {
-    const ENDS: [&str; 20] = [
+    const ENDS: [&str; 19] = [
         "WHERE",
         "ORDER",
         "SKIP",
-        "OFFSET",
         "LIMIT",
         "RETURN",
         "WITH",
@@ -797,11 +796,9 @@ impl<'a> Parser<'a> {
             if let TokenKind::Word(word) = token.kind
                 && depth == 0
                 && !after_dot
-                && [
-                    "WHERE", "ORDER", "SKIP", "OFFSET", "LIMIT", "RETURN", "WITH",
-                ]
-                .iter()
-                .any(|clause| word.eq_ignore_ascii_case(clause))
+                && ["WHERE", "ORDER", "SKIP", "LIMIT", "RETURN", "WITH"]
+                    .iter()
+                    .any(|clause| word.eq_ignore_ascii_case(clause))
                 && let Some(kept) = pending.take()
             {
                 carried = Some(kept);
@@ -2361,7 +2358,7 @@ impl<'a> Parser<'a> {
                     if depth == 0
                         && [
                             "WITH", "RETURN", "UNWIND", "MATCH", "OPTIONAL", "UNION", "ORDER",
-                            "SKIP", "OFFSET", "LIMIT",
+                            "SKIP", "LIMIT",
                         ]
                         .iter()
                         .any(|end| word.eq_ignore_ascii_case(end)) =>
@@ -2764,7 +2761,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        let offset = if self.take_word("SKIP")? || self.take_word("OFFSET")? {
+        let offset = if self.take_word("SKIP")? {
             present = true;
             self.row_page_number()?
         } else {

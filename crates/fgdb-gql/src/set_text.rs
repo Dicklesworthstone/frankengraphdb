@@ -1759,7 +1759,6 @@ impl<'a> Composition<'a> {
                     || token.punct(b')')
                     || token.punct(b';')
                     || token.word("SKIP")
-                    || token.word("OFFSET")
                     || token.word("LIMIT")
             });
         }
@@ -1831,7 +1830,6 @@ impl<'a> Composition<'a> {
                 if returned
                     && (token.word("ORDER")
                         || token.word("SKIP")
-                        || token.word("OFFSET")
                         || token.word("LIMIT")
                         || self.set_separator())
                 {
@@ -1959,8 +1957,7 @@ impl<'a> Composition<'a> {
                 }
             }
         }
-        // GQL's OFFSET and openCypher's SKIP are one clause.
-        if self.take_word("SKIP") || self.take_word("OFFSET") {
+        if self.take_word("SKIP") {
             node.offset = self.page_number()?;
         }
         if self.take_word("LIMIT") {

@@ -147,7 +147,7 @@ impl<'a> Parser<'a> {
     /// operands (`sum(v) * 10 / count(v)`, `count(*) + 1`, fgdb-4avot): it
     /// contains a call, and it is not exactly one call. Lookahead only.
     fn starts_aggregate_expression(&self) -> Result<bool, Error> {
-        const ENDS: [&str; 7] = ["AS", "GROUP", "HAVING", "ORDER", "SKIP", "OFFSET", "LIMIT"];
+        const ENDS: [&str; 6] = ["AS", "GROUP", "HAVING", "ORDER", "SKIP", "LIMIT"];
         let single = self.starts_pipeline_summary()?;
         let mut lexer = self.lexer.clone();
         let mut token = self.current;
@@ -557,7 +557,7 @@ impl PreparedGraphPipelineAggregateText {
                 // item. In x+1 or x[0], x still belongs to the input schema.
                 let standalone = match parser.lexer.clone().next()?.kind {
                     TokenKind::End | TokenKind::Punct(b',') => true,
-                    TokenKind::Word(word) => ["HAVING", "ORDER", "SKIP", "OFFSET", "LIMIT"]
+                    TokenKind::Word(word) => ["HAVING", "ORDER", "SKIP", "LIMIT"]
                         .iter()
                         .any(|keyword| word.eq_ignore_ascii_case(keyword)),
                     _ => false,

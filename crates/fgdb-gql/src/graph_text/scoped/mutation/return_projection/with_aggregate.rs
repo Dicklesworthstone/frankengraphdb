@@ -165,7 +165,6 @@ impl<'a> Parser<'a> {
                             "WHERE",
                             "ORDER",
                             "SKIP",
-                            "OFFSET",
                             "LIMIT",
                             "RETURN",
                             "WITH",
@@ -440,12 +439,11 @@ impl<'a> Parser<'a> {
     /// operands (`count(*) + 1`, `me.age + count(you.age)`, fgdb-4avot): it
     /// contains a call, and it is not exactly one call. Lookahead only.
     fn starts_combined_aggregate(&self) -> Result<bool, GraphPatternTextError> {
-        const ENDS: [&str; 15] = [
+        const ENDS: [&str; 14] = [
             "AS",
             "WHERE",
             "ORDER",
             "SKIP",
-            "OFFSET",
             "LIMIT",
             "RETURN",
             "WITH",

@@ -21,6 +21,8 @@ const R: RelationId = RelationId(1);
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+        // The scan reads one value for every key, so `n.offset` is `n.p`.
+        (GraphSymbolKind::Property, "offset") => Some(GraphSymbol::Property(PropertyKeyId(2))),
         (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         _ => None,
     }
@@ -789,6 +791,10 @@ fn gql_offset_pages_returns_and_with_stages_as_skip_does() {
              RETURN parity, c ORDER BY parity {} 1",
             vec![1],
         ),
+        (
+            "MATCH (n) RETURN n.p AS p ORDER BY p {} (1 + 1)",
+            vec![3, 4],
+        ),
     ] {
         let offset = statement.replace("{}", "OFFSET");
         let skip = statement.replace("{}", "SKIP");
@@ -796,6 +802,85 @@ fn gql_offset_pages_returns_and_with_stages_as_skip_does() {
         assert_eq!(column(&offset), expected, "{offset}");
         assert_eq!(column(&skip), expected, "{skip}");
     }
+}
+
+/// OFFSET pages only where a page expression follows it; any other `offset`
+/// is a name. A property after a WITH, a map key, a column of a set
+/// composition and a variable each read their value, beside a real OFFSET
+/// page in the same statement. When every clause lookahead stopped at the
+/// word, unaliased `d.offset` after a WITH (TCK Temporal5 [4] and [6]) and
+/// `WITH 1 AS offset RETURN offset` refused as pages.
+#[test]
+fn a_key_named_offset_is_read_never_paged() {
+    let values = [1, 2, 3].map(CanonicalScalar::Int);
+    let column = |statement: &str, at: usize| {
+        let rows = run(&prepare(statement), &values, wide(), &mut || Ok(()))
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+            .value;
+        ints(&rows, at)
+    };
+    for (statement, at, expected) in [
+        (
+            "MATCH (n) WITH n RETURN n.p AS p, n.offset AS o ORDER BY p",
+            1,
+            vec![1, 2, 3],
+        ),
+        (
+            "MATCH (n) WITH n RETURN n.p, n.offset ORDER BY n.p",
+            1,
+            vec![1, 2, 3],
+        ),
+        (
+            "MATCH (n) WITH n RETURN n.offset AS o ORDER BY o DESC OFFSET 1",
+            0,
+            vec![2, 1],
+        ),
+        (
+            "MATCH (n) WITH {offset: n.p * 10} AS m RETURN m.offset ORDER BY m.offset OFFSET 1",
+            0,
+            vec![20, 30],
+        ),
+        (
+            "MATCH (n) WITH {offset: n.p, limit: n.p * 10} AS m \
+             RETURN m.offset AS o, m.limit AS l ORDER BY o DESC LIMIT 2",
+            1,
+            vec![30, 20],
+        ),
+        (
+            "MATCH (n) WITH n.p AS offset RETURN offset ORDER BY offset",
+            0,
+            vec![1, 2, 3],
+        ),
+        (
+            "MATCH (n) WITH n.p AS offset RETURN offset AS o ORDER BY o OFFSET 1",
+            0,
+            vec![2, 3],
+        ),
+        (
+            "MATCH (n) WITH n.p AS offset RETURN offset + 1 AS o ORDER BY o DESC",
+            0,
+            vec![4, 3, 2],
+        ),
+        (
+            "MATCH (n) WITH n.p AS offset RETURN offset ORDER BY offset OFFSET 1 LIMIT 1",
+            0,
+            vec![2],
+        ),
+        (
+            "MATCH (n) WITH n.p % 2 AS offset, count(*) AS c \
+             RETURN offset ORDER BY offset DESC",
+            0,
+            vec![1, 0],
+        ),
+    ] {
+        let expected: Vec<_> = expected.into_iter().map(Some).collect();
+        assert_eq!(column(statement, at), expected, "{statement}");
+    }
+    let statement = "MATCH (n) WHERE n.p > 1 RETURN n.offset AS o \
+                     UNION MATCH (n) WHERE n.p < 3 RETURN n.offset AS o";
+    let mut union = column(statement, 0);
+    union.sort_unstable();
+    assert_eq!(union, vec![Some(1), Some(2), Some(3)], "{statement}");
 }
 
 /// A CASE after WITH may return a graph element: the arm's vertex itself,

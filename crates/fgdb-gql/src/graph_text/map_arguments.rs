@@ -534,8 +534,8 @@ enum Clause {
 const PATTERN_CLAUSES: &[&str] = &["MATCH", "CREATE", "MERGE", "INSERT"];
 const OTHER_CLAUSES: &[&str] = &[
     "WHERE", "RETURN", "WITH", "UNWIND", "ON", "DELETE", "DETACH", "REMOVE", "ORDER", "SKIP",
-    "LIMIT", "OFFSET", "CALL", "UNION", "YIELD", "FOREACH", "OPTIONAL", "FINISH", "FILTER", "LET",
-    "NEXT", "USE", "FOR",
+    "LIMIT", "CALL", "UNION", "YIELD", "FOREACH", "OPTIONAL", "FINISH", "FILTER", "LET", "NEXT",
+    "USE", "FOR",
 ];
 
 fn is_clause(word: &str) -> bool {

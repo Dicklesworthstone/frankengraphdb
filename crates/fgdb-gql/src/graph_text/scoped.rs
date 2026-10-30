@@ -1168,9 +1168,8 @@ impl<'a> Parser<'a> {
             return false;
         }
         [
-            "RETURN", "WITH", "MATCH", "OPTIONAL", "UNWIND", "ORDER", "SKIP", "OFFSET", "LIMIT",
-            "UNION", "CALL", "CREATE", "INSERT", "MERGE", "SET", "DELETE", "DETACH", "REMOVE",
-            "FOREACH",
+            "RETURN", "WITH", "MATCH", "OPTIONAL", "UNWIND", "ORDER", "SKIP", "LIMIT", "UNION",
+            "CALL", "CREATE", "INSERT", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "FOREACH",
         ]
         .iter()
         .any(|clause| word.eq_ignore_ascii_case(clause))

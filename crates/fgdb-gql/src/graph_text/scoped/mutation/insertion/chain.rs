@@ -659,7 +659,7 @@ impl PreparedGraphWriteChainText {
                     if word.eq_ignore_ascii_case("OPTIONAL") || word.eq_ignore_ascii_case("CALL") {
                         multipart = true;
                     }
-                    if ["WITH", "UNWIND", "ORDER", "SKIP", "OFFSET", "LIMIT"]
+                    if ["WITH", "UNWIND", "ORDER", "SKIP", "LIMIT"]
                         .iter()
                         .any(|stage| word.eq_ignore_ascii_case(stage))
                     {
@@ -744,8 +744,7 @@ impl PreparedGraphWriteChainText {
             ))
         ) || matches!(previous, Some(TokenKind::Word(word))
                 if ["WITH", "BY", "WHERE", "AS", "AND", "OR", "XOR", "NOT", "WHEN", "THEN",
-                    "ELSE", "IN", "IS", "UNWIND", "SKIP", "OFFSET", "LIMIT", "STARTS", "ENDS",
-                    "CONTAINS"]
+                    "ELSE", "IN", "IS", "UNWIND", "SKIP", "LIMIT", "STARTS", "ENDS", "CONTAINS"]
                     .iter().any(|prefix| word.eq_ignore_ascii_case(prefix)))
         {
             return Ok(false);

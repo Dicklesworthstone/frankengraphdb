@@ -171,7 +171,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        let offset = if self.take_word("SKIP")? || self.take_word("OFFSET")? {
+        let offset = if self.take_word("SKIP")? {
             present = true;
             self.row_page_number()?
         } else {
@@ -321,7 +321,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Word(word)
                     if depth == 0
                         && !after_dot
-                        && ["SKIP", "OFFSET", "LIMIT", "UNION"]
+                        && ["SKIP", "LIMIT", "UNION"]
                             .iter()
                             .any(|end| word.eq_ignore_ascii_case(end)) =>
                 {

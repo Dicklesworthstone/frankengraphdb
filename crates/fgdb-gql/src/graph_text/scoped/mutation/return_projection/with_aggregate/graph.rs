@@ -36,7 +36,6 @@ fn scope_end(word: &str, previous: Option<TokenKind<'_>>) -> bool {
         "WHERE",
         "ORDER",
         "SKIP",
-        "OFFSET",
         "LIMIT",
         "RETURN",
         "WITH",
@@ -496,7 +495,7 @@ impl<'a> Parser<'a> {
         width: usize,
     ) -> Result<Vec<(&'a str, &'a str, Name<'a>, usize)>, GraphSetTextError> {
         let mut grouped: Vec<(&'a str, &'a str, Name<'a>, usize)> = Vec::new();
-        if !["WHERE", "ORDER", "SKIP", "OFFSET", "LIMIT", "RETURN"]
+        if !["WHERE", "ORDER", "SKIP", "LIMIT", "RETURN"]
             .iter()
             .any(|keyword| end.eq_ignore_ascii_case(keyword))
         {
@@ -515,7 +514,7 @@ impl<'a> Parser<'a> {
                     if depth == 0 {
                         // Pages after RETURN belong to the set parser, which
                         // addresses the RETURN's own columns.
-                        let page = ["ORDER", "SKIP", "OFFSET", "LIMIT"]
+                        let page = ["ORDER", "SKIP", "LIMIT"]
                             .iter()
                             .any(|keyword| word.eq_ignore_ascii_case(keyword));
                         if (returned && page)

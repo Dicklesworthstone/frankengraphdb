@@ -977,7 +977,7 @@ fn row_pattern_ends<'a>(
     }
     Ok(matches!(token.kind, TokenKind::End)
         || matches!(token.kind, TokenKind::Word(word)
-            if ["WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "CALL", "ORDER", "SKIP", "OFFSET", "LIMIT"]
+            if ["WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "CALL", "ORDER", "SKIP", "LIMIT"]
                 .iter().any(|clause| word.eq_ignore_ascii_case(clause))))
 }
 
@@ -1168,8 +1168,7 @@ impl<'a> Parser<'a> {
         }
         if !matches!(self.current.kind, TokenKind::End)
             && ![
-                "WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "CALL", "ORDER", "SKIP", "OFFSET",
-                "LIMIT",
+                "WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "CALL", "ORDER", "SKIP", "LIMIT",
             ]
             .iter()
             .any(|clause| self.is_word(clause))
@@ -2993,9 +2992,9 @@ impl<'a> Parser<'a> {
     /// Whether the clause starting at this MATCH has a top-level WHERE the
     /// composition entry re-reads (deferred_wheres). Nothing is consumed.
     fn clause_where_deferred(&self) -> Result<bool, GraphPatternTextError> {
-        const CLAUSES: [&str; 11] = [
+        const CLAUSES: [&str; 10] = [
             "WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "CALL", "UNION", "ORDER", "SKIP",
-            "OFFSET", "LIMIT",
+            "LIMIT",
         ];
         let mut lexer = self.lexer.clone();
         let mut previous = self.current.kind;

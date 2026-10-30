@@ -45,7 +45,7 @@ fn return_gathers_comprehension(parser: &mut Parser<'_>) -> Result<bool, Error> 
             TokenKind::End => break Ok(comprehension && aggregate),
             TokenKind::Word(word)
                 if depth == 0
-                    && ["ORDER", "SKIP", "OFFSET", "LIMIT", "UNION"]
+                    && ["ORDER", "SKIP", "LIMIT", "UNION"]
                         .iter()
                         .any(|end| word.eq_ignore_ascii_case(end)) =>
             {

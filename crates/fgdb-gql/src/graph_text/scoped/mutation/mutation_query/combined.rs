@@ -193,7 +193,6 @@ impl<'a> Parser<'a> {
                             "WHERE",
                             "ORDER",
                             "SKIP",
-                            "OFFSET",
                             "LIMIT",
                             "RETURN",
                             "MATCH",

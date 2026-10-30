@@ -25,7 +25,7 @@ impl<'a> Parser<'a> {
         Ok(match next.kind {
             TokenKind::Word(word) => ![
                 "AS", "THEN", "ELSE", "END", "AND", "OR", "RETURN", "SET", "REMOVE", "GROUP",
-                "HAVING", "ORDER", "SKIP", "OFFSET", "LIMIT", "WITH", "WHERE",
+                "HAVING", "ORDER", "SKIP", "LIMIT", "WITH", "WHERE",
             ]
             .iter()
             .any(|suffix| word.eq_ignore_ascii_case(suffix)),

@@ -1376,7 +1376,7 @@ impl<'a> Parser<'a> {
         loop {
             if depth == 0
                 && (matches!(token.kind, TokenKind::End | TokenKind::Punct(b',' | b';'))
-                    || matches!(token.kind, TokenKind::Word(word) if ["AS", "GROUP", "HAVING", "ORDER", "SKIP", "OFFSET", "LIMIT"].iter().any(|name| word.eq_ignore_ascii_case(name))))
+                    || matches!(token.kind, TokenKind::Word(word) if ["AS", "GROUP", "HAVING", "ORDER", "SKIP", "LIMIT"].iter().any(|name| word.eq_ignore_ascii_case(name))))
             {
                 break;
             }
