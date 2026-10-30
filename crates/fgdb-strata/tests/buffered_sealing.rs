@@ -632,7 +632,7 @@ fn source_family_sealing_fits_below_total_raw_history_and_preserves_exact_images
         // This is a lower bound on the old all-family source's OWNED payloads,
         // excluding every vector, routing entry, row and decoder workspace.
         // Retaining all statements cannot fit in this admitted source pool.
-        assert!(2 * FAMILIES * PAYLOAD > HEADROOM);
+        const { assert!(2 * FAMILIES * PAYLOAD > HEADROOM) };
         let before = view.stats();
         assert!(matches!(
             view.seal_relation(
