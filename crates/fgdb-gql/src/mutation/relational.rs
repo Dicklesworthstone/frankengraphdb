@@ -138,7 +138,7 @@ impl PreparedGraphMutation {
         &self,
         policy: GqlQueryPolicy,
         owned: Option<Vec<GraphValueRow>>,
-        mut source: super::collect::ErasedSource<'_, E, C>,
+        source: super::collect::ErasedSource<'_, E, C>,
         elements: Option<&mut super::collect::MutationElementReader<'_, E>>,
         checkpoint: &mut impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphMutationError<E>, C>> {
@@ -146,6 +146,15 @@ impl PreparedGraphMutation {
             GqlQueryError::Source(GraphMutationError::InputRelation(
                 crate::GraphSetExecutionError::OwnedRowsUnavailable,
             ))
+        };
+        // Split a seeded reader off before the pattern closure borrows the
+        // source; the relation below offers it to a joined MATCH leaf.
+        let (mut source, mut seeded) = match source {
+            super::collect::ErasedSource::Seeded { patterns, seeded } => (
+                super::collect::ErasedSource::Reusable(patterns),
+                Some(seeded),
+            ),
+            source => (source, None),
         };
         let mut patterns = |pattern: &PreparedGraphPattern<GraphValueRow>,
                             remaining: GqlQueryPolicy| {
@@ -156,7 +165,10 @@ impl PreparedGraphMutation {
                     };
                     source(pattern, remaining)
                 }
-                super::collect::ErasedSource::Reusable(source) => source(pattern, remaining),
+                super::collect::ErasedSource::Reusable(source)
+                | super::collect::ErasedSource::Seeded {
+                    patterns: source, ..
+                } => source(pattern, remaining),
             };
             selected.map_err(|error| error.map_source(SourceError::Host))
         };
@@ -175,8 +187,25 @@ impl PreparedGraphMutation {
             read,
             error: SourceError::Host,
         });
+        let mut combined;
+        let host: &mut dyn crate::GraphSetSource<SourceError<E>, C> = match seeded.as_mut() {
+            Some(reader) => {
+                combined = crate::set_ops::WithSeededPatterns {
+                    source: &mut patterns,
+                    seeded: |pattern: &PreparedGraphPattern<GraphValueRow>,
+                             seeds: crate::GraphSeeds<'_>,
+                             remaining: GqlQueryPolicy| {
+                        reader(pattern, seeds, remaining).map(|result| {
+                            result.map_err(|error| error.map_source(SourceError::Host))
+                        })
+                    },
+                };
+                &mut combined
+            }
+            None => &mut patterns,
+        };
         let mut source = crate::set_ops::BorrowedSource {
-            source: &mut patterns,
+            source: host,
             elements: elements
                 .as_mut()
                 .map(|read| read as &mut super::collect::MutationElementReader<'_, SourceError<E>>),

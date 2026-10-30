@@ -614,10 +614,9 @@ fn computed_keys_probe_the_property_index_below_one_scan() {
         // A WITH stage computing the key from the row joins on it: the
         // batch writer leaves the statement to the multipart compiler, which
         // used to be unreachable here ("MERGE or MATCH after the UNWIND
-        // sources"). The mutation's selection source has no seeded hook yet
-        // (graph_mutations.rs collect_graph_mutation_over), so this runs
-        // under the ordinary allowance. 80752e7cb tightened it to `tight`
-        // without a run; that was never green (51 > 50). fgdb-2npty.
+        // sources"). The MATCH joins the WITH rows as a row join, and the
+        // mutation's selection seeds it through the overlay-aware reader,
+        // so it fits the allowance below one scan (fgdb-2npty).
         for (statement, s, vertex, count) in [
             (
                 "UNWIND $rows AS row WITH row, toInteger(row.s) AS k \
@@ -642,7 +641,7 @@ fn computed_keys_probe_the_property_index_below_one_scan() {
                 &batch(vec![field("s", text(s))]),
                 symbols,
                 R,
-                program_policy(100),
+                tight,
                 |_| Err::<ElementId, _>(()),
             )
             .await
@@ -653,6 +652,34 @@ fn computed_keys_probe_the_property_index_below_one_scan() {
                 "{statement}"
             );
         }
+
+        // A MERGE after the WITH stage with no RETURN is the chain's: the
+        // batch writer declines the stage, and this used to refuse ("expected
+        // CREATE or INSERT after WITH/UNWIND/MATCH"). Its key still probes,
+        // matching one vertex and creating the one missing key.
+        let before = allocations;
+        db.query_write(
+            &txn,
+            &query,
+            &commit,
+            "UNWIND $rows AS row WITH row, toInteger(row.s) AS k \
+             MERGE (n:Person {id: k}) ON CREATE SET n.count = 21 ON MATCH SET n.count = 22",
+            &batch(vec![field("s", text("14")), field("s", text("901"))]),
+            symbols,
+            R,
+            tight,
+            |_| {
+                allocations += 1;
+                Ok::<_, ()>(ElementId::Vertex(VId(1_000 + allocations)))
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("MERGE after WITH: {error:?}"));
+        assert_eq!(allocations, before + 1);
+        assert_eq!(scalar(&db, VId(14), COUNT), Scalar::Int(22));
+        let created = VId(1_000 + allocations);
+        assert_eq!(scalar(&db, created, ID), Scalar::Int(901));
+        assert_eq!(scalar(&db, created, COUNT), Scalar::Int(21));
 
         // The allowance is below one scan: a key the column itself feeds, or
         // an equality under OR, stays a residual filter and refuses there,

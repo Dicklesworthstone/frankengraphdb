@@ -623,7 +623,34 @@ where
             // (fgdb-2npty). A join that keeps only matching right rows may
             // seed its pattern leaf from the complete left bag, exactly as
             // the filtered cross does; Right and Full keep every right row.
-            let seeded = match (spec.kind(), spec.predicate()) {
+            // A typed equality key (a computed `WITH row.a + 1 AS k` column
+            // against a stored property) is the same necessary equality an
+            // ON predicate states, canonical and never matched by NULL, so it
+            // seeds as one; the join below still applies the spec unchanged.
+            let keyed;
+            let code = match (spec.keys(), spec.predicate()) {
+                ([], predicate) => predicate,
+                (keys, predicate) => {
+                    let mut code = Vec::with_capacity(2 * keys.len() + 1);
+                    for &(l, r) in keys {
+                        code.push(GraphSetPredicateOp::Compare {
+                            left: GraphSetOperand::Column(l),
+                            comparison: crate::algebra::IntegerComparison::Equal,
+                            right: GraphSetOperand::Column(spec.left_types().len() + r),
+                        });
+                        if code.len() > 1 {
+                            code.push(GraphSetPredicateOp::And);
+                        }
+                    }
+                    if let Some(predicate) = predicate {
+                        code.extend_from_slice(predicate);
+                        code.push(GraphSetPredicateOp::And);
+                    }
+                    keyed = code;
+                    Some(keyed.as_slice())
+                }
+            };
+            let seeded = match (spec.kind(), code) {
                 (
                     crate::row_join::RowJoinKind::Inner
                     | crate::row_join::RowJoinKind::Left

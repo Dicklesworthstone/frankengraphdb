@@ -405,7 +405,12 @@ pub(crate) fn edge_merge_row_actions_controlled<E, A, C>(
             };
         }
         checkpoint.borrow_mut()().map_err(GqlQueryError::Interrupted)?;
-        stage(batch)?;
+        // A replacement with nothing left to unset, or assignments to a NULL
+        // row vertex, write nothing; the clause still read its edge, and an
+        // empty batch would refuse as a commit for nothing.
+        if !batch.is_empty() {
+            stage(batch)?;
+        }
     }
     control(GlaExecutionEvent::Work)
 }

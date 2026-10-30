@@ -409,10 +409,16 @@ impl WriteTxn {
         TxnGqlError<fgdb_gql::GraphMutationError<WriteTxnError>>,
     > {
         let failure = std::cell::RefCell::new(None);
-        let result = mutation.execute_governed_over_reading_with_source(
+        // A MATCH joined to the input relation's rows (after a WITH stage)
+        // admits only the roots they can join, through the overlay-aware
+        // seeded reader the set queries use (fgdb-2npty).
+        let result = mutation.execute_governed_over_reading_with_seeded_source(
             owned,
             policy,
             |pattern, budget| self.execute_graph_pattern_governed(database, cx, pattern, budget),
+            |pattern, seeds, budget| {
+                self.execute_seeded_graph_pattern_governed(database, cx, pattern, seeds, budget)
+            },
             self.element_reader_with_checkpoint(database, cx, &failure),
             || match failure.borrow_mut().take() {
                 Some(error) => Err(error),
@@ -437,10 +443,13 @@ impl WriteTxn {
         TxnGqlError<fgdb_gql::GraphMutationQueryError<WriteTxnError>>,
     > {
         let failure = std::cell::RefCell::new(None);
-        let result = query.execute_governed_over_reading_with_source(
+        let result = query.execute_governed_over_reading_with_seeded_source(
             owned,
             policy,
             |pattern, budget| self.execute_graph_pattern_governed(database, cx, pattern, budget),
+            |pattern, seeds, budget| {
+                self.execute_seeded_graph_pattern_governed(database, cx, pattern, seeds, budget)
+            },
             self.element_reader_with_checkpoint(database, cx, &failure),
             || match failure.borrow_mut().take() {
                 Some(error) => Err(error),

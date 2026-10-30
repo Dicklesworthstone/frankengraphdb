@@ -721,11 +721,28 @@ type ReusableSource<'a, E, C> = Box<
         + 'a,
 >;
 
+/// The host's seeded single-root pattern reader (fgdb-2acff, fgdb-2npty);
+/// `None` declines a shape and keeps the unchanged leaf.
+pub(super) type SeededSource<'a, E, C> = Box<
+    dyn FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            crate::GraphSeeds<'_>,
+            GqlQueryPolicy,
+        ) -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>>
+        + 'a,
+>;
+
 /// Erase caller closure types while retaining the legacy once-only contract.
 /// The relation adapter returns a typed refusal if it consumes Once twice.
 pub(super) enum ErasedSource<'a, E, C> {
     Once(Option<OnceSource<'a, E, C>>),
     Reusable(ReusableSource<'a, E, C>),
+    /// A reusable source plus its seeded reader: a MATCH joined to an input
+    /// relation's rows admits only the roots those rows can join (fgdb-2npty).
+    Seeded {
+        patterns: ReusableSource<'a, E, C>,
+        seeded: SeededSource<'a, E, C>,
+    },
 }
 
 /// `owned` are a chain step's input rows (fgdb-cpny9); `None` for every

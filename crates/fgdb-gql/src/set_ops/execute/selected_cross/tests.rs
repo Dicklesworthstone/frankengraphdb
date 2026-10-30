@@ -799,3 +799,97 @@ fn a_hinted_boundary_is_the_bisected_one_and_an_ascending_left_probes_twice() {
         assert!(events <= 1 + 4 * comparison, "{key}: {events} events");
     }
 }
+
+/// A MATCH after a WITH stage joins the stage's rows as a row join. Whether
+/// join_spec states the equality as an ON predicate (a `Scalar` column
+/// against the stored property) or as typed keys (a `Stored` column, as
+/// arithmetic yields), the pattern leaf is asked only for the roots whose
+/// `id` the stage names, and never scanned (fgdb-2npty).
+#[test]
+fn with_stage_joins_seed_the_pattern_by_the_key_property() {
+    let rows = GqlParameters::new()
+        .with_list(
+            "rows",
+            vec![
+                GraphValue::map(vec![
+                    (
+                        "s".into(),
+                        GraphValue::Scalar(CanonicalScalar::ucs_basic_text("3000").unwrap()),
+                    ),
+                    ("id".into(), GraphValue::Scalar(CanonicalScalar::Int(3000))),
+                ])
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+    for (text, value) in [
+        (
+            "UNWIND $rows AS row WITH toInteger(row.s) AS k MATCH (a:P {id: k}) RETURN a.id AS id",
+            3000,
+        ),
+        (
+            "UNWIND $rows AS row WITH toInteger(row.s) + 1000 AS k \
+             MATCH (a:P {id: k}) RETURN a.id AS id",
+            4000,
+        ),
+        (
+            "UNWIND $rows AS row WITH toInteger(row.s) + 1000 AS k \
+             MATCH (a:P) WHERE a.id = k RETURN a.id AS id",
+            4000,
+        ),
+        (
+            "UNWIND $rows AS row WITH row MATCH (a:P {id: row.id + 1000}) RETURN a.id AS id",
+            4000,
+        ),
+    ] {
+        let prepared = PreparedGraphSetText::prepare_with_parameter_types(
+            text,
+            &[("rows", crate::GqlParameterType::List)],
+            |kind, name| match (kind, name) {
+                (crate::GraphSymbolKind::Property, "id") => Some(crate::GraphSymbol::Property(
+                    fgdb_delta_types::PropertyKeyId(1),
+                )),
+                (crate::GraphSymbolKind::Label, "P") => {
+                    Some(crate::GraphSymbol::Label(fgdb_delta_types::LabelId(1)))
+                }
+                _ => None,
+            },
+        )
+        .unwrap()
+        .bind_parameters(&rows)
+        .unwrap();
+        type Execution = Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<usize, usize>>;
+        let seeds = core::cell::RefCell::new(Vec::new());
+        let scan = |_: &PreparedGraphPattern<GraphValueRow>, _: GqlQueryPolicy| -> Execution {
+            panic!("{text}: the pattern leaf was scanned")
+        };
+        let seeded = |_: &PreparedGraphPattern<GraphValueRow>,
+                      given: crate::GraphSeeds<'_>,
+                      _: GqlQueryPolicy|
+         -> Option<Execution> {
+            let crate::GraphSeeds::Property { key, values } = given else {
+                panic!("{text}: identity seeds")
+            };
+            seeds.borrow_mut().push((key, values.to_vec()));
+            Some(Ok(GqlQueryExecution {
+                value: Vec::new(),
+                rows: crate::GqlExecutionStats::default(),
+                evaluator: GlaExecutionStats::default(),
+            }))
+        };
+        let mut source = crate::set_ops::WithSeededPatterns {
+            source: scan,
+            seeded,
+        };
+        let result = prepared.execute_with_source(policy(), &mut source, || Ok::<(), usize>(()));
+        assert!(result.is_ok(), "{text}");
+        assert_eq!(
+            seeds.into_inner(),
+            [(
+                fgdb_delta_types::PropertyKeyId(1),
+                vec![CanonicalScalar::Int(value)]
+            )],
+            "{text}"
+        );
+    }
+}

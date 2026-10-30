@@ -1059,6 +1059,44 @@ impl PreparedGraphMutation {
         .map(|(batch, _)| batch)
     }
 
+    /// [`Self::execute_governed_over_reading_with_source`] plus the host's
+    /// seeded single-root pattern reader (fgdb-2npty): a MATCH the input
+    /// relation joins to its rows, as after a WITH stage, admits only the
+    /// roots those rows can join. `seeded` may decline a shape with `None`,
+    /// which keeps the unchanged leaf.
+    pub fn execute_governed_over_reading_with_seeded_source<E, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GraphMutationPolicy,
+        source: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        seeded: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            crate::GraphSeeds<'_>,
+            GqlQueryPolicy,
+        )
+            -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>>,
+        mut elements: impl crate::GraphElementReader<E>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
+        collect::execute_erased(
+            self,
+            policy,
+            None,
+            owned,
+            collect::ErasedSource::Seeded {
+                patterns: Box::new(source),
+                seeded: Box::new(seeded),
+            },
+            Some(&mut crate::set_ops::projection::HostElements(&mut elements)),
+            None,
+            &mut checkpoint,
+        )
+        .map(|(batch, _)| batch)
+    }
+
     /// Reusable multipart selection with admission of every computed-map
     /// field. Assigned and replacement-removed keys are admitted before any
     /// proposal, deduplication or RETURN observes them, including no-op writes.

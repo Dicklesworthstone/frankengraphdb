@@ -412,6 +412,39 @@ impl PreparedGraphMutationQuery {
         )
     }
 
+    /// [`Self::execute_governed_over_reading_with_source`] plus the host's
+    /// seeded single-root pattern reader (fgdb-2npty); `None` from `seeded`
+    /// keeps the unchanged leaf.
+    pub fn execute_governed_over_reading_with_seeded_source<E, C>(
+        &self,
+        owned: Option<Vec<GraphValueRow>>,
+        policy: GraphMutationPolicy,
+        source: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        seeded: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            crate::GraphSeeds<'_>,
+            GqlQueryPolicy,
+        )
+            -> Option<Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>>,
+        mut elements: impl crate::GraphElementReader<E>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GraphMutationQueryBatch, GqlQueryError<GraphMutationQueryError<E>, C>> {
+        self.execute_with(
+            owned,
+            policy,
+            collect::ErasedSource::Seeded {
+                patterns: Box::new(source),
+                seeded: Box::new(seeded),
+            },
+            Some(&mut crate::set_ops::projection::HostElements(&mut elements)),
+            None,
+            checkpoint,
+        )
+    }
+
     /// Returning multipart mutation with actual-key admission for computed
     /// maps. A denied assigned or removed key cannot reach final bindings,
     /// grouping, projection or a WITH tail, including equal-to-current writes.

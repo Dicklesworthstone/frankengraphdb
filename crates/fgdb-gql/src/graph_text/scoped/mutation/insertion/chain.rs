@@ -266,12 +266,20 @@ impl PreparedGraphWriteChainText {
                             if parameter_matched && vertex {
                                 return Ok(true);
                             }
+                            // `UNWIND $rows AS row WITH ... MERGE (n {id: k})`:
+                            // the batch writer binds row fields only and
+                            // declines a WITH stage; the chain's vertex MERGE
+                            // reads the stage's rows, RETURN or not (fgdb-2npty).
+                            if parameter_unwound && projected && vertex {
+                                return Ok(true);
+                            }
                             if !vertex
                                 && (matched || parameter_matched)
                                 && Self::edge_actions_need_rows(
                                     lookahead.clone(),
                                     Self::named_merge_pattern(lexer.clone())?,
                                     staged,
+                                    parameter_matched,
                                 )?
                             {
                                 return Ok(true);
@@ -357,10 +365,14 @@ impl PreparedGraphWriteChainText {
     /// `lexer` is just past the `-` or `<` after the first node pattern.
     /// `any`: every ON/SET action needs the chain's rows, as after a WITH or
     /// UNWIND stage, which the unique MATCH-only upsert cannot read.
+    /// `replacement_only`: after `UNWIND $rows`, the batch writer binds each
+    /// row and reads `row.k` and other elements itself, so only a whole-map
+    /// replacement of the relationship needs the chain's rows.
     fn edge_actions_need_rows(
         mut lexer: Lexer<'_>,
         named_path: bool,
         any: bool,
+        replacement_only: bool,
     ) -> Result<bool, GraphPatternTextError> {
         const ENDS: [&str; 12] = [
             "RETURN", "WITH", "CREATE", "INSERT", "MERGE", "MATCH", "OPTIONAL", "UNWIND", "DELETE",
@@ -413,12 +425,14 @@ impl PreparedGraphWriteChainText {
                         && (word.eq_ignore_ascii_case("ON")
                             || word.eq_ignore_ascii_case("SET")) =>
                 {
-                    if named_path || relationship.is_none() || any || map_reads {
+                    if !replacement_only
+                        && (named_path || relationship.is_none() || any || map_reads)
+                    {
                         return Ok(true);
                     }
                     actions = true;
                 }
-                TokenKind::Punct(b'.') if actions => {
+                TokenKind::Punct(b'.') if actions && !replacement_only => {
                     if let Some(TokenKind::Word(element)) = previous
                         && !matches!(before, Some(TokenKind::Punct(b'.')))
                         && Some(element) != relationship
@@ -430,13 +444,14 @@ impl PreparedGraphWriteChainText {
                 // read at each clause, which the row-action owner supplies.
                 // This also admits an empty map and a map parameter after
                 // the ordinary map-argument expansion.
-                TokenKind::Punct(b'=') if actions && depth == 0 => {
-                    if matches!(previous, Some(TokenKind::Word(element))
-                        if Some(element) == relationship)
-                        && !matches!(before, Some(TokenKind::Punct(b'.')))
-                    {
-                        return Ok(true);
-                    }
+                TokenKind::Punct(b'=')
+                    if actions
+                        && depth == 0
+                        && matches!(previous, Some(TokenKind::Word(element))
+                            if Some(element) == relationship)
+                        && !matches!(before, Some(TokenKind::Punct(b'.'))) =>
+                {
+                    return Ok(true);
                 }
                 _ => {}
             }
@@ -1411,6 +1426,10 @@ mod tests {
             "UNWIND $rows AS row MERGE (n:N {id: row.id}) ON CREATE SET n.name = row.name \
              RETURN n.id AS id, n.name AS name",
             "UNWIND $rows AS row MERGE (n:N {id: row.id}) SET n.name = row.name RETURN n",
+            // A vertex MERGE after a WITH stage over a parameter UNWIND, RETURN
+            // or not: the batch writer declines the stage (fgdb-2npty).
+            "UNWIND $rows AS row WITH row, toInteger(row.s) AS k MERGE (n:N {id: k})",
+            "UNWIND $rows AS row WITH row MERGE (n:N {id: row.id}) SET n.name = row.name",
             // A vertex MERGE over the bindings of a MATCH after the UNWIND
             // (TCK Unwind1 [6]), over a parameter or a literal list.
             "UNWIND $events AS event MATCH (y:Year {year: event.year}) \
@@ -1477,6 +1496,10 @@ mod tests {
             "UNWIND $rows AS row MERGE (n:Entity {id: row.id})",
             "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n.name = row.name",
             "UNWIND $pairs AS row MATCH (a {id: row.a}), (b {id: row.b}) MERGE (a)-[:R]->(b)",
+            // It binds each row itself, so actions reading `row.k` stay its own;
+            // only a whole-map replacement of the relationship is the chain's.
+            "UNWIND $pairs AS row MATCH (a {id: row.a}), (b {id: row.b}) MERGE (a)-[r:R]->(b) \
+             ON CREATE SET r.w = 0 SET r.w = r.w + row.d",
             "UNWIND $rows AS row MERGE (n:Entity {p: 'RETURN'})",
             "MERGE (a:A) ON CREATE SET a.p = 1",
             "MERGE (a:A) ON CREATE SET a.p = 1 ON MATCH SET a.q = 2 RETURN a",
