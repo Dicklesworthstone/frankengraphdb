@@ -217,41 +217,60 @@ fn pack_retained(
     debug_assert!(max_entries > 0, "the durable block capacity is nonzero");
     debug_assert!(max_patch_rows > 0, "the hosted patch capacity is nonzero");
 
-    // V3's durable unit is per descriptor.  Capacity is therefore a lower
-    // bound within each `(src, relation)` family, never permission to merge two
-    // descriptors merely because a block has spare rows.
-    let mut by_descriptor: BTreeMap<_, Vec<_>> = BTreeMap::new();
-    for pair in retained.drain(..) {
-        by_descriptor
-            .entry((pair.0.src, pair.0.relation))
-            .or_default()
-            .push(pair);
+    // Group the owned winners in place, then sort each descriptor's target run.
+    // Building a map of per-descriptor vectors retained a second edge-sized
+    // backing store alongside `retained`, plus one allocation per descriptor.
+    // Separate descriptor and target comparisons keep both sorts narrow.
+    // History collapse has already made (eid, created_at) unique, so each
+    // target sort is total and these stages reproduce exactly the old order.
+    retained.sort_unstable_by_key(|(entry, _)| (entry.src, entry.relation));
+    let mut descriptor_start = 0;
+    while descriptor_start < retained.len() {
+        let descriptor = (
+            retained[descriptor_start].0.src,
+            retained[descriptor_start].0.relation,
+        );
+        let mut descriptor_end = descriptor_start + 1;
+        while descriptor_end < retained.len()
+            && (
+                retained[descriptor_end].0.src,
+                retained[descriptor_end].0.relation,
+            ) == descriptor
+        {
+            descriptor_end += 1;
+        }
+        retained[descriptor_start..descriptor_end]
+            .sort_unstable_by_key(|(entry, _)| (entry.dst, entry.eid, entry.created_at));
+        descriptor_start = descriptor_end;
     }
     let mut packed: Vec<(Vec<AdjacencyEntry>, Option<BlockProps>)> = Vec::new();
-    for pairs in by_descriptor.values_mut() {
-        pairs.sort_by_key(|(entry, _)| (entry.dst, entry.eid, entry.created_at));
-        // A block hosts at most one patch. Split at the first entry, patch
-        // row, or stored-byte ceiling, using the writer's admission measure.
-        let mut chunk: Vec<(AdjacencyEntry, EdgePropertyRow)> = Vec::new();
-        let mut propertied = 0usize;
-        let mut patch_bytes = PROPERTY_PATCH_HEADER_BYTES;
-        for pair in pairs.drain(..) {
-            let row_bytes = admitted_row_bytes(&pair.1).map_err(RootError::PropertyPatch)?;
-            if chunk.len() == max_entries
+    let mut descriptor = None;
+    let mut chunk: Vec<(AdjacencyEntry, EdgePropertyRow)> = Vec::new();
+    let mut propertied = 0usize;
+    let mut patch_bytes = PROPERTY_PATCH_HEADER_BYTES;
+    for pair in retained {
+        let key = (pair.0.src, pair.0.relation);
+        // V3's durable unit is per descriptor: spare capacity never licenses
+        // mixing families. Keep property validation in the same canonical
+        // order, before the entry/patch/byte-ceiling split as in the map path.
+        let row_bytes = admitted_row_bytes(&pair.1).map_err(RootError::PropertyPatch)?;
+        if !chunk.is_empty()
+            && (descriptor != Some(key)
+                || chunk.len() == max_entries
                 || (!pair.1.is_empty() && propertied == max_patch_rows)
-                || patch_bytes + row_bytes > crate::store::MAX_STORED_OBJECT_BYTES
-            {
-                packed.push(seal_chunk(std::mem::take(&mut chunk)));
-                propertied = 0;
-                patch_bytes = PROPERTY_PATCH_HEADER_BYTES;
-            }
-            propertied += usize::from(!pair.1.is_empty());
-            patch_bytes += row_bytes;
-            chunk.push(pair);
+                || patch_bytes + row_bytes > crate::store::MAX_STORED_OBJECT_BYTES)
+        {
+            packed.push(seal_chunk(std::mem::take(&mut chunk)));
+            propertied = 0;
+            patch_bytes = PROPERTY_PATCH_HEADER_BYTES;
         }
-        if !chunk.is_empty() {
-            packed.push(seal_chunk(chunk));
-        }
+        descriptor = Some(key);
+        propertied += usize::from(!pair.1.is_empty());
+        patch_bytes += row_bytes;
+        chunk.push(pair);
+    }
+    if !chunk.is_empty() {
+        packed.push(seal_chunk(chunk));
     }
 
     // A root's list is publication order, witnessed by nondecreasing `last_seq`.
@@ -305,6 +324,253 @@ mod tests {
     use fgdb_delta_types::RelationId;
     use fgdb_types::{EId, VId};
     use std::collections::BTreeSet;
+
+    /// The former descriptor-map packer, kept only as an independent ordering
+    /// and chunk-boundary oracle and a paired measurement control.
+    fn pack_by_descriptor_map(
+        mut retained: Vec<(AdjacencyEntry, EdgePropertyRow)>,
+        max_entries: usize,
+        max_patch_rows: usize,
+    ) -> Result<PackedBlocks, RootError> {
+        let mut by_descriptor: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for pair in retained.drain(..) {
+            by_descriptor
+                .entry((pair.0.src, pair.0.relation))
+                .or_default()
+                .push(pair);
+        }
+        let mut packed = Vec::new();
+        for pairs in by_descriptor.values_mut() {
+            pairs.sort_by_key(|(entry, _)| (entry.dst, entry.eid, entry.created_at));
+            let mut chunk = Vec::new();
+            let mut propertied = 0usize;
+            let mut patch_bytes = PROPERTY_PATCH_HEADER_BYTES;
+            for pair in pairs.drain(..) {
+                let row_bytes = admitted_row_bytes(&pair.1).map_err(RootError::PropertyPatch)?;
+                if chunk.len() == max_entries
+                    || (!pair.1.is_empty() && propertied == max_patch_rows)
+                    || patch_bytes + row_bytes > crate::store::MAX_STORED_OBJECT_BYTES
+                {
+                    packed.push(seal_chunk(std::mem::take(&mut chunk)));
+                    propertied = 0;
+                    patch_bytes = PROPERTY_PATCH_HEADER_BYTES;
+                }
+                propertied += usize::from(!pair.1.is_empty());
+                patch_bytes += row_bytes;
+                chunk.push(pair);
+            }
+            if !chunk.is_empty() {
+                packed.push(seal_chunk(chunk));
+            }
+        }
+        packed.sort_by_key(|(block, _)| {
+            crate::root::span_of(block)
+                .map(|(first, last)| (last, first))
+                .unwrap_or((CommitSeq(0), CommitSeq(0)))
+        });
+        Ok(packed.into_iter().unzip())
+    }
+
+    fn descriptor_fixture(
+        count: usize,
+        sources: usize,
+        properties: bool,
+    ) -> Vec<(AdjacencyEntry, EdgePropertyRow)> {
+        use fgdb_delta_types::PropertyKeyId;
+        use fgdb_types::CanonicalScalar;
+        let mut retained: Vec<_> = (0..count)
+            .map(|at| {
+                let source = at % sources;
+                let edge = AdjacencyEntry {
+                    src: VId((1u128 << 127) | source as u128),
+                    relation: RelationId(((at / sources) % 3 + 1) as u64),
+                    dst: VId((1u128 << 100) | ((at * 53 + 17) % (count + 1)) as u128),
+                    eid: EId((at as u128 + 1).wrapping_mul(0x9e3779b97f4a7c15_bf58476d1ce4e5b9)),
+                    created_at: CommitSeq((at % 7 + 1) as u64),
+                    retired_at: (at % 5 == 0).then_some(CommitSeq(12)),
+                };
+                let props = if properties && at % 3 != 0 {
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(at as i64).into())]
+                } else {
+                    Vec::new()
+                };
+                (edge, props)
+            })
+            .collect();
+        // The real caller passes collapsed statement order, not descriptor
+        // order. Permuted full-width EIds prevent sorted-input special pleading.
+        retained.sort_unstable_by_key(|(entry, _)| (entry.eid, entry.created_at));
+        retained
+    }
+
+    #[test]
+    fn contiguous_packing_matches_descriptor_map_across_families_and_caps() {
+        for count in [0, 1, 17, 257, 1025] {
+            for sources in [1, 7, 257] {
+                for properties in [false, true] {
+                    let retained = descriptor_fixture(count, sources, properties);
+                    for max_entries in [1, 3, 16, 256] {
+                        for max_patch_rows in [1, 2, 255] {
+                            let expected = pack_by_descriptor_map(
+                                retained.clone(),
+                                max_entries,
+                                max_patch_rows,
+                            );
+                            let found =
+                                pack_retained(retained.clone(), max_entries, max_patch_rows);
+                            assert_eq!(
+                                found, expected,
+                                "n={count}, sources={sources}, properties={properties}, entries={max_entries}, patch_rows={max_patch_rows}"
+                            );
+                            let (blocks, props) = found.unwrap();
+                            for (block, props) in blocks.iter().zip(&props) {
+                                let descriptor = (block[0].src, block[0].relation);
+                                assert!(
+                                    block
+                                        .iter()
+                                        .all(|edge| (edge.src, edge.relation) == descriptor)
+                                );
+                                if let Some(props) = props {
+                                    crate::encode_block_with_properties(
+                                        0,
+                                        None,
+                                        block,
+                                        fgdb_types::ids::ObjectId([0x5a; 32]),
+                                        &props.locators,
+                                        &props.rows,
+                                    )
+                                    .expect("canonical hosted block");
+                                } else {
+                                    crate::encode_block(0, None, block).expect("canonical block");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn contiguous_packing_preserves_content_versions_and_property_refusals() {
+        use fgdb_delta_types::PropertyKeyId;
+        use fgdb_types::CanonicalScalar;
+        let mut retained = descriptor_fixture(37, 5, true);
+        let current = retained
+            .iter()
+            .position(|(edge, _)| edge.created_at.0 > 1)
+            .unwrap();
+        let mut previous = retained[current].clone();
+        previous.0.created_at = CommitSeq(1);
+        previous.0.retired_at = Some(retained[current].0.created_at);
+        previous.1 = vec![(PropertyKeyId(2), CanonicalScalar::Int(-1).into())];
+        retained.push(previous);
+        for max_entries in [1, 3, 256] {
+            assert_eq!(
+                pack_retained(retained.clone(), max_entries, 2),
+                pack_by_descriptor_map(retained.clone(), max_entries, 2),
+            );
+        }
+        retained[7].1 = vec![
+            (PropertyKeyId(2), CanonicalScalar::Int(1).into()),
+            (PropertyKeyId(1), CanonicalScalar::Int(2).into()),
+        ];
+        let expected = pack_by_descriptor_map(retained.clone(), 3, 2);
+        assert!(matches!(expected, Err(RootError::PropertyPatch(_))));
+        assert_eq!(pack_retained(retained, 3, 2), expected);
+    }
+
+    #[test]
+    fn contiguous_packing_preserves_patch_byte_boundaries_and_oversize_refusal() {
+        use fgdb_delta_types::PropertyKeyId;
+        use fgdb_types::CanonicalScalar;
+        let payload = CanonicalScalar::bytes(vec![0xa5; 6000]).unwrap();
+        let row: EdgePropertyRow = vec![(PropertyKeyId(1), payload.into())];
+        let bytes = admitted_row_bytes(&row).unwrap();
+        assert!(PROPERTY_PATCH_HEADER_BYTES + 2 * bytes <= crate::store::MAX_STORED_OBJECT_BYTES);
+        assert!(PROPERTY_PATCH_HEADER_BYTES + 3 * bytes > crate::store::MAX_STORED_OBJECT_BYTES);
+        let retained: Vec<_> = (0..8)
+            .map(|at| {
+                let mut edge = entry(at + 1);
+                edge.src = VId((1u128 << 127) | (at / 4 + 1));
+                (edge, row.clone())
+            })
+            .rev()
+            .collect();
+        let found = pack_retained(retained.clone(), 256, 255).unwrap();
+        assert_eq!(
+            found,
+            pack_by_descriptor_map(retained.clone(), 256, 255).unwrap()
+        );
+        assert_eq!(
+            found.0.iter().map(Vec::len).collect::<Vec<_>>(),
+            [2, 2, 2, 2]
+        );
+        for props in found.1.iter().flatten() {
+            let wire = crate::edge_props::encode_property_patch(&props.rows).unwrap();
+            assert!(wire.len() as u64 <= crate::store::MAX_STORED_OBJECT_BYTES);
+        }
+
+        let mut oversized = retained;
+        oversized[0].1 = vec![(
+            PropertyKeyId(1),
+            CanonicalScalar::bytes(vec![0; 20_000]).unwrap().into(),
+        )];
+        let expected = pack_by_descriptor_map(oversized.clone(), 256, 255);
+        assert!(matches!(
+            expected,
+            Err(RootError::PropertyPatch(
+                crate::edge_props::EdgePropertyPatchError::RowExceedsStorageLimit { .. }
+            ))
+        ));
+        assert_eq!(pack_retained(oversized, 256, 255), expected);
+    }
+
+    #[test]
+    #[ignore = "manual paired compaction packing measurement; no wall-clock threshold"]
+    fn benchmark_contiguous_descriptor_packing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        for count in [16_384usize, 131_072] {
+            for sources in [1, count / 32, count] {
+                for properties in [false, true] {
+                    let retained = descriptor_fixture(count, sources, properties);
+                    let mut samples = [Vec::new(), Vec::new()];
+                    for trial in 0..9 {
+                        let mut outputs = [None, None];
+                        for which in [trial % 2, 1 - trial % 2] {
+                            // Clone input before timing: both packers own and
+                            // consume exactly the same admitted statement rows.
+                            let input = retained.clone();
+                            let start = Instant::now();
+                            let result = black_box(
+                                if which == 0 {
+                                    pack_by_descriptor_map(input, 256, 255)
+                                } else {
+                                    pack_retained(input, 256, 255)
+                                }
+                                .unwrap(),
+                            );
+                            samples[which].push(start.elapsed().as_nanos());
+                            outputs[which] = Some(result);
+                        }
+                        assert_eq!(outputs[0], outputs[1]);
+                    }
+                    eprintln!(
+                        "descriptor_packing edges={count} sources={sources} properties={properties} trials=9 incumbent_ns={:?} candidate_ns={:?}",
+                        samples[0], samples[1]
+                    );
+                    for sample in &mut samples {
+                        sample.sort_unstable();
+                    }
+                    eprintln!(
+                        "descriptor_packing edges={count} sources={sources} properties={properties} incumbent_median_ns={} candidate_median_ns={}",
+                        samples[0][4], samples[1][4]
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn borrowed_vertex_winners_preserve_all_retained_cuts_and_property_versions() {
