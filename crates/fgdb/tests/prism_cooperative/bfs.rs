@@ -322,33 +322,65 @@ fn compressed_bfs_optional_pull_respects_cutoff_and_independent_resource_limits(
                 .unwrap();
             assert_eq!(low_memory.rows, expected.rows);
             assert!(low_memory.certificate.bfs_decision_card.is_none());
-            let failure = FnxMemoryLimits {
-                max_result_bytes: bytes - 1,
-                ..memory()
-            };
-            for cooperative in [false, true] {
-                let result = if cooperative {
-                    call.execute_sealed_cooperative(
-                        &cx,
-                        &graph,
-                        opt.execution_limits,
-                        failure,
-                        quantum(7),
-                        yield_now,
-                    )
-                    .await
-                } else {
-                    call.execute_sealed(&cx, &graph, opt.execution_limits, failure)
-                };
-                assert!(matches!(
-                    result,
-                    Err(FnxSealedExecutionError::Execution(
-                        FnxExecutionError::LimitExceeded {
-                            resource: "result bytes",
-                            ..
-                        }
-                    ))
-                ));
+            // Compact distances and the queue each need one word per vertex.
+            // Prove both real drivers fit that exact allowance, while keeping
+            // output admission independent and rejecting one byte less.
+            assert_eq!(
+                queue_memory.max_kernel_workspace_bytes,
+                2 * graph.node_count() * size_of::<usize>()
+            );
+            let cooperative = call
+                .execute_sealed_cooperative(
+                    &cx,
+                    &graph,
+                    opt.execution_limits,
+                    queue_memory,
+                    quantum(7),
+                    yield_now,
+                )
+                .await
+                .unwrap();
+            compare_execution(&cooperative, &low_memory);
+            for (resource, failure) in [
+                (
+                    "result bytes",
+                    FnxMemoryLimits {
+                        max_result_bytes: bytes - 1,
+                        ..memory()
+                    },
+                ),
+                (
+                    "kernel workspace bytes",
+                    FnxMemoryLimits {
+                        max_kernel_workspace_bytes: queue_memory.max_kernel_workspace_bytes - 1,
+                        ..memory()
+                    },
+                ),
+            ] {
+                for cooperative in [false, true] {
+                    let result = if cooperative {
+                        call.execute_sealed_cooperative(
+                            &cx,
+                            &graph,
+                            opt.execution_limits,
+                            failure,
+                            quantum(7),
+                            yield_now,
+                        )
+                        .await
+                    } else {
+                        call.execute_sealed(&cx, &graph, opt.execution_limits, failure)
+                    };
+                    assert!(matches!(
+                        result,
+                        Err(FnxSealedExecutionError::Execution(
+                            FnxExecutionError::LimitExceeded {
+                                resource: observed,
+                                ..
+                            }
+                        )) if observed == resource
+                    ));
+                }
             }
         }
         let isolated = FnxCallSpec::single_source_shortest_path_length(VId(u128::MAX), None);
@@ -582,7 +614,7 @@ fn measure_compressed_bfs_database_to_result_against_queue_fallback() {
             let n = projection(&db, &cx, opt).await.node_count();
             let call = FnxCallSpec::single_source_shortest_path_length(source, cutoff);
             let queue_memory = FnxMemoryLimits {
-                max_kernel_workspace_bytes: n * (size_of::<usize>() + size_of::<Option<usize>>()),
+                max_kernel_workspace_bytes: 2 * n * size_of::<usize>(),
                 ..memory()
             };
             // Workspace is the only differing request field. It selects the

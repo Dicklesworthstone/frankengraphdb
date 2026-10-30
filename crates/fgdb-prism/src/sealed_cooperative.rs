@@ -16,9 +16,9 @@
 use super::{
     ComplexityWitness, DegreeCentrality, Delivery, EncodedRows, Error, ExecutionError, Finished,
     FnxAlgorithm, FnxCallSpec, FnxExecutionLimits, FnxMemoryLimits, FnxResult, FnxRowCursor,
-    KernelOutput, KernelValues, PageRankOptions, QueryCx, Result, ResultAdmission, SealedGraphView,
-    SealedNeighborCursor, add, admit, checkpoint, execution_pass_work, finish_encoded, mul,
-    require_loop_free_degree, reserve,
+    HopDistance, KernelOutput, KernelValues, PageRankOptions, QueryCx, Result, ResultAdmission,
+    SealedGraphView, SealedNeighborCursor, add, admit, checkpoint, execution_pass_work,
+    finish_encoded, mul, require_loop_free_degree, reserve,
 };
 use crate::sealed_control::Control;
 use crate::shortest_path::{Entry, IndexedHeap};
@@ -574,7 +574,7 @@ impl FnxCallSpec {
                     (
                         "fgdb-prism/sealed-bfs-cooperative-v1",
                         pass,
-                        mul(n, size_of::<usize>() + size_of::<Option<usize>>())?,
+                        mul(n, size_of::<usize>() + size_of::<Option<HopDistance>>())?,
                         Some(ordinal),
                     )
                 }
@@ -1197,7 +1197,7 @@ where
     }
     *distances
         .get_mut(source)
-        .ok_or(ExecutionError::InvalidUpstreamResult)? = Some(0usize);
+        .ok_or(ExecutionError::InvalidUpstreamResult)? = Some(HopDistance::ZERO);
     queue.push(source);
     let mut head = 0usize;
     let mut witness = ComplexityWitness {
@@ -1213,10 +1213,10 @@ where
         head += 1;
         witness.nodes_touched = add(witness.nodes_touched, 1)?;
         let depth = distances[vertex].ok_or(ExecutionError::InvalidUpstreamResult)?;
-        if cutoff.is_some_and(|limit| depth >= limit) {
+        if cutoff.is_some_and(|limit| depth.hops() >= limit) {
             continue;
         }
-        let next_depth = add(depth, 1)?;
+        let next_depth = depth.checked_next().ok_or(ExecutionError::SizeOverflow)?;
         let mut row = graph.neighbor_cursor_controlled(control.cx, vertex, None)?;
         while let Some((neighbor, _)) = control.next(&mut row).await? {
             control.tick().await?;

@@ -80,6 +80,65 @@ fn oracle_labels(components: Vec<Vec<String>>, graph: &SnapshotGraphView) -> BTr
     result
 }
 
+#[test]
+fn bfs_compact_workspace_preserves_long_paths_cutoffs_and_public_cursor_values() {
+    // Cross both byte and u16 hop ranges; identities use the full VId domain.
+    // A two-vertex unreachable prefix distinguishes absence from source zero.
+    let n = 65_539;
+    let source = 2;
+    let vertices: Vec<_> = (0..n)
+        .map(|index| VId((index as u128) << 64 | 17))
+        .collect();
+    let edges: Vec<_> = (1..n)
+        .map(|target| ProjectionEdge {
+            eid: EId((target as u128) << 64 | 29),
+            source: vertices[target - 1],
+            target: vertices[target],
+            weight: -1.0, // unweighted BFS must still ignore weights
+        })
+        .collect();
+    let view = graph(&vertices, &edges, Directedness::Directed);
+    for cutoff in [Some(0), Some(usize::MAX), None] {
+        let call = FnxCallSpec::single_source_shortest_path_length(vertices[source], cutoff);
+        let mut meter = ComponentMeter::default();
+        let mut cursor = call.execute_rows(&view, limits(), &mut meter).unwrap();
+        let reached = if cutoff == Some(0) { 1 } else { n - source };
+        assert_eq!(cursor.remaining(), reached);
+        assert_eq!(
+            cursor.certificate().kernel_workspace_bytes,
+            2 * n * size_of::<usize>()
+        );
+        assert!(cursor.certificate().bfs_decision_card.is_none());
+        assert_eq!(cursor.certificate().witness.nodes_touched, reached);
+        assert_eq!(cursor.certificate().witness.edges_scanned, reached - 1);
+        assert_eq!(meter.observed, 3 * n + reached + (reached - 1) + 3);
+        assert_eq!(cursor.max_integer(), Some((reached - 1) as u64));
+        let mut row = Vec::new();
+        let mut pulled = 0;
+        let mut checks = 0;
+        while cursor
+            .next_row(&mut row, || {
+                checks += 1;
+                Ok::<(), Infallible>(())
+            })
+            .unwrap()
+        {
+            assert_eq!(
+                row,
+                [
+                    FnxValue::Vertex(vertices[source + pulled]),
+                    FnxValue::Integer(pulled as u64),
+                ]
+            );
+            pulled += 1;
+        }
+        assert_eq!(pulled, reached);
+        assert_eq!(checks, n);
+        assert_eq!(cursor.remaining(), 0);
+        assert!(row.is_empty());
+    }
+}
+
 #[derive(Default)]
 struct ComponentMeter {
     observed: usize,

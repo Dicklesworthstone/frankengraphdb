@@ -2,7 +2,7 @@
 //! construct a second Graph/DiGraph, recurse on the process stack, or consult
 //! weights that their registered semantics ignore.
 
-use crate::execute::{ComplexityWitness, KernelOutput, KernelValues, admit, reserve};
+use crate::execute::{ComplexityWitness, HopDistance, KernelOutput, KernelValues, admit, reserve};
 use crate::{
     FNX_METER_RUN, FnxAlgorithm, FnxExecutionError, FnxMeter, GraphView, SnapshotGraphView,
 };
@@ -361,7 +361,7 @@ fn bounded_bfs<C>(
             .map_err(FnxExecutionError::Cancelled)?;
         distances.resize(distances.len() + count, None);
     }
-    distances[source] = Some(0usize);
+    distances[source] = Some(HopDistance::ZERO);
     queue.push(source);
     let mut pulls = Vec::new();
     let mut head = 0;
@@ -390,11 +390,11 @@ fn bounded_bfs<C>(
                 .checked_add(run.len())
                 .ok_or(FnxExecutionError::SizeOverflow)?;
         }
-        if cutoff.is_some_and(|cutoff| depth >= cutoff) {
+        if cutoff.is_some_and(|cutoff| depth.hops() >= cutoff) {
             break;
         }
         let next_depth = depth
-            .checked_add(1)
+            .checked_next()
             .ok_or(FnxExecutionError::SizeOverflow)?;
         let pull_bound = n
             .checked_add(unseen_in)
@@ -407,7 +407,7 @@ fn bounded_bfs<C>(
                 .try_reserve(1)
                 .map_err(|_| FnxExecutionError::AllocationFailed)?;
             let mut decision = BfsPullDecision {
-                depth,
+                depth: depth.hops(),
                 frontier_vertices,
                 frontier_arcs,
                 unseen_incoming_arcs: unseen_in,
@@ -485,7 +485,7 @@ fn bounded_bfs<C>(
     }
     let workspace_bytes = distances
         .capacity()
-        .checked_mul(std::mem::size_of::<Option<usize>>())
+        .checked_mul(std::mem::size_of::<Option<HopDistance>>())
         .and_then(|bytes| {
             queue
                 .capacity()
@@ -544,7 +544,7 @@ fn bfs<C>(
         .map_err(FnxExecutionError::Cancelled)?;
         distances.resize(distances.len() + run, None);
     }
-    distances[source] = Some(0usize);
+    distances[source] = Some(HopDistance::ZERO);
     queue.push(source);
     let mut head = 0;
     let mut witness = witness("single_source_shortest_path_length_bfs");
@@ -555,11 +555,11 @@ fn bfs<C>(
         head += 1;
         increment(&mut witness.nodes_touched)?;
         let depth = distances[vertex].ok_or(FnxExecutionError::InvalidUpstreamResult)?;
-        if cutoff.is_some_and(|cutoff| depth >= cutoff) {
+        if cutoff.is_some_and(|cutoff| depth.hops() >= cutoff) {
             continue;
         }
         let next_depth = depth
-            .checked_add(1)
+            .checked_next()
             .ok_or(FnxExecutionError::SizeOverflow)?;
         let mut neighbors = graph
             .neighbors_indices(vertex)
@@ -1458,11 +1458,15 @@ mod tests {
         }
     }
 
-    fn distance_values(output: &KernelOutput) -> &[Option<usize>] {
-        let KernelValues::Distances(values) = &output.values else {
-            panic!("BFS produces distances");
-        };
-        values
+    fn distance_values(output: &KernelOutput) -> Vec<Option<usize>> {
+        match &output.values {
+            KernelValues::Distances(values) => values
+                .iter()
+                .map(|distance| distance.map(HopDistance::hops))
+                .collect(),
+            KernelValues::WideDistances(values) => values.clone(),
+            _ => panic!("BFS produces distances"),
+        }
     }
 
     /// Independent all-pairs min-plus oracle built from the raw input, not
@@ -1597,8 +1601,9 @@ mod tests {
                         assert!((pull.benefit_lower..=pull.benefit_upper).contains(&avoided));
                     }
                     assert!(actual.output.witness.edges_scanned < arcs / 4);
-                    let vector_bytes =
-                        n * (std::mem::size_of::<Option<usize>>() + std::mem::size_of::<usize>());
+                    let vector_bytes = n
+                        * (std::mem::size_of::<Option<HopDistance>>()
+                            + std::mem::size_of::<usize>());
                     assert_eq!(
                         actual.workspace_bytes.unwrap(),
                         vector_bytes
@@ -1859,7 +1864,7 @@ mod tests {
             }
         }
         Ok(KernelOutput {
-            values: KernelValues::Distances(distances),
+            values: KernelValues::WideDistances(distances),
             row_count: queue.len(),
             witness,
         })
@@ -1906,12 +1911,7 @@ mod tests {
     ) {
         match (actual, expected) {
             (Ok(actual), Ok(expected)) => {
-                let (KernelValues::Distances(actual_rows), KernelValues::Distances(expected_rows)) =
-                    (actual.values, expected.values)
-                else {
-                    panic!("BFS produces distances");
-                };
-                assert_eq!(actual_rows, expected_rows);
+                assert_eq!(distance_values(&actual), distance_values(&expected));
                 assert_eq!(actual.row_count, expected.row_count);
                 assert_eq!(actual.witness, expected.witness);
             }
@@ -2351,13 +2351,22 @@ mod tests {
                     }
                 }
                 .unwrap();
-                let KernelValues::Distances(distances) = &output.values else {
-                    panic!("BFS produces distances");
-                };
-                for &distance in distances {
-                    checksum = checksum
-                        .wrapping_mul(31)
-                        .wrapping_add(distance.unwrap_or(usize::MAX) as u64);
+                match &output.values {
+                    KernelValues::Distances(distances) => {
+                        for &distance in distances {
+                            checksum = checksum.wrapping_mul(31).wrapping_add(
+                                distance.map(HopDistance::hops).unwrap_or(usize::MAX) as u64,
+                            );
+                        }
+                    }
+                    KernelValues::WideDistances(distances) => {
+                        for &distance in distances {
+                            checksum = checksum
+                                .wrapping_mul(31)
+                                .wrapping_add(distance.unwrap_or(usize::MAX) as u64);
+                        }
+                    }
+                    _ => panic!("BFS produces distances"),
                 }
                 black_box(checksum);
                 if repetition + 1 == REPETITIONS {

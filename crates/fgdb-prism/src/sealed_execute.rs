@@ -3,7 +3,7 @@
 //! an independent differential oracle, not a hidden fallback.
 
 use crate::execute::{
-    KernelOutput, KernelValues, PageRankRestart, hash_bfs_decision_card,
+    HopDistance, KernelOutput, KernelValues, PageRankRestart, hash_bfs_decision_card,
     hash_component_decision_card, hash_result_value,
 };
 use crate::sealed_control::Control;
@@ -689,7 +689,7 @@ fn bfs(
     }
     *distances
         .get_mut(source)
-        .ok_or(ExecutionError::InvalidUpstreamResult)? = Some(0usize);
+        .ok_or(ExecutionError::InvalidUpstreamResult)? = Some(HopDistance::ZERO);
     queue.push(source);
     let mut head = 0usize;
     let mut witness = ComplexityWitness {
@@ -705,10 +705,10 @@ fn bfs(
         head += 1;
         witness.nodes_touched = add(witness.nodes_touched, 1)?;
         let depth = distances[vertex].ok_or(ExecutionError::InvalidUpstreamResult)?;
-        if cutoff.is_some_and(|cutoff| depth >= cutoff) {
+        if cutoff.is_some_and(|cutoff| depth.hops() >= cutoff) {
             continue;
         }
-        let next_depth = add(depth, 1)?;
+        let next_depth = depth.checked_next().ok_or(ExecutionError::SizeOverflow)?;
         let mut row = graph.open(vertex)?;
         while let Some((neighbor, _)) = row.next()? {
             checkpoint()?;
@@ -995,7 +995,7 @@ impl FnxCallSpec {
                 (
                     "fgdb-prism/sealed-bfs-v1",
                     pass,
-                    mul(n, size_of::<usize>() + size_of::<Option<usize>>())?,
+                    mul(n, size_of::<usize>() + size_of::<Option<HopDistance>>())?,
                     Some(ordinal),
                 )
             }
@@ -1224,6 +1224,18 @@ impl EncodedRows {
                 FnxValue::Score(value)
             }
             KernelValues::Distances(values) => {
+                let Some(distance) = *values
+                    .get(index)
+                    .ok_or(ExecutionError::InvalidUpstreamResult)?
+                else {
+                    return Ok(());
+                };
+                FnxValue::Integer(
+                    u64::try_from(distance.hops()).map_err(|_| ExecutionError::SizeOverflow)?,
+                )
+            }
+            #[cfg(test)]
+            KernelValues::WideDistances(values) => {
                 let Some(distance) = *values
                     .get(index)
                     .ok_or(ExecutionError::InvalidUpstreamResult)?
@@ -1532,7 +1544,11 @@ mod tests {
                 bind(
                     "CALL fnx.single_source_shortest_path_length($source) YIELD distance AS hops, vertex AS id",
                 ),
-                KernelValues::Distances(vec![None, Some(0), Some(9)]),
+                KernelValues::Distances(vec![
+                    None,
+                    Some(HopDistance::ZERO),
+                    HopDistance::from_hops(9),
+                ]),
                 vec![
                     vec![FnxValue::Integer(0), FnxValue::Vertex(vertices[1])],
                     vec![FnxValue::Integer(9), FnxValue::Vertex(vertices[2])],
@@ -2367,7 +2383,7 @@ mod tests {
                             distance.map(|distance| {
                                 vec![
                                     FnxValue::Vertex(graph.vertex_id(index).unwrap()),
-                                    FnxValue::Integer(u64::try_from(distance).unwrap()),
+                                    FnxValue::Integer(u64::try_from(distance.hops()).unwrap()),
                                 ]
                             })
                         })

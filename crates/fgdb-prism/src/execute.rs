@@ -11,6 +11,7 @@ use crate::{
 use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 pub use fnx_algorithms::ComplexityWitness;
+use std::num::NonZeroUsize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FnxExecutionLimits {
@@ -429,13 +430,43 @@ pub(crate) fn reserve<T, C>(length: usize) -> Result<Vec<T>, FnxExecutionError<C
     Ok(result)
 }
 
+/// A reached BFS distance, stored as hops + 1 so `Option<HopDistance>` uses
+/// one machine word. An unreachable vertex is still `None`, distinct from
+/// the source's zero hops. Every finite simple shortest path has at most
+/// n - 1 edges, so an addressable n-element distance vector can represent
+/// every answer; advancing the encoded value remains checked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub(crate) struct HopDistance(NonZeroUsize);
+
+impl HopDistance {
+    pub(crate) const ZERO: Self = Self(NonZeroUsize::MIN);
+
+    pub(crate) fn hops(self) -> usize {
+        self.0.get() - 1
+    }
+
+    pub(crate) fn checked_next(self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_hops(hops: usize) -> Option<Self> {
+        hops.checked_add(1).and_then(NonZeroUsize::new).map(Self)
+    }
+}
+
 pub(crate) enum KernelValues {
     Scores(Vec<f64>),
     HubsAndAuthorities {
         hubs: Vec<f64>,
         authorities: Vec<f64>,
     },
-    Distances(Vec<Option<usize>>),
+    Distances(Vec<Option<HopDistance>>),
+    /// The exact pre-compaction scalar BFS control keeps its original array
+    /// width for differential and paired measurements. Never a product path.
+    #[cfg(test)]
+    WideDistances(Vec<Option<usize>>),
     Components(Vec<usize>),
     WeightedDistances(Vec<Option<f64>>),
     Counts(Vec<u64>),
@@ -453,6 +484,8 @@ impl KernelValues {
                 index < hubs.len() && index < authorities.len()
             }
             Self::Distances(values) => values.get(index).is_some_and(Option::is_some),
+            #[cfg(test)]
+            Self::WideDistances(values) => values.get(index).is_some_and(Option::is_some),
             Self::Components(values) => index < values.len(),
             Self::WeightedDistances(values) => values.get(index).is_some_and(Option::is_some),
             Self::Counts(values) => index < values.len(),
@@ -486,6 +519,17 @@ impl KernelValues {
                 .map(FnxValue::Score)
                 .ok_or(FnxExecutionError::InvalidUpstreamResult),
             (FnxOutput::Distance, Self::Distances(values)) => {
+                let distance = values
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                Ok(FnxValue::Integer(
+                    u64::try_from(distance.hops()).map_err(|_| FnxExecutionError::SizeOverflow)?,
+                ))
+            }
+            #[cfg(test)]
+            (FnxOutput::Distance, Self::WideDistances(values)) => {
                 let distance = values
                     .get(index)
                     .copied()
@@ -1433,7 +1477,7 @@ impl FnxCallSpec {
             _ => {
                 let bytes_per_vertex = match algorithm {
                     FnxAlgorithm::SingleSourceShortestPathLength { .. } => {
-                        word + std::mem::size_of::<Option<usize>>()
+                        word + std::mem::size_of::<Option<HopDistance>>()
                     }
                     FnxAlgorithm::StronglyConnectedComponents => {
                         4 * word + std::mem::size_of::<bool>()
@@ -1791,6 +1835,54 @@ mod tests {
     use std::convert::Infallible;
     use std::mem::size_of;
 
+    #[test]
+    fn compact_hops_keep_zero_unreachable_and_the_complete_addressable_range() {
+        assert_eq!(size_of::<Option<HopDistance>>(), size_of::<usize>());
+        assert!(size_of::<Option<HopDistance>>() < size_of::<Option<usize>>());
+        assert_eq!(HopDistance::ZERO.hops(), 0);
+        for hops in [0, 1, 255, 65_536, usize::MAX - 2, usize::MAX - 1] {
+            let encoded = HopDistance::from_hops(hops).unwrap();
+            assert_eq!(encoded.hops(), hops);
+            assert_eq!(
+                encoded.checked_next().map(HopDistance::hops),
+                (hops < usize::MAX - 1).then_some(hops + 1)
+            );
+        }
+        assert!(HopDistance::from_hops(usize::MAX).is_none());
+
+        // Exercise the public value-domain boundary, not just the storage
+        // wrapper: unreachable rows stay absent and zero is an emitted value.
+        let values = KernelValues::Distances(vec![
+            None,
+            Some(HopDistance::ZERO),
+            HopDistance::from_hops(65_536),
+        ]);
+        let vertices = [VId(0), VId(1u128 << 127), VId(u128::MAX)];
+        assert!(!values.contains(0));
+        assert!(values.contains(1));
+        assert!(matches!(
+            values.value::<Infallible>(0, FnxOutput::Distance, &vertices),
+            Err(FnxExecutionError::InvalidUpstreamResult)
+        ));
+        assert_eq!(
+            values
+                .value::<Infallible>(1, FnxOutput::Distance, &vertices)
+                .unwrap(),
+            FnxValue::Integer(0)
+        );
+        assert_eq!(
+            values
+                .value::<Infallible>(2, FnxOutput::Distance, &vertices)
+                .unwrap(),
+            FnxValue::Integer(65_536)
+        );
+        assert_eq!(
+            values
+                .value::<Infallible>(2, FnxOutput::Vertex, &vertices)
+                .unwrap(),
+            FnxValue::Vertex(VId(u128::MAX))
+        );
+    }
     thread_local! {
         // Retain the predecessor as a differential and paired-measurement
         // control. This switch does not exist in production builds.
@@ -2105,7 +2197,7 @@ mod tests {
                         incoming_visits: 0,
                     }]
                 );
-                let vectors = n * (size_of::<usize>() + size_of::<Option<usize>>());
+                let vectors = n * (size_of::<usize>() + size_of::<Option<HopDistance>>());
                 let decision_bytes = card.pulls.capacity() * size_of::<crate::BfsPullDecision>();
                 assert!(certificate.kernel_workspace_bytes >= vectors + decision_bytes);
                 // Known dense-graph decision bytes, independent of the

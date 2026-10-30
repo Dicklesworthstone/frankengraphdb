@@ -19,8 +19,8 @@
 
 use super::{
     ComplexityWitness, Cursor, Delivery, EncodedRows, ExecutionError, Finished, FnxAlgorithm,
-    FnxCallSpec, FnxExecutionLimits, FnxMemoryLimits, KernelOutput, KernelValues, Result,
-    ResultAdmission, Rows, SealedGraphView, SealedRows, add, checkpoint, finish_bfs,
+    FnxCallSpec, FnxExecutionLimits, FnxMemoryLimits, HopDistance, KernelOutput, KernelValues,
+    Result, ResultAdmission, Rows, SealedGraphView, SealedRows, add, checkpoint, finish_bfs,
     finish_encoded_bfs, mul, reserve,
 };
 use crate::sealed_control::Control;
@@ -90,7 +90,7 @@ impl Model {
 
     fn workspace(self, n: usize) -> Result<usize> {
         add(
-            mul(n, size_of::<Option<usize>>() + 2 * size_of::<usize>())?,
+            mul(n, size_of::<Option<HopDistance>>() + 2 * size_of::<usize>())?,
             mul(self.records, size_of::<BfsPullDecision>())?,
         )
     }
@@ -186,7 +186,7 @@ enum Phase {
 }
 
 struct Traversal {
-    distances: Vec<Option<usize>>,
+    distances: Vec<Option<HopDistance>>,
     queue: Vec<usize>,
     raw: Vec<usize>,
     pulls: Vec<BfsPullDecision>,
@@ -204,7 +204,7 @@ struct Traversal {
     head: usize,
     frontier_end: usize,
     frontier_arcs: usize,
-    depth: usize,
+    depth: HopDistance,
     witness: ComplexityWitness,
 }
 
@@ -255,7 +255,7 @@ impl Traversal {
             head: 0,
             frontier_end: 0,
             frontier_arcs: 0,
-            depth: 0,
+            depth: HopDistance::ZERO,
             witness: ComplexityWitness {
                 algorithm: "single_source_shortest_path_length_retained_pull_v2".to_owned(),
                 complexity_claim: "O(V*(1+log(1+H)) + H*(1+log(1+H)+log(1+V))) bounded compressed visits and scalar work; O(V) traversal state plus at most usize::BITS pull records; H is retained source history".to_owned(),
@@ -321,7 +321,7 @@ impl Traversal {
             Phase::Start => {
                 self.unseen_raw = self.raw_sum - self.raw[self.source];
                 self.unseen_vertices = self.n - 1;
-                self.distances[self.source] = Some(0);
+                self.distances[self.source] = Some(HopDistance::ZERO);
                 self.queue.push(self.source);
                 self.start_frontier()?;
             }
@@ -336,7 +336,10 @@ impl Traversal {
             }
             Phase::Frontier(_) => self.phase = Phase::Choose,
             Phase::Choose => {
-                if self.cutoff.is_some_and(|cutoff| self.depth >= cutoff) {
+                if self
+                    .cutoff
+                    .is_some_and(|cutoff| self.depth.hops() >= cutoff)
+                {
                     self.phase = Phase::Complete;
                     return Ok(());
                 }
@@ -348,7 +351,7 @@ impl Traversal {
                         return Err(ExecutionError::InvalidUpstreamResult.into());
                     }
                     self.pending = Some(BfsPullDecision {
-                        depth: self.depth,
+                        depth: self.depth.hops(),
                         frontier_vertices: self.frontier_end - self.head,
                         frontier_arcs: self.frontier_arcs,
                         unseen_incoming_arcs: self.unseen_raw,
@@ -394,7 +397,11 @@ impl Traversal {
 
     fn discover(&mut self, vertex: usize) -> Result<()> {
         if self.distances[vertex].is_none() {
-            self.distances[vertex] = Some(add(self.depth, 1)?);
+            self.distances[vertex] = Some(
+                self.depth
+                    .checked_next()
+                    .ok_or(ExecutionError::SizeOverflow)?,
+            );
             self.queue.push(vertex);
             self.unseen_raw = self
                 .unseen_raw
@@ -809,11 +816,14 @@ mod tests {
         }
     }
 
-    fn distances(output: &KernelOutput) -> &[Option<usize>] {
+    fn distances(output: &KernelOutput) -> Vec<Option<usize>> {
         let KernelValues::Distances(values) = &output.values else {
             panic!("distance output")
         };
         values
+            .iter()
+            .map(|distance| distance.map(HopDistance::hops))
+            .collect()
     }
 
     // Floyd-Warshall has no BFS frontier, queue or direction-selection logic.
@@ -1025,6 +1035,17 @@ mod tests {
         let fixture = dense();
         let model = fixture.model();
         let bytes = model.workspace(fixture.rows.len()).unwrap();
+        let n = fixture.rows.len();
+        // Distance, queue and retained-incidence arrays now each use one
+        // word per vertex. Evidence capacity and every other allowance stay
+        // separate; one byte below the real requested state still refuses.
+        assert_eq!(
+            bytes,
+            3 * n * size_of::<usize>() + model.records * size_of::<BfsPullDecision>()
+        );
+        let old_bytes = n * (size_of::<Option<usize>>() + 2 * size_of::<usize>())
+            + model.records * size_of::<BfsPullDecision>();
+        assert_eq!(old_bytes - bytes, n * size_of::<usize>());
         assert!(
             Traversal::new(
                 fixture.rows.len(),
