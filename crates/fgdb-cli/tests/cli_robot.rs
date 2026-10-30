@@ -4863,6 +4863,47 @@ fn search_lanes_equal_the_library_and_pin_history() {
 }
 
 #[test]
+fn historical_composed_sealed_calls_select_one_cut_across_processes() {
+    let db = TestDb::new("prism-temporal-composed-sealed");
+    db.create();
+    let cut = db.write(&[
+        "INSERT (a:Person {name:'A'}),(b:Person {name:'B'}),(c:Person {name:'C'}),\
+         (a)-[:KNOWS]->(b),(b)-[:KNOWS]->(c)",
+    ]);
+    db.write(&["INSERT (:Person {name:'Later'})"]);
+    let at = format!("at=uint:{cut}");
+    let cut_text = cut.to_string();
+    let text = "MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ $at WITH n \
+        CALL fnx.weakly_connected_components(label => 'Person', relation => 'KNOWS', \
+        parallel => 'collapse', self_loops => 'drop') YIELD vertex, component \
+        WHERE vertex = n RETURN n.name AS name ORDER BY name";
+    let expected = db.command("query", &["--param", &at, text]);
+    assert_rows(&expected, r#"[[{"type":"text","value":"A"}],[{"type":"text","value":"B"}],[{"type":"text","value":"C"}]]"#);
+    for explicit in [false, true] {
+        let mut args = vec!["--sealed", "--graph-relation", "KNOWS", "--param", &at];
+        if explicit {
+            args.extend(["--as-of", cut_text.as_str()]);
+        }
+        args.push(text);
+        let actual = db.command("query", &args);
+        assert_eq!(actual.sequence("rows"), cut);
+        assert_eq!(actual.events, expected.events);
+    }
+    let refused = db.command(
+        "query",
+        &["--sealed", "--graph-relation", "KNOWS", "--as-of", "0", "--param", &at, text],
+    );
+    refused.failure(3, "query");
+    assert_eq!(refused.terminal().get("code").string(), "invalid_value");
+    let missing = TestDb::new("prism-temporal-conflict-no-open");
+    missing.command(
+        "query",
+        &["--sealed", "--graph-relation", "KNOWS", "--as-of", "0", "--param", &at, text],
+    ).failure(3, "query");
+    assert!(!std::path::Path::new(&missing.db).exists());
+}
+
+#[test]
 fn a_composed_prism_call_is_an_ordinary_query_over_the_whole_graph() {
     let db = TestDb::new("prism-composed");
     db.create();

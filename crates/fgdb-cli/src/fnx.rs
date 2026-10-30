@@ -501,6 +501,7 @@ pub(super) fn prepare_sealed_read(options: &Options) -> Result<PreparedSealedRea
     // Bind values now, including parameters in a page or kernel argument, so
     // malformed input cannot reach the filesystem. Execution reuses the same
     // immutable template and parameter set for the selected historical cut.
+    let mut as_of = options.fnx.as_of;
     let calls_procedure = match &native {
         PreparedNativeRead::Set(prepared) => prepared
             .bind_parameters(params)
@@ -513,12 +514,26 @@ pub(super) fn prepare_sealed_read(options: &Options) -> Result<PreparedSealedRea
                 .input()
                 .calls_procedure()
         }
+        PreparedNativeRead::TemporalSet(prepared) => {
+            let query = prepared
+                .bind_parameters(params)
+                .map_err(|error| super::read_failure(options, QueryError::TemporalSetText(error)))?;
+            let requested = query.as_of();
+            if let Some(retained) = as_of
+                && retained != requested
+            {
+                return Err(Failure::coded(
+                    super::refusal::Code::InvalidValue,
+                    SealedQueryError::SnapshotMismatch { requested, retained },
+                ));
+            }
+            as_of = Some(requested);
+            query.query().calls_procedure()
+        }
         other => {
             return Err(Failure::coded(
                 super::refusal::Code::Unsupported,
-                SealedQueryError::Unsupported {
-                    facade: other.facade_class(),
-                },
+                format!("native {:?} read has no composed procedure source", other.facade_class()),
             ));
         }
     };
@@ -544,7 +559,7 @@ pub(super) fn prepare_sealed_read(options: &Options) -> Result<PreparedSealedRea
         native,
         lowered_params: lowered.map(|(_, params)| params),
         relation,
-        as_of: options.fnx.as_of,
+        as_of,
         memory,
         sealing,
         source_limits,
@@ -588,8 +603,8 @@ pub(super) async fn run_sealed_read(
         )
         .map_err(|error| match error {
             SealedQueryError::Query(error) => super::read_failure(options, error),
-            error @ SealedQueryError::Unsupported { .. } => {
-                Failure::coded(super::refusal::Code::Unsupported, error)
+            error @ SealedQueryError::SnapshotMismatch { .. } => {
+                Failure::coded(super::refusal::Code::InvalidValue, error)
             }
         })?;
     super::render(result, view.snapshot_seq().0, "rows", robot, out)
@@ -1028,6 +1043,39 @@ mod tests {
                 "missing page argument must bind before open"
             );
         }
+    }
+
+    #[test]
+    fn temporal_sealed_preflight_selects_the_bound_cut_and_refuses_conflicting_flags() {
+        let text = "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at WITH n \
+                    CALL fnx.weakly_connected_components(relation => 'KNOWS') \
+                    YIELD vertex RETURN vertex LIMIT 0";
+        for requested in [0, 7] {
+            for explicit in [false, true] {
+                let rendered = requested.to_string();
+                let mut flags = vec!["--sealed", "--graph-relation", "KNOWS"];
+                if explicit {
+                    flags.extend(["--as-of", rendered.as_str()]);
+                }
+                let mut options = composed_options(text, &flags).unwrap();
+                options.params = fgdb_gql::GqlParameters::new()
+                    .with_uint64("at", requested)
+                    .unwrap();
+                let prepared = super::prepare_sealed_read(&options).unwrap();
+                assert_eq!(prepared.as_of, Some(fgdb_types::CommitSeq(requested)));
+                options.params = fgdb_gql::GqlParameters::new();
+                assert_eq!(super::prepare_sealed_read(&options).err().unwrap().code, 3);
+            }
+        }
+        let mut options = composed_options(
+            text,
+            &["--sealed", "--graph-relation", "KNOWS", "--as-of", "8"],
+        )
+        .unwrap();
+        options.params = fgdb_gql::GqlParameters::new().with_uint64("at", 7).unwrap();
+        let failure = super::prepare_sealed_read(&options).err().unwrap();
+        assert_eq!(failure.code, 3);
+        assert_eq!(failure.refusal, super::super::refusal::Code::InvalidValue);
     }
 
     #[test]
