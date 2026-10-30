@@ -560,6 +560,189 @@ fn signed_limits_and_native_limits_are_cumulative_and_independent() {
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+/// The large fixed-width projection sort changes physical builder work. A
+/// retained projection must replay that work under the current capability,
+/// including its signed limit and the exact live-refusal checkpoint.
+#[test]
+fn radix_projection_reuse_preserves_scopes_signed_limits_and_live_refusals() {
+    let ((), report) = run_async_under_lab(0x5ec0_3031, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let mut db =
+            Database::open_memory(&c.commit(), DatabaseKeys::new([0x31; 32], NS, [0x32; 32]))
+                .await
+                .unwrap();
+        let vertex = |id: u128| VId((id << 97) | 17);
+        let mut batch = WriteBatch::new(RelationId(1));
+        for id in 0..32 {
+            batch.create_vertex(vertex(id), vec![LabelId(1)], vec![]);
+        }
+        // EId order differs from topology order, including in high bits. The
+        // 576 admitted edges cross the production builder's radix threshold.
+        for id in 0..576u128 {
+            let eid = EId(id
+                .wrapping_mul(0x9e37_79b9_7f4a_7c15_d1b5_4a32_d192_ed03)
+                .rotate_left(47));
+            let source = id / 18;
+            let target = (source + id % 18 + 1) % 32;
+            batch.add_edge(
+                eid,
+                vertex(source),
+                vertex(target),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(1))],
+            );
+        }
+        batch.create_vertex(VId(u128::MAX), vec![LabelId(99)], vec![]);
+        batch.add_edge(
+            EId(u128::MAX),
+            vertex(0),
+            VId(u128::MAX),
+            vec![(PropertyKeyId(1), CanonicalScalar::Bool(true))],
+        );
+        db.write(&c.commit(), batch).await.unwrap();
+        let mut hidden = WriteBatch::new(RelationId(2));
+        hidden.add_edge(
+            EId(u128::MAX - 1),
+            vertex(0),
+            vertex(31),
+            vec![(PropertyKeyId(1), CanonicalScalar::Bool(true))],
+        );
+        db.write(&c.commit(), hidden).await.unwrap();
+        let issuer = authority(331, NS);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let mut opt = options(Directedness::Directed);
+        opt.projection_limits.max_input_edges = 1000;
+        opt.projection_limits.max_adjacency_entries = 2000;
+        let text = "CALL fnx.weakly_connected_components() YIELD vertex,component";
+        let params = FnxParameters::new();
+        // Unmasked malformed weights are observable to this control, while
+        // both their endpoint and relation scopes must hide them below.
+        assert!(matches!(
+            db.call_fnx(&cx, text, &params, opt),
+            Err(FnxReadError::Weight {
+                reason: FnxWeightError::NotNumeric,
+                ..
+            })
+        ));
+        let clear = || {
+            for authorized_projection_bytes in [
+                0,
+                fgdb::ReadCacheLimits::default().authorized_projection_bytes,
+            ] {
+                db.set_read_cache_limits(
+                    &cx,
+                    fgdb::ReadCacheLimits {
+                        authorized_projection_bytes,
+                        ..fgdb::ReadCacheLimits::default()
+                    },
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                db.read_cache_status(&cx)
+                    .unwrap()
+                    .authorized_projections
+                    .entries,
+                0
+            );
+        };
+        let footprint = |token: &CapabilityToken, stop: Option<usize>| {
+            let probe = Arc::new(SimulationCheckpointProbe::new(stop));
+            let query = cx.with_checkpoint_probe(Arc::clone(&probe));
+            let mut clocks = 0;
+            let result =
+                db.call_fnx_authorized(&query, &issuer, token, BRANCH, text, &params, opt, || {
+                    clocks += 1;
+                    100
+                });
+            if let Some(stop) = stop {
+                assert!(matches!(result, Err(FnxReadError::Cancelled(_))));
+                assert_eq!(probe.calls(), stop, "no checkpoint after refusal");
+            }
+            (format!("{result:?}"), probe.calls(), clocks)
+        };
+        clear();
+        let cold = footprint(&token, None);
+        assert!(cold.0.starts_with("Ok("), "{cold:?}");
+        assert_eq!(
+            db.read_cache_status(&cx)
+                .unwrap()
+                .authorized_projections
+                .entries,
+            1
+        );
+        assert_eq!(footprint(&token, None), cold, "cached build transcript");
+        let rows = read(&db, &cx, &issuer, &token, text, opt);
+        assert_eq!(rows.len(), 32);
+        for (id, row) in rows.iter().enumerate() {
+            assert_eq!(
+                row.as_slice(),
+                &[
+                    FnxValue::Vertex(vertex(id as u128)),
+                    FnxValue::Vertex(vertex(0))
+                ]
+            );
+        }
+        // A different compiled scope cannot use the connected projection.
+        let no_edges = token
+            .attenuate(Restriction::Relations(Scope::only([])))
+            .unwrap();
+        let isolates = read(&db, &cx, &issuer, &no_edges, text, opt);
+        assert_eq!(isolates.len(), 32);
+        assert!(isolates.iter().all(|row| row[0] == row[1]));
+        assert_eq!(
+            db.read_cache_status(&cx)
+                .unwrap()
+                .authorized_projections
+                .entries,
+            2
+        );
+        assert_eq!(footprint(&token, None), cold);
+
+        let minimum = threshold(1_000_000, |work| {
+            let limited = token.attenuate(Restriction::MaxWork(work)).unwrap();
+            db.call_fnx_authorized(&cx, &issuer, &limited, BRANCH, text, &params, opt, || 100)
+                .is_ok()
+        });
+        assert!(minimum > 2048);
+        // Cover early source work, sorting, and the exact acceptance boundary.
+        // The private tape law separately compares every recorded event.
+        for work in [
+            1,
+            64,
+            512,
+            2048,
+            minimum / 3,
+            minimum / 2,
+            minimum - 1,
+            minimum,
+        ] {
+            read(&db, &cx, &issuer, &token, text, opt);
+            let limited = token.attenuate(Restriction::MaxWork(work)).unwrap();
+            let hit = footprint(&limited, None);
+            clear();
+            assert_eq!(footprint(&limited, None), hit, "signed work={work}");
+            assert_eq!(hit.0.starts_with("Ok("), work == minimum);
+        }
+        for stop in [
+            1,
+            64,
+            cold.1 / 4,
+            cold.1 / 2,
+            cold.1 * 3 / 4,
+            cold.1 - 1,
+            cold.1,
+        ] {
+            read(&db, &cx, &issuer, &token, text, opt);
+            let hit = footprint(&token, Some(stop));
+            clear();
+            assert_eq!(footprint(&token, Some(stop)), hit, "live checkpoint={stop}");
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[test]
 fn authentication_precedes_frontier_and_projection_and_hidden_sources_are_absent() {
     let ((), report) = run_async_under_lab(0x5ec0_3004, |root| async move {

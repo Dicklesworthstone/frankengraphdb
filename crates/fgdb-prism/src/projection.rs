@@ -300,6 +300,200 @@ fn offsets<C>(
     Ok(result)
 }
 
+/// The complete, big-endian byte order of the projection's fixed-width keys.
+/// `shared_bytes` is called only for distinct extrema, so `byte` never sees
+/// the sentinel immediately past the key. No identity is truncated to a dense
+/// ordinal or to its low bits during sorting or duplicate validation.
+trait RadixKey: Copy + Ord {
+    fn shared_bytes(self, other: Self) -> usize;
+    fn byte(self, at: usize) -> usize;
+}
+
+impl RadixKey for VId {
+    fn shared_bytes(self, other: Self) -> usize {
+        ((self.0 ^ other.0).leading_zeros() / 8) as usize
+    }
+
+    fn byte(self, at: usize) -> usize {
+        ((self.0 >> (8 * (15 - at))) & 255) as usize
+    }
+}
+
+impl RadixKey for EId {
+    fn shared_bytes(self, other: Self) -> usize {
+        ((self.0 ^ other.0).leading_zeros() / 8) as usize
+    }
+
+    fn byte(self, at: usize) -> usize {
+        ((self.0 >> (8 * (15 - at))) & 255) as usize
+    }
+}
+
+impl RadixKey for (VId, VId, EId) {
+    fn shared_bytes(self, other: Self) -> usize {
+        if self.0 != other.0 {
+            self.0.shared_bytes(other.0)
+        } else if self.1 != other.1 {
+            16 + self.1.shared_bytes(other.1)
+        } else {
+            32 + self.2.shared_bytes(other.2)
+        }
+    }
+
+    fn byte(self, at: usize) -> usize {
+        match at {
+            0..16 => self.0.byte(at),
+            16..32 => self.1.byte(at - 16),
+            _ => self.2.byte(at - 32),
+        }
+    }
+}
+
+// Small buckets retain the incumbent introsort. A large partition pays for
+// at most 256 metadata entries, independent of population or key prefix.
+const RADIX_SORT_MIN: usize = 512;
+
+#[derive(Clone, Copy, Default)]
+struct RadixBucket {
+    next: usize,
+    end: usize,
+}
+
+/// Preserve the original linear sorted-input path. Only after its first
+/// inversion do we collect extrema; the already visited prefix is ordered,
+/// so its first/last keys are its minimum/maximum. This is one full pass,
+/// even when identities share fifteen leading bytes or every key is equal.
+fn unordered_extrema<T, K: Copy + Ord, C>(
+    values: &[T],
+    key: &impl Fn(&T) -> K,
+    checkpoint: &mut impl FnMut() -> Result<(), C>,
+) -> Result<Option<(K, K)>, ProjectionBuildError<C>> {
+    poll(checkpoint)?;
+    let Some(first) = values.first().map(key) else {
+        return Ok(None);
+    };
+    let mut previous = first;
+    for index in 1..values.len() {
+        poll(checkpoint)?;
+        let current = key(&values[index]);
+        if previous > current {
+            let mut minimum = first.min(current);
+            let mut maximum = previous;
+            for value in &values[index + 1..] {
+                poll(checkpoint)?;
+                let current = key(value);
+                minimum = minimum.min(current);
+                maximum = maximum.max(current);
+            }
+            return Ok(Some((minimum, maximum)));
+        }
+        previous = current;
+    }
+    Ok(None)
+}
+
+/// Cancellable in-place MSD/American-flag sort. The one reusable table is
+/// exactly 512 machine words (4096 bytes on a 64-bit target), with no heap
+/// allocation or population-sized permutation buffer. Child ranges are found
+/// in the already partitioned slice before reusing that table. Each recursive
+/// partition fixes another key byte, bounding depth by 16 bytes for identities
+/// and 48 for (source, target, EId), even on adversarial duplicate prefixes.
+///
+/// As with the incumbent sort's bounded call frames and the ordinal prefix
+/// directory, this fixed stack scratch is outside the declared vector-backing
+/// workspace admission. Every population-sized pass, permutation step and
+/// interval-search comparison polls; only the fixed table reset is indivisible.
+/// These are actual sorting work checkpoints, not a replay of the incumbent's
+/// comparisons. Authorized hosts record/replay the resulting build transcript.
+fn sort_fixed_by_key<T, K: RadixKey, C>(
+    values: &mut [T],
+    key: impl Fn(&T) -> K,
+    checkpoint: &mut impl FnMut() -> Result<(), C>,
+) -> Result<(), ProjectionBuildError<C>> {
+    #[cfg(test)]
+    if tests::comparison_sort_incumbent() {
+        return sort_by_key(values, key, checkpoint);
+    }
+    if values.len() < RADIX_SORT_MIN {
+        return sort_by_key(values, key, checkpoint);
+    }
+    let Some(extrema) = unordered_extrema(values, &key, checkpoint)? else {
+        return Ok(());
+    };
+    let mut buckets = [RadixBucket::default(); 256];
+    radix_partition(values, &key, extrema, &mut buckets, checkpoint)
+}
+
+fn radix_partition<T, K: RadixKey, C>(
+    values: &mut [T],
+    key: &impl Fn(&T) -> K,
+    extrema: (K, K),
+    buckets: &mut [RadixBucket; 256],
+    checkpoint: &mut impl FnMut() -> Result<(), C>,
+) -> Result<(), ProjectionBuildError<C>> {
+    let at = extrema.0.shared_bytes(extrema.1);
+    buckets.fill(RadixBucket::default());
+    for value in values.iter() {
+        poll(checkpoint)?;
+        buckets[key(value).byte(at)].end += 1;
+    }
+    let mut end = 0;
+    for bucket in buckets.iter_mut() {
+        poll(checkpoint)?;
+        bucket.next = end;
+        end += bucket.end;
+        bucket.end = end;
+    }
+    debug_assert_eq!(end, values.len());
+    // Each step advances one cursor, even when it swaps into a later bucket.
+    // No cursor crosses its disjoint interval; finalized earlier buckets
+    // therefore never receive another displaced element.
+    for bucket in 0..buckets.len() {
+        while buckets[bucket].next < buckets[bucket].end {
+            poll(checkpoint)?;
+            let position = buckets[bucket].next;
+            let target = key(&values[position]).byte(at);
+            if target == bucket {
+                buckets[bucket].next += 1;
+            } else {
+                let destination = buckets[target].next;
+                debug_assert!(target > bucket && destination < buckets[target].end);
+                values.swap(position, destination);
+                buckets[target].next += 1;
+            }
+        }
+    }
+    // Recursive children overwrite the table. The fixed parent byte remains
+    // monotone, so find each interval directly without retaining 256 offsets
+    // on every stack frame or rescanning every record to find its end.
+    let mut start = 0;
+    while start < values.len() {
+        poll(checkpoint)?;
+        let digit = key(&values[start]).byte(at);
+        let mut low = start + 1;
+        let mut high = values.len();
+        while low < high {
+            poll(checkpoint)?;
+            let middle = low + (high - low) / 2;
+            if key(&values[middle]).byte(at) == digit {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        let child = &mut values[start..low];
+        if child.len() > 1 {
+            if child.len() < RADIX_SORT_MIN {
+                sort_by_key(child, key, checkpoint)?;
+            } else if let Some(extrema) = unordered_extrema(child, key, checkpoint)? {
+                radix_partition(child, key, extrema, buckets, checkpoint)?;
+            }
+        }
+        start = low;
+    }
+    Ok(())
+}
+
 /// In-place O(n log n) worst-case introsort, with cancellation inside every
 /// partition, insertion and heap step. Keys here are fixed-width IDs/tuples,
 /// so comparisons are bounded. Using the standard sort with a callback only
@@ -719,7 +913,7 @@ impl SnapshotGraphView {
         )?;
         limit("workspace bytes", input_bytes, limits.max_workspace_bytes)?;
 
-        sort_by_key(&mut vertices, |vertex| *vertex, &mut checkpoint)?;
+        sort_fixed_by_key(&mut vertices, |vertex| *vertex, &mut checkpoint)?;
         let mut directory = SortedVertexLookup::new(&vertices);
         for (index, pair) in vertices.windows(2).enumerate() {
             poll(&mut checkpoint)?;
@@ -729,7 +923,7 @@ impl SnapshotGraphView {
             directory.include(index + 1);
         }
         directory.finish();
-        sort_by_key(&mut work, |edge| edge.eid, &mut checkpoint)?;
+        sort_fixed_by_key(&mut work, |edge| edge.eid, &mut checkpoint)?;
         for pair in work.windows(2) {
             poll(&mut checkpoint)?;
             if pair[0].eid == pair[1].eid {
@@ -810,7 +1004,7 @@ impl SnapshotGraphView {
             hash.update(&bytes);
         }
 
-        sort_by_key(
+        sort_fixed_by_key(
             &mut work,
             |edge| (edge.source, edge.target, edge.eid),
             &mut checkpoint,

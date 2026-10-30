@@ -7,6 +7,22 @@ use std::convert::Infallible;
 thread_local! {
     static INCUMBENT_DIRECTORY: Cell<bool> = const { Cell::new(false) };
     static DENSE_WEIGHT_INCUMBENT: Cell<bool> = const { Cell::new(false) };
+    static COMPARISON_SORT_INCUMBENT: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(super) fn comparison_sort_incumbent() -> bool {
+    COMPARISON_SORT_INCUMBENT.with(Cell::get)
+}
+
+fn with_comparison_sort<T>(enabled: bool, work: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            COMPARISON_SORT_INCUMBENT.with(|mode| mode.set(self.0));
+        }
+    }
+    let _reset = Reset(COMPARISON_SORT_INCUMBENT.with(|mode| mode.replace(enabled)));
+    work()
 }
 
 pub(super) fn incumbent_directory() -> bool {
@@ -899,6 +915,409 @@ fn scrambled(n: usize, seed: u64) -> Vec<u64> {
             x
         })
         .collect()
+}
+
+#[test]
+fn fixed_width_sort_matches_std_across_full_keys_prefixes_and_duplicate_buckets() {
+    for n in [0, 1, 16, 511, 512, 513, 1025, 4096] {
+        for shape in 0..8 {
+            let mut input: Vec<_> = (0..n)
+                .map(|index| {
+                    let value = index as u128;
+                    let random = permuted_identity(value);
+                    match shape {
+                        0 => (VId(random), VId(random.rotate_left(47)), EId(!random)),
+                        1 => (
+                            VId(u128::MAX - value % 19),
+                            VId((0xfedcu128 << 112) | (value % 31)),
+                            EId((0xabcdu128 << 112) | value),
+                        ),
+                        2 => (VId(u128::MAX), VId(random), EId(value)),
+                        3 => (VId(u128::MAX), VId(17), EId(random)),
+                        4 => (VId(value % 3), VId(value % 7), EId(value % 5)),
+                        5 => (VId(value.min((n - index) as u128)), VId(0), EId(0)),
+                        6 => (VId(0), VId(0), EId(u128::MAX)),
+                        _ => (VId(value), VId(value.rotate_left(63)), EId(value)),
+                    }
+                })
+                .collect();
+            if shape == 7 {
+                input.reverse();
+            }
+            let mut expected = input.clone();
+            expected.sort_unstable();
+            let mut actual = input.clone();
+            sort_fixed_by_key(
+                &mut actual,
+                |value| *value,
+                &mut || Ok::<(), Infallible>(()),
+            )
+            .unwrap();
+            assert_eq!(actual, expected, "n={n} shape={shape}");
+            // The single-identity routes use the same complete u128 order.
+            for field in 0..3 {
+                let mut ids: Vec<_> = input
+                    .iter()
+                    .map(|value| match field {
+                        0 => value.0.0,
+                        1 => value.1.0,
+                        _ => value.2.0,
+                    })
+                    .collect();
+                let mut vertices: Vec<_> = ids.iter().copied().map(VId).collect();
+                let mut edges: Vec<_> = ids.iter().copied().map(EId).collect();
+                ids.sort_unstable();
+                sort_fixed_by_key(&mut vertices, |value| *value, &mut || {
+                    Ok::<(), Infallible>(())
+                })
+                .unwrap();
+                sort_fixed_by_key(&mut edges, |value| *value, &mut || Ok::<(), Infallible>(()))
+                    .unwrap();
+                assert!(vertices.iter().map(|value| value.0).eq(ids.iter().copied()));
+                assert!(edges.iter().map(|value| value.0).eq(ids.iter().copied()));
+            }
+            // Both increasing and all-equal inputs keep exactly one check per
+            // item (one fixed leading check for the empty input).
+            let mut checks = 0;
+            sort_fixed_by_key(&mut expected, |value| *value, &mut || {
+                checks += 1;
+                Ok::<(), Infallible>(())
+            })
+            .unwrap();
+            assert_eq!(checks, n.max(1));
+        }
+    }
+    assert_eq!(size_of::<[RadixBucket; 256]>(), 512 * size_of::<usize>());
+}
+
+#[test]
+fn radix_prefix_selection_handles_every_bit_of_every_identity_field() {
+    for field in 0..3 {
+        for bit in 0..128 {
+            let low = (VId(0), VId(0), EId(0));
+            let mut high = low;
+            match field {
+                0 => high.0 = VId(1u128 << bit),
+                1 => high.1 = VId(1u128 << bit),
+                _ => high.2 = EId(1u128 << bit),
+            }
+            let at = low.shared_bytes(high);
+            assert_eq!(at, field * 16 + (127 - bit) / 8);
+            assert!(low.byte(at) < high.byte(at));
+            // Repeated, maximally skewed buckets must terminate without
+            // reexamining all of the common leading zero bytes.
+            let mut input = vec![low; RADIX_SORT_MIN + 1];
+            input[0] = high;
+            let mut checks = 0;
+            sort_fixed_by_key(&mut input, |value| *value, &mut || {
+                checks += 1;
+                Ok::<(), Infallible>(())
+            })
+            .unwrap();
+            assert!(input[..RADIX_SORT_MIN].iter().all(|&value| value == low));
+            assert_eq!(input[RADIX_SORT_MIN], high);
+            assert!(
+                checks < input.len() * 6,
+                "field={field} bit={bit} checks={checks}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cancellation_interrupts_every_radix_pass_and_never_publishes_a_partial_projection() {
+    let input: Vec<_> = (0..RADIX_SORT_MIN)
+        .map(|value| (VId(value as u128 % 3), VId(17), EId((value % 7) as u128)))
+        .rev()
+        .collect();
+    let mut checks = 0;
+    sort_fixed_by_key(&mut input.clone(), |value| *value, &mut || {
+        checks += 1;
+        Ok::<(), usize>(())
+    })
+    .unwrap();
+    assert!(checks > input.len() * 2);
+    for stop in 1..=checks {
+        let mut observed = 0;
+        let error = sort_fixed_by_key(&mut input.clone(), |value| *value, &mut || {
+            observed += 1;
+            if observed == stop { Err(stop) } else { Ok(()) }
+        })
+        .unwrap_err();
+        assert_eq!(error, ProjectionBuildError::Cancelled(stop));
+        assert_eq!(observed, stop, "no work callback after refusal");
+    }
+    let vertices: Vec<_> = (0..RADIX_SORT_MIN)
+        .rev()
+        .map(|value| VId(permuted_identity(value as u128)))
+        .collect();
+    let admission = ProjectionLimits {
+        max_vertices: vertices.len(),
+        ..limits()
+    };
+    let mut complete = 0;
+    SnapshotGraphView::build_with_checkpoint(binding(), &vertices, &[], spec(), admission, || {
+        complete += 1;
+        Ok::<(), usize>(())
+    })
+    .unwrap();
+    // Include both constructor entrypoints, the final fence and every phase
+    // of the larger sort without making this a quadratic graph-build test.
+    for stop in (1..=complete).step_by(31).chain([complete]) {
+        for owned in [false, true] {
+            let mut observed = 0;
+            let mut checkpoint = || {
+                observed += 1;
+                if observed == stop { Err(stop) } else { Ok(()) }
+            };
+            let result = if owned {
+                SnapshotGraphView::build_owned_with_checkpoint(
+                    binding(),
+                    vertices.clone(),
+                    Vec::new(),
+                    spec(),
+                    admission,
+                    &mut checkpoint,
+                )
+            } else {
+                SnapshotGraphView::build_with_checkpoint(
+                    binding(),
+                    &vertices,
+                    &[],
+                    spec(),
+                    admission,
+                    &mut checkpoint,
+                )
+            };
+            // Owned input omits the borrowed-input copying checkpoints.
+            if let Err(error) = result {
+                assert_eq!(error, ProjectionBuildError::Cancelled(stop));
+                assert_eq!(observed, stop);
+            } else {
+                assert!(owned && observed < stop);
+            }
+        }
+    }
+}
+
+#[test]
+fn radix_projection_matches_comparison_predecessor_for_all_reductions_and_errors() {
+    let vertices: Vec<_> = (0..RADIX_SORT_MIN + 1)
+        .map(|index| VId(permuted_identity(index as u128)))
+        .collect();
+    let edges: Vec<_> = (0..RADIX_SORT_MIN + 1)
+        .flat_map(|index| {
+            [1e16, -1e16, 1.0]
+                .into_iter()
+                .enumerate()
+                .map(move |(part, weight)| {
+                    // Increasing EIds fix the cancellation-sensitive sum at one.
+                    edge(
+                        (0xabcd_u128 << 112) | (index * 3 + part) as u128,
+                        permuted_identity(index as u128),
+                        permuted_identity(((index + 1) % (RADIX_SORT_MIN + 1)) as u128),
+                        weight,
+                    )
+                })
+        })
+        .rev()
+        .collect();
+    let admission = ProjectionLimits {
+        max_vertices: vertices.len(),
+        max_input_edges: edges.len() + 2,
+        max_adjacency_entries: 2 * edges.len(),
+        max_workspace_bytes: 1 << 24,
+    };
+    let build = |vertices: &[VId], edges: &[ProjectionEdge], spec, admission, incumbent| {
+        with_comparison_sort(incumbent, || {
+            SnapshotGraphView::build(binding(), vertices, edges, spec, admission).map(contents)
+        })
+    };
+    for directedness in [
+        Directedness::Directed,
+        Directedness::Reversed,
+        Directedness::Undirected,
+    ] {
+        for parallel_edges in [
+            ParallelEdgePolicy::Reject,
+            ParallelEdgePolicy::CollapseUnit,
+            ParallelEdgePolicy::Minimum,
+            ParallelEdgePolicy::Maximum,
+            ParallelEdgePolicy::Sum,
+        ] {
+            let spec = ProjectionSpec {
+                directedness,
+                parallel_edges,
+                self_loops: SelfLoopPolicy::Keep,
+            };
+            let previous = build(&vertices, &edges, spec, admission, true);
+            let actual = build(&vertices, &edges, spec, admission, false);
+            assert_eq!(actual, previous, "{spec:?}");
+            if let Ok(actual) = actual {
+                if parallel_edges == ParallelEdgePolicy::Sum {
+                    assert!(
+                        actual
+                            .weight_bits
+                            .iter()
+                            .all(|&bits| bits == 1.0f64.to_bits())
+                    );
+                }
+                for bytes in [actual.counts_and_bytes[4] - 1, actual.counts_and_bytes[4]] {
+                    let limit = ProjectionLimits {
+                        max_workspace_bytes: bytes,
+                        ..admission
+                    };
+                    assert_eq!(
+                        build(&vertices, &edges, spec, limit, false),
+                        build(&vertices, &edges, spec, limit, true),
+                        "quota={bytes} {spec:?}",
+                    );
+                }
+            }
+        }
+    }
+    let mut malformed = Vec::new();
+    let mut duplicate = edges.clone();
+    duplicate.push(edges[0]);
+    malformed.push(duplicate);
+    let mut missing = edges.clone();
+    missing[0].target = VId(u128::MAX);
+    malformed.push(missing);
+    let mut nonfinite = edges.clone();
+    nonfinite[0].weight = f64::NAN;
+    malformed.push(nonfinite);
+    let mut overflow = edges;
+    overflow[0].weight = f64::MAX;
+    overflow[1].weight = f64::MAX;
+    malformed.push(overflow);
+    for edges in malformed {
+        let previous = build(&vertices, &edges, spec(), admission, true);
+        assert!(previous.is_err());
+        assert_eq!(build(&vertices, &edges, spec(), admission, false), previous);
+    }
+    let mut duplicate_vertices = vertices;
+    duplicate_vertices[0] = duplicate_vertices[1];
+    assert_eq!(
+        build(&duplicate_vertices, &[], spec(), admission, false),
+        build(&duplicate_vertices, &[], spec(), admission, true),
+    );
+}
+
+/// Both versions call the actual public builder in the same process; only the
+/// three sorting sites select the predecessor. Timed work includes borrowed
+/// input copies, validation, identity hashing, reduction and both CSR faces.
+/// Input generation, oracle comparison and destruction are outside the timer.
+/// This is projection-stage maintenance evidence, not a database/GAPBS win.
+#[test]
+#[ignore = "paired projection construction measurement; run with --ignored --nocapture"]
+fn radix_projection_paired_measurement() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    #[inline(never)]
+    fn count(checks: &mut usize) -> Result<(), Infallible> {
+        *black_box(checks) += 1;
+        Ok(())
+    }
+
+    let n = 8192;
+    for shape in 0..5 {
+        let vertices = match shape {
+            0 => (0..n).map(|index| VId(index as u128)).collect(),
+            1 => directory_vertices(n, 1),
+            _ => directory_vertices(n, 0),
+        };
+        let edges: Vec<_> = (0..n)
+            .flat_map(|source| {
+                let vertices = &vertices;
+                (0..16).map(move |slot| {
+                    let at = source * 16 + slot;
+                    let target = match shape {
+                        0 => source / 16 * 16 + slot,
+                        3 => slot % 4,
+                        _ => (source * 127 + slot * 997) % n,
+                    };
+                    let eid = if shape == 0 {
+                        at as u128
+                    } else {
+                        permuted_identity(at as u128)
+                    };
+                    edge(eid, vertices[source].0, vertices[target].0, 1.0)
+                })
+            })
+            .collect();
+        let spec = ProjectionSpec {
+            directedness: if shape == 4 {
+                Directedness::Undirected
+            } else {
+                Directedness::Directed
+            },
+            parallel_edges: ParallelEdgePolicy::Sum,
+            self_loops: SelfLoopPolicy::Keep,
+        };
+        let admission = ProjectionLimits {
+            max_vertices: n,
+            max_input_edges: edges.len(),
+            max_adjacency_entries: edges.len() * 2,
+            max_workspace_bytes: 1 << 28,
+        };
+        let run = |incumbent| {
+            let mut checks = 0;
+            let start = Instant::now();
+            let graph = with_comparison_sort(incumbent, || {
+                SnapshotGraphView::build_with_checkpoint(
+                    binding(),
+                    black_box(&vertices),
+                    black_box(&edges),
+                    spec,
+                    admission,
+                    || count(&mut checks),
+                )
+            })
+            .unwrap();
+            let elapsed = start.elapsed().as_nanos();
+            black_box(graph.digest());
+            black_box(graph.charged_resident_bytes());
+            (elapsed, checks, contents(graph))
+        };
+        // Warm both paths and check every retained byte/ordinal before timing.
+        let expected = run(true).2;
+        assert_eq!(run(false).2, expected);
+        let mut previous = Vec::new();
+        let mut radix = Vec::new();
+        let mut checkpoints = [0; 2];
+        for trial in 0..9 {
+            for incumbent in if trial % 2 == 0 {
+                [true, false]
+            } else {
+                [false, true]
+            } {
+                let (elapsed, checks, output) = run(incumbent);
+                assert_eq!(output, expected);
+                if incumbent {
+                    previous.push(elapsed);
+                    checkpoints[0] = checks;
+                } else {
+                    radix.push(elapsed);
+                    checkpoints[1] = checks;
+                }
+            }
+        }
+        let names = [
+            "ordered",
+            "engine_ids",
+            "full_width",
+            "parallel",
+            "undirected",
+        ];
+        eprintln!(
+            "projection_sort shape={} vertices={n} edges={} comparator_checks={} radix_checks={} comparator_ns={previous:?} radix_ns={radix:?}",
+            names[shape],
+            edges.len(),
+            checkpoints[0],
+            checkpoints[1],
+        );
+    }
 }
 
 #[test]
