@@ -508,6 +508,108 @@ pub fn encode_patch(rows: &[VertexRow]) -> Result<Vec<u8>, VertexPatchError> {
     Ok(out)
 }
 
+fn patch_full(rows: usize, bytes: u64, row_bytes: u64) -> bool {
+    rows == MAX_PATCH_ROWS as usize
+        || bytes
+            .checked_add(row_bytes)
+            .is_none_or(|total| total > crate::store::MAX_STORED_OBJECT_BYTES)
+}
+
+struct PatchOrder<'a>(&'a VertexRow, usize);
+
+impl PartialEq for PatchOrder<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+impl Eq for PatchOrder<'_> {}
+impl PartialOrd for PatchOrder<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for PatchOrder<'_> {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        (self.0.vid, self.0.created_at, self.1).cmp(&(other.0.vid, other.0.created_at, other.1))
+    }
+}
+
+// The zero-floor compactor's borrowed packing predicate. A positive result
+// relies on the caller's existing whole-root admission; no new history proof
+// or durable owner is minted. Inspect one row's canonical encoding at a time.
+pub(crate) fn is_packed<E>(
+    patches: &[VertexPatchRows],
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<bool, E> {
+    checkpoint()?;
+    let mut order = Vec::new();
+    if order.try_reserve_exact(patches.len()).is_err() {
+        return Ok(false);
+    }
+    let mut publication = None;
+    for (at, patch) in patches.iter().enumerate() {
+        checkpoint()?;
+        let Some(first) = patch.first() else {
+            return Ok(false);
+        };
+        if patch.len() > MAX_PATCH_ROWS as usize {
+            return Ok(false);
+        }
+        let Some((lower, upper)) = span_of_rows(patch) else {
+            return Ok(false);
+        };
+        let key = (upper, lower, first.vid, first.created_at);
+        if publication.is_some_and(|previous| previous >= key) {
+            return Ok(false);
+        }
+        publication = Some(key);
+        order.push(PatchOrder(first, at));
+    }
+    crate::tiered::edge_scan::sort(&mut order, checkpoint)?;
+    let header_bytes = match encode_patch(&[]) {
+        Ok(bytes) => bytes.len() as u64,
+        Err(_) => return Ok(false),
+    };
+    let mut previous: Option<&VertexRow> = None;
+    let mut previous_shape = None;
+    for PatchOrder(_, at) in order {
+        checkpoint()?;
+        let patch = &patches[at];
+        let mut bytes = header_bytes;
+        for (position, row) in patch.iter().enumerate() {
+            checkpoint()?;
+            if validate_succession(position, previous, row).is_err() {
+                return Ok(false);
+            }
+            let single_bytes = match encode_patch(core::slice::from_ref(row)) {
+                Ok(bytes) => bytes.len() as u64,
+                Err(_) => return Ok(false),
+            };
+            if single_bytes > crate::store::MAX_STORED_OBJECT_BYTES {
+                return Ok(false);
+            }
+            let row_bytes = single_bytes - header_bytes;
+            if position == 0 {
+                if let Some((rows, bytes)) = previous_shape
+                    && !patch_full(rows, bytes, row_bytes)
+                {
+                    return Ok(false);
+                }
+            } else if patch_full(position, bytes, row_bytes) {
+                return Ok(false);
+            }
+            let Some(total) = bytes.checked_add(row_bytes) else {
+                return Ok(false);
+            };
+            bytes = total;
+            previous = Some(row);
+        }
+        previous_shape = Some((patch.len(), bytes));
+    }
+    checkpoint()?;
+    Ok(true)
+}
+
 /// Pack staging rows under both the format's row ceiling and the store's
 /// byte admission. Measure with the canonical encoder so variable labels and
 /// scalar encodings cannot drift from a second size formula. Sealing and
@@ -530,12 +632,7 @@ pub(crate) fn pack_rows(rows: Vec<VertexRow>) -> Result<Vec<VertexPatchRows>, Ve
             });
         }
         let row_bytes = (single_bytes - header_bytes) as u64;
-        if !pending.is_empty()
-            && (pending.len() == MAX_PATCH_ROWS as usize
-                || pending_bytes
-                    .checked_add(row_bytes)
-                    .is_none_or(|bytes| bytes > crate::store::MAX_STORED_OBJECT_BYTES))
-        {
+        if !pending.is_empty() && patch_full(pending.len(), pending_bytes, row_bytes) {
             packed.push(VertexPatchRows(Arc::new(core::mem::take(&mut pending))));
             pending_bytes = header_bytes as u64;
         }

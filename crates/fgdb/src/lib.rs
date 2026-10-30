@@ -5597,6 +5597,13 @@ impl<V: Vfs + Clone> Database<V> {
     /// guess. What it does reclaim: cross-block restatements collapse, and
     /// the block count stops growing with tombstone churn.
     ///
+    /// An already consolidated admitted generation is recognized directly
+    /// from its borrowed block/patch ranges and the canonical packing rules.
+    /// This performs no writer rebuild, object I/O or root-slot publication,
+    /// including after reopen. It is not a persistent flag or an admission
+    /// shortcut: the current snapshot has already passed the ordinary root
+    /// and history checks. Cancellation remains active throughout recognition.
+    ///
     /// **DURABLE because open selects the manifest**: the compacted root is
     /// republished through manifest and slot, and checkpoint-selected open
     /// lands on it after authenticating its temporal projection.
@@ -5628,6 +5635,14 @@ impl<V: Vfs + Clone> Database<V> {
         // unreferenced replacement object when no successor slot can ever
         // select it.
         let next_generation = next_slot_generation(self.slot_generation)?;
+        if fgdb_strata::compact::is_consolidated_with_props(
+            &self.snapshot.blocks,
+            &self.snapshot.block_props,
+            &self.snapshot.patches,
+            &mut || cx.checkpoint().map_err(RebuildError::Interrupted),
+        )? {
+            return Ok(());
+        }
         self.retain_preparation_anchor();
         let frontier = self.snapshot.frontier;
         let writer = consolidated_writer(
@@ -7566,6 +7581,59 @@ mod lazy_delta_laws {
     }
 
     #[test]
+    fn consolidated_compaction_preserves_slot_exhaustion_before_cancellation() {
+        let ((), report) = run_async_under_lab(0xa67c, |root| async move {
+            let mut handle = root
+                .spawn(move |child| async move {
+                    let contexts = PurposeContexts::narrow_runtime_root(&child);
+                    let cx = contexts.commit();
+                    let vfs = MemVfs::new().unwrap();
+                    let path = vfs.database_dir();
+                    let mut db = Database::create_with_vfs(&cx, vfs, &path, keys())
+                        .await
+                        .unwrap();
+                    db.write(&cx, create(1)).await.unwrap();
+                    assert!(
+                        fgdb_strata::compact::is_consolidated_with_props(
+                            &db.snapshot.blocks,
+                            &db.snapshot.block_props,
+                            &db.snapshot.patches,
+                            &mut || Ok::<(), ()>(()),
+                        )
+                        .unwrap()
+                    );
+                    let snapshot = Arc::clone(&db.snapshot);
+                    let generation = db.slot_generation;
+                    let state = db.state;
+                    child.set_cancel_reason(
+                        asupersync::CancelReason::new(asupersync::CancelKind::User)
+                            .with_message("cancel no-op compaction"),
+                    );
+                    db.slot_generation = u64::MAX;
+                    assert!(matches!(
+                        db.compact(&cx).await,
+                        Err(RebuildError::SlotGenerationExhausted(
+                            SlotGenerationExhausted { current: u64::MAX }
+                        ))
+                    ));
+                    assert!(Arc::ptr_eq(&snapshot, &db.snapshot));
+                    assert_eq!(db.state, state);
+                    db.slot_generation = generation;
+                    assert!(matches!(
+                        db.compact(&cx).await,
+                        Err(RebuildError::Interrupted(_))
+                    ));
+                    assert!(Arc::ptr_eq(&snapshot, &db.snapshot));
+                    assert_eq!(db.slot_generation, generation);
+                    assert_eq!(db.state, state);
+                })
+                .unwrap();
+            assert_eq!(handle.join(&root).await, Ok(()));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
     fn checkpoint_open_reads_zero_capsules_and_materializes_only_requested_prefixes() {
         let ((), report) = run_async_under_lab(0xa671, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -8956,9 +9024,23 @@ mod root_capacity_laws {
             vec![(PropertyKeyId(1), CanonicalScalar::Int(1))],
         );
         runtime.block_on(db.write(&cx, initial)).unwrap();
+        // Create real consolidation debt before examining replacement of
+        // the lazy version basis. An already packed generation needs none.
+        let mut update = WriteBatch::new(RelationId(1));
+        update.set_edge_property(EId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(2)));
+        runtime.block_on(db.write(&cx, update)).unwrap();
         runtime.block_on(db.compact(&cx)).unwrap();
         let old_basis = Arc::downgrade(db.heads.versions.checkpoint.as_ref().unwrap());
         let old_block = Arc::downgrade(&db.snapshot.blocks[0]);
+        let expected = db.element_versions().unwrap().clone();
+        runtime.block_on(db.compact(&cx)).unwrap();
+        assert!(old_basis.upgrade().is_some(), "no-op keeps the same basis");
+        assert!(old_block.upgrade().is_some(), "no-op keeps the same block");
+        assert_eq!(db.element_versions().unwrap(), &expected);
+
+        let mut update = WriteBatch::new(RelationId(1));
+        update.set_edge_property(EId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(3)));
+        runtime.block_on(db.write(&cx, update)).unwrap();
         let expected = db.element_versions().unwrap().clone();
         runtime.block_on(db.compact(&cx)).unwrap();
         assert!(
@@ -9857,7 +9939,15 @@ mod lazy_writable_adjacency_laws {
         let mut db = runtime
             .block_on(Database::open_with_vfs(&cx, vfs, &dir, keys()))
             .unwrap();
+        // Keep both branches on real replacement compaction: a canonical
+        // unchanged generation now correctly preserves its existing indexes.
+        let mut update = WriteBatch::new(RelationId(1));
+        update.set_edge_property(EId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(1)));
+        runtime.block_on(db.write(&cx, update)).unwrap();
+        assert!(db.snapshot.adjacency.get().is_none());
+        let before = Arc::clone(&db.snapshot);
         runtime.block_on(db.compact(&cx)).unwrap();
+        assert!(!Arc::ptr_eq(&before, &db.snapshot));
         assert!(
             db.snapshot.adjacency.get().is_none(),
             "an untraversed handle compacts without building it"
@@ -9866,7 +9956,13 @@ mod lazy_writable_adjacency_laws {
             db.neighbours(VId(1), RelationId(1)).unwrap(),
             vec![VId(2), VId(3)]
         );
+        let mut update = WriteBatch::new(RelationId(1));
+        update.set_edge_property(EId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(2)));
+        runtime.block_on(db.write(&cx, update)).unwrap();
+        assert!(db.snapshot.adjacency.get().is_some());
+        let before = Arc::clone(&db.snapshot);
         runtime.block_on(db.compact(&cx)).unwrap();
+        assert!(!Arc::ptr_eq(&before, &db.snapshot));
         assert!(
             db.snapshot.adjacency.get().is_some(),
             "a serving handle keeps its index across a compaction"

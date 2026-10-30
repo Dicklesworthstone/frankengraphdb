@@ -33,6 +33,203 @@ use fgdb_types::CommitSeq;
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
 
+fn edge_chunk_full(
+    entries: usize,
+    properties: usize,
+    bytes: u64,
+    row_bytes: u64,
+    has_properties: bool,
+    max_entries: usize,
+    max_patch_rows: usize,
+) -> bool {
+    entries == max_entries
+        || (has_properties && properties == max_patch_rows)
+        || bytes
+            .checked_add(row_bytes)
+            .is_none_or(|total| total > crate::store::MAX_STORED_OBJECT_BYTES)
+}
+
+fn edge_key(
+    entry: &AdjacencyEntry,
+) -> (
+    fgdb_types::VId,
+    fgdb_delta_types::RelationId,
+    fgdb_types::VId,
+    fgdb_types::EId,
+    CommitSeq,
+) {
+    (
+        entry.src,
+        entry.relation,
+        entry.dst,
+        entry.eid,
+        entry.created_at,
+    )
+}
+
+// Only borrowed first-row pointers and input positions survive the ordering
+// pass. No property values or complete adjacency population are copied.
+struct BlockOrder<'a>(&'a AdjacencyEntry, usize);
+
+impl PartialEq for BlockOrder<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+impl Eq for BlockOrder<'_> {}
+impl PartialOrd for BlockOrder<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for BlockOrder<'_> {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        edge_key(self.0)
+            .cmp(&edge_key(other.0))
+            .then_with(|| self.1.cmp(&other.1))
+    }
+}
+
+/// Recognize the zero-floor compactor's exact decoded block/patch layout in
+/// an ALREADY ADMITTED partition. This is an optimization predicate, never a
+/// replacement for root, identity, history, property or durability admission.
+/// It grants no source receipt and creates no persistent consolidation flag.
+///
+/// Disjoint sorted ranges prove that no statement needs last-block-wins
+/// collapse; the ordinary packer's shared capacity rules prove every boundary.
+/// Publication-span order, with canonical chunk order as the tie breaker, must
+/// already match the compactor. Unrecognized layouts take the ordinary path.
+/// Scratch is two short-lived directories of borrowed row pointers/positions,
+/// plus one property/vertex row's encoding. Allocation refusal declines the
+/// optimization; input/control errors belong to the ordinary operation or caller.
+pub fn is_consolidated_with_props<E>(
+    blocks: &[impl AsRef<[AdjacencyEntry]>],
+    block_props: &[Option<impl Borrow<BlockProps>>],
+    patches: &[crate::vertex::VertexPatchRows],
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<bool, E> {
+    checkpoint()?;
+    if blocks.len() != block_props.len() {
+        return Ok(false);
+    }
+    // Ordinary writes usually leave unmerged vertex patches. Check their
+    // smaller directory first, before sorting any edge-block directory.
+    if !crate::vertex::is_packed(patches, checkpoint)? {
+        return Ok(false);
+    }
+    let mut order = Vec::new();
+    if order.try_reserve_exact(blocks.len()).is_err() {
+        return Ok(false);
+    }
+    let mut publication = None;
+    for (at, block) in blocks.iter().enumerate() {
+        checkpoint()?;
+        let block = block.as_ref();
+        let Some(first) = block.first() else {
+            return Ok(false);
+        };
+        if block.len() > crate::MAX_BLOCK_ENTRIES as usize {
+            return Ok(false);
+        }
+        let Some((lower, upper)) = crate::root::span_of(block) else {
+            return Ok(false);
+        };
+        let key = (upper, lower, edge_key(first));
+        if publication.is_some_and(|previous| previous >= key) {
+            return Ok(false);
+        }
+        publication = Some(key);
+        order.push(BlockOrder(first, at));
+    }
+    crate::tiered::edge_scan::sort(&mut order, checkpoint)?;
+    let mut previous: Option<(&AdjacencyEntry, usize, usize, u64)> = None;
+    for BlockOrder(first, at) in order {
+        checkpoint()?;
+        let block = blocks[at].as_ref();
+        let props = block_props[at].as_ref().map(Borrow::borrow);
+        if let Some(props) = props
+            && (props.rows.is_empty()
+                || props.locators.len() != block.len()
+                || crate::edge_props::validate_locator_sequence(&props.locators).ok()
+                    != Some(props.rows.len()))
+        {
+            return Ok(false);
+        }
+        let mut properties = 0;
+        let mut bytes = PROPERTY_PATCH_HEADER_BYTES;
+        for (position, entry) in block.iter().enumerate() {
+            checkpoint()?;
+            if crate::validate_entry(position, entry).is_err()
+                || (entry.src, entry.relation) != (first.src, first.relation)
+            {
+                return Ok(false);
+            }
+            let row = props.and_then(|props| {
+                usize::from(props.locators[position])
+                    .checked_sub(1)
+                    .map(|locator| &props.rows[locator])
+            });
+            // Hosted empty rows are noncanonical; None is the zero locator.
+            let row_bytes = match row {
+                Some(row) if row.is_empty() => return Ok(false),
+                Some(row) => match admitted_row_bytes(row) {
+                    Ok(bytes) => bytes,
+                    Err(_) => return Ok(false),
+                },
+                None => 0,
+            };
+            if position == 0 {
+                if let Some((last, count, property_count, property_bytes)) = previous {
+                    if edge_key(last) >= edge_key(entry) {
+                        return Ok(false);
+                    }
+                    if (last.src, last.relation) == (entry.src, entry.relation)
+                        && !edge_chunk_full(
+                            count,
+                            property_count,
+                            property_bytes,
+                            row_bytes,
+                            row.is_some(),
+                            crate::MAX_BLOCK_ENTRIES as usize,
+                            MAX_PROPERTY_PATCH_ROWS as usize,
+                        )
+                    {
+                        return Ok(false);
+                    }
+                }
+            } else if edge_key(&block[position - 1]) >= edge_key(entry)
+                || edge_chunk_full(
+                    position,
+                    properties,
+                    bytes,
+                    row_bytes,
+                    row.is_some(),
+                    crate::MAX_BLOCK_ENTRIES as usize,
+                    MAX_PROPERTY_PATCH_ROWS as usize,
+                )
+            {
+                return Ok(false);
+            }
+            let Some(total) = bytes.checked_add(row_bytes) else {
+                return Ok(false);
+            };
+            if total > crate::store::MAX_STORED_OBJECT_BYTES {
+                return Ok(false);
+            }
+            bytes = total;
+            properties += usize::from(row.is_some());
+        }
+        previous = Some((
+            block.last().expect("nonempty block"),
+            block.len(),
+            properties,
+            bytes,
+        ));
+    }
+    checkpoint()?;
+    Ok(true)
+}
+
 /// The result of compacting a partition's blocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Compaction {
@@ -256,9 +453,15 @@ fn pack_retained(
         let row_bytes = admitted_row_bytes(&pair.1).map_err(RootError::PropertyPatch)?;
         if !chunk.is_empty()
             && (descriptor != Some(key)
-                || chunk.len() == max_entries
-                || (!pair.1.is_empty() && propertied == max_patch_rows)
-                || patch_bytes + row_bytes > crate::store::MAX_STORED_OBJECT_BYTES)
+                || edge_chunk_full(
+                    chunk.len(),
+                    propertied,
+                    patch_bytes,
+                    row_bytes,
+                    !pair.1.is_empty(),
+                    max_entries,
+                    max_patch_rows,
+                ))
         {
             packed.push(seal_chunk(std::mem::take(&mut chunk)));
             propertied = 0;
@@ -401,6 +604,172 @@ mod tests {
         // order. Permuted full-width EIds prevent sorted-input special pleading.
         retained.sort_unstable_by_key(|(entry, _)| (entry.eid, entry.created_at));
         retained
+    }
+
+    fn canonical_vertices(count: usize, payload: usize) -> Vec<crate::vertex::VertexPatchRows> {
+        use fgdb_delta_types::PropertyKeyId;
+        use fgdb_types::CanonicalScalar;
+        let rows = (0..count)
+            .map(|at| crate::vertex::VertexRow {
+                vid: VId((1_u128 << 127) | at as u128),
+                birth_ordinal: at as u64,
+                created_at: CommitSeq(1 + (at % 7) as u64),
+                retired_at: (at % 5 == 0).then_some(CommitSeq(12)),
+                labels: Vec::new(),
+                props: if payload == 0 {
+                    Vec::new()
+                } else {
+                    vec![(
+                        PropertyKeyId(1),
+                        CanonicalScalar::bytes(vec![at as u8; payload])
+                            .unwrap()
+                            .into(),
+                    )]
+                },
+            })
+            .collect();
+        let mut patches = crate::vertex::pack_rows(rows).unwrap();
+        patches.sort_by_key(|rows| {
+            let (first, last) = crate::vertex::span_of_rows(rows).unwrap();
+            (last, first)
+        });
+        patches
+    }
+
+    fn consolidated(
+        blocks: &[Vec<AdjacencyEntry>],
+        props: &[Option<BlockProps>],
+        patches: &[crate::vertex::VertexPatchRows],
+    ) -> bool {
+        is_consolidated_with_props(blocks, props, patches, &mut || Ok::<(), ()>(())).unwrap()
+    }
+
+    #[test]
+    fn consolidated_recognition_matches_real_packing_at_row_and_property_boundaries() {
+        for count in [0, 1, 255, 256, 257, 1025] {
+            for sources in [1, 7] {
+                for properties in [false, true] {
+                    let (blocks, props) = pack_retained(
+                        descriptor_fixture(count, sources, properties),
+                        crate::MAX_BLOCK_ENTRIES as usize,
+                        MAX_PROPERTY_PATCH_ROWS as usize,
+                    )
+                    .unwrap();
+                    let patches = canonical_vertices(count, 0);
+                    assert!(consolidated(&blocks, &props, &patches));
+                    let rebuilt = compact_with_props(&blocks, &props, CommitSeq::ORIGIN).unwrap();
+                    assert_eq!(rebuilt.blocks, blocks);
+                    assert_eq!(rebuilt.block_props, props);
+                    assert_eq!(
+                        compact_vertex_patches(&patches, CommitSeq::ORIGIN)
+                            .unwrap()
+                            .0,
+                        patches
+                    );
+                }
+            }
+        }
+        // Both byte ceilings split before their row ceilings. A semantic row
+        // remains intact, and the detector uses exactly the packer's boundary.
+        use fgdb_delta_types::PropertyKeyId;
+        use fgdb_types::CanonicalScalar;
+        let row = vec![(
+            PropertyKeyId(1),
+            CanonicalScalar::bytes(vec![5; 6000]).unwrap().into(),
+        )];
+        let retained = (1..=9).map(|id| (entry(id), row.clone())).collect();
+        let (blocks, props) = pack_retained(retained, 256, 255).unwrap();
+        assert!(blocks.len() > 1);
+        let patches = canonical_vertices(9, 6000);
+        assert!(patches.len() > 1);
+        assert!(consolidated(&blocks, &props, &patches));
+        let rebuilt = compact_with_props(&blocks, &props, CommitSeq::ORIGIN).unwrap();
+        assert_eq!(rebuilt.blocks, blocks);
+        assert_eq!(rebuilt.block_props, props);
+    }
+
+    #[test]
+    fn consolidation_recognition_declines_restatements_fragmentation_and_bad_locators() {
+        let (fragmented, props) =
+            pack_retained((1..=5).map(|id| (entry(id), Vec::new())).collect(), 1, 255).unwrap();
+        assert!(!consolidated(&fragmented, &props, &[]));
+        assert_eq!(
+            compact_with_props(&fragmented, &props, CommitSeq::ORIGIN)
+                .unwrap()
+                .blocks
+                .len(),
+            1
+        );
+        // Two full blocks whose ranges interleave still need repacking.
+        let interleaved = vec![
+            (1..=512).step_by(2).map(entry).collect(),
+            (2..=512).step_by(2).map(entry).collect(),
+        ];
+        assert!(!consolidated(&interleaved, &[None, None], &[]));
+        let restated = vec![vec![entry(1)], vec![version(1, 1, Some(4))]];
+        assert!(!consolidated(&restated, &[None, None], &[]));
+        assert_eq!(
+            compact_with_props(&restated, &[None::<BlockProps>, None], CommitSeq::ORIGIN)
+                .unwrap()
+                .superseded,
+            1
+        );
+        let patches = canonical_vertices(5, 0);
+        let mut fragmented_patches: Vec<_> = patches[0]
+            .iter()
+            .flat_map(|row| crate::vertex::pack_rows(vec![row.clone()]).unwrap())
+            .collect();
+        // Use truthful publication spans, so this is legal fragmentation,
+        // rather than merely an impossible root publication order.
+        fragmented_patches.sort_by_key(|rows| {
+            let (first, last) = crate::vertex::span_of_rows(rows).unwrap();
+            (last, first)
+        });
+        assert!(!consolidated(&[], &[], &fragmented_patches));
+        let mut duplicated = patches.clone();
+        duplicated.extend(patches);
+        assert!(!consolidated(&[], &[], &duplicated));
+        let (blocks, props) = pack_retained(descriptor_fixture(20, 1, true), 256, 255).unwrap();
+        let at = props.iter().position(Option::is_some).unwrap();
+        let mut bad = props.clone();
+        bad[at].as_mut().unwrap().locators.pop();
+        assert!(!consolidated(&blocks, &bad, &[]));
+        let mut bad = props.clone();
+        bad[at].as_mut().unwrap().rows.push(Vec::new());
+        assert!(!consolidated(&blocks, &bad, &[]));
+        let mut bad = props;
+        bad[at].as_mut().unwrap().locators.fill(0);
+        bad[at].as_mut().unwrap().rows.clear();
+        assert!(!consolidated(&blocks, &bad, &[]));
+    }
+
+    #[test]
+    fn every_consolidation_recognition_checkpoint_can_refuse_without_changing_inputs() {
+        let (blocks, props) = pack_retained(descriptor_fixture(37, 7, true), 256, 255).unwrap();
+        let patches = canonical_vertices(19, 8);
+        let original = (blocks.clone(), props.clone(), patches.clone());
+        let mut calls = 0;
+        assert!(
+            is_consolidated_with_props(&blocks, &props, &patches, &mut || {
+                calls += 1;
+                Ok::<(), usize>(())
+            })
+            .unwrap()
+        );
+        for stop in 1..=calls {
+            let mut reached = 0;
+            let result = is_consolidated_with_props(&blocks, &props, &patches, &mut || {
+                reached += 1;
+                if reached == stop { Err(stop) } else { Ok(()) }
+            });
+            assert_eq!(result, Err(stop));
+            assert_eq!(reached, stop);
+            assert_eq!(
+                (&blocks, &props, &patches),
+                (&original.0, &original.1, &original.2)
+            );
+        }
+        assert!(consolidated(&blocks, &props, &patches));
     }
 
     #[test]

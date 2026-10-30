@@ -13,6 +13,7 @@
 use asupersync::fs::{Metadata, OpenOptions, Permissions, ReadDir, Vfs};
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, DatabaseState, MemVfs, MemVfsFile, RebuildError, WriteBatch};
+use fgdb_chronicle::RootStore;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_strata::store::{BLOCK_DIR, PACK_DIR, StoreError};
 use fgdb_types::{
@@ -33,6 +34,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 struct ObjectIoVfs {
     memory: MemVfs,
     touched: Arc<AtomicUsize>,
+    publication_calls: Arc<AtomicUsize>,
     snapshot_reads: Arc<AtomicUsize>,
     refuse_snapshot_reads: Arc<AtomicBool>,
     corrupt_durable_read: Arc<AtomicBool>,
@@ -44,6 +46,7 @@ impl ObjectIoVfs {
         Self {
             memory: MemVfs::new().unwrap(),
             touched: Arc::new(AtomicUsize::new(0)),
+            publication_calls: Arc::new(AtomicUsize::new(0)),
             snapshot_reads: Arc::new(AtomicUsize::new(0)),
             refuse_snapshot_reads: Arc::new(AtomicBool::new(false)),
             corrupt_durable_read: Arc::new(AtomicBool::new(false)),
@@ -79,6 +82,7 @@ impl Vfs for ObjectIoVfs {
     type File = MemVfsFile;
 
     async fn open(&self, path: &Path, options: &OpenOptions) -> io::Result<Self::File> {
+        self.publication_calls.fetch_add(1, Ordering::SeqCst);
         self.observe(path);
         self.memory.open(path, options).await
     }
@@ -137,6 +141,7 @@ impl Vfs for ObjectIoVfs {
         self.memory.remove_dir_all(path).await
     }
     async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.publication_calls.fetch_add(1, Ordering::SeqCst);
         self.memory.rename(from, to).await
     }
     async fn copy(&self, from: &Path, to: &Path) -> io::Result<u64> {
@@ -168,6 +173,7 @@ impl Vfs for ObjectIoVfs {
         self.memory.read_to_string(path).await
     }
     async fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.publication_calls.fetch_add(1, Ordering::SeqCst);
         self.memory.write(path, bytes).await
     }
 }
@@ -199,12 +205,10 @@ fn spoke(i: u128) -> WriteBatch {
 }
 
 /// **Recompaction touches no published object, however large the
-/// partition (fgdb-l89gt).** Compaction's publication starts from the
-/// handle's receipts (the fgdb-ibbuq "trust publication" ruling), so
-/// recompacting an already compacted generation re-reads and re-syncs no
-/// block or patch object: its object I/O is its root and manifest, the
-/// same for 16 spokes as for 64. The recompacted root is the same root,
-/// and a cold reopen of the result answers the same graph.
+/// partition (fgdb-l89gt).** An already consolidated generation needs no
+/// object or root-slot publication. Recognition works after a cold reopen,
+/// without a process-local flag. New writes still require real compaction,
+/// while historical answers and the old immutable generation stay intact.
 #[test]
 fn recompaction_touches_no_published_object_however_large_the_partition() {
     let ((), report) = run_async_under_lab(0x1891, |root| async move {
@@ -229,10 +233,16 @@ fn recompaction_touches_no_published_object_however_large_the_partition() {
             db.compact(&cx).await.unwrap();
             assert_eq!(vfs.snapshot_reads.load(Ordering::SeqCst), 0);
             let compacted = db.partition_root().unwrap();
+            let slot_store = RootStore::with_vfs(vfs.clone(), &path);
+            let slot = slot_store.current(&cx).await.unwrap();
             let first = vfs.take();
+            vfs.publication_calls.store(0, Ordering::SeqCst);
             db.compact(&cx).await.unwrap();
+            assert_eq!(vfs.publication_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(slot_store.current(&cx).await.unwrap(), slot);
             assert_eq!(vfs.snapshot_reads.load(Ordering::SeqCst), 0);
             let again = vfs.take();
+            assert_eq!(again, 0, "already consolidated objects are untouched");
             assert_eq!(db.partition_root().unwrap(), compacted);
             assert!(
                 first > again,
@@ -241,7 +251,7 @@ fn recompaction_touches_no_published_object_however_large_the_partition() {
             touched.push(again);
             drop(db);
             vfs.refuse_snapshot_reads(false);
-            let db = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
+            let mut db = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
                 .await
                 .unwrap();
             assert_eq!(db.partition_root().unwrap(), compacted);
@@ -251,15 +261,33 @@ fn recompaction_touches_no_published_object_however_large_the_partition() {
                 vfs.snapshot_reads.load(Ordering::SeqCst) > 0,
                 "a cold open still authenticates its root and immutable objects"
             );
+            vfs.take();
+            vfs.refuse_snapshot_reads(true);
+            vfs.publication_calls.store(0, Ordering::SeqCst);
+            db.compact(&cx).await.unwrap();
+            assert_eq!(vfs.publication_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(vfs.take(), 0);
+            assert_eq!(vfs.snapshot_reads.load(Ordering::SeqCst), 0);
+            assert_eq!(slot_store.current(&cx).await.unwrap(), slot);
+
+            let old_cut = db.frontier().unwrap();
+            let old_vertices = db.vertices_at(old_cut).unwrap();
+            let old_edges = db.edges_at(old_cut).unwrap();
+            db.write(&cx, spoke(spokes)).await.unwrap();
+            vfs.publication_calls.store(0, Ordering::SeqCst);
+            db.compact(&cx).await.unwrap();
+            assert!(vfs.publication_calls.load(Ordering::SeqCst) > 0);
+            assert_eq!(db.vertices_at(old_cut).unwrap(), old_vertices);
+            assert_eq!(db.edges_at(old_cut).unwrap(), old_edges);
+            assert_eq!(db.edges().unwrap().len(), spokes as usize + 1);
+            assert_eq!(db.vertices().unwrap().len(), spokes as usize + 2);
+            assert!(slot_store.current(&cx).await.unwrap().slot_generation > slot.slot_generation);
         }
         assert_eq!(
             touched[0], touched[1],
             "recompaction object I/O must not grow with the partition: {touched:?}"
         );
-        // Only the root and the manifest: an existing canonical object is
-        // probed once and opened twice (one handle re-reads and proves it,
-        // the other is synced), so 2 x 3.
-        assert!(touched[0] <= 6, "only the root and manifest: {touched:?}");
+        assert_eq!(touched, [0, 0], "no object or slot publication is needed");
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
