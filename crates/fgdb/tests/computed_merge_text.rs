@@ -908,3 +908,172 @@ fn on_create_map_replacement_sets_the_entries_and_unsets_omitted_pattern_keys() 
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// fgdb-at06q: `ON MATCH SET n = {map}` and a trailing `SET n = {map}`
+/// replace the chosen vertex's map at run time (ClearProperties): every key
+/// it holds when the clause starts and the clause does not assign is unset,
+/// then the entries apply. This is the ingestion idiom `UNWIND $rows AS row
+/// MERGE (n {id: row.id}) SET n = row`. A capability clears only the keys
+/// its scope shows; a hidden key survives the replacement.
+#[test]
+fn match_and_trailing_map_replacement_clear_the_keys_the_clause_does_not_assign() {
+    let ((), report) = run_async_under_lab(0x5c73_a707, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let name = |value: &str| Scalar::ucs_basic_text(value).unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(
+            VId(1),
+            vec![PERSON],
+            vec![
+                (ID, Scalar::Int(1)),
+                (NAME, name("A")),
+                (COUNT, Scalar::Int(3)),
+            ],
+        );
+        db.write(&commit, seed).await.unwrap();
+        let props = |db: &Database<MemVfs>, vertex: u128| {
+            let mut props: Vec<_> = db
+                .vertex(VId(vertex))
+                .unwrap()
+                .unwrap()
+                .props
+                .into_iter()
+                .map(|(key, value)| (key, value.as_scalar().expect("scalar property").clone()))
+                .collect();
+            props.sort_by_key(|(key, _)| *key);
+            props
+        };
+        let rows = GqlParameters::new()
+            .with_list(
+                "rows",
+                vec![
+                    GraphValue::map(vec![
+                        ("id".into(), GraphValue::Scalar(Scalar::Int(1))),
+                        ("count".into(), GraphValue::Scalar(Scalar::Int(7))),
+                    ])
+                    .unwrap(),
+                ],
+            )
+            .unwrap();
+        let mut allocations = 1_u128;
+        for (statement, params, vertex, expected) in [
+            // ON MATCH: count, not in the map, is unset.
+            (
+                "MERGE (n:Person {id: 1}) ON MATCH SET n = {id: 1, name: 'B'}",
+                GqlParameters::new(),
+                1,
+                vec![(ID, Scalar::Int(1)), (NAME, name("B"))],
+            ),
+            // A trailing SET replaces a created vertex's map too.
+            (
+                "MERGE (n:Person {id: 2}) SET n = {id: 2, name: 'C'}",
+                GqlParameters::new(),
+                2,
+                vec![(ID, Scalar::Int(2)), (NAME, name("C"))],
+            ),
+            // The ingestion idiom: name is unset, count arrives.
+            (
+                "UNWIND $rows AS row MERGE (n:Person {id: row.id}) SET n = row",
+                rows,
+                1,
+                vec![(ID, Scalar::Int(1)), (COUNT, Scalar::Int(7))],
+            ),
+            // Keys the clause assigns after the replacement are kept.
+            (
+                "MERGE (n:Person {id: 2}) ON MATCH SET n = {id: 2}, n.count = 5",
+                GqlParameters::new(),
+                2,
+                vec![(ID, Scalar::Int(2)), (COUNT, Scalar::Int(5))],
+            ),
+        ] {
+            db.query_write(
+                &txn,
+                &query,
+                &commit,
+                statement,
+                &params,
+                symbols,
+                R,
+                program_policy(10),
+                |_| {
+                    allocations += 1;
+                    Ok::<_, ()>(ElementId::Vertex(VId(allocations)))
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+            assert_eq!(props(&db, vertex), expected, "{statement}");
+        }
+        for refused in [
+            // SET items apply in order: an earlier assignment would need erasing.
+            "MERGE (n:Person {id: 1}) ON MATCH SET n.name = 'X', n = {id: 1}",
+            // A MERGE step over rows has no current-key read yet.
+            "MATCH (m:Person {id: 2}) MERGE (n:Person {id: m.id}) ON MATCH SET n = {id: 2}",
+        ] {
+            assert!(
+                db.query_write(
+                    &txn,
+                    &query,
+                    &commit,
+                    refused,
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    program_policy(10),
+                    |_| Err::<ElementId, _>(()),
+                )
+                .await
+                .is_err(),
+                "{refused}"
+            );
+        }
+        assert_eq!(
+            props(&db, 1),
+            [(ID, Scalar::Int(1)), (COUNT, Scalar::Int(7))]
+        );
+
+        // A capability that cannot see `secret` clears only id and count.
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(
+            VId(50),
+            vec![PERSON],
+            vec![
+                (ID, Scalar::Int(50)),
+                (COUNT, Scalar::Int(1)),
+                (SECRET, Scalar::Int(99)),
+            ],
+        );
+        db.write(&commit, seed).await.unwrap();
+        let authority = authority();
+        let token = authority.issue_at(&grant(), 100).unwrap();
+        let program = PreparedGraphWriteScript::prepare(
+            "MERGE (n:Person {id: 50}) ON MATCH SET n = {id: 50}",
+            R,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        db.execute_graph_write_program_authorized(
+            &txn,
+            &query,
+            &commit,
+            &authority,
+            &token,
+            "main",
+            &program,
+            program_policy(1),
+            || 100,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            props(&db, 50),
+            [(ID, Scalar::Int(50)), (SECRET, Scalar::Int(99))]
+        );
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
