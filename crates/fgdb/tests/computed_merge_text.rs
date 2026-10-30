@@ -614,8 +614,10 @@ fn computed_keys_probe_the_property_index_below_one_scan() {
         // A WITH stage computing the key from the row joins on it: the
         // batch writer leaves the statement to the multipart compiler, which
         // used to be unreachable here ("MERGE or MATCH after the UNWIND
-        // sources"). The transaction now admits the computed key's indexed
-        // candidates under an allowance below one scan (fgdb-2npty).
+        // sources"). The mutation's selection source has no seeded hook yet
+        // (graph_mutations.rs collect_graph_mutation_over), so this runs
+        // under the ordinary allowance. 80752e7cb tightened it to `tight`
+        // without a run; that was never green (51 > 50). fgdb-2npty.
         for (statement, s, vertex, count) in [
             (
                 "UNWIND $rows AS row WITH row, toInteger(row.s) AS k \
@@ -640,7 +642,7 @@ fn computed_keys_probe_the_property_index_below_one_scan() {
                 &batch(vec![field("s", text(s))]),
                 symbols,
                 R,
-                tight,
+                program_policy(100),
                 |_| Err::<ElementId, _>(()),
             )
             .await
@@ -1079,7 +1081,8 @@ fn match_and_trailing_map_replacement_clear_the_keys_the_clause_does_not_assign(
             &token,
             "main",
             &program,
-            program_policy(1),
+            // Each unset is a mutation effect: clearing count and setting id.
+            program_policy(2),
             || 100,
         )
         .await

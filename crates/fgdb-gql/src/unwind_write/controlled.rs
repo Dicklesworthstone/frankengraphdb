@@ -567,11 +567,27 @@ impl GraphUnwindWriteText {
     /// assignment form means.
     fn assigns_map_at(&self, site: usize) -> bool {
         let before = self.lowered[..site].trim_end_matches(|ch: char| ch.is_ascii_whitespace());
-        before.ends_with("+=")
-            || (before.ends_with('=')
-                && !["==", "<=", ">=", "!="]
-                    .iter()
-                    .any(|comparison| before.ends_with(comparison)))
+        if before.ends_with("+=") {
+            return true;
+        }
+        // A replacing `=` assigns a whole variable (`SET n = row`): not a
+        // property (`SET n.p = row` keeps its scalar-field refusal), and
+        // not a comparison.
+        let Some(target) = before.strip_suffix('=') else {
+            return false;
+        };
+        if ["=", "<", ">", "!"]
+            .iter()
+            .any(|operator| target.ends_with(operator))
+        {
+            return false;
+        }
+        let target = target.trim_end_matches(|ch: char| ch.is_ascii_whitespace());
+        let prefix = target.trim_end_matches(|ch: char| ch.is_ascii_alphanumeric() || ch == '_');
+        prefix.len() < target.len()
+            && !prefix
+                .trim_end_matches(|ch: char| ch.is_ascii_whitespace())
+                .ends_with('.')
     }
 }
 

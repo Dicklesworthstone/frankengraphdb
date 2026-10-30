@@ -611,11 +611,38 @@ where
             }
             output
         }
-        SetNode::Join { left, right, spec } => {
+        SetNode::Join {
+            left: leading,
+            right,
+            spec,
+        } => {
             // Preserve both complete source scopes and their failure order.
             // A missing witness or LIMIT 0 never skips the right operand.
-            let left = run(left, source, meter, operand)?;
-            let right = run(right, source, meter, operand)?;
+            let left = run(leading, source, meter, operand)?;
+            // A MATCH after a WITH stage joins here, not as a filtered cross
+            // (fgdb-2npty). A join that keeps only matching right rows may
+            // seed its pattern leaf from the complete left bag, exactly as
+            // the filtered cross does; Right and Full keep every right row.
+            let seeded = match (spec.kind(), spec.predicate()) {
+                (
+                    crate::row_join::RowJoinKind::Inner
+                    | crate::row_join::RowJoinKind::Left
+                    | crate::row_join::RowJoinKind::Semi
+                    | crate::row_join::RowJoinKind::Anti,
+                    Some(code),
+                ) => selected_cross::seeded::collect(
+                    &left,
+                    (leading, right, code, None),
+                    source,
+                    meter,
+                    operand,
+                )?,
+                _ => None,
+            };
+            let right = match seeded {
+                Some(rows) => rows,
+                None => run(right, source, meter, operand)?,
+            };
             join::execute(spec, left, right, &mut |event| meter.event(event))?
         }
         SetNode::Pattern(pattern) => {

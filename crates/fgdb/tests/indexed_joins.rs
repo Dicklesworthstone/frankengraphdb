@@ -566,6 +566,17 @@ fn row_keyed_property_matches_admit_only_the_posted_roots() {
                  RETURN a.x AS x ORDER BY x",
                 &numbers,
             ),
+            // A WITH stage joins the MATCH as a row join, seeded the same way.
+            (
+                "UNWIND $rows AS row WITH toInteger(row.s) AS k MATCH (a:Node {id: k}) \
+                 RETURN a.x AS x ORDER BY x",
+                &texts,
+            ),
+            (
+                "UNWIND $rows AS row WITH row MATCH (a:Node {id: row.id + 1}) \
+                 RETURN a.x AS x ORDER BY x",
+                &numbers,
+            ),
         ] {
             let reference = xs(db
                 .query(&cx, statement, params, names, policy())
@@ -742,7 +753,7 @@ fn transaction_property_seed_witnesses_catch_empty_phantoms_and_refused_reads() 
                     winner.create_vertex(VId(901), vec![], vec![(SCORE, CanonicalScalar::Int(500))])
                 }
                 _ => winner.set_vertex_property(VId(3), SCORE, Some(CanonicalScalar::Int(499))),
-            }
+            };
             db.write(&commit, winner).await.unwrap();
             let frontier = db.frontier().unwrap();
             // No getter or full scan may repair a missing membership witness.
