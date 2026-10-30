@@ -62,13 +62,36 @@ impl PreparedRead {
     }
 }
 
-pub(crate) struct PreparedWrite {
+pub(crate) enum PreparedWrite {
+    Script(PreparedScript),
+    /// A chain without RETURN keeps the Write wire class while reusing the
+    /// existing row-action template and authorized chain execution owner.
+    Chain(PreparedReturning),
+}
+
+pub(crate) struct PreparedScript {
     script: PreparedGraphWriteScript,
     /// The value-free splice of map arguments standing for property maps
     /// (fgdb-0s2pq); every execution derives its own arguments through it.
     lowered: Option<fgdb_gql::GqlMapArgumentText>,
     generation: Generation,
     source_bytes: usize,
+}
+
+impl PreparedWrite {
+    fn generation(&self) -> &Generation {
+        match self {
+            Self::Script(prepared) => &prepared.generation,
+            Self::Chain(prepared) => &prepared.generation,
+        }
+    }
+
+    fn source_bytes(&self) -> usize {
+        match self {
+            Self::Script(prepared) => prepared.source_bytes,
+            Self::Chain(prepared) => prepared.source_bytes,
+        }
+    }
 }
 
 /// A script fault of a lowered statement, at the caller's bytes.
@@ -108,7 +131,7 @@ impl PreparedDefinition {
     pub(crate) fn generation(&self) -> &Generation {
         match self {
             Self::Read(definition) => &definition.generation,
-            Self::Write(definition) => &definition.generation,
+            Self::Write(definition) => definition.generation(),
             Self::WriteReturning(definition) => &definition.generation,
         }
     }
@@ -116,7 +139,7 @@ impl PreparedDefinition {
     pub(crate) fn source_bytes(&self) -> usize {
         match self {
             Self::Read(definition) => definition.source_bytes,
-            Self::Write(definition) => definition.source_bytes,
+            Self::Write(definition) => definition.source_bytes(),
             Self::WriteReturning(definition) => definition.source_bytes,
         }
     }
@@ -149,7 +172,8 @@ pub(crate) async fn prepare_statement(
             .await
             .map(PreparedDefinition::Write),
         PrepareMode::WriteReturning => {
-            prepare_write_returning(cx, db, token, request).map(PreparedDefinition::WriteReturning)
+            prepare_row_write(cx, db, token, request, true)
+                .map(PreparedDefinition::WriteReturning)
         }
     }
 }
@@ -246,12 +270,24 @@ async fn prepare_write(
     let generation = db.db.generation().map_err(Refusal::from)?;
     let _operation = generation.enter().map_err(Refusal::from)?;
     let now = unix_millis();
-    db.authority
+    let capability = db
+        .authority
         .verify_at(token, TRUNK, now)
-        .and_then(|capability| capability.begin_write_at(TRUNK, now).map(|_| ()))
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    let mut permit = capability
+        .begin_write_at(TRUNK, now)
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    // Reserve the definition's byte price before converting or inspecting it.
+    // This is a preflight check of the same price the selected native owner
+    // still bills in full; it does not grant an extra allowance or credit.
+    permit
+        .charge_work_at(now, request.statement.len() as u64)
         .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
     let contexts = PurposeContexts::narrow_runtime_root(cx);
     let query = crate::query_cx(&contexts);
+    query
+        .checkpoint()
+        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
     let parameters = convert::parameters(&request.parameters, None)
         .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
     // Map arguments standing for property maps splice with the representative
@@ -261,6 +297,31 @@ async fn prepare_write(
         (request.statement.as_str(), &parameters),
         |(lowered, derived)| (lowered.text(), derived),
     );
+    // Use the same lowered framing as ReturningTemplate. A map argument can
+    // become a literal map, which must keep its established script owner.
+    // Cover expanded bytes before the framing probe; no second byte bill is
+    // added to the selected owner's existing complete preparation charge.
+    permit
+        .charge_work_at(
+            unix_millis(),
+            statement.len().saturating_sub(request.statement.len()) as u64,
+        )
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    let chain = query.with_restriction(|| {
+        PreparedGraphWriteChainText::is_chain(statement).map_err(|error| {
+            restored_refusal(lowered.as_ref().map(|(lowered, _)| lowered), error)
+        })
+    });
+    permit
+        .checkpoint_at(unix_millis())
+        .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
+    query
+        .checkpoint()
+        .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
+    generation.check().map_err(Refusal::from)?;
+    if chain? {
+        return prepare_row_write(cx, db, token, request, false).map(PreparedWrite::Chain);
+    }
     let guard = db.db.read(cx).await.map_err(Refusal::from)?;
     generation.check().map_err(Refusal::from)?;
     let script = guard.prepare_graph_write_script_authorized(
@@ -278,19 +339,20 @@ async fn prepare_write(
     );
     generation.check().map_err(Refusal::from)?;
     let lowered = lowered.map(|(lowered, _)| lowered);
-    Ok(PreparedWrite {
+    Ok(PreparedWrite::Script(PreparedScript {
         script: script.map_err(|error| write_refusal(&restored_fault(lowered.as_ref(), error)))?,
         lowered,
         generation,
         source_bytes: request.statement.len(),
-    })
+    }))
 }
 
-fn prepare_write_returning(
+fn prepare_row_write(
     cx: &Cx,
     db: &Served,
     token: &CapabilityToken,
     request: &Prepare,
+    returns_rows: bool,
 ) -> Result<PreparedReturning, Refusal> {
     let generation = db.db.generation().map_err(Refusal::from)?;
     let _operation = generation.enter().map_err(Refusal::from)?;
@@ -319,7 +381,7 @@ fn prepare_write_returning(
         let parameters = convert::parameters(&request.parameters, None)
             .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
         let template = ReturningTemplate::prepare(db, &request.statement, &parameters)?
-            .filter(ReturningTemplate::returns_rows)
+            .filter(|template| template.returns_rows() == returns_rows)
             .ok_or_else(mode_refusal)?;
         // Validate representative types/constant expressions, then discard
         // their values. They can never become an execution's implicit defaults.
@@ -359,7 +421,10 @@ pub(crate) fn run_prepared<'a>(
         (PreparedDefinition::Read(prepared), PreparedExecutionMode::Buffered) => {
             read_prepared(cx, db, token, prepared, parameters)
         }
-        (PreparedDefinition::Write(prepared), PreparedExecutionMode::Write) => {
+        (
+            PreparedDefinition::Write(PreparedWrite::Script(prepared)),
+            PreparedExecutionMode::Write,
+        ) => {
             Box::pin(write_prepared_inner(
                 cx,
                 db,
@@ -368,7 +433,8 @@ pub(crate) fn run_prepared<'a>(
                 PreparedParameters::Single(parameters),
             ))
         }
-        (PreparedDefinition::WriteReturning(prepared), PreparedExecutionMode::WriteReturning) => {
+        (PreparedDefinition::Write(PreparedWrite::Chain(prepared)), PreparedExecutionMode::Write)
+        | (PreparedDefinition::WriteReturning(prepared), PreparedExecutionMode::WriteReturning) => {
             Box::pin(write_returning_prepared(
                 cx, db, token, prepared, parameters,
             ))
@@ -387,14 +453,18 @@ pub(crate) fn run_prepared_batch<'a>(
     argument_sets: &'a [Vec<(String, WireValue)>],
 ) -> Execution<'a> {
     match definition {
-        PreparedDefinition::Write(prepared) => Box::pin(write_prepared_inner(
+        PreparedDefinition::Write(PreparedWrite::Script(prepared)) => Box::pin(write_prepared_inner(
             cx,
             db,
             token,
             prepared,
             PreparedParameters::Batch(argument_sets),
         )),
-        PreparedDefinition::Read(_) | PreparedDefinition::WriteReturning(_) => {
+        PreparedDefinition::Read(_)
+        | PreparedDefinition::Write(PreparedWrite::Chain(_))
+        | PreparedDefinition::WriteReturning(_) => {
+            // A chain has one frozen native input, not an atomic script-batch
+            // owner. Do not emulate a batch with separately committed calls.
             Box::pin(async { Err(mode_refusal()) })
         }
     }
@@ -482,7 +552,7 @@ async fn write_prepared_inner(
     cx: &Cx,
     db: &Served,
     token: &CapabilityToken,
-    prepared: &PreparedWrite,
+    prepared: &PreparedScript,
     parameters: PreparedParameters<'_>,
 ) -> Result<Answer, Refusal> {
     let _operation = prepared.generation.enter().map_err(Refusal::from)?;

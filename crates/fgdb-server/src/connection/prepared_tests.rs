@@ -1038,3 +1038,126 @@ fn prepared_returning_binding_and_native_execution_share_one_signed_work_ceiling
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn prepared_no_return_chains_keep_write_mode_and_fresh_arguments() {
+    let ((), report) = run_async_under_lab(0x79a0_0442, |root| async move {
+        let (server, token, _) = served(&root, "prepared-rowless-chain").await;
+        let db = &server.databases["test"];
+        let arguments = |values: &[i64]| -> Vec<(String, WireValue)> {
+            vec![(
+                "rows".into(),
+                WireValue::List(values.iter().copied().map(WireValue::Int).collect()),
+            )]
+        };
+        let statement = "UNWIND $rows AS row CREATE (a) WITH a, row CREATE (b)";
+        let definition = ok(prepare_statement(
+            &root,
+            db,
+            &token,
+            &Prepare {
+                mode: PrepareMode::Write,
+                statement: statement.into(),
+                parameters: arguments(&[99]),
+            },
+        )
+        .await);
+        let mut cache = PreparedStatements::default();
+        let (handle, _) = ok(cache.insert(&root, definition));
+        let definition = ok(cache.get(handle));
+        assert!(definition.read().is_none());
+        for mode in [
+            PreparedExecutionMode::Buffered,
+            PreparedExecutionMode::WriteReturning,
+        ] {
+            assert_eq!(
+                run_prepared(&root, db, &token, &definition, mode, &arguments(&[1]))
+                    .await
+                    .err()
+                    .unwrap()
+                    .code,
+                ErrorCode::Statement
+            );
+        }
+        assert_eq!(
+            run_prepared_batch(&root, db, &token, &definition, &[arguments(&[1])])
+                .await
+                .err()
+                .unwrap()
+                .code,
+            ErrorCode::Statement,
+            "the script-batch owner cannot independently commit chain argument sets"
+        );
+        assert_eq!(
+            prepare_statement(
+                &root,
+                db,
+                &token,
+                &Prepare {
+                    mode: PrepareMode::Write,
+                    statement: format!("{statement} RETURN 1 AS value"),
+                    parameters: arguments(&[1]),
+                },
+            )
+            .await
+            .err()
+            .unwrap()
+            .code,
+            ErrorCode::Statement
+        );
+        assert_eq!(
+            db.db.read(&root).await.unwrap().frontier().unwrap(),
+            CommitSeq(0)
+        );
+        let answer = ok(run_prepared(
+            &root,
+            db,
+            &token,
+            &definition,
+            PreparedExecutionMode::Write,
+            &arguments(&[1, 2]),
+        )
+        .await);
+        assert!(answer.columns.is_empty());
+        assert!(answer.rows.is_empty());
+        assert_eq!(
+            answer.outcome,
+            Outcome::WriteCommitted { seq: 1, statements: 1 }
+        );
+        assert_eq!(db.db.read(&root).await.unwrap().vertices().unwrap().len(), 4);
+        assert_eq!(
+            run_prepared(
+                &root,
+                db,
+                &token,
+                &definition,
+                PreparedExecutionMode::Write,
+                &[],
+            )
+            .await
+            .err()
+            .unwrap()
+            .code,
+            ErrorCode::Statement,
+            "PREPARE arguments are not implicit execution defaults"
+        );
+        let empty = ok(run_prepared(
+            &root,
+            db,
+            &token,
+            &definition,
+            PreparedExecutionMode::Write,
+            &arguments(&[]),
+        )
+        .await);
+        assert!(empty.columns.is_empty());
+        assert!(empty.rows.is_empty());
+        assert_eq!(
+            empty.outcome,
+            Outcome::ReadClosed { seq: 1, statements: 1 }
+        );
+        assert_eq!(db.db.read(&root).await.unwrap().vertices().unwrap().len(), 4);
+        server.join_database_workers(&root).await;
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
