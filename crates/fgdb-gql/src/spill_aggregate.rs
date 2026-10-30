@@ -185,6 +185,51 @@ impl AsyncSpillAggregatePlan {
         })
     }
 
+    /// Admit a terminal summary with exactly one procedure in its complete
+    /// relational input. The procedure cannot occur inside any Apply body.
+    /// Ordinary compilation still refuses procedures; a graph-only definition
+    /// or a relation without a procedure also refuses this explicit capability.
+    ///
+    /// The host must admit the original procedure shape before opening storage
+    /// and evaluate arguments only when that source is reached. Every input
+    /// barrier and completed-group clause remains native. This returns exact
+    /// aggregate cells, including wide sums and rational averages, without
+    /// converting them into the ordinary relational row domain.
+    pub fn compile_with_single_procedure(
+        aggregate: &PreparedGraphAggregate,
+    ) -> Result<Self, SpillAggregateBuildError> {
+        let relation = aggregate
+            .input_relation()
+            .ok_or(SpillAggregateBuildError::Unsupported)?;
+        let input = AsyncSpillSetPlan::compile_with_single_procedure(relation)
+            .map_err(SpillAggregateBuildError::Relation)?;
+        let physical = aggregate
+            .prepare_complete_group_output()
+            .ok_or(SpillAggregateBuildError::Unsupported)?;
+        let definition = SpillAggregateDefinition::from_physical(physical)?;
+        Ok(Self::Relation {
+            input: Box::new(input),
+            definition,
+        })
+    }
+
+    /// Admit the source-aware terminal aggregate owner with exactly one
+    /// non-correlated procedure. The same complete-input and native value
+    /// contracts as `compile_with_single_procedure` apply. COLLECT and COLLECT
+    /// DISTINCT retain the input's occurrence order and existing value bounds;
+    /// each collection still needs the host's per-allocation memory admission.
+    pub fn compile_relation_with_single_procedure(
+        aggregate: &PreparedGraphSetAggregate,
+    ) -> Result<Self, SpillAggregateBuildError> {
+        let input = AsyncSpillSetPlan::compile_with_single_procedure(aggregate.input())
+            .map_err(SpillAggregateBuildError::Relation)?;
+        let definition = SpillAggregateDefinition::from_relation(aggregate)?;
+        Ok(Self::Relation {
+            input: Box::new(input),
+            definition,
+        })
+    }
+
     pub fn definition(&self) -> &SpillAggregateDefinition {
         match self {
             Self::Vertex(plan) => plan.definition(),
@@ -936,3 +981,5 @@ fn result_event(event: GlaExecutionEvent) -> VertexScanEvent {
 
 #[cfg(test)]
 mod input_tests;
+#[cfg(test)]
+mod procedure_tests;
