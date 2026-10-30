@@ -59,7 +59,8 @@ impl Fixture {
             control,
         )?;
         let work = plan.work;
-        Ok((run(self, plan, coefficients, control)?, work))
+        let (output, _) = run(self, plan, coefficients, usize::MAX, control)?;
+        Ok((output, work))
     }
 }
 struct FixtureRow<'a> {
@@ -229,13 +230,13 @@ fn retained_cost_orientation_minimizes_the_charged_inner_scans_not_visible_degre
     assert_eq!(counts, [1, 1, 1]);
     assert_eq!(
         graph.opens[0].get(),
-        3,
+        2,
         "heavy row is never an inner rescan"
     );
     let inner = costs[0].min(costs[1]) + costs[0].min(costs[2]) + costs[1].min(costs[2]);
     assert_eq!(
         work,
-        3 * (32 + 4 * bits(history)) + 3 * costs.iter().sum::<usize>() + inner
+        3 * (32 + 4 * bits(history)) + 2 * costs.iter().sum::<usize>() + 3 * 6 + inner
     );
     let degree_order_inner = costs[0] * 2 + costs[1];
     assert!(
@@ -424,8 +425,8 @@ fn a_source_needs_two_eligible_lower_neighbors_before_any_repeated_inner_scan() 
         panic!("counts");
     };
     assert_eq!(counts, vec![0; n + 2]);
-    assert_eq!(graph.opens.iter().map(Cell::get).sum::<usize>(), 2 * n + 5);
-    assert_eq!(output.witness.edges_scanned, 2 * n + 6);
+    assert_eq!(graph.opens.iter().map(Cell::get).sum::<usize>(), 2 * n + 4);
+    assert_eq!(output.witness.edges_scanned, 2 * n + 4);
     assert_eq!(output.witness.nodes_touched, n + 2);
 }
 
@@ -446,17 +447,17 @@ fn isolates_alone_do_not_select_neighbor_pruning_for_the_connected_population() 
     .unwrap();
     assert!(!plan.prune);
     assert_eq!(plan.costs[3], 0);
-    let output = run(&graph, plan, false, &mut || Ok(())).unwrap();
+    let (output, _) = run(&graph, plan, false, usize::MAX, &mut || Ok(())).unwrap();
     let KernelValues::Counts(counts) = output.values else {
         panic!("counts");
     };
     assert_eq!(counts, [1, 1, 1, 0]);
-    assert_eq!(graph.opens[3].get(), 3);
-    assert_eq!(output.witness.edges_scanned, 18);
+    assert_eq!(graph.opens[3].get(), 2);
+    assert_eq!(output.witness.edges_scanned, 12);
 }
 
 #[test]
-fn all_eligible_rows_keep_the_original_counting_scan_and_control_schedule() {
+fn all_eligible_rows_enumerate_marks_without_reopening_sources() {
     let n = 17;
     let rows: Vec<_> = (0..n)
         .map(|source| {
@@ -475,13 +476,135 @@ fn all_eligible_rows_keep_the_original_counting_scan_and_control_schedule() {
         .unwrap();
     assert_eq!(
         output.witness.algorithm,
-        "triangles_retained_cost_oriented_rows"
+        "triangles_retained_cost_oriented_bitmap"
     );
-    assert_eq!(output.witness.edges_scanned, 6 * n);
+    assert_eq!(output.witness.edges_scanned, 4 * n);
     assert_eq!(output.witness.nodes_touched, n);
-    assert_eq!(graph.opens.iter().map(Cell::get).sum::<usize>(), 4 * n);
-    assert_eq!(graph.steps.get(), 16 * n);
-    assert_eq!(controls, 12 * n + 3);
+    assert_eq!(graph.opens.iter().map(Cell::get).sum::<usize>(), 3 * n);
+    assert_eq!(graph.steps.get(), 12 * n);
+    assert_eq!(controls, 13 * n + 1);
+}
+
+#[test]
+fn marks_cross_word_boundaries_and_survive_every_inner_scan_until_source_completion() {
+    let n = 193;
+    let clique = [0, 1, 63, 64, 65, 127, 128, 191, 192];
+    for leaves in [false, true] {
+        let mut rows = vec![Vec::new(); n];
+        for (source, target) in clique
+            .iter()
+            .enumerate()
+            .flat_map(|(i, &source)| clique[i + 1..].iter().map(move |&target| (source, target)))
+            .chain([
+                (2, 62),
+                (62, 126),
+                (126, 2),
+                (63, 129),
+                (129, 190),
+                (190, 63),
+            ])
+            .chain([(64, 64), (4, 4)])
+            .chain(leaves.then_some((3, 64)))
+        {
+            rows[source].push(target);
+            if source != target {
+                rows[target].push(source);
+            }
+        }
+        for row in &mut rows {
+            row.sort_unstable();
+        }
+        let (counts, scores) = oracle(&rows);
+        for heavy in [None, Some(0), Some(64), Some(192)] {
+            let mut retained: Vec<_> = rows.iter().map(Vec::len).collect();
+            if let Some(heavy) = heavy {
+                retained[heavy] = 1_000_000;
+            }
+            let graph = Fixture::new(rows.clone(), retained);
+            let (output, _) = graph.execute(false, usize::MAX, &mut || Ok(())).unwrap();
+            let KernelValues::Counts(actual) = output.values else {
+                panic!("counts");
+            };
+            assert_eq!(actual, counts, "leaves={leaves}, heavy={heavy:?}");
+            let (output, _) = graph.execute(true, usize::MAX, &mut || Ok(())).unwrap();
+            let KernelValues::Scores(actual) = output.values else {
+                panic!("scores");
+            };
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                scores
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "leaves={leaves}, heavy={heavy:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn word_rounding_and_actual_capacities_control_workspace_admission() {
+    assert_eq!(bitmap_words(usize::MAX), usize::MAX / 64 + 1);
+    for n in [0, 1, 63, 64, 65, 127, 128, 129] {
+        for coefficients in [false, true] {
+            let mut rows = vec![Vec::new(); n];
+            if n >= 3 {
+                rows[0] = vec![1, 2];
+                rows[1] = vec![0, 2];
+                rows[2] = vec![0, 1];
+            }
+            let graph = Fixture::new(rows, vec![6; n]);
+            let prepare_plan = || {
+                prepare(
+                    &graph,
+                    6 * n,
+                    |source| Ok(graph.retained[source]),
+                    coefficients,
+                    usize::MAX,
+                    &mut || Ok(()),
+                )
+                .unwrap()
+            };
+            let expected = workspace(n, coefficients).unwrap();
+            let (output, actual) = run(&graph, prepare_plan(), coefficients, expected, &mut || {
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(output.row_count, n);
+            assert_eq!(actual, expected);
+            if n == 0 {
+                continue;
+            }
+            assert!(matches!(
+                run(
+                    &graph,
+                    prepare_plan(),
+                    coefficients,
+                    expected - 1,
+                    &mut || Ok(())
+                ),
+                Err(Error::Execution(ExecutionError::LimitExceeded {
+                    resource: "kernel workspace bytes",
+                    ..
+                }))
+            ));
+            // A Vec may retain more capacity than its length. Such backing
+            // storage must be charged even though only n costs are consulted.
+            let mut extra = prepare_plan();
+            extra.costs.reserve_exact(n);
+            assert!(extra.costs.capacity() > n);
+            assert!(matches!(
+                run(&graph, extra, coefficients, expected, &mut || Ok(())),
+                Err(Error::Execution(ExecutionError::LimitExceeded {
+                    resource: "kernel workspace bytes",
+                    ..
+                }))
+            ));
+        }
+    }
 }
 
 #[test]
@@ -539,7 +662,7 @@ fn twenty_thousand_vertex_hub_keeps_vertex_workspace_and_avoids_all_leaf_rescans
         &mut || Ok(()),
     )
     .unwrap();
-    let output = run(&graph, plan, true, &mut || Ok(())).unwrap();
+    let (output, actual_workspace) = run(&graph, plan, true, usize::MAX, &mut || Ok(())).unwrap();
     assert_eq!(graph.opens.get(), graph.n + 1);
     assert_eq!(output.witness.edges_scanned, graph.n - 1);
     assert_eq!(output.witness.nodes_touched, graph.n);
@@ -549,6 +672,9 @@ fn twenty_thousand_vertex_hub_keeps_vertex_workspace_and_avoids_all_leaf_rescans
     assert_eq!(scores, vec![0.0; graph.n]);
     assert_eq!(
         workspace(graph.n, true).unwrap(),
-        graph.n * (3 * size_of::<usize>() + size_of::<u64>()).max(size_of::<usize>() + 16)
+        (graph.n * (2 * size_of::<usize>() + size_of::<u64>())
+            + graph.n.div_ceil(64) * (size_of::<u64>() + size_of::<usize>()))
+        .max(graph.n * (size_of::<usize>() + size_of::<u64>() + size_of::<f64>()))
     );
+    assert_eq!(actual_workspace, workspace(graph.n, true).unwrap());
 }

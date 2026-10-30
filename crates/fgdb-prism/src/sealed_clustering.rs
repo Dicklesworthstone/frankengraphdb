@@ -4,6 +4,9 @@
 //! higher endpoint marks its lower neighbors; the middle endpoint scans only
 //! for lower marked neighbors. Thus a triangle is discovered once, then adds
 //! one to all three exact u64 counts. Loops never enter counts or degrees.
+//! A bitmap and its sorted touched-word directory retain one source's marks.
+//! Enumerating those bits replaces a second compressed scan of that source;
+//! no projected adjacency or per-edge cache is retained.
 //!
 //! Retained history, including invisible and excluded incidences on BOTH faces,
 //! determines row cost. A bounded planning pass admits every later repeated
@@ -14,7 +17,7 @@
 //! neighbors ineligible. Retain that proof in the existing cost directory and
 //! omit their counting scans. A source also needs two eligible lower neighbors
 //! before its marked row can contribute a triangle. Without a degree-one row,
-//! retain the original counting loop without pruning checks in its hot path:
+//! omit those eligibility checks from the counting loop's hot path:
 //! isolates cannot occur in any neighbor row and do not justify that work.
 
 use super::{
@@ -56,11 +59,17 @@ pub(super) fn execute(
         &mut control,
     )?;
     let estimated_work = plan.work;
-    let output = run(&rows, plan, coefficients, &mut control)?;
+    let (output, workspace) = run(
+        &rows,
+        plan,
+        coefficients,
+        memory.max_kernel_workspace_bytes,
+        &mut control,
+    )?;
     let kernel = if coefficients {
-        "fgdb-prism/sealed-clustering-retained-cost-pruned-v2"
+        "fgdb-prism/sealed-clustering-retained-cost-bitmap-v3"
     } else {
-        "fgdb-prism/sealed-triangles-retained-cost-pruned-v2"
+        "fgdb-prism/sealed-triangles-retained-cost-bitmap-v3"
     };
     finish(
         call,
@@ -75,14 +84,18 @@ pub(super) fn execute(
 }
 
 fn workspace(n: usize, coefficients: bool) -> Result<usize> {
-    // Counts alone retain costs + marks + u64 counts. Coefficients also retain
-    // loop-free degrees. Drop costs/marks before allocating the score vector.
-    let counting = mul(
-        n,
-        add(
-            mul(if coefficients { 3 } else { 2 }, size_of::<usize>())?,
-            size_of::<u64>(),
+    // Counts retain costs + u64 counts and two bounded word directories.
+    // Coefficients also retain loop-free degrees. Drop costs/marks before
+    // allocating scores; execution checks the concrete reserved capacities.
+    let counting = add(
+        mul(
+            n,
+            add(
+                mul(if coefficients { 2 } else { 1 }, size_of::<usize>())?,
+                size_of::<u64>(),
+            )?,
         )?,
+        mul(bitmap_words(n), size_of::<u64>() + size_of::<usize>())?,
     )?;
     let conversion = if coefficients {
         mul(n, size_of::<usize>() + size_of::<u64>() + size_of::<f64>())?
@@ -90,6 +103,58 @@ fn workspace(n: usize, coefficients: bool) -> Result<usize> {
         0
     };
     Ok(counting.max(conversion))
+}
+
+fn bitmap_words(n: usize) -> usize {
+    n / 64 + usize::from(n % 64 != 0)
+}
+
+fn vector_bytes<T>(values: &Vec<T>) -> Result<usize> {
+    mul(values.capacity(), size_of::<T>())
+}
+
+struct MarkedNeighbors {
+    words: Vec<u64>,
+    // Source rows are strictly ordered, so newly touched words are too.
+    // At most ceil(V/64) entries, never one retained ordinal per neighbor.
+    touched: Vec<usize>,
+}
+
+impl MarkedNeighbors {
+    fn reserve(n: usize) -> Result<Self> {
+        let words = bitmap_words(n);
+        Ok(Self {
+            words: reserve(words)?,
+            touched: reserve(words)?,
+        })
+    }
+
+    fn bytes(&self) -> Result<usize> {
+        add(vector_bytes(&self.words)?, vector_bytes(&self.touched)?)
+    }
+
+    #[inline]
+    fn insert(&mut self, vertex: usize) {
+        let word = vertex / 64;
+        if self.words[word] == 0 {
+            self.touched.push(word);
+        }
+        self.words[word] |= 1u64 << (vertex % 64);
+    }
+
+    #[inline]
+    fn contains(&self, vertex: usize) -> bool {
+        self.words[vertex / 64] & (1u64 << (vertex % 64)) != 0
+    }
+
+    fn clear(&mut self, control: &mut impl FnMut() -> Result<()>) -> Result<()> {
+        for &word in &self.touched {
+            control()?;
+            self.words[word] = 0;
+        }
+        self.touched.clear();
+        Ok(())
+    }
 }
 
 struct Plan {
@@ -166,9 +231,9 @@ fn prepare(
     for source in 0..n {
         control()?;
         let cost = row_work(n, history, retained(source)?)?;
-        // Planning, marking and outer-edge walks are all complete row scans.
-        // Admit all three before opening even the planning cursor.
-        charge(&mut work, mul(cost, 3)?, limit)?;
+        // Planning and marking are complete row scans. Enumerating the marks
+        // below needs no third source cursor; admit both before planning.
+        charge(&mut work, mul(cost, 2)?, limit)?;
         costs.push(cost);
     }
     for source in 0..n {
@@ -192,6 +257,9 @@ fn prepare(
         if graph.degree(source) != Some(seen) {
             return Err(ExecutionError::InvalidUpstreamResult.into());
         }
+        // Each marked neighbor costs one bit visit and at most one word
+        // visit/clear. Admit all three before any counting begins.
+        charge(&mut work, mul(seen, 3)?, limit)?;
         if degree < 2 {
             costs[source] = 0;
             prune |= degree == 1;
@@ -213,8 +281,9 @@ fn run(
     graph: &impl Rows,
     plan: Plan,
     coefficients: bool,
+    workspace_limit: usize,
     control: &mut impl FnMut() -> Result<()>,
-) -> Result<KernelOutput> {
+) -> Result<(KernelOutput, usize)> {
     let n = graph.node_count();
     let Plan {
         costs,
@@ -226,17 +295,25 @@ fn run(
         return Err(ExecutionError::InvalidUpstreamResult.into());
     }
     let mut counts = reserve(n)?;
-    let mut marked = reserve(n)?;
+    let mut marked = MarkedNeighbors::reserve(n)?;
+    let mut workspace = add(
+        add(vector_bytes(&costs)?, vector_bytes(&degrees)?)?,
+        add(vector_bytes(&counts)?, marked.bytes()?)?,
+    )?;
+    admit("kernel workspace bytes", workspace, workspace_limit)?;
     for _ in 0..n {
         control()?;
         counts.push(0u64);
-        marked.push(usize::MAX);
+    }
+    for _ in 0..bitmap_words(n) {
+        control()?;
+        marked.words.push(0);
     }
     let mut witness = ComplexityWitness {
         algorithm: if prune {
-            "triangles_retained_cost_pruned_rows"
+            "triangles_retained_cost_pruned_bitmap"
         } else {
-            "triangles_retained_cost_oriented_rows"
+            "triangles_retained_cost_oriented_bitmap"
         }
         .to_owned(),
         complexity_claim:
@@ -268,6 +345,12 @@ fn run(
     drop(costs);
     let values = if coefficients {
         let mut scores = reserve(n)?;
+        let conversion = add(
+            vector_bytes(&counts)?,
+            add(vector_bytes(&degrees)?, vector_bytes(&scores)?)?,
+        )?;
+        admit("kernel workspace bytes", conversion, workspace_limit)?;
+        workspace = workspace.max(conversion);
         for (count, degree) in counts.into_iter().zip(degrees) {
             control()?;
             let degree = degree as u128;
@@ -294,21 +377,24 @@ fn run(
         KernelValues::Counts(counts)
     };
     control()?;
-    Ok(KernelOutput {
-        values,
-        row_count: n,
-        witness,
-    })
+    Ok((
+        KernelOutput {
+            values,
+            row_count: n,
+            witness,
+        },
+        workspace,
+    ))
 }
 
 // Keep the caller's admitted vector-length facts visible to both specialized
-// loops; outlining this seam adds bounds work to the unchanged dense path.
+// loops; outlining this seam adds bounds work to the dense path.
 #[inline(always)]
 fn count_rows<const PRUNE: bool>(
     graph: &impl Rows,
     costs: &[usize],
     counts: &mut [u64],
-    marked: &mut [usize],
+    marked: &mut MarkedNeighbors,
     witness: &mut ComplexityWitness,
     control: &mut impl FnMut() -> Result<()>,
 ) -> Result<()> {
@@ -316,6 +402,9 @@ fn count_rows<const PRUNE: bool>(
     for source in 0..n {
         control()?;
         witness.nodes_touched = add(witness.nodes_touched, 1)?;
+        // Keep every mark until ALL inner rows for its source have finished.
+        // A pruned source still retires the previous source's touched words.
+        marked.clear(control)?;
         if PRUNE && costs[source] == 0 {
             continue;
         }
@@ -327,7 +416,7 @@ fn count_rows<const PRUNE: bool>(
                 control()?;
                 witness.edges_scanned = add(witness.edges_scanned, 1)?;
                 if lower(costs, target, source) && (!PRUNE || costs[target] != 0) {
-                    marked[target] = source;
+                    marked.insert(target);
                     if PRUNE {
                         lower_neighbors = add(lower_neighbors, 1)?;
                     }
@@ -340,30 +429,27 @@ fn count_rows<const PRUNE: bool>(
         if PRUNE && lower_neighbors < 2 {
             continue;
         }
-        let mut row = graph.open(source)?;
-        let mut previous = None;
-        while let Some(target) = next_neighbor(&mut row, n, &mut previous)? {
+        for &word in &marked.touched {
             control()?;
-            witness.edges_scanned = add(witness.edges_scanned, 1)?;
-            // The marking pass already proved eligibility and orientation.
-            if if PRUNE {
-                marked[target] != source
-            } else {
-                !lower(costs, target, source)
-            } {
-                continue;
-            }
-            let mut other = graph.open(target)?;
-            let mut previous = None;
-            while let Some(third) = next_neighbor(&mut other, n, &mut previous)? {
+            let mut bits = marked.words[word];
+            while bits != 0 {
                 control()?;
-                witness.edges_scanned = add(witness.edges_scanned, 1)?;
-                if lower(costs, third, target) && marked[third] == source {
-                    // Total orientation makes source, target and third distinct.
-                    for vertex in [source, target, third] {
-                        counts[vertex] = counts[vertex]
-                            .checked_add(1)
-                            .ok_or(ExecutionError::SizeOverflow)?;
+                let target = word * 64 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                // Sorted touched words and low-bit order retain the original
+                // source-row order, without reopening its compressed cursor.
+                let mut other = graph.open(target)?;
+                let mut previous = None;
+                while let Some(third) = next_neighbor(&mut other, n, &mut previous)? {
+                    control()?;
+                    witness.edges_scanned = add(witness.edges_scanned, 1)?;
+                    if lower(costs, third, target) && marked.contains(third) {
+                        // Total orientation makes all three endpoints distinct.
+                        for vertex in [source, target, third] {
+                            counts[vertex] = counts[vertex]
+                                .checked_add(1)
+                                .ok_or(ExecutionError::SizeOverflow)?;
+                        }
                     }
                 }
             }
@@ -409,8 +495,8 @@ where
     for source in 0..n {
         control.tick().await?;
         let cost = row_work(n, history, graph.retained_row_incidence_bound(source)?)?;
-        // Charge planning, marking and outer scans before opening any cursor.
-        charge(&mut work, mul(cost, 3)?, limit)?;
+        // Charge planning and marking before opening either source cursor.
+        charge(&mut work, mul(cost, 2)?, limit)?;
         costs.push(cost);
     }
     for source in 0..n {
@@ -434,6 +520,7 @@ where
         if graph.degree(source) != Some(seen) {
             return Err(ExecutionError::InvalidUpstreamResult.into());
         }
+        charge(&mut work, mul(seen, 3)?, limit)?;
         if degree < 2 {
             costs[source] = 0;
             prune |= degree == 1;
@@ -445,17 +532,29 @@ where
 
     control.tick().await?;
     let mut counts = reserve(n)?;
-    let mut marked = reserve(n)?;
+    let mut marked = MarkedNeighbors::reserve(n)?;
+    let mut workspace = add(
+        add(vector_bytes(&costs)?, vector_bytes(&degrees)?)?,
+        add(vector_bytes(&counts)?, marked.bytes()?)?,
+    )?;
+    admit(
+        "kernel workspace bytes",
+        workspace,
+        memory.max_kernel_workspace_bytes,
+    )?;
     for _ in 0..n {
         control.tick().await?;
         counts.push(0u64);
-        marked.push(usize::MAX);
+    }
+    for _ in 0..bitmap_words(n) {
+        control.tick().await?;
+        marked.words.push(0);
     }
     let mut witness = ComplexityWitness {
         algorithm: if prune {
-            "triangles_retained_cost_pruned_rows"
+            "triangles_retained_cost_pruned_bitmap"
         } else {
-            "triangles_retained_cost_oriented_rows"
+            "triangles_retained_cost_oriented_bitmap"
         }
         .to_owned(),
         complexity_claim:
@@ -492,6 +591,16 @@ where
     control.tick().await?;
     let values = if coefficients {
         let mut scores = reserve(n)?;
+        let conversion = add(
+            vector_bytes(&counts)?,
+            add(vector_bytes(&degrees)?, vector_bytes(&scores)?)?,
+        )?;
+        admit(
+            "kernel workspace bytes",
+            conversion,
+            memory.max_kernel_workspace_bytes,
+        )?;
+        workspace = workspace.max(conversion);
         for (count, degree) in counts.into_iter().zip(degrees) {
             control.tick().await?;
             let degree = degree as u128;
@@ -524,9 +633,9 @@ where
     }
     control.tick().await?;
     let kernel = if coefficients {
-        "fgdb-prism/sealed-clustering-retained-cost-pruned-cooperative-v2"
+        "fgdb-prism/sealed-clustering-retained-cost-bitmap-cooperative-v3"
     } else {
-        "fgdb-prism/sealed-triangles-retained-cost-pruned-cooperative-v2"
+        "fgdb-prism/sealed-triangles-retained-cost-bitmap-cooperative-v3"
     };
     super::finish_encoded(
         call,
@@ -545,7 +654,7 @@ async fn count_rows_cooperative<const PRUNE: bool, Yield, YieldFuture>(
     graph: &SealedGraphView,
     costs: &[usize],
     counts: &mut [u64],
-    marked: &mut [usize],
+    marked: &mut MarkedNeighbors,
     witness: &mut ComplexityWitness,
     control: &mut super::cooperative::Cooperate<'_, Yield>,
 ) -> Result<()>
@@ -557,6 +666,11 @@ where
     for source in 0..n {
         control.tick().await?;
         witness.nodes_touched = add(witness.nodes_touched, 1)?;
+        for &word in &marked.touched {
+            control.tick().await?;
+            marked.words[word] = 0;
+        }
+        marked.touched.clear();
         if PRUNE && costs[source] == 0 {
             continue;
         }
@@ -570,7 +684,7 @@ where
                 control.tick().await?;
                 witness.edges_scanned = add(witness.edges_scanned, 1)?;
                 if lower(costs, target, source) && (!PRUNE || costs[target] != 0) {
-                    marked[target] = source;
+                    marked.insert(target);
                     if PRUNE {
                         lower_neighbors = add(lower_neighbors, 1)?;
                     }
@@ -580,32 +694,26 @@ where
         if PRUNE && lower_neighbors < 2 {
             continue;
         }
-        let mut row = graph.neighbor_cursor_controlled(control.cx, source, None)?;
-        let mut previous = None;
-        while let Some(target) =
-            next_cooperative_neighbor(&mut row, n, &mut previous, control).await?
-        {
+        for &word in &marked.touched {
             control.tick().await?;
-            witness.edges_scanned = add(witness.edges_scanned, 1)?;
-            if if PRUNE {
-                marked[target] != source
-            } else {
-                !lower(costs, target, source)
-            } {
-                continue;
-            }
-            let mut other = graph.neighbor_cursor_controlled(control.cx, target, None)?;
-            let mut previous = None;
-            while let Some(third) =
-                next_cooperative_neighbor(&mut other, n, &mut previous, control).await?
-            {
+            let mut bits = marked.words[word];
+            while bits != 0 {
                 control.tick().await?;
-                witness.edges_scanned = add(witness.edges_scanned, 1)?;
-                if lower(costs, third, target) && marked[third] == source {
-                    for vertex in [source, target, third] {
-                        counts[vertex] = counts[vertex]
-                            .checked_add(1)
-                            .ok_or(ExecutionError::SizeOverflow)?;
+                let target = word * 64 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let mut other = graph.neighbor_cursor_controlled(control.cx, target, None)?;
+                let mut previous = None;
+                while let Some(third) =
+                    next_cooperative_neighbor(&mut other, n, &mut previous, control).await?
+                {
+                    control.tick().await?;
+                    witness.edges_scanned = add(witness.edges_scanned, 1)?;
+                    if lower(costs, third, target) && marked.contains(third) {
+                        for vertex in [source, target, third] {
+                            counts[vertex] = counts[vertex]
+                                .checked_add(1)
+                                .ok_or(ExecutionError::SizeOverflow)?;
+                        }
                     }
                 }
             }

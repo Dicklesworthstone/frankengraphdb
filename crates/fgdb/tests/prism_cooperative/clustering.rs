@@ -256,6 +256,116 @@ fn topology_empty_and_isolated_populations_yield_during_scalar_and_result_walks(
     });
 }
 
+#[test]
+fn topology_bitmaps_keep_cross_word_marks_and_exact_counts_across_yields() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let n = 193usize;
+        let clique = [0, 1, 63, 64, 65, 127, 128, 191, 192];
+        let edges: Vec<_> = clique
+            .iter()
+            .enumerate()
+            .flat_map(|(i, &source)| clique[i + 1..].iter().map(move |&target| (source, target)))
+            .chain([
+                (2, 62),
+                (62, 126),
+                (126, 2),
+                (63, 129),
+                (129, 190),
+                (190, 63),
+            ])
+            .chain([(3, 64), (64, 64), (4, 4)])
+            .collect();
+        let db = directed_database(&contexts.commit(), n, &edges).await;
+        let cx = contexts.query();
+        let mut opt = options(Directedness::Undirected);
+        opt.projection.self_loops = SelfLoopPolicy::Keep;
+        let graph = projection(&db, &cx, opt).await;
+        // Enumerate unordered triples directly; no retained-cost orientation,
+        // bitset, touched-word list or source-rescan logic enters this oracle.
+        let mut adjacent = vec![vec![false; n]; n];
+        for &(source, target) in &edges {
+            if source != target {
+                adjacent[source][target] = true;
+                adjacent[target][source] = true;
+            }
+        }
+        let mut counts = vec![0u64; n];
+        for a in 0..n {
+            for b in a + 1..n {
+                for c in b + 1..n {
+                    if adjacent[a][b] && adjacent[b][c] && adjacent[c][a] {
+                        counts[a] += 1;
+                        counts[b] += 1;
+                        counts[c] += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(counts[63], 29);
+        assert_eq!(counts[64], 28);
+        assert_eq!(counts[192], 28);
+        for call in [
+            FnxCallSpec::triangles(),
+            FnxCallSpec::clustering_coefficient(),
+        ] {
+            let coefficients = matches!(call.algorithm(), FnxAlgorithm::ClusteringCoefficient);
+            let expected = call
+                .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                .unwrap();
+            let rows: Vec<_> = (0..n)
+                .map(|vertex| {
+                    let value = if coefficients {
+                        let degree = adjacent[vertex].iter().filter(|&&present| present).count();
+                        FnxValue::Score(if degree < 2 {
+                            0.0
+                        } else {
+                            (2 * counts[vertex]) as f64 / (degree * (degree - 1)) as f64
+                        })
+                    } else {
+                        FnxValue::Integer(counts[vertex])
+                    };
+                    vec![FnxValue::Vertex(directed_identity(vertex, n)), value]
+                })
+                .collect();
+            assert_eq!(expected.rows, rows);
+            let counting = n
+                * (size_of::<u64>() + size_of::<usize>() * if coefficients { 2 } else { 1 })
+                + n.div_ceil(64) * (size_of::<u64>() + size_of::<usize>());
+            let conversion = if coefficients {
+                n * (size_of::<usize>() + size_of::<u64>() + size_of::<f64>())
+            } else {
+                0
+            };
+            assert_eq!(
+                expected.certificate.kernel_workspace_bytes,
+                counting.max(conversion)
+            );
+            for q in [1, 7, 65] {
+                let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                let (actual, pending) = drive(
+                    call.execute_sealed_cooperative(
+                        &controlled,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(q),
+                        yield_now,
+                    ),
+                    &probe,
+                    q,
+                );
+                compare_execution(&actual.unwrap(), &expected);
+                assert!(pending > 0);
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
 fn directed_identity(vertex: usize, n: usize) -> VId {
     VId(u128::MAX - (n - 1 - vertex) as u128)
 }
