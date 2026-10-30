@@ -2433,9 +2433,10 @@ impl<'a> Parser<'a> {
         row: &[(Name<'a>, GraphSetColumnType)],
         variable: Option<&str>,
     ) -> Result<(bool, bool), GraphPatternTextError> {
-        const CLAUSES: [&str; 18] = [
+        const CLAUSES: [&str; 19] = [
             "ON", "SET", "RETURN", "WITH", "MERGE", "CREATE", "DELETE", "DETACH", "REMOVE",
-            "UNWIND", "MATCH", "OPTIONAL", "FOREACH", "CALL", "UNION", "ORDER", "SKIP", "LIMIT",
+            "UNWIND", "MATCH", "OPTIONAL", "FOREACH", "CALL", "UNION", "ORDER", "SKIP", "OFFSET",
+            "LIMIT",
         ];
         let visible = &row[..self.visible_width(row)];
         let mut lexer = self.lexer.clone();

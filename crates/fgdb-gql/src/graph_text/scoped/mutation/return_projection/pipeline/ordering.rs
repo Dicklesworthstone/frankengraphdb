@@ -171,7 +171,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        let offset = if self.take_word("SKIP")? {
+        let offset = if self.take_word("SKIP")? || self.take_word("OFFSET")? {
             present = true;
             self.row_page_number()?
         } else {

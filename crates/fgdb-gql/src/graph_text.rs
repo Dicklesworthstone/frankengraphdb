@@ -2178,7 +2178,8 @@ impl<'a> Parser<'a> {
         Ok(name)
     }
     fn parse_pagination(&mut self) -> Result<(), GraphPatternTextError> {
-        if self.take_word("SKIP")? {
+        // GQL's OFFSET and openCypher's SKIP are one clause.
+        if self.take_word("SKIP")? || self.take_word("OFFSET")? {
             self.syntax.offset = self.page_number()?;
         }
         if self.take_word("LIMIT")? {

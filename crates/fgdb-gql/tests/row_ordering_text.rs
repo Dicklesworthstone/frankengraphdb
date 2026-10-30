@@ -495,6 +495,47 @@ fn ranked_pages_do_not_hide_late_source_errors_or_copy_rejected_payloads() {
     }
 }
 
+/// GQL spells the offset clause OFFSET; openCypher spells it SKIP. Both are
+/// one clause with the same rows, after ORDER BY or alone, with or without a
+/// LIMIT.
+#[test]
+fn gql_offset_is_the_skip_clause() {
+    let scalars = [
+        CanonicalScalar::Int(2),
+        CanonicalScalar::Null,
+        CanonicalScalar::Int(3),
+    ]
+    .map(CanonicalPropertyValue::from);
+    let rows = |statement: &str| {
+        let query = text(statement);
+        let result = query.plan().execute_governed_with_properties(
+            3,
+            (0..3).map(VId),
+            [],
+            |_, _| Ok::<_, ()>(true),
+            |vid, _| Ok(Some(&scalars[vid.0 as usize])),
+            wide(),
+            || Ok::<_, ()>(()),
+        );
+        plain(&result.unwrap().value)
+    };
+    let head = "MATCH (x) RETURN x AS owner,x.score AS rank";
+    for page in [
+        "ORDER BY rank DESC {} 1 LIMIT 2",
+        "ORDER BY rank {} 2",
+        "ORDER BY owner {} 0 LIMIT 1",
+        "{} 1",
+    ] {
+        let offset = format!("{head} {}", page.replace("{}", "OFFSET"));
+        let skip = format!("{head} {}", page.replace("{}", "SKIP"));
+        assert_eq!(rows(&offset), rows(&skip), "{offset}");
+    }
+    assert_eq!(
+        rows(&format!("{head} ORDER BY rank DESC OFFSET 1 LIMIT 2")),
+        vec![(VId(0), Some(2)), (VId(1), None)]
+    );
+}
+
 #[test]
 fn ordered_text_has_exact_limits_and_propagates_each_interruption() {
     let scalars = [

@@ -758,6 +758,46 @@ fn plus_over_untyped_operands_follows_their_values() {
     assert!(fails("MATCH (n) WITH n.p AS a, 1 AS b RETURN a + b AS v"));
 }
 
+/// GQL's OFFSET is openCypher's SKIP at every page position the set text
+/// reads: after RETURN, after a WITH (where it pages the stage), after a
+/// computed projection, and after a grouping WITH.
+#[test]
+fn gql_offset_pages_returns_and_with_stages_as_skip_does() {
+    let values = [1, 2, 3, 4].map(CanonicalScalar::Int);
+    let column = |statement: &str| {
+        let rows = run(&prepare(statement), &values, wide(), &mut || Ok(()))
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+            .value;
+        ints(&rows, 0)
+    };
+    for (statement, expected) in [
+        (
+            "MATCH (n) RETURN n.p AS p ORDER BY p {} 1 LIMIT 2",
+            vec![2, 3],
+        ),
+        ("MATCH (n) RETURN n.p AS p ORDER BY p DESC {} 2", vec![2, 1]),
+        (
+            "MATCH (n) WITH n ORDER BY n.p {} 1 LIMIT 1 RETURN n.p AS p",
+            vec![2],
+        ),
+        (
+            "MATCH (n) WITH n.p AS k RETURN k * 10 AS v ORDER BY k DESC {} 1",
+            vec![30, 20, 10],
+        ),
+        (
+            "MATCH (n) WITH n.p % 2 AS parity, count(*) AS c \
+             RETURN parity, c ORDER BY parity {} 1",
+            vec![1],
+        ),
+    ] {
+        let offset = statement.replace("{}", "OFFSET");
+        let skip = statement.replace("{}", "SKIP");
+        let expected: Vec<_> = expected.into_iter().map(Some).collect();
+        assert_eq!(column(&offset), expected, "{offset}");
+        assert_eq!(column(&skip), expected, "{skip}");
+    }
+}
+
 /// A CASE after WITH may return a graph element: the arm's vertex itself,
 /// not a scalar, in both the searched and the simple form. A missing ELSE is
 /// NULL. Each row is compared with a plain `RETURN x, n` over the same rows.

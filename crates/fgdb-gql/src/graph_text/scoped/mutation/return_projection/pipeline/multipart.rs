@@ -2991,9 +2991,9 @@ impl<'a> Parser<'a> {
     /// Whether the clause starting at this MATCH has a top-level WHERE the
     /// composition entry re-reads (deferred_wheres). Nothing is consumed.
     fn clause_where_deferred(&self) -> Result<bool, GraphPatternTextError> {
-        const CLAUSES: [&str; 10] = [
+        const CLAUSES: [&str; 11] = [
             "WITH", "RETURN", "MATCH", "OPTIONAL", "UNWIND", "CALL", "UNION", "ORDER", "SKIP",
-            "LIMIT",
+            "OFFSET", "LIMIT",
         ];
         let mut lexer = self.lexer.clone();
         let mut previous = self.current.kind;
