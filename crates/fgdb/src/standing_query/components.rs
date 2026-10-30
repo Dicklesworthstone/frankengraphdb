@@ -24,26 +24,31 @@ type MembershipSinks<'a> = (&'a mut ZSet<Pair>, &'a mut rows::State);
 pub(super) enum ComponentRelation {
     Weak(RelationId),
     Strong(RelationId),
+    WeakAll,
+    StrongAll,
     WeakRows(relation::Definition),
     StrongRows(relation::Definition),
 }
 impl ComponentRelation {
-    fn edge_type(self) -> Option<RelationId> {
+    fn edge_type(self) -> Result<Option<RelationId>, StandingQueryFailure> {
         match self {
-            Self::Weak(relation) | Self::Strong(relation) => Some(relation),
-            Self::WeakRows(_) | Self::StrongRows(_) => None,
+            Self::Weak(relation) | Self::Strong(relation) => Ok(Some(relation)),
+            Self::WeakAll | Self::StrongAll => Ok(None),
+            Self::WeakRows(_) | Self::StrongRows(_) => Err(StandingQueryFailure::InvalidDelta),
         }
     }
     fn selected(self) -> Option<relation::Definition> {
         match self {
             Self::WeakRows(definition) | Self::StrongRows(definition) => Some(definition),
-            Self::Weak(_) | Self::Strong(_) => None,
+            Self::Weak(_) | Self::Strong(_) | Self::WeakAll | Self::StrongAll => None,
         }
     }
     fn empty_kernel(self) -> Kernel {
         match self {
-            Self::Weak(_) | Self::WeakRows(_) => Kernel::Weak(IncrementalComponents::new()),
-            Self::Strong(_) | Self::StrongRows(_) => {
+            Self::Weak(_) | Self::WeakAll | Self::WeakRows(_) => {
+                Kernel::Weak(IncrementalComponents::new())
+            }
+            Self::Strong(_) | Self::StrongAll | Self::StrongRows(_) => {
                 Kernel::Strong(IncrementalStrongComponents::new())
             }
         }
@@ -210,13 +215,15 @@ pub(super) fn result_bound(
 }
 pub(super) fn project(
     input: &ZSet<EdgeTuple>,
-    relation: RelationId,
+    relation: Option<RelationId>,
     meter: &mut Meter<'_>,
 ) -> Result<ZSet<Pair>, StandingQueryFailure> {
     input
-        .filter(|(r, _, _)| Ok(*r == relation), LIMBS, &mut |event| {
-            meter.charge(event)
-        })
+        .filter(
+            |(r, _, _)| Ok(relation.is_none_or(|selected| *r == selected)),
+            LIMBS,
+            &mut |event| meter.charge(event),
+        )
         .map_err(zset_error)?
         .map(|(_, a, b)| Ok((*a, *b)), LIMBS, &mut |event| {
             meter.charge(event)
@@ -272,10 +279,7 @@ impl State {
         let Input::Graph(source) = &mut self.input else {
             return Err(StandingQueryFailure::InvalidDelta);
         };
-        let relation = self
-            .relation
-            .edge_type()
-            .ok_or(StandingQueryFailure::InvalidDelta)?;
+        let relation = self.relation.edge_type()?;
         if self.frontier != source.frontier() {
             return Err(StandingQueryFailure::InvalidDelta);
         }
@@ -302,9 +306,7 @@ impl State {
         relation: ComponentRelation,
         meter: &mut Meter<'_>,
     ) -> Result<Self, StandingQueryFailure> {
-        let edge_type = relation
-            .edge_type()
-            .ok_or(StandingQueryFailure::InvalidDelta)?;
+        let edge_type = relation.edge_type()?;
         let TopologyInput {
             input,
             vertices,
@@ -338,7 +340,7 @@ pub(super) struct TopologyInput {
 }
 pub(super) fn topology_input(
     snapshot: &crate::Snapshot,
-    relation: RelationId,
+    relation: Option<RelationId>,
     meter: &mut Meter<'_>,
 ) -> Result<TopologyInput, StandingQueryFailure> {
     // Admit physical vertex AND edge history before either borrowed scan.

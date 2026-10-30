@@ -146,7 +146,7 @@ impl State {
 /// callers compose their own operator/sink before publishing a new generation.
 pub(super) fn topology_snapshot(
     snapshot: &crate::Snapshot,
-    relation: RelationId,
+    relation: Option<RelationId>,
     meter: &mut Meter<'_>,
 ) -> Result<EdgeSnapshot, StandingQueryFailure> {
     meter.charge(ZSetEvent::Work)?;
@@ -185,12 +185,16 @@ pub(super) fn topology_snapshot(
     )
     .map_err(snapshot_error)?;
     // The embedded write template fixes coordinates to SchemaEpoch(0).
-    // Record the selected relation even when empty. A schema-capable spine
-    // must supply authenticated current catalog epochs instead; the shared
+    // Record an explicitly selected relation even when empty. An all-relation
+    // projection has no synthetic edge type; insert records each live type.
+    // A schema-capable spine must supply authenticated current catalog epochs
+    // instead; the shared
     // builder already supports them, including known empty relations.
-    builder
-        .record_epoch(relation, SchemaEpoch(0), &mut |event| meter.charge(event))
-        .map_err(snapshot_error)?;
+    if let Some(relation) = relation {
+        builder
+            .record_epoch(relation, SchemaEpoch(0), &mut |event| meter.charge(event))
+            .map_err(snapshot_error)?;
+    }
     source::visit_edges(
         &snapshot.blocks,
         snapshot.frontier,
@@ -227,7 +231,7 @@ impl State {
         relation: RelationId,
         meter: &mut Meter<'_>,
     ) -> Result<Self, StandingQueryFailure> {
-        let baseline = topology_snapshot(snapshot, relation, meter)?;
+        let baseline = topology_snapshot(snapshot, Some(relation), meter)?;
         let input = CommittedReachability::from_snapshot(baseline, relation, LIMBS, &mut |event| {
             meter.charge(event)
         })

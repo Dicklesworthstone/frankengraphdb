@@ -41,9 +41,7 @@ pub(super) fn analytic_procedure(
     // Read the immutable input recipe only; no source is pinned or executed
     // at this placeholder cut. The analytic owner admits the live snapshot.
     let options = bound.options_at(CommitSeq(0));
-    let Some(relation) = options.selection.relation else {
-        return Err(StandingQueryError::Unsupported);
-    };
+    let relation = options.selection.relation;
     if options.selection.vertex_label.is_some()
         || options.selection.weight != FnxWeightSpec::Unit
         || options.projection.parallel_edges != ParallelEdgePolicy::CollapseUnit
@@ -56,12 +54,18 @@ pub(super) fn analytic_procedure(
     // neither changes reachability between distinct vertices.
     let (source, value_type, value_field) = match bound.algorithm() {
         FnxAlgorithm::ConnectedComponents | FnxAlgorithm::WeaklyConnectedComponents => (
-            AnalyticSource::Components(components::ComponentRelation::Weak(relation)),
+            AnalyticSource::Components(match relation {
+                Some(relation) => components::ComponentRelation::Weak(relation),
+                None => components::ComponentRelation::WeakAll,
+            }),
             GraphSetColumnType::Vertex,
             FnxOutput::Component,
         ),
         FnxAlgorithm::StronglyConnectedComponents => (
-            AnalyticSource::Components(components::ComponentRelation::Strong(relation)),
+            AnalyticSource::Components(match relation {
+                Some(relation) => components::ComponentRelation::Strong(relation),
+                None => components::ComponentRelation::StrongAll,
+            }),
             GraphSetColumnType::Vertex,
             FnxOutput::Component,
         ),
@@ -69,18 +73,24 @@ pub(super) fn analytic_procedure(
             if options.projection.self_loops == SelfLoopPolicy::Drop =>
         {
             (
-                AnalyticSource::CoreNumbers(relation),
+                AnalyticSource::CoreNumbers(relation.ok_or(StandingQueryError::Unsupported)?),
                 GraphSetColumnType::Scalar,
                 FnxOutput::Core,
             )
         }
         FnxAlgorithm::Triangles if options.projection.self_loops == SelfLoopPolicy::Drop => (
-            AnalyticSource::TriangleCounts(relation, triangle_counts::Output::Triangles),
+            AnalyticSource::TriangleCounts(
+                relation.ok_or(StandingQueryError::Unsupported)?,
+                triangle_counts::Output::Triangles,
+            ),
             GraphSetColumnType::Scalar,
             FnxOutput::Triangles,
         ),
         FnxAlgorithm::ClusteringCoefficient => (
-            AnalyticSource::TriangleCounts(relation, triangle_counts::Output::Clustering),
+            AnalyticSource::TriangleCounts(
+                relation.ok_or(StandingQueryError::Unsupported)?,
+                triangle_counts::Output::Clustering,
+            ),
             GraphSetColumnType::Scalar,
             FnxOutput::Score,
         ),
@@ -610,6 +620,8 @@ fn rebuild_checked<V: Vfs + Clone>(
                     query.relation,
                     components::ComponentRelation::Weak(_)
                         | components::ComponentRelation::Strong(_)
+                        | components::ComponentRelation::WeakAll
+                        | components::ComponentRelation::StrongAll
                 ) => {}
             _ => return Err(StandingQueryError::Unsupported),
         }
@@ -634,6 +646,8 @@ fn rebuild_checked<V: Vfs + Clone>(
                     query.relation,
                     components::ComponentRelation::Weak(_)
                         | components::ComponentRelation::Strong(_)
+                        | components::ComponentRelation::WeakAll
+                        | components::ComponentRelation::StrongAll
                 ) =>
             {
                 StandingQuery::Components(Box::new(staged.database.prepare_standing_components(

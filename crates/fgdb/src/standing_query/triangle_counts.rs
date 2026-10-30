@@ -374,7 +374,7 @@ impl State {
             .prepare_committed_successor(cx, batch, LIMBS, &mut |event| meter.charge(event))
             .map_err(components::input_error)?;
         let vertices = components::vertex_delta(batch, meter)?;
-        let edges = components::project(input.delta(), self.relation, meter)?;
+        let edges = components::project(input.delta(), Some(self.relation), meter)?;
         let triangles = self
             .triangles
             .prepare(&edges, LIMBS, &mut |event| meter.charge(event))
@@ -403,7 +403,7 @@ impl State {
             input,
             vertices,
             edges,
-        } = components::topology_input(snapshot, relation, meter)?;
+        } = components::topology_input(snapshot, Some(relation), meter)?;
         let mut triangles = IncrementalTriangles::new(TriangleQuantifier::Distinct);
         let pending = triangles
             .prepare(&edges, LIMBS, &mut |event| meter.charge(event))

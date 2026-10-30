@@ -68,15 +68,15 @@ impl PreparedNativeRead {
     /// binary set/product circuits with projections, filters and UNWIND are admitted
     /// only where the existing standing engines support their bound operators.
     /// Zero-argument connected/weakly-connected/strongly-connected component
-    /// CALLs reuse the component delta engines for one explicit relation and
-    /// all live vertices, with unit weights, collapsed parallel edges and
-    /// kept or dropped self-loops. YIELD aliases and downstream row stages retain
-    /// their native schema; unsupported projection recipes refuse.
+    /// CALLs reuse the component delta engines for one explicit relation or
+    /// all relation types, and all live vertices, with unit weights, collapsed
+    /// parallel edges and kept or dropped self-loops. YIELD aliases and downstream
+    /// row stages retain their native schema; unsupported projection recipes refuse.
     /// Core-number CALLs use the existing exact affected-component maintainer
-    /// under the same projection profile with self-loops explicitly dropped.
+    /// for one explicit relation with self-loops explicitly dropped.
     /// Their checked integer rows and derivatives are retained only for native
     /// registration; typed core-number views do not acquire a second row sink.
-    /// Triangle CALLs under the explicit undirected/unit/collapse/drop profile
+    /// Triangle CALLs for one relation under the undirected/unit/collapse/drop profile
     /// maintain exact per-vertex counts, including live zero-count isolates.
     /// The source retains linear vertex result/incidence state and consumes
     /// signed triangle changes; it does not retain the typed triple table or

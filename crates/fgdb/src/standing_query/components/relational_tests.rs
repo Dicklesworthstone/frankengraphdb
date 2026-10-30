@@ -469,7 +469,12 @@ fn every_composed_checkpoint_and_exact_budget_preserves_both_membership_outputs(
         change.add_edge(EId(4), VId(3), VId(1), vec![]);
         db.write(&commit, change).await.unwrap();
         let batch = db.delta_since(snapshot.frontier).unwrap().next().unwrap();
-        for relation in [ComponentRelation::Weak(R), ComponentRelation::Strong(R)] {
+        for relation in [
+            ComponentRelation::Weak(R),
+            ComponentRelation::Strong(R),
+            ComponentRelation::WeakAll,
+            ComponentRelation::StrongAll,
+        ] {
             let before = build(&snapshot, relation);
             let expected = build(&db.snapshot, relation);
             let mut successful = build(&snapshot, relation);

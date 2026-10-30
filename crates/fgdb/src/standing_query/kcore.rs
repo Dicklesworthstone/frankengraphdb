@@ -63,7 +63,7 @@ impl State {
             .map_err(components::input_error)?;
         // Global vertex membership is projected only after full batch admission.
         let vertices = components::vertex_delta(batch, meter)?;
-        let edges = components::project(input.delta(), self.relation, meter)?;
+        let edges = components::project(input.delta(), Some(self.relation), meter)?;
         let pending = self
             .cores
             .prepare(&vertices, &edges, LIMBS, &mut |event| meter.charge(event))
@@ -111,7 +111,7 @@ impl State {
             input,
             vertices,
             edges,
-        } = components::topology_input(snapshot, relation, meter)?;
+        } = components::topology_input(snapshot, Some(relation), meter)?;
         let mut cores = IncrementalCoreNumbers::new();
         let pending = cores
             .prepare(&vertices, &edges, LIMBS, &mut |event| meter.charge(event))

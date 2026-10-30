@@ -78,7 +78,11 @@ fn call(name: &str) -> String {
 
 // Independent full-source oracle: BFS from every vertex, then mutual
 // reachability for SCC. It shares neither maintained kernel nor Prism CSR.
-fn oracle(db: &Database<MemVfs>, strong: bool) -> ZSet<Vec<QueryValue>> {
+fn oracle(
+    db: &Database<MemVfs>,
+    strong: bool,
+    relation: Option<RelationId>,
+) -> ZSet<Vec<QueryValue>> {
     let vertices: BTreeSet<_> = db.vertices().unwrap().iter().map(|row| row.vid).collect();
     let edges = db.edges().unwrap();
     let mut closure = BTreeMap::new();
@@ -87,7 +91,7 @@ fn oracle(db: &Database<MemVfs>, strong: bool) -> ZSet<Vec<QueryValue>> {
         let mut todo = VecDeque::from([vertex]);
         while let Some(from) = todo.pop_front() {
             for edge in edges.iter().filter(|edge| {
-                edge.entry.relation == R
+                relation.is_none_or(|selected| edge.entry.relation == selected)
                     && vertices.contains(&edge.entry.src)
                     && vertices.contains(&edge.entry.dst)
             }) {
@@ -222,13 +226,17 @@ fn all_component_calls_and_downstream_operators_match_fresh_queries_after_mutati
                 if index < 3 || index == 7 || (kept_first..page_first).contains(&index) {
                     assert_eq!(
                         actual,
-                        oracle(&db, index == 2 || index == 7 || index == kept_first + 2),
+                        oracle(
+                            &db,
+                            index == 2 || index == 7 || index == kept_first + 2,
+                            Some(R),
+                        ),
                         "independent reachability oracle, tick {tick}: {text}"
                     );
                 }
                 if index >= page_first {
                     let (skip, count) = pages[index - page_first];
-                    let complete = oracle(&db, false);
+                    let complete = oracle(&db, false, Some(R));
                     let expected = ZSet::from_updates(
                         complete
                             .iter()
@@ -371,7 +379,7 @@ fn component_subscription_replays_exact_retractions_empty_ticks_and_rebaselines(
         assert!(baseline.is_snapshot());
         let mut delivered = copied(baseline.rows());
         assert_eq!(delivered, eager(&db, &cx, &text));
-        assert_eq!(delivered, oracle(&db, true));
+        assert_eq!(delivered, oracle(&db, true, Some(R)));
         subscriber.acknowledge(baseline.receipt()).unwrap();
 
         let mut expected = Vec::new();
@@ -416,8 +424,151 @@ fn component_subscription_replays_exact_retractions_empty_ticks_and_rebaselines(
         let fresh = subscriber.poll(&db, &cx, policy()).unwrap().unwrap();
         assert!(fresh.is_snapshot());
         assert_eq!(fresh.frontier(), after);
-        assert_eq!(fresh.rows(), &oracle(&db, true));
+        assert_eq!(fresh.rows(), &oracle(&db, true, Some(R)));
         subscriber.acknowledge(fresh.receipt()).unwrap();
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn graph_wide_components_replay_cross_relation_support_and_rebuild_from_empty() {
+    let ((), report) = run_async_under_lab(0x6e63_6105, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let params = GqlParameters::new();
+        let setup = NativeSubscriptionSetup {
+            maintenance: policy(),
+            delivery: policy(),
+            retention: [32, 10_000, 1_000_000],
+        };
+        let mut consumers = Vec::new();
+        for (name, strong, extra) in [
+            ("connected_components", false, "self_loops:'drop'"),
+            ("weakly_connected_components", false, "self_loops:'keep'"),
+            ("strongly_connected_components", true, "self_loops:'drop'"),
+            (
+                "strongly_connected_components",
+                true,
+                "self_loops:'keep',direction:'reversed'",
+            ),
+        ] {
+            let text = format!(
+                "CALL fnx.{name}({{parallel:'collapse',{extra}}}) \
+                 YIELD component AS group_id,vertex AS node RETURN group_id,node"
+            );
+            let prepared = PreparedNativeRead::prepare_subscription(
+                &cx,
+                &format!("SUBSCRIBE TO {text}"),
+                &params,
+                symbols,
+            )
+            .unwrap();
+            let (bound, width) = prepared.subscription_footprint(&cx, &params).unwrap();
+            assert_eq!(width, 2);
+            let before = db.standing_queries.len();
+            let (mut consumer, baseline) = prepared
+                .subscribe_replaying(&mut db, &cx, &params, setup, |columns, batch| {
+                    assert_eq!(columns, &["group_id", "node"]);
+                    Ok::<_, SubscriptionError>(Arc::clone(batch))
+                })
+                .unwrap();
+            assert!(u64::try_from(db.standing_queries.len() - before).unwrap() <= bound + 1);
+            assert!(baseline.rows().is_empty());
+            assert_eq!(baseline.frontier(), CommitSeq::ORIGIN);
+            consumer.acknowledge(baseline.receipt()).unwrap();
+            consumers.push((text, strong, consumer, copied(baseline.rows())));
+        }
+
+        // Each new type is first seen AFTER registration. R and S/T can supply
+        // the same directed pair: deleting one type must not erase the other's
+        // counted support. The oracle reads the complete live graph each tick.
+        let mut expected = Vec::new();
+        for tick in 0..9 {
+            let mut change = WriteBatch::new(match tick {
+                2 | 4 => S,
+                3 | 5 => RelationId(3),
+                _ => R,
+            });
+            match tick {
+                0 => change = seed(),
+                1 => {
+                    change.create_vertex(VId(7), vec![], vec![]);
+                }
+                2 => {
+                    change.add_edge(EId(30), VId(3), VId(u128::MAX), vec![]);
+                }
+                3 => {
+                    change.add_edge(EId(31), VId(u128::MAX), VId(2), vec![]);
+                    change.add_edge(EId(32), VId(3), VId(u128::MAX), vec![]);
+                }
+                4 => {
+                    change.delete_edge(EId(30));
+                }
+                5 => {
+                    change.delete_edge(EId(32));
+                }
+                6 => {
+                    change.set_vertex_property(
+                        VId(0),
+                        PropertyKeyId(1),
+                        Some(CanonicalScalar::Int(99)),
+                    );
+                }
+                7 => {
+                    change.delete_vertex(VId(u128::MAX));
+                }
+                _ => {
+                    change.delete_vertex(VId(7));
+                }
+            }
+            let at = db.write(&commit, change).await.unwrap();
+            let mut answers = Vec::new();
+            for (text, strong, consumer, _) in &consumers {
+                let answer = oracle(&db, *strong, None);
+                assert_eq!(answer, eager(&db, &cx, text), "tick {tick}: {text}");
+                let (frontier, maintained) = db
+                    .standing_native_bag(&cx, consumer.handle(), policy())
+                    .unwrap();
+                assert_eq!(frontier, at);
+                assert_eq!(maintained, answer, "tick {tick}: {text}");
+                answers.push(answer);
+            }
+            expected.push((at, answers));
+        }
+
+        // Slow consumers receive every atomic tick, including both unchanged
+        // parallel support and property-only ticks, without an eager rescan.
+        for (index, (text, strong, consumer, delivered)) in consumers.iter_mut().enumerate() {
+            let mut previous = CommitSeq::ORIGIN;
+            for (tick, (at, answers)) in expected.iter().enumerate() {
+                let frame = consumer.poll(&db, &cx, policy()).unwrap().unwrap();
+                assert_eq!((frame.from(), frame.frontier()), (Some(previous), *at));
+                assert!(Arc::ptr_eq(
+                    &frame,
+                    &consumer.poll(&db, &cx, policy()).unwrap().unwrap()
+                ));
+                if matches!(tick, 4 | 6) {
+                    assert!(frame.rows().is_empty(), "unchanged tick {tick}: {text}");
+                }
+                delivered
+                    .integrate(frame.rows(), LIMBS, &mut |_| Ok::<_, ()>(()))
+                    .unwrap();
+                assert_eq!(delivered, &answers[index], "replay tick {tick}: {text}");
+                consumer.acknowledge(frame.receipt()).unwrap();
+                previous = *at;
+            }
+            assert!(consumer.poll(&db, &cx, policy()).unwrap().is_none());
+            db.rebuild_standing_query(&cx, consumer.handle(), policy())
+                .unwrap();
+            consumer.restart_from_current().unwrap();
+            let baseline = consumer.poll(&db, &cx, policy()).unwrap().unwrap();
+            assert!(baseline.is_snapshot());
+            assert_eq!(baseline.frontier(), previous);
+            assert_eq!(baseline.rows(), &oracle(&db, *strong, None));
+            consumer.acknowledge(baseline.receipt()).unwrap();
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -497,11 +648,17 @@ fn unsupported_component_contracts_and_unbounded_pages_refuse_before_publication
             GqlQueryPolicy::new(100_000, 100_000, 0, 10_000_000),
             GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 0),
         ] {
-            assert!(
-                db.register_standing_native(&cx, &accepted, &params, symbols, tight)
-                    .is_err()
-            );
-            assert_eq!(db.standing_queries.len(), before);
+            for text in [
+                accepted.as_str(),
+                "CALL fnx.connected_components({parallel:'collapse',self_loops:'drop'}) \
+                 YIELD component AS group_id,vertex AS node RETURN group_id,node",
+            ] {
+                assert!(
+                    db.register_standing_native(&cx, text, &params, symbols, tight)
+                        .is_err()
+                );
+                assert_eq!(db.standing_queries.len(), before);
+            }
         }
         assert_eq!(
             db.standing_native_bag(&cx, &prior, policy()).unwrap(),

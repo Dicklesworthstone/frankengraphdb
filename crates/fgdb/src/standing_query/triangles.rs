@@ -90,7 +90,7 @@ impl State {
         quantifier: TriangleQuantifier,
         meter: &mut Meter<'_>,
     ) -> Result<Self, StandingQueryFailure> {
-        let baseline = recursive::topology_snapshot(snapshot, relation, meter)?;
+        let baseline = recursive::topology_snapshot(snapshot, Some(relation), meter)?;
         let input = CommittedTriangles::from_snapshot(
             baseline,
             relation,
