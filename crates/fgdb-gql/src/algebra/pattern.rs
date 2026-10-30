@@ -10,13 +10,13 @@ pub use factors::PreparedGraphPatternFactors;
 
 use super::{
     BindingSlot, EdgeRelation, GlaDirection, GlaOperator, GlaPlan, GraphBindingRow, GraphMatchMode,
-    GraphPathFunction, GraphWalkSearch, IntegerComparison, VertexPredicate,
+    GraphPathFunction, GraphWalkSearch, IntegerComparison, VertexPredicate, WalkEdgePredicate,
 };
 use crate::GraphSetColumnType;
 #[cfg(test)]
 use fgdb_delta_types::RelationId;
 use fgdb_delta_types::{LabelId, PropertyKeyId};
-use fgdb_types::VId;
+use fgdb_types::{CanonicalPropertyValue, VId};
 use property_comparison::PropertyComparison;
 
 pub const MAX_PATTERN_EDGES: usize = 64;
@@ -55,6 +55,7 @@ pub enum PatternBuildError {
     InvalidColumnName,
     RequiresValueProjection,
     InvalidPathCapture,
+    InvalidPropertyValue,
     /// A quantified atom with no upper hop bound whose repetition rule does
     /// not end it: a WALK that may repeat edges and selects every walk.
     UnboundedWalk,
@@ -84,6 +85,7 @@ impl core::fmt::Display for PatternBuildError {
                 "binding property comparisons, path captures and relationship uniqueness require prepare_values or its scoped variants",
             ),
             Self::InvalidPathCapture => f.write_str("path capture requires an ordered connected root chain or a single WALK atom"),
+            Self::InvalidPropertyValue => f.write_str("walk predicate requires a bounded canonical property value"),
             Self::UnboundedWalk => f.write_str("an unbounded quantified atom requires TRAIL, ACYCLIC, SIMPLE, a shortest selector or DIFFERENT EDGES"),
             Self::LimitExceeded {
                 dimension,
@@ -104,7 +106,7 @@ struct Variable {
     predicates: Vec<VertexPredicate>,
     outer: bool,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Edge {
     source: usize,
     destination: usize,
@@ -112,9 +114,10 @@ struct Edge {
     direction: GlaDirection,
     walk: Option<crate::GraphWalkBounds>,
     search: GraphWalkSearch,
+    predicates: Vec<WalkEdgePredicate>,
 }
 impl Edge {
-    fn expansion(self, source: BindingSlot, direction: GlaDirection) -> GlaOperator {
+    fn expansion(&self, source: BindingSlot, direction: GlaDirection) -> GlaOperator {
         match self.walk {
             Some(bounds) => GlaOperator::VarLengthExpand {
                 source,
@@ -122,6 +125,7 @@ impl Edge {
                 direction,
                 bounds,
                 search: self.search,
+                edge_predicates: self.predicates.clone(),
             },
             None => GlaOperator::Expand {
                 source,
@@ -285,7 +289,7 @@ fn relations_overlap(left: EdgeRelation, right: EdgeRelation) -> bool {
 ///
 /// An undirected SIMPLE or shortest walk can return over the edge it came
 /// by (a-b-a), and an unrestricted walk can repeat anything: both keep it.
-fn walk_can_repeat_an_edge(edge: Edge) -> bool {
+fn walk_can_repeat_an_edge(edge: &Edge) -> bool {
     let Some(bounds) = edge.walk else {
         return false;
     };
@@ -335,7 +339,7 @@ impl GraphPatternBuilder {
     fn constrains_edges(&self) -> bool {
         self.match_mode == GraphMatchMode::DifferentEdges
             && self.edges.iter().enumerate().any(|(at, edge)| {
-                walk_can_repeat_an_edge(*edge)
+                walk_can_repeat_an_edge(edge)
                     || self.edges[..at]
                         .iter()
                         .any(|previous| relations_overlap(previous.relation, edge.relation))
@@ -349,7 +353,7 @@ impl GraphPatternBuilder {
     /// an untyped atom overlaps every relation and a walk checks itself.
     fn constrain_edge(
         &self,
-        edge: Edge,
+        edge: &Edge,
         appended: BindingSlot,
         previous: &mut Vec<(EdgeRelation, BindingSlot)>,
         operators: &mut Vec<GlaOperator>,
@@ -394,6 +398,10 @@ impl GraphPatternBuilder {
                     property(GraphSetColumnType::Vertex, *key)
                 }
             })
+        }) || self.edges.iter().any(|edge| {
+            edge.predicates
+                .iter()
+                .any(|predicate| property(GraphSetColumnType::Edge, predicate.key))
         }) || self
             .property_comparisons
             .iter()
@@ -437,7 +445,10 @@ impl GraphPatternBuilder {
             .edges
             .iter()
             .any(|edge| matches!(edge.relation, EdgeRelation::Set(_)));
-        let mut bytes = if alternation {
+        let walk_predicates = self.edges.iter().any(|edge| !edge.predicates.is_empty());
+        let mut bytes = if walk_predicates {
+            b"fgdb:gql:pattern-template:v4\0".to_vec()
+        } else if alternation {
             b"fgdb:gql:pattern-template:v3\0".to_vec()
         } else if untyped {
             b"fgdb:gql:pattern-template:v2\0".to_vec()
@@ -482,7 +493,7 @@ impl GraphPatternBuilder {
         for edge in &self.edges {
             ordinal(&mut bytes, edge.source);
             ordinal(&mut bytes, edge.destination);
-            if alternation {
+            if alternation || walk_predicates {
                 match edge.relation {
                     EdgeRelation::One(relation) => {
                         bytes.push(0);
@@ -519,6 +530,9 @@ impl GraphPatternBuilder {
                 GraphWalkSearch::Simple => 4,
                 GraphWalkSearch::Trail => 5,
             });
+            if walk_predicates {
+                super::append_walk_predicates(&mut bytes, &edge.predicates);
+            }
         }
         ordinal(&mut bytes, self.identities.len());
         for identity in &self.identities {
@@ -612,7 +626,7 @@ impl GraphPatternBuilder {
                 "Expand"
             });
             if self.match_mode == GraphMatchMode::DifferentEdges
-                && (walk_can_repeat_an_edge(*edge)
+                && (walk_can_repeat_an_edge(edge)
                     || self.edges[..at]
                         .iter()
                         .any(|previous| relations_overlap(previous.relation, edge.relation)))
@@ -900,6 +914,7 @@ impl GraphPatternBuilder {
             direction,
             walk: None,
             search: GraphWalkSearch::All,
+            predicates: Vec::new(),
         });
         Ok(self)
     }
@@ -927,6 +942,33 @@ impl GraphPatternBuilder {
             .last_mut()
             .expect("one validated atom was just added")
             .walk = Some(bounds);
+        Ok(self)
+    }
+
+    /// Require every relationship of one quantified atom to carry this exact
+    /// property value. Filtering precedes traversal and shortest selection;
+    /// an empty route satisfies every such equality without reading an edge.
+    pub fn filter_walk_edge(
+        &mut self,
+        edge: usize,
+        key: PropertyKeyId,
+        value: CanonicalPropertyValue,
+    ) -> Result<&mut Self, PatternBuildError> {
+        let atom = self
+            .edges
+            .get_mut(edge)
+            .filter(|atom| atom.walk.is_some())
+            .ok_or(PatternBuildError::InvalidPathCapture)?;
+        value
+            .canonical_encoded_len()
+            .map_err(|_| PatternBuildError::InvalidPropertyValue)?;
+        check_next(
+            self.predicate_count,
+            MAX_PATTERN_PREDICATES,
+            PatternLimitDimension::Predicates,
+        )?;
+        atom.predicates.push(WalkEdgePredicate { key, value });
+        self.predicate_count += 1;
         Ok(self)
     }
 
@@ -1194,7 +1236,7 @@ impl GraphPatternBuilder {
             self.select(root, BindingSlot(0), &mut operators);
             next_slot = 1;
         } else {
-            let first = self.edges[0];
+            let first = &self.edges[0];
             if first.walk.is_some() {
                 operators.push(GlaOperator::ScanVertices);
                 // Filter the walk's start vertices before expanding from them.
@@ -1245,7 +1287,7 @@ impl GraphPatternBuilder {
                 !consumed[at] && (slots[edge.source].is_some() || slots[edge.destination].is_some())
             });
             if let Some(at) = connected {
-                let edge = self.edges[at];
+                let edge = &self.edges[at];
                 let (source, target, direction) = if let Some(source) = slots[edge.source] {
                     (source, edge.destination, edge.direction)
                 } else {

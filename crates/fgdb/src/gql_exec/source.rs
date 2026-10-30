@@ -4448,11 +4448,17 @@ fn bound_shortest(prefix: &[fgdb_gql::algebra::GlaOperator]) -> Option<BoundShor
         direction,
         bounds,
         search,
+        edge_predicates,
     }) = walks.next()
     else {
         return None;
     };
     if walks.next().is_some()
+        // The two-frontier source shortcut searches topology alone. A rejected
+        // short edge cannot hide a longer qualifying path from the evaluator:
+        // retain the ordinary bounded closure until this source also applies
+        // every per-hop property predicate during its search.
+        || !edge_predicates.is_empty()
         || source.ordinal() != 0
         || bounds.minimum() > 1
         || bounds.minimum() > bounds.maximum()

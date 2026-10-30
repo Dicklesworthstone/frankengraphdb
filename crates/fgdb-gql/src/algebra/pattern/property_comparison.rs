@@ -113,7 +113,7 @@ impl GraphPatternBuilder {
             && !self
                 .edges
                 .iter()
-                .any(|edge| edge.search == GraphWalkSearch::Trail)
+                .any(|edge| edge.search == GraphWalkSearch::Trail || !edge.predicates.is_empty())
         {
             Ok(())
         } else {

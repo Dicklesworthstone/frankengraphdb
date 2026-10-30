@@ -198,6 +198,11 @@ type Adjacency = BTreeMap<VId, Vec<VId>>;
 type Index = BTreeMap<(EdgeRelation, GlaDirection), Adjacency>;
 use crate::identified::{IdentifiedAdjacency, IdentifiedNeighbors, IdentifiedStage};
 type IdentifiedIndex = BTreeMap<(EdgeRelation, GlaDirection), IdentifiedAdjacency>;
+type FilteredIdentifiedIndex = BTreeMap<usize, IdentifiedAdjacency>;
+struct IdentifiedSources {
+    shared: IdentifiedIndex,
+    filtered: FilteredIdentifiedIndex,
+}
 
 // Search kernels borrow the SAME admitted index and feed the same binding
 // continuation. Search is a prepared logical choice, never an adaptive fallback
@@ -524,6 +529,72 @@ fn build_identified_index<E>(
     Ok(index)
 }
 
+/// Each quantified atom owns its filtered incidence, even when another atom
+/// uses the same relation and direction with different property values. The
+/// shared input has already passed source authorization. Fallible field reads
+/// use that same source and happen before any path or shortest selection.
+fn filter_identified_index<'a, E: From<crate::GraphIntegerError>>(
+    operators: &[GlaOperator],
+    index: &IdentifiedIndex,
+    edge_property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalPropertyValue>, E>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<FilteredIdentifiedIndex, E> {
+    let mut filtered = FilteredIdentifiedIndex::new();
+    for (ordinal, operator) in operators.iter().enumerate() {
+        let GlaOperator::VarLengthExpand {
+            relation,
+            direction,
+            bounds,
+            edge_predicates,
+            ..
+        } = operator
+        else {
+            continue;
+        };
+        if edge_predicates.is_empty() {
+            continue;
+        }
+        control(GlaExecutionEvent::ScratchEntry)?;
+        let mut stage = IdentifiedStage::default();
+        if bounds.maximum() > 0
+            && let Some(adjacency) = index.get(&(*relation, *direction))
+        {
+            for (source, neighbors) in adjacency.iter() {
+                control(GlaExecutionEvent::Work)?;
+                for &(edge, destination) in neighbors {
+                    control(GlaExecutionEvent::Work)?;
+                    let mut keep = true;
+                    for predicate in edge_predicates {
+                        control(GlaExecutionEvent::Work)?;
+                        let expected = &predicate.value;
+                        let actual = edge_property(edge, predicate.key)?;
+                        if let Some(actual) = actual {
+                            charge_stored_payload(actual, control)?;
+                        }
+                        charge_stored_payload(expected, control)?;
+                        if !crate::algebra::IntegerComparison::Equal.accepts_property_pair(
+                            actual,
+                            Some(expected),
+                            control,
+                        )? {
+                            keep = false;
+                            break;
+                        }
+                    }
+                    if keep {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        stage.push(source, (edge, destination), control)?;
+                    }
+                }
+            }
+        }
+        // Input neighbor lists were sorted. Keeping their relative order
+        // preserves deterministic tie-breaking without another sort.
+        filtered.insert(ordinal, stage.finish());
+    }
+    Ok(filtered)
+}
+
 fn sort_identified_neighbors<E>(
     values: &mut [(EId, VId)],
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -667,6 +738,7 @@ struct Execution<'i, F, C, P, Row> {
     // Never materialize a Cartesian intermediate or reopen a source per row.
     vertex_domain: Vec<VId>,
     identified_index: Option<&'i IdentifiedIndex>,
+    filtered_identified_index: Option<&'i FilteredIdentifiedIndex>,
     segments: [Option<GraphPath>; crate::algebra::MAX_PATTERN_BINDINGS],
     paths: [Option<GraphPath>; crate::algebra::MAX_PATTERN_IDENTITIES],
     /// Each Collect group's witnesses so far, then its published list.
@@ -1035,8 +1107,10 @@ impl<'i, F, C, P, Row: GlaOutput> Execution<'i, F, C, P, Row> {
                                     | GlaOperator::DifferentEdges { .. }
                             )
                         });
-                        let adjacency = identified
-                            .get(&(*relation, *direction))
+                        let adjacency = self
+                            .filtered_identified_index
+                            .and_then(|filtered| filtered.get(&ordinal))
+                            .or_else(|| identified.get(&(*relation, *direction)))
                             .map(|adjacency| adjacency as &dyn IdentifiedNeighbors);
                         let cursor = if let Some(segments) =
                             different_edges::for_expansion(operators, ordinal, bindings.len())
@@ -1351,7 +1425,10 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         self.execute_projected_index(
             vertices,
             Index::new(),
-            Some(identified),
+            Some(IdentifiedSources {
+                shared: identified,
+                filtered: FilteredIdentifiedIndex::new(),
+            }),
             test_vertex,
             control,
             Projection::Terminal(
@@ -1451,10 +1528,19 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             );
         }
         let identified = build_identified_index(self.operators(), edges, &mut control)?;
+        let filtered = filter_identified_index(
+            self.operators(),
+            &identified,
+            &mut edge_property,
+            &mut control,
+        )?;
         self.execute_projected_index(
             vertices,
             Index::new(),
-            Some(identified),
+            Some(IdentifiedSources {
+                shared: identified,
+                filtered,
+            }),
             test_vertex,
             control,
             Projection::Terminal(
@@ -1597,7 +1683,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         &self,
         vertices: impl IntoIterator<Item = VId>,
         index: Index,
-        identified_index: Option<IdentifiedIndex>,
+        identified_index: Option<IdentifiedSources>,
         test_vertex: F,
         mut control: C,
         project: Projection<P>,
@@ -1643,7 +1729,8 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             probe_matches: [false; crate::algebra::MAX_PATTERN_IDENTITIES],
             optional_matches: [false; crate::algebra::MAX_PATTERN_IDENTITIES],
             vertex_domain,
-            identified_index: identified_index.as_ref(),
+            identified_index: identified_index.as_ref().map(|index| &index.shared),
+            filtered_identified_index: identified_index.as_ref().map(|index| &index.filtered),
             segments: core::array::from_fn(|_| None),
             paths: core::array::from_fn(|_| None),
             collecting: core::array::from_fn(|_| Vec::new()),
@@ -1674,7 +1761,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             }) => {
                 if let Some(adjacency) = identified_index
                     .as_ref()
-                    .and_then(|index| index.get(&(*relation, *direction)))
+                    .and_then(|index| index.shared.get(&(*relation, *direction)))
                 {
                     for (source, neighbors) in adjacency.iter() {
                         for &(edge, destination) in neighbors {

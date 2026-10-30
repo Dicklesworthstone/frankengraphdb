@@ -133,6 +133,279 @@ fn read(
 }
 
 #[test]
+fn quantified_relationship_maps_match_a_physically_masked_graph() {
+    let ((), report) = run_async_under_lab(0x5ec0_1009, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = database(&commit).await;
+        // The hidden relation would satisfy the property map if relation
+        // masking happened after traversal instead of before it.
+        let mut other = WriteBatch::new(RelationId(2));
+        other.set_edge_property(EId(20), PropertyKeyId(1), Some(CanonicalScalar::Int(5)));
+        db.write(&commit, other).await.unwrap();
+        let mut visible =
+            Database::open_memory(&commit, DatabaseKeys::new([0x45; 32], NS, [0x73; 32]))
+                .await
+                .unwrap();
+        let mut physical = WriteBatch::new(RelationId(1));
+        for (id, p) in [(1, 10), (3, 30)] {
+            physical.create_vertex(
+                VId(id),
+                vec![LabelId(1)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(p))],
+            );
+        }
+        for (id, from, to) in [(12, 1, 3), (13, 1, 3), (14, 3, 1)] {
+            physical.add_edge(
+                EId(id),
+                VId(from),
+                VId(to),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(5))],
+            );
+        }
+        visible.write(&commit, physical).await.unwrap();
+        let issuer = authority(111, NS);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let ordered = |mut rows: Vec<GraphValueRow>| {
+            rows.sort_by(|left, right| left.values().cmp(right.values()));
+            rows
+        };
+        for text in [
+            "MATCH WALK (a)-[:R*1..2 {p:5}]->(b) RETURN a,b",
+            "MATCH WALK (a)<-[:R*1..2 {p:5}]-(b) RETURN a,b",
+            "MATCH WALK (a)-[:R*1..2 {p:5}]-(b) RETURN a,b",
+            "MATCH WALK (a)-[:R|S*1..2 {p:5}]->(b) RETURN a,b",
+            "MATCH WALK (a)-[*1..2 {p:5}]->(b) RETURN a,b",
+            "MATCH WALK (a)-[:R*1..2 {hidden:999}]->(b) RETURN a,b",
+            "MATCH WALK (a)-[:R*0..2 {hidden:999}]->(b) RETURN a,b",
+            "MATCH WALK (a)-[:R*0..2 {p:NULL}]->(b) RETURN a,b",
+            "MATCH (a) OPTIONAL MATCH WALK (a)-[:R*1..2 {hidden:999}]->(b) RETURN a,b",
+        ] {
+            let expected = visible
+                .execute_graph_pattern_governed(&cx, &pattern(text), policy())
+                .unwrap_or_else(|error| panic!("physical graph {text}: {error:?}"))
+                .value;
+            assert_eq!(
+                ordered(read(&db, &cx, &issuer, &token, text)),
+                ordered(expected),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            ordered(read(
+                &db,
+                &cx,
+                &issuer,
+                &token,
+                "MATCH WALK (a)-[:R*1..2 {p:5}]->(b) RETURN a,b",
+            )),
+            vec![
+                row(vec![vertex(1), vertex(1)]),
+                row(vec![vertex(1), vertex(1)]),
+                row(vec![vertex(1), vertex(3)]),
+                row(vec![vertex(1), vertex(3)]),
+                row(vec![vertex(3), vertex(1)]),
+                row(vec![vertex(3), vertex(3)]),
+                row(vec![vertex(3), vertex(3)]),
+            ]
+        );
+        // The predicate is universal over the traversed edges. A zero-hop
+        // occurrence reads no edge property, including a masked/NULL one.
+        for field in ["hidden:999", "p:NULL"] {
+            assert_eq!(
+                read(
+                    &db,
+                    &cx,
+                    &issuer,
+                    &token,
+                    &format!("MATCH WALK (a)-[:R*0..2 {{{field}}}]->(b) RETURN a,b"),
+                ),
+                vec![
+                    row(vec![vertex(1), vertex(1)]),
+                    row(vec![vertex(3), vertex(3)])
+                ]
+            );
+        }
+        assert_eq!(
+            read(
+                &db,
+                &cx,
+                &issuer,
+                &token,
+                "MATCH (a) OPTIONAL MATCH WALK (a)-[:R*1..2 {hidden:999}]->(b) RETURN a,b",
+            ),
+            vec![row(vec![vertex(1), null()]), row(vec![vertex(3), null()])]
+        );
+        // Bind the same value-free template twice; the second execution must
+        // not reuse the first edge predicate or its accepted paths.
+        let template = PreparedGraphText::prepare(
+            "MATCH WALK (a)-[:R*1..2 {p:$wanted}]->(b) RETURN a,b",
+            symbols,
+        )
+        .unwrap();
+        for (wanted, expected) in [(5, 7), (99, 0)] {
+            let query = template
+                .bind_parameters(&GqlParameters::new().with_int64("wanted", wanted).unwrap())
+                .unwrap()
+                .with_duplicates();
+            let result = db
+                .execute_graph_pattern_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    &query,
+                    policy(),
+                    || 100,
+                )
+                .unwrap();
+            assert_eq!(result.len(), expected);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn quantified_map_filters_precede_shortest_selection_and_keep_history_and_limits() {
+    let ((), report) = run_async_under_lab(0x5ec0_1010, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, DatabaseKeys::new([0x45; 32], NS, [0x73; 32]))
+            .await
+            .unwrap();
+        let mut data = WriteBatch::new(RelationId(1));
+        for id in 1..=3 {
+            data.create_vertex(
+                VId(id),
+                vec![LabelId(1)],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(id as i64 * 10))],
+            );
+        }
+        // The one-hop shortcut fails its map. The two qualifying paths use
+        // distinct parallel first edges, so ALL SHORTEST must retain both.
+        for (id, from, to, p) in [(10, 1, 3, 0), (11, 1, 2, 5), (12, 2, 3, 5), (13, 1, 2, 5)] {
+            data.add_edge(
+                EId(id),
+                VId(from),
+                VId(to),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(p))],
+            );
+        }
+        let before = db.write(&commit, data).await.unwrap();
+        let issuer = authority(112, NS);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let text = "MATCH ALL SHORTEST WALK (a {p:10})-[:R*1..3 {p:5}]->(b {p:30}) \
+                    RETURN a,b";
+        let query = pattern(text);
+        let expected = vec![row(vec![vertex(1), vertex(3)]); 2];
+        assert_eq!(read(&db, &cx, &issuer, &token, text), expected);
+        // Bound source/target lookups must not take the topology-only
+        // shortest-closure shortcut, which would retain only edge 10 and
+        // suppress both longer qualifying paths before map evaluation.
+        assert_eq!(
+            db.execute_graph_pattern_governed(&cx, &query, policy())
+                .unwrap()
+                .value,
+            expected
+        );
+        let full = issuer
+            .issue_at(
+                &Grant::read_only(
+                    BRANCH,
+                    1000,
+                    QueryLimits {
+                        max_nodes: 1000,
+                        max_work: 1_000_000,
+                        max_rows: 1000,
+                    },
+                ),
+                100,
+            )
+            .unwrap();
+        assert_eq!(read(&db, &cx, &issuer, &full, text), expected);
+        // Aggregate topology shortcuts must also decline a per-hop field
+        // predicate. They cannot count a rejected route or infer endpoint
+        // support from connectivity alone.
+        for (wanted, paths, endpoints) in [(5, 2, 1), (99, 0, 0)] {
+            for (aggregate, count) in [("count(*)", paths), ("count(DISTINCT b)", endpoints)] {
+                let text = format!(
+                    "MATCH ALL SHORTEST WALK (a {{p:10}})-[:R*1..3 {{p:{wanted}}}]->(b {{p:30}}) \
+                     RETURN {aggregate} AS n"
+                );
+                let owner = db
+                    .query(&cx, &text, &GqlParameters::new(), symbols, policy())
+                    .unwrap();
+                let authorized = db
+                    .query_authorized(
+                        &cx,
+                        &issuer,
+                        &full,
+                        BRANCH,
+                        &text,
+                        &GqlParameters::new(),
+                        symbols,
+                        policy(),
+                        || 100,
+                    )
+                    .unwrap();
+                assert_eq!(authorized, owner, "{text}");
+                let fgdb::QueryResult::Rows { rows, .. } = owner else {
+                    panic!("aggregate returns rows");
+                };
+                assert_eq!(rows.len(), 1, "{text}");
+                assert_eq!(rows[0][0].as_count(), Some(count), "{text}");
+            }
+        }
+        assert_eq!(
+            read(
+                &db,
+                &cx,
+                &issuer,
+                &token,
+                "MATCH ANY SHORTEST WALK (a {p:10})-[:R*1..3 {p:5}]->(b {p:30}) \
+                 RETURN a,b",
+            ),
+            vec![row(vec![vertex(1), vertex(3)])]
+        );
+        for (restriction, dimension) in [
+            (Restriction::MaxNodes(0), LimitDimension::Nodes),
+            (Restriction::MaxWork(0), LimitDimension::Work),
+            (Restriction::MaxRows(1), LimitDimension::Rows),
+        ] {
+            let limited = token.attenuate(restriction).unwrap();
+            assert!(matches!(
+                db.execute_graph_pattern_authorized(
+                    &cx, &issuer, &limited, BRANCH, &query, policy(), || 100,
+                ),
+                Err(QueryError::Authorization(Error::LimitExceeded(actual))) if actual == dimension
+            ));
+        }
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_edge_property(EId(11), PropertyKeyId(1), Some(CanonicalScalar::Int(0)));
+        change.set_edge_property(EId(13), PropertyKeyId(1), Some(CanonicalScalar::Int(0)));
+        db.write(&commit, change).await.unwrap();
+        assert!(read(&db, &cx, &issuer, &token, text).is_empty());
+        assert_eq!(
+            db.execute_graph_pattern_authorized_at(
+                &cx,
+                &issuer,
+                &token,
+                BRANCH,
+                &query,
+                before,
+                policy(),
+                || 100,
+            )
+            .unwrap(),
+            expected
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn topology_and_metadata_are_masked_before_matching_not_after_projection() {
     let ((), report) = run_async_under_lab(0x5ec0_1001, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

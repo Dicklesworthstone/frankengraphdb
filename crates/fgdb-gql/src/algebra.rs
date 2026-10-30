@@ -222,6 +222,34 @@ pub enum IntegerComparison {
     LessOrEqual,
 }
 
+/// A checked per-hop equality operand. Plan diagnostics reveal its property
+/// key, but never the bound property value.
+#[derive(Clone, PartialEq, Eq)]
+pub struct WalkEdgePredicate {
+    pub(crate) key: PropertyKeyId,
+    pub(crate) value: CanonicalPropertyValue,
+}
+impl core::fmt::Debug for WalkEdgePredicate {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("WalkEdgePredicate")
+            .field("key", &self.key)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
+}
+
+pub(crate) fn append_walk_predicates(bytes: &mut Vec<u8>, predicates: &[WalkEdgePredicate]) {
+    bytes.extend_from_slice(&(predicates.len() as u64).to_be_bytes());
+    for WalkEdgePredicate { key, value } in predicates {
+        bytes.extend_from_slice(&key.0.to_be_bytes());
+        let encoded = value
+            .encode()
+            .expect("walk predicate values are validated by the pattern builder");
+        bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(&encoded);
+    }
+}
+
 impl IntegerComparison {
     #[must_use]
     pub const fn accepts(self, actual: i64, expected: i64) -> bool {
@@ -361,6 +389,10 @@ pub enum GlaOperator {
         direction: GlaDirection,
         bounds: crate::GraphWalkBounds,
         search: GraphWalkSearch,
+        /// Equalities that every traversed relationship must satisfy. Source
+        /// admission and these reads precede path selection, including
+        /// shortest-path selection. Zero hops satisfy them vacuously.
+        edge_predicates: Vec<WalkEdgePredicate>,
     },
     /// Require pairwise distinct actual EIds across these identified expansion
     /// segments. The newest endpoint is last. This positive-clause constraint
@@ -845,7 +877,8 @@ impl<Row> GlaPlan<Row> {
                         search: GraphWalkSearch::Trail,
                         ..
                     }
-            )
+            ) || matches!(op, GlaOperator::VarLengthExpand { edge_predicates, .. }
+                if !edge_predicates.is_empty())
         })
     }
 
@@ -877,6 +910,9 @@ impl<Row> GlaPlan<Row> {
                 )
             }),
             GlaOperator::SelectBoolean { expression } => expression.contains_captured_edge(),
+            GlaOperator::VarLengthExpand {
+                edge_predicates, ..
+            } => !edge_predicates.is_empty(),
             _ => false,
         })
     }
@@ -990,6 +1026,16 @@ impl<Row> GlaPlan<Row> {
         let mut bytes = b"fgdb:bounded-gla:v1\0".to_vec();
         bytes.extend_from_slice(&(self.operators.len() as u64).to_be_bytes());
         for operator in &self.operators {
+            // A nonempty quantified relationship map prefixes its bounded
+            // equality definition. Existing unfiltered plan bytes stay exact.
+            if let GlaOperator::VarLengthExpand {
+                edge_predicates, ..
+            } = operator
+                && !edge_predicates.is_empty()
+            {
+                bytes.push(41);
+                append_walk_predicates(&mut bytes, edge_predicates);
+            }
             // A type alternation prefixes its members (tag 40), then encodes
             // the operator in its untyped form. One and Any keep their bytes.
             if let GlaOperator::ScanEdges {
@@ -1084,6 +1130,7 @@ impl<Row> GlaPlan<Row> {
                     direction,
                     bounds,
                     search,
+                    edge_predicates: _,
                 } => {
                     // Preserve existing transcripts byte-for-byte. Every
                     // selector has its own tag even when outputs coincide.

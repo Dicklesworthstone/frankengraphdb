@@ -1,6 +1,6 @@
-//! Fixed-length edge property binding and identity-domain separation.
+//! Edge property binding, quantified hop predicates and identity domains.
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_gql::algebra::GraphValue;
+use fgdb_gql::algebra::{GraphValue, GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphPatternTextErrorKind, GraphSymbol,
     GraphSymbolKind, PreparedGraphText,
@@ -81,6 +81,10 @@ fn inline_rows(text: &str) -> Vec<Vec<GraphValue>> {
         .unwrap_or_else(|error| panic!("{text}: {error}"))
         .bind_parameters(&GqlParameters::new())
         .unwrap();
+    inline_pattern_rows(&prepared)
+}
+
+fn inline_pattern_rows(prepared: &PreparedGraphPattern<GraphValueRow>) -> Vec<Vec<GraphValue>> {
     let five = CanonicalPropertyValue::from(CanonicalScalar::Int(5));
     let seven = CanonicalPropertyValue::from(CanonicalScalar::Int(7));
     let nine = CanonicalPropertyValue::from(CanonicalScalar::Int(9));
@@ -115,7 +119,7 @@ fn inline_rows(text: &str) -> Vec<Vec<GraphValue>> {
             GqlQueryPolicy::new(100, 100, 10000, 10000),
             || Ok::<_, ()>(()),
         )
-        .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+        .unwrap()
         .value
         .iter()
         .map(|row| row.values().to_vec())
@@ -201,15 +205,11 @@ fn inline_relationship_and_anonymous_node_maps_filter_like_where() {
         .bind_parameters(&GqlParameters::new())
         .unwrap();
     assert_eq!(star.columns(), ["a", "b"]);
-    // A walk's map would range over a list of relationships.
+    // Malformed fixed and quantified maps still refuse at their source site.
     for (text, expected) in [
         (
-            "MATCH (a)-[r:R*1..2 {p: 5}]->(b) RETURN a",
-            "fixed-length relationship for a property map",
-        ),
-        (
-            "MATCH (a)-[:R*1..2 {p: 5}]->(b) RETURN a",
-            "fixed-length relationship for a property map",
+            "MATCH (a)-[r:R*1..2 {p: 5, p: 6}]->(b) RETURN a",
+            "distinct property name in relationship map",
         ),
         (
             "MATCH (a)-[r:R {p: 5, p: 6}]->(b) RETURN a",
@@ -224,6 +224,284 @@ fn inline_relationship_and_anonymous_node_maps_filter_like_where() {
             PreparedGraphText::prepare(text, symbols).unwrap_err().kind,
             GraphPatternTextErrorKind::Expected(expected),
             "{text}"
+        );
+    }
+}
+
+#[test]
+fn quantified_relationship_maps_constrain_each_hop_and_each_atom() {
+    let vertex = |id| GraphValue::Vertex(VId(id));
+    let expected = vec![
+        vec![vertex(1), vertex(2)],
+        vec![vertex(3), vertex(1)],
+        vec![vertex(3), vertex(2)],
+    ];
+    for text in [
+        "MATCH (a)-[:R*1..3 {p: 5}]->(b) RETURN a,b",
+        "MATCH (a)-[r:R*1..3 {p: 5}]->(b) RETURN a,b",
+        "MATCH (a)-[*1..3 {p: 5}]->(b) RETURN a,b",
+        "MATCH (a)-[:R* {p: 5}]->(b) RETURN a,b",
+        "MATCH (a)-[:R*1..3 {p: toInteger('5')}]->(b) RETURN a,b",
+        "MATCH (a)-[:R {p: 5}]->{1,3}(b) RETURN a,b",
+        "MATCH (a)-[r:R {p: 5}]->{1,3}(b) RETURN a,b",
+    ] {
+        assert_eq!(inline_rows(text), expected, "{text}");
+    }
+    // The same relationship type and orientation can have independently
+    // filtered adjacency in two atoms. One atom's map must not filter the
+    // other's source or change the matching occurrence bag.
+    assert_eq!(
+        inline_rows("MATCH (a)-[:R*1..2 {p: 5}]->(b)-[:R*1..2 {p: 7}]->(c) RETURN a,c"),
+        vec![vec![vertex(3), vertex(3)]]
+    );
+    assert_eq!(
+        inline_rows("MATCH (a)<-[:R*1..3 {p: 5}]-(b) RETURN a,b"),
+        vec![
+            vec![vertex(1), vertex(3)],
+            vec![vertex(2), vertex(1)],
+            vec![vertex(2), vertex(3)],
+        ]
+    );
+    // No generated relationship capture is exposed by an anonymous map.
+    let star = PreparedGraphText::prepare("MATCH (a)-[:R* {p: 5}]->(b) RETURN *", symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+    assert_eq!(star.columns(), ["a", "b"]);
+}
+
+#[test]
+fn quantified_maps_rebind_without_catalog_reads_and_keep_zero_hop_truth() {
+    use std::cell::Cell;
+    let resolutions = Cell::new(0);
+    let template = PreparedGraphText::prepare(
+        "MATCH (a)-[:R*0..3 {p: $wanted}]->(b) RETURN a,b",
+        |kind, name: &str| {
+            resolutions.set(resolutions.get() + 1);
+            symbols(kind, name)
+        },
+    )
+    .unwrap();
+    let frozen = resolutions.get();
+    let vertex = |id| GraphValue::Vertex(VId(id));
+    let zero_hops = vec![
+        vec![vertex(1), vertex(1)],
+        vec![vertex(2), vertex(2)],
+        vec![vertex(3), vertex(3)],
+    ];
+    let seven = template
+        .bind_parameters(&GqlParameters::new().with_int64("wanted", 7).unwrap())
+        .unwrap();
+    assert_eq!(
+        inline_pattern_rows(&seven),
+        vec![
+            vec![vertex(1), vertex(1)],
+            vec![vertex(1), vertex(3)],
+            vec![vertex(2), vertex(2)],
+            vec![vertex(3), vertex(3)],
+        ]
+    );
+    let absent = template
+        .bind_parameters(&GqlParameters::new().with_int64("wanted", 99).unwrap())
+        .unwrap();
+    assert_eq!(inline_pattern_rows(&absent), zero_hops);
+    assert_ne!(seven.canonical_bytes(), absent.canonical_bytes());
+    assert_eq!(resolutions.get(), frozen);
+    assert_eq!(
+        inline_rows("MATCH (a)-[:R*0..3 {p: NULL}]->(b) RETURN a,b"),
+        zero_hops
+    );
+    assert!(inline_rows("MATCH (a)-[:R*1..3 {p: NULL}]->(b) RETURN a,b").is_empty());
+    assert_eq!(
+        inline_rows("MATCH (a)-[:R*0..0 {p: NULL}]->(b) RETURN a,b"),
+        zero_hops
+    );
+    let secret = PreparedGraphText::prepare(
+        "MATCH (a)-[:R*1..3 {p: 'confidential-hop-value'}]->(b) RETURN b",
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
+    let diagnostic = format!("{:?}", secret.plan());
+    assert!(diagnostic.contains("[REDACTED]"));
+    assert!(!diagnostic.contains("confidential-hop-value"));
+}
+
+#[test]
+fn quantified_map_sources_fail_closed_even_when_no_output_is_requested() {
+    let text =
+        PreparedGraphText::prepare("MATCH (a)-[:R*1..3 {p: 5}]->(b) RETURN b LIMIT 0", symbols)
+            .unwrap();
+    let prepared = text.bind_parameters(&GqlParameters::new()).unwrap();
+    assert!(prepared.plan().requires_identified_edges());
+    assert!(prepared.plan().projects_edge_properties());
+    let result = prepared.plan().execute_governed_with_element_properties(
+        1,
+        [VId(1), VId(2)],
+        [(EId(1), VId(1), RelationId(1), VId(2))],
+        |_, _| Ok::<_, &'static str>(true),
+        |_, _| Ok(None),
+        |_, _| Err("unreadable quantified edge payload"),
+        GqlQueryPolicy::new(10, 10, 10000, 10000),
+        || Ok::<_, ()>(()),
+    );
+    assert!(matches!(
+        result,
+        Err(GqlQueryError::Source("unreadable quantified edge payload"))
+    ));
+    let result = prepared.plan().execute_governed_with_identified_properties(
+        1,
+        [VId(1), VId(2)],
+        [(EId(1), VId(1), RelationId(1), VId(2))],
+        |_, _| Ok::<_, ()>(true),
+        |_, _| Ok(None),
+        GqlQueryPolicy::new(10, 10, 10000, 10000),
+        || Ok::<_, ()>(()),
+    );
+    assert!(
+        result.is_err(),
+        "an absent edge reader must never widen a walk"
+    );
+}
+
+#[test]
+fn quantified_maps_preserve_stored_collection_equality_and_multiple_keys() {
+    use fgdb_types::CanonicalF64;
+    let int = |n| GraphValue::Scalar(CanonicalScalar::Int(n));
+    let float = |n| GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(n)));
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    let values = [
+        GraphValue::List(vec![int(5), int(6)]),
+        GraphValue::List(vec![float(5.0), float(6.0)]),
+        GraphValue::List(vec![int(5), null.clone()]),
+        GraphValue::map(vec![("a".into(), int(5))]).unwrap(),
+    ];
+    let stored: Vec<_> = values
+        .iter()
+        .map(|value| value.to_property_value().unwrap())
+        .collect();
+    let q = CanonicalPropertyValue::from(CanonicalScalar::Int(1));
+    let resolver = |kind, name: &str| {
+        if kind == GraphSymbolKind::Property && name == "q" {
+            Some(GraphSymbol::Property(PropertyKeyId(2)))
+        } else {
+            symbols(kind, name)
+        }
+    };
+    let execute = |text: &str, params: &GqlParameters| {
+        let declarations: Vec<_> = params.parameter_types().collect();
+        let prepared =
+            PreparedGraphText::prepare_with_parameter_types(text, &declarations, resolver)
+                .unwrap()
+                .bind_parameters(params)
+                .unwrap();
+        prepared
+            .plan()
+            .execute_governed_with_element_properties(
+                4,
+                [VId(1), VId(2), VId(3), VId(4), VId(5)],
+                (0..4).map(|edge| (EId(edge + 1), VId(1), RelationId(1), VId(edge + 2))),
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                |edge, key| {
+                    Ok(match key {
+                        PropertyKeyId(1) => stored.get(edge.0 as usize - 1),
+                        PropertyKeyId(2) => Some(&q),
+                        _ => None,
+                    })
+                },
+                GqlQueryPolicy::new(100, 100, 100_000, 100_000),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value
+            .iter()
+            .map(|row| row.values().to_vec())
+            .collect::<Vec<_>>()
+    };
+    let expected = vec![
+        vec![GraphValue::Vertex(VId(2))],
+        vec![GraphValue::Vertex(VId(3))],
+    ];
+    let args = GqlParameters::new()
+        .with_list("wanted", vec![int(5), int(6)])
+        .unwrap();
+    assert_eq!(
+        execute(
+            "MATCH (a)-[:R*1..2 {p: $wanted, q: 1}]->(b) RETURN b",
+            &args
+        ),
+        expected
+    );
+    assert_eq!(
+        execute(
+            "MATCH (a)-[:R*1..2 {p: [5,6], q: 1}]->(b) RETURN b",
+            &GqlParameters::new(),
+        ),
+        expected
+    );
+    assert!(
+        execute(
+            "MATCH (a)-[:R*1..2 {p: [5,6], q: 2}]->(b) RETURN b",
+            &GqlParameters::new(),
+        )
+        .is_empty()
+    );
+    assert!(
+        execute(
+            "MATCH (a)-[:R*1..2 {p: [5,null]}]->(b) RETURN b",
+            &GqlParameters::new(),
+        )
+        .is_empty(),
+        "UNKNOWN collection equality does not admit an edge"
+    );
+    let map = GqlParameters::new()
+        .with_map("wanted", vec![("a".into(), int(5))])
+        .unwrap();
+    assert_eq!(
+        execute("MATCH (a)-[:R*1..2 {p: $wanted}]->(b) RETURN b", &map),
+        vec![vec![GraphValue::Vertex(VId(5))]]
+    );
+}
+
+#[test]
+fn quantified_map_filtering_honors_every_cancellation_checkpoint() {
+    use std::cell::Cell;
+    let prepared =
+        PreparedGraphText::prepare("MATCH (a)-[:R*1..2 {p: 5}]->(b) RETURN a,b", symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+    let five = CanonicalPropertyValue::from(CanonicalScalar::Int(5));
+    let execute = |fail_at| {
+        let checkpoints = Cell::new(0);
+        let result = prepared.plan().execute_governed_with_element_properties(
+            2,
+            [VId(1), VId(2), VId(3)],
+            [
+                (EId(1), VId(1), RelationId(1), VId(2)),
+                (EId(2), VId(2), RelationId(1), VId(3)),
+            ],
+            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok(None),
+            |_, _| Ok(Some(&five)),
+            GqlQueryPolicy::new(100, 100, 100_000, 100_000),
+            || {
+                let at = checkpoints.get();
+                checkpoints.set(at + 1);
+                if fail_at == Some(at) { Err(at) } else { Ok(()) }
+            },
+        );
+        (result, checkpoints.get())
+    };
+    let (result, checkpoints) = execute(None);
+    assert_eq!(result.unwrap().value.len(), 3);
+    assert!(checkpoints > 5);
+    for at in 0..checkpoints {
+        assert!(
+            matches!(execute(Some(at)).0, Err(GqlQueryError::Interrupted(observed)) if observed == at),
+            "checkpoint {at} must interrupt before releasing rows"
         );
     }
 }

@@ -901,6 +901,7 @@ fn reach_shape(aggregate: &PreparedGraphAggregate) -> Option<Reach<'_>> {
         direction,
         bounds,
         search,
+        edge_predicates,
     } = operators.next()?
     else {
         return None;
@@ -911,6 +912,7 @@ fn reach_shape(aggregate: &PreparedGraphAggregate) -> Option<Reach<'_>> {
         GlaDirection::Undirected => return None,
     };
     if source.ordinal() != 0
+        || !edge_predicates.is_empty()
         || bounds.minimum() > 1
         || !matches!(
             search,
@@ -1367,7 +1369,8 @@ fn chain_shape(aggregate: &PreparedGraphAggregate) -> Option<Chain<'_>> {
                 direction,
                 bounds,
                 search,
-            } if quantified && last == 0 && source.ordinal() == 0 => {
+                edge_predicates,
+            } if quantified && last == 0 && source.ordinal() == 0 && edge_predicates.is_empty() => {
                 let (minimum, maximum) = (bounds.minimum(), bounds.maximum());
                 if !(2..=3).contains(&minimum) || !(minimum..=3).contains(&maximum) {
                     return None;

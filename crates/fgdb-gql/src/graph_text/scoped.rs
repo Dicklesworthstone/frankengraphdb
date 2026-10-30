@@ -365,6 +365,17 @@ fn resolve_pattern_with_captures<'a>(
             ),
         };
         built(edge.relation.map_or(edge.source.at, |name| name.at), result)?;
+        for (key, value, at) in &edge.walk_properties {
+            let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, *key)? else {
+                unreachable!("symbol domain is checked by the shared resolver")
+            };
+            numeric.push(BoundFilter::WalkProperty {
+                edge: edge_at,
+                key,
+                value: value.clone(),
+                at: *at,
+            });
+        }
         if let Some(variable) = edge.variable {
             built(variable.at, builder.capture_edge(variable.text, edge_at))?;
         }
@@ -536,6 +547,17 @@ pub(super) fn bind_builder(
 ) -> Result<GraphPatternBuilder, GraphPatternTextError> {
     let mut builder = builder.clone();
     for filter in filters {
+        if let BoundFilter::WalkProperty {
+            edge,
+            key,
+            value,
+            at,
+        } = filter
+        {
+            let value = boolean::bind_stored_literal(value, values, *at)?;
+            built(*at, builder.filter_walk_edge(*edge, *key, value))?;
+            continue;
+        }
         if let BoundFilter::PathLength {
             variable,
             comparison,
@@ -1158,6 +1180,32 @@ impl<'a> Parser<'a> {
         Ok(matches!(self.current.kind, TokenKind::Word(_))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'=')))
     }
+
+    /// At a relationship map, distinguish the fixed-length form from GQL's
+    /// quantifier after `]` and the direction. Braces inside the map belong
+    /// to values; only the brace following the complete relationship counts.
+    fn map_has_postfix_walk(&self) -> Result<bool, GraphPatternTextError> {
+        let mut ahead = self.lexer.clone();
+        let mut depth = 1_usize;
+        while depth > 0 {
+            match ahead.next()?.kind {
+                TokenKind::Punct(b'{') => depth += 1,
+                TokenKind::Punct(b'}') => depth -= 1,
+                TokenKind::End => return Ok(false),
+                _ => {}
+            }
+        }
+        if ahead.next()?.kind != TokenKind::Punct(b']')
+            || ahead.next()?.kind != TokenKind::Punct(b'-')
+        {
+            return Ok(false);
+        }
+        let mut next = ahead.next()?.kind;
+        if next == TokenKind::Punct(b'>') {
+            next = ahead.next()?.kind;
+        }
+        Ok(next == TokenKind::Punct(b'{'))
+    }
     /// One positive-pattern parser, used at the root and in each scope. Both
     /// relationship quantifier spellings retain the native path semantics.
     /// Restricted native patterns contain one finite atom; separate MATCH
@@ -1223,6 +1271,7 @@ impl<'a> Parser<'a> {
                 let incoming = self.take(b'<')?;
                 self.punct(b'-', "-")?;
                 let mut alternatives = Vec::new();
+                let mut walk_properties = Vec::new();
                 let (variable, relation, walk) = if self.take(b'[')? {
                     let variable = if matches!(self.current.kind, TokenKind::Word(_)) {
                         Some(self.name()?)
@@ -1249,24 +1298,58 @@ impl<'a> Parser<'a> {
                         alternatives.push(self.schema_name()?);
                     }
                     let walk = self.pattern_walk_bounds()?;
-                    // openCypher `-[r:T {k: v}]->` filters that one captured
-                    // relationship, and `-[:T {k: v}]->` a private capture of
-                    // it. A walk's map would range over a list.
+                    // A quantified map constrains every hop before shortest
+                    // selection; it does not read the captured list as though
+                    // the list were one relationship. Fixed-length maps keep
+                    // their ordinary captured-edge predicate lowering.
                     let variable = if self.is_punct(b'{') {
-                        if walk.is_some() {
-                            return Err(error(
-                                self.current.at,
-                                GraphPatternTextErrorKind::Expected(
-                                    "fixed-length relationship for a property map",
-                                ),
-                            ));
+                        if walk.is_some() || self.map_has_postfix_walk()? {
+                            self.punct(b'{', "{")?;
+                            if !self.take(b'}')? {
+                                loop {
+                                    self.capacity(
+                                        self.predicates,
+                                        MAX_PATTERN_PREDICATES,
+                                        PatternLimitDimension::Predicates,
+                                    )?;
+                                    let key = self.schema_name()?;
+                                    if walk_properties.iter().any(
+                                        |(existing, _, _): &(Name<'a>, _, _)| {
+                                            existing.text == key.text
+                                        },
+                                    ) {
+                                        return Err(error(
+                                            key.at,
+                                            GraphPatternTextErrorKind::Expected(
+                                                "distinct property name in relationship map",
+                                            ),
+                                        ));
+                                    }
+                                    self.punct(b':', ":")?;
+                                    let Filter::ConstantProperty { value, at, .. } =
+                                        self.constant_property_operand(left, key)?
+                                    else {
+                                        unreachable!(
+                                            "constant property parser returns its template"
+                                        )
+                                    };
+                                    walk_properties.push((key, value, at));
+                                    self.predicates += 1;
+                                    if !self.take(b',')? {
+                                        break;
+                                    }
+                                }
+                                self.punct(b'}', "}")?;
+                            }
+                            variable
+                        } else {
+                            let variable = match variable {
+                                Some(variable) => variable,
+                                None => self.anonymous_edge()?,
+                            };
+                            self.property_map(variable, true)?;
+                            Some(variable)
                         }
-                        let variable = match variable {
-                            Some(variable) => variable,
-                            None => self.anonymous_edge()?,
-                        };
-                        self.property_map(variable, true)?;
-                        Some(variable)
                     } else {
                         variable
                     };
@@ -1318,6 +1401,7 @@ impl<'a> Parser<'a> {
                     },
                     walk,
                     search,
+                    walk_properties,
                 });
                 self.edge_count += 1;
                 left = right;

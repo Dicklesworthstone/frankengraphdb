@@ -746,6 +746,9 @@ struct Edge<'a> {
     destination: Name<'a>,
     walk: Option<crate::GraphWalkBounds>,
     search: crate::algebra::GraphWalkSearch,
+    /// Equality constraints on every traversed relationship, before path
+    /// selection. The values are constant templates rebound per execution.
+    walk_properties: Vec<(Name<'a>, Box<crate::set_text::ReadValueTemplate>, usize)>,
 }
 enum Filter<'a> {
     PathCapture(Name<'a>),
@@ -2287,6 +2290,12 @@ pub(crate) fn constant_page_number(
 
 #[derive(Clone)]
 enum BoundFilter {
+    WalkProperty {
+        edge: usize,
+        key: PropertyKeyId,
+        value: Box<crate::set_text::ReadValueTemplate>,
+        at: usize,
+    },
     PathLength {
         variable: String,
         comparison: IntegerComparison,
@@ -2632,6 +2641,14 @@ impl PreparedGraphText {
         }
         fn append_filter(bytes: &mut Vec<u8>, filter: &BoundFilter) {
             match filter {
+                BoundFilter::WalkProperty {
+                    edge, key, value, ..
+                } => {
+                    bytes.push(4);
+                    bytes.extend_from_slice(&(*edge as u64).to_be_bytes());
+                    bytes.extend_from_slice(&key.0.to_be_bytes());
+                    value.append_template_transcript(bytes);
+                }
                 BoundFilter::PathLength {
                     variable,
                     comparison,
@@ -2781,6 +2798,7 @@ impl PreparedGraphText {
         operators.extend(std::iter::repeat_n("MatchScope", self.scopes.len()));
         for filter in &self.filters {
             operators.push(match filter {
+                BoundFilter::WalkProperty { .. } => "FilterWalkEdgeProperty",
                 BoundFilter::PathLength { .. } => "FilterPathLength",
                 BoundFilter::Property { .. } | BoundFilter::ConstantProperty { .. } => {
                     "FilterProperty"

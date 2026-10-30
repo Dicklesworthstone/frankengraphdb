@@ -1600,6 +1600,9 @@ impl PreparedGraphMutationText {
         let reads_written_field = |builder: &GraphPatternBuilder, filters: &[BoundFilter]| {
             builder.selects_on_any_field(writes_property, writes_label)
                 || filters.iter().any(|filter| match filter {
+                    BoundFilter::WalkProperty { key, .. } => {
+                        writes_property(crate::GraphSetColumnType::Edge, *key)
+                    }
                     BoundFilter::Property { key, .. }
                     | BoundFilter::ConstantProperty { key, .. } => {
                         writes_property(crate::GraphSetColumnType::Vertex, *key)

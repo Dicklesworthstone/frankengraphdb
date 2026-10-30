@@ -154,7 +154,11 @@ impl Probe {
                     direction,
                     bounds,
                     search,
-                } if (source.ordinal() as usize) < width && expansions < MAX_PATTERN_EDGES => {
+                    edge_predicates,
+                } if (source.ordinal() as usize) < width
+                    && expansions < MAX_PATTERN_EDGES
+                    && edge_predicates.is_empty() =>
+                {
                     expansions += 1;
                     Some(Binding::Walk {
                         expansion: Expansion {
