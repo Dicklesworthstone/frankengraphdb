@@ -198,7 +198,7 @@ pub struct GraphWriteChainCursor<'a> {
     at: usize,
     deliver_final: bool,
     awaiting_input: Option<&'a PreparedGraphForeach>,
-    iteration: Option<Iteration<'a>>,
+    iterations: Vec<Iteration<'a>>,
 }
 
 impl<'a> GraphWriteChainCursor<'a> {
@@ -208,7 +208,7 @@ impl<'a> GraphWriteChainCursor<'a> {
             at: 0,
             deliver_final,
             awaiting_input: None,
-            iteration: None,
+            iterations: Vec::new(),
         }
     }
 
@@ -224,7 +224,13 @@ impl<'a> GraphWriteChainCursor<'a> {
         };
         if let Some(foreach) = self.awaiting_input.take() {
             control(Work)?;
-            self.iteration = Some(Iteration {
+            if self.iterations.len() >= crate::MAX_GRAPH_SET_DEPTH {
+                return Err(invalid().into());
+            }
+            // Reserve the live frame before moving its input or growing the
+            // stack. A child shares the host's cumulative scratch allowance.
+            control(ScratchEntry)?;
+            self.iterations.push(Iteration {
                 foreach,
                 incoming: rows.take().ok_or_else(invalid)?.into_iter(),
                 outer: None,
@@ -236,7 +242,8 @@ impl<'a> GraphWriteChainCursor<'a> {
             });
         }
         loop {
-            if let Some(iteration) = self.iteration.as_mut() {
+            let depth = self.iterations.len();
+            if let Some(iteration) = self.iterations.last_mut() {
                 if iteration.collection_running {
                     control(Work)?;
                     let mut evaluated = rows.take().ok_or_else(invalid)?.into_iter();
@@ -254,6 +261,16 @@ impl<'a> GraphWriteChainCursor<'a> {
                     control(Work)?;
                     let step = &iteration.foreach.body.steps[iteration.body_at];
                     iteration.body_at += 1;
+                    if let GraphWriteChainStep::Foreach(foreach) = step {
+                        if depth >= crate::MAX_GRAPH_SET_DEPTH {
+                            return Err(invalid().into());
+                        }
+                        // The parent's next step already follows this child.
+                        // Its row, member and restored bag stay on the stack
+                        // while the child uses the same native host phases.
+                        self.awaiting_input = Some(foreach);
+                        return Ok(Some(GraphWriteChainTask::ForeachInput { foreach }));
+                    }
                     return Ok(Some(GraphWriteChainTask::Write {
                         step,
                         continues: iteration.body_at < iteration.foreach.body.steps.len(),
@@ -346,16 +363,20 @@ impl<'a> GraphWriteChainCursor<'a> {
                     );
                     continue;
                 }
-                let iteration = self.iteration.take().expect("iteration present");
+                let iteration = self.iterations.pop().expect("iteration present");
                 *rows = Some(iteration.restored);
                 if iteration.foreach.output.is_some() {
                     return Ok(Some(GraphWriteChainTask::ForeachOutput {
                         foreach: iteration.foreach,
                         delivers: self.deliver_final
+                            && self.iterations.is_empty()
                             && self.at == self.chain.steps.len()
                             && iteration.foreach.returns_rows(),
                     }));
                 }
+                // A completed child restores the parent's current local row
+                // bag. Resume that body before advancing the root statement.
+                continue;
             }
             let Some(step) = self.chain.steps.get(self.at) else {
                 return Ok(None);

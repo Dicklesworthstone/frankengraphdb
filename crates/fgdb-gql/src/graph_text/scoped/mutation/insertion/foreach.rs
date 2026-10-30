@@ -17,6 +17,29 @@ impl PreparedGraphForeachText {
         resolve: &mut impl GraphSymbolResolver,
         from: Option<ChainContinuation<'a>>,
     ) -> Result<(Self, Option<ChainContinuation<'a>>), GraphWriteChainTextError> {
+        Self::prepare_at_depth(statement, relation, declarations, resolve, from, 0)
+    }
+
+    /// Bound recursion before constructing a descendant parser. Body width
+    /// and step count remain independent bounds; siblings reuse this depth.
+    fn prepare_at_depth<'a>(
+        statement: &'a str,
+        relation: RelationId,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: &mut impl GraphSymbolResolver,
+        from: Option<ChainContinuation<'a>>,
+        depth: usize,
+    ) -> Result<(Self, Option<ChainContinuation<'a>>), GraphWriteChainTextError> {
+        if depth >= crate::MAX_GRAPH_SET_DEPTH {
+            return Err(crate::GraphSetTextError {
+                offset: from.as_ref().map_or(0, |from| from.at),
+                kind: crate::GraphSetTextErrorKind::SetBuild(crate::GraphSetBuildError::TooDeep {
+                    limit: crate::MAX_GRAPH_SET_DEPTH,
+                    observed: depth + 1,
+                }),
+            }
+            .into());
+        }
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?
             .with_zones(resolve.time_zones());
         parser.chain_write = true;
@@ -157,6 +180,18 @@ impl PreparedGraphForeachText {
                 tokens: 0,
             };
             match lexer.next()?.kind {
+                TokenKind::Word(word) if word.eq_ignore_ascii_case("FOREACH") => {
+                    let (foreach, after) = Self::prepare_at_depth(
+                        body_text,
+                        relation,
+                        declarations,
+                        resolve,
+                        Some(from),
+                        depth + 1,
+                    )?;
+                    steps.push(ChainTextStep::Foreach(Box::new(foreach)));
+                    next = after;
+                }
                 TokenKind::Word(word)
                     if word.eq_ignore_ascii_case("CREATE")
                         || word.eq_ignore_ascii_case("INSERT") =>
@@ -236,7 +271,7 @@ impl PreparedGraphForeachText {
                 _ => {
                     return Err(expected(
                         from.at,
-                        "CREATE, INSERT, MERGE, SET or REMOVE in FOREACH",
+                        "CREATE, INSERT, MERGE, SET, REMOVE or FOREACH in FOREACH",
                     )
                     .into());
                 }
@@ -464,14 +499,14 @@ impl Parser<'_> {
                         && !matches!(previous, Some(TokenKind::Word(prior))
                         if ["AS", "STARTS", "ENDS", "ON"].iter().any(|word| prior.eq_ignore_ascii_case(word))) =>
                 {
-                    if ["CREATE", "INSERT", "MERGE", "SET", "REMOVE"]
+                    if ["CREATE", "INSERT", "MERGE", "SET", "REMOVE", "FOREACH"]
                         .iter()
                         .any(|clause| word.eq_ignore_ascii_case(clause))
                     {
                         clauses += 1;
                     } else if [
-                        "FOREACH", "DELETE", "DETACH", "MATCH", "OPTIONAL", "WITH", "RETURN",
-                        "UNWIND", "CALL", "UNION",
+                        "DELETE", "DETACH", "MATCH", "OPTIONAL", "WITH", "RETURN", "UNWIND",
+                        "CALL", "UNION",
                     ]
                     .iter()
                     .any(|clause| word.eq_ignore_ascii_case(clause))
@@ -479,7 +514,7 @@ impl Parser<'_> {
                         return Err(error(
                             token.at,
                             GraphPatternTextErrorKind::Expected(
-                                "CREATE, INSERT, MERGE, SET or REMOVE in FOREACH",
+                                "CREATE, INSERT, MERGE, SET, REMOVE or FOREACH in FOREACH",
                             ),
                         ));
                     }
@@ -563,7 +598,10 @@ mod tests {
             "FOREACH (x IN [] | CREATE (:F)) RETURN x",
             "FOREACH (x IN [] | SET missing.p=1)",
             "FOREACH (x IN [] |)",
-            "FOREACH (x IN [] | FOREACH (y IN [] | CREATE (:F)))",
+            "FOREACH (x IN [] | FOREACH (y IN [] | MATCH (n:F) SET n.p=1))",
+            "FOREACH (x IN [] | FOREACH (y IN [] | CREATE (child:F)) SET child.p=1)",
+            "FOREACH (x IN [] | FOREACH (y IN [] | CREATE (:F)) CREATE (:F {p:y}))",
+            "FOREACH (x IN [] | FOREACH (y IN [] | DELETE y))",
             "FOREACH (x IN [] | MERGE (local:F)) RETURN local",
             "FOREACH (x IN [] | MERGE (a:F)-[r:R]->(b:F)) RETURN a",
             "FOREACH (x IN [] | MERGE path=(a:F)-[r:R]->(b:F)) RETURN path",
@@ -657,6 +695,316 @@ mod tests {
         _: GqlQueryPolicy,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<(), ()>> {
         panic!("source-free FOREACH must not request graph patterns")
+    }
+
+    fn execute_foreach_phase(
+        task: &GraphWriteChainTask<'_>,
+        rows: &mut Option<Vec<GraphValueRow>>,
+    ) -> bool {
+        let policy = GqlQueryPolicy::new(1_000, 1_000, 1_000_000, 1_000_000);
+        let execution = match task {
+            GraphWriteChainTask::ForeachInput { foreach } => {
+                foreach.execute_input_governed(rows.take(), policy, no_patterns, || Ok(()))
+            }
+            GraphWriteChainTask::ForeachCollection { foreach } => {
+                foreach.execute_collection_governed(rows.take(), policy, no_patterns, || Ok(()))
+            }
+            GraphWriteChainTask::ForeachOutput { foreach, .. } => {
+                foreach.execute_output_governed(rows.take(), policy, no_patterns, || Ok(()))
+            }
+            GraphWriteChainTask::Write { .. } => return false,
+        };
+        *rows = Some(execution.unwrap().value);
+        true
+    }
+
+    #[test]
+    fn nested_bodies_reuse_native_scopes_and_parameter_tables() {
+        for text in [
+            "FOREACH (x IN [1,2] | FOREACH (y IN [x] | CREATE (:F {p:y})))",
+            "FOREACH (x IN [1,2] | FOREACH (y IN [x] | MERGE (:F {p:y})) FOREACH (z IN [x+1] | CREATE (:F {q:z})))",
+            "WITH 99 AS x FOREACH (x IN [1,2] | CREATE (parent:F {p:x}) FOREACH (x IN [x,x+10] | CREATE (parent)-[:R]->(:F {p:x})) SET parent.q=x) RETURN x",
+            "MATCH (n:F) FOREACH (x IN [1,2] | FOREACH (y IN range(1,n.p) | SET n.p=n.p+1) SET n.q=x) RETURN n",
+        ] {
+            PreparedGraphWriteChainText::prepare(text, RelationId(1), symbols)
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+                .bind_parameters(&GqlParameters::new())
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        }
+        let text = "FOREACH (outer IN [1,2] | FOREACH (x IN $xs | MERGE (n:F {p:x}) ON CREATE SET n.q=$delta)) RETURN $delta AS delta";
+        let template = PreparedGraphWriteChainText::prepare_with_parameter_types(
+            text,
+            RelationId(1),
+            &[("delta", GqlParameterType::Int64)],
+            symbols,
+        )
+        .unwrap();
+        assert_eq!(template.parameter_schema().len(), 2);
+        let mut arguments = GqlParameters::new().with_int64("delta", 3).unwrap();
+        arguments
+            .insert(
+                "xs",
+                GqlParameterValue::List(
+                    GqlListParameter::new(vec![
+                        GraphValue::Scalar(CanonicalScalar::Int(1)),
+                        GraphValue::Scalar(CanonicalScalar::Int(2)),
+                    ])
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        template.bind_parameters(&arguments).unwrap();
+    }
+
+    #[test]
+    fn nested_scheduler_restores_parent_rows_after_shadowing_and_empty_siblings() {
+        for collection in ["[]", "NULL", "[x,x+10]"] {
+            let text = format!(
+                "WITH 99 AS x FOREACH (x IN [1,2] | CREATE (parent:F) FOREACH (x IN {collection} | CREATE (:F)) FOREACH (z IN [] | CREATE (:F)) CREATE (:F)) RETURN x"
+            );
+            let chain = PreparedGraphWriteChainText::prepare(&text, RelationId(1), symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            let mut cursor = GraphWriteChainCursor::new(&chain, true);
+            let mut rows = None;
+            let mut trace = Vec::new();
+            while let Some(task) = cursor
+                .next(&mut rows, &mut |_| Ok::<_, GraphIntegerError>(()))
+                .unwrap()
+            {
+                if execute_foreach_phase(&task, &mut rows) {
+                    continue;
+                }
+                let GraphWriteChainTask::Write {
+                    step,
+                    delivers,
+                    continues,
+                } = task
+                else {
+                    unreachable!("native source phases were executed above")
+                };
+                assert!(!delivers);
+                let local = rows.take().unwrap();
+                assert_eq!(local.len(), 1);
+                match step {
+                    GraphWriteChainStep::Query(_) => {
+                        assert!(continues);
+                        let [GraphValue::Scalar(CanonicalScalar::Int(x))] = local[0].values()
+                        else {
+                            panic!("the parent's local loop member")
+                        };
+                        trace.push(("before", *x));
+                        rows = Some(vec![GraphValueRow::from_owned_values(vec![
+                            GraphValue::Scalar(CanonicalScalar::Int(*x)),
+                            GraphValue::Vertex(VId(7)),
+                        ])]);
+                    }
+                    GraphWriteChainStep::Insert(_) => {
+                        assert!(!continues);
+                        match local[0].values() {
+                            [
+                                GraphValue::Vertex(VId(7)),
+                                GraphValue::Scalar(CanonicalScalar::Int(x)),
+                            ] => {
+                                trace.push(("child", *x));
+                            }
+                            [
+                                GraphValue::Scalar(CanonicalScalar::Int(x)),
+                                GraphValue::Vertex(VId(7)),
+                            ] => {
+                                trace.push(("after", *x));
+                            }
+                            _ => {
+                                panic!("a child must restore the parent's row and shadowed member")
+                            }
+                        }
+                    }
+                    other => panic!("unexpected nested write: {other:?}"),
+                }
+            }
+            let expected = if collection == "[x,x+10]" {
+                vec![
+                    ("before", 1),
+                    ("child", 1),
+                    ("child", 11),
+                    ("after", 1),
+                    ("before", 2),
+                    ("child", 2),
+                    ("child", 12),
+                    ("after", 2),
+                ]
+            } else {
+                vec![("before", 1), ("after", 1), ("before", 2), ("after", 2)]
+            };
+            assert_eq!(trace, expected, "{collection}");
+            assert_eq!(
+                rows.unwrap()[0].values(),
+                &[GraphValue::Scalar(CanonicalScalar::Int(99))]
+            );
+        }
+    }
+
+    fn nested_text(depth: usize) -> String {
+        let mut text = "CREATE (:F)".to_owned();
+        for _ in 0..depth {
+            // Shadowing one name isolates nesting depth from row-width limits.
+            text = format!("FOREACH (x IN [1] | {text})");
+        }
+        text
+    }
+
+    #[test]
+    fn nested_preparation_and_execution_share_an_explicit_depth_bound() {
+        let limit = crate::MAX_GRAPH_SET_DEPTH;
+        let template =
+            PreparedGraphWriteChainText::prepare(&nested_text(limit), RelationId(1), symbols)
+                .unwrap();
+        let mut chain = template.bind_parameters(&GqlParameters::new()).unwrap();
+        let mut cursor = GraphWriteChainCursor::new(&chain, true);
+        let mut rows = None;
+        let (mut inputs, mut writes) = (0, 0);
+        while let Some(task) = cursor
+            .next(&mut rows, &mut |_| Ok::<_, GraphIntegerError>(()))
+            .unwrap()
+        {
+            inputs += usize::from(matches!(&task, GraphWriteChainTask::ForeachInput { .. }));
+            if !execute_foreach_phase(&task, &mut rows) {
+                assert!(matches!(
+                    task,
+                    GraphWriteChainTask::Write {
+                        step: GraphWriteChainStep::Insert(_),
+                        delivers: false,
+                        continues: false
+                    }
+                ));
+                writes += 1;
+                rows = None;
+            }
+        }
+        assert_eq!((inputs, writes), (limit, 1));
+        assert_eq!(rows.unwrap()[0].len(), 0);
+        let error =
+            PreparedGraphWriteChainText::prepare(&nested_text(limit + 1), RelationId(1), symbols)
+                .unwrap_err();
+        assert!(
+            matches!(error, GraphWriteChainTextError::Read(crate::GraphSetTextError {
+            kind: crate::GraphSetTextErrorKind::SetBuild(crate::GraphSetBuildError::TooDeep { limit: found, observed }), ..
+        }) if found == limit && observed == limit + 1)
+        );
+
+        // Defend the executor too: an internal caller cannot bypass its bound
+        // by supplying a deeper prepared body without going through text.
+        let mut step = &mut chain.steps[0];
+        for _ in 1..limit {
+            let GraphWriteChainStep::Foreach(foreach) = step else {
+                unreachable!()
+            };
+            step = &mut foreach.body.steps[0];
+        }
+        let GraphWriteChainStep::Foreach(foreach) = step else {
+            unreachable!()
+        };
+        foreach.body.steps[0] = GraphWriteChainStep::Foreach(foreach.clone());
+        let mut cursor = GraphWriteChainCursor::new(&chain, true);
+        let mut rows = None;
+        let mut inputs = 0;
+        let error = loop {
+            match cursor.next(&mut rows, &mut |_| Ok::<_, GraphIntegerError>(())) {
+                Ok(Some(task)) => {
+                    inputs +=
+                        usize::from(matches!(&task, GraphWriteChainTask::ForeachInput { .. }));
+                    assert!(execute_foreach_phase(&task, &mut rows));
+                }
+                Err(error) => break error,
+                Ok(None) => panic!("an over-depth prepared body must refuse"),
+            }
+        };
+        assert_eq!(inputs, limit);
+        assert_eq!(
+            error.kind,
+            crate::GraphIntegerErrorKind::IncompatibleOperands
+        );
+    }
+
+    #[test]
+    fn nested_frames_require_scratch_admission_and_never_deliver_child_rows() {
+        let text =
+            "WITH 99 AS keep FOREACH (x IN [1] | FOREACH (y IN [1] | CREATE (:F))) RETURN keep";
+        let mut chain = PreparedGraphWriteChainText::prepare(text, RelationId(1), symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let mut cursor = GraphWriteChainCursor::new(&chain, true);
+        let mut rows = None;
+        let mut inputs = 0;
+        while inputs < 2 {
+            let task = cursor
+                .next(&mut rows, &mut |_| Ok::<_, GraphIntegerError>(()))
+                .unwrap()
+                .unwrap();
+            inputs += usize::from(matches!(&task, GraphWriteChainTask::ForeachInput { .. }));
+            assert!(execute_foreach_phase(&task, &mut rows));
+        }
+        let before = rows.clone();
+        let refusal = GraphIntegerError {
+            instruction: 7,
+            kind: crate::GraphIntegerErrorKind::Overflow,
+        };
+        let error = cursor
+            .next(&mut rows, &mut |event| {
+                if matches!(event, crate::GlaExecutionEvent::ScratchEntry) {
+                    Err(refusal)
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        assert_eq!(error, refusal);
+        assert_eq!(
+            rows, before,
+            "frame admission precedes moving its owned rows"
+        );
+
+        // Native callers can provide a private output relation. Its output
+        // remains private even when the root statement is at its final step.
+        let GraphWriteChainStep::Foreach(parent) = &mut chain.steps[0] else {
+            unreachable!()
+        };
+        let GraphWriteChainStep::Foreach(child) = &mut parent.body.steps[0] else {
+            unreachable!()
+        };
+        child.output = Some(crate::PreparedGraphSet::owned(
+            child.outer_columns.clone(),
+            child.outer_types.clone(),
+        ));
+        child.returning = true;
+        let mut cursor = GraphWriteChainCursor::new(&chain, true);
+        let mut rows = None;
+        let mut outputs = Vec::new();
+        while let Some(task) = cursor
+            .next(&mut rows, &mut |_| Ok::<_, GraphIntegerError>(()))
+            .unwrap()
+        {
+            if let GraphWriteChainTask::ForeachOutput { delivers, .. } = &task {
+                outputs.push(*delivers);
+            }
+            if !execute_foreach_phase(&task, &mut rows) {
+                assert!(matches!(
+                    task,
+                    GraphWriteChainTask::Write {
+                        delivers: false,
+                        ..
+                    }
+                ));
+                rows = None;
+            }
+        }
+        assert_eq!(outputs, [false, true]);
+        assert_eq!(
+            rows.unwrap()[0].values(),
+            &[GraphValue::Scalar(CanonicalScalar::Int(99))]
+        );
     }
 
     #[test]

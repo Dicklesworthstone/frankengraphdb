@@ -4,10 +4,11 @@ use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, QueryValue};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
+use fgdb_gql::insertion::GraphInsertRequest;
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphWriteProgramPolicy,
 };
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts, VId};
+use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 use std::convert::Infallible;
 
 const R: RelationId = RelationId(1);
@@ -25,6 +26,7 @@ fn keys() -> DatabaseKeys {
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Label, "F") => Some(GraphSymbol::Label(L)),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
         (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
@@ -416,6 +418,128 @@ fn parameterized_merge_upserts_publish_once_and_survive_reopen() {
             .await
             .unwrap();
         assert_eq!(reopened.vertices().unwrap(), expected);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn nested_parameterized_graph_import_publishes_once_and_survives_reopen() {
+    let ((), report) = run_async_under_lab(0xf0ec_1020, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&contexts.commit(), vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let parameters = GqlParameters::new()
+            .with_list(
+                "groups",
+                [
+                    (1, vec![vec![10, 20], vec![]]),
+                    (2, vec![vec![]]),
+                    (1, vec![vec![20], vec![30]]),
+                ]
+                .into_iter()
+                .map(|(key, batches)| {
+                    GraphValue::map(vec![
+                        ("key".into(), int(key)),
+                        (
+                            "batches".into(),
+                            GraphValue::List(
+                                batches
+                                    .into_iter()
+                                    .map(|children| {
+                                        GraphValue::List(children.into_iter().map(int).collect())
+                                    })
+                                    .collect(),
+                            ),
+                        ),
+                    ])
+                    .unwrap()
+                })
+                .collect(),
+            )
+            .unwrap();
+        let original = parameters.canonical_bytes();
+        let mut next = 100_u128;
+        let result = db
+            .query_write(
+                &contexts.txn(),
+                &contexts.query(),
+                &contexts.commit(),
+                "FOREACH (group IN $groups | MERGE (parent:F {p:group.key}) \
+             ON CREATE SET parent.q=0 \
+             FOREACH (batch IN group.batches | FOREACH (child_key IN batch | \
+             MERGE (child:F {p:child_key}) MERGE (parent)-[edge:R]->(child) \
+             ON CREATE SET edge.p=1 ON MATCH SET edge.p=edge.p+1 \
+             SET parent.q=parent.q+1))) \
+             MATCH (n:F) WHERE n.p<10 RETURN n.p AS key, n.q AS total ORDER BY key",
+                &parameters,
+                symbols,
+                R,
+                policy(2),
+                |request| {
+                    next += 1;
+                    Ok::<_, Infallible>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                    })
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows(result, &["key", "total"]),
+            vec![vec![int(1), int(4)], vec![int(2), int(0)]]
+        );
+        assert_eq!(
+            next, 108,
+            "repeated child keys reuse both vertex and relationship identities"
+        );
+        assert_eq!(parameters.canonical_bytes(), original);
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(db.delta_since(basis).unwrap().count(), 1);
+        assert!(pinned.vertices().unwrap().is_empty());
+        assert!(pinned.edges().unwrap().is_empty());
+        let expected_vertices = db.vertices().unwrap();
+        let expected_edges = db.edges().unwrap();
+        assert_eq!(expected_vertices.len(), 5);
+        assert_eq!(expected_edges.len(), 3);
+        let mut children = Vec::new();
+        for edge in &expected_edges {
+            assert_eq!(edge.entry.relation, R);
+            assert_eq!(
+                db.vertex(edge.entry.src).unwrap().unwrap().props,
+                vec![
+                    (P, CanonicalScalar::Int(1).into()),
+                    (Q, CanonicalScalar::Int(4).into()),
+                ]
+            );
+            children.push((
+                db.vertex(edge.entry.dst).unwrap().unwrap().props,
+                edge.props.clone(),
+            ));
+        }
+        children.sort();
+        assert_eq!(
+            children,
+            [(10, 1), (20, 2), (30, 1)]
+                .into_iter()
+                .map(|(key, count)| (
+                    vec![(P, CanonicalScalar::Int(key).into())],
+                    vec![(P, CanonicalScalar::Int(count).into())],
+                ))
+                .collect::<Vec<_>>()
+        );
+        drop(db);
+        let reopened = Database::open_with_vfs(&contexts.commit(), vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(reopened.vertices().unwrap(), expected_vertices);
+        assert_eq!(reopened.edges().unwrap(), expected_edges);
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

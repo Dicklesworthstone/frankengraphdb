@@ -962,3 +962,228 @@ fn relationship_merge_endpoint_padding_preserves_hidden_body_fields() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn nested_shadowing_and_empty_children_restore_parent_continuations() {
+    let ((), report) = run_async_under_lab(0xf0ec_0020, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let basis = db.frontier().unwrap();
+        let chain = prepare(
+            "WITH 99 AS x FOREACH (x IN [1,2] | \
+             CREATE (parent:Outer {p:x,q:0}) \
+             FOREACH (x IN [10,20] | CREATE (child:F {p:parent.p,q:x}) \
+             SET parent.q=parent.q+1) \
+             FOREACH (x IN [] | SET parent.q=1000) \
+             SET parent.q=parent.q+x CREATE (:Counter {p:x,q:parent.q})) RETURN x",
+        );
+        let mut txn = db.begin(&contexts.txn()).unwrap();
+        let next = AtomicU64::new(100);
+        let (stats, rows, receipt) = txn
+            .execute_graph_write_chain_governed(
+                &mut db,
+                &contexts.query(),
+                &chain,
+                generous(),
+                |request| allocate(&next, request),
+            )
+            .unwrap();
+        assert_eq!((stats.created_vertices, stats.created_edges), (8, 0));
+        assert_eq!(receipt.stats().mutation_effects, 6);
+        assert_eq!(rows.value.len(), 1);
+        assert_eq!(
+            rows.value[0].values(),
+            &[GraphValue::Scalar(CanonicalScalar::Int(99))]
+        );
+        let vertices = txn.vertices(&db).unwrap();
+        for label in [OUTER, COUNTER] {
+            let mut found: Vec<_> = vertices
+                .iter()
+                .filter(|vertex| vertex.labels.contains(&label))
+                .map(|vertex| vertex.props.clone())
+                .collect();
+            found.sort();
+            assert_eq!(
+                found,
+                [(1, 3), (2, 4)]
+                    .into_iter()
+                    .map(|(p, q)| vec![
+                        (P, CanonicalScalar::Int(p).into()),
+                        (Q, CanonicalScalar::Int(q).into()),
+                    ])
+                    .collect::<Vec<_>>()
+            );
+        }
+        let mut children: Vec<_> = vertices
+            .into_iter()
+            .filter(|vertex| vertex.labels.contains(&ITEM))
+            .map(|vertex| vertex.props)
+            .collect();
+        children.sort();
+        assert_eq!(
+            children,
+            [(1, 10), (1, 20), (2, 10), (2, 20)]
+                .into_iter()
+                .map(|(p, q)| vec![
+                    (P, CanonicalScalar::Int(p).into()),
+                    (Q, CanonicalScalar::Int(q).into()),
+                ])
+                .collect::<Vec<_>>()
+        );
+        txn.finish(&mut db, &contexts.commit()).await.unwrap();
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn child_collections_refresh_between_merge_matches_and_remain_fixed_while_running() {
+    let ((), report) = run_async_under_lab(0xf0ec_0021, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in [1, 2] {
+            seed.create_vertex(
+                VId(id),
+                vec![ITEM],
+                vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(0))],
+            );
+        }
+        db.write(&contexts.commit(), seed).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let chain = prepare(
+            "CREATE (counter:Counter {p:[1,2]}) \
+             FOREACH (round IN [1,2] | MERGE (n:F {p:1}) \
+             FOREACH (value IN counter.p | CREATE (:Outer {p:n.q,q:value}) \
+             SET counter.p=[9] SET n.q=n.q+1) SET n.q=n.q+100) \
+             RETURN size(counter.p)",
+        );
+        let mut txn = db.begin(&contexts.txn()).unwrap();
+        let next = AtomicU64::new(100);
+        let (stats, rows, _) = txn
+            .execute_graph_write_chain_governed(
+                &mut db,
+                &contexts.query(),
+                &chain,
+                policy(1, HIGH, HIGH, 100, 100),
+                |request| allocate(&next, request),
+            )
+            .unwrap();
+        assert_eq!((stats.created_vertices, stats.created_edges), (6, 0));
+        assert_eq!(
+            rows.value.len(),
+            1,
+            "child and MERGE rows must stay inside their parents"
+        );
+        assert_eq!(
+            rows.value[0].values(),
+            &[GraphValue::Scalar(CanonicalScalar::Int(1))]
+        );
+        let vertices = txn.vertices(&db).unwrap();
+        let mut matched: Vec<_> = vertices
+            .iter()
+            .filter(|vertex| vertex.labels.contains(&ITEM))
+            .map(|vertex| vertex.props.clone())
+            .collect();
+        matched.sort();
+        assert_eq!(
+            matched,
+            [202, 203]
+                .into_iter()
+                .map(|q| vec![
+                    (P, CanonicalScalar::Int(1).into()),
+                    (Q, CanonicalScalar::Int(q).into()),
+                ])
+                .collect::<Vec<_>>()
+        );
+        let mut visits: Vec<_> = vertices
+            .into_iter()
+            .filter(|vertex| vertex.labels.contains(&OUTER))
+            .map(|vertex| vertex.props)
+            .collect();
+        visits.sort();
+        // The first child invocation retains both original members. Every
+        // later MERGE occurrence sees the replacement singleton collection.
+        assert_eq!(
+            visits,
+            [(0, 1), (0, 9), (1, 2), (101, 9), (102, 9)]
+                .into_iter()
+                .map(|(p, q)| vec![
+                    (P, CanonicalScalar::Int(p).into()),
+                    (Q, CanonicalScalar::Int(q).into()),
+                ])
+                .collect::<Vec<_>>()
+        );
+        txn.finish(&mut db, &contexts.commit()).await.unwrap();
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn late_inner_failure_restores_the_transaction_prefix_and_earlier_parent_effects() {
+    let ((), report) = run_async_under_lab(0xf0ec_0022, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(1), vec![COUNTER], vec![(P, CanonicalScalar::Int(0))]);
+        db.write(&contexts.commit(), seed).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let mut txn = db.begin(&contexts.txn()).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(7), vec![OUTER], vec![(P, CanonicalScalar::Int(99))]);
+        txn.write(&mut db, prefix).unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        let chain = prepare(
+            "MATCH (counter:Counter) FOREACH (round IN [1,2] | \
+             SET counter.p=counter.p+round CREATE (:F {p:round}) \
+             FOREACH (member IN [1,2] | CREATE (:F {p:round*10+member}) \
+             SET counter.p=counter.p+1/(4-round-member)) \
+             CREATE (:Outer {p:counter.p})) RETURN counter.p",
+        );
+        let next = AtomicU64::new(100);
+        txn.execute_graph_write_chain_governed(
+            &mut db,
+            &contexts.query(),
+            &chain,
+            generous(),
+            |request| allocate(&next, request),
+        )
+        .expect_err("an inner failure must unwind every enclosing FOREACH workspace");
+        assert_eq!(
+            next.load(Ordering::Relaxed),
+            107,
+            "the first parent and three inner iterations completed"
+        );
+        assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        assert_eq!(txn.vertices(&db).unwrap().len(), 2);
+        assert_eq!(
+            txn.vertex(&db, VId(1)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(0).into())]
+        );
+        assert_eq!(
+            txn.vertex(&db, VId(7)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(99).into())]
+        );
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert_eq!(db.vertices().unwrap().len(), 1);
+        txn.finish(&mut db, &contexts.commit()).await.unwrap();
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(db.delta_since(basis).unwrap().count(), 1);
+        assert_eq!(db.vertices().unwrap().len(), 2);
+        assert_eq!(
+            db.vertex(VId(1)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(0).into())]
+        );
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
