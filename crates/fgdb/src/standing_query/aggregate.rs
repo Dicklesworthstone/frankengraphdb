@@ -36,7 +36,9 @@ type EdgeProperties = BTreeMap<PropertyKeyId, CanonicalPropertyValue>;
 
 #[derive(Clone, Copy)]
 struct EdgeBinding<'a> {
-    id: EId,
+    // A present binding with no identity is the null-extended OPTIONAL edge.
+    // No binding at all remains an invalid edge projection, not SQL NULL.
+    id: Option<EId>,
     props: Option<&'a EdgeProperties>,
 }
 

@@ -521,7 +521,7 @@ impl Enumeration<'_> {
         // extension and semi/anti presence happen once per root after all paths.
         match self.shape.scope {
             Some(scope) => {
-                scope.binding_contribution(self.query, &row, self.sign, counts, output, meter)
+                scope.binding_contribution(self.query, &row, None, self.sign, counts, output, meter)
             }
             None => {
                 grouped::binding_contributions(self.query, &row, None, self.sign, output, meter)

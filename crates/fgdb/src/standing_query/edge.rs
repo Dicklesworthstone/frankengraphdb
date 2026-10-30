@@ -349,6 +349,10 @@ impl OneHopState {
             scope.contribute(
                 query,
                 pair,
+                EdgeBinding {
+                    id: Some(row.eid),
+                    props: properties.as_ref(),
+                },
                 vertices,
                 &BTreeMap::new(),
                 1,
@@ -371,7 +375,7 @@ impl OneHopState {
                 query,
                 pair,
                 EdgeBinding {
-                    id: row.eid,
+                    id: Some(row.eid),
                     props: properties.as_ref(),
                 },
                 vertices,
@@ -567,6 +571,10 @@ impl OneHopState {
                     scope.contribute(
                         query,
                         pair,
+                        EdgeBinding {
+                            id: Some(eid),
+                            props: self.properties.get(&eid),
+                        },
                         vertices,
                         &empty,
                         -1,
@@ -579,7 +587,7 @@ impl OneHopState {
                         query,
                         pair,
                         EdgeBinding {
-                            id: eid,
+                            id: Some(eid),
                             props: self.properties.get(&eid),
                         },
                         vertices,
@@ -603,6 +611,10 @@ impl OneHopState {
                     scope.contribute(
                         query,
                         pair,
+                        EdgeBinding {
+                            id: Some(eid),
+                            props: properties.get(&eid).or_else(|| self.properties.get(&eid)),
+                        },
                         vertices,
                         staged,
                         1,
@@ -615,7 +627,7 @@ impl OneHopState {
                         query,
                         pair,
                         EdgeBinding {
-                            id: eid,
+                            id: Some(eid),
                             props: properties.get(&eid).or_else(|| self.properties.get(&eid)),
                         },
                         vertices,

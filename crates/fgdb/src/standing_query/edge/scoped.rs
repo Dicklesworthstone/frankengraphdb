@@ -59,8 +59,9 @@ impl Shape {
     /// One correlated positive child rooted at the outer vertex. The compiler
     /// copies slot 0 to child slot 1; each expansion adds one child slot, even
     /// when an identity predicate closes a graph cycle. Independent scans,
-    /// additional/nested scopes, captured paths and nullable outer captures
-    /// refuse. OPTIONAL must declare the exact complete child-frame width.
+    /// additional/nested scopes, multi-hop captures and nullable outer captures
+    /// refuse. A one-hop OPTIONAL may export its exact relationship identity
+    /// and fields. OPTIONAL must declare the exact complete child-frame width.
     fn fixed_hop(query: &PreparedGraphAggregate) -> Option<Self> {
         let ops = query.input_pattern().plan().operators();
         if !matches!(ops.first(), Some(GlaOperator::ScanVertices)) {
@@ -124,6 +125,13 @@ impl Shape {
                         && segments
                             .iter()
                             .all(|slot| slot.ordinal() >= 2 && slot.ordinal() < width) => {}
+                GlaOperator::CapturePath {
+                    start, segments, ..
+                } if mode == Mode::Optional
+                    && width == 3
+                    && start.ordinal() == 1
+                    && segments.len() == 1
+                    && segments[0].ordinal() == 2 => {}
                 op if predicate(op, width) => {}
                 _ => return None,
             }
@@ -138,10 +146,19 @@ impl Shape {
         // Existential locals never escape the probe frame. Only OPTIONAL
         // exports nullable child bindings to grouping/aggregate arguments.
         let output_width = if mode == Mode::Optional { width } else { 1 };
-        if columns.iter().any(|column| {
-            !matches!(column,
-            ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. }
-                if slot.ordinal() < output_width)
+        if columns.iter().any(|column| match column {
+            ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. } => {
+                slot.ordinal() >= output_width
+            }
+            ValueProjection::EdgeProperty { capture, .. }
+            | ValueProjection::Path {
+                capture,
+                function: GraphPathFunction::Edge,
+            } if mode == Mode::Optional && width == 3 => !ops[start + 2..end].iter().any(|op| {
+                matches!(op, GlaOperator::CapturePath { capture: actual, .. }
+                        if actual == capture)
+            }),
+            _ => true,
         }) {
             return None;
         }
@@ -185,10 +202,12 @@ impl Shape {
     /// whole binding; edge prefixes are never OPTIONAL/EXISTS witnesses. The
     /// same routine serves one-hop and multi-hop inputs and preserves ordinary
     /// GLA predicate order, Boolean UNKNOWN and hidden-property dependencies.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn binding_contribution(
         &self,
         query: &PreparedGraphAggregate,
         binding: &[(VId, &VertexState)],
+        edge: Option<EdgeBinding<'_>>,
         sign: i128,
         counts: &mut BTreeMap<VId, i128>,
         output: &mut Vec<grouped::Contribution>,
@@ -219,7 +238,7 @@ impl Shape {
                     .map(Some)
                     .ok_or(StandingQueryFailure::InvalidDelta)
             },
-            None,
+            edge,
             sign,
             output,
             meter,
@@ -231,6 +250,7 @@ impl Shape {
         &self,
         query: &PreparedGraphAggregate,
         pair: Endpoints,
+        edge: EdgeBinding<'_>,
         vertices: &Vertices,
         staged: &VertexPatch,
         sign: i128,
@@ -245,7 +265,7 @@ impl Shape {
         let target = vertex(vertices, staged, pair.1)?;
         let mut visit = |root, root_state, child, child_state| {
             let binding = [(root, root_state), (root, root_state), (child, child_state)];
-            self.binding_contribution(query, &binding, sign, counts, output, meter)
+            self.binding_contribution(query, &binding, Some(edge), sign, counts, output, meter)
         };
         match self.direction {
             GlaDirection::Forward => visit(pair.0, source, pair.1, target),
@@ -295,7 +315,10 @@ impl Shape {
                 slot if self.mode == Mode::Optional && slot < self.width => Ok(None),
                 _ => Err(StandingQueryFailure::InvalidDelta),
             },
-            None,
+            Some(EdgeBinding {
+                id: None,
+                props: None,
+            }),
             sign,
             output,
             meter,
@@ -426,8 +449,29 @@ mod tests {
         .unwrap()
     }
 
-    fn seeded(batch: &LogicalDeltaBatch, mode: Mode) -> StandingQuery {
-        let definition = definition(mode);
+    fn seeded(batch: &LogicalDeltaBatch, mode: Mode, edge_fields: bool) -> StandingQuery {
+        let definition = if edge_fields {
+            fgdb_gql::PreparedGraphAggregateText::prepare(
+                "MATCH (a) OPTIONAL MATCH (a)-[r:R]-(b) WHERE a.p<=b.p RETURN a,COUNT(r) AS hits,SUM(r.q) AS total,MIN(r) AS first GROUP BY a",
+                |kind, name: &str| match (kind, name) {
+                    (fgdb_gql::GraphSymbolKind::Relation, "R") => {
+                        Some(fgdb_gql::GraphSymbol::Relation(RelationId(1)))
+                    }
+                    (fgdb_gql::GraphSymbolKind::Property, "p") => {
+                        Some(fgdb_gql::GraphSymbol::Property(PropertyKeyId(1)))
+                    }
+                    (fgdb_gql::GraphSymbolKind::Property, "q") => {
+                        Some(fgdb_gql::GraphSymbol::Property(PropertyKeyId(2)))
+                    }
+                    _ => None,
+                },
+            )
+            .unwrap()
+            .bind_parameters(&fgdb_gql::GqlParameters::new())
+            .unwrap()
+        } else {
+            definition(mode)
+        };
         assert!(eligible(&definition));
         let edges = State::for_definition(&definition);
         assert!(edges.as_ref().unwrap().has_scope());
@@ -465,16 +509,21 @@ mod tests {
 
     #[test]
     fn every_optional_checkpoint_rolls_back_witnesses_sources_and_results_then_retries() {
-        check_every_boundary(Mode::Optional);
+        check_every_boundary(Mode::Optional, false);
+    }
+
+    #[test]
+    fn every_optional_edge_field_checkpoint_rolls_back_and_retries() {
+        check_every_boundary(Mode::Optional, true);
     }
 
     #[test]
     fn every_semijoin_and_antijoin_checkpoint_preserves_counts_and_can_retry() {
-        check_every_boundary(Mode::Exists);
-        check_every_boundary(Mode::NotExists);
+        check_every_boundary(Mode::Exists, false);
+        check_every_boundary(Mode::NotExists, false);
     }
 
-    fn check_every_boundary(mode: Mode) {
+    fn check_every_boundary(mode: Mode, edge_fields: bool) {
         let ((), report) = run_async_under_lab(0x8f05, move |runtime| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&runtime);
             let cx = contexts.commit();
@@ -488,8 +537,22 @@ mod tests {
                     vec![(PropertyKeyId(1), CanonicalScalar::Int(id as i64))],
                 );
             }
-            batch.add_edge(EId(1), VId(1), VId(2), vec![]);
-            batch.add_edge(EId(2), VId(1), VId(2), vec![]);
+            for eid in [EId(1), EId(2)] {
+                batch.add_edge(
+                    eid,
+                    VId(1),
+                    VId(2),
+                    vec![(PropertyKeyId(2), CanonicalScalar::Int(7))],
+                );
+            }
+            if edge_fields {
+                batch.add_edge(
+                    EId(9),
+                    VId(3),
+                    VId(3),
+                    vec![(PropertyKeyId(2), CanonicalScalar::Int(5))],
+                );
+            }
             let basis = db.write(&cx, batch).await.unwrap();
             let first = db.delta_index().unwrap().get(basis).unwrap().clone();
             let mut next = WriteBatch::new(RelationId(1));
@@ -500,11 +563,19 @@ mod tests {
                 vec![],
                 vec![(PropertyKeyId(1), CanonicalScalar::Int(20))],
             );
-            next.add_edge(EId(3), VId(3), VId(4), vec![]);
+            next.add_edge(
+                EId(3),
+                VId(3),
+                VId(4),
+                vec![(PropertyKeyId(2), CanonicalScalar::Int(11))],
+            );
+            if edge_fields {
+                next.set_edge_property(EId(9), PropertyKeyId(2), Some(CanonicalScalar::Int(9)));
+            }
             let at = db.write(&cx, next).await.unwrap();
             let delta = db.delta_index().unwrap().get(at).unwrap().clone();
-            let before = seeded(&first, mode);
-            let mut success = seeded(&first, mode);
+            let before = seeded(&first, mode, edge_fields);
+            let mut success = seeded(&first, mode, edge_fields);
             let policy = success.policy;
             let mut total = 0;
             {
@@ -521,7 +592,7 @@ mod tests {
             }
             assert!(total > 0);
             for stop in 1..=total {
-                let mut candidate = seeded(&first, mode);
+                let mut candidate = seeded(&first, mode, edge_fields);
                 let mut seen = 0;
                 {
                     let mut checkpoint = || {
@@ -572,7 +643,7 @@ mod tests {
                 delta.commit_seq(),
                 delta.frontier(),
             );
-            let mut candidate = seeded(&first, mode);
+            let mut candidate = seeded(&first, mode, edge_fields);
             let mut checkpoint = || Ok(());
             let mut meter = Meter {
                 policy,

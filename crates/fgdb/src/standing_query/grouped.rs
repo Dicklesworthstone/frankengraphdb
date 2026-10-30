@@ -218,7 +218,8 @@ fn projected_value<'a>(
         }
         ValueProjection::EdgeProperty { key, .. } => {
             // Shape admission proved every capture is the same single edge.
-            // Missing fields are NULL; an absent edge binding is not NULL.
+            // Missing fields and the explicitly null-extended OPTIONAL edge
+            // are NULL; an absent edge binding is still malformed.
             let edge = edge.ok_or(StandingQueryFailure::InvalidDelta)?;
             let Some(value) = edge.props.and_then(|props| props.get(&key)) else {
                 meter.units(
@@ -236,7 +237,9 @@ fn projected_value<'a>(
         } => {
             let edge = edge.ok_or(StandingQueryFailure::InvalidDelta)?;
             meter.charge(ZSetEvent::ScratchEntry)?;
-            Ok(GraphValue::Edge(edge.id))
+            Ok(edge
+                .id
+                .map_or(GraphValue::Scalar(CanonicalScalar::Null), GraphValue::Edge))
         }
         _ => Err(StandingQueryFailure::InvalidDelta),
     }
@@ -325,10 +328,10 @@ pub(super) fn project_contributions<'a>(
             Some(ValueProjection::Path {
                 function: GraphPathFunction::Edge,
                 ..
-            }) if aggregate.function() == GraphAggregateFunction::Count => {
-                edge.ok_or(StandingQueryFailure::InvalidDelta)?;
-                Some(0)
-            }
+            }) if aggregate.function() == GraphAggregateFunction::Count => edge
+                .ok_or(StandingQueryFailure::InvalidDelta)?
+                .id
+                .map(|_| 0),
             _ => return Err(StandingQueryFailure::InvalidDelta),
         };
         meter.charge(ZSetEvent::ScratchEntry)?;

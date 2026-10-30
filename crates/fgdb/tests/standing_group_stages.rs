@@ -430,7 +430,7 @@ fn edge_field_ticks_are_sparse_and_failed_groups_rebuild_from_committed_values()
             assert_native(&db, &cx, &handle, text, &args);
             for unsupported in [
                 "MATCH (a)-[e:R]->(b)-[:R]->(c) RETURN e.p AS p",
-                "MATCH (a) OPTIONAL MATCH (a)-[e:R]->(b) RETURN e.p AS p",
+                "MATCH (a) OPTIONAL MATCH (a)-[e:R]->(b)-[:R]->(c) RETURN e.p AS p",
                 "MATCH (a)-[e:R]->(b)-[:R]->(c) RETURN e AS edge",
             ] {
                 assert!(

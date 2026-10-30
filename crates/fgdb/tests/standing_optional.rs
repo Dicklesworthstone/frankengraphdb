@@ -1,6 +1,9 @@
 //! Maintained OPTIONAL matches compared with public storage and full GLA reads.
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, MemVfs, StandingQueryError, StandingQueryFailure, WriteBatch};
+use fgdb::{
+    Database, DatabaseKeys, MemVfs, QueryResult, QueryValue, StandingQueryError,
+    StandingQueryFailure, WriteBatch,
+};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, ZWeight};
 use fgdb_gql::algebra::{
     GlaDirection, GraphColumn, GraphMatchClause, GraphPatternBuilder, GraphValue,
@@ -307,6 +310,274 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         (GraphSymbolKind::Property, "amount") => Some(GraphSymbol::Property(AMOUNT)),
         _ => None,
     }
+}
+
+#[test]
+fn optional_relationship_fields_and_identities_follow_every_committed_transition() {
+    let ((), report) = run_async_under_lab(0x8f17, |runtime| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&runtime);
+        let (commit, cx) = (contexts.commit(), contexts.query());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let parameters = GqlParameters::new();
+        let delivery = GqlQueryPolicy::new(0, 100_000, 10_000_000, 10_000_000);
+        let mut definitions = Vec::new();
+        for pattern in ["(a)-[e:R]->(b)", "(a)<-[e:R]-(b)", "(a)-[e:R]-(b)"] {
+            let prefix = format!("MATCH (a:Owner) OPTIONAL MATCH {pattern} WHERE b.flag=1");
+            for projection in [
+                "RETURN a,e,e.amount AS amount,b.amount AS endpoint",
+                "RETURN e.amount AS amount",
+                "WITH a AS root,COUNT(*) AS rows,COUNT(e) AS hits,SUM(e.amount) AS total RETURN root,rows,hits,total ORDER BY root",
+                "WITH e.amount AS amount,COUNT(DISTINCT e) AS distinct_edges,COUNT(*) AS copies RETURN amount,distinct_edges,copies ORDER BY amount",
+            ] {
+                let text = format!("{prefix} {projection}");
+                let handle = db
+                    .register_standing_native(&cx, &text, &parameters, symbols, policy())
+                    .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+                definitions.push((text, handle));
+            }
+        }
+        for step in 0..11 {
+            let mut change = WriteBatch::new(R);
+            match step {
+                0 => {
+                    for (vid, labels, flag, amount) in [
+                        (1, vec![OWNER], 1, 50),
+                        (2, vec![OWNER], 1, 80),
+                        (3, vec![], 1, 30),
+                        (4, vec![OWNER], 0, 40),
+                        (5, vec![OWNER], 1, 90),
+                    ] {
+                        change.create_vertex(
+                            VId(vid),
+                            labels,
+                            vec![
+                                (FLAG, CanonicalScalar::Int(flag)),
+                                (AMOUNT, CanonicalScalar::Int(amount)),
+                            ],
+                        );
+                    }
+                    for (eid, src, dst, amount) in [
+                        (0, 1, 3, 2),
+                        (u128::MAX, 1, 3, 4),
+                        (2, 2, 1, 7),
+                        (3, 2, 2, 11),
+                        (4, 1, 4, 13),
+                    ] {
+                        change.add_edge(
+                            EId(eid),
+                            VId(src),
+                            VId(dst),
+                            vec![(AMOUNT, CanonicalScalar::Int(amount))],
+                        );
+                    }
+                }
+                1 => {
+                    // A property-only tick must retract the old edge field.
+                    change.set_edge_property(EId(0), AMOUNT, Some(CanonicalScalar::Int(6)));
+                }
+                2 => {
+                    change.set_edge_property(EId(u128::MAX), AMOUNT, None);
+                    change.set_vertex_property(VId(3), AMOUNT, Some(CanonicalScalar::Int(31)));
+                }
+                3 => {
+                    // All of root 1's former witnesses become false together.
+                    change.set_vertex_property(VId(3), FLAG, Some(CanonicalScalar::Int(0)));
+                }
+                4 => {
+                    // A replacement witness removes the null row only once.
+                    change.delete_edge(EId(0));
+                    change.add_edge(
+                        EId(6),
+                        VId(1),
+                        VId(5),
+                        vec![(AMOUNT, CanonicalScalar::Int(17))],
+                    );
+                }
+                5 => {
+                    change.set_vertex_property(VId(3), FLAG, Some(CanonicalScalar::Int(1)));
+                    change.set_vertex_label(VId(4), OWNER, false);
+                }
+                6 => {
+                    // Cascades retract fields before the endpoint disappears.
+                    change.delete_vertex(VId(1));
+                }
+                7 => {
+                    change.delete_edge(EId(3));
+                }
+                8 => {
+                    change.set_vertex_label(VId(3), OWNER, true);
+                    change.add_edge(EId(7), VId(3), VId(5), vec![]);
+                }
+                9 => {
+                    change.delete_vertex(VId(5));
+                }
+                _ => {
+                    for vid in [2, 3, 4] {
+                        change.delete_vertex(VId(vid));
+                    }
+                }
+            }
+            let at = db.write(&commit, change).await.unwrap();
+            for (index, (text, handle)) in definitions.iter().enumerate() {
+                let expected = db.query(&cx, text, &parameters, symbols, policy()).unwrap();
+                let (frontier, actual) = db.standing_native_query(&cx, handle, delivery).unwrap();
+                assert_eq!(frontier, at);
+                assert_eq!(actual, expected, "step={step}: {text}");
+                let mut cursor = db.standing_native_cursor(&cx, handle, delivery).unwrap();
+                let QueryResult::Rows { rows, .. } = actual else {
+                    panic!("native rows");
+                };
+                assert_eq!(
+                    cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+                    rows
+                );
+                assert_eq!(cursor.row_stats().snapshot_records, 0);
+                drop(cursor);
+                if step == 0 && index == 0 {
+                    let cell = |value| QueryValue::Value(GraphValue::Scalar(value));
+                    let vertex = |vid| QueryValue::Value(GraphValue::Vertex(VId(vid)));
+                    let edge = |eid| QueryValue::Value(GraphValue::Edge(EId(eid)));
+                    assert_eq!(
+                        rows,
+                        vec![
+                            vec![
+                                vertex(1),
+                                edge(0),
+                                cell(CanonicalScalar::Int(2)),
+                                cell(CanonicalScalar::Int(30))
+                            ],
+                            vec![
+                                vertex(1),
+                                edge(u128::MAX),
+                                cell(CanonicalScalar::Int(4)),
+                                cell(CanonicalScalar::Int(30))
+                            ],
+                            vec![
+                                vertex(2),
+                                edge(2),
+                                cell(CanonicalScalar::Int(7)),
+                                cell(CanonicalScalar::Int(50))
+                            ],
+                            vec![
+                                vertex(2),
+                                edge(3),
+                                cell(CanonicalScalar::Int(11)),
+                                cell(CanonicalScalar::Int(80))
+                            ],
+                            vec![
+                                vertex(4),
+                                cell(CanonicalScalar::Null),
+                                cell(CanonicalScalar::Null),
+                                cell(CanonicalScalar::Null)
+                            ],
+                            vec![
+                                vertex(5),
+                                cell(CanonicalScalar::Null),
+                                cell(CanonicalScalar::Null),
+                                cell(CanonicalScalar::Null)
+                            ],
+                        ],
+                    );
+                }
+                if matches!(step, 2 | 6 | 10) {
+                    db.rebuild_standing_query(&cx, handle, policy()).unwrap();
+                    assert_eq!(
+                        db.standing_native_query(&cx, handle, delivery).unwrap().1,
+                        expected,
+                        "rebuild step={step}: {text}"
+                    );
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn optional_edge_field_ticks_touch_only_the_changed_relationship() {
+    let ((), report) = run_async_under_lab(0x8f18, |runtime| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&runtime);
+        let (commit, cx) = (contexts.commit(), contexts.query());
+        let text = "MATCH (a:Owner) OPTIONAL MATCH (a)-[e:R]->(b) RETURN a,COUNT(e) AS hits,SUM(e.amount) AS total GROUP BY a";
+        let query = parsed(text);
+        let mut measurements = Vec::new();
+        for size in [1, 1000] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(VId(1), vec![OWNER], vec![]);
+            seed.create_vertex(VId(2), vec![], vec![]);
+            seed.create_vertex(VId(3), vec![OWNER], vec![]);
+            for eid in 1..=size {
+                seed.add_edge(
+                    EId(eid),
+                    VId(1),
+                    VId(2),
+                    vec![(AMOUNT, CanonicalScalar::Int(2))],
+                );
+            }
+            db.write(&commit, seed).await.unwrap();
+            let handle = db
+                .register_standing_query(&cx, query.clone(), policy())
+                .unwrap();
+            let mut update = WriteBatch::new(R);
+            update.set_edge_property(EId(1), AMOUNT, Some(CanonicalScalar::Int(9)));
+            let at = db.write(&commit, update).await.unwrap();
+            let expected = db
+                .execute_graph_aggregate_governed(&cx, &query, policy())
+                .unwrap()
+                .value;
+            let view = db.standing_query(&cx, &handle).unwrap();
+            assert_eq!(view.frontier(), at);
+            assert_eq!(view.rows().len(), expected.len());
+            for row in expected {
+                assert_eq!(view.rows().weight(&row), Some(&ZWeight::ONE));
+            }
+            measurements.push(*view.last_maintenance());
+            assert_eq!(measurements.last().unwrap().affected_edges, 1);
+
+            // Derived failure fences the view, never the authoritative commit
+            // or a partially updated aggregate. A rebuild reads the repaired
+            // committed field through the same ordinary snapshot path.
+            let mut invalid = WriteBatch::new(R);
+            invalid.set_edge_property(
+                EId(1),
+                AMOUNT,
+                Some(CanonicalScalar::ucs_basic_text("not numeric").unwrap()),
+            );
+            let failed_at = db.write(&commit, invalid).await.unwrap();
+            assert_eq!(db.frontier().unwrap(), failed_at);
+            assert!(matches!(
+                db.standing_query(&cx, &handle),
+                Err(StandingQueryError::Unavailable {
+                    reason: StandingQueryFailure::NonIntegerSum,
+                    ..
+                })
+            ));
+            assert!(
+                db.execute_graph_aggregate_governed(&cx, &query, policy())
+                    .is_err()
+            );
+            let mut repair = WriteBatch::new(R);
+            repair.set_edge_property(EId(1), AMOUNT, Some(CanonicalScalar::Int(12)));
+            let repaired_at = db.write(&commit, repair).await.unwrap();
+            assert_eq!(
+                db.rebuild_standing_query(&cx, &handle, policy()).unwrap(),
+                repaired_at
+            );
+            let full = db
+                .execute_graph_aggregate_governed(&cx, &query, policy())
+                .unwrap()
+                .value;
+            let view = db.standing_query(&cx, &handle).unwrap();
+            assert_eq!(view.rows().len(), full.len());
+            for row in full {
+                assert_eq!(view.rows().weight(&row), Some(&ZWeight::ONE));
+            }
+        }
+        assert_eq!(measurements[0], measurements[1]);
+        assert!(measurements[0].work_units > 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 fn parsed(text: &str) -> PreparedGraphAggregate {
     PreparedGraphAggregateText::prepare(text, symbols)
