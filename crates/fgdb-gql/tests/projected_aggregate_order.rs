@@ -788,6 +788,11 @@ fn deviation_order_expressions_collect_hidden_inputs_without_widening_rows() {
         "(CASE WHEN true THEN 0 ELSE 1 END) + stDev(n.p)",
         "coalesce(0, count(*)) + stDev(n.p)",
         "stDevP(n.p) + coalesce(0, count(*))",
+        // Multiplication keeps the count's exact Integer domain even at zero;
+        // beside a Float it is its nearest binary64, as an Int is
+        // (fgdb-y255t), so it ranks as the deviation alone.
+        "coalesce(count(*) * 0, 0) + stDev(n.p)",
+        "stDevP(n.p) + coalesce(count(*) * 0, 0)",
         "size(CASE WHEN true THEN [0] ELSE [stDev(true)] END) + stDev(n.p)",
         "size(coalesce([0], [stDev(true)])) + stDev(n.p)",
     ] {
@@ -806,33 +811,6 @@ fn deviation_order_expressions_collect_hidden_inputs_without_widening_rows() {
                 .map(|row| (bucket(row, 0), row.values()[1].as_count().unwrap()))
                 .collect::<Vec<_>>(),
             [(2, 2), (3, 3), (1, 2)],
-            "{rank}"
-        );
-    }
-
-    // Multiplication preserves the aggregate's exact Integer domain even
-    // when its value is zero. The established numeric VM refuses mixing
-    // that domain with Float; the composed rank must not silently narrow it.
-    for rank in [
-        "coalesce(count(*) * 0, 0) + stDev(n.p)",
-        "stDevP(n.p) + coalesce(count(*) * 0, 0)",
-    ] {
-        let query = text(&format!(
-            "MATCH (n) RETURN n.g AS k,count(*) AS c ORDER BY {rank}"
-        ));
-        assert!(
-            matches!(
-                execute(&query, &values, policy(), || Ok::<_, ()>(())),
-                Err(GqlQueryError::Source(
-                    GraphAggregateError::OutputExpression {
-                        error: fgdb_gql::GraphIntegerError {
-                            kind: fgdb_gql::GraphIntegerErrorKind::IncompatibleOperands,
-                            ..
-                        },
-                        ..
-                    }
-                ))
-            ),
             "{rank}"
         );
     }

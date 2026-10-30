@@ -105,6 +105,11 @@ fn terminal_deviation_ranks_share_hidden_collects_across_pipeline_owners() {
             "(CASE WHEN true THEN 0 ELSE 1 END) + stDev(value)",
             "coalesce(0, count(*)) + stDev(value)",
             "stDevP(value) + coalesce(0, count(*))",
+            // A zero computed from COUNT stays an exact Integer through
+            // COALESCE; beside a Float it is its nearest binary64, as an Int
+            // is (fgdb-y255t), so it ranks as the deviation alone.
+            "coalesce(count(*) * 0, 0) + stDev(value)",
+            "stDevP(value) + coalesce(count(*) * 0, 0)",
             "size(CASE WHEN true THEN [0] ELSE [stDev(true)] END) + stDev(value)",
             "size(coalesce([0], [stDev(true)])) + stDev(value)",
         ] {
@@ -149,33 +154,6 @@ fn terminal_deviation_ranks_share_hidden_collects_across_pipeline_owners() {
                 .collect::<Vec<_>>();
             assert_eq!(actual, [(2, 2), (3, 3), (1, 2)], "{statement}");
         }
-    }
-
-    // A zero computed from COUNT remains exact Integer. COALESCE retains
-    // that domain, so mixing it with Float must keep the existing refusal.
-    for rank in [
-        "coalesce(count(*) * 0, 0) + stDev(value)",
-        "stDevP(value) + coalesce(count(*) * 0, 0)",
-    ] {
-        let statement = format!(
-            "MATCH (n) WITH n.p / 100 AS bucket,n.p % 100 AS value \
-             RETURN bucket,count(*) AS count ORDER BY {rank}"
-        );
-        assert!(
-            matches!(
-                try_run(&query(&statement), &input, wide()),
-                Err(GqlQueryError::Source(
-                    GraphAggregateError::OutputExpression {
-                        error: fgdb_gql::GraphIntegerError {
-                            kind: fgdb_gql::GraphIntegerErrorKind::IncompatibleOperands,
-                            ..
-                        },
-                        ..
-                    }
-                ))
-            ),
-            "{statement}"
-        );
     }
 }
 

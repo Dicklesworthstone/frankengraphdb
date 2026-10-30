@@ -241,16 +241,18 @@ mod tests {
             Op::Binary(GraphIntegerBinary::Add),
         ])
         .unwrap();
-        let refused = expression.evaluate_loaded_with_control(
+        // Only a Float operand leaves the exact domain: the wide sum is then
+        // its nearest binary64 (2^127 for i128::MAX), as an Int would be.
+        let joined = expression.evaluate_loaded_with_control(
             1,
             |_| Ok(ExpressionCell::Integer(i128::MAX)),
             |_| Err(GraphIntegerErrorKind::NonScalar),
             &mut |_| Ok::<_, ()>(()),
         );
-        assert!(
-            matches!(refused, Err(GraphIntegerEvaluationError::Value(error))
-            if error.kind == GraphIntegerErrorKind::IncompatibleOperands)
-        );
+        let Ok(ExpressionCell::Scalar(joined)) = joined else {
+            panic!("a wide sum beside a Float joins as a float")
+        };
+        assert_eq!(joined.into_owned(), f(2.0_f64.powi(127)));
     }
 
     /// fgdb-y255t, option C: arithmetic and conversions read an exact
