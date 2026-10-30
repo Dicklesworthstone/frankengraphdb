@@ -1,7 +1,9 @@
-//! Definition-based reuse is confined to privileged, exact-cut database reads.
+//! Definition-based reuse is confined to fully visible, exact-cut reads.
 //! Query-only pins may belong to a retained read view's older frontier.
-//! Authorized readers must build their masked corpus: an endpoint predicate
-//! cannot remove hidden documents from BM25 statistics or ANN routing.
+//! Masked readers must build their own corpus: an endpoint predicate cannot
+//! remove hidden documents from BM25 statistics or ANN routing. An authorized
+//! owner may reuse only after proving complete incidence and field visibility,
+//! and still admits the complete population against its live signed limits.
 
 use super::{Options, QueryIndexes};
 use fgdb_beacon::read::Search;
@@ -9,6 +11,10 @@ use fgdb_beacon::{BeaconError, IndexConfig, IndexSnapshot, VectorSearch, WorkCon
 use fgdb_types::CommitSeq;
 
 impl QueryIndexes {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     /// Select the first healthy, compatible current generation in bounded slot
     /// order. A miss precedes execution and chooses the ordinary native build;
     /// a refused lookup/search is never retried with a fresh work allowance.

@@ -3,16 +3,18 @@
 //! its corpus; the optimized and incumbent answers do not share the cache path.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, WriteBatch};
+use asupersync::security::key::AuthKey;
+use fgdb::{Database, DatabaseKeys, QueryError, WriteBatch};
 use fgdb_beacon::read::{ReadError, ReadOptions, ReadPolicy, Search};
 use fgdb_beacon::{BeaconError, DistanceMetric, HnswConfig, TextMatch, VectorSearch};
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphSet,
     PreparedGraphSetText,
 };
 use fgdb_types::context::SimulationCheckpointProbe;
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts, VId};
+use fgdb_warden::{Authority, Grant, LimitDimension, QueryLimits, Restriction, Scope};
 use std::sync::Arc;
 
 const DOC: LabelId = LabelId(1);
@@ -29,6 +31,8 @@ const HYBRID: &str = "CALL hybrid.search(text => 'graph storage', text_property 
     candidates => 8, k => 4, eligible => [3, 4, 5, 7]) \
     YIELD node, score, vector_rank, text_rank, vector_distance, text_score \
     RETURN node, score, vector_rank, text_rank, vector_distance, text_score";
+const PROPERTIES: &str = "CALL hybrid.search(text => 'graph storage', text_property => 'body', \
+    label => 'Doc', candidates => 8, k => 4) YIELD node, score RETURN node.x AS x, score";
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
@@ -391,6 +395,421 @@ fn staged_queries_keep_the_transaction_corpus_when_a_committed_index_matches() {
         let after = db.execute_graph_set_governed(&cx, &plan, policy()).unwrap();
         assert_eq!(after.value, staged.value);
         assert_eq!(after.rows.snapshot_records, 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+fn authority(seed: u64) -> Authority {
+    Authority::new(
+        AuthKey::from_seed(seed),
+        DatabaseSecurityNamespaceId([0x82; 32]),
+        "graph",
+        SchemaEpoch(0),
+        1,
+    )
+    .unwrap()
+}
+
+fn full_grant() -> Grant {
+    let mut grant = Grant::read_only(
+        "main",
+        10_000,
+        QueryLimits {
+            max_nodes: 100_000,
+            max_work: 100_000_000,
+            max_rows: 1000,
+        },
+    );
+    grant.labels = Scope::All;
+    grant.relations = Scope::All;
+    grant.properties = Scope::All;
+    grant
+}
+
+#[test]
+fn authorized_native_calls_reuse_exact_pins_and_keep_their_snapshot_after_writes() {
+    let ((), report) = run_async_under_lab(0xbeac_4105, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let at = db.write(&commit, corpus()).await.unwrap();
+        let issuer = authority(4105);
+        let token = issuer.issue_at(&full_grant(), 100).unwrap();
+        let mut cold = db
+            .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+            .unwrap();
+        let original = db.read_session().unwrap();
+        let handle = db
+            .register_beacon_index(&cx, &options(), ReadPolicy::default())
+            .unwrap();
+        let mut pinned = db
+            .authorized_read_session(&cx, &issuer, &token, "main", symbols, policy(), || 100)
+            .unwrap();
+        let params = GqlParameters::new();
+        for statement in [TEXT, HYBRID, PROPERTIES] {
+            let cold_probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let expected = cold
+                .query(
+                    &cx.with_checkpoint_probe(cold_probe.clone()),
+                    statement,
+                    &params,
+                )
+                .unwrap();
+            let warm_probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let actual = pinned
+                .query(
+                    &cx.with_checkpoint_probe(warm_probe.clone()),
+                    statement,
+                    &params,
+                )
+                .unwrap();
+            assert_eq!(actual, expected);
+            assert!(
+                warm_probe.calls() < cold_probe.calls(),
+                "authorized CALL still rebuilt its corpus: {} >= {}",
+                warm_probe.calls(),
+                cold_probe.calls()
+            );
+            assert_eq!(
+                db.query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    "main",
+                    statement,
+                    &params,
+                    symbols,
+                    policy(),
+                    || 100,
+                )
+                .unwrap(),
+                expected
+            );
+            let prepared = pinned.prepare(&cx, statement, &params).unwrap();
+            assert_eq!(pinned.execute(&cx, &prepared, &params).unwrap(), expected);
+        }
+        for query in [text_query(), vector_query()] {
+            let expected = original.beacon_search(&cx, &options(), query).unwrap();
+            let mut probe_only = options();
+            probe_only.policy.max_staging_rows = 0;
+            assert_eq!(
+                db.beacon_search_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    "main",
+                    &probe_only,
+                    query,
+                    || 100,
+                )
+                .unwrap(),
+                expected,
+                "the maintained authorized path must not stage a corpus"
+            );
+        }
+
+        let before = pinned.query(&cx, HYBRID, &params).unwrap();
+        let mut changes = WriteBatch::new(LINKS);
+        changes.set_vertex_property(VId(3), BODY, Some(text("unrelated")));
+        changes.set_vertex_property(VId(3), X, Some(CanonicalScalar::Int(999)));
+        changes.delete_vertex(VId(4));
+        db.write(&commit, changes).await.unwrap();
+        let after = db
+            .query_authorized(
+                &cx,
+                &issuer,
+                &token,
+                "main",
+                HYBRID,
+                &params,
+                symbols,
+                policy(),
+                || 100,
+            )
+            .unwrap();
+        assert_ne!(after, before);
+        assert_eq!(pinned.query(&cx, HYBRID, &params).unwrap(), before);
+
+        let mut historical = options();
+        historical.as_of = Some(at);
+        assert_eq!(
+            db.beacon_search_authorized(
+                &cx,
+                &issuer,
+                &token,
+                "main",
+                &historical,
+                text_query(),
+                || 100,
+            )
+            .unwrap(),
+            original
+                .beacon_search(&cx, &options(), text_query())
+                .unwrap()
+        );
+        historical.policy.max_staging_rows = 0;
+        assert!(matches!(
+            db.beacon_search_authorized(
+                &cx,
+                &issuer,
+                &token,
+                "main",
+                &historical,
+                text_query(),
+                || 100,
+            ),
+            Err(ReadError::Index(BeaconError::ResourceLimit {
+                resource: "staged vertices",
+                ..
+            }))
+        ));
+        db.unregister_beacon_index(&cx, &handle).unwrap();
+        assert_eq!(
+            db.query_authorized(
+                &cx,
+                &issuer,
+                &token,
+                "main",
+                HYBRID,
+                &params,
+                symbols,
+                policy(),
+                || 100,
+            )
+            .unwrap(),
+            after,
+            "a fresh rebuild at the new cut must reproduce maintained scores"
+        );
+        drop(db);
+        assert_eq!(pinned.query(&cx, HYBRID, &params).unwrap(), before);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authorized_reuse_keeps_full_population_limits_and_never_uses_a_masked_corpus() {
+    let ((), report) = run_async_under_lab(0xbeac_4106, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut rows = corpus();
+        // This live vertex is outside the index definition but inside the
+        // signed source population. Document count is not a node-budget proxy.
+        rows.create_vertex(VId(1000), vec![], vec![]);
+        db.write(&commit, rows).await.unwrap();
+        let issuer = authority(4106);
+        let full = issuer.issue_at(&full_grant(), 100).unwrap();
+        let masked = full
+            .attenuate(Restriction::Properties(Scope::only([X])))
+            .unwrap();
+        let expected_masked = db
+            .beacon_search_authorized(
+                &cx,
+                &issuer,
+                &masked,
+                "main",
+                &options(),
+                text_query(),
+                || 100,
+            )
+            .unwrap();
+        assert!(expected_masked.is_empty());
+        db.register_beacon_index(&cx, &options(), ReadPolicy::default())
+            .unwrap();
+        assert_eq!(
+            db.beacon_search_authorized(
+                &cx,
+                &issuer,
+                &masked,
+                "main",
+                &options(),
+                text_query(),
+                || 100,
+            )
+            .unwrap(),
+            expected_masked
+        );
+        let mut no_staging = options();
+        no_staging.policy.max_staging_rows = 0;
+        for restriction in [
+            Restriction::Labels(Scope::only([DOC])),
+            Restriction::Relations(Scope::only([LINKS])),
+            Restriction::Properties(Scope::only([BODY, X])),
+        ] {
+            let scoped = full.attenuate(restriction).unwrap();
+            assert!(matches!(
+                db.beacon_search_authorized(
+                    &cx,
+                    &issuer,
+                    &scoped,
+                    "main",
+                    &no_staging,
+                    text_query(),
+                    || 100,
+                ),
+                Err(ReadError::Index(BeaconError::ResourceLimit {
+                    resource: "staged vertices",
+                    ..
+                }))
+            ));
+        }
+        let ann = Search::Vector {
+            query: &[0.0],
+            k: 4,
+            mode: VectorSearch::Approximate { ef_search: 8 },
+        };
+        assert!(matches!(
+            db.beacon_search_authorized(&cx, &issuer, &full, "main", &no_staging, ann, || 100,),
+            Err(ReadError::Index(BeaconError::ResourceLimit {
+                resource: "staged vertices",
+                ..
+            }))
+        ));
+        for (restriction, dimension) in [
+            (Restriction::MaxNodes(96), LimitDimension::Nodes),
+            (Restriction::MaxWork(0), LimitDimension::Work),
+            (Restriction::MaxRows(3), LimitDimension::Rows),
+        ] {
+            let short = full.attenuate(restriction).unwrap();
+            assert!(matches!(
+                db.beacon_search_authorized(
+                    &cx, &issuer, &short, "main", &no_staging, text_query(), || 100,
+                ),
+                Err(ReadError::Interrupted(QueryError::Authorization(
+                    fgdb_warden::Error::LimitExceeded(actual)
+                ))) if actual == dimension
+            ));
+        }
+
+        let params = GqlParameters::new();
+        let exact = full.attenuate(Restriction::MaxNodes(97)).unwrap();
+        let exact_policy = GqlQueryPolicy::new(97, 100, 100_000_000, 100_000);
+        assert!(
+            db.query_authorized(
+                &cx,
+                &issuer,
+                &exact,
+                "main",
+                TEXT,
+                &params,
+                symbols,
+                exact_policy,
+                || 100,
+            )
+            .is_ok()
+        );
+        let short_policy = GqlQueryPolicy::new(96, 100, 100_000_000, 100_000);
+        assert!(
+            db.query_authorized(
+                &cx,
+                &issuer,
+                &full,
+                "main",
+                TEXT,
+                &params,
+                symbols,
+                short_policy,
+                || 100,
+            )
+            .is_err()
+        );
+        let twice = format!("{TEXT} UNION ALL {TEXT}");
+        assert!(matches!(
+            db.query_authorized(
+                &cx,
+                &issuer,
+                &exact,
+                "main",
+                &twice,
+                &params,
+                symbols,
+                policy(),
+                || 100,
+            ),
+            Err(QueryError::Authorization(
+                fgdb_warden::Error::LimitExceeded(LimitDimension::Nodes)
+            ))
+        ));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authorized_reuse_observes_every_cancellation_and_live_expiry_before_empty_delivery() {
+    let ((), report) = run_async_under_lab(0xbeac_4107, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        db.write(&contexts.commit(), corpus()).await.unwrap();
+        db.register_beacon_index(&cx, &options(), ReadPolicy::default())
+            .unwrap();
+        let issuer = authority(4107);
+        let token = issuer.issue_at(&full_grant(), 100).unwrap();
+        let empty = "CALL hybrid.search(text => 'graph', text_property => 'body', label => 'Doc', \
+            eligible => [], k => 1) YIELD node RETURN node";
+        let params = GqlParameters::new();
+        let probe = Arc::new(SimulationCheckpointProbe::new(None));
+        let expected = db
+            .query_authorized(
+                &cx.with_checkpoint_probe(probe.clone()),
+                &issuer,
+                &token,
+                "main",
+                empty,
+                &params,
+                symbols,
+                policy(),
+                || 100,
+            )
+            .unwrap();
+        assert!(matches!(expected, fgdb::QueryResult::Rows { rows, .. } if rows.is_empty()));
+        for stop in 1..=probe.calls() {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let result = db.query_authorized(
+                &cx.with_checkpoint_probe(probe.clone()),
+                &issuer,
+                &token,
+                "main",
+                empty,
+                &params,
+                symbols,
+                policy(),
+                || 100,
+            );
+            assert!(result.is_err(), "cancellation {stop} escaped: {result:?}");
+            // native_at intentionally rechecks the live permit after a failed
+            // bind/source. That one completion check may follow the injected
+            // failure; the retrieval itself must not resume or retry a scan.
+            assert!(
+                (stop..=stop + 1).contains(&probe.calls()),
+                "retrieval continued after cancellation {stop}: {} checkpoints",
+                probe.calls()
+            );
+        }
+        let ticks = std::cell::Cell::new(0_u64);
+        let expired = db.query_authorized(
+            &cx,
+            &issuer,
+            &token,
+            "main",
+            empty,
+            &params,
+            symbols,
+            policy(),
+            || {
+                let at = ticks.get();
+                ticks.set(at + 1);
+                if at < 12 { 100 } else { 10_000 }
+            },
+        );
+        assert!(matches!(
+            expired,
+            Err(QueryError::Authorization(fgdb_warden::Error::Expired))
+        ));
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

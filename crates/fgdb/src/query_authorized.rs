@@ -99,6 +99,11 @@ struct Execution<'cx, 'permit, Clock> {
     run_left: u64,
     // Inside a `work_runs` phase: only there may work be deferred.
     in_runs: bool,
+    // Immutable query pins supplied by this execution's Database/read view.
+    // They carry no authority: Beacon must prove complete visibility, exact
+    // frontier and definition equality before using any entry. Transaction
+    // overlays and pull owners that do not supply pins retain ordinary reads.
+    beacon_indexes: Option<crate::query::beacon::BeaconQueryIndexes>,
 }
 
 /// Signed work units charged in one Warden call while the allowance covers
@@ -125,6 +130,7 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
             deferred: 0,
             run_left: 0,
             in_runs: false,
+            beacon_indexes: None,
         }
     }
     fn tracking(
@@ -456,6 +462,8 @@ fn authorized_with_errors<V: Vfs + Clone, Row, Clock: FnMut() -> u64, Error>(
         .check_frontier(at)
         .map_err(QueryError::Read)
         .map_err(map_error)?;
+    execution.borrow_mut().beacon_indexes =
+        Some(database.maintained_beacon.query_indexes().clone());
     cx.with_restriction(|| {
         let rows = evaluate(&database.snapshot, at, verified.predicates(), &execution)?;
         // No result prefix, source rows or private statistics were released.

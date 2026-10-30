@@ -72,8 +72,11 @@
 //!
 //! Privileged text/vector calls reuse a compatible healthy maintained
 //! generation at the database or read view's exact cut with fresh accounting.
-//! Older historical selectors, approximate, masked and transaction reads retain
-//! their source build. Endpoint eligibility never changes the reused BM25 corpus.
+//! Fully visible authorized text/exact-vector calls without graph expansion
+//! also reuse, while admitting the complete population to their original signed
+//! node and native source limits. Older historical selectors, approximate,
+//! masked and transaction reads retain their source build. Endpoint eligibility
+//! never changes the reused BM25 corpus.
 //! This is exact fusion of selected candidates, not an exhaustive hybrid
 //! top-k; `ann` remains approximate. It is not a durable index definition.
 
@@ -784,6 +787,41 @@ impl HybridSearch {
             include_seeds: self.include_seeds,
             limits: ExpansionLimits::default(),
         }
+    }
+
+    /// Reuse an already matched, fully visible exact generation for a query
+    /// without graph expansion. The authorized owner admits the complete
+    /// population on its original permit after query validation and before
+    /// search. Eligibility retains the same refusal latch and ranking semantics.
+    pub(crate) fn execute_index_filtered(
+        &self,
+        eligible: Option<&[GraphValue]>,
+        remaining: GqlQueryPolicy,
+        index: &fgdb_beacon::IndexSnapshot,
+        work: &RefCell<impl WorkControl>,
+        admit_population: impl FnOnce() -> Result<(), BeaconError>,
+    ) -> Result<(Vec<GraphHybridHit>, u64), BeaconError> {
+        let query = self.query();
+        if query.graph_enabled() || !self.uses_indexed_graph() {
+            return Err(BeaconError::Invariant(
+                "maintained CALL reuse requires the index-only source profile",
+            ));
+        }
+        let filter = EndpointFilter::prepare(
+            eligible,
+            self.k,
+            remaining.evaluator.max_scratch_entries,
+            &mut SharedWork(work),
+        )?;
+        work.borrow_mut().charge(1)?;
+        let config = self.options.config_for_graph(query)?;
+        fgdb_beacon::read::Search::Hybrid(query.source_query())
+            .validate(&config, &mut SharedWork(work))?;
+        admit_population()?;
+        let result = indexed::search_index(index, query, work, |id| filter.admits(id, work));
+        filter
+            .finish(result)
+            .map(|hits| (hits, filter.scratch_entries()))
     }
 
     /// Both immutable hosts use this body, including the bool-predicate

@@ -12,7 +12,7 @@ use fgdb_beacon::expansion::{
     ExpansionDirection, ExpansionGraph, ExpansionLimits, ExpansionNeighbors, ExpansionSpec,
 };
 use fgdb_beacon::read::{ReadError as Error, Search};
-use fgdb_beacon::{BeaconError, GraphHybridHit, GraphHybridQuery, WorkControl};
+use fgdb_beacon::{BeaconError, GraphHybridHit, GraphHybridQuery, IndexSnapshot, WorkControl};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{GlaExecutionEvent, algebra::GlaDirection};
 use fgdb_types::{CommitSeq, QueryCx, VId};
@@ -48,6 +48,31 @@ impl<W: WorkControl> WorkControl for ScratchWork<'_, W> {
         self.used.set(next);
         Ok(())
     }
+}
+
+/// Search a matched immutable generation with graph expansion disabled. Keep
+/// the same fusion scratch/work accounting as the indexed source below; this
+/// helper neither selects a generation nor grants authority to its corpus.
+pub(crate) fn search_index(
+    index: &IndexSnapshot,
+    query: GraphHybridQuery<'_>,
+    work: &RefCell<impl WorkControl>,
+    eligible: impl Fn(VId) -> bool,
+) -> Result<Vec<GraphHybridHit>, BeaconError> {
+    if query.graph_enabled() {
+        return Err(BeaconError::Invariant(
+            "index-only search cannot supply graph candidates",
+        ));
+    }
+    let scratch = Cell::new(0usize);
+    let mut kernel = ScratchWork {
+        work,
+        used: &scratch,
+        limit: usize::MAX,
+    };
+    let rows = index.hybrid_search_graph_filtered(query, &[], eligible, &mut kernel)?;
+    work.borrow_mut().charge(1)?;
+    Ok(rows)
 }
 
 struct IndexedNeighbors<'s, 'g, 'c, R, A> {

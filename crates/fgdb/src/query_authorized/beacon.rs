@@ -3,12 +3,12 @@
 //! tokenization, BM25 statistics, vector validation and HNSW construction.
 
 use super::authorized_with_errors;
-use crate::query::beacon::{self, Meter, Options};
+use crate::query::beacon::{self, Meter, Options, SharedWork};
 use crate::{Database, QueryError, ReadError};
 use asupersync::fs::Vfs;
 use fgdb_beacon::expansion::ExpansionSpec;
 use fgdb_beacon::read::{ReadError as BeaconReadError, Rows, Search};
-use fgdb_beacon::{BeaconError, GraphHybridHit, GraphHybridQuery};
+use fgdb_beacon::{BeaconError, GraphHybridHit, GraphHybridQuery, IndexSnapshot, WorkControl};
 use fgdb_delta_types::RelationId;
 use fgdb_types::{QueryCx, VId};
 use fgdb_warden::{Authority, CapabilityToken, Error as WardenError, LimitDimension};
@@ -24,6 +24,51 @@ fn control_error(error: QueryError) -> Error {
         QueryError::Read(error) => Error::Read(error),
         other => Error::Interrupted(other),
     }
+}
+
+/// A maintained pin is usable only when its whole corpus is visible and its
+/// exact generation is the selected snapshot. Never inspect a global registry
+/// under a masked scope: even a lookup's work/refusal could disclose its shape.
+/// The live vertex population is mandatory for signed node admission, including
+/// vertices outside the requested label and vertices without indexed fields.
+fn maintained_index<Clock: FnMut() -> u64>(
+    snapshot: &crate::Snapshot,
+    at: fgdb_types::CommitSeq,
+    scope: &super::PlannerPredicates,
+    execution: &RefCell<super::Execution<'_, '_, Clock>>,
+    options: &Options,
+    query: Search<'_>,
+    work: &RefCell<impl WorkControl>,
+) -> Result<Option<(IndexSnapshot, u64)>, BeaconError> {
+    if at != snapshot.frontier || !scope.sees_all_incidence() || !scope.sees_all_fields() {
+        return Ok(None);
+    }
+    // Release the Execution borrow before lookup checkpoints spend its permit.
+    let indexes = execution.borrow().beacon_indexes.clone();
+    let Some(indexes) = indexes.filter(|indexes| !indexes.is_empty()) else {
+        return Ok(None);
+    };
+    let config = options.config_for(query)?;
+    let Some(index) = indexes.lookup_exact(
+        at,
+        snapshot.frontier,
+        options,
+        &config,
+        query,
+        &mut SharedWork(work),
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some((vertices, _)) = snapshot
+        .exact_counts
+        .lookup_with_vertices(fgdb_gql::GraphCountSource::Vertices, &mut |_| {
+            work.borrow_mut().charge(1)
+        })?
+    else {
+        return Ok(None);
+    };
+    Ok(Some((index, vertices)))
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -51,9 +96,12 @@ impl<V: Vfs + Clone> Database<V> {
     /// live gate. The first authorization/cancellation cause remains typed.
     /// No index, permit, source root or private corpus statistics are returned.
     ///
-    /// This is per-execution resident construction, not a maintained index or
-    /// GLA operator. Existing mixed-scope history traversal is still inspected
-    /// and charged: this does NOT establish descriptor-I/O, timing, error-detail
+    /// A fully visible current-cut text/exact-vector request may reuse a
+    /// compatible maintained generation. The complete live vertex population
+    /// still spends signed nodes; source-staging limits apply only when source
+    /// rows are actually staged. Masked, historical and ANN requests keep their
+    /// ordinary corpus construction. Existing mixed-scope history traversal is
+    /// still inspected: this does NOT establish descriptor-I/O, timing, error-detail
     /// or resource-failure noninterference. ANN remains approximate; exact
     /// fusion ranks only its explicitly selected candidate population.
     #[allow(clippy::too_many_arguments)]
@@ -327,28 +375,61 @@ pub(super) fn hybrid_at<Clock: FnMut() -> u64>(
         let polled = execution.borrow_mut().poll();
         polled.map_err(|error| work.borrow_mut().refuse(error))
     };
-    let result = search.execute_filtered(
-        eligible,
-        remaining,
-        snapshot,
-        at,
-        &work,
-        beacon::Scan::Unmetered(&mut poll),
-        |row| {
-            if !scope.allows_vertex(&row.labels) {
-                return Ok(false);
-            }
-            execution
-                .borrow_mut()
-                .node()
-                .map_err(|error| work.borrow_mut().refuse(error))?;
-            admitted.set(admitted.get() + 1);
-            Ok(true)
-        },
-        |label| scope.allows_label(label),
-        |key| scope.allows_property(key),
-        |relation| scope.allows_relation(relation),
-    );
+    let result = (|| {
+        let query = search.query();
+        // Graph-enabled profiles retain their original selected-directory and
+        // incidence admission. A maintained corpus cannot grant graph access.
+        if search.uses_indexed_graph()
+            && !query.graph_enabled()
+            && let Some((index, vertices)) = maintained_index(
+                snapshot,
+                at,
+                scope,
+                execution,
+                search.options(),
+                Search::Hybrid(query.source_query()),
+                &work,
+            )?
+        {
+            return search.execute_index_filtered(eligible, remaining, &index, &work, || {
+                remaining
+                    .rows
+                    .check(fgdb_gql::GqlBudgetDimension::SnapshotRecords, vertices)
+                    .map_err(|error| {
+                        work.borrow_mut()
+                            .refuse(QueryError::Pattern(fgdb_gql::GqlQueryError::Rows(error)))
+                    })?;
+                execution
+                    .borrow_mut()
+                    .nodes(vertices)
+                    .map_err(|error| work.borrow_mut().refuse(error))?;
+                admitted.set(vertices);
+                Ok(())
+            });
+        }
+        search.execute_filtered(
+            eligible,
+            remaining,
+            snapshot,
+            at,
+            &work,
+            beacon::Scan::Unmetered(&mut poll),
+            |row| {
+                if !scope.allows_vertex(&row.labels) {
+                    return Ok(false);
+                }
+                execution
+                    .borrow_mut()
+                    .node()
+                    .map_err(|error| work.borrow_mut().refuse(error))?;
+                admitted.set(admitted.get() + 1);
+                Ok(true)
+            },
+            |label| scope.allows_label(label),
+            |key| scope.allows_property(key),
+            |relation| scope.allows_relation(relation),
+        )
+    })();
     let (hits, filter_entries) = work
         .into_inner()
         .finish::<ReadError, _>(result)
@@ -413,27 +494,43 @@ fn search<V: Vfs + Clone, Row, Clock: FnMut() -> u64>(
                 let polled = execution.borrow_mut().poll();
                 polled.map_err(|error| work.borrow_mut().refuse(error))
             };
-            let result = beacon::evaluate_filtered(
-                snapshot,
-                at,
-                options,
-                query,
-                &work,
-                beacon::Scan::Unmetered(&mut poll),
-                |row| {
-                    if !scope.allows_vertex(&row.labels) {
-                        return Ok(false);
-                    }
+            let result = (|| {
+                if let Some((index, vertices)) =
+                    maintained_index(snapshot, at, scope, execution, options, query, &work)?
+                {
+                    work.borrow_mut().charge(1)?;
+                    let config = options.config_for(query)?;
+                    query.validate(&config, &mut SharedWork(&work))?;
                     execution
                         .borrow_mut()
-                        .node()
+                        .nodes(vertices)
                         .map_err(|error| work.borrow_mut().refuse(error))?;
-                    Ok(true)
-                },
-                |label| scope.allows_label(label),
-                |key| scope.allows_property(key),
-                eligible,
-            );
+                    let rows = query.execute_filtered(&index, eligible, &mut SharedWork(&work))?;
+                    work.borrow_mut().charge(1)?;
+                    return Ok(rows);
+                }
+                beacon::evaluate_filtered(
+                    snapshot,
+                    at,
+                    options,
+                    query,
+                    &work,
+                    beacon::Scan::Unmetered(&mut poll),
+                    |row| {
+                        if !scope.allows_vertex(&row.labels) {
+                            return Ok(false);
+                        }
+                        execution
+                            .borrow_mut()
+                            .node()
+                            .map_err(|error| work.borrow_mut().refuse(error))?;
+                        Ok(true)
+                    },
+                    |label| scope.allows_label(label),
+                    |key| scope.allows_property(key),
+                    eligible,
+                )
+            })();
             let rows = work.into_inner().finish::<ReadError, _>(result)?;
             unpack(rows).map_err(Error::Index)
         },

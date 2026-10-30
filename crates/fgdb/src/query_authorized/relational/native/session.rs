@@ -264,6 +264,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                     AuthorizationError::ExecutionStopped,
                 ))
             })?;
+            execution.borrow_mut().beacon_indexes = Some(view.beacon_indexes.clone());
             let result = cx.with_restriction(|| {
                 action(
                     view,
