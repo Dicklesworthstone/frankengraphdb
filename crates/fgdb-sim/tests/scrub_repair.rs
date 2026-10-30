@@ -1,6 +1,8 @@
 //! Engine capsule scrub acceptance: exact inventory, canonical bytes, loss fencing,
 //! retained-snapshot answers, and crashes at every repair I/O boundary.
 
+#![recursion_limit = "256"]
+
 use asupersync::fs::Vfs;
 use asupersync::lab::run_async_under_lab;
 use fgdb::{

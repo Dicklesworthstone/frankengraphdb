@@ -16,6 +16,8 @@
 //!
 //! Everything runs under asupersync's lab runtime with a real `CommitCx`.
 
+#![recursion_limit = "256"]
+
 use asupersync::fs::UnixVfs;
 use asupersync::lab::run_async_under_lab;
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};

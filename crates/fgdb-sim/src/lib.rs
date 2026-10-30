@@ -23,6 +23,7 @@
 //! stay independent implementations that can disagree.
 
 #![forbid(unsafe_code)]
+#![recursion_limit = "256"]
 
 pub mod artifact;
 pub mod campaign;
