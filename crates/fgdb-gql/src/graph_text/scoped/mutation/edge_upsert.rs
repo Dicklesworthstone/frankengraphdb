@@ -56,11 +56,15 @@ impl<'a> Parser<'a> {
     /// One `SET` assignment list of a relationship MERGE branch, appended to
     /// `target` under the branch's action limit. `r += {k: v, ...}` is the
     /// same simultaneous assignments as `r.k = v, ...`, one action apiece.
+    /// `replaced`: the MERGE pattern's property keys, which a created
+    /// relationship holds exactly, so ON CREATE may replace its whole map
+    /// (fgdb-at06q); `None` refuses replacement.
     fn edge_upsert_assignments(
         &mut self,
         relationship: Name<'a>,
         target: &mut Vec<ParsedEdgeUpsertAction<'a>>,
         branch: GraphEdgeUpsertBranch,
+        replaced: Option<&[Name<'a>]>,
     ) -> Result<(), GraphEdgeUpsertTextError> {
         let capacity = |parser: &Self, count: usize| {
             if count < crate::MAX_GRAPH_EDGE_UPSERT_ACTIONS {
@@ -87,7 +91,23 @@ impl<'a> Parser<'a> {
                 )
                 .into());
             }
-            if self.take(b'+')? {
+            // `r = {...}` in ON CREATE replaces the created relationship's
+            // map: each entry is assigned and each pattern key the map omits
+            // is unset by a NULL write. As the clause's first item only, as
+            // for a vertex MERGE.
+            let replacing = replaced.is_some()
+                && self.is_punct(b'=')
+                && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'{'));
+            if replacing && !target.is_empty() {
+                return Err(error(
+                    self.current.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "a replacing map as the first ON CREATE assignment",
+                    ),
+                )
+                .into());
+            }
+            if replacing || self.take(b'+')? {
                 self.punct(b'=', "=")?;
                 self.punct(b'{', "literal property map after +=")?;
                 // `{}` assigns nothing (TCK Set5 [5]).
@@ -115,6 +135,20 @@ impl<'a> Parser<'a> {
                     if !closed {
                         self.punct(b',', ", or }")?;
                     }
+                }
+                for key in replaced.filter(|_| replacing).unwrap_or_default() {
+                    if target.iter().any(|action| action.key.text == key.text) {
+                        continue;
+                    }
+                    capacity(self, target.len())?;
+                    let null = crate::GqlScalarParameter::new(CanonicalScalar::Null)
+                        .map_err(|_| error(key.at, GraphPatternTextErrorKind::ScalarLiteral))?;
+                    target.push(ParsedEdgeUpsertAction {
+                        key: *key,
+                        value: ParsedEdgeValue::Scalar(Operand::Literal(null)),
+                        properties: Vec::new(),
+                        at: key.at,
+                    });
                 }
             } else {
                 self.punct(b'.', "relationship property assignment")?;
@@ -262,6 +296,7 @@ impl<'a> Parser<'a> {
         let right = self.variable()?;
         self.punct(b')', ")")?;
 
+        let pattern_keys: Vec<_> = properties.iter().map(|property| property.key).collect();
         let mut on_match = Vec::new();
         let mut on_create = Vec::new();
         let mut after = Vec::new();
@@ -295,19 +330,28 @@ impl<'a> Parser<'a> {
                 .into());
             };
             self.word("SET")?;
-            let (target, branch) = if create {
-                (&mut on_create, GraphEdgeUpsertBranch::Create)
+            let (target, branch, replaced) = if create {
+                (
+                    &mut on_create,
+                    GraphEdgeUpsertBranch::Create,
+                    Some(pattern_keys.as_slice()),
+                )
             } else {
-                (&mut on_match, GraphEdgeUpsertBranch::Match)
+                (&mut on_match, GraphEdgeUpsertBranch::Match, None)
             };
-            self.edge_upsert_assignments(relationship, target, branch)?;
+            self.edge_upsert_assignments(relationship, target, branch, replaced)?;
         }
         // A trailing SET reads the selected ON clause's native staged effects.
         // Do not flatten clauses or erase overwritten assignments: that would
         // also erase earlier expression failures, action charges and writes
         // that the authorized executor must individually admit.
         if self.take_word("SET")? {
-            self.edge_upsert_assignments(relationship, &mut after, GraphEdgeUpsertBranch::Match)?;
+            self.edge_upsert_assignments(
+                relationship,
+                &mut after,
+                GraphEdgeUpsertBranch::Match,
+                None,
+            )?;
         }
         for (branch, actions) in [
             (GraphEdgeUpsertBranch::Match, &on_match),

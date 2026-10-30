@@ -560,11 +560,18 @@ impl GraphUnwindWriteText {
             .collect()
     }
 
-    /// Whether the hole at `site` is the right-hand side of `+=`.
+    /// Whether the hole at `site` is the right-hand side of `+=`, or of a
+    /// replacing `=` (`SET n = row`, `ON CREATE SET n = row`, fgdb-at06q),
+    /// never of a comparison. Rows must still share row 0's key set: one
+    /// template serves every row, and the native compiler owns what each
+    /// assignment form means.
     fn assigns_map_at(&self, site: usize) -> bool {
-        self.lowered[..site]
-            .trim_end_matches(|ch: char| ch.is_ascii_whitespace())
-            .ends_with("+=")
+        let before = self.lowered[..site].trim_end_matches(|ch: char| ch.is_ascii_whitespace());
+        before.ends_with("+=")
+            || (before.ends_with('=')
+                && !["==", "<=", ">=", "!="]
+                    .iter()
+                    .any(|comparison| before.ends_with(comparison)))
     }
 }
 

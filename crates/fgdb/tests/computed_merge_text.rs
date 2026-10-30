@@ -35,6 +35,7 @@ fn keys() -> DatabaseKeys {
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Label, "Person") => Some(GraphSymbol::Label(PERSON)),
+        (GraphSymbolKind::Relation, "KNOWS") => Some(GraphSymbol::Relation(R)),
         (GraphSymbolKind::Property, name) => match name {
             "id" => Some(ID),
             "count" => Some(COUNT),
@@ -835,6 +836,57 @@ fn on_create_map_replacement_sets_the_entries_and_unsets_omitted_pattern_keys() 
         assert_eq!(props(&db, 2), [(NAME, name("Bob"))]);
         assert_eq!(props(&db, 3), [(ID, Scalar::Int(11)), (NAME, name("Cy"))]);
         assert_eq!(props(&db, 4), [(ID, Scalar::Int(12)), (NAME, name("Dee"))]);
+        // The batch writer lowers `n = row` as it lowers `n += row`.
+        let more = GqlParameters::new()
+            .with_list(
+                "rows",
+                vec![
+                    GraphValue::map(vec![
+                        ("id".into(), GraphValue::Scalar(Scalar::Int(13))),
+                        ("name".into(), GraphValue::Scalar(name("Eli"))),
+                    ])
+                    .unwrap(),
+                ],
+            )
+            .unwrap();
+        let statement = "UNWIND $rows AS row MERGE (n:Person {id: row.id}) ON CREATE SET n = row";
+        db.query_write(
+            &txn,
+            &query,
+            &commit,
+            statement,
+            &more,
+            symbols,
+            R,
+            program_policy(10),
+            |_| {
+                allocations += 1;
+                Ok::<_, ()>(ElementId::Vertex(VId(allocations)))
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+        assert_eq!(props(&db, 5), [(ID, Scalar::Int(13)), (NAME, name("Eli"))]);
+        // A relationship's ON CREATE replacement unsets its omitted pattern key.
+        let statement = "MATCH (a:Person {id: 9}), (b:Person {id: 11}) \
+             MERGE (a)-[r:KNOWS {count: 1}]->(b) ON CREATE SET r = {name: 'x'}";
+        db.query_write(
+            &txn,
+            &query,
+            &commit,
+            statement,
+            &GqlParameters::new(),
+            symbols,
+            R,
+            program_policy(10),
+            |_| Ok::<_, ()>(ElementId::Edge(fgdb_types::EId(500))),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+        assert_eq!(
+            db.edges().unwrap()[0].props,
+            vec![(NAME, fgdb_types::CanonicalPropertyValue::Scalar(name("x")))]
+        );
         for refused in [
             "MERGE (n:Person {id: 9}) ON MATCH SET n = {name: 'Eve'}",
             "MERGE (n:Person {id: 20}) ON CREATE SET n.name = 'Fay', n = {id: 20}",
@@ -857,7 +909,7 @@ fn on_create_map_replacement_sets_the_entries_and_unsets_omitted_pattern_keys() 
                 "{refused}"
             );
         }
-        assert_eq!(db.vertices().unwrap().len(), 4);
+        assert_eq!(db.vertices().unwrap().len(), 5);
         assert_eq!(txn.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
