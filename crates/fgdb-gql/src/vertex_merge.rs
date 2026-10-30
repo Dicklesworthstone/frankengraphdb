@@ -646,6 +646,36 @@ impl PreparedGraphVertexMergeRows {
         }
     }
 
+    /// Whether an input projection, pattern key or row action may read a
+    /// carried element's properties or metadata. Hosts that defer creations
+    /// must stage those creations before such reads. This conservative effect
+    /// check includes lazy branches without evaluating or admitting them;
+    /// values computed only from scalars, lists and maps remain reader-free.
+    #[must_use]
+    pub fn may_read_carried_elements(&self) -> bool {
+        matches!(
+            &self.input,
+            GraphVertexMergeRowsInput::Relation(input) if input.reads_elements()
+        ) || self.properties.iter().any(|(_, value)| {
+            matches!(value, GraphVertexMergeRowValue::Computed(value)
+                if value.may_read_element_properties())
+        }) || self.actions.as_deref().is_some_and(|actions| {
+            actions
+                .on_match
+                .iter()
+                .chain(&actions.on_create)
+                .chain(&actions.after)
+                .any(|action| match action {
+                    GraphVertexMergeRowAction::Value { value, .. }
+                    | GraphVertexMergeRowAction::Properties { value, .. } => {
+                        value.0.may_read_element_properties()
+                    }
+                    GraphVertexMergeRowAction::Vertex(_)
+                    | GraphVertexMergeRowAction::Expression { .. } => false,
+                })
+        })
+    }
+
     /// The rows this MERGE runs over, with the statistics of producing them.
     /// The rows are `owned` (the previous write's), the leading UNWIND's
     /// rows, or the one empty row of a first write. Owned rows must have the

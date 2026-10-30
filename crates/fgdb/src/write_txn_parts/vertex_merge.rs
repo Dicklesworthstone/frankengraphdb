@@ -231,6 +231,14 @@ fn frozen_chain(chain: &fgdb_gql::PreparedGraphWriteChain) -> bool {
             | GraphWriteChainStep::EdgeUpsertRows { .. }
             | GraphWriteChainStep::EdgeUpsertQuery { .. } => return false,
             GraphWriteChainStep::VertexMerge(merge) => {
+                // A carried identity can name an earlier held creation. The
+                // point/metadata reader sees staged state, so these steps
+                // require ordinary staging before their input and ON values
+                // run. Reader-free row maps and scalar expressions retain
+                // the held-creation path.
+                if merge.may_read_carried_elements() {
+                    return false;
+                }
                 // ON CREATE acts only on the vertex its row's MERGE created,
                 // which the chain holds. ON MATCH and a trailing SET update
                 // vertices the chain did not create.
@@ -1439,18 +1447,38 @@ pub(crate) fn vertex_merge_row_actions_controlled<E, A, C>(
                             source,
                         })
                     };
-                    let written = value
-                        .written(row, &mut |event| charge(used, event))
-                        .map_err(|error| match error {
-                            GraphIntegerEvaluationError::Control(error) => error,
-                            GraphIntegerEvaluationError::Value(source) => refusal(source),
-                        })?
-                        .ok_or_else(|| {
-                            refusal(fgdb_gql::GraphIntegerError {
-                                instruction: 0,
-                                kind: fgdb_gql::GraphIntegerErrorKind::NonScalar,
-                            })
-                        })?;
+                    let written = {
+                        // Carried elements use the same input-cut reader as
+                        // map assignments. Evaluation and point reads spend
+                        // the same statement allowance, only for the selected
+                        // ON branch (or the following SET clause).
+                        let mut control = |event| charge(used, event);
+                        let controls = std::cell::RefCell::new(&mut control);
+                        value
+                            .value_with_elements(
+                                row,
+                                &mut |event| controls.borrow_mut()(event),
+                                &mut MergeRowMapReader(
+                                    |column, element, key| {
+                                        read_row(column, element, key, &mut |event| {
+                                            controls.borrow_mut()(event)
+                                        })
+                                    },
+                                    &mut metadata,
+                                ),
+                            )
+                            .map_err(|error| match error {
+                                GraphIntegerEvaluationError::Control(error) => error,
+                                GraphIntegerEvaluationError::Value(source) => refusal(source),
+                            })?
+                            .to_written_property()
+                            .ok_or_else(|| {
+                                refusal(fgdb_gql::GraphIntegerError {
+                                    instruction: 0,
+                                    kind: fgdb_gql::GraphIntegerErrorKind::NonScalar,
+                                })
+                            })?
+                    };
                     point_payload_admission(&written, &mut |event| charge(used, payload(event)))?;
                     batch.set_vertex_property_value(vertex, *key, Some(written));
                 }

@@ -7,8 +7,8 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertRequest};
 use fgdb_gql::{
-    GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphWriteChain,
-    PreparedGraphWriteChainText,
+    GqlParameters, GqlQueryPolicy, GraphIntegerError, GraphIntegerErrorKind, GraphSymbol,
+    GraphSymbolKind, PreparedGraphWriteChain, PreparedGraphWriteChainText,
 };
 use fgdb_types::{
     CanonicalScalar, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion, PurposeContexts, VId,
@@ -93,6 +93,459 @@ fn authorization(error: &(dyn core::error::Error + 'static)) -> Option<Error> {
         cause = error.source();
     }
     None
+}
+
+fn expression_error(error: &(dyn core::error::Error + 'static)) -> Option<GraphIntegerErrorKind> {
+    let mut cause = Some(error);
+    while let Some(error) = cause {
+        if let Some(error) = error.downcast_ref::<GraphIntegerError>() {
+            return Some(error.kind);
+        }
+        cause = error.source();
+    }
+    None
+}
+
+#[test]
+fn authorized_foreach_merge_copies_carried_scalar_list_and_map_fields() {
+    let ((), report) = run_async_under_lab(0xf0ea_c010, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&merge_grant(0), NOW).unwrap();
+        let scalar = GraphValue::Scalar(CanonicalScalar::Int(7));
+        let list = GraphValue::List(
+            vec![
+                scalar.clone(),
+                GraphValue::List(vec![GraphValue::Scalar(CanonicalScalar::Int(8))].into()),
+            ]
+            .into(),
+        );
+        let map = GraphValue::map(vec![("q".into(), list.clone())]).unwrap();
+        for (stored, rhs, expected) in [
+            (scalar.clone(), "n.p", scalar.clone()),
+            (list.clone(), "n.p", list.clone()),
+            (map.clone(), "n.p.q", list),
+            (map, "n.p.q[0]", scalar),
+        ] {
+            for matched in [false, true] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(R);
+                seed.create_vertex_values(
+                    VId(1),
+                    vec![VISIBLE],
+                    vec![
+                        (P, stored.to_property_value().unwrap()),
+                        (Q, CanonicalScalar::Int(0).into()),
+                    ],
+                );
+                if matched {
+                    seed.create_vertex(
+                        VId(2),
+                        vec![VISIBLE],
+                        vec![(P, CanonicalScalar::Int(-1)), (Q, CanonicalScalar::Int(1))],
+                    );
+                }
+                db.write(&commit, seed).await.unwrap();
+                let source = db.vertex(VId(1)).unwrap();
+                let before = db.frontier().unwrap();
+                let program = chain(&format!(
+                    "MATCH (n:Visible {{q:0}}) FOREACH (x IN [1] | \
+                     MERGE (m:Visible {{q:x}}) \
+                     ON CREATE SET m.p={rhs} ON MATCH SET m.p={rhs})"
+                ));
+                let (stats, rows, completion) = db
+                    .execute_graph_write_chain_authorized(
+                        &txn,
+                        &query,
+                        &commit,
+                        &issuer,
+                        &token,
+                        "main",
+                        &program,
+                        policy(0),
+                        || NOW,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{rhs}, matched={matched}: {error:?}"));
+                assert_eq!(stats.created_vertices, u64::from(!matched));
+                assert!(rows.value.is_empty());
+                let vertices = db.vertices().unwrap();
+                assert_eq!(vertices.len(), 2);
+                let target = vertices.iter().find(|vertex| vertex.vid != VId(1)).unwrap();
+                assert_eq!(
+                    target.props,
+                    vec![
+                        (P, expected.to_written_property().unwrap()),
+                        (Q, CanonicalScalar::Int(1).into()),
+                    ],
+                    "{rhs}, matched={matched}"
+                );
+                assert_eq!(db.vertex(VId(1)).unwrap(), source);
+                assert!(matches!(
+                    completion,
+                    EmbeddedTxnCompletion::WriteCommitted { commit_seq }
+                    if commit_seq.0 == before.0 + 1
+                ));
+                assert_eq!(txn.outstanding_obligations(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authorized_foreach_merge_carried_reads_keep_selected_branch_scope() {
+    let ((), report) = run_async_under_lab(0xf0ea_c011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&merge_grant(0), NOW).unwrap();
+        for (text, target, expected) in [
+            (
+                "MATCH (n:Visible {q:0}) FOREACH (x IN [1] | \
+                 MERGE (m:Visible {q:x}) ON CREATE SET m.secret=[n.secret,1/(x-x)] \
+                 ON MATCH SET m.p=n.p)",
+                1,
+                Some(CanonicalScalar::Int(7)),
+            ),
+            (
+                "MATCH (n:Visible {q:0}) FOREACH (x IN [2] | \
+                 MERGE (m:Visible {q:x}) ON CREATE SET m.p=n.p \
+                 ON MATCH SET m.secret=[n.secret,1/(x-x)])",
+                2,
+                Some(CanonicalScalar::Int(7)),
+            ),
+            (
+                "MATCH (n:Visible {q:0}) FOREACH (x IN [1] | \
+                 MERGE (m:Visible {q:x}) ON MATCH SET m.p=n.secret)",
+                1,
+                None,
+            ),
+            (
+                "MATCH (n:Visible {q:0}) FOREACH (x IN [2] | \
+                 MERGE (m:Visible {q:x}) ON CREATE SET m.p=n.secret)",
+                2,
+                None,
+            ),
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            for (id, key, value, secret) in [(1, 0, 7, 99), (2, 1, 9, 55)] {
+                seed.create_vertex(
+                    VId(id),
+                    vec![VISIBLE],
+                    vec![
+                        (P, CanonicalScalar::Int(value)),
+                        (Q, CanonicalScalar::Int(key)),
+                        (SECRET, CanonicalScalar::Int(secret)),
+                    ],
+                );
+            }
+            db.write(&commit, seed).await.unwrap();
+            let source = db.vertex(VId(1)).unwrap();
+            db.execute_graph_write_chain_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &chain(text),
+                policy(0),
+                || NOW,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            let vertices = db.vertices().unwrap();
+            let target = vertices
+                .iter()
+                .find(|vertex| {
+                    vertex
+                        .props
+                        .contains(&(Q, CanonicalScalar::Int(target).into()))
+                })
+                .unwrap();
+            assert_eq!(
+                target
+                    .props
+                    .iter()
+                    .find(|(key, _)| *key == P)
+                    .map(|(_, value)| value.clone()),
+                expected.map(Into::into),
+                "hidden RHS becomes NULL; it never discloses the secret: {text}"
+            );
+            assert_eq!(db.vertex(VId(1)).unwrap(), source);
+            assert!(
+                db.vertex(VId(2))
+                    .unwrap()
+                    .unwrap()
+                    .props
+                    .contains(&(SECRET, CanonicalScalar::Int(55).into()))
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authorized_foreach_merge_carried_reads_refresh_and_share_work_limits() {
+    let ((), report) = run_async_under_lab(0xf0ea_c012, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&merge_grant(1), NOW).unwrap();
+        let program = chain(
+            "MATCH (n:Visible {q:0}) FOREACH (x IN [1,2,3] | SET n.p=n.p+1 \
+             MERGE (m:Visible {q:x}) ON CREATE SET m.p=n.p ON MATCH SET m.p=n.p) \
+             RETURN n.p AS value",
+        );
+        let mut measured = None;
+        for attempt in 0..4 {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(
+                VId(1),
+                vec![VISIBLE],
+                vec![(P, CanonicalScalar::Int(0)), (Q, CanonicalScalar::Int(0))],
+            );
+            seed.create_vertex(
+                VId(2),
+                vec![VISIBLE],
+                vec![(P, CanonicalScalar::Int(-1)), (Q, CanonicalScalar::Int(1))],
+            );
+            db.write(&commit, seed).await.unwrap();
+            let before = (db.frontier().unwrap(), db.vertices().unwrap());
+            let mut bounded = GraphInsertPolicy::new(policy(1).query, 2, 0).with_mutation_limit(6);
+            if let Some((work, scratch)) = measured {
+                if attempt == 1 {
+                    bounded.query.evaluator.max_work_units = work - 1;
+                } else if attempt == 2 {
+                    bounded.query.evaluator.max_scratch_entries = scratch - 1;
+                } else {
+                    bounded.max_mutation_effects = 5;
+                }
+            }
+            let result = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    bounded,
+                    || NOW,
+                )
+                .await;
+            if attempt == 0 {
+                let (stats, rows, completion) = result.unwrap();
+                assert_eq!((stats.created_vertices, stats.created_edges), (2, 0));
+                assert_eq!(rows.value.len(), 1);
+                assert_eq!(
+                    rows.value[0].values(),
+                    &[GraphValue::Scalar(CanonicalScalar::Int(3))]
+                );
+                let vertices = db.vertices().unwrap();
+                assert_eq!(vertices.len(), 4);
+                for (key, value) in [(0, 3), (1, 1), (2, 2), (3, 3)] {
+                    assert_eq!(
+                        vertices
+                            .iter()
+                            .filter(|vertex| {
+                                vertex.props
+                                    == vec![
+                                        (P, CanonicalScalar::Int(value).into()),
+                                        (Q, CanonicalScalar::Int(key).into()),
+                                    ]
+                            })
+                            .count(),
+                        1,
+                        "each selected branch reads the current staged source"
+                    );
+                }
+                assert!(
+                    matches!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq } if commit_seq.0 == before.0.0 + 1)
+                );
+                assert!(stats.evaluator.work_units > 0 && stats.evaluator.scratch_entries > 0);
+                measured = Some((stats.evaluator.work_units, stats.evaluator.scratch_entries));
+            } else {
+                assert!(result.is_err(), "limit attempt {attempt} must refuse");
+                assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+                assert!(db.edges().unwrap().is_empty());
+            }
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authorized_foreach_merge_carried_read_failures_rollback_prior_effects() {
+    let ((), report) = run_async_under_lab(0xf0ea_c013, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&merge_grant(0), NOW).unwrap();
+        for (on_create, denied, arithmetic) in [
+            ("m.secret=n.p", Some(Error::ScopeDenied), None),
+            (
+                "m.p=n.p/(2-x)",
+                None,
+                Some(GraphIntegerErrorKind::DivisionByZero),
+            ),
+            (
+                "m.p=properties(n)",
+                None,
+                Some(GraphIntegerErrorKind::NonScalar),
+            ),
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(
+                VId(1),
+                vec![VISIBLE],
+                vec![
+                    (P, CanonicalScalar::Int(7)),
+                    (Q, CanonicalScalar::Int(0)),
+                    (SECRET, CanonicalScalar::Int(99)),
+                ],
+            );
+            seed.create_vertex(
+                VId(2),
+                vec![VISIBLE],
+                vec![(P, CanonicalScalar::Int(9)), (Q, CanonicalScalar::Int(1))],
+            );
+            db.write(&commit, seed).await.unwrap();
+            let before = (db.frontier().unwrap(), db.vertices().unwrap());
+            let program = chain(&format!(
+                "MATCH (n:Visible {{q:0}}) FOREACH (x IN [1,2] | SET n.p=n.p+1 \
+                 MERGE (m:Visible {{q:x}}) ON CREATE SET {on_create} ON MATCH SET m.p=n.p)"
+            ));
+            let error = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    policy(0),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(authorization(&error), denied, "{on_create}: {error:?}");
+            assert_eq!(
+                expression_error(&error),
+                arithmetic,
+                "{on_create}: {error:?}"
+            );
+            assert_eq!((db.frontier().unwrap(), db.vertices().unwrap()), before);
+            assert!(db.edges().unwrap().is_empty());
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authorized_merge_only_chain_reads_earlier_creations_without_returning() {
+    let ((), report) = run_async_under_lab(0xf0ea_c014, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&merge_grant(0), NOW).unwrap();
+        let scalar = GraphValue::Scalar(CanonicalScalar::Int(7));
+        let list = GraphValue::List(
+            vec![
+                GraphValue::Scalar(CanonicalScalar::Int(8)),
+                GraphValue::Scalar(CanonicalScalar::Int(9)),
+            ]
+            .into(),
+        );
+        for (text, matched, expected) in [
+            (
+                "MERGE (a:Visible {p:1}) ON CREATE SET a.q=7 \
+                 MERGE (b:Visible {p:2}) ON CREATE SET b.q=a.q",
+                false,
+                scalar.clone(),
+            ),
+            (
+                "MERGE (a:Visible {p:1}) ON CREATE SET a.q=7 \
+                 MERGE (b:Visible {p:2}) ON MATCH SET b.q=a.q",
+                true,
+                scalar.clone(),
+            ),
+            (
+                "MERGE (a:Visible {p:1}) ON CREATE SET a.q=7 \
+                 MERGE (b:Visible {p:2}) ON CREATE SET b.q=properties(a).q",
+                false,
+                scalar.clone(),
+            ),
+            (
+                "WITH 7 AS value MERGE (a:Visible {p:1}) \
+                 MERGE (b:Visible {p:2}) ON CREATE SET b.q=value",
+                false,
+                scalar,
+            ),
+            (
+                "WITH {q:[8,9]} AS value MERGE (a:Visible {p:1}) \
+                 MERGE (b:Visible {p:2}) ON CREATE SET b.q=value.q",
+                false,
+                list,
+            ),
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            if matched {
+                let mut seed = WriteBatch::new(R);
+                seed.create_vertex(
+                    VId(1),
+                    vec![VISIBLE],
+                    vec![(P, CanonicalScalar::Int(2)), (Q, CanonicalScalar::Int(-1))],
+                );
+                db.write(&commit, seed).await.unwrap();
+            }
+            let before = db.frontier().unwrap();
+            let (stats, rows, completion) = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &chain(text),
+                    policy(0),
+                    || NOW,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            assert_eq!(stats.created_vertices, if matched { 1 } else { 2 });
+            assert!(rows.value.is_empty());
+            let vertices = db.vertices().unwrap();
+            assert_eq!(vertices.len(), 2);
+            let target = vertices
+                .iter()
+                .find(|vertex| vertex.props.contains(&(P, CanonicalScalar::Int(2).into())))
+                .unwrap();
+            assert_eq!(
+                target.props,
+                vec![
+                    (P, CanonicalScalar::Int(2).into()),
+                    (Q, expected.to_written_property().unwrap())
+                ]
+            );
+            assert!(
+                matches!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq } if commit_seq.0 == before.0 + 1)
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

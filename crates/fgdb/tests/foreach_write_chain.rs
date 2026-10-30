@@ -9,7 +9,10 @@ use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphWriteChain,
     PreparedGraphWriteChainText,
 };
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalList, CanonicalPropertyValue, CanonicalScalar, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, VId,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const R: RelationId = RelationId(1);
@@ -879,6 +882,276 @@ fn merge_pattern_keys_refresh_staged_elements_but_preserve_scalar_aliases() {
         }
         txn.finish(&mut db, &contexts.commit()).await.unwrap();
         assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn vertex_merge_selected_on_values_read_carried_properties_and_metadata() {
+    let ((), report) = run_async_under_lab(0xf0ec_0015, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let int = |value| GraphValue::Scalar(CanonicalScalar::Int(value));
+        let list =
+            |values: &[i64]| GraphValue::List(values.iter().map(|&value| int(value)).collect());
+        for matched in [false, true] {
+            for (expression, expected) in [
+                ("source.p", int(7)),
+                ("source.q", list(&[8, 9])),
+                ("[source.p, source.q[1]]", list(&[7, 9])),
+                ("properties(source).p", int(7)),
+            ] {
+                let mut db = Database::open_memory(&contexts.commit(), keys())
+                    .await
+                    .unwrap();
+                let mut seed = WriteBatch::new(R);
+                seed.create_vertex_values(
+                    VId(1),
+                    vec![COUNTER],
+                    vec![
+                        (P, CanonicalScalar::Int(7).into()),
+                        (
+                            Q,
+                            CanonicalPropertyValue::List(
+                                CanonicalList::try_new(vec![
+                                    CanonicalScalar::Int(8).into(),
+                                    CanonicalScalar::Int(9).into(),
+                                ])
+                                .unwrap(),
+                            ),
+                        ),
+                    ],
+                );
+                if matched {
+                    seed.create_vertex(
+                        VId(2),
+                        vec![ITEM],
+                        vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(99))],
+                    );
+                }
+                db.write(&contexts.commit(), seed).await.unwrap();
+                let (create, update) = if matched {
+                    ("source.p/0", expression)
+                } else {
+                    (expression, "source.p/0")
+                };
+                let chain = prepare(&format!(
+                    "MATCH (source:Counter) MERGE (target:F {{p:1}}) \
+                     ON CREATE SET target.q={create} ON MATCH SET target.q={update} \
+                     RETURN target.q",
+                ));
+                let mut txn = db.begin(&contexts.txn()).unwrap();
+                let next = AtomicU64::new(100);
+                let (stats, rows, receipt) = txn
+                    .execute_graph_write_chain_governed(
+                        &mut db,
+                        &contexts.query(),
+                        &chain,
+                        generous(),
+                        |request| allocate(&next, request),
+                    )
+                    .expect("only the selected ON branch may read and evaluate its value");
+                assert_eq!(stats.created_vertices, u64::from(!matched));
+                assert_eq!(receipt.stats().mutation_effects, 1);
+                assert_eq!(rows.value.len(), 1);
+                assert_eq!(rows.value[0].values(), &[expected.clone()], "{expression}");
+                let target = if matched { VId(2) } else { VId(100) };
+                let properties = vec![
+                    (P, CanonicalScalar::Int(1).into()),
+                    (Q, expected.to_property_value().unwrap()),
+                ];
+                assert_eq!(txn.vertex(&db, target).unwrap().unwrap().props, properties);
+                txn.finish(&mut db, &contexts.commit()).await.unwrap();
+                assert_eq!(db.vertex(target).unwrap().unwrap().props, properties);
+            }
+        }
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn vertex_merge_on_values_refresh_between_foreach_iterations_and_keep_scalar_aliases() {
+    let ((), report) = run_async_under_lab(0xf0ec_0016, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let basis = db.frontier().unwrap();
+        let chain = prepare(
+            "CREATE (source:Counter {p:10,q:[4,5]}) WITH source, source.p AS frozen \
+             FOREACH (x IN [1,2,1] | MERGE (target:F {p:x}) \
+             ON CREATE SET target.q=[source.p,source.q[0],frozen] \
+             ON MATCH SET target.q=[source.p,source.q[1],frozen] \
+             SET source.p=source.p+1) RETURN source.p, frozen",
+        );
+        let mut txn = db.begin(&contexts.txn()).unwrap();
+        let next = AtomicU64::new(100);
+        let (stats, rows, receipt) = txn
+            .execute_graph_write_chain_governed(
+                &mut db,
+                &contexts.query(),
+                &chain,
+                policy(1, HIGH, HIGH, 3, 6),
+                |request| allocate(&next, request),
+            )
+            .unwrap();
+        assert_eq!((stats.created_vertices, stats.created_edges), (3, 0));
+        assert_eq!(receipt.stats().mutation_effects, 6);
+        assert_eq!(rows.value.len(), 1);
+        assert_eq!(
+            rows.value[0].values(),
+            &[
+                GraphValue::Scalar(CanonicalScalar::Int(13)),
+                GraphValue::Scalar(CanonicalScalar::Int(10)),
+            ]
+        );
+        let mut copied: Vec<_> = txn
+            .vertices(&db)
+            .unwrap()
+            .into_iter()
+            .filter(|vertex| vertex.labels == [ITEM])
+            .map(|vertex| vertex.props)
+            .collect();
+        copied.sort();
+        assert_eq!(
+            copied,
+            [(1, [12, 5, 10]), (2, [11, 4, 10])]
+                .into_iter()
+                .map(|(p, values)| vec![
+                    (P, CanonicalScalar::Int(p).into()),
+                    (
+                        Q,
+                        CanonicalPropertyValue::List(
+                            CanonicalList::try_new(
+                                values
+                                    .into_iter()
+                                    .map(|value| CanonicalScalar::Int(value).into())
+                                    .collect(),
+                            )
+                            .unwrap(),
+                        ),
+                    ),
+                ])
+                .collect::<Vec<_>>()
+        );
+        txn.finish(&mut db, &contexts.commit()).await.unwrap();
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(db.delta_since(basis).unwrap().count(), 1);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn vertex_merge_carried_aliases_keep_the_input_cut_when_the_target_is_the_same_vertex() {
+    let ((), report) = run_async_under_lab(0xf0ec_0017, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(
+            VId(1),
+            vec![ITEM],
+            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(10))],
+        );
+        db.write(&contexts.commit(), seed).await.unwrap();
+        let chain = prepare(
+            "MATCH (source:F) WITH source UNWIND [1,2] AS occurrence \
+             MERGE (target:F {p:1}) ON MATCH SET target.q=source.q+1 \
+             RETURN target.q",
+        );
+        let mut txn = db.begin(&contexts.txn()).unwrap();
+        let (stats, rows, receipt) = txn
+            .execute_graph_write_chain_governed(
+                &mut db,
+                &contexts.query(),
+                &chain,
+                generous(),
+                |_| -> Result<ElementId, ()> { panic!("both rows match the existing vertex") },
+            )
+            .unwrap();
+        assert_eq!(stats.created_vertices, 0);
+        assert_eq!(receipt.stats().mutation_effects, 2);
+        assert_eq!(rows.value.len(), 2);
+        for row in rows.value {
+            assert_eq!(
+                row.values(),
+                &[GraphValue::Scalar(CanonicalScalar::Int(11))]
+            );
+        }
+        txn.finish(&mut db, &contexts.commit()).await.unwrap();
+        assert_eq!(
+            db.vertex(VId(1)).unwrap().unwrap().props,
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(11).into()),
+            ]
+        );
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn no_return_merge_values_and_keys_read_earlier_created_vertices() {
+    let ((), report) = run_async_under_lab(0xf0ec_0018, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        for (key, value, expected_key, expected_value) in [
+            ("1", "source.p", 1, CanonicalScalar::Int(7).into()),
+            (
+                "1",
+                "properties(source).p",
+                1,
+                CanonicalScalar::Int(7).into(),
+            ),
+            (
+                "source.p",
+                "source.q",
+                7,
+                CanonicalPropertyValue::List(
+                    CanonicalList::try_new(vec![
+                        CanonicalScalar::Int(8).into(),
+                        CanonicalScalar::Int(9).into(),
+                    ])
+                    .unwrap(),
+                ),
+            ),
+        ] {
+            let mut db = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
+            let basis = db.frontier().unwrap();
+            let chain = prepare(&format!(
+                "MERGE (source:Counter {{p:7}}) ON CREATE SET source.q=[8,9] \
+                 MERGE (target:F {{p:{key}}}) ON CREATE SET target.q={value}",
+            ));
+            let mut txn = db.begin(&contexts.txn()).unwrap();
+            let next = AtomicU64::new(100);
+            let (stats, rows, receipt) = txn
+                .execute_graph_write_chain_governed(
+                    &mut db,
+                    &contexts.query(),
+                    &chain,
+                    policy(0, HIGH, HIGH, 2, 2),
+                    |request| allocate(&next, request),
+                )
+                .unwrap();
+            assert_eq!((stats.created_vertices, stats.created_edges), (2, 0));
+            assert_eq!(receipt.stats().mutation_effects, 2);
+            assert!(rows.value.is_empty());
+            let expected = vec![
+                (P, CanonicalScalar::Int(expected_key).into()),
+                (Q, expected_value),
+            ];
+            assert_eq!(txn.vertex(&db, VId(101)).unwrap().unwrap().props, expected);
+            assert!(db.vertices().unwrap().is_empty());
+            txn.finish(&mut db, &contexts.commit()).await.unwrap();
+            assert_eq!(db.vertex(VId(101)).unwrap().unwrap().props, expected);
+            assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+            assert_eq!(db.delta_since(basis).unwrap().count(), 1);
+        }
         assert_eq!(contexts.txn().outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
