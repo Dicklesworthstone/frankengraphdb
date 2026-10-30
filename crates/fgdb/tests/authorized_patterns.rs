@@ -310,20 +310,22 @@ fn quantified_map_filters_precede_shortest_selection_and_keep_history_and_limits
                 .value,
             expected
         );
-        let full = issuer
-            .issue_at(
-                &Grant::read_only(
-                    BRANCH,
-                    1000,
-                    QueryLimits {
-                        max_nodes: 1000,
-                        max_work: 1_000_000,
-                        max_rows: 1000,
-                    },
-                ),
-                100,
-            )
-            .unwrap();
+        let mut full = Grant::read_only(
+            BRANCH,
+            1000,
+            QueryLimits {
+                max_nodes: 1000,
+                max_work: 1_000_000,
+                max_rows: 1000,
+            },
+        );
+        // A default read grant is deliberately empty, not unrestricted.
+        let empty = issuer.issue_at(&full, 100).unwrap();
+        assert!(read(&db, &cx, &issuer, &empty, text).is_empty());
+        full.labels = Scope::All;
+        full.relations = Scope::All;
+        full.properties = Scope::All;
+        let full = issuer.issue_at(&full, 100).unwrap();
         assert_eq!(read(&db, &cx, &issuer, &full, text), expected);
         // Aggregate topology shortcuts must also decline a per-hop field
         // predicate. They cannot count a rejected route or infer endpoint

@@ -328,6 +328,40 @@ fn membership_preserves_visible_collection_and_earlier_arithmetic_errors() {
         let mut db = Database::open_memory(&c.commit(), DatabaseKeys::new([1; 32], NS, [2; 32]))
             .await
             .unwrap();
+        let oversized = CanonicalPropertyValue::List(
+            CanonicalList::try_new(vec![
+                CanonicalScalar::Null.into();
+                GraphValue::MAX_LIST_NODES
+            ])
+            .unwrap(),
+        );
+        // Logical conversion keeps its exact bound error. This value cannot
+        // reach an authorized stored-row cursor: storage's indivisible-row
+        // ceiling is stricter, and must refuse before consuming a sequence.
+        let error = GraphValue::admit_property_value::<fgdb_gql::GraphIntegerError>(
+            &oversized,
+            &mut |_| Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.kind,
+            fgdb_gql::GraphIntegerErrorKind::StoredValueBounds,
+        );
+        let before = db.frontier().unwrap();
+        let mut rejected = WriteBatch::new(RelationId(1));
+        rejected.create_vertex_values(
+            VId(0),
+            vec![LabelId(1)],
+            vec![(PropertyKeyId(1), oversized)],
+        );
+        let error = db.write(&c.commit(), rejected).await.unwrap_err();
+        assert!(matches!(
+            error,
+            fgdb::WriteError::VertexStorageAdmission { vid: VId(0), source }
+                if matches!(source.as_ref(), fgdb_strata::vertex::VertexPatchError::RowExceedsStorageLimit { bytes, limit } if bytes > limit && *limit == 16_384)
+        ));
+        assert_eq!(db.frontier().unwrap(), before);
+        assert!(db.vertices().unwrap().is_empty());
         let mut batch = WriteBatch::new(RelationId(1));
         batch.create_vertex_values(
             VId(0),
@@ -335,11 +369,7 @@ fn membership_preserves_visible_collection_and_earlier_arithmetic_errors() {
             vec![(
                 PropertyKeyId(1),
                 CanonicalPropertyValue::List(
-                    CanonicalList::try_new(vec![
-                        CanonicalScalar::Null.into();
-                        GraphValue::MAX_LIST_NODES
-                    ])
-                    .unwrap(),
+                    CanonicalList::try_new(vec![CanonicalScalar::Null.into(); 1_024]).unwrap(),
                 ),
             )],
         );
@@ -349,9 +379,14 @@ fn membership_preserves_visible_collection_and_earlier_arithmetic_errors() {
             vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
         );
         db.write(&c.commit(), batch).await.unwrap();
-        for members in [
-            Vec::new(),
-            vec![GraphValue::Scalar(CanonicalScalar::Int(7))],
+        for (members, expected) in [
+            (Vec::new(), Vec::new()),
+            (
+                vec![GraphValue::Scalar(CanonicalScalar::Int(7))],
+                vec![GraphValueRow::from_owned_values(vec![GraphValue::Vertex(
+                    VId(1),
+                )])],
+            ),
         ] {
             let args = GqlParameters::new().with_list("members", members).unwrap();
             let mut session = db
@@ -361,12 +396,9 @@ fn membership_preserves_visible_collection_and_earlier_arithmetic_errors() {
                 .prepare(&cx, "MATCH (n) WHERE n.p IN $members RETURN n AS id", &args)
                 .unwrap();
             let mut cursor = session.stream(&cx, &prepared, &args).unwrap();
-            let error = cursor.next().unwrap().unwrap_err();
-            assert!(
-                format!("{error:?}").contains("StoredValueBounds"),
-                "{error:?}"
-            );
-            assert_eq!(cursor.state(), VertexScanState::Failed);
+            let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(rows, expected);
+            assert_eq!(cursor.state(), VertexScanState::Exhausted);
             assert!(cursor.next().is_none());
         }
         let db = membership_database(&c.commit(), 0).await;

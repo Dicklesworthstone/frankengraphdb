@@ -659,7 +659,28 @@ fn radix_projection_reuse_preserves_scopes_signed_limits_and_live_refusals() {
                 assert!(matches!(result, Err(FnxReadError::Cancelled(_))));
                 assert_eq!(probe.calls(), stop, "no checkpoint after refusal");
             }
-            (format!("{result:?}"), probe.calls(), clocks)
+            let encoded = if stop.is_some() {
+                let Err(FnxReadError::Cancelled(QueryError::Pattern(
+                    fgdb_gql::GqlQueryError::Interrupted(error),
+                ))) = &result
+                else {
+                    panic!("the injected checkpoint cancellation is preserved: {result:?}");
+                };
+                // Each interruption receives a fresh tracing identity. Keep
+                // the exact kind, message and all other context fields in the
+                // comparison; only that per-interruption identity differs.
+                let mut context = error.context().clone();
+                assert!(context.correlation_id.take().is_some());
+                assert!(std::error::Error::source(error).is_none());
+                format!(
+                    "Cancelled(Pattern(Interrupted({:?}, {:?}, {context:?})))",
+                    error.kind(),
+                    error.message(),
+                )
+            } else {
+                format!("{result:?}")
+            };
+            (encoded, probe.calls(), clocks)
         };
         clear();
         let cold = footprint(&token, None);
