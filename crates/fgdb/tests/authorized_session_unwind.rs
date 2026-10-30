@@ -1067,3 +1067,484 @@ fn explicit_preparation_is_separate_but_query_must_not_refresh_its_binding_allow
         assert_eq!(txn.outstanding_obligations(), 0);
     });
 }
+
+#[test]
+fn native_chains_and_prepared_nested_imports_share_the_session_boundary() {
+    lab(0xac31, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let issuer = authority();
+        let mut scope = grant();
+        scope.limits.max_rows = 0;
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        let calls = AtomicUsize::new(0);
+        let text = "FOREACH (row IN $rows | MERGE (n:Visible {p:row.p}) \
+                    ON CREATE SET n.q=0 \
+                    FOREACH (step IN [row.q] | SET n.q=n.q+step))";
+        let mut session = db
+            .authorized_write_session(
+                &txn,
+                &commit,
+                &issuer,
+                &token,
+                BRANCH,
+                |kind: GraphSymbolKind, name: &str| {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    symbols(kind, name)
+                },
+                R,
+                policy(),
+                1,
+                || NOW,
+            )
+            .unwrap();
+        let arguments = rows(&[(1, 2), (2, 4), (1, 3)]);
+        let original = arguments.canonical_bytes();
+        let (receipt, completion) = session.query(&query, text, &arguments).await.unwrap();
+        assert_eq!(receipt.stats().completed_statements, 1);
+        assert_eq!(receipt.stats().created_vertices, 2);
+        assert_eq!(receipt.stats().mutation_effects, 5);
+        assert!(
+            receipt.steps().is_empty(),
+            "chain-local identities are private"
+        );
+        assert_eq!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: CommitSeq(basis.0 + 1),
+            }
+        );
+        assert_eq!(arguments.canonical_bytes(), original);
+
+        let sample = rows(&[(99, 999)]);
+        let prepared = session.prepare(&query, text, &sample).unwrap();
+        assert_eq!(prepared.parameter_schema().len(), 1);
+        assert_eq!(prepared.parameter_schema()[0].name, "rows");
+        assert_eq!(
+            prepared.parameter_schema()[0].parameter_type,
+            fgdb_gql::GqlParameterType::List
+        );
+        drop(sample);
+        let resolved = calls.load(Ordering::Relaxed);
+        let arguments = rows(&[(1, 7), (3, 1)]);
+        let original = arguments.canonical_bytes();
+        let (receipt, _) = session
+            .execute(&query, &prepared, &arguments)
+            .await
+            .unwrap();
+        assert_eq!(receipt.stats().completed_statements, 1);
+        assert_eq!(receipt.stats().created_vertices, 1);
+        assert_eq!(receipt.stats().mutation_effects, 3);
+        assert!(receipt.steps().is_empty());
+        let (stats, _) = session
+            .execute_stats(&query, &prepared, &rows(&[(2, 6)]))
+            .await
+            .unwrap();
+        assert_eq!(stats.completed_statements, 1);
+        assert_eq!(stats.created_vertices, 0);
+        assert_eq!(stats.mutation_effects, 1);
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            resolved,
+            "prepared executions do not resolve names again"
+        );
+        assert_eq!(arguments.canonical_bytes(), original);
+        assert!(!session.is_closed());
+        drop(session);
+
+        assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 3));
+        assert_eq!(db.delta_since(basis).unwrap().count(), 3);
+        assert!(pinned.vertices().unwrap().is_empty());
+        let mut properties: Vec<_> = db
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .map(|vertex| vertex.props)
+            .collect();
+        properties.sort();
+        assert_eq!(
+            properties,
+            [(1, 12), (2, 10), (3, 1)]
+                .into_iter()
+                .map(|(p, q)| vec![
+                    (P, CanonicalScalar::Int(p).into()),
+                    (Q, CanonicalScalar::Int(q).into()),
+                ])
+                .collect::<Vec<_>>()
+        );
+        let expected = db.vertices().unwrap();
+        drop(db);
+        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(reopened.vertices().unwrap(), expected);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn prepared_chain_property_maps_rebind_values_without_reusing_samples() {
+    lab(0xac32, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = authority();
+        let mut scope = grant();
+        scope.limits.max_rows = 0;
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let calls = AtomicUsize::new(0);
+        let values = |name: &str, value| {
+            GqlParameters::new()
+                .with_map(
+                    "props",
+                    vec![(name.into(), GraphValue::Scalar(CanonicalScalar::Int(value)))],
+                )
+                .unwrap()
+        };
+        let mut session = db
+            .authorized_write_session(
+                &txn,
+                &commit,
+                &issuer,
+                &token,
+                BRANCH,
+                |kind: GraphSymbolKind, name: &str| {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    symbols(kind, name)
+                },
+                R,
+                policy(),
+                1,
+                || NOW,
+            )
+            .unwrap();
+        let prepared = session.prepare(
+            &query,
+            "CREATE (source:Visible {p:$props.p}) FOREACH (x IN [1] | CREATE (:Visible {p:source.p}))",
+            &values("p", 99),
+        ).unwrap();
+        assert_eq!(prepared.parameter_schema().len(), 1);
+        assert_eq!(prepared.parameter_schema()[0].name, "props");
+        assert_eq!(
+            prepared.parameter_schema()[0].parameter_type,
+            fgdb_gql::GqlParameterType::Map
+        );
+        let resolved = calls.load(Ordering::Relaxed);
+        for value in [4, 8] {
+            let (stats, _) = session
+                .execute_stats(&query, &prepared, &values("p", value))
+                .await
+                .unwrap();
+            assert_eq!(stats.created_vertices, 2);
+            assert_eq!(stats.completed_statements, 1);
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), resolved);
+        assert!(
+            session
+                .execute_stats(
+                    &query,
+                    &prepared,
+                    &GqlParameters::new().with_int64("props", 999).unwrap(),
+                )
+                .await
+                .is_err(),
+            "a scalar cannot replace the prepared map parameter"
+        );
+        assert!(session.is_closed());
+        drop(session);
+        assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 2));
+        let mut properties: Vec<_> = db
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .map(|vertex| vertex.props)
+            .collect();
+        properties.sort();
+        assert_eq!(
+            properties,
+            [4, 4, 8, 8]
+                .into_iter()
+                .map(|value| vec![(P, CanonicalScalar::Int(value).into()),])
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
+                .unwrap(),
+            ElementId::Vertex(engine_vertex(5)),
+            "bad final binding consumed no identity"
+        );
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn native_session_chain_refusals_are_atomic_and_close_the_session() {
+    lab(0xac33, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        for (text, limit, effects, before_allocation) in [
+            (
+                "FOREACH (x IN [1] | CREATE (:Visible {p:x})) RETURN 1",
+                1,
+                64,
+                true,
+            ),
+            ("FOREACH (x IN [] | CREATE (:Visible {p:x}))", 0, 64, true),
+            (
+                "CREATE (n:Visible {p:0}) FOREACH (x IN [1,2] | SET n.p=n.p+x)",
+                1,
+                1,
+                false,
+            ),
+            (
+                "FOREACH (x IN [1,0] | CREATE (:Visible {p:1/x}))",
+                1,
+                64,
+                false,
+            ),
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let mut bounded = policy();
+            bounded.mutations.max_effects = effects;
+            let mut session = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    symbols,
+                    R,
+                    bounded,
+                    limit,
+                    || NOW,
+                )
+                .unwrap();
+            assert!(
+                session
+                    .query_stats(&query, text, &GqlParameters::new())
+                    .await
+                    .is_err(),
+                "{text}"
+            );
+            assert!(session.is_closed());
+            let error = session
+                .query_stats(&query, "CREATE (:Visible)", &GqlParameters::new())
+                .await
+                .unwrap_err();
+            assert_eq!(authorization(&error), Some(Error::ExecutionStopped));
+            drop(session);
+            assert_eq!(db.frontier().unwrap(), basis);
+            assert!(db.vertices().unwrap().is_empty());
+            assert!(db.edges().unwrap().is_empty());
+            if before_allocation {
+                assert_eq!(
+                    db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
+                        .unwrap(),
+                    ElementId::Vertex(engine_vertex(1)),
+                    "{text}"
+                );
+            }
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+        let mut scope = grant();
+        scope.rights = Rights::Write;
+        scope.limits.max_rows = 0;
+        let token = issuer.issue_at(&scope, NOW).unwrap();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut session = db
+            .authorized_write_session(
+                &txn,
+                &commit,
+                &issuer,
+                &token,
+                BRANCH,
+                symbols,
+                R,
+                policy(),
+                1,
+                || NOW,
+            )
+            .unwrap();
+        let (stats, _) = session
+            .query_stats(
+                &query,
+                "FOREACH (x IN [1,2] | FOREACH (y IN [3,4] | CREATE (:Visible {p:x+y})))",
+                &GqlParameters::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stats.created_vertices, 4);
+        assert_eq!(stats.selection.result_rows, 0);
+        drop(session);
+        assert_eq!(db.vertices().unwrap().len(), 4);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn prepared_native_chain_handles_reject_foreign_sessions_and_atomic_batch_substitution() {
+    lab(0xac34, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        let text = "FOREACH (row IN $rows | CREATE (:Visible {p:row.p}))";
+        for mode in 0..5 {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let arguments = rows(&[(1, 2)]);
+            let mut session = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    symbols,
+                    R,
+                    policy(),
+                    4,
+                    || NOW,
+                )
+                .unwrap();
+            let prepared = session.prepare(&query, text, &arguments).unwrap();
+            if mode == 0 {
+                drop(session);
+                let mut foreign = db
+                    .authorized_write_session(
+                        &txn,
+                        &commit,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        |_: GraphSymbolKind, _: &str| -> Option<GraphSymbol> {
+                            panic!("a foreign prepared handle must refuse before catalog access")
+                        },
+                        R,
+                        policy(),
+                        4,
+                        || NOW,
+                    )
+                    .unwrap();
+                assert!(
+                    foreign
+                        .execute_stats(&query, &prepared, &arguments)
+                        .await
+                        .is_err()
+                );
+                assert!(foreign.is_closed());
+                drop(foreign);
+            } else {
+                if mode == 1 {
+                    assert!(
+                        session
+                            .execute_batch_stats(&query, &prepared, &[arguments])
+                            .await
+                            .is_err()
+                    );
+                } else if mode == 2 {
+                    assert!(session.bind_batch(&query, &prepared, &[arguments]).is_err());
+                } else if mode == 3 {
+                    assert!(
+                        session
+                            .query_batch_stats(&query, text, &[arguments])
+                            .await
+                            .is_err()
+                    );
+                } else {
+                    assert!(session.bind_unwind_batch(&query, text, &arguments).is_err());
+                }
+                assert!(session.is_closed());
+                drop(session);
+            }
+            assert_eq!(db.frontier().unwrap(), basis);
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(
+                db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
+                    .unwrap(),
+                ElementId::Vertex(engine_vertex(1))
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn prepared_native_chains_keep_definition_scope_and_live_authority() {
+    lab(0xac35, |contexts| async move {
+        let (commit, query, txn) = (contexts.commit(), contexts.query(), contexts.txn());
+        let issuer = authority();
+        for mode in 0..3 {
+            let mut scope = grant();
+            if mode == 0 {
+                scope.rights = Rights::Write;
+            } else if mode == 1 {
+                scope.properties = Scope::only([P]);
+            }
+            let token = issuer.issue_at(&scope, NOW).unwrap();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let time = AtomicU64::new(NOW);
+            let mut session = db
+                .authorized_write_session(
+                    &txn,
+                    &commit,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    symbols,
+                    R,
+                    policy(),
+                    1,
+                    || time.load(Ordering::Relaxed),
+                )
+                .unwrap();
+            let text = match mode {
+                0 => "FOREACH (x IN [] | MERGE (:Visible {p:1}))",
+                1 => "FOREACH (x IN [] | MERGE (:Visible {q:1}))",
+                _ => "FOREACH (x IN [1] | CREATE (:Visible {p:x}))",
+            };
+            let prepared = session.prepare(&query, text, &GqlParameters::new());
+            let (error, expected) = if mode == 2 {
+                let prepared = prepared.unwrap();
+                time.store(scope.expires_at_ms, Ordering::Relaxed);
+                (
+                    session
+                        .execute_stats(&query, &prepared, &GqlParameters::new())
+                        .await
+                        .unwrap_err(),
+                    Error::Expired,
+                )
+            } else {
+                (
+                    prepared.unwrap_err(),
+                    if mode == 0 {
+                        Error::PermissionDenied
+                    } else {
+                        Error::ScopeDenied
+                    },
+                )
+            };
+            assert_eq!(authorization(&error), Some(expected), "{text}: {error:?}");
+            assert!(session.is_closed());
+            drop(session);
+            assert_eq!(db.frontier().unwrap(), basis);
+            assert!(db.vertices().unwrap().is_empty());
+            assert_eq!(
+                db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 })
+                    .unwrap(),
+                ElementId::Vertex(engine_vertex(1)),
+                "preparation and refused execution consumed no identity"
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+}

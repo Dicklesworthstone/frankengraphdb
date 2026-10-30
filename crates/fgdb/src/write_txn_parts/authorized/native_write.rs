@@ -123,6 +123,18 @@ fn statement_limit(script: &PreparedGraphWriteScript, limit: usize) -> Result<()
     Ok(())
 }
 
+// A chain is one native statement, regardless of its clauses or iterations.
+// Those consume the chain owner's cumulative native and signed allowances.
+#[allow(clippy::result_large_err)]
+fn chain_statement_limit(limit: usize) -> Result<(), Fault> {
+    if limit == 0 {
+        return Err(Fault::BatchBinding(
+            fgdb_gql::GraphWriteScriptBatchError::TooManyStatements { limit, observed: 1 },
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::result_large_err)]
 fn reserve_text<Clock: FnMut() -> u64>(
     cx: &QueryCx,
@@ -143,6 +155,23 @@ fn reserve_text<Clock: FnMut() -> u64>(
         return Err(admission(WriteTxnError::Authorization(Error::ScopeDenied)));
     }
     Ok(())
+}
+
+// Original bytes have already been reserved. Preserve the ordinary script's
+// preparation bill; its parser checkpoints successful classification. A failed
+// classifier still checks live controls before exposing a syntax diagnostic.
+#[allow(clippy::result_large_err)]
+fn is_chain_admitted<Clock: FnMut() -> u64>(
+    cx: &QueryCx,
+    execution: &mut Execution<'_, '_, Clock>,
+    text: &str,
+) -> Result<bool, Fault> {
+    let classified = fgdb_gql::PreparedGraphWriteChainText::is_chain(text);
+    if classified.is_err() {
+        checkpoint(cx, execution).map_err(admission)?;
+    }
+    classified
+        .map_err(|error| Fault::ChainBinding(fgdb_gql::GraphWriteChainTextError::Insert(error)))
 }
 
 // The trusted host still owns catalog semantics. This wrapper controls when
@@ -211,25 +240,18 @@ fn prepare_admitted<Clock: FnMut() -> u64>(
     prepared.map_err(Fault::Binding)
 }
 
-/// Bind one native chain without lowering whole-map values or replacing the
-/// live preparation permit. Pattern-map arguments keep their original offsets.
+/// Prepare a chain after original text admission. Callers may retain this
+/// value-free native definition and bind fresh values under later live permits.
 #[allow(clippy::result_large_err)]
-fn bind_chain_admitted<Clock: FnMut() -> u64>(
+fn prepare_chain_admitted<Clock: FnMut() -> u64>(
     cx: &QueryCx,
     execution: &mut Execution<'_, '_, Clock>,
     text: &str,
     params: &GqlParameters,
     relation: RelationId,
     mut resolver: impl GraphSymbolResolver,
-) -> Result<fgdb_gql::PreparedGraphWriteChain, Fault> {
+) -> Result<fgdb_gql::PreparedGraphWriteChainText, Fault> {
     cx.with_restriction(|| {
-        let lowered = GqlMapArgumentText::lower_fields(text, params);
-        let (text, params) = lowered
-            .as_ref()
-            .map_or((text, params), |(lowered, derived)| {
-                (lowered.text(), derived)
-            });
-        let lowered = lowered.as_ref().map(|(lowered, _)| lowered);
         let mut declarations = Vec::new();
         for (name, kind) in params.parameter_types() {
             checkpoint(cx, execution).map_err(admission)?;
@@ -258,13 +280,50 @@ fn bind_chain_admitted<Clock: FnMut() -> u64>(
             return Err(admission(error));
         }
         checkpoint(cx, execution).map_err(admission)?;
-        let prepared = prepared.map_err(|error| restored(lowered, Fault::ChainBinding(error)))?;
+        prepared.map_err(Fault::ChainBinding)
+    })
+}
+
+#[allow(clippy::result_large_err)]
+fn bind_chain_template<Clock: FnMut() -> u64>(
+    cx: &QueryCx,
+    execution: &mut Execution<'_, '_, Clock>,
+    prepared: &fgdb_gql::PreparedGraphWriteChainText,
+    params: &GqlParameters,
+) -> Result<fgdb_gql::PreparedGraphWriteChain, Fault> {
+    cx.with_restriction(|| {
         // A chain is one native statement. Its clauses and input occurrences
         // spend their cumulative execution allowance in the existing owner.
         execution.work(1).map_err(admission)?;
         let bound = prepared.bind_parameters(params);
         checkpoint(cx, execution).map_err(admission)?;
-        bound.map_err(|error| restored(lowered, Fault::ChainBinding(error)))
+        bound.map_err(Fault::ChainBinding)
+    })
+}
+
+/// Bind one native chain without lowering whole-map values or replacing the
+/// live preparation permit. Pattern-map arguments keep their original offsets.
+#[allow(clippy::result_large_err)]
+fn bind_chain_admitted<Clock: FnMut() -> u64>(
+    cx: &QueryCx,
+    execution: &mut Execution<'_, '_, Clock>,
+    text: &str,
+    params: &GqlParameters,
+    relation: RelationId,
+    resolver: impl GraphSymbolResolver,
+) -> Result<fgdb_gql::PreparedGraphWriteChain, Fault> {
+    cx.with_restriction(|| {
+        let lowered = GqlMapArgumentText::lower_fields(text, params);
+        let (text, params) = lowered
+            .as_ref()
+            .map_or((text, params), |(lowered, derived)| {
+                (lowered.text(), derived)
+            });
+        let lowered = lowered.as_ref().map(|(lowered, _)| lowered);
+        let prepared = prepare_chain_admitted(cx, execution, text, params, relation, resolver)
+            .map_err(|fault| restored(lowered, fault))?;
+        bind_chain_template(cx, execution, &prepared, params)
+            .map_err(|fault| restored(lowered, fault))
     })
 }
 
@@ -368,6 +427,11 @@ fn bind_native<Clock: FnMut() -> u64>(
 ) -> Result<super::Bound<'static>, Fault> {
     cx.with_restriction(|| {
         reserve_text(cx, execution, text)?;
+        if is_chain_admitted(cx, execution, text)? {
+            // This entry returns scripts or reusable bound batches. A chain
+            // requires its own atomic owner, never a partial script fallback.
+            return Err(admission(WriteTxnError::AuthorizedMutationRefused));
+        }
         bind_native_admitted(
             cx,
             execution,
@@ -381,8 +445,7 @@ fn bind_native<Clock: FnMut() -> u64>(
     })
 }
 
-// Native dispatch has already paid for the original bytes. Prepared sessions
-// continue through bind_native and reserve their own text exactly once.
+// Native dispatch or the session has already paid for the original bytes.
 #[allow(clippy::too_many_arguments, clippy::result_large_err)]
 fn bind_native_admitted<Clock: FnMut() -> u64>(
     cx: &QueryCx,

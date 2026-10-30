@@ -8,8 +8,9 @@ use super::{
     RelationId, TxnCx, Vfs, WriteTxnError, admission, checkpoint, statement_limit,
 };
 use fgdb_gql::{
-    BoundGraphWriteScriptBatch, GraphSymbolResolver, GraphWriteProgramStats,
-    GraphWriteScriptBatchLocation, GraphWriteStepReceipt,
+    BoundGraphWriteScriptBatch, GqlMapArgumentText, GqlParameterSpec, GraphSymbolResolver,
+    GraphWriteProgramStats, GraphWriteScriptBatchLocation, GraphWriteStepReceipt,
+    PreparedGraphWriteChain, PreparedGraphWriteChainText,
 };
 use fgdb_types::EmbeddedTxnCompletion;
 use fgdb_warden::{ExecutionPermit, VerifiedCapability, WriteAccess};
@@ -72,13 +73,54 @@ pub struct AuthorizedWriteSession<'db, 'issuer, V: Vfs, Resolver, Clock> {
     owner: Arc<()>,
 }
 
-/// A native script template admitted by exactly one mutable session. There is
+/// A native write template admitted by exactly one mutable session. There is
 /// no public constructor, raw script/plan accessor or independently usable
 /// authorization. Only parameter-schema metadata is exposed. Values supplied
 /// during prepare are checked, but executions bind their own argument values.
 pub struct AuthorizedPreparedWrite {
     owner: Arc<()>,
-    script: PreparedGraphWriteScript,
+    definition: PreparedDefinition,
+    schema: Vec<GqlParameterSpec>,
+}
+
+enum PreparedDefinition {
+    Script(PreparedGraphWriteScript),
+    Chain(Box<PreparedChain>),
+}
+
+struct PreparedChain {
+    template: PreparedGraphWriteChainText,
+    // Only source offsets and field paths survive preparation. Each execution
+    // derives fresh operands from its own caller-supplied map values.
+    lowered: Option<GqlMapArgumentText>,
+}
+
+impl PreparedChain {
+    #[allow(clippy::result_large_err)]
+    fn bind<Clock: FnMut() -> u64>(
+        &self,
+        cx: &QueryCx,
+        execution: &mut Execution<'_, '_, Clock>,
+        params: &GqlParameters,
+    ) -> Result<PreparedGraphWriteChain, Fault> {
+        cx.with_restriction(|| {
+            let derived = match &self.lowered {
+                Some(lowered) => {
+                    let arguments = lowered.arguments(params);
+                    checkpoint(cx, execution).map_err(admission)?;
+                    Some(arguments.map_err(|error| super::map_argument_fault(0, &error))?)
+                }
+                None => None,
+            };
+            super::bind_chain_template(
+                cx,
+                execution,
+                &self.template,
+                derived.as_ref().unwrap_or(params),
+            )
+            .map_err(|fault| super::restored(self.lowered.as_ref(), fault))
+        })
+    }
 }
 
 /// An entirely bound, same-session ingestion program. It cannot be constructed
@@ -136,7 +178,19 @@ impl core::fmt::Debug for AuthorizedPreparedWrite {
 }
 impl AuthorizedPreparedWrite {
     pub fn parameter_schema(&self) -> &[fgdb_gql::GqlParameterSpec] {
-        self.script.parameter_schema()
+        &self.schema
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn batch_script(&self) -> Result<&PreparedGraphWriteScript, Fault> {
+        match &self.definition {
+            PreparedDefinition::Script(script) => Ok(script),
+            // Native chains need a shared batch workspace, not a loop of
+            // independent autocommits. Refuse before binding or graph access.
+            PreparedDefinition::Chain(_) => {
+                Err(admission(WriteTxnError::AuthorizedMutationRefused))
+            }
+        }
     }
 }
 impl<V: Vfs, R, C> AuthorizedWriteSession<'_, '_, V, R, C> {
@@ -277,6 +331,11 @@ enum Request<'a> {
     Bound(&'a AuthorizedBoundWriteBatch),
 }
 
+enum SessionBound<'a> {
+    Program(Bound<'a>),
+    Chain(Box<PreparedGraphWriteChain>),
+}
+
 impl<V, R, C> AuthorizedWriteSession<'_, '_, V, R, C>
 where
     V: Vfs + Clone,
@@ -307,24 +366,77 @@ where
                 permit,
                 clock: tracked_clock(&mut state.clock, &mut state.last_now_ms),
             };
-            let script = super::prepare(
-                cx,
-                &mut execution,
-                text,
-                params,
-                state.relation,
-                super::BorrowedCatalog(&mut state.resolver),
-            )?;
-            statement_limit(&script, state.max_statements)?;
-            Input::Script(&script, params).bind(
-                cx,
-                state.capability.predicates(),
-                &mut execution,
-            )?;
+            let (definition, schema) = cx.with_restriction(|| {
+                super::reserve_text(cx, &mut execution, text)?;
+                if super::is_chain_admitted(cx, &mut execution, text)? {
+                    super::chain_statement_limit(state.max_statements)?;
+                    let lowered = GqlMapArgumentText::lower_fields(text, params);
+                    let (statement, arguments) = lowered
+                        .as_ref()
+                        .map_or((text, params), |(recipe, derived)| (recipe.text(), derived));
+                    let recipe = lowered.as_ref().map(|(recipe, _)| recipe);
+                    let template = super::prepare_chain_admitted(
+                        cx,
+                        &mut execution,
+                        statement,
+                        arguments,
+                        state.relation,
+                        super::BorrowedCatalog(&mut state.resolver),
+                    )
+                    .map_err(|fault| super::restored(recipe, fault))?;
+                    // This API exposes receipts/statistics, not RETURN rows.
+                    // Never remove a projection to make a write admissible.
+                    if template.returns_rows() {
+                        return Err(admission(WriteTxnError::AuthorizedMutationRefused));
+                    }
+                    let bound =
+                        super::bind_chain_template(cx, &mut execution, &template, arguments)
+                            .map_err(|fault| super::restored(recipe, fault))?;
+                    crate::write_txn::authorized::chain::admit_definition(
+                        &bound,
+                        None,
+                        cx,
+                        state.capability.predicates(),
+                        &mut execution,
+                    )
+                    .map_err(Fault::Chain)?;
+                    let schema = template.parameter_schema();
+                    let schema = if let Some(recipe) = recipe {
+                        recipe.field_parameter_schema(&schema)
+                    } else {
+                        schema
+                    };
+                    Ok((
+                        PreparedDefinition::Chain(Box::new(PreparedChain {
+                            template,
+                            lowered: lowered.map(|(recipe, _)| recipe),
+                        })),
+                        schema,
+                    ))
+                } else {
+                    let script = super::prepare_admitted(
+                        cx,
+                        &mut execution,
+                        text,
+                        params,
+                        state.relation,
+                        super::BorrowedCatalog(&mut state.resolver),
+                    )?;
+                    statement_limit(&script, state.max_statements)?;
+                    Input::Script(&script, params).bind(
+                        cx,
+                        state.capability.predicates(),
+                        &mut execution,
+                    )?;
+                    let schema = script.parameter_schema().to_vec();
+                    Ok((PreparedDefinition::Script(script), schema))
+                }
+            })?;
             checkpoint(cx, &mut execution).map_err(admission)?;
             Ok(AuthorizedPreparedWrite {
                 owner: Arc::clone(&self.owner),
-                script,
+                definition,
+                schema,
             })
         })();
         if result.is_ok() {
@@ -335,12 +447,15 @@ where
 
     /// Parse, bind and commit native text with no request-supplied authority,
     /// allocator, catalog, route, clock or execution policy. The result is the
-    /// complete ordered identity receipt plus the original native completion.
+    /// ordered script identity receipt plus the original native completion.
     /// UNWIND MERGE/MATCH mutations bind all rows before graph access, under
     /// the same permit as execution. Every expanded row counts against the
     /// host's max_statements; no row or phase receives a fresh allowance.
     /// CREATE/INSERT UNWIND retains its native compiler. A failure closes this
     /// session and preserves original row coordinates and publication causes.
+    /// Native chains and FOREACH share one atomic workspace and one allowance;
+    /// their receipt contains aggregate statistics with no implicit identity
+    /// rows. Explicit RETURN is refused before execution by this receipt API.
     #[allow(clippy::result_large_err)]
     pub async fn query(
         &mut self,
@@ -361,6 +476,8 @@ where
     /// receipts. A signed max_rows=0 is usable for ingestion; graph visibility,
     /// binding, mutation and work limits are identical to query(). This does
     /// not suppress errors or turn an uncertain completion into success.
+    /// Native chains and FOREACH use the same atomic owner as query(); an
+    /// explicit RETURN is refused rather than silently discarding its rows.
     #[allow(clippy::result_large_err)]
     pub async fn query_stats(
         &mut self,
@@ -405,6 +522,8 @@ where
     /// Rebind a template from this exact session, then execute one atomic
     /// program. A foreign template fails before binding or graph observation,
     /// even if issuer, database keys, statement and token happen to match.
+    /// A native chain's receipt contains aggregate statistics and no implicit
+    /// identity rows, just as query() does for the same native text.
     #[allow(clippy::result_large_err)]
     pub async fn execute(
         &mut self,
@@ -417,6 +536,25 @@ where
             Request::Prepared(prepared, params),
             true,
             GraphWriteProgramReceipt::new,
+        )
+        .await
+    }
+
+    /// Rebind and atomically execute a same-session template without retaining
+    /// identity receipts. Preparation values are never reused; the fresh bind,
+    /// all native writes and final admission share this execution's allowance.
+    #[allow(clippy::result_large_err)]
+    pub async fn execute_stats(
+        &mut self,
+        cx: &QueryCx,
+        prepared: &AuthorizedPreparedWrite,
+        params: &GqlParameters,
+    ) -> Result<(GraphWriteProgramStats, EmbeddedTxnCompletion), Fault> {
+        self.run(
+            cx,
+            Request::Prepared(prepared, params),
+            false,
+            |stats, _| stats,
         )
         .await
     }
@@ -489,11 +627,8 @@ where
             if !Arc::ptr_eq(&self.owner, &prepared.owner) {
                 return Err(admission(WriteTxnError::AuthorizedMutationRefused));
             }
-            let bound = Input::Batch(&prepared.script, arguments, state.max_statements).bind(
-                cx,
-                state.capability.predicates(),
-                &mut execution,
-            )?;
+            let bound = Input::Batch(prepared.batch_script()?, arguments, state.max_statements)
+                .bind(cx, state.capability.predicates(), &mut execution)?;
             checkpoint(cx, &mut execution).map_err(admission)?;
             // Input::Batch is the only producer above. Keep this fail-closed
             // rather than exposing a raw program if its binding contract changes.
@@ -673,20 +808,49 @@ where
             .with_restriction_async(async {
                 checkpoint(cx, &mut execution).map_err(admission)?;
                 let bound = match request {
-                    Request::Text(text, params) => super::bind_native(
-                        cx,
-                        &mut execution,
-                        text,
-                        params,
-                        *relation,
-                        capability.predicates(),
-                        *max_statements,
-                        super::BorrowedCatalog(resolver),
-                    )?,
+                    Request::Text(text, params) => {
+                        let chain = cx.with_restriction(|| {
+                            super::reserve_text(cx, &mut execution, text)?;
+                            super::is_chain_admitted(cx, &mut execution, text)
+                        })?;
+                        if chain {
+                            super::chain_statement_limit(*max_statements)?;
+                            let chain = super::bind_chain_admitted(
+                                cx,
+                                &mut execution,
+                                text,
+                                params,
+                                *relation,
+                                super::BorrowedCatalog(resolver),
+                            )?;
+                            if chain.returns_rows() {
+                                return Err(admission(WriteTxnError::AuthorizedMutationRefused));
+                            }
+                            SessionBound::Chain(Box::new(chain))
+                        } else {
+                            SessionBound::Program(super::bind_native_admitted(
+                                cx,
+                                &mut execution,
+                                text,
+                                params,
+                                *relation,
+                                capability.predicates(),
+                                *max_statements,
+                                super::BorrowedCatalog(resolver),
+                            )?)
+                        }
+                    }
                     Request::TextBatch(text, arguments) => {
                         let first = arguments.first().ok_or(Fault::BatchBinding(
                             fgdb_gql::GraphWriteScriptBatchError::Empty,
                         ))?;
+                        cx.with_restriction(|| {
+                            super::reserve_text(cx, &mut execution, text)?;
+                            if super::is_chain_admitted(cx, &mut execution, text)? {
+                                return Err(admission(WriteTxnError::AuthorizedMutationRefused));
+                            }
+                            Ok(())
+                        })?;
                         // Map arguments standing for property maps splice
                         // with the first set's keys, and every set must carry
                         // exactly those keys (fgdb-0s2pq). The original text
@@ -711,7 +875,6 @@ where
                         };
                         let script = cx
                             .with_restriction(|| {
-                                super::reserve_text(cx, &mut execution, text)?;
                                 super::prepare_admitted(
                                     cx,
                                     &mut execution,
@@ -728,56 +891,100 @@ where
                         else {
                             unreachable!("text batch input always returns an owned batch")
                         };
-                        Bound::Batch(batch)
+                        SessionBound::Program(Bound::Batch(batch))
                     }
                     Request::Prepared(prepared, params) => {
                         if !Arc::ptr_eq(owner, &prepared.owner) {
                             return Err(admission(WriteTxnError::AuthorizedMutationRefused));
                         }
-                        statement_limit(&prepared.script, *max_statements)?;
-                        Input::Script(&prepared.script, params).bind(
-                            cx,
-                            capability.predicates(),
-                            &mut execution,
-                        )?
+                        match &prepared.definition {
+                            PreparedDefinition::Script(script) => {
+                                statement_limit(script, *max_statements)?;
+                                SessionBound::Program(Input::Script(script, params).bind(
+                                    cx,
+                                    capability.predicates(),
+                                    &mut execution,
+                                )?)
+                            }
+                            PreparedDefinition::Chain(prepared) => {
+                                super::chain_statement_limit(*max_statements)?;
+                                let chain = prepared.bind(cx, &mut execution, params)?;
+                                if chain.returns_rows() {
+                                    return Err(admission(
+                                        WriteTxnError::AuthorizedMutationRefused,
+                                    ));
+                                }
+                                SessionBound::Chain(Box::new(chain))
+                            }
+                        }
                     }
                     Request::Batch(prepared, arguments) => {
                         if !Arc::ptr_eq(owner, &prepared.owner) {
                             return Err(admission(WriteTxnError::AuthorizedMutationRefused));
                         }
-                        Input::Batch(&prepared.script, arguments, *max_statements).bind(
-                            cx,
-                            capability.predicates(),
-                            &mut execution,
-                        )?
+                        SessionBound::Program(
+                            Input::Batch(prepared.batch_script()?, arguments, *max_statements)
+                                .bind(cx, capability.predicates(), &mut execution)?,
+                        )
                     }
                     Request::Bound(bound) => {
                         if !Arc::ptr_eq(owner, &bound.owner) {
                             return Err(admission(WriteTxnError::AuthorizedMutationRefused));
                         }
-                        Input::Bound(&bound.batch).bind(
+                        SessionBound::Program(Input::Bound(&bound.batch).bind(
                             cx,
                             capability.predicates(),
                             &mut execution,
-                        )?
+                        )?)
                     }
                 };
                 // A second erased boundary under `run`'s (fgdb-a5y6m): one
                 // `Send` proof from the session down to here, another from the
                 // program completion down, so neither descends the whole chain.
-                let completion: crate::SendFuture<'_, _> =
-                    Box::pin(database.complete_authorized_program(
-                        txn_cx,
-                        cx,
-                        commit_cx,
-                        bound.program(),
-                        *policy,
-                        capability.predicates(),
-                        &mut execution,
-                        returning,
-                        receipt,
-                    ));
-                completion.await.map_err(|error| bound.error(error))
+                match bound {
+                    SessionBound::Program(bound) => {
+                        let completion: crate::SendFuture<'_, _> =
+                            Box::pin(database.complete_authorized_program(
+                                txn_cx,
+                                cx,
+                                commit_cx,
+                                bound.program(),
+                                *policy,
+                                capability.predicates(),
+                                &mut execution,
+                                returning,
+                                receipt,
+                            ));
+                        completion.await.map_err(|error| bound.error(error))
+                    }
+                    SessionBound::Chain(chain) => {
+                        let mut result = None;
+                        let completion: crate::SendFuture<'_, _> =
+                            Box::pin(database.complete_authorized_chain(
+                                txn_cx,
+                                cx,
+                                commit_cx,
+                                &chain,
+                                None,
+                                policy.insertion_policy(),
+                                capability.predicates(),
+                                execution,
+                                |stats, _, work| {
+                                    // Chains publish only their aggregate effects;
+                                    // private carried identities are not RETURN.
+                                    // Construct even a stats receipt before commit.
+                                    work(1)?;
+                                    result = Some(receipt(stats, Vec::new()));
+                                    Ok(())
+                                },
+                            ));
+                        let (_, _, completion) = completion.await.map_err(Fault::Chain)?;
+                        Ok((
+                            result.expect("chain receipt was admitted before completion"),
+                            completion,
+                        ))
+                    }
+                }
                 // Nothing fallible, no authorization sampling, no callback and no
                 // receipt allocation after the existing completion boundary.
             })

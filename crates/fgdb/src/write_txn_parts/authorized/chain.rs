@@ -260,6 +260,43 @@ fn preflight_steps<Clock: FnMut() -> u64>(
     Ok(reads)
 }
 
+/// Admit the complete native definition without reading the database or
+/// reserving identities. Prepared sessions use the same recursive admission
+/// as execution; an empty loop cannot hide a forbidden operation or field.
+pub(super) fn admit_definition<Clock: FnMut() -> u64>(
+    chain: &PreparedGraphWriteChain,
+    continuation: Option<&fgdb_gql::PreparedGraphSet>,
+    query_cx: &QueryCx,
+    scope: &PlannerPredicates,
+    execution: &mut Execution<'_, '_, Clock>,
+) -> Result<(), Fault> {
+    let continuation = continuation.or_else(|| chain.read_continuation());
+    if continuation.is_some_and(|read| !chain.accepts_read_continuation(read)) {
+        return Err(GqlQueryError::Source(GraphWriteChainError::Read(
+            fgdb_gql::GraphSetExecutionError::InputSchema { operand: 0 },
+        )));
+    }
+    // A terminal read's explicitly named field is a textual read, refused
+    // out of scope like a field named in a write's RETURN.
+    if chain
+        .read_element_keys()
+        .iter()
+        .any(|key| !scope.allows_property(*key))
+    {
+        return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
+    }
+    // Whole-program admission precedes even the first engine ID. The
+    // chain is compiler-owned, but its unsupported family is not authority.
+    let definition_reads = preflight_steps(chain.steps(), query_cx, scope, execution)?;
+    let reads = chain.returns_rows() || continuation.is_some() || definition_reads;
+    if reads && !scope.rights().can_read() {
+        return Err(source(WriteTxnError::Authorization(
+            Error::PermissionDenied,
+        )));
+    }
+    Ok(())
+}
+
 struct ChainSource<'s, 'db, 'run, 'cx, 'permit, V: Vfs, Clock> {
     transaction: &'s WriteTxn,
     database: &'s RefCell<&'db mut Database<V>>,
@@ -718,29 +755,7 @@ impl<V: Vfs + Clone> Database<V> {
         ) -> Result<(), WriteTxnError>,
     ) -> Result<Receipt, Fault> {
         let continuation = continuation.or_else(|| chain.read_continuation());
-        if continuation.is_some_and(|read| !chain.accepts_read_continuation(read)) {
-            return Err(GqlQueryError::Source(GraphWriteChainError::Read(
-                fgdb_gql::GraphSetExecutionError::InputSchema { operand: 0 },
-            )));
-        }
-        // A terminal read's explicitly named field is a textual read, refused
-        // out of scope like a field named in a write's RETURN.
-        if chain
-            .read_element_keys()
-            .iter()
-            .any(|key| !scope.allows_property(*key))
-        {
-            return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
-        }
-        // Whole-program admission precedes even the first engine ID. The
-        // chain is compiler-owned, but its unsupported family is not authority.
-        let definition_reads = preflight_steps(chain.steps(), query_cx, scope, &mut execution)?;
-        let reads = chain.returns_rows() || continuation.is_some() || definition_reads;
-        if reads && !scope.rights().can_read() {
-            return Err(source(WriteTxnError::Authorization(
-                Error::PermissionDenied,
-            )));
-        }
+        admit_definition(chain, continuation, query_cx, scope, &mut execution)?;
         commit_cx
             .with_restriction_async(async {
                 let mut workspace = Workspace(Some(
