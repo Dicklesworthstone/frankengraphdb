@@ -336,6 +336,21 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn boolean_predicates(&mut self) -> Result<bool, GraphPatternTextError> {
+        self.boolean_predicates_of(false)
+    }
+
+    /// A scalar AND conjunct (`id(a) < id(b)`, arithmetic, a function call)
+    /// of a root WHERE whose path predicates are read term by term: it ends
+    /// at the next AND, which a following `length(p) > 2` needs. None when
+    /// the term is not scalar; nothing is consumed then.
+    pub(super) fn scalar_conjunct(&mut self) -> Result<Option<bool>, GraphPatternTextError> {
+        if !self.starts_scalar_predicate()? {
+            return Ok(None);
+        }
+        self.boolean_predicates_of(true).map(Some)
+    }
+
+    fn boolean_predicates_of(&mut self, conjunct: bool) -> Result<bool, GraphPatternTextError> {
         let at = self.current.at;
         let mut parsed = Parsed {
             program: Vec::new(),
@@ -346,7 +361,11 @@ impl<'a> Parser<'a> {
             relations: Vec::new(),
             constants: Vec::new(),
         };
-        self.boolean_or(0, &mut parsed)?;
+        if conjunct {
+            self.boolean_unary(0, &mut parsed)?;
+        } else {
+            self.boolean_or(0, &mut parsed)?;
+        }
         if let Some(&(variable, _)) = parsed.labels.first() {
             // Under OR, NOT or parentheses a label test is a Boolean leaf the
             // compound evaluator cannot read; flat, it is an inline label.

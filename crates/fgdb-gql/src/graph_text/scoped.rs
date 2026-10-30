@@ -1471,6 +1471,15 @@ impl<'a> Parser<'a> {
             } else if path_predicates {
                 if self.starts_path_predicate()? {
                     self.path_predicate()?;
+                } else if let Some(extended) = self.scalar_conjunct()? {
+                    // `id(a) < id(b)` beside a named path.
+                    if extended && has_existence {
+                        return Err(error(
+                            self.current.at,
+                            GraphPatternTextErrorKind::UnsupportedBooleanScope,
+                        ));
+                    }
+                    has_boolean |= extended;
                 } else {
                     self.positive_predicate()?;
                 }

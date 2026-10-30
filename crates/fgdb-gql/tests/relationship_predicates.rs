@@ -242,6 +242,36 @@ fn relationship_match_predicates_keep_budgets_and_cancellation_atomic() {
 /// parallel relationships between the same endpoints are different, a path
 /// compares node by node and relationship by relationship, so a self-loop
 /// traversed either way is one path (TCK Comparison1 [14]).
+/// A scalar conjunct beside a named path (`id(a) < id(b)`) filters exactly as
+/// it does without the path name, and ends at its AND, so a path predicate on
+/// either side still binds at the root. The named-path WHERE once read only
+/// property atoms, and `id(a)` refused as an unknown variable.
+#[test]
+fn a_named_path_keeps_scalar_conjuncts_beside_its_path_predicates() {
+    let count = |text: &str| execute(text).len();
+    // 1->2 twice, 2->3, and the loop 3->3, which id(a) < id(b) drops.
+    for text in [
+        "MATCH p = (a)-[:R]->(b) WHERE id(a) < id(b) RETURN p",
+        "MATCH (a)-[:R]->(b) WHERE id(a) < id(b) RETURN a",
+    ] {
+        assert_eq!(count(text), 3, "{text}");
+    }
+    // Trails of one or two hops: three of each pass, the two-hop ones being
+    // 11 then 13, 12 then 13 (1 to 3) and 13 then 14 (2 to 3).
+    for text in [
+        "MATCH p = (a)-[:R*1..2]->(b) WHERE id(a) < id(b) RETURN p",
+        "MATCH (a)-[:R*1..2]->(b) WHERE id(a) < id(b) RETURN a",
+    ] {
+        assert_eq!(count(text), 6, "{text}");
+    }
+    for text in [
+        "MATCH p = (a)-[:R*1..2]->(b) WHERE id(a) < id(b) AND length(p) = 2 RETURN p",
+        "MATCH p = (a)-[:R*1..2]->(b) WHERE length(p) = 2 AND id(a) < id(b) RETURN p",
+    ] {
+        assert_eq!(count(text), 3, "{text}");
+    }
+}
+
 #[test]
 fn relationships_and_paths_compare_by_identity_in_projections() {
     let truth = |value: bool| {
