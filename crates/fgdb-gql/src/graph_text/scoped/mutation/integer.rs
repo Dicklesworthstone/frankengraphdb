@@ -63,6 +63,8 @@ fn static_text(root: Option<&ParsedOp>) -> bool {
             GraphIntegerOp::Upper
                 | GraphIntegerOp::Lower
                 | GraphIntegerOp::Trim
+                | GraphIntegerOp::LTrim
+                | GraphIntegerOp::RTrim
                 | GraphIntegerOp::Substring
                 | GraphIntegerOp::SubstringFrom
                 | GraphIntegerOp::CypherSubstring
@@ -2332,6 +2334,10 @@ impl<'a> Parser<'a> {
             Some(GraphIntegerOp::Lower)
         } else if function.eq_ignore_ascii_case("TRIM") {
             Some(GraphIntegerOp::Trim)
+        } else if function.eq_ignore_ascii_case("LTRIM") {
+            Some(GraphIntegerOp::LTrim)
+        } else if function.eq_ignore_ascii_case("RTRIM") {
+            Some(GraphIntegerOp::RTrim)
         } else if function.eq_ignore_ascii_case("TOSTRING") {
             Some(GraphIntegerOp::ToText)
         } else if function.eq_ignore_ascii_case("TOINTEGER") {

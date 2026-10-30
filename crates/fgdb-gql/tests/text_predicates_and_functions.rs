@@ -582,6 +582,13 @@ fn opencypher_left_right_replace_length_and_two_argument_substring() {
         ("replace('abc', '', '-')", text("-a-b-c-")),
         ("replace('é🦀', '', '-')", text("-é-🦀-")),
         ("replace('', '', '-')", text("-")),
+        // lTrim and rTrim strip trim()'s whitespace from one end only.
+        ("ltrim('  a b  ')", text("a b  ")),
+        ("rTrim('  a b  ')", text("  a b")),
+        ("LTRIM('\t\u{2003}x')", text("x")),
+        ("rtrim(n.text)", input.clone()),
+        ("ltrim(' ' + n.text)", input.clone()),
+        ("rtrim('x ') + 'y'", text("xy")),
         ("length(n.text)", CanonicalScalar::Int(5)),
         ("length('hello')", CanonicalScalar::Int(5)),
         ("length('') + 1", CanonicalScalar::Int(1)),
@@ -623,6 +630,8 @@ fn opencypher_left_right_replace_length_and_two_argument_substring() {
         "length(NULL)",
         "substring(NULL, 1)",
         "substring('a', NULL)",
+        "ltrim(NULL)",
+        "rtrim(NULL)",
     ] {
         assert_eq!(
             scalar(expression, &input),

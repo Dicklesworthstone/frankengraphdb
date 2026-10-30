@@ -43,7 +43,7 @@ pub const MAX_GRAPH_TEXT_TOKENS: usize = 24_576;
 /// this one table, so a name cannot be known to one and not the other. PI()
 /// and E() take no argument; ATAN2, LEFT and RIGHT take two, REPLACE three.
 /// LENGTH is not here: `text_length_call` tells text's length from a path's.
-const SCALAR_FUNCTIONS: [&str; 39] = [
+const SCALAR_FUNCTIONS: [&str; 41] = [
     "ABS",
     "TOFLOAT",
     "FLOOR",
@@ -74,6 +74,8 @@ const SCALAR_FUNCTIONS: [&str; 39] = [
     "LOWER",
     "TOLOWER",
     "TRIM",
+    "LTRIM",
+    "RTRIM",
     "SUBSTRING",
     "LEFT",
     "RIGHT",

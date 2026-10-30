@@ -163,6 +163,9 @@ pub enum GraphIntegerOp {
     Upper,
     Lower,
     Trim,
+    /// openCypher lTrim and rTrim: Trim's whitespace, from one end only.
+    LTrim,
+    RTrim,
     CharLength,
     /// LENGTH of a dynamic value: hop count for a Path, Unicode scalar
     /// count for text, and NULL for NULL. CHAR_LENGTH stays text-only.
@@ -314,6 +317,8 @@ impl GraphIntegerOp {
             Self::Upper => bytes.push(17),
             Self::Lower => bytes.push(18),
             Self::Trim => bytes.push(19),
+            Self::LTrim => bytes.push(50),
+            Self::RTrim => bytes.push(51),
             Self::CharLength => bytes.push(20),
             Self::Length => bytes.push(47),
             Self::Size => bytes.push(46),
@@ -383,6 +388,8 @@ impl core::fmt::Debug for GraphIntegerOp {
             Self::Upper => f.write_str("Upper"),
             Self::Lower => f.write_str("Lower"),
             Self::Trim => f.write_str("Trim"),
+            Self::LTrim => f.write_str("LTrim"),
+            Self::RTrim => f.write_str("RTrim"),
             Self::CharLength => f.write_str("CharLength"),
             Self::Length => f.write_str("Length"),
             Self::Size => f.write_str("Size"),
@@ -706,6 +713,8 @@ enum Instruction {
     Upper,
     Lower,
     Trim,
+    LTrim,
+    RTrim,
     CharLength,
     Length,
     Size,
@@ -1312,6 +1321,8 @@ impl GraphIntegerExpression {
                 Instruction::Upper
                 | Instruction::Lower
                 | Instruction::Trim
+                | Instruction::LTrim
+                | Instruction::RTrim
                 | Instruction::CharLength
                 | Instruction::Length
                 | Instruction::Size => {
@@ -1353,6 +1364,8 @@ impl GraphIntegerExpression {
                                 )
                             }
                             Instruction::Trim => make_text(text.trim(), at, control)?,
+                            Instruction::LTrim => make_text(text.trim_start(), at, control)?,
+                            Instruction::RTrim => make_text(text.trim_end(), at, control)?,
                             _ => {
                                 // Unicode case mapping expands a scalar by at most three
                                 // times its UTF-8 bytes. Reserve before str allocates.
@@ -1688,6 +1701,8 @@ impl GraphIntegerExpression {
                 Instruction::Upper => bytes.push(17),
                 Instruction::Lower => bytes.push(18),
                 Instruction::Trim => bytes.push(19),
+                Instruction::LTrim => bytes.push(50),
+                Instruction::RTrim => bytes.push(51),
                 Instruction::CharLength => bytes.push(20),
                 Instruction::Length => bytes.push(47),
                 Instruction::Size => bytes.push(46),

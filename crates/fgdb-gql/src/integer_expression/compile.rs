@@ -113,6 +113,8 @@ fn prepare_root(
             | Op::Upper
             | Op::Lower
             | Op::Trim
+            | Op::LTrim
+            | Op::RTrim
             | Op::CharLength
             | Op::Length
             | Op::Size
@@ -183,6 +185,8 @@ fn prepare_root(
                 Op::Upper
                 | Op::Lower
                 | Op::Trim
+                | Op::LTrim
+                | Op::RTrim
                 | Op::CharLength
                 | Op::Length
                 | Op::Size
@@ -324,6 +328,8 @@ fn prepare_root(
             Op::Upper
             | Op::Lower
             | Op::Trim
+            | Op::LTrim
+            | Op::RTrim
             | Op::Substring
             | Op::SubstringFrom
             | Op::CypherSubstring
@@ -493,6 +499,8 @@ fn prepare_root(
                     Op::Upper => Some(Instruction::Upper),
                     Op::Lower => Some(Instruction::Lower),
                     Op::Trim => Some(Instruction::Trim),
+                    Op::LTrim => Some(Instruction::LTrim),
+                    Op::RTrim => Some(Instruction::RTrim),
                     Op::CharLength => Some(Instruction::CharLength),
                     Op::Length => Some(Instruction::Length),
                     Op::Size => Some(Instruction::Size),
@@ -588,6 +596,8 @@ fn prepare_root(
                     | Op::Upper
                     | Op::Lower
                     | Op::Trim
+                    | Op::LTrim
+                    | Op::RTrim
                     | Op::CharLength
                     | Op::Length
                     | Op::Size
