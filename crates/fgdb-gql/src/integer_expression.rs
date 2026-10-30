@@ -592,6 +592,11 @@ impl ExpressionCell<'_> {
         matches!(self, Self::Composite(value) if value.as_list().is_some())
     }
 
+    /// A text scalar, which `+` concatenates with.
+    fn is_text(&self) -> bool {
+        matches!(self, Self::Scalar(value) if matches!(value.as_ref(), CanonicalScalar::Text(_)))
+    }
+
     pub(crate) fn integer(&self) -> Result<Option<i128>, GraphIntegerErrorKind> {
         match self {
             Self::Scalar(value) => scalar_integer(value).map(|value| value.map(i128::from)),
@@ -1118,6 +1123,15 @@ impl GraphIntegerExpression {
                         at += 1;
                         continue;
                     }
+                    // `+` over a text concatenates, as the value language's
+                    // sum_value does. Only an operand typed at preparation
+                    // compiles to Concat; a dynamically typed one (`n.a + n.b`,
+                    // a WITH alias, a reduce accumulator) reaches Add here.
+                    if *op == GraphIntegerBinary::Add && (left.is_text() || right.is_text()) {
+                        *left = concat_cells(left, &right, at, control)?.into();
+                        at += 1;
+                        continue;
+                    }
                     // Arithmetic rounds each average operand once; NULLIF is
                     // an equality and keeps it exact.
                     let averaged = *op != GraphIntegerBinary::NullIf
@@ -1352,34 +1366,21 @@ impl GraphIntegerExpression {
                     let right = stack.pop().expect("validated text right operand");
                     let left = stack.last_mut().expect("validated text left operand");
                     // `n.tags + 'x'` compiles to Concat; over a List it appends.
-                    if matches!(op, Instruction::Concat) && (left.is_list() || right.is_list()) {
-                        let joined = list_plus(left, &right, at, control)?;
-                        *left = joined;
+                    if matches!(op, Instruction::Concat) {
+                        *left = if left.is_list() || right.is_list() {
+                            list_plus(left, &right, at, control)?
+                        } else {
+                            concat_cells(left, &right, at, control)?.into()
+                        };
                         at += 1;
                         continue;
                     }
-                    let (a, b) = if matches!(op, Instruction::Concat) {
-                        (left.text(), right.text())
-                    } else {
-                        (predicate_text(left.text()), predicate_text(right.text()))
-                    };
-                    let a = a.map_err(failure)?;
-                    let b = b.map_err(failure)?;
+                    let a = predicate_text(left.text()).map_err(failure)?;
+                    let b = predicate_text(right.text()).map_err(failure)?;
                     let result = if let (Some(a), Some(b)) = (a, b) {
                         charge_payload(a.len(), false, control)?;
                         charge_payload(b.len(), false, control)?;
                         match op {
-                            Instruction::Concat => {
-                                let size = a
-                                    .len()
-                                    .checked_add(b.len())
-                                    .ok_or_else(|| failure(GraphIntegerErrorKind::Overflow))?;
-                                charge_payload(size, true, control)?;
-                                let mut joined = String::with_capacity(size);
-                                joined.push_str(a);
-                                joined.push_str(b);
-                                make_text(&joined, at, control)?
-                            }
                             Instruction::StartsWith => CanonicalScalar::Bool(a.starts_with(b)),
                             Instruction::EndsWith => CanonicalScalar::Bool(a.ends_with(b)),
                             _ => CanonicalScalar::Bool(a.contains(b)),
@@ -2240,6 +2241,34 @@ fn make_text<E>(
             kind: GraphIntegerErrorKind::TextConstruction,
         })
     })
+}
+
+/// `left || right`, or `+` meeting a text: NULL when either side is NULL,
+/// otherwise both sides must be text (NonText). Both payloads are scanned and
+/// the joined text is reserved before it exists.
+fn concat_cells<E>(
+    left: &ExpressionCell<'_>,
+    right: &ExpressionCell<'_>,
+    instruction: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<CanonicalScalar, GraphIntegerEvaluationError<E>> {
+    let failure =
+        |kind| GraphIntegerEvaluationError::Value(GraphIntegerError { instruction, kind });
+    let a = left.text().map_err(failure)?;
+    let b = right.text().map_err(failure)?;
+    let (Some(a), Some(b)) = (a, b) else {
+        return Ok(CanonicalScalar::Null);
+    };
+    charge_payload(a.len(), false, control)?;
+    charge_payload(b.len(), false, control)?;
+    let size = (a.len())
+        .checked_add(b.len())
+        .ok_or_else(|| failure(GraphIntegerErrorKind::Overflow))?;
+    charge_payload(size, true, control)?;
+    let mut joined = String::with_capacity(size);
+    joined.push_str(a);
+    joined.push_str(b);
+    make_text(&joined, instruction, control)
 }
 
 /// openCypher `+` with a List operand (fgdb-bqri3, as the value language's

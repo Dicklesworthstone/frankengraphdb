@@ -681,6 +681,83 @@ fn plus_concatenates_list_columns_after_with() {
     );
 }
 
+/// openCypher `+` over operands that preparation does not type follows their
+/// run-time values, as the value language's sum_value does: two texts
+/// concatenate, NULL is NULL, numbers add, and a text never adds to a number.
+/// The texts are a property, a WITH alias, an UNWIND element, a comprehension
+/// local and a reduce accumulator, in RETURN, WHERE and reduce. A lone reduce
+/// accumulator holding a list joins a list sum whole.
+#[test]
+fn plus_over_untyped_operands_follows_their_values() {
+    use fgdb_gql::algebra::GraphValue;
+    let text = |value: &str| GraphValue::Scalar(CanonicalScalar::ucs_basic_text(value).unwrap());
+    let int = |n: i64| GraphValue::Scalar(CanonicalScalar::Int(n));
+    let list = |items: &[i64]| GraphValue::List(items.iter().map(|&n| int(n)).collect());
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    let values = ["ab", "cd"].map(|value| CanonicalScalar::ucs_basic_text(value).unwrap());
+    let column = |statement: &str| -> Vec<GraphValue> {
+        (run(&prepare(statement), &values, wide(), &mut || Ok(())))
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
+            .value
+            .iter()
+            .map(|row| row.get(0).unwrap().clone())
+            .collect()
+    };
+    for statement in [
+        "MATCH (n) RETURN n.p + n.p AS v ORDER BY v",
+        "MATCH (n) WITH n.p AS a RETURN a + a AS v ORDER BY v",
+        "MATCH (n) RETURN [x IN [n.p] | x + x][0] AS v ORDER BY v",
+        "MATCH (n) RETURN reduce(s = '', x IN [n.p, n.p] | s + x) AS v ORDER BY v",
+    ] {
+        assert_eq!(
+            column(statement),
+            [text("abab"), text("cdcd")],
+            "{statement}"
+        );
+    }
+    assert_eq!(
+        column("MATCH (n) WHERE n.p + n.p = 'cdcd' RETURN n.p AS v"),
+        [text("cd")]
+    );
+    assert_eq!(
+        column("MATCH (n) WITH n.p AS a WHERE a + a = 'abab' RETURN a AS v"),
+        [text("ab")]
+    );
+    assert_eq!(
+        column("UNWIND ['x', 'y'] AS s RETURN s + s AS v ORDER BY v"),
+        [text("xx"), text("yy")]
+    );
+    assert_eq!(
+        column("MATCH (n) WITH n.p AS a, null AS b RETURN a + b AS v"),
+        [null.clone(), null]
+    );
+    assert_eq!(
+        column("UNWIND [1, 2] AS i WITH i AS a RETURN a + a AS v ORDER BY v"),
+        [int(2), int(4)]
+    );
+    for (statement, expected) in [
+        (
+            "reduce(acc = [], x IN [1, 2] | acc + [x * 2])",
+            list(&[2, 4]),
+        ),
+        ("reduce(acc = [], x IN [2, 1] | [x] + acc)", list(&[1, 2])),
+        ("reduce(acc = [], x IN [1, 2] | acc + x)", list(&[1, 2])),
+    ] {
+        assert_eq!(
+            column(&format!("UNWIND [0] AS z RETURN {statement} AS v")),
+            [expected],
+            "{statement}"
+        );
+    }
+    let fails = |text: &str| {
+        PreparedGraphSetText::prepare(text, symbols)
+            .ok()
+            .and_then(|query| query.bind_parameters(&GqlParameters::new()).ok())
+            .is_none_or(|query| run(&query, &values, wide(), &mut || Ok(())).is_err())
+    };
+    assert!(fails("MATCH (n) WITH n.p AS a, 1 AS b RETURN a + b AS v"));
+}
+
 /// A CASE after WITH may return a graph element: the arm's vertex itself,
 /// not a scalar, in both the searched and the simple form. A missing ELSE is
 /// NULL. Each row is compared with a plain `RETURN x, n` over the same rows.

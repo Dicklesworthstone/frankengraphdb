@@ -812,9 +812,9 @@ fn opencypher_left_right_replace_length_and_two_argument_substring() {
 
 /// fgdb-j687q: openCypher `+` concatenates when either operand is statically
 /// text, compiling to the same program `||` does, in RETURN and WHERE and
-/// through chains. An operand of unknown type keeps integer addition, and a
-/// text literal added to an integer is refused at preparation, as `'a' || 1`
-/// is.
+/// through chains. Operands of unknown type are decided by their values when
+/// evaluated: two texts concatenate, and text + integer fails typed. A text
+/// literal added to an integer is refused at preparation, as `'a' || 1` is.
 #[test]
 fn opencypher_plus_over_text_is_concatenation() {
     for (cypher, gql) in [
@@ -830,7 +830,36 @@ fn opencypher_plus_over_text_is_concatenation() {
     }
     let input = text("ab");
     assert_eq!(scalar("'<' + n.text + '>'", &input), text("<ab>"));
+    assert_eq!(scalar("n.text + n.text", &input), text("abab"));
     assert_eq!(scalar("1 + 2", &input), CanonicalScalar::Int(3));
+    // A parameter declared STRING is as static as a text literal.
+    let with_text_parameter = |statement: &str| {
+        let template = PreparedGraphSetText::prepare_with_parameter_types(
+            statement,
+            &[(
+                "a",
+                fgdb_gql::GqlParameterType::Scalar(fgdb_types::CanonicalScalarKind::Text),
+            )],
+            symbols,
+        )
+        .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+        let value = fgdb_gql::GqlScalarParameter::new(text("!")).unwrap();
+        let mut arguments = GqlParameters::new();
+        arguments
+            .insert("a", fgdb_gql::GqlParameterValue::Scalar(value))
+            .unwrap();
+        let query = template.bind_parameters(&arguments).unwrap();
+        let result = execute(&query, &input, policy()).unwrap();
+        result.value[0].values()[0].as_scalar().unwrap().clone()
+    };
+    assert_eq!(
+        with_text_parameter("MATCH (n) RETURN n.text + $a AS value"),
+        text("ab!")
+    );
+    assert_eq!(
+        with_text_parameter("MATCH (n) RETURN $a + $a AS value"),
+        text("!!")
+    );
     let rows = |statement: &str| {
         execute(&prepare(statement), &input, policy())
             .unwrap()

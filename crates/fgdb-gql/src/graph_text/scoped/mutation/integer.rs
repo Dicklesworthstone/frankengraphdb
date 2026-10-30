@@ -800,7 +800,28 @@ impl<'a> Parser<'a> {
         let parsed = self.checked_expression_scoped(columns, ExpressionBoundary::Product, true);
         self.let_base = base;
         let (operand, slots) = parsed?;
+        // A lone comprehension or reduce local is its whole value, as
+        // comparison_operand reads it: in `reduce(acc = [], x IN l | acc +
+        // [x])` the accumulator holds a list, which a scalar program refuses.
+        if slots.is_empty()
+            && let Operand::Integer { program, .. } = &operand
+            && let [MutationIntegerTemplateOp::Bound(GraphIntegerOp::Local(offset))] =
+                program.as_slice()
+        {
+            return Ok(ReadValueTemplate::Local(*offset));
+        }
         Ok(self.scalar_let_value(operand, slots, at)?)
+    }
+
+    /// Whether a parsed operand root is a parameter declared STRING.
+    fn text_parameter(&self, root: Option<&ParsedOp>) -> bool {
+        let Some(ParsedOp::Atom(Operand::Number(Number::Parameter(index)), _)) = root else {
+            return false;
+        };
+        matches!(
+            self.syntax.parameters[*index].parameter_type,
+            GqlParameterType::Scalar(CanonicalScalarKind::Text)
+        )
     }
 
     /// Whether a lone operand (a number or text literal, a parameter, a
@@ -1894,10 +1915,13 @@ impl<'a> Parser<'a> {
             self.integer_product(columns, depth, program)?;
             // openCypher `+` concatenates when either operand is statically
             // text (fgdb-j687q), compiling to exactly the program `||` does.
-            // An operand of unknown type keeps integer addition, and a
-            // text/integer mix is the typed Concat operand refusal.
+            // Over operands of unknown type, Add concatenates when a value is
+            // text, and a text/integer mix is the typed Concat operand refusal.
+            // A parameter declared STRING is as static as a text literal.
             let concat = matches!(op, GraphIntegerBinary::Add)
-                && (static_text(program[..right].last()) || static_text(program.last()));
+                && [program[..right].last(), program.last()]
+                    .into_iter()
+                    .any(|root| static_text(root) || self.text_parameter(root));
             if concat {
                 emit(program, ParsedOp::Bound(GraphIntegerOp::Concat), at)?;
             } else {
