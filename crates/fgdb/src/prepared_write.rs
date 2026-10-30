@@ -2,6 +2,7 @@
 
 mod at_basis;
 mod atomic;
+mod incremental;
 mod ordered;
 
 pub(super) use at_basis::PreparationAnchor;

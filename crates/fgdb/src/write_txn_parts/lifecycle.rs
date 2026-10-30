@@ -53,7 +53,9 @@ impl WriteTxn {
     }
 
     /// Stage a batch against this transaction's pinned snapshot.
-    /// Same-relation prefixes retain the original preparation path. Once an
+    /// Same-relation prefixes reuse already admitted effects where the native
+    /// evaluator can reconstruct only the suffix's required state. Unsupported
+    /// intent families retain full preparation. Once an
     /// explicit composition call has staged multiple relations, subsequent
     /// writes preserve source order through `prepare_ordered_writes`.
     /// Use `write_ordered` to explicitly introduce the first dependent relation;
@@ -102,14 +104,29 @@ impl WriteTxn {
         // or rolled-back preparations separately retain their observations.
         let previous_len = self.staged.len();
         self.staged.push(batch);
-        let combined = Self::combined_batch(&self.staged)
-            .expect("a batch was staged immediately before combination");
-        let prepared = match database.prepare_write(combined) {
+        let incremental = match self.prepared.as_deref() {
+            Some(previous) => database.try_extend_prepared_write(
+                previous,
+                &self.staged[..previous_len],
+                self.staged.last().expect("a batch was just staged"),
+            ),
+            None => Ok(None),
+        };
+        let prepared = match incremental.and_then(|incremental| {
+            if let Some(prepared) = incremental {
+                return Ok(prepared);
+            }
+            let combined = Self::combined_batch(&self.staged)
+                .expect("a batch was staged immediately before combination");
+            database
+                .prepare_write(combined)
+                .map_err(WriteTxnError::Write)
+        }) {
             Ok(prepared) => prepared,
             Err(source) => {
                 self.retain_failed_preparation_observations(database, previous_len);
                 let _ = self.staged.pop();
-                return Err(WriteTxnError::Write(source));
+                return Err(source);
             }
         };
         debug_assert_eq!(prepared.basis(), self.basis);
