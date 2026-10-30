@@ -417,6 +417,22 @@ tracks that work; checked investigation is not delivered capability.
   dependency and comment. Portable fields match; primary audit events remain
   intact and are not part of the JSONL export format.
 - [x] Repair the first formatting failures and run focused integration tests.
+- [x] Repair multipart `MATCH ... WITH ... MATCH ... SET ... RETURN`
+  classification through the existing chain owner. All thirteen computed
+  mutation integration tests now pass. The six authorized targets pass 113
+  tests; three buffered targets pass 29; chained writes pass five. These are
+  focused runtime results, not the still-required whole-workspace verdict.
+- [x] Re-run the three public targets skipped after the first focused failure:
+  procedures 29 passed, sealed owners 19 passed, cooperative 75 passed (one
+  ignored). Parse six stored-source component receipts with exact labels,
+  source roots and scheduling quanta. These executable builds predate the
+  final multipart classifier repair.
+- [x] Correct the tracker preservation denominator: the first reconciliation
+  checks missed two canonical dependencies and two superseded close reasons.
+  Both dependencies now retain original provenance, and both old reasons
+  survive as comments. Explicit checks cover every original/current label,
+  dependency and comment fact and all 914 original close reasons. The repair
+  and this qualification do not constitute database product capability.
 - [ ] Complete the mandatory chain on a stable source. The first full run
   found additional integration reds. Another process fast-forwarded main from
   `3cda9945f7877502cc9c636b70067a8140099b9d` to

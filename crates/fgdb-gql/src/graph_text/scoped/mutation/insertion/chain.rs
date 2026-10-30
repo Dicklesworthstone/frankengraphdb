@@ -212,11 +212,11 @@ impl PreparedGraphWriteChainText {
                         mutated = true;
                     } else if clause
                         && mutated
-                        && leading_rows
+                        && (leading_rows || multipart_mutation)
                         && word.eq_ignore_ascii_case("RETURN")
                     {
                         // The parameter batch writer returns no rows. Keep
-                        // a mutation over a leading row relation on the
+                        // a mutation over a leading or multipart relation on the
                         // chain's existing frozen-input and RETURN owner.
                         return Ok(true);
                     } else if clause
@@ -1568,6 +1568,7 @@ mod tests {
 
         let symbols = |kind, name: &str| match (kind, name) {
             (GraphSymbolKind::Label, "N") => Some(GraphSymbol::Label(LabelId(1))),
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
             (GraphSymbolKind::Property, "id") => Some(GraphSymbol::Property(PropertyKeyId(1))),
             (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(2))),
             _ => None,
@@ -1609,6 +1610,15 @@ mod tests {
             ),
             (
                 "UNWIND [1] AS k MATCH (n:N {id:k}) DETACH DELETE n RETURN k AS value",
+                false,
+            ),
+            (
+                "MATCH (a:N {id:1}) WITH a MATCH (a)-[:R]->(n) \
+                 SET n.p=7 RETURN n.p AS value",
+                false,
+            ),
+            (
+                "CALL { RETURN 1 AS k } MATCH (n:N {id:k}) SET n.p=7 RETURN n.p AS value",
                 false,
             ),
         ] {

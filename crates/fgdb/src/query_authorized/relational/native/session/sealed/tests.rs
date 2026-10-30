@@ -13,7 +13,7 @@ use fgdb_strata::store::RootReadLimits;
 use fgdb_strata::tiered::sealed::SealedLimits;
 use fgdb_types::context::SimulationCheckpointProbe;
 use fgdb_types::{CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts};
-use fgdb_warden::{Grant, QueryLimits, Scope};
+use fgdb_warden::{Grant, LimitDimension, QueryLimits, Scope};
 use std::cell::Cell;
 
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x69; 32]);
@@ -123,6 +123,14 @@ async fn retained(db: &Database<MemVfs>, cx: &QueryCx, cut: Option<CommitSeq>) -
     )
     .await
     .unwrap()
+}
+async fn subset_database(cx: &CommitCx) -> Database<MemVfs> {
+    let mut db = database(cx, false).await;
+    let mut extra = WriteBatch::new(R);
+    extra.create_vertex(VId(4), vec![H], vec![]);
+    extra.add_edge(EId(3), VId(1), VId(4), vec![]);
+    db.write(cx, extra).await.unwrap();
+    db
 }
 fn compressed_calls() -> usize {
     crate::query::authorized::analytics::sealed::EXECUTIONS.with(Cell::get)
@@ -1000,6 +1008,222 @@ fn compressed_reuse_matches_cold_rows_statistics_and_each_fresh_allowance() {
                 reused,
                 "case {index}: rows/refusal, admitted statistics, QueryCx and clock ordering",
             );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+fn full_scope_compressed_nodes_and_rows_refuse_one_below_and_admit_exactly() {
+    let ((), report) = run_async_under_lab(0xa115_ea06, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = subset_database(&c.commit()).await;
+        let owner = retained(&db, &cx, None).await;
+        let authority = issuer(7);
+        let args = GqlParameters::new();
+        let prefix = "CALL fnx.out_degree_centrality(label => 'L', relation => 'R') \
+                      YIELD vertex, score ";
+        for (tail, rows) in [
+            ("RETURN vertex, score ORDER BY vertex", 3),
+            ("RETURN count(*) AS n", 1),
+            ("RETURN vertex, score LIMIT 0", 0),
+        ] {
+            let text = format!("{prefix}{tail}");
+            let expected = db.query(&cx, &text, &args, catalog, policy()).unwrap();
+            let QueryResult::Rows { rows: result, .. } = &expected else {
+                panic!("a native read returns rows");
+            };
+            assert_eq!(result.len(), rows);
+            if rows == 1 {
+                assert_eq!(result[0][0].as_count(), Some(3));
+            } else if rows == 3 {
+                for (row, id) in result.iter().zip(1..=3) {
+                    assert_eq!(row[0], QueryValue::Value(GraphValue::Vertex(VId(id))));
+                }
+            }
+            // The full grant sees four vertices. The query's label selects
+            // only three, and their induced graph produces three kernel rows.
+            // COUNT and the terminal empty page still complete that procedure;
+            // neither replaces its own signed source/kernel admission.
+            for dimension in [LimitDimension::Nodes, LimitDimension::Rows] {
+                let exact = match dimension {
+                    LimitDimension::Nodes => 4,
+                    LimitDimension::Rows => 3,
+                    LimitDimension::Work => unreachable!(),
+                };
+                for limit in [exact - 1, exact] {
+                    let mut allowed = grant(false);
+                    allowed.limits.max_nodes = 4;
+                    allowed.limits.max_rows = 3;
+                    match dimension {
+                        LimitDimension::Nodes => allowed.limits.max_nodes = limit,
+                        LimitDimension::Rows => allowed.limits.max_rows = limit,
+                        LimitDimension::Work => unreachable!(),
+                    }
+                    let token = authority.issue_at(&allowed, NOW).unwrap();
+                    let mut session = owner
+                        .authorized_read_session(
+                            &cx,
+                            &authority,
+                            &token,
+                            "main",
+                            catalog,
+                            policy(),
+                            memory(),
+                            || NOW,
+                        )
+                        .unwrap();
+                    for repeat in 0..2 {
+                        let before = compressed_calls();
+                        let result = session.query(&cx, &text, &args);
+                        assert!(
+                            compressed_calls() > before,
+                            "{dimension:?}={limit}, repeat {repeat}: {text}"
+                        );
+                        if limit == exact {
+                            assert_eq!(result.unwrap(), expected);
+                        } else {
+                            refusal(result, AuthorizationError::LimitExceeded(dimension));
+                        }
+                        assert!(!session.is_closed(), "a quota refusal is retryable");
+                    }
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn full_scope_compressed_work_pays_the_declared_kernel_model_and_all_host_events() {
+    let ((), report) = run_async_under_lab(0xa115_ea07, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = subset_database(&c.commit()).await;
+        let owner = retained(&db, &cx, None).await;
+        let authority = issuer(8);
+        let call = FnxCallSpec::bind(
+            "CALL fnx.out_degree_centrality() YIELD vertex,score",
+            &FnxParameters::new(),
+        )
+        .unwrap();
+        let mut options = FnxReadOptions::whole_graph_for(&call, Some(owner.snapshot_seq()));
+        options.selection.relation = Some(R);
+        options.selection.vertex_label = Some(L);
+        let (_, partition, at, _) = owner.authorized_parts();
+        assert_eq!(partition.incidence_count(), 3);
+        // Count public projection and kernel guard events without using any
+        // Warden adapter, usage counter, or measured acceptance threshold.
+        let projection_guards = Cell::new(0_u64);
+        let graph = SealedGraphView::build_with_checkpoint(
+            &cx,
+            partition,
+            &[VId(1), VId(2), VId(3)],
+            SealedProjectionSpec {
+                as_of: at,
+                selection: options.selection,
+                projection: options.projection,
+            },
+            SealedProjectionMask::UNMASKED,
+            options.projection_limits,
+            || {
+                projection_guards.set(projection_guards.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!((graph.node_count(), graph.edge_count()), (3, 2));
+        let kernel_guards = Cell::new(0_u64);
+        let mut cursor = call
+            .execute_sealed_rows_with_checkpoint(
+                &cx,
+                &graph,
+                options.execution_limits,
+                memory(),
+                || {
+                    kernel_guards.set(kernel_guards.get() + 1);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        // The degree-directory model is n + 2: one degree per vertex,
+        // initialization and completion. It is separate from guard callbacks.
+        const KERNEL_WORK: u64 = 3 + 2;
+        assert_eq!(cursor.certificate().estimated_work as u64, KERNEL_WORK);
+        let mut expected = Vec::new();
+        let mut row = Vec::new();
+        while cursor.next_row(&mut row, || Ok::<_, ()>(())).unwrap() {
+            expected.push(std::mem::take(&mut row));
+        }
+        assert_eq!(expected.len(), 3);
+        // Four session work checkpoints; four visible vertices each paying
+        // vertex, label and node work; three raw incidences; three prepaid
+        // cursor pulls; and the independently declared kernel model.
+        let exact = 4 + 4 * 3 + 3 + 3 + KERNEL_WORK + projection_guards.get() + kernel_guards.get();
+        for work in [exact - 1, exact] {
+            let mut allowed = grant(false);
+            allowed.limits = QueryLimits {
+                max_nodes: 4,
+                max_rows: 3,
+                max_work: work,
+            };
+            let token = authority.issue_at(&allowed, NOW).unwrap();
+            let mut session = owner
+                .authorized_read_session(
+                    &cx,
+                    &authority,
+                    &token,
+                    "main",
+                    catalog,
+                    policy(),
+                    memory(),
+                    || NOW,
+                )
+                .unwrap();
+            for repeat in 0..2 {
+                let before = compressed_calls();
+                let result = session
+                    .inner
+                    .run(&cx, |view, _, scope, _, policy, execution| {
+                        let mut usage = crate::gql_exec::AdmissionUsage::default();
+                        let rows = crate::query::authorized::analytics::execute(
+                            &view.snapshot,
+                            SnapshotBinding {
+                                root: view.partition_root().0,
+                                as_of: selected_cut(view, execution),
+                            },
+                            &call,
+                            options,
+                            scope,
+                            execution,
+                            crate::query::authorized::analytics::UsageObserver {
+                                usage: &mut usage,
+                                policy,
+                            },
+                        )
+                        .map_err(|error| match error {
+                            FnxReadError::Cancelled(error) => error,
+                            FnxReadError::Read(error) => QueryError::Read(error),
+                            other => QueryError::Unsupported {
+                                diagnostics: vec![other.to_string()],
+                            },
+                        })?;
+                        // The completion check and the two delivery checkpoints
+                        // still lie ahead. Removing the five-unit kernel charge
+                        // cannot be hidden by recalibrating a measured threshold.
+                        assert_eq!(execution.borrow().permit.usage().work, exact - 3);
+                        Ok((rows, 3))
+                    });
+                assert!(compressed_calls() > before, "work={work}, repeat {repeat}");
+                if work == exact {
+                    assert_eq!(result.unwrap(), expected);
+                } else {
+                    refusal(
+                        result,
+                        AuthorizationError::LimitExceeded(LimitDimension::Work),
+                    );
+                }
+                assert!(!session.is_closed());
+            }
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
