@@ -345,6 +345,9 @@ impl<V: Vfs> Driver<'_, V> {
         // before heap insertion. Root heads and their position stay unchanged.
         let mut state = State {
             heads: Vec::new(),
+            orders: Vec::new(),
+            order_bytes: 0,
+            retain_orders: retained,
             active: None,
             initialized: true,
             incidence: retained.then_some(request),
@@ -365,7 +368,7 @@ impl<V: Vfs> Driver<'_, V> {
                 break;
             };
             self.root
-                .load(&mut state, cx, block, properties, observe)
+                .load(&mut state, cx, block, None, properties, observe)
                 .await?;
             let active = state.active.as_ref().ok_or_else(invalid_load)?;
             let mut ordinal = 0;
@@ -391,6 +394,7 @@ impl<V: Vfs> Driver<'_, V> {
                         created,
                         block,
                         ordinal: at,
+                        slot: state.orders.len(),
                     }));
                     break;
                 }
@@ -406,17 +410,23 @@ impl<V: Vfs> Driver<'_, V> {
                         requested: charge.bytes(),
                     })
                 })?;
-                if state
-                    .heads
-                    .capacity()
-                    .checked_mul(size_of::<Reverse<Head>>())
-                    .is_none_or(|bytes| bytes > charge.bytes())
-                {
-                    return Err(BufferedReadError::SizeOverflow.into());
+                if state.retain_orders {
+                    state.orders.try_reserve(1).map_err(|_| {
+                        BufferedReadError::Memory(MemoryError::AllocationFailed {
+                            requested: charge.bytes(),
+                        })
+                    })?;
+                    state.orders.push(None);
                 }
+                state.check_retained_bytes()?;
                 heap_push(&mut state.heads, head, &mut || {
                     self.root.work.step(cx, observe)
                 })?;
+                // Routing may produce a block with no matching row. Only a
+                // real reserved head can later retain its displaced order.
+                let active = state.active.as_mut().ok_or_else(invalid_load)?;
+                active.slot = state.retain_orders.then_some(head.0.slot);
+                active.has_head = true;
             }
         }
         Ok(state)

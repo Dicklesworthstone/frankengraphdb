@@ -274,6 +274,131 @@ fn controlled_heap_and_local_permutations_match_independent_standard_order() {
 }
 
 #[test]
+fn compact_orders_restore_full_width_history_and_original_property_positions() {
+    let mut seed = 19u128;
+    for count in 0..=crate::MAX_BLOCK_ENTRIES as usize {
+        let entries: Vec<_> = (0..count)
+            .map(|at| {
+                seed = seed
+                    .wrapping_mul(0x2360_ed05_1fc6_5da4_4385_df64_9fcc_f645)
+                    .wrapping_add(1);
+                entry(
+                    match at % 7 {
+                        0 => u128::MAX,
+                        1 => 0,
+                        2 | 3 => 1u128 << 100,
+                        _ => seed,
+                    },
+                    (at % 3) as u128,
+                    (at % 5) as u128,
+                    R,
+                    (at % 4) as u64,
+                    None,
+                )
+            })
+            .collect();
+        // Whole-root, outgoing and incoming incidence selections. A retained
+        // incidence's predicate is fixed even as its after-position advances.
+        for filter in 0..3 {
+            let mut expected: Vec<Key> = entries
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| match filter {
+                    1 => row.src == VId(1),
+                    2 => row.dst == VId(2),
+                    _ => true,
+                })
+                .map(|(at, row)| (row.eid, row.created_at, at))
+                .collect();
+            expected.sort_unstable();
+            let positions =
+                compact_positions(&expected, 256, &mut || Ok::<_, BufferedScanError<()>>(()))
+                    .unwrap();
+            assert_eq!(positions.len(), expected.len());
+            let mut actual = Vec::with_capacity(count);
+            restore_positions(&entries, &positions, &mut actual, &mut || {
+                Ok::<_, BufferedScanError<()>>(())
+            })
+            .unwrap();
+            assert_eq!(actual, expected, "count {count}, selection {filter}");
+            // Property locators still address the original encoded image,
+            // including equal (identity, birth) statements and position255.
+            for (key, position) in actual.iter().zip(positions) {
+                assert_eq!(key.2, usize::from(position));
+                assert_eq!(
+                    (key.0, key.1),
+                    (entries[key.2].eid, entries[key.2].created_at)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn compact_order_controls_refuse_every_prefix_without_publishing_a_memo() {
+    let entries: Vec<_> = (0..256)
+        .map(|at| entry(255 - at, 1, at, R, 1, None))
+        .collect();
+    let order: Vec<Key> = (0..256)
+        .rev()
+        .map(|at| (entries[at].eid, entries[at].created_at, at))
+        .collect();
+    let positions =
+        compact_positions(&order, 256, &mut || Ok::<_, BufferedScanError<usize>>(())).unwrap();
+    for stop in 0..256 {
+        let mut calls = 0;
+        let result = compact_positions(&order, 256, &mut || {
+            let at = calls;
+            calls += 1;
+            if at == stop {
+                Err(BufferedScanError::Control(at))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(result, Err(BufferedScanError::Control(at)) if at == stop));
+        assert_eq!(calls, stop + 1);
+        let mut restored = Vec::with_capacity(256);
+        let mut calls = 0;
+        let result = restore_positions(&entries, &positions, &mut restored, &mut || {
+            let at = calls;
+            calls += 1;
+            if at == stop {
+                Err(BufferedScanError::Control(at))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(result, Err(BufferedScanError::Control(at)) if at == stop));
+        assert_eq!(calls, stop + 1);
+        assert_eq!(restored, order[..stop]);
+    }
+}
+
+#[test]
+fn compact_order_refuses_short_reservations_and_invalid_positions() {
+    let mut control = || Ok::<_, BufferedScanError<()>>(());
+    let max: Vec<Key> = (0..256)
+        .map(|at| (EId(at as u128), CommitSeq(1), at))
+        .collect();
+    assert!(matches!(
+        compact_positions(&max, 255, &mut control),
+        Err(BufferedScanError::Read(BufferedReadError::SizeOverflow))
+    ));
+    assert!(matches!(
+        compact_positions(&[(EId(0), CommitSeq(1), 256)], 256, &mut control),
+        Err(BufferedScanError::Read(BufferedReadError::SizeOverflow))
+    ));
+    let entries = [entry(0, 1, 2, R, 1, None)];
+    assert!(matches!(
+        restore_positions(&entries, &[1], &mut Vec::new(), &mut control),
+        Err(BufferedScanError::Read(BufferedReadError::Buffer(
+            BufferError::InvalidLoad
+        )))
+    ));
+}
+
+#[test]
 fn snapshots_preserve_properties_parallel_edges_and_invisible_candidate_admission() {
     run(|contexts, path| async move {
         let (store, id) = fixture(&contexts, &path, false).await;
@@ -304,6 +429,18 @@ fn snapshots_preserve_properties_parallel_edges_and_invisible_candidate_admissio
                 .await
                 .unwrap()
             {
+                let state = scan.state.as_ref().unwrap();
+                state.check_retained_bytes().unwrap();
+                if candidate.eid == EId(0) {
+                    assert_eq!(state.order_bytes, 0, "first load retains no memo");
+                    assert!(state.orders.iter().all(Option::is_none));
+                }
+                if candidate.eid == EId(4) {
+                    assert!(
+                        state.order_bytes > 0,
+                        "interleaved unfinished blocks reuse orders"
+                    );
+                }
                 returned.push(candidate.eid);
                 if let Some(row) = candidate.row {
                     visible.push(row.as_ref().clone());

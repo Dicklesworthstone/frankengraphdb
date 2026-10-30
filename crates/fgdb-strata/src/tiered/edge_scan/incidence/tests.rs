@@ -28,6 +28,68 @@ const TOPOLOGY: [(u128, u128, u128, RelationId); 7] = [
     (90, 1, 1, R),
     (u128::MAX, 1, 3, R),
 ];
+
+#[test]
+fn only_retained_incidence_positions_allocate_displaced_order_memos() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let mut driver = Driver {
+            root: view.edge_scan(&cx, CommitSeq(3)).unwrap(),
+        };
+        for (endpoint, direction, selected_rows) in [
+            (VId(1), BufferedEdgeDirection::Outgoing, 4),
+            // A one-row incidence selection from a larger physical block
+            // still benefits from avoiding a complete refault/filter pass.
+            (VId(3), BufferedEdgeDirection::Incoming, 1),
+        ] {
+            let request = Incidence {
+                endpoint,
+                relation: Some(R),
+                direction,
+                after: None,
+            };
+            for retained in [false, true] {
+                let state = driver
+                    .prepare_incident(
+                        &cx,
+                        request,
+                        retained,
+                        EdgePropertyAccess::Read,
+                        &mut |_| Ok::<_, ()>(()),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(state.heads.len(), 2);
+                state.check_retained_bytes().unwrap();
+                if retained {
+                    assert_eq!(state.orders.len(), 2);
+                    assert!(
+                        state.order_bytes > 0,
+                        "the first unfinished block was displaced"
+                    );
+                    assert_eq!(
+                        state.orders.iter().flatten().next().unwrap().len(),
+                        selected_rows,
+                    );
+                } else {
+                    assert_eq!(state.orders.capacity(), 0);
+                    assert_eq!(state.order_bytes, 0);
+                    assert!(state.active.as_ref().unwrap().slot.is_none());
+                }
+            }
+        }
+        drop(driver);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
 fn run<F: Future<Output = ()> + Send>(
     test: impl FnOnce(PurposeContexts, PathBuf) -> F + Send + 'static,
 ) {

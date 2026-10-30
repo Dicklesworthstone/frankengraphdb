@@ -1,8 +1,10 @@
 //! Ordered identified-edge history merging through the admitted extent cache.
 //!
-//! Blocks are adjacency-ordered. Each fault sorts a bounded permutation of its
+//! Blocks are adjacency-ordered. A first fault sorts a bounded permutation of
 //! original row positions; property locators ALWAYS use the original position.
-//! One head per block, one active decoded block and one winning edge suffice.
+//! One head and a compact position memo per block, one active decoded block
+//! and one winning edge suffice. Refaults authenticate the same immutable
+//! bytes but need not sort a block's positions again.
 //! No full edge directory, result table or per-candidate partition rescan exists.
 
 use crate::AdjacencyEntry;
@@ -119,11 +121,16 @@ struct Head {
     block: usize,
     // Ordinal in the block's EId-sorted permutation, NOT a property locator.
     ordinal: usize,
+    // Private memo slot. Keep this after the complete historical order key.
+    slot: usize,
 }
 
 type Key = (EId, CommitSeq, usize);
 struct ActiveBlock {
     block: usize,
+    slot: Option<usize>,
+    // Whether this state still owns an unconsumed heap head for the block.
+    has_head: bool,
     image: BufferedValue<(Vec<AdjacencyEntry>, Option<BlockProps>)>,
     properties: EdgePropertyAccess,
     order: Vec<Key>,
@@ -131,6 +138,12 @@ struct ActiveBlock {
 }
 struct State {
     heads: Vec<Reverse<Head>>,
+    // Only original positions, never identities or properties. Allocate a
+    // memo only when an unfinished block is displaced. One- and two-row
+    // blocks stay on the bounded sort path without another allocation.
+    orders: Vec<Option<Vec<u8>>>,
+    order_bytes: usize,
+    retain_orders: bool,
     active: Option<ActiveBlock>,
     initialized: bool,
     // A retained incidence merge filters each refault's position permutation,
@@ -141,13 +154,114 @@ struct State {
     _head_charge: Option<MemoryCharge>,
 }
 
+impl State {
+    /// Both directory capacities and every memo capacity share the existing
+    /// head reservation. No retained allocation may hide behind vector length.
+    fn retained_bytes(&self) -> Option<usize> {
+        self.heads
+            .capacity()
+            .checked_mul(size_of::<Reverse<Head>>())?
+            .checked_add(
+                self.orders
+                    .capacity()
+                    .checked_mul(size_of::<Option<Vec<u8>>>())?,
+            )?
+            .checked_add(self.order_bytes)
+    }
+
+    fn check_retained_bytes(&self) -> Result<(), BufferedReadError> {
+        let reserved = self._head_charge.as_ref().map_or(0, MemoryCharge::bytes);
+        if self.retained_bytes().is_none_or(|bytes| bytes > reserved) {
+            return Err(BufferedReadError::SizeOverflow);
+        }
+        Ok(())
+    }
+
+    fn remember_order<C>(
+        &mut self,
+        slot: usize,
+        control: &mut impl FnMut() -> Result<(), BufferedScanError<C>>,
+    ) -> Result<(), BufferedScanError<C>> {
+        let cached = self.orders.get(slot).ok_or_else(invalid_load)?;
+        let active = self.active.as_ref().ok_or_else(invalid_load)?;
+        if cached.is_some() || active.image.0.len() <= 2 {
+            return Ok(());
+        }
+        let available = self
+            ._head_charge
+            .as_ref()
+            .ok_or_else(invalid_load)?
+            .bytes()
+            .checked_sub(
+                self.retained_bytes()
+                    .ok_or(BufferedReadError::SizeOverflow)?,
+            )
+            .ok_or(BufferedReadError::SizeOverflow)?;
+        let positions = compact_positions(&active.order, available, control)?;
+        self.order_bytes = self
+            .order_bytes
+            .checked_add(positions.capacity())
+            .ok_or(BufferedReadError::SizeOverflow)?;
+        self.orders[slot] = Some(positions);
+        self.check_retained_bytes()?;
+        Ok(())
+    }
+}
+
+/// The format admits at most 256 rows: original positions fit in u8 even
+/// when the complete permutation has length 256. Copy controls precede every
+/// element; interruption cannot publish a partially initialized memo.
+fn compact_positions<C>(
+    order: &[Key],
+    available: usize,
+    control: &mut impl FnMut() -> Result<(), BufferedScanError<C>>,
+) -> Result<Vec<u8>, BufferedScanError<C>> {
+    if order.len() > crate::MAX_BLOCK_ENTRIES as usize || order.len() > available {
+        return Err(BufferedReadError::SizeOverflow.into());
+    }
+    let mut positions = Vec::new();
+    positions.try_reserve_exact(order.len()).map_err(|_| {
+        BufferedReadError::Memory(MemoryError::AllocationFailed {
+            requested: order.len(),
+        })
+    })?;
+    if positions.capacity() > available {
+        return Err(BufferedReadError::SizeOverflow.into());
+    }
+    for &(_, _, original) in order {
+        control()?;
+        positions.push(u8::try_from(original).map_err(|_| BufferedReadError::SizeOverflow)?);
+    }
+    Ok(positions)
+}
+
+/// Reconstruct keys from the freshly authenticated image, retaining original
+/// property locators and full identity widths. The immutable object binding
+/// proved the memo's order; no cached payload substitutes for this refault.
+fn restore_positions<C>(
+    entries: &[AdjacencyEntry],
+    positions: &[u8],
+    order: &mut Vec<Key>,
+    control: &mut impl FnMut() -> Result<(), BufferedScanError<C>>,
+) -> Result<(), BufferedScanError<C>> {
+    for &position in positions {
+        control()?;
+        let original = usize::from(position);
+        let entry = entries.get(original).ok_or_else(invalid_load)?;
+        order.push((entry.eid, entry.created_at, original));
+    }
+    Ok(())
+}
+
 /// A canonical k-way merge of immutable edge histories. Construction creates
 /// an empty position without reserving its O(block count) root heap. First root
 /// pull reserves that heap and inserts each authenticated minimum key.
 /// Each refault decodes at most one
-/// format-bounded block and sorts its original positions, with controls before
-/// comparisons. Refault frequency can be up to once per historical row; this
-/// is bounded resident execution, not an optimal sequential-I/O claim.
+/// format-bounded block. Its first load sorts original positions with controls
+/// before comparisons; subsequent loads rebuild keys from a compact memo.
+/// Refault frequency can still be once per historical row: this removes
+/// repeated sorting, not decoding or I/O. Head and position-memo capacities
+/// share the same pre-admitted 512-byte-per-block reservation.
 ///
 /// Complete histories are resolved before publishing each candidate. The last
 /// eligible creation version/publication position wins, including retirement
@@ -201,6 +315,9 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
             relation,
             state: Some(State {
                 heads: Vec::new(),
+                orders: Vec::new(),
+                order_bytes: 0,
+                retain_orders: true,
                 active: None,
                 initialized: false,
                 incidence: None,
@@ -228,15 +345,27 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         state: &mut State,
         cx: &QueryCx,
         block: usize,
+        slot: Option<usize>,
         properties: EdgePropertyAccess,
         observe: &mut (impl FnMut(BufferedEdgeScanEvent) -> Result<(), C> + Send),
     ) -> Result<(), BufferedScanError<C>> {
+        let slot = slot.filter(|_| state.retain_orders);
         if state.active.as_ref().is_some_and(|active| {
             active.block == block
                 && (properties == EdgePropertyAccess::Skip
                     || active.properties == EdgePropertyAccess::Read)
         }) {
             return Ok(());
+        }
+        // An exhausted or never-displaced block pays no memo allocation or
+        // copy. One-shot incidence positions also have no reuse to amortize.
+        let displaced = state.active.as_ref().and_then(|active| {
+            (state.retain_orders && active.has_head)
+                .then_some(active.slot)
+                .flatten()
+        });
+        if let Some(slot) = displaced {
+            state.remember_order(slot, &mut || self.work.step(cx, observe))?;
         }
         // Drop old decoded storage before faulting another block.
         state.active = None;
@@ -263,16 +392,28 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
         {
             return Err(BufferedReadError::SizeOverflow.into());
         }
-        for (at, row) in image.0.iter().enumerate() {
-            self.work.step(cx, observe)?;
-            if state.incidence.is_some_and(|request| !request.matches(row)) {
-                continue;
+        if let Some(positions) = slot
+            .map(|slot| state.orders.get(slot).ok_or_else(invalid_load))
+            .transpose()?
+            .and_then(Option::as_ref)
+        {
+            restore_positions(&image.0, positions, &mut order, &mut || {
+                self.work.step(cx, observe)
+            })?;
+        } else {
+            for (at, row) in image.0.iter().enumerate() {
+                self.work.step(cx, observe)?;
+                if state.incidence.is_some_and(|request| !request.matches(row)) {
+                    continue;
+                }
+                order.push((row.eid, row.created_at, at));
             }
-            order.push((row.eid, row.created_at, at));
+            sort(&mut order, &mut || self.work.step(cx, observe))?;
         }
-        sort(&mut order, &mut || self.work.step(cx, observe))?;
         state.active = Some(ActiveBlock {
             block,
+            slot,
+            has_head: slot.is_some(),
             image,
             properties,
             order,
@@ -315,15 +456,14 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                 heads.try_reserve_exact(capacity).map_err(|_| {
                     BufferedReadError::Memory(MemoryError::AllocationFailed { requested: bytes })
                 })?;
-                if heads
-                    .capacity()
-                    .checked_mul(size_of::<Reverse<Head>>())
-                    .is_none_or(|allocated| allocated > bytes)
-                {
-                    return Err(BufferedReadError::SizeOverflow.into());
-                }
+                let mut orders = Vec::new();
+                orders.try_reserve_exact(capacity).map_err(|_| {
+                    BufferedReadError::Memory(MemoryError::AllocationFailed { requested: bytes })
+                })?;
                 state.heads = heads;
+                state.orders = orders;
                 state._head_charge = Some(charge);
+                state.check_retained_bytes()?;
             }
             let mut all = 0..self.blocks;
             loop {
@@ -347,6 +487,8 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                     // Exclude unrelated relations before heap insertion or any
                     // payload/property refault. Every matching block remains
                     // present even when its history is invisible at this cut.
+                    let slot = state.orders.len();
+                    state.orders.push(None);
                     heap_push(
                         &mut state.heads,
                         Reverse(Head {
@@ -354,6 +496,7 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                             created,
                             block,
                             ordinal: 0,
+                            slot,
                         }),
                         &mut || self.work.step(cx, observe),
                     )?;
@@ -372,7 +515,7 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                 break;
             }
             self.work.step(cx, observe)?;
-            self.load(state, cx, head.block, properties, observe)
+            self.load(state, cx, head.block, Some(head.slot), properties, observe)
                 .await?;
             let active = state.active.as_ref().ok_or_else(invalid_load)?;
             let &(eid, created, original) =
@@ -416,12 +559,14 @@ impl<'source, V: Vfs> BufferedEdgeScan<'source, V> {
                         created,
                         block: head.block,
                         ordinal: head.ordinal + 1,
+                        slot: head.slot,
                     })
                 });
             heap_pop(&mut state.heads, &mut || self.work.step(cx, observe))?;
             if let Some(next) = next {
                 heap_push(&mut state.heads, next, &mut || self.work.step(cx, observe))?;
             }
+            state.active.as_mut().ok_or_else(invalid_load)?.has_head = next.is_some();
         }
         self.work.step(cx, observe)?;
         let row = winner
