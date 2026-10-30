@@ -91,6 +91,8 @@ pub(super) fn rebase_error(
             .map(|error| NativeSpoolError::BufferedExecute(Box::new(error))),
         NativeSpoolError::Execute(error) => rebase_query_error(*error, policy, left)
             .map(|error| NativeSpoolError::Execute(Box::new(error))),
+        NativeSpoolError::Procedure(error) => rebase_query_error(*error, policy, left)
+            .map(|error| NativeSpoolError::Procedure(Box::new(error))),
         NativeSpoolError::Authorized(error) => {
             let mapped = match *error {
                 QueryError::Stream(error) => {

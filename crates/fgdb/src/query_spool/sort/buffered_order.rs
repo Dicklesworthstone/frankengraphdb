@@ -11,6 +11,10 @@ use fgdb_gql::stream::AsyncVertexScanPlan;
 use fgdb_strata::tiered::memory::MemoryCharge;
 use fgdb_types::CanonicalScalarResolver;
 
+#[path = "buffered_sealed.rs"]
+mod sealed;
+pub use sealed::PreparedBufferedSealedOrder;
+
 #[derive(Clone)]
 enum Input {
     Vertex(AsyncVertexScanPlan<GraphValueRow>, ScanSortTail),

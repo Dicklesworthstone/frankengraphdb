@@ -18,8 +18,8 @@ mod prepared;
 // Exact aggregate delivery reuses the difference cursor's external merge.
 pub(in crate::query::view::spool) use difference::Merge;
 pub use difference::NativeSpoolDifference;
-pub use prepared::PreparedBufferedOrder;
 pub(crate) use prepared::{ExternalOrderHost, ExternalOrderLimits, execute_relation};
+pub use prepared::{PreparedBufferedOrder, PreparedBufferedSealedOrder};
 pub(crate) use prepared::{ordered_input, ordered_stages};
 
 type Result<T> = core::result::Result<T, NativeSpoolError>;

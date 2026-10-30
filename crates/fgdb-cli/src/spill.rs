@@ -7,7 +7,8 @@ use super::{
 use asupersync::fs::{File, Vfs};
 use fgdb::{
     BufferedReadView, EmbeddedReadView, NativeAggregateSpool, NativeResultSpool,
-    PreparedBufferedAggregate, PreparedBufferedOrder, PreparedNativeRead,
+    PreparedBufferedAggregate, PreparedBufferedOrder, PreparedBufferedSealedOrder,
+    PreparedNativeRead,
 };
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_strata::tiered::memory::{MemoryPool, SpillFile, SpillLimits};
@@ -433,6 +434,7 @@ fn is_aggregate(prepared: &PreparedNativeRead) -> bool {
 /// either would size every prepared buffered query, the streaming ones too.
 pub(super) enum PreparedBuffered {
     Ordered(Box<PreparedBufferedOrder>),
+    SealedOrdered(Box<PreparedBufferedSealedOrder>),
     Aggregate(Box<PreparedBufferedAggregate>),
 }
 
@@ -443,6 +445,10 @@ pub(super) fn prepare_buffered(options: &Options) -> Result<PreparedBuffered, Fa
         |(lowered, derived)| (lowered.text(), derived),
     );
     let prepared = PreparedNativeRead::prepare(text, params, options).map_err(execution_failure)?;
+    if options.fnx.is_sealed() {
+        return super::fnx::prepare_buffered_sealed_order(options, &prepared, params)
+            .map(|order| PreparedBuffered::SealedOrdered(Box::new(order)));
+    }
     if is_aggregate(&prepared) {
         prepared
             .prepare_buffered_aggregate(params)
@@ -467,16 +473,44 @@ pub(super) async fn run_buffered<V: Vfs + Clone>(
 ) -> Result<(), Failure> {
     let groupings = match prepared {
         PreparedBuffered::Ordered(prepared) => prepared.aggregate_count(),
+        PreparedBuffered::SealedOrdered(prepared) => prepared.aggregate_count(),
         PreparedBuffered::Aggregate(prepared) => prepared.aggregate_count(),
     };
     let stages = match prepared {
         PreparedBuffered::Ordered(prepared) => prepared.stage_count(),
+        PreparedBuffered::SealedOrdered(prepared) => prepared.stage_count(),
         PreparedBuffered::Aggregate(prepared) => prepared.stage_count(),
     };
     let mut scratch = Scratch::new(cx, options, groupings, stages, true).await?;
     let outcome = async {
         match prepared {
             PreparedBuffered::Ordered(prepared) => {
+                let auxiliary = scratch.partition.as_mut().ok_or_else(|| {
+                    Failure::query("buffered spill is missing its private auxiliary file")
+                })?;
+                let (spool, _) = prepared
+                    .spool_in_view_with_resolver(
+                        view,
+                        cx,
+                        options.budget.policy(),
+                        &mut scratch.source,
+                        &mut scratch.destination,
+                        auxiliary,
+                        scratch.run_rows,
+                        scratch.max_partitions,
+                        scratch.run_rows,
+                        scratch.max_runs,
+                        PAGE_BYTES,
+                        MAX_ROW_BYTES,
+                        scratch.input_rows,
+                        options.spill.work.unwrap_or(DEFAULT_SORT_WORK),
+                        resolver,
+                    )
+                    .await
+                    .map_err(execution_failure)?;
+                deliver_ordered(&spool, &mut scratch.destination, cx, resolver, robot, out).await
+            }
+            PreparedBuffered::SealedOrdered(prepared) => {
                 let auxiliary = scratch.partition.as_mut().ok_or_else(|| {
                     Failure::query("buffered spill is missing its private auxiliary file")
                 })?;

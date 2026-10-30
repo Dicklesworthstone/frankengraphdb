@@ -2,7 +2,7 @@
 //! permit, unverified source claim or partial build is retained here.
 //!
 //! Standalone and buffered construction allowances remain exact keys. Composed
-//! queries may reuse the same image/projection when their complete measured
+//! resident queries may reuse the same image/projection when their complete measured
 //! construction cost fits every fresh source/GQL counter allowance. Otherwise
 //! the ordinary build reaches its original first refusal. Physical build
 //! checkpoints and I/O disappear on a hit; live entry/return checks and all
@@ -44,9 +44,10 @@ pub(crate) enum Source {
 pub(crate) struct Request {
     pub(crate) projection: ProjectionRequest,
     pub(crate) source: Source,
-    /// A query retains its complete measured construction admission. Different
-    /// remaining allowances may reuse only when every construction counter
-    /// fits; otherwise they rebuild and reach their own first refusal.
+    /// A query retains its complete measured construction admission. Buffered
+    /// queries require exact policy equality. A resident query may reuse under
+    /// different remaining allowances only when every construction counter
+    /// fits; otherwise it rebuilds and reaches its own first refusal.
     /// Standalone preparation has no GQL admission profile.
     pub(crate) query_policy: Option<GqlQueryPolicy>,
 }
@@ -137,18 +138,24 @@ impl SealedProjectionCache {
 }
 
 pub(crate) trait RetainedProjection: Clone {
-    fn retained_bytes(&self) -> usize;
+    fn retained_bytes(&self) -> Option<usize>;
 }
 
 impl RetainedProjection for SealedGraphView {
-    fn retained_bytes(&self) -> usize {
-        self.charged_resident_bytes()
+    fn retained_bytes(&self) -> Option<usize> {
+        Some(self.charged_resident_bytes())
     }
 }
 
 impl RetainedProjection for SnapshotGraphView {
-    fn retained_bytes(&self) -> usize {
-        self.charged_resident_bytes()
+    fn retained_bytes(&self) -> Option<usize> {
+        Some(self.charged_resident_bytes())
+    }
+}
+
+impl RetainedProjection for Retained {
+    fn retained_bytes(&self) -> Option<usize> {
+        self.charged_bytes()
     }
 }
 
@@ -167,7 +174,7 @@ pub(crate) struct BufferedCache<Key, Graph> {
     entries: [Option<BufferedEntry<Key, Graph>>; CACHE_ENTRIES],
 }
 
-pub(crate) type BufferedSealedCache = BufferedCache<Request, SealedGraphView>;
+pub(crate) type BufferedSealedCache = BufferedCache<Request, Retained>;
 pub(crate) type BufferedProjectionCache = BufferedCache<ProjectionRequest, SnapshotGraphView>;
 
 impl<Key: PartialEq, Graph: RetainedProjection> BufferedCache<Key, Graph> {
@@ -274,7 +281,10 @@ impl<Key: PartialEq, Graph: RetainedProjection> BufferedCache<Key, Graph> {
         // Transfer an already-completed caller-owned graph into retained-cache
         // ownership only after admission. A full/disabled pool merely declines
         // this optional extra owner; it never evicts a live entry or a frame.
-        let Ok(charge) = reserve(&self.pool, graph.retained_bytes()) else {
+        let Some(bytes) = graph.retained_bytes() else {
+            return Ok(());
+        };
+        let Ok(charge) = reserve(&self.pool, bytes) else {
             return Ok(());
         };
         *slot = Some(BufferedEntry {

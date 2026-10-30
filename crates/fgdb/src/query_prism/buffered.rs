@@ -4,30 +4,42 @@
 //! adjacency rather than decoded CSR. No resident Snapshot is opened.
 
 use super::{BufferedReadError, BufferedReadView};
+use crate::GqlError;
+use crate::gql_exec::AdmissionUsage;
 use crate::gql_exec::source::SourceEvent;
 use crate::query::{
-    CooperativeSealedBuild, ImmediateSealedBuild, ProjectionRequest, SealedBuild,
-    SealedProjectionRequest, SealedProjectionSource, prism_source_control, push_prism_staged,
+    CooperativeSealedBuild, ImmediateSealedBuild, ProcedureError, ProjectionRequest,
+    RetainedSealedProjection, SealedBuild, SealedProjectionRequest, SealedProjectionSource,
+    SealedSourceUsage, bind_procedure, charge_sealed_usage, prism_source_control,
+    procedure_options, push_prism_staged, sealed_usage_count,
 };
 use asupersync::fs::Vfs;
+use fgdb_delta_types::RelationId;
+use fgdb_gql::algebra::GraphValue;
+use fgdb_gql::{
+    GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
+    PreparedProcedureCall,
+};
 use fgdb_prism::{
-    FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadError, FnxReadOptions, FnxReadResult,
-    FnxSealedReadError, FnxSelection, FnxSourceLimits, ParallelEdgePolicy, ProjectionBuildError,
-    ProjectionEdge, ProjectionError, ProjectionLimits, ProjectionSpec, SealedGraphView,
-    SealedProjectionError, SealedProjectionSpec, SelfLoopPolicy, SnapshotBinding,
-    SnapshotGraphView, SortedVertexLookup,
+    FnxCallSpec, FnxExecutionError, FnxMemoryLimits, FnxOutput, FnxParameters, FnxReadError,
+    FnxReadOptions, FnxReadResult, FnxRowCursor, FnxSealedExecutionError, FnxSealedReadError,
+    FnxSelection, FnxSourceLimits, ParallelEdgePolicy, ProjectionBuildError, ProjectionEdge,
+    ProjectionError, ProjectionLimits, ProjectionSpec, SealedGraphView, SealedProjectionError,
+    SealedProjectionMask, SealedProjectionSpec, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView,
+    SortedVertexLookup,
 };
 use fgdb_strata::store::{BufferedEdge, BufferedScanError, BufferedScanEvent, BufferedValue};
 use fgdb_strata::tiered::buffer::BufferError;
 use fgdb_strata::tiered::edge_scan::{
     BufferedEdgeCandidate, BufferedEdgeScanEvent, BufferedEdgeTopology,
 };
-use fgdb_strata::tiered::sealed::SealedLimits;
+use fgdb_strata::tiered::sealed::{SealedError, SealedLimits};
 use fgdb_types::{CommitSeq, QueryCx, VId};
 use std::num::NonZeroUsize;
 
 type Cancel = Box<asupersync::error::Error>;
 type Error = FnxReadError<BufferedReadError, Cancel>;
+type QueryFailure = GqlQueryError<GqlError, Cancel>;
 
 enum ProjectionSourceEdge {
     Complete(BufferedValue<BufferedEdge>),
@@ -58,6 +70,45 @@ fn scan_failure(error: BufferedScanError<Error>) -> Error {
         BufferedScanError::Read(error) => read_failure(error),
         BufferedScanError::Control(error) => error,
     }
+}
+
+fn query_input_failure(error: Error) -> QueryFailure {
+    query_sealed_failure(FnxSealedReadError::Input(error))
+}
+
+fn query_sealed_failure(error: FnxSealedReadError<BufferedReadError, Cancel>) -> QueryFailure {
+    let refusal = match error {
+        FnxSealedReadError::Input(error) => match error.split_cancel::<core::convert::Infallible>()
+        {
+            Err(cancel) => return GqlQueryError::Interrupted(cancel),
+            Ok(error) => FnxSealedReadError::Input(error),
+        },
+        FnxSealedReadError::Seal(SealedError::Interrupted(error))
+        | FnxSealedReadError::Projection(SealedProjectionError::Read(SealedError::Interrupted(
+            error,
+        ))) => return GqlQueryError::Interrupted(error),
+        FnxSealedReadError::Projection(SealedProjectionError::Guard(error)) => {
+            match error.downcast::<QueryFailure>() {
+                Ok(error) => return *error,
+                Err(error) => FnxSealedReadError::Projection(SealedProjectionError::Guard(error)),
+            }
+        }
+        FnxSealedReadError::Execution(FnxSealedExecutionError::Cancelled(error)) => {
+            match error.downcast::<asupersync::error::Error>() {
+                Ok(error) => return GqlQueryError::Interrupted(error),
+                Err(error) => {
+                    FnxSealedReadError::Execution(FnxSealedExecutionError::Cancelled(error))
+                }
+            }
+        }
+        FnxSealedReadError::Seal(error) => FnxSealedReadError::Seal(error),
+        FnxSealedReadError::Projection(error) => FnxSealedReadError::Projection(error),
+        FnxSealedReadError::Execution(error) => FnxSealedReadError::Execution(error),
+        FnxSealedReadError::SourceMismatch => FnxSealedReadError::SourceMismatch,
+    };
+    GqlQueryError::Source(GqlError::Procedure(ProcedureError::BufferedSealedRead(
+        Box::new(refusal),
+    )))
 }
 
 impl<V: Vfs + Clone> BufferedReadView<V> {
@@ -149,6 +200,111 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                 .execute_sealed(cx, &graph, options.execution_limits, memory)
                 .map_err(FnxSealedReadError::Execution)?;
             Ok(FnxReadResult::bind_selection(result, options.selection))
+        })
+        .await
+    }
+
+    /// Complete one owner-level compressed procedure source for the ordinary
+    /// external GQL executor. Arguments are evaluated by that executor only
+    /// when this leaf is reached. Selected vertices, sealed source records and
+    /// projection checkpoints share its remaining query allowance; the completed
+    /// cursor avoids a resident graph snapshot or a second analytics row table.
+    ///
+    /// The supplied result-row limit is the host's private intermediate-row
+    /// allowance. The downstream relational stages retain the final page and
+    /// result limit. All selected integer fields are checked before a cursor
+    /// escapes, including fields in rows a later filter or LIMIT would hide.
+    /// This explicit owner API does not admit procedures to authorized hosts.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn execute_fnx_sealed_query_rows(
+        &mut self,
+        cx: &QueryCx,
+        call: &PreparedProcedureCall,
+        arguments: &[GraphValue],
+        as_of: CommitSeq,
+        relation: RelationId,
+        policy: GqlQueryPolicy,
+        memory: FnxMemoryLimits,
+        sealing: SealedLimits,
+        max_source_incidences: usize,
+    ) -> Result<(FnxRowCursor, GqlExecutionStats, GlaExecutionStats), QueryFailure> {
+        cx.with_restriction_async(async {
+            let bound = bind_procedure(call, arguments)?;
+            if bound
+                .outputs()
+                .first()
+                .is_none_or(|column| column.field != FnxOutput::Vertex)
+            {
+                return Err(GqlQueryError::Source(GqlError::Procedure(
+                    ProcedureError::ResultDomain,
+                )));
+            }
+            let mut options = procedure_options(&bound, as_of, policy);
+            if options.selection.relation != Some(relation) {
+                return Err(GqlQueryError::Source(GqlError::Procedure(
+                    ProcedureError::SealedRelationMismatch {
+                        requested: options.selection.relation,
+                        retained: relation,
+                    },
+                )));
+            }
+            bound
+                .validate_sealed_projection(options.projection.directedness)
+                .map_err(|error| query_sealed_failure(FnxSealedReadError::Execution(error)))?;
+            let (graph, mut usage) = self
+                .prism_sealed_query_projection(
+                    cx,
+                    as_of,
+                    options,
+                    policy,
+                    sealing,
+                    max_source_incidences,
+                )
+                .await?;
+            // Sparse cursors also inspect unreachable ordinals. Reserve the
+            // whole future pass before kernel execution or any row callback.
+            usage.charge_work(policy, sealed_usage_count(graph.node_count())?)?;
+            options.execution_limits.max_estimated_work =
+                options.execution_limits.max_estimated_work.min(
+                    usize::try_from(usage.remaining(policy).evaluator.max_work_units)
+                        .unwrap_or(usize::MAX),
+                );
+            let cursor = bound
+                .execute_sealed_rows(cx, &graph, options.execution_limits, memory)
+                .map_err(|error| query_sealed_failure(FnxSealedReadError::Execution(error)))?;
+            let count = sealed_usage_count(cursor.remaining())?;
+            // This is the registered conservative kernel estimate, not its
+            // live checkpoint count or an arithmetic-instruction measurement.
+            usage.charge_work(
+                policy,
+                sealed_usage_count(cursor.certificate().estimated_work)?,
+            )?;
+            charge_sealed_usage(&mut usage, policy, 0, count, count)?;
+            policy
+                .rows
+                .check(fgdb_gql::GqlBudgetDimension::ResultRows, count)
+                .map_err(GqlQueryError::Rows)?;
+            if cursor
+                .max_integer()
+                .is_some_and(|value| value > i64::MAX as u64)
+            {
+                return Err(GqlQueryError::Source(GqlError::Procedure(
+                    ProcedureError::ResultDomain,
+                )));
+            }
+            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+            let measured = usage.finish::<GqlError, Cancel, ()>(
+                policy,
+                Ok(GqlQueryExecution {
+                    value: Vec::new(),
+                    rows: GqlExecutionStats {
+                        snapshot_records: usage.snapshot_records(),
+                        result_rows: count,
+                    },
+                    evaluator: GlaExecutionStats::default(),
+                }),
+            )?;
+            Ok((cursor, measured.rows, measured.evaluator))
         })
         .await
     }
@@ -269,12 +425,12 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                 },
                 query_policy: None,
             };
-            if let Some(graph) = self
+            if let Some(retained) = self
                 .sealed_cache
                 .lookup(cx, request)
                 .map_err(FnxReadError::Cancelled)?
             {
-                return Ok(graph);
+                return Ok(retained.graph);
             }
             let mut control = prism_source_control(cx, source_limits);
             let mut staged_bytes = 0;
@@ -285,6 +441,8 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                     selection,
                     limits,
                     source_limits,
+                    false,
+                    |error| error,
                     &mut control,
                     &mut staged_bytes,
                 )
@@ -319,32 +477,178 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                 .await
                 .map_err(FnxSealedReadError::Projection)?;
             self.sealed_cache
-                .remember(cx, request, &graph)
+                .remember(
+                    cx,
+                    request,
+                    &RetainedSealedProjection::standalone(graph.clone()),
+                )
                 .map_err(FnxReadError::Cancelled)?;
             Ok(graph)
         })
         .await
     }
 
-    /// One vertex-selection implementation for decoded and sealed adapters.
-    /// Keep the decoded path's event order and cumulative two-scan allowance.
+    /// Query construction retains a complete admission receipt beside the
+    /// compressed graph. Its exact key includes every query/source/build
+    /// allowance; a standalone build cannot satisfy it. Reuse skips physical
+    /// I/O and builder checkpoints but recharges all successful logical source
+    /// counters. Live checks and kernel/output admissions are never cached.
     #[allow(clippy::too_many_arguments)]
-    async fn select_prism_vertices(
+    async fn prism_sealed_query_projection(
+        &mut self,
+        cx: &QueryCx,
+        as_of: CommitSeq,
+        options: FnxReadOptions,
+        policy: GqlQueryPolicy,
+        sealing: SealedLimits,
+        max_source_incidences: usize,
+    ) -> Result<(SealedGraphView, AdmissionUsage), QueryFailure> {
+        cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+        let relation = options.selection.relation.ok_or_else(|| {
+            query_sealed_failure(FnxSealedReadError::Projection(
+                SealedProjectionError::RelationRequired,
+            ))
+        })?;
+        if as_of > self.frontier() {
+            return Err(query_input_failure(read_failure(
+                BufferedReadError::BeyondPublication {
+                    requested: as_of,
+                    publication: self.frontier(),
+                },
+            )));
+        }
+        let request = SealedProjectionRequest {
+            projection: ProjectionRequest {
+                binding: SnapshotBinding {
+                    root: self.partition_root().0,
+                    as_of,
+                },
+                selection: options.selection,
+                projection: options.projection,
+                projection_limits: options.projection_limits,
+                source_limits: options.source_limits,
+            },
+            source: SealedProjectionSource::Buffered {
+                sealing,
+                max_source_incidences,
+            },
+            query_policy: Some(policy),
+        };
+        if let Some(retained) = self
+            .sealed_cache
+            .lookup(cx, request)
+            .map_err(GqlQueryError::Interrupted)?
+        {
+            let Some(usage) = retained.query_usage else {
+                return Err(query_input_failure(FnxReadError::Execution(
+                    FnxExecutionError::InvalidUpstreamResult,
+                )));
+            };
+            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+            return Ok((retained.graph, usage.admission));
+        }
+        let mut usage = SealedSourceUsage::new(policy, options.source_limits);
+        let mut staged_bytes = 0;
+        let vertices = self
+            .select_prism_vertices(
+                cx,
+                as_of,
+                options.selection,
+                options.projection_limits,
+                options.source_limits,
+                true,
+                query_input_failure,
+                &mut |event| {
+                    cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                    usage.event(event)
+                },
+                &mut staged_bytes,
+            )
+            .await?;
+        // The source owner already authenticated the complete root. Its pool,
+        // buffered-read limits, raw-incidence cap and image limits govern this
+        // physical preparation. GQL also admits the authenticated raw input
+        // population before payload faults or compaction can remove superseded
+        // history, including old versions and excluded endpoints.
+        let partition = self
+            .partition
+            .seal_relation_with_source_admission(
+                cx,
+                as_of,
+                relation,
+                sealing,
+                max_source_incidences,
+                |records| usage.raw_records(sealed_usage_count(records)?),
+                |error| query_sealed_failure(FnxSealedReadError::Seal(error)),
+            )
+            .await?;
+        let scope = partition.anchor().scope();
+        let root = self.partition.root();
+        if scope.source_root != self.partition_root()
+            || scope.publication != self.frontier()
+            || scope.graph != root.graph
+            || scope.branch != root.branch
+            || scope.partition != root.partition
+        {
+            return Err(query_sealed_failure(FnxSealedReadError::SourceMismatch));
+        }
+        cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+        let graph = SealedGraphView::build_with_checkpoint(
+            cx,
+            &partition,
+            &vertices,
+            SealedProjectionSpec {
+                as_of,
+                selection: options.selection,
+                projection: options.projection,
+            },
+            SealedProjectionMask::UNMASKED,
+            options.projection_limits,
+            || {
+                usage
+                    .event(SourceEvent::Work)
+                    .map_err(|error| SealedProjectionError::Guard(Box::new(error)))
+            },
+        )
+        .map_err(|error| query_sealed_failure(FnxSealedReadError::Projection(error)))?;
+        cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+        let usage = usage.completed();
+        self.sealed_cache
+            .remember(
+                cx,
+                request,
+                &RetainedSealedProjection {
+                    graph: graph.clone(),
+                    query_usage: Some(usage),
+                },
+            )
+            .map_err(GqlQueryError::Interrupted)?;
+        Ok((graph, usage.admission))
+    }
+
+    /// One vertex-selection implementation for decoded and sealed adapters.
+    /// Keep the standalone paths' event order and cumulative two-scan
+    /// allowance. Composed queries additionally count visible source records
+    /// and selected ID allocations before either can enter the projection.
+    #[allow(clippy::too_many_arguments)]
+    async fn select_prism_vertices<E: Send>(
         &mut self,
         cx: &QueryCx,
         as_of: CommitSeq,
         selection: FnxSelection,
         limits: ProjectionLimits,
         source_limits: FnxSourceLimits,
+        query_records: bool,
+        map_error: fn(Error) -> E,
         // The buffered scan's observer crosses its awaits, so it must be Send.
-        control: &mut (impl FnMut(SourceEvent) -> Result<(), Error> + Send),
+        control: &mut (impl FnMut(SourceEvent) -> Result<(), E> + Send),
         staged_bytes: &mut usize,
-    ) -> Result<Vec<VId>, Error> {
+    ) -> Result<Vec<VId>, E> {
         let mut vertices = Vec::new();
         let mut scan = self
             .partition
             .vertex_scan(cx, as_of)
-            .map_err(read_failure)?;
+            .map_err(|error| map_error(read_failure(error)))?;
         while let Some(candidate) = scan
             .next_topology_candidate_with(cx, &mut |event| {
                 control(match event {
@@ -353,11 +657,17 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                 })
             })
             .await
-            .map_err(scan_failure)?
+            .map_err(|error| match error {
+                BufferedScanError::Read(error) => map_error(read_failure(error)),
+                BufferedScanError::Control(error) => error,
+            })?
         {
             let Some(row) = candidate.row else {
                 continue;
             };
+            if query_records {
+                control(SourceEvent::SnapshotRecord)?;
+            }
             control(SourceEvent::Work)?;
             if selection
                 .vertex_label
@@ -366,6 +676,9 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                 continue;
             }
             debug_assert!(vertices.last().is_none_or(|last| *last < row.vid()));
+            if query_records {
+                control(SourceEvent::ScratchEntry)?;
+            }
             push_prism_staged(
                 &mut vertices,
                 row.vid(),
@@ -373,7 +686,8 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                 limits.max_vertices,
                 staged_bytes,
                 source_limits.max_staging_bytes,
-            )?;
+            )
+            .map_err(map_error)?;
         }
         Ok(vertices)
     }
@@ -452,6 +766,8 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                     selection,
                     limits,
                     source_limits,
+                    false,
+                    |error| error,
                     &mut control,
                     &mut staged_bytes,
                 )

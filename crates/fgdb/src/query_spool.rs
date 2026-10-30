@@ -21,7 +21,7 @@ pub use aggregate::{
     NativeAggregateSpoolError, NativeAggregateSpoolRow, PreparedBufferedAggregate,
 };
 pub(crate) use sort::{ExternalOrderHost, ExternalOrderLimits, execute_relation};
-pub use sort::{NativeSpoolDifference, PreparedBufferedOrder};
+pub use sort::{NativeSpoolDifference, PreparedBufferedOrder, PreparedBufferedSealedOrder};
 pub(crate) use sort::{ordered_input, ordered_stages};
 
 #[derive(Debug)]
@@ -31,6 +31,8 @@ pub enum NativeSpoolError {
     Authorized(Box<QueryError>),
     Execute(Box<GqlQueryError<ScanError<ReadError>, Cancel>>),
     BufferedExecute(Box<GqlQueryError<ScanError<crate::BufferedReadError>, Cancel>>),
+    /// A completed native analytics source, retaining typed source refusals.
+    Procedure(Box<GqlQueryError<crate::GqlError, Cancel>>),
     /// Snapshot admission for a source that opens no graph scan.
     BufferedRead(Box<crate::BufferedReadError>),
     SetExecution(fgdb_gql::GraphSetExecutionError<core::convert::Infallible>),
@@ -60,6 +62,7 @@ impl core::fmt::Display for NativeSpoolError {
             Self::Prepare(e) | Self::Authorized(e) => e.fmt(f),
             Self::Execute(e) => e.fmt(f),
             Self::BufferedExecute(e) => e.fmt(f),
+            Self::Procedure(e) => e.fmt(f),
             Self::BufferedRead(e) => e.fmt(f),
             Self::SetExecution(e) => e.fmt(f),
             Self::Aggregate(e) => e.fmt(f),
@@ -89,6 +92,7 @@ impl core::error::Error for NativeSpoolError {
             Self::Prepare(e) | Self::Authorized(e) => Some(e.as_ref()),
             Self::Execute(e) => Some(e.as_ref()),
             Self::BufferedExecute(e) => Some(e.as_ref()),
+            Self::Procedure(e) => Some(e.as_ref()),
             Self::BufferedRead(e) => Some(e.as_ref()),
             Self::SetExecution(e) => Some(e),
             Self::Aggregate(e) => Some(e.as_ref()),

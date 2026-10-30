@@ -65,8 +65,44 @@ impl<V: Vfs> BufferedPartition<V> {
         limits: SealedLimits,
         max_source_incidences: usize,
     ) -> Result<SealedPartition, SealedError> {
+        self.seal_relation_with_source_admission(
+            cx,
+            floor,
+            relation,
+            limits,
+            max_source_incidences,
+            |_| Ok(()),
+            |error| error,
+        )
+        .await
+    }
+
+    /// Seal the same authenticated source with an additional owner-level
+    /// admission for its complete selected RAW incidence population. The count
+    /// comes from the existing descriptor admission, before compaction can
+    /// discard superseded or pre-floor histories. No selected payload is faulted
+    /// and no image builder is allocated until `admit` succeeds.
+    ///
+    /// The callback runs once, after the ordinary source count/work/routing
+    /// bounds succeed. It may return the host's original typed refusal without
+    /// wrapping or flattening it; `map_error` preserves storage causes in that
+    /// same host error domain. Successful admission does not replace live
+    /// cancellation or the source, compactor and image limits.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn seal_relation_with_source_admission<E: Send>(
+        &mut self,
+        cx: &QueryCx,
+        floor: CommitSeq,
+        relation: RelationId,
+        limits: SealedLimits,
+        max_source_incidences: usize,
+        admit: impl FnOnce(usize) -> Result<(), E> + Send,
+        map_error: fn(SealedError) -> E,
+    ) -> Result<SealedPartition, E> {
         cx.with_restriction_async(async {
-            cx.checkpoint().map_err(SealedError::Interrupted)?;
+            cx.checkpoint()
+                .map_err(SealedError::Interrupted)
+                .map_err(map_error)?;
             let root = self.root();
             let scope = SealedScope {
                 source_root: self.root_id(),
@@ -78,30 +114,35 @@ impl<V: Vfs> BufferedPartition<V> {
             };
             let mut sources = self
                 .sealed_relation_sources(cx, floor, relation, max_source_incidences)
-                .map_err(buffered_error)?;
-            let mut builder = image::ImageBuilder::new(limits)?;
+                .map_err(buffered_error)
+                .map_err(map_error)?;
+            admit(sources.incidences)?;
+            let mut builder = image::ImageBuilder::new(limits).map_err(map_error)?;
             let mut checkpoint = || cx.checkpoint().map_err(SealedError::Interrupted);
             while let Some(source) = self
                 .next_sealed_relation_source(cx, &mut sources)
                 .await
-                .map_err(buffered_error)?
+                .map_err(buffered_error)
+                .map_err(map_error)?
             {
-                checkpoint()?;
+                checkpoint().map_err(map_error)?;
                 let family =
                     crate::compact::compact_with_props(&source.blocks, &source.properties, floor)
-                        .map_err(SealedError::History)?;
+                        .map_err(SealedError::History)
+                        .map_err(map_error)?;
                 drop(source);
-                checkpoint()?;
+                checkpoint().map_err(map_error)?;
                 // Complete root admission fixed each EId's source/relation.
                 // Sources arrive in canonical order; publication precedence
                 // inside a source was resolved by the ordinary compactor.
                 // The builder consumes and drops this family's decoded output.
-                builder.push(family, &mut checkpoint)?;
+                builder.push(family, &mut checkpoint).map_err(map_error)?;
             }
             drop(sources);
-            checkpoint()?;
-            let image = builder.finish(&mut checkpoint)?;
+            checkpoint().map_err(map_error)?;
+            let image = builder.finish(&mut checkpoint).map_err(map_error)?;
             SealedPartition::finish_scoped(scope, Some(relation), image, limits, &mut checkpoint)
+                .map_err(map_error)
         })
         .await
     }

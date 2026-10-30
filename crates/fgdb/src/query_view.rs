@@ -27,6 +27,7 @@ pub use spool::{
     NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolDifference,
     NativeAggregateSpoolError, NativeAggregateSpoolRow, NativeResultSpool, NativeSpoolCursor,
     NativeSpoolDifference, NativeSpoolError, PreparedBufferedAggregate, PreparedBufferedOrder,
+    PreparedBufferedSealedOrder,
 };
 pub(crate) use spool::{SpoolInput, SpoolRow, ordered_input, ordered_stages};
 

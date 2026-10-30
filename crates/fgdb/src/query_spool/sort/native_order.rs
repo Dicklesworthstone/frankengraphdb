@@ -14,7 +14,7 @@ use fgdb_types::CanonicalPropertyValue;
 
 #[path = "buffered_order.rs"]
 mod buffered;
-pub use buffered::PreparedBufferedOrder;
+pub use buffered::{PreparedBufferedOrder, PreparedBufferedSealedOrder};
 #[path = "binary.rs"]
 mod binary;
 #[path = "cross.rs"]

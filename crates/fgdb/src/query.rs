@@ -51,10 +51,11 @@ pub use explain::{ExplainRow, NativeExplainCertificate, PreparedNativeRead, Repl
 use explain::{explain_prefix, explain_result};
 pub(crate) use prism::{
     BufferedProjectionCache, BufferedSealedCache, CooperativeSealedBuild, ImmediateSealedBuild,
-    PROJECTION_CACHE_BYTES, ProcedureRowSink, ProjectionRequest, SEALED_CACHE_BYTES, SealedBuild,
-    SealedProjectionRequest, SealedProjectionSource, bind_procedure, fnx_procedure,
+    PROJECTION_CACHE_BYTES, ProcedureRowSink, ProcedureRows, ProjectionRequest,
+    RetainedSealedProjection, SEALED_CACHE_BYTES, SealedBuild, SealedProjectionRequest,
+    SealedProjectionSource, SealedSourceUsage, bind_procedure, charge_sealed_usage, fnx_procedure,
     fnx_procedure_rows, procedure_failure, procedure_options, push_staged as push_prism_staged,
-    source_control as prism_source_control,
+    sealed_usage_count, source_control as prism_source_control,
 };
 pub use prism::{ProcedureError, SealedProjectionOpenError, SealedQueryError, SealedReadView};
 pub(crate) use read_cache::ReadCaches;
@@ -63,6 +64,7 @@ pub use view::{
     NativeAggregateSpool, NativeAggregateSpoolCursor, NativeAggregateSpoolDifference,
     NativeAggregateSpoolError, NativeAggregateSpoolRow, NativeResultSpool, NativeSpoolCursor,
     NativeSpoolDifference, NativeSpoolError, PreparedBufferedAggregate, PreparedBufferedOrder,
+    PreparedBufferedSealedOrder,
 };
 
 /// Lossless cells: identity/scalar values, counts, wide integer sums and exact

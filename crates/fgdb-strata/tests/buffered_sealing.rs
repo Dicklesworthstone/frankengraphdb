@@ -254,6 +254,148 @@ fn buffered_sealing_matches_native_bytes_and_independent_history_expectations() 
 }
 
 #[test]
+fn raw_source_admission_precedes_compaction_payloads_and_image_allocation() {
+    #[derive(Debug)]
+    enum Refusal {
+        Source(SealedError),
+        Admission { limit: usize, observed: usize },
+    }
+
+    run(|contexts, path| async move {
+        let (store, root) = fixture(&contexts, &path).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(MEMORY, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, root, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        let faults = view.stats().misses;
+
+        // The fixture has 44 raw incidences but only 40 retained at floor 3.
+        // A post-compaction admission would wrongly accept the 43-record cap.
+        // The host's typed refusal also precedes an impossible image allowance.
+        let mut calls = 0;
+        let refused = view
+            .seal_relation_with_source_admission(
+                &cx,
+                CommitSeq(3),
+                R,
+                SealedLimits {
+                    max_image_bytes: 0,
+                    ..SealedLimits::default()
+                },
+                RAW,
+                |observed| {
+                    calls += 1;
+                    if observed > RAW - 1 {
+                        Err(Refusal::Admission {
+                            limit: RAW - 1,
+                            observed,
+                        })
+                    } else {
+                        Ok(())
+                    }
+                },
+                Refusal::Source,
+            )
+            .await;
+        assert!(matches!(
+            refused,
+            Err(Refusal::Admission { limit, observed })
+                if limit == RAW - 1 && observed == RAW
+        ));
+        assert_eq!(calls, 1);
+        assert_eq!(view.stats().misses, faults, "admission faulted a payload");
+        assert!(pool.used() <= baseline, "refused routing charge survived");
+
+        // Native source admission keeps its original precedence, and cannot
+        // be skipped by the extra caller callback.
+        let refused = view
+            .seal_relation_with_source_admission(
+                &cx,
+                CommitSeq(3),
+                R,
+                SealedLimits::default(),
+                RAW - 1,
+                |_| panic!("raw source limit must precede caller admission"),
+                Refusal::Source,
+            )
+            .await;
+        assert!(matches!(
+            refused,
+            Err(Refusal::Source(SealedError::Limit {
+                resource: "sealed source incidences",
+                requested,
+                limit,
+            })) if requested == RAW && limit == RAW - 1
+        ));
+        assert_eq!(view.stats().misses, faults);
+        assert!(pool.used() <= baseline);
+
+        for floor in [1, 3] {
+            let mut calls = 0;
+            let image = view
+                .seal_relation_with_source_admission(
+                    &cx,
+                    CommitSeq(floor),
+                    R,
+                    SealedLimits::default(),
+                    RAW,
+                    |observed| {
+                        calls += 1;
+                        assert_eq!(observed, RAW, "history was discounted before admission");
+                        Ok(())
+                    },
+                    Refusal::Source,
+                )
+                .await
+                .unwrap();
+            assert_eq!(calls, 1);
+            if floor == 3 {
+                assert_eq!(image.incidence_count(), 40);
+            }
+            let ordinary = view
+                .seal_relation(&cx, CommitSeq(floor), R, SealedLimits::default(), RAW)
+                .await
+                .unwrap();
+            assert_eq!(image.anchor(), ordinary.anchor());
+            assert_eq!(
+                image.encode(&cx, SealedLimits::default()).unwrap(),
+                ordinary.encode(&cx, SealedLimits::default()).unwrap(),
+            );
+            assert!(pool.used() <= baseline);
+        }
+
+        // An empty selected relation still reaches the caller exactly once.
+        let faults = view.stats().misses;
+        let mut calls = 0;
+        let empty = view
+            .seal_relation_with_source_admission(
+                &cx,
+                CommitSeq(3),
+                RelationId(u64::MAX),
+                SealedLimits::default(),
+                0,
+                |observed| {
+                    calls += 1;
+                    assert_eq!(observed, 0);
+                    Ok(())
+                },
+                Refusal::Source,
+            )
+            .await
+            .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(empty.incidence_count(), 0);
+        assert_eq!(view.stats().misses, faults);
+        assert!(pool.used() <= baseline);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
 fn sealing_interleaved_relation_ranges_preserves_retire_precedence_and_selected_faults() {
     run(|contexts, path| async move {
         let cx = contexts.query();

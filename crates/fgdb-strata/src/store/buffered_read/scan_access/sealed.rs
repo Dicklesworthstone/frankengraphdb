@@ -18,6 +18,8 @@ pub(crate) struct SealedSources {
     blocks: Vec<(VId, usize)>,
     next: usize,
     work: usize,
+    /// The complete selected RAW population, before history compaction.
+    pub(crate) incidences: usize,
     _charge: MemoryCharge,
 }
 
@@ -89,6 +91,7 @@ impl<V: Vfs> BufferedPartition<V> {
             blocks,
             next: 0,
             work,
+            incidences,
             _charge: charge,
         })
     }

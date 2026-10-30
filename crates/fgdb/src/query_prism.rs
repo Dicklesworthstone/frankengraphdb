@@ -44,10 +44,15 @@ pub(crate) use cache::{
 pub(crate) use projection::{bind_procedure, procedure_options};
 pub(crate) use sealed_cache::{
     BufferedProjectionCache, BufferedSealedCache, CACHE_BYTES as SEALED_CACHE_BYTES,
-    Request as SealedProjectionRequest, SealedProjectionCache, Source as SealedProjectionSource,
+    Request as SealedProjectionRequest, Retained as RetainedSealedProjection,
+    SealedProjectionCache, Source as SealedProjectionSource,
 };
 pub(crate) use sealed_prepare::{CooperativeSealedBuild, ImmediateSealedBuild, SealedBuild};
 pub use sealed_query::{SealedQueryError, SealedReadView};
+pub(crate) use sealed_query::{
+    SourceUsage as SealedSourceUsage, charge_usage as charge_sealed_usage,
+    count as sealed_usage_count,
+};
 
 type Error = FnxReadError<ReadError, Cancel>;
 type SealedReadError = FnxSealedReadError<ReadError, Cancel>;
@@ -332,6 +337,12 @@ pub enum ProcedureError {
     /// The compressed source, projection or kernel refused. Native runtime
     /// cancellation is lifted into the enclosing query's interruption.
     SealedRead(Box<FnxSealedReadError<ReadError, core::convert::Infallible>>),
+    /// A compressed owner-level query over an authenticated buffered source.
+    /// Source, image and kernel refusals retain their typed causes; native
+    /// runtime cancellation is lifted into the enclosing query interruption.
+    BufferedSealedRead(
+        Box<FnxSealedReadError<crate::BufferedReadError, core::convert::Infallible>>,
+    ),
     /// A query must explicitly select this prepared source's relation; the
     /// source never substitutes its relation for a different or whole graph.
     SealedRelationMismatch {
@@ -349,6 +360,7 @@ impl core::fmt::Display for ProcedureError {
             Self::Bind(error) => error.fmt(f),
             Self::Read(error) => error.fmt(f),
             Self::SealedRead(error) => error.fmt(f),
+            Self::BufferedSealedRead(error) => error.fmt(f),
             Self::SealedRelationMismatch { .. } => {
                 f.write_str("Prism query relation does not match the prepared sealed source")
             }
@@ -363,6 +375,7 @@ impl core::error::Error for ProcedureError {
             Self::Bind(error) => Some(error),
             Self::Search(error) => Some(error),
             Self::SealedRead(error) => Some(error),
+            Self::BufferedSealedRead(error) => Some(error),
             Self::Read(_) | Self::ResultDomain | Self::SealedRelationMismatch { .. } => None,
         }
     }
@@ -380,6 +393,14 @@ impl ProcedureError {
                 FnxReadError::Execution(fgdb_prism::FnxExecutionError::GraphKind { .. })
             ),
             Self::SealedRead(error) => matches!(
+                **error,
+                FnxSealedReadError::Execution(
+                    FnxSealedExecutionError::Execution(FnxExecutionError::GraphKind { .. })
+                        | FnxSealedExecutionError::UnsupportedAlgorithm(_)
+                        | FnxSealedExecutionError::UnsupportedCooperativeAlgorithm(_)
+                )
+            ),
+            Self::BufferedSealedRead(error) => matches!(
                 **error,
                 FnxSealedReadError::Execution(
                     FnxSealedExecutionError::Execution(FnxExecutionError::GraphKind { .. })

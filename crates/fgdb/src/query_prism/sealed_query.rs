@@ -740,7 +740,7 @@ impl GraphProcedureRowCursor<GqlError, Cancel> for CompletedRows {
     }
 }
 
-struct SourceUsage {
+pub(crate) struct SourceUsage {
     admission: AdmissionUsage,
     policy: GqlQueryPolicy,
     limits: FnxSourceLimits,
@@ -749,7 +749,7 @@ struct SourceUsage {
 }
 
 impl SourceUsage {
-    fn new(policy: GqlQueryPolicy, limits: FnxSourceLimits) -> Self {
+    pub(crate) fn new(policy: GqlQueryPolicy, limits: FnxSourceLimits) -> Self {
         Self {
             admission: AdmissionUsage::default(),
             policy,
@@ -759,7 +759,7 @@ impl SourceUsage {
         }
     }
 
-    fn event(&mut self, event: SourceEvent) -> Result<(), Failure> {
+    pub(crate) fn event(&mut self, event: SourceEvent) -> Result<(), Failure> {
         let (value, limit, resource) = match event {
             SourceEvent::Work | SourceEvent::SnapshotRecord => {
                 (&mut self.work, self.limits.max_work_units, "work units")
@@ -777,7 +777,7 @@ impl SourceUsage {
         self.admission.observe(self.policy, event)
     }
 
-    fn raw_records(&mut self, records: u64) -> Result<(), Failure> {
+    pub(crate) fn raw_records(&mut self, records: u64) -> Result<(), Failure> {
         self.work = self
             .work
             .checked_add(records)
@@ -790,15 +790,25 @@ impl SourceUsage {
         .map_err(procedure_failure)?;
         charge_usage(&mut self.admission, self.policy, records, records, 0)
     }
+
+    /// A completed construction receipt, before kernel or output work. An
+    /// exact buffered query request recharges this admission on every reuse.
+    pub(crate) fn completed(self) -> sealed_cache::QueryUsage {
+        sealed_cache::QueryUsage {
+            admission: self.admission,
+            source_work: self.work,
+            source_scratch: self.scratch,
+        }
+    }
 }
 
-fn count(value: usize) -> Result<u64, Failure> {
+pub(crate) fn count(value: usize) -> Result<u64, Failure> {
     u64::try_from(value).map_err(|_| procedure_failure(Error::SizeOverflow))
 }
 
 /// Admit a known complete population without iterating solely to increment a
 /// counter. Check each dimension before mutating the successful usage record.
-fn charge_usage(
+pub(crate) fn charge_usage(
     usage: &mut AdmissionUsage,
     policy: GqlQueryPolicy,
     records: u64,

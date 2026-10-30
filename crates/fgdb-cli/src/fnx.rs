@@ -477,6 +477,45 @@ pub(super) struct PreparedSealedRead {
     source_limits: RootReadLimits,
 }
 
+/// Bind the explicit external owner without evaluating a reached procedure's
+/// arguments early. The ordinary buffered compiler never admits procedures.
+pub(super) fn prepare_buffered_sealed_order(
+    options: &Options,
+    native: &PreparedNativeRead,
+    params: &fgdb_gql::GqlParameters,
+) -> Result<fgdb::PreparedBufferedSealedOrder, Failure> {
+    options.fnx.validate_composed()?;
+    let name = options
+        .fnx
+        .relation
+        .as_ref()
+        .ok_or_else(|| Failure::usage("--sealed requires --graph-relation"))?;
+    let relation = options
+        .relations
+        .get(name)
+        .copied()
+        .map(RelationId)
+        .ok_or_else(|| Failure::usage(format!("relation {name:?} has no binding")))?;
+    let (memory, sealing) = options
+        .fnx
+        .sealed_limits()
+        .ok_or_else(|| Failure::usage("compressed native reads require --sealed"))?;
+    let incidences = options.fnx.sealed_source_incidences.unwrap_or_else(|| {
+        RootReadLimits::default()
+            .max_incidences
+            .max(sealing.max_incidences)
+    });
+    let prepared = native
+        .prepare_buffered_sealed_order(params, relation, memory, sealing, incidences)
+        .map_err(super::execution_failure)?;
+    match options.fnx.as_of {
+        Some(snapshot) => prepared
+            .with_as_of(snapshot)
+            .map_err(|error| Failure::coded(super::refusal::Code::InvalidValue, error)),
+        None => Ok(prepared),
+    }
+}
+
 pub(super) fn prepare_sealed_read(options: &Options) -> Result<PreparedSealedRead, Failure> {
     options.fnx.validate_composed()?;
     let name = options
@@ -1158,6 +1197,83 @@ mod tests {
             assert_eq!(failure.code, 3);
             assert_eq!(failure.refusal, super::super::refusal::Code::Unsupported);
         }
+    }
+
+    #[test]
+    fn composed_buffered_sealed_preflight_selects_the_explicit_external_owner() {
+        let text = "CALL fnx.weakly_connected_components({relations:['KNOWS'],parallel:'collapse'}) \
+                    YIELD node,component RETURN node,component ORDER BY component,node LIMIT 2";
+        for flags in [
+            vec![
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "--buffered",
+                "--spill-dir",
+                "never-opened-spill",
+            ],
+            vec![
+                "--spill-dir",
+                "never-opened-spill",
+                "--buffered",
+                "--sealed",
+                "--graph-relation",
+                "KNOWS",
+                "--max-result-rows",
+                "2",
+                "--max-snapshot-records",
+                "1000",
+                "--max-work-units",
+                "100000",
+                "--max-scratch-entries",
+                "10000",
+                "--as-of",
+                "7",
+            ],
+        ] {
+            let options = composed_options(text, &flags).unwrap();
+            assert!(options.buffered.enabled());
+            assert!(options.spill.enabled());
+            assert!(!options.fnx_call);
+            let prepared = super::super::spill::prepare_buffered(&options).unwrap();
+            let super::super::spill::PreparedBuffered::SealedOrdered(prepared) = prepared else {
+                panic!("explicit composed mode must retain its sealed external owner");
+            };
+            assert!(prepared.stage_count() > 0);
+        }
+    }
+
+    #[test]
+    fn composed_buffered_sealed_preflight_refuses_unsupported_shapes_before_open() {
+        let flags = [
+            "--sealed",
+            "--graph-relation",
+            "KNOWS",
+            "--buffered",
+            "--spill-dir",
+            "never-opened-spill",
+        ];
+        for text in [
+            "MATCH (n) RETURN n",
+            "CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node RETURN COUNT(*) AS count",
+            "(CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node RETURN node) \
+             UNION ALL (CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node RETURN node)",
+        ] {
+            let options = composed_options(text, &flags).unwrap();
+            assert!(
+                super::super::spill::prepare_buffered(&options).is_err(),
+                "{text}"
+            );
+        }
+        let text = "CALL fnx.weakly_connected_components({relations:['KNOWS']}) YIELD node \
+                    MATCH (node) FOR SYSTEM_TIME AS OF SEQ 2 RETURN node";
+        let mut conflicting = flags.to_vec();
+        conflicting.extend_from_slice(&["--as-of", "3"]);
+        let options = composed_options(text, &conflicting).unwrap();
+        let error = super::super::spill::prepare_buffered(&options)
+            .err()
+            .unwrap();
+        assert_eq!(error.refusal, super::super::refusal::Code::InvalidValue);
     }
 
     #[test]
