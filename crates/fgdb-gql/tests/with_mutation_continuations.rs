@@ -262,6 +262,55 @@ fn multipart_optional_null_set_target_skips_a_failing_rhs() {
 }
 
 #[test]
+fn unwind_before_a_mutation_preserves_unwritten_carried_fields() {
+    let query = prepare(
+        "MATCH (a) WITH a MATCH (a) UNWIND [0,0] AS occurrence \
+         SET a.q=a.p+10 RETURN a.p AS p,a.q AS q,occurrence ORDER BY p,occurrence",
+    );
+    let batch = execute_multipart(&query, policy(6), None, &[], || Ok(())).unwrap();
+    assert_eq!(
+        rows(&batch),
+        (1..=3)
+            .flat_map(|value| vec![vec![int(value), int(value + 10), int(0)]; 2])
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(batch.mutation().stats().effects, 3);
+    assert_eq!(batch.mutation().stats().selection.result_rows, 6);
+}
+
+#[test]
+fn optional_apply_preimages_follow_null_extension_and_final_identity_updates() {
+    let query = prepare(
+        "MATCH (a) WITH a,[2] AS allowed \
+         OPTIONAL MATCH (a)-[:R]->(b) WHERE b.p IN allowed \
+         UNWIND [0,0] AS occurrence SET a.q=a.p+10 \
+         RETURN a.p AS p,a.q AS q,b.p AS peer,b.q AS final_peer,occurrence \
+         ORDER BY p,occurrence",
+    );
+    let edges = [
+        (VId(BASE + 1), R, VId(BASE + 2)),
+        (VId(BASE + 1), R, VId(BASE + 2)),
+    ];
+    let batch = execute_multipart(&query, policy(8), None, &edges, || Ok(())).unwrap();
+    let expected = (1..=3)
+        .flat_map(|value| {
+            let (peer, final_peer, copies) = if value == 1 {
+                // b is the same identity another outer row updates. RETURN
+                // observes the complete statement, not this occurrence's input.
+                (int(2), int(12), 4)
+            } else {
+                (null(), null(), 2)
+            };
+            vec![vec![int(value), int(value + 10), peer, final_peer, int(0)]; copies]
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rows(&batch), expected);
+    assert_eq!(batch.mutation().stats().effects, 3);
+    assert_eq!(batch.mutation().stats().selection.result_rows, 8);
+    assert!(execute_multipart(&query, policy(7), None, &edges, || Ok(())).is_err());
+}
+
+#[test]
 fn multipart_remove_and_delete_keep_null_and_duplicate_rows() {
     let edges = [
         (VId(BASE + 1), R, VId(BASE + 2)),

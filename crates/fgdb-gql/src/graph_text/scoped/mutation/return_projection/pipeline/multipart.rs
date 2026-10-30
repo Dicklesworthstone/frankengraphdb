@@ -2855,32 +2855,7 @@ impl<'a> Parser<'a> {
             combined.push((name, kind));
         }
         let types: Vec<GraphSetColumnType> = combined.iter().map(|(_, kind)| *kind).collect();
-        let mut head = GraphProjectionHead {
-            with: true,
-            plain: false,
-            inputs: Vec::new(),
-            outputs: (combined.iter().enumerate())
-                .map(|(column, &(name, _))| (name, ReadValueTemplate::Column(column)))
-                .collect(),
-        };
-        // A write after the CALL reads its carried identities' preimages
-        // (fgdb-cpny9), as a continuation head's write does: row reads only,
-        // never a graph input in this unit part.
-        if self.write_prefix && !self.call_body {
-            self.hoist_boundary_reads_with_imports(&mut head, combined.len(), &combined)?;
-            if !head.inputs.is_empty() {
-                return Err(expected(at, "carried row reads after an inline CALL"));
-            }
-            combined = (head.outputs.iter())
-                .map(|(name, value)| (*name, value.column_type(&types, &self.syntax.parameters)))
-                .collect();
-        }
-        let projection = (head.outputs.into_iter())
-            .map(|(name, value)| ReadProjectionTemplate {
-                name: name.text.to_owned(),
-                value,
-            })
-            .collect();
+        let projection = self.carried_write_projection(&mut combined, &types, at)?;
         // A returning CALL exports real typed identities, not graph slots.
         // Its caller's WHERE/RETURN/aggregate reads them through the same
         // governed element reader as the body; dropped names remain absent.
@@ -2910,6 +2885,40 @@ impl<'a> Parser<'a> {
             next,
             terminal,
         ))
+    }
+
+    /// A completed CALL or OPTIONAL Apply owns a typed row, including NULL
+    /// exports. Capture mutation preimages after that row is formed, through
+    /// its element reader, while retaining the visible prefix and occurrences.
+    fn carried_write_projection(
+        &mut self,
+        combined: &mut RowSchema<'a>,
+        types: &[GraphSetColumnType],
+        at: usize,
+    ) -> Result<Vec<ReadProjectionTemplate>, GraphSetTextError> {
+        let mut head = GraphProjectionHead {
+            with: true,
+            plain: false,
+            inputs: Vec::new(),
+            outputs: (combined.iter().enumerate())
+                .map(|(column, &(name, _))| (name, ReadValueTemplate::Column(column)))
+                .collect(),
+        };
+        if self.write_prefix && !self.call_body {
+            self.hoist_boundary_reads_with_imports(&mut head, combined.len(), combined)?;
+            if !head.inputs.is_empty() {
+                return Err(expected(at, "carried row reads after a read subquery"));
+            }
+            *combined = (head.outputs.iter())
+                .map(|(name, value)| (*name, value.column_type(types, &self.syntax.parameters)))
+                .collect();
+        }
+        Ok((head.outputs.into_iter())
+            .map(|(name, value)| ReadProjectionTemplate {
+                name: name.text.to_owned(),
+                value,
+            })
+            .collect())
     }
 
     /// `OPTIONAL MATCH ... WHERE w`, where `w` reads the incoming row in a way
@@ -2948,15 +2957,8 @@ impl<'a> Parser<'a> {
             )?;
             combined.push((name, kind));
         }
-        let projection = combined
-            .iter()
-            .enumerate()
-            .map(|(column, (name, _))| ReadProjectionTemplate {
-                name: name.text.to_owned(),
-                value: ReadValueTemplate::Column(column),
-            })
-            .collect();
-        let types = combined.iter().map(|(_, kind)| *kind).collect();
+        let types: Vec<_> = combined.iter().map(|(_, kind)| *kind).collect();
+        let projection = self.carried_write_projection(&mut combined, &types, at)?;
         // The clause's bindings are real typed identities after the Apply, as
         // a CALL's exports are; later clauses read their properties through
         // the governed element reader.
@@ -3377,9 +3379,22 @@ impl<'a> Parser<'a> {
                 self.graph_projection_head()?
             }
         } else if implicit_star {
-            // The same graph-to-row aggregate head owns carried properties
-            // in WITH and in an implicit WITH * before aggregate RETURN.
-            self.with_graph_head(incoming, inputs, optional)?
+            if self.write_prefix && !self.call_body {
+                // An UNWIND before a write retains the whole mutation tail's
+                // preimages, including fields read only by RETURN. The
+                // aggregate head scans only its immediate input expression.
+                let outputs = self.star_outputs(incoming, &mut inputs)?;
+                GraphProjectionHead {
+                    with: true,
+                    plain: false,
+                    inputs,
+                    outputs,
+                }
+            } else {
+                // The same graph-to-row aggregate head owns carried properties
+                // in WITH and in an implicit WITH * before aggregate RETURN.
+                self.with_graph_head(incoming, inputs, optional)?
+            }
         } else {
             self.multipart_head(incoming, inputs, optional)?
         };
@@ -3388,7 +3403,7 @@ impl<'a> Parser<'a> {
         let offset = if kind.is_none() { 0 } else { incoming.len() };
         // The `WITH *` columns, before any hidden read.
         let visible = head.outputs.len();
-        if !implicit_star && !implicit_end {
+        if (!implicit_star || self.write_prefix && !self.call_body) && !implicit_end {
             // A write after this part reads its carried row identities'
             // preimages, as the leading-row heads do (fgdb-cpny9); a read
             // keeps its own templates.

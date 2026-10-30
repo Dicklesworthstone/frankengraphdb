@@ -562,6 +562,32 @@ fn boundary_metadata_binding<'a>(
     .then_some(input.variable)
 }
 
+/// Imported typed identities read metadata through the same governed reader
+/// as their property preimages. They must not become graph inputs: an OPTIONAL
+/// export may be NULL while its carried outer row still survives.
+fn boundary_metadata_source<'a>(
+    head: &GraphProjectionHead<'a>,
+    offset: usize,
+    imports: &[(Name<'a>, GraphSetColumnType)],
+    alias: &str,
+    function: GraphPathFunction,
+) -> Option<BoundaryPropertySource<'a>> {
+    if let Some(variable) = boundary_metadata_binding(head, offset, alias, function) {
+        return Some(BoundaryPropertySource::Graph(variable));
+    }
+    let BoundaryPropertySource::Row(column) =
+        boundary_property_source(head, offset, imports, alias)?
+    else {
+        return None;
+    };
+    matches!(
+        (function, imports[column].1),
+        (GraphPathFunction::Labels, GraphSetColumnType::Vertex)
+            | (GraphPathFunction::Type, GraphSetColumnType::Edge)
+    )
+    .then_some(BoundaryPropertySource::Row(column))
+}
+
 fn expected(at: usize, item: &'static str) -> GraphSetTextError {
     GraphSetTextError {
         offset: at,
@@ -967,8 +993,8 @@ impl<'a> Parser<'a> {
                     if let Some((source, function)) = metadata
                         && !read_locals.shadows(source.text)
                         && kept(source.text)
-                        && let Some(variable) =
-                            boundary_metadata_binding(head, offset, source.text, function)
+                        && let Some(binding) =
+                            boundary_metadata_source(head, offset, imports, source.text, function)
                         && !functions
                             .iter()
                             .any(|&(alias, known, _)| alias == source.text && known == function)
@@ -982,28 +1008,51 @@ impl<'a> Parser<'a> {
                             .ok_or_else(|| {
                                 expected(source.at, "at most 16 carried-element reads after a WITH")
                             })?;
-                        let input = self.projection_slot(
-                            &mut head.inputs,
-                            Projection {
-                                variable,
-                                property: None,
-                                path: Some(function),
-                                collect: None,
-                            },
-                        )?;
+                        let value = match binding {
+                            BoundaryPropertySource::Graph(variable) => {
+                                let input = self.projection_slot(
+                                    &mut head.inputs,
+                                    Projection {
+                                        variable,
+                                        property: None,
+                                        path: Some(function),
+                                        collect: None,
+                                    },
+                                )?;
+                                ReadValueTemplate::Column(offset + input)
+                            }
+                            BoundaryPropertySource::Row(column) => {
+                                ReadValueTemplate::ElementMetadata {
+                                    kind: match function {
+                                        GraphPathFunction::Labels => {
+                                            crate::GraphElementMetadata::Labels
+                                        }
+                                        GraphPathFunction::Type => {
+                                            crate::GraphElementMetadata::Type
+                                        }
+                                        _ => {
+                                            unreachable!("only typed element metadata is imported")
+                                        }
+                                    },
+                                    value: Box::new(ReadValueTemplate::Column(column)),
+                                    catalog: self.syntax.element_catalog.request(),
+                                }
+                            }
+                        };
                         head.outputs.push((
                             Name {
                                 text: name,
                                 at: token.at,
                             },
-                            ReadValueTemplate::Column(offset + input),
+                            value,
                         ));
                         functions.push((source.text, function, head.outputs.len() - 1));
                     }
                     if let Some(source) = property_map_source(word, token.at, &lexer)?
                         && !read_locals.shadows(source.text)
                         && kept(source.text)
-                        && let Some(variable) = boundary_binding(head, offset, source.text)
+                        && let Some(binding) =
+                            boundary_property_source(head, offset, imports, source.text)
                         && !reads.iter().any(|&(alias, key, _): &(_, Name<'_>, _)| {
                             alias == source.text && key.text == "*"
                         })
@@ -1020,13 +1069,26 @@ impl<'a> Parser<'a> {
                                     "at most 16 carried-element property reads after a WITH",
                                 )
                             })?;
-                        let input = self.property_map_projection(&mut head.inputs, variable)?;
+                        let value = match binding {
+                            BoundaryPropertySource::Graph(variable) => {
+                                let input =
+                                    self.property_map_projection(&mut head.inputs, variable)?;
+                                ReadValueTemplate::Column(offset + input)
+                            }
+                            BoundaryPropertySource::Row(column) => {
+                                ReadValueTemplate::ElementMetadata {
+                                    kind: crate::GraphElementMetadata::Properties,
+                                    value: Box::new(ReadValueTemplate::Column(column)),
+                                    catalog: self.syntax.element_catalog.request(),
+                                }
+                            }
+                        };
                         head.outputs.push((
                             Name {
                                 text: name,
                                 at: source.at,
                             },
-                            ReadValueTemplate::Column(offset + input),
+                            value,
                         ));
                         reads.push((
                             source.text,

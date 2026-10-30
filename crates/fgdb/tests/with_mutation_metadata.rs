@@ -2,18 +2,20 @@
 //! owner. Expected maps/lists come from the fixture, never another query engine.
 
 use asupersync::Budget;
+use asupersync::security::key::AuthKey;
 use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, QueryValue, QueryWriteError, WriteBatch};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
-    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind,
-    GraphSymbolResolver, GraphWriteIdentityRequest, GraphWriteProgramPolicy,
+    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphMutationPolicy, GraphSymbol,
+    GraphSymbolKind, GraphSymbolResolver, GraphWriteIdentityRequest, GraphWriteProgramPolicy,
     PreparedGraphMutationQueryText, ReverseSymbolCatalog,
 };
 use fgdb_types::{
     CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, TxnCx,
     VId,
 };
+use fgdb_warden::{Authority, Grant, QueryLimits, Rights, Scope};
 
 const R: RelationId = RelationId(1);
 const ITEM: LabelId = LabelId(1);
@@ -511,6 +513,227 @@ fn metadata_respects_scope_and_map_locals_instead_of_reviving_graph_names() {
         .unwrap();
         let null = GraphValue::Scalar(CanonicalScalar::Null);
         assert_eq!(rows(result, &["l", "t"]), vec![vec![null.clone(), null]; 2]);
+    });
+}
+
+async fn apply_continuation(
+    db: &mut Database<MemVfs>,
+    contexts: (&CommitCx, &QueryCx, &TxnCx),
+    statement: &str,
+    columns: &[&str],
+    authorized: bool,
+    limit: u64,
+) -> Result<Vec<Vec<GraphValue>>, String> {
+    let (commit, cx, txcx) = contexts;
+    if !authorized {
+        return apply(db, commit, cx, txcx, statement, limit)
+            .await
+            .map(|result| rows(result, columns))
+            .map_err(|error| format!("{error:?}"));
+    }
+    let issuer = Authority::new(
+        AuthKey::from_seed(0x7c1b),
+        DatabaseSecurityNamespaceId([0x62; 32]),
+        "graph",
+        fgdb_delta_types::SchemaEpoch(1),
+        1,
+    )
+    .unwrap();
+    let grant = Grant {
+        branch: "main".into(),
+        labels: Scope::only([ITEM, TAGGED]),
+        relations: Scope::only([R]),
+        // The fixture's q is deliberately hidden, including inside maps.
+        properties: Scope::only([P]),
+        rights: Rights::ReadWrite,
+        limits: QueryLimits {
+            max_nodes: 10_000,
+            max_work: 1_000_000,
+            max_rows: 100,
+        },
+        expires_at_ms: 10_000,
+    };
+    let token = issuer.issue_at(&grant, 100).unwrap();
+    let query = PreparedGraphMutationQueryText::prepare(statement, R, Catalog)
+        .map_err(|error| format!("{error:?}"))?
+        .bind_parameters(&GqlParameters::new())
+        .map_err(|error| format!("{error:?}"))?;
+    db.execute_graph_mutation_query_authorized(
+        txcx,
+        cx,
+        commit,
+        &issuer,
+        &token,
+        "main",
+        &query,
+        GraphMutationPolicy::new(query_policy(limit), 100),
+        || 100,
+    )
+    .await
+    .map(|(_, result, _)| {
+        result
+            .value
+            .into_iter()
+            .map(|row| row.values().to_vec())
+            .collect()
+    })
+    .map_err(|error| format!("{error:?}"))
+}
+
+#[test]
+fn optional_and_unwind_continuations_return_final_scoped_maps_and_rollback() {
+    run(async |commit, cx, txcx| {
+        let prefixes = [
+            (
+                "MATCH (a:Item) WITH a,a AS b MATCH (a) UNWIND [0,0] AS occurrence",
+                false,
+            ),
+            (
+                "MATCH (a:Item) WITH a,[2] AS allowed \
+                 OPTIONAL MATCH (a)-[:R]->(b) WHERE b.p IN allowed \
+                 UNWIND [0,0] AS occurrence",
+                true,
+            ),
+        ];
+        for authorized in [false, true] {
+            for (prefix, optional) in prefixes {
+                let mut db = Database::open_memory(commit, keys()).await.unwrap();
+                db.write(commit, fixture()).await.unwrap();
+                let before = db.frontier().unwrap();
+                let statement = format!(
+                    "{prefix} SET a.p=a.p+10,a:Tagged \
+                     RETURN a.p AS p,a.q AS q,a{{.*}} AS props,keys(a) AS names, \
+                     labels(a) AS tags,b.p AS peer,b{{.*}} AS peer_props ORDER BY p"
+                );
+                let columns = ["p", "q", "props", "names", "tags", "peer", "peer_props"];
+                // A rejected delivery cannot publish a prefix of the changes.
+                assert!(
+                    apply_continuation(
+                        &mut db,
+                        (commit, cx, txcx),
+                        &statement,
+                        &columns,
+                        authorized,
+                        3,
+                    )
+                    .await
+                    .is_err(),
+                    "{statement}; authorized={authorized}"
+                );
+                assert_eq!(db.frontier().unwrap(), before);
+                assert_eq!(read_p(&db, cx), vec![vec![int(1)], vec![int(2)]]);
+                let failing = format!(
+                    "{prefix} SET a.p=a.p+10 \
+                     RETURN a{{.*}} AS props,12/(a.p-12) AS bad LIMIT 0"
+                );
+                assert!(
+                    apply_continuation(
+                        &mut db,
+                        (commit, cx, txcx),
+                        &failing,
+                        &["props", "bad"],
+                        authorized,
+                        0,
+                    )
+                    .await
+                    .is_err(),
+                    "{failing}; authorized={authorized}"
+                );
+                assert_eq!(db.frontier().unwrap(), before);
+                assert_eq!(read_p(&db, cx), vec![vec![int(1)], vec![int(2)]]);
+                let actual = apply_continuation(
+                    &mut db,
+                    (commit, cx, txcx),
+                    &statement,
+                    &columns,
+                    authorized,
+                    4,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{statement}; authorized={authorized}: {error}"));
+                let properties = |id| {
+                    if authorized {
+                        map(&[("p", id + 10)])
+                    } else {
+                        map(&[("p", id + 10), ("q", id * 10)])
+                    }
+                };
+                let expected = (1..=2)
+                    .flat_map(|id| {
+                        let peer = if optional {
+                            (id == 1).then_some(2)
+                        } else {
+                            Some(id)
+                        };
+                        vec![
+                            vec![
+                                int(id + 10),
+                                if authorized { null() } else { int(id * 10) },
+                                properties(id),
+                                if authorized {
+                                    names(&["p"])
+                                } else {
+                                    names(&["p", "q"])
+                                },
+                                names(&["Item", "Tagged"]),
+                                peer.map_or_else(null, |id| int(id + 10)),
+                                peer.map_or_else(null, properties),
+                            ];
+                            2
+                        ]
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(actual, expected, "{statement}; authorized={authorized}");
+                assert_eq!(read_p(&db, cx), vec![vec![int(11)], vec![int(12)]]);
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        }
+    });
+}
+
+#[test]
+fn optional_apply_carries_relationship_type_and_final_maps_through_unwind() {
+    run(async |commit, cx, txcx| {
+        for authorized in [false, true] {
+            let mut db = Database::open_memory(commit, keys()).await.unwrap();
+            db.write(commit, fixture()).await.unwrap();
+            let statement = "MATCH (a:Item) WITH a,[2] AS allowed \
+                 OPTIONAL MATCH (a)-[r:R]->(b) WHERE b.p IN allowed \
+                 UNWIND [0,0] AS occurrence SET r.p=r.p+10 \
+                 RETURN a.p AS p,r.p AS edge_p,type(r) AS relation, \
+                 r{.*} AS props,keys(r) AS names ORDER BY p";
+            let actual = apply_continuation(
+                &mut db,
+                (commit, cx, txcx),
+                statement,
+                &["p", "edge_p", "relation", "props", "names"],
+                authorized,
+                4,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{statement}; authorized={authorized}: {error}"));
+            assert_eq!(
+                actual,
+                [
+                    vec![int(1), int(17), text("R"), map(&[("p", 17)]), names(&["p"])],
+                    vec![int(1), int(17), text("R"), map(&[("p", 17)]), names(&["p"])],
+                    vec![int(2), null(), null(), null(), null()],
+                    vec![int(2), null(), null(), null(), null()],
+                ],
+                "authorized={authorized}"
+            );
+            let result = db
+                .query(
+                    cx,
+                    "MATCH (a)-[r:R]->(b) RETURN r.p AS p",
+                    &GqlParameters::new(),
+                    Catalog,
+                    query_policy(1),
+                )
+                .unwrap();
+            assert_eq!(rows(result, &["p"]), [vec![int(17)]]);
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
     });
 }
 
