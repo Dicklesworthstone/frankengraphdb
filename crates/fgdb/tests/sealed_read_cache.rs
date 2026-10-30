@@ -1078,6 +1078,9 @@ fn sealed_owners_execute_every_native_class_at_current_and_historical_cuts() {
         let commit = contexts.commit();
         let vfs = MemVfs::new().unwrap();
         let mut database = seed(&commit, &vfs).await;
+        let mut update = WriteBatch::new(R);
+        update.create_vertex(VId(4), vec![L], vec![(P, CanonicalScalar::Int(99))]);
+        assert_eq!(database.write(&commit, update).await.unwrap(), CommitSeq(4));
         let cases = [
             (Class::Pattern, "MATCH (n:L) RETURN n.p"),
             (Class::Aggregate, "MATCH (n:L) RETURN COUNT(*) AS n"),
@@ -1104,7 +1107,7 @@ fn sealed_owners_execute_every_native_class_at_current_and_historical_cuts() {
             ),
         ];
         let mut retained = Vec::new();
-        for selected in [CommitSeq(1), CommitSeq(3)] {
+        for selected in [CommitSeq(1), CommitSeq(4)] {
             let view = database
                 .prepare_sealed_read(
                     &cx,
@@ -1154,7 +1157,9 @@ fn sealed_owners_execute_every_native_class_at_current_and_historical_cuts() {
                         actual,
                         fgdb::QueryResult::Rows {
                             columns: vec!["n".into()],
-                            rows: vec![vec![fgdb::QueryValue::Count(4)]],
+                            rows: vec![vec![fgdb::QueryValue::Count(
+                                if selected == CommitSeq(1) { 4 } else { 5 }
+                            )]],
                         },
                     );
                 }
@@ -1163,8 +1168,8 @@ fn sealed_owners_execute_every_native_class_at_current_and_historical_cuts() {
             retained.push((view, results));
         }
         let mut update = WriteBatch::new(R);
-        update.create_vertex(VId(4), vec![L], vec![(P, CanonicalScalar::Int(99))]);
-        database.write(&commit, update).await.unwrap();
+        update.create_vertex(VId(5), vec![L], vec![(P, CanonicalScalar::Int(100))]);
+        assert_eq!(database.write(&commit, update).await.unwrap(), CommitSeq(5));
         drop(database);
         for (view, results) in retained {
             for (prepared, params, expected) in results {
