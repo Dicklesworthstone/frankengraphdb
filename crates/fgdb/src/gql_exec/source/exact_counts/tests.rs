@@ -142,7 +142,10 @@ fn committed_deltas_and_pinned_generations_agree_with_independent_maps() {
                 read(&counts, GraphCountSource::Vertices),
                 Some(vertices.len() as u64)
             );
-            assert_eq!(read(&counts, GraphCountSource::Edges), Some(edges.len() as u64));
+            assert_eq!(
+                read(&counts, GraphCountSource::Edges),
+                Some(edges.len() as u64)
+            );
             for relation in 1..=3 {
                 let relation = RelationId(relation);
                 let expected = edges.values().filter(|&&(_, r, _)| r == relation).count() as u64;
@@ -224,7 +227,10 @@ fn committed_deltas_and_pinned_generations_agree_with_independent_maps() {
         .unwrap();
     edges.retain(|_, (source, _, target)| *source != vertex && *target != vertex);
     assert_eq!(read(&counts, GraphCountSource::Vertices), Some(19));
-    assert_eq!(read(&counts, GraphCountSource::Edges), Some(edges.len() as u64));
+    assert_eq!(
+        read(&counts, GraphCountSource::Edges),
+        Some(edges.len() as u64)
+    );
     for relation in 1..=3 {
         let relation = RelationId(relation);
         assert_eq!(
@@ -237,7 +243,10 @@ fn committed_deltas_and_pinned_generations_agree_with_independent_maps() {
             read(&pinned, GraphCountSource::Vertices),
             Some(vertex_count)
         );
-        assert_eq!(read(&pinned, GraphCountSource::Edges), Some(edges.len() as u64));
+        assert_eq!(
+            read(&pinned, GraphCountSource::Edges),
+            Some(edges.len() as u64)
+        );
         for relation in 1..=3 {
             let relation = RelationId(relation);
             assert_eq!(

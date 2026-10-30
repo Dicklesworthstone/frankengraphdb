@@ -40,7 +40,10 @@ pub enum SealedQueryError {
 impl core::fmt::Display for SealedQueryError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::SnapshotMismatch { requested, retained } => write!(
+            Self::SnapshotMismatch {
+                requested,
+                retained,
+            } => write!(
                 f,
                 "native read selects {requested:?}, but the sealed owner retains {retained:?}",
             ),

@@ -363,7 +363,9 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
                 .borrowed
                 .as_ref()
                 .expect("exact edge metadata requires the private snapshot source");
-            snapshot.exact_counts.publish_edges(tables.edges.len() as u64);
+            snapshot
+                .exact_counts
+                .publish_edges(tables.edges.len() as u64);
         }
     }
     result

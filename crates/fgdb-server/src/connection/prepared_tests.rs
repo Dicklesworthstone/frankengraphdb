@@ -1122,9 +1122,15 @@ fn prepared_no_return_chains_keep_write_mode_and_fresh_arguments() {
         assert!(answer.rows.is_empty());
         assert_eq!(
             answer.outcome,
-            Outcome::WriteCommitted { seq: 1, statements: 1 }
+            Outcome::WriteCommitted {
+                seq: 1,
+                statements: 1
+            }
         );
-        assert_eq!(db.db.read(&root).await.unwrap().vertices().unwrap().len(), 4);
+        assert_eq!(
+            db.db.read(&root).await.unwrap().vertices().unwrap().len(),
+            4
+        );
         assert_eq!(
             run_prepared(
                 &root,
@@ -1154,9 +1160,15 @@ fn prepared_no_return_chains_keep_write_mode_and_fresh_arguments() {
         assert!(empty.rows.is_empty());
         assert_eq!(
             empty.outcome,
-            Outcome::ReadClosed { seq: 1, statements: 1 }
+            Outcome::ReadClosed {
+                seq: 1,
+                statements: 1
+            }
         );
-        assert_eq!(db.db.read(&root).await.unwrap().vertices().unwrap().len(), 4);
+        assert_eq!(
+            db.db.read(&root).await.unwrap().vertices().unwrap().len(),
+            4
+        );
         server.join_database_workers(&root).await;
     });
     assert!(report.lab_test_passed(), "{report:?}");

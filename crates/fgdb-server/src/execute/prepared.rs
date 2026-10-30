@@ -172,8 +172,7 @@ pub(crate) async fn prepare_statement(
             .await
             .map(PreparedDefinition::Write),
         PrepareMode::WriteReturning => {
-            prepare_row_write(cx, db, token, request, true)
-                .map(PreparedDefinition::WriteReturning)
+            prepare_row_write(cx, db, token, request, true).map(PreparedDefinition::WriteReturning)
         }
     }
 }
@@ -308,9 +307,8 @@ async fn prepare_write(
         )
         .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
     let chain = query.with_restriction(|| {
-        PreparedGraphWriteChainText::is_chain(statement).map_err(|error| {
-            restored_refusal(lowered.as_ref().map(|(lowered, _)| lowered), error)
-        })
+        PreparedGraphWriteChainText::is_chain(statement)
+            .map_err(|error| restored_refusal(lowered.as_ref().map(|(lowered, _)| lowered), error))
     });
     permit
         .checkpoint_at(unix_millis())
@@ -424,16 +422,17 @@ pub(crate) fn run_prepared<'a>(
         (
             PreparedDefinition::Write(PreparedWrite::Script(prepared)),
             PreparedExecutionMode::Write,
-        ) => {
-            Box::pin(write_prepared_inner(
-                cx,
-                db,
-                token,
-                prepared,
-                PreparedParameters::Single(parameters),
-            ))
-        }
-        (PreparedDefinition::Write(PreparedWrite::Chain(prepared)), PreparedExecutionMode::Write)
+        ) => Box::pin(write_prepared_inner(
+            cx,
+            db,
+            token,
+            prepared,
+            PreparedParameters::Single(parameters),
+        )),
+        (
+            PreparedDefinition::Write(PreparedWrite::Chain(prepared)),
+            PreparedExecutionMode::Write,
+        )
         | (PreparedDefinition::WriteReturning(prepared), PreparedExecutionMode::WriteReturning) => {
             Box::pin(write_returning_prepared(
                 cx, db, token, prepared, parameters,
@@ -453,13 +452,15 @@ pub(crate) fn run_prepared_batch<'a>(
     argument_sets: &'a [Vec<(String, WireValue)>],
 ) -> Execution<'a> {
     match definition {
-        PreparedDefinition::Write(PreparedWrite::Script(prepared)) => Box::pin(write_prepared_inner(
-            cx,
-            db,
-            token,
-            prepared,
-            PreparedParameters::Batch(argument_sets),
-        )),
+        PreparedDefinition::Write(PreparedWrite::Script(prepared)) => {
+            Box::pin(write_prepared_inner(
+                cx,
+                db,
+                token,
+                prepared,
+                PreparedParameters::Batch(argument_sets),
+            ))
+        }
         PreparedDefinition::Read(_)
         | PreparedDefinition::Write(PreparedWrite::Chain(_))
         | PreparedDefinition::WriteReturning(_) => {

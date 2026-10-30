@@ -187,10 +187,7 @@ fn fallible_owned_readers_keep_their_source_errors_and_preceding_checkpoint() {
             "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS total",
             CommitSeq(12),
         ),
-        (
-            "MATCH (a)-[r]->(b) RETURN COUNT(*) AS total",
-            CommitSeq(12),
-        ),
+        ("MATCH (a)-[r]->(b) RETURN COUNT(*) AS total", CommitSeq(12)),
     ] {
         let aggregate = query(text);
         let policy = GqlQueryPolicy::new(0, 0, 0, 0);
@@ -339,8 +336,10 @@ fn wildcard_counts_follow_commits_pins_failed_writes_and_reopen() {
         let tight = GqlQueryPolicy::new(1, 1, 100, 100);
         let wide = GqlQueryPolicy::new(100, 10, 100_000, 100_000);
         for aggregate in &queries {
-            let result = execute_at(&db, aggregate, db.snapshot.frontier, tight, || Ok::<_, ()>(()))
-                .unwrap();
+            let result = execute_at(&db, aggregate, db.snapshot.frontier, tight, || {
+                Ok::<_, ()>(())
+            })
+            .unwrap();
             assert_eq!(result.value[0].values()[0].as_count(), Some(0));
         }
         let mut first = WriteBatch::new(RelationId(1));
@@ -372,8 +371,8 @@ fn wildcard_counts_follow_commits_pins_failed_writes_and_reopen() {
         assert!(db.write(&contexts.commit(), failed).await.is_err());
         assert_eq!(db.snapshot.frontier, before_failure);
         for aggregate in &queries {
-            let result = execute_at(&db, aggregate, before_failure, tight, || Ok::<_, ()>(()))
-                .unwrap();
+            let result =
+                execute_at(&db, aggregate, before_failure, tight, || Ok::<_, ()>(())).unwrap();
             assert_eq!(result.value[0].values()[0].as_count(), Some(4));
         }
         let mut delete = WriteBatch::new(RelationId(1));

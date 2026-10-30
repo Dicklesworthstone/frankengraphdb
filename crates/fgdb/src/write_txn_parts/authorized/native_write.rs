@@ -287,8 +287,8 @@ fn chain_result(
     }
     let mut columns = Vec::new();
     for name in chain.columns() {
-        let bytes = u64::try_from(name.len())
-            .map_err(|_| WriteTxnError::Authorization(Error::TooLarge))?;
+        let bytes =
+            u64::try_from(name.len()).map_err(|_| WriteTxnError::Authorization(Error::TooLarge))?;
         work(1)?;
         work(bytes)?;
         columns.push(name.clone());

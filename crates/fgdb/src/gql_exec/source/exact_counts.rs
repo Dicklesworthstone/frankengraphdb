@@ -168,9 +168,9 @@ impl ExactCounts {
         };
         let next = match row {
             DeltaRow::CreateEdge { .. } => previous.checked_add(1),
-            DeltaRow::DeleteEdge { eid, .. } => writer
-                .live_edge(*eid)
-                .and_then(|_| previous.checked_sub(1)),
+            DeltaRow::DeleteEdge { eid, .. } => {
+                writer.live_edge(*eid).and_then(|_| previous.checked_sub(1))
+            }
             DeltaRow::DeleteVertex {
                 vid,
                 sorted_retired_incident_edges,

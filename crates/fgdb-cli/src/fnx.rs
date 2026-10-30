@@ -515,16 +515,19 @@ pub(super) fn prepare_sealed_read(options: &Options) -> Result<PreparedSealedRea
                 .calls_procedure()
         }
         PreparedNativeRead::TemporalSet(prepared) => {
-            let query = prepared
-                .bind_parameters(params)
-                .map_err(|error| super::read_failure(options, QueryError::TemporalSetText(error)))?;
+            let query = prepared.bind_parameters(params).map_err(|error| {
+                super::read_failure(options, QueryError::TemporalSetText(error))
+            })?;
             let requested = query.as_of();
             if let Some(retained) = as_of
                 && retained != requested
             {
                 return Err(Failure::coded(
                     super::refusal::Code::InvalidValue,
-                    SealedQueryError::SnapshotMismatch { requested, retained },
+                    SealedQueryError::SnapshotMismatch {
+                        requested,
+                        retained,
+                    },
                 ));
             }
             as_of = Some(requested);
@@ -533,7 +536,10 @@ pub(super) fn prepare_sealed_read(options: &Options) -> Result<PreparedSealedRea
         other => {
             return Err(Failure::coded(
                 super::refusal::Code::Unsupported,
-                format!("native {:?} read has no composed procedure source", other.facade_class()),
+                format!(
+                    "native {:?} read has no composed procedure source",
+                    other.facade_class()
+                ),
             ));
         }
     };
