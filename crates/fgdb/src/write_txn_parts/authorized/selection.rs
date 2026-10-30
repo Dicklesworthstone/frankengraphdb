@@ -275,6 +275,11 @@ pub(super) fn mutation_element_property_controlled<V: Vfs + Clone, Clock: FnMut(
     if !scope.allows_property(key) {
         return Ok(None);
     }
+    transaction.check_chain_element_read(
+        element,
+        &mut |_| control(GlaExecutionEvent::Work),
+        &source_error,
+    )?;
     if mutation_element_visible(transaction, database, cx, element, scope, execution)
         .map_err(&source_error)?
         .is_none()
@@ -399,6 +404,20 @@ pub(super) fn returning_element_metadata<V: Vfs + Clone, Clock: FnMut() -> u64>(
             WriteTxnError::Authorization(Error::PermissionDenied),
         ));
     }
+    transaction.check_chain_element_read(
+        element,
+        &mut |_| {
+            cx.checkpoint()
+                .map_err(WriteTxnError::Interrupted)
+                .map_err(GraphElementMetadataError::Source)?;
+            execution
+                .borrow_mut()
+                .checkpoint()
+                .map_err(GraphElementMetadataError::Source)?;
+            control(GlaExecutionEvent::Work).map_err(|()| GraphElementMetadataError::Interrupted)
+        },
+        &GraphElementMetadataError::Source,
+    )?;
     let Some(nodes) =
         mutation_element_visible(transaction, database, cx, element, scope, execution)
             .map_err(GraphElementMetadataError::Source)?

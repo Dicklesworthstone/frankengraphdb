@@ -66,7 +66,7 @@ impl WriteTxn {
         admit_write_read(chain, continuation)?;
         cx.with_restriction(|| {
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-            let workspace = MutationProgramWorkspace::new(self);
+            let workspace = MutationProgramWorkspace::for_write_chain(self);
             let mut write_policy = policy;
             write_policy.query.rows = match policy.query.rows.max_snapshot_records() {
                 Some(limit) => GqlExecutionBudget::snapshot_records(limit),

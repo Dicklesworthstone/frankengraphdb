@@ -590,6 +590,12 @@ impl WriteTxn {
             .map_err(source_error)?;
         control(SourceEvent::Work)?;
         let mut edge_endpoints = None;
+        if matches!(
+            field,
+            PointReadField::Property(_) | PointReadField::Label(_)
+        ) {
+            self.check_chain_element_read(element, control, source_error)?;
+        }
         let mut projected = match element {
             ElementId::Vertex(vid) => match find_vertex(snapshot, vid, self.basis, control)? {
                 Some(row) => {

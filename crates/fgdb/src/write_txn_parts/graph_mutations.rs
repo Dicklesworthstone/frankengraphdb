@@ -1,6 +1,214 @@
 // Query-selected writes share the existing canonical staged overlay and the
 // ordinary WriteTxn::write rollback/preparation boundary. No alternate writer.
 
+/// A chain's proof of successful native retirement, with a small append-only
+/// journal so nested rollback restores its entry prefix without cloning it.
+/// Only the native deletion owners insert identities after successful staging.
+#[derive(Default)]
+struct ChainRetirements {
+    identities: std::collections::BTreeSet<ElementId>,
+    journal: Vec<ElementId>,
+}
+
+impl ChainRetirements {
+    fn contains(&self, element: ElementId) -> bool {
+        self.identities.contains(&element)
+    }
+
+    fn lookup_work(&self) -> u32 {
+        (usize::BITS - self.identities.len().leading_zeros()).max(1)
+    }
+
+    // Callers admit both the tree entry and rollback-journal slot first.
+    fn insert(&mut self, element: ElementId) {
+        if self.identities.insert(element) {
+            self.journal.push(element);
+        }
+    }
+
+    fn truncate(&mut self, len: usize) {
+        while self.journal.len() > len {
+            if let Some(element) = self.journal.pop() {
+                self.identities.remove(&element);
+            }
+        }
+    }
+}
+
+impl WriteTxn {
+    fn chain_element_retired<E>(
+        &self,
+        element: ElementId,
+        control: &mut impl FnMut(crate::gql_exec::source::SourceEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        let Some(retired) = &self.chain_retirements else {
+            return Ok(false);
+        };
+        if retired.identities.is_empty() {
+            return Ok(false);
+        }
+        for _ in 0..retired.lookup_work() {
+            control(crate::gql_exec::source::SourceEvent::Work)?;
+        }
+        Ok(retired.contains(element))
+    }
+
+    fn check_chain_element_read<E>(
+        &self,
+        element: ElementId,
+        control: &mut impl FnMut(crate::gql_exec::source::SourceEvent) -> Result<(), E>,
+        source: &impl Fn(WriteTxnError) -> E,
+    ) -> Result<(), E> {
+        if self.chain_element_retired(element, control)? {
+            return Err(source(WriteTxnError::DeletedElementRead));
+        }
+        Ok(())
+    }
+
+    fn record_chain_retirement<E>(
+        &mut self,
+        element: ElementId,
+        control: &mut impl FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
+        use fgdb_gql::GlaExecutionEvent::{ScratchEntry, Work};
+        let Some(retired) = &mut self.chain_retirements else {
+            return Ok(());
+        };
+        for _ in 0..retired.lookup_work() {
+            control(Work)?;
+        }
+        if !retired.contains(element) {
+            control(ScratchEntry)?;
+            control(ScratchEntry)?;
+            retired.insert(element);
+        }
+        Ok(())
+    }
+
+    /// Freeze the owner's live cascade identities before native retirement.
+    /// Raw creation spellings provide candidates only: each candidate must
+    /// still be a canonical live edge touching the requested vertex. The
+    /// returned proof is recorded only after the native write succeeds.
+    fn collect_chain_retirements<V: Vfs + Clone, E>(
+        &self,
+        database: &Database<V>,
+        intents: &[fgdb_gql::GraphMutationIntent],
+        control: &mut impl FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), E>,
+        source: &impl Fn(WriteTxnError) -> E,
+    ) -> Result<Vec<ElementId>, E> {
+        use fgdb_gql::GlaExecutionEvent::{ScratchEntry, Work};
+        use fgdb_gql::GraphMutationIntent;
+        let mut retired = Vec::new();
+        if self.chain_retirements.is_none()
+            || !intents.iter().any(|intent| {
+                matches!(
+                    intent,
+                    GraphMutationIntent::Delete { .. }
+                        | GraphMutationIntent::DetachDelete { .. }
+                        | GraphMutationIntent::DeleteEdge { .. }
+                )
+            })
+        {
+            return Ok(retired);
+        }
+        for intent in intents {
+            control(Work)?;
+            let (target, cascade) = match intent {
+                GraphMutationIntent::Delete { vertex } => (ElementId::Vertex(*vertex), false),
+                GraphMutationIntent::DetachDelete { vertex } => (ElementId::Vertex(*vertex), true),
+                GraphMutationIntent::DeleteEdge { edge } => (ElementId::Edge(*edge), false),
+                _ => continue,
+            };
+            control(ScratchEntry)?;
+            retired.push(target);
+            if !cascade || self.chain_element_retired(target, &mut |_| control(Work))? {
+                continue;
+            }
+            let ElementId::Vertex(vertex) = target else {
+                unreachable!("only vertices cascade")
+            };
+            let mut candidates = std::collections::BTreeSet::new();
+            let snapshot = self.query_snapshot(database).map_err(source)?;
+            let mut after = None;
+            while let Some(edge) = snapshot.adjacency_index().next_incident_edge(
+                vertex,
+                fgdb_gql::algebra::GlaDirection::Undirected,
+                after,
+                &mut |event| control(event),
+            )? {
+                after = Some(edge);
+                control(ScratchEntry)?;
+                candidates.insert(edge);
+            }
+            for batch in &self.staged {
+                control(Work)?;
+                for row in &batch.rows {
+                    control(Work)?;
+                    if let PendingRow::Edge { eid, src, dst, .. } = row
+                        && (*src == vertex || *dst == vertex)
+                    {
+                        control(ScratchEntry)?;
+                        candidates.insert(*eid);
+                    }
+                }
+            }
+            for edge in candidates {
+                control(Work)?;
+                let Some(record) = self.edge(database, edge).map_err(source)? else {
+                    continue;
+                };
+                if record.entry.src == vertex || record.entry.dst == vertex {
+                    control(ScratchEntry)?;
+                    retired.push(ElementId::Edge(edge));
+                }
+            }
+        }
+        Ok(retired)
+    }
+}
+
+/// Extend a mutation's existing allowance for retirement proofs and their
+/// bounded rollback journal. The caller supplies its live interruption and,
+/// on the authorized path, signed-work checkpoint as one control callback.
+fn chain_retirement_event<C>(
+    stats: &mut fgdb_gql::GraphMutationStats,
+    policy: fgdb_gql::GraphMutationPolicy,
+    event: fgdb_gql::GlaExecutionEvent,
+    checkpoint: &mut impl FnMut() -> Result<
+        (),
+        fgdb_gql::GqlQueryError<fgdb_gql::GraphMutationError<WriteTxnError>, C>,
+    >,
+) -> Result<(), fgdb_gql::GqlQueryError<fgdb_gql::GraphMutationError<WriteTxnError>, C>> {
+    use fgdb_gql::{GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlQueryError};
+    checkpoint()?;
+    let work = u128::from(stats.evaluator.work_units) + 1;
+    let scratch = u128::from(stats.evaluator.scratch_entries)
+        + u128::from(event == GlaExecutionEvent::ScratchEntry);
+    for (observed, limit, dimension) in [
+        (
+            work,
+            policy.query.evaluator.max_work_units,
+            GlaLimitDimension::WorkUnits,
+        ),
+        (
+            scratch,
+            policy.query.evaluator.max_scratch_entries,
+            GlaLimitDimension::ScratchEntries,
+        ),
+    ] {
+        if observed > u128::from(limit) {
+            return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                dimension,
+                limit,
+                observed,
+            }));
+        }
+    }
+    stats.evaluator.work_units = work as u64;
+    stats.evaluator.scratch_entries = scratch as u64;
+    Ok(())
+}
+
 // Mutation RETURN/WITH has already evaluated the collection prefix when the
 // host proves plain DELETE incidence. All four standalone/chain and
 // owner/authorized adapters reserve the projection's additional usage before
@@ -250,12 +458,29 @@ impl WriteTxn {
         use fgdb_gql::{GqlQueryError, GraphDeleteError, GraphMutationError, GraphMutationIntent};
         let mut stats = proposal.stats();
         let intents = proposal.into_intents();
-        if intents.iter().any(|intent| {
-            matches!(
-                intent,
-                GraphMutationIntent::Delete { .. } | GraphMutationIntent::DeleteEdge { .. }
+        let retired = self
+            .collect_chain_retirements(
+                database,
+                &intents,
+                &mut |event| {
+                    chain_retirement_event(&mut stats, policy, event, &mut || {
+                        cx.checkpoint().map_err(GqlQueryError::Interrupted)
+                    })
+                },
+                &|error| GqlQueryError::Source(GraphMutationError::Source(error)),
             )
-        }) {
+            .map_err(|error| error.map_source(&wrap))?;
+        let detaching = intents
+            .iter()
+            .any(|intent| matches!(intent, GraphMutationIntent::DetachDelete { .. }));
+        if !detaching
+            && intents.iter().any(|intent| {
+                matches!(
+                    intent,
+                    GraphMutationIntent::Delete { .. } | GraphMutationIntent::DeleteEdge { .. }
+                )
+            })
+        {
             // Preparation admits no other action beside a plain DELETE.
             let mut vertices = Vec::new();
             let mut edges = Vec::new();
@@ -306,6 +531,14 @@ impl WriteTxn {
                 })?;
             stats.selection = deleted.selection;
             stats.evaluator = deleted.evaluator;
+            for element in retired {
+                self.record_chain_retirement(element, &mut |event| {
+                    chain_retirement_event(&mut stats, policy, event, &mut || {
+                        cx.checkpoint().map_err(GqlQueryError::Interrupted)
+                    })
+                })
+                .map_err(|error| error.map_source(&wrap))?;
+            }
             return Ok(stats);
         }
         let mut batch = WriteBatch::new(relation);
@@ -344,17 +577,29 @@ impl WriteTxn {
                 GraphMutationIntent::DetachDelete { vertex } => {
                     batch.delete_vertex(vertex);
                 }
-                GraphMutationIntent::Delete { .. } | GraphMutationIntent::DeleteEdge { .. } => {
+                GraphMutationIntent::DeleteEdge { edge } => {
+                    batch.delete_edge(edge);
+                }
+                GraphMutationIntent::Delete { .. } => {
                     unreachable!("plain DELETE statements stage above")
                 }
             }
         }
         // Last cancellable boundary before synchronous atomic staging.
-        // Never report a new interruption after the workspace has changed.
+        // A chain's proof journal below remains inside its outer rollback
+        // workspace. Standalone mutations have no journal or fallible tail.
         cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
         if !batch.is_empty() {
             self.write(database, batch)
                 .map_err(|error| GqlQueryError::Source(wrap(GraphMutationError::Source(error))))?;
+        }
+        for element in retired {
+            self.record_chain_retirement(element, &mut |event| {
+                chain_retirement_event(&mut stats, policy, event, &mut || {
+                    cx.checkpoint().map_err(GqlQueryError::Interrupted)
+                })
+            })
+            .map_err(|error| error.map_source(&wrap))?;
         }
         Ok(stats)
     }

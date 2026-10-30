@@ -1460,3 +1460,262 @@ fn late_inner_failure_restores_the_transaction_prefix_and_earlier_parent_effects
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn foreach_delete_preserves_identity_and_captured_values_and_reopens() {
+    let ((), report) = run_async_under_lab(0xf0ec_0021, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, query, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(1), vec![COUNTER], vec![(P, CanonicalScalar::Int(7))]);
+        db.write(&commit, seed).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let chain = prepare(
+            "MATCH (n:Counter) WITH n,n.p AS captured \
+             FOREACH (target IN [n,NULL,n] | DELETE target) RETURN n,captured,[n]",
+        );
+        let mut txn = db.begin(&txcx).unwrap();
+        let (stats, rows, receipt) = txn
+            .execute_graph_write_chain_governed(
+                &mut db,
+                &query,
+                &chain,
+                generous(),
+                |_| -> Result<ElementId, ()> { panic!("deletion reserves no identity") },
+            )
+            .unwrap();
+        assert_eq!(stats.created_vertices, 0);
+        assert_eq!(receipt.stats().mutation_effects, 2);
+        assert_eq!(rows.value.len(), 1);
+        assert_eq!(
+            rows.value[0].values(),
+            &[
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Scalar(CanonicalScalar::Int(7)),
+                GraphValue::List(vec![GraphValue::Vertex(VId(1))].into()),
+            ]
+        );
+        assert!(txn.vertices(&db).unwrap().is_empty());
+        assert_eq!(db.vertices().unwrap().len(), 1);
+        txn.finish(&mut db, &commit).await.unwrap();
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(db.delta_since(basis).unwrap().count(), 1);
+        assert_eq!(pinned.vertices().unwrap().len(), 1);
+        drop(db);
+        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert!(reopened.vertices().unwrap().is_empty());
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn foreach_local_create_update_delete_and_nested_continuation_are_one_write() {
+    let ((), report) = run_async_under_lab(0xf0ec_0022, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let basis = db.frontier().unwrap();
+        let chain = prepare(
+            "FOREACH (x IN [1,2] | CREATE (local:F {p:x}) SET local.q=x \
+             DELETE local FOREACH (y IN [x] | CREATE (:Outer {p:y})))",
+        );
+        let mut txn = db.begin(&contexts.txn()).unwrap();
+        let next = AtomicU64::new(100);
+        let (stats, rows, receipt) = txn
+            .execute_graph_write_chain_governed(
+                &mut db,
+                &contexts.query(),
+                &chain,
+                policy(0, HIGH, HIGH, 4, 4),
+                |request| allocate(&next, request),
+            )
+            .unwrap();
+        assert_eq!(stats.created_vertices, 4);
+        assert_eq!(receipt.stats().mutation_effects, 4);
+        assert!(rows.value.is_empty());
+        assert_eq!(next.load(Ordering::Relaxed), 104);
+        let vertices = txn.vertices(&db).unwrap();
+        assert_eq!(
+            vertices.iter().map(|vertex| vertex.vid).collect::<Vec<_>>(),
+            [VId(101), VId(103)]
+        );
+        for (vertex, value) in vertices.iter().zip([1, 2]) {
+            assert_eq!(vertex.labels, [OUTER]);
+            assert_eq!(vertex.props, vec![(P, CanonicalScalar::Int(value).into())]);
+        }
+        txn.finish(&mut db, &contexts.commit()).await.unwrap();
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(db.vertices().unwrap(), vertices);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn foreach_detach_cascades_self_parallel_and_incoming_edges_before_repeated_deletes() {
+    let ((), report) = run_async_under_lab(0xf0ec_0023, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let mut db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(1), vec![COUNTER], vec![(P, CanonicalScalar::Int(1))]);
+        seed.create_vertex(VId(2), vec![OUTER], vec![(P, CanonicalScalar::Int(2))]);
+        for (edge, source, destination) in [(1, 1, 1), (2, 1, 2), (3, 1, 2), (4, 2, 1)] {
+            seed.add_edge(EId(edge), VId(source), VId(destination), vec![]);
+        }
+        db.write(&contexts.commit(), seed).await.unwrap();
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let chain = prepare(
+            "MATCH (n:Counter)-[r:R]->(m:Outer) WITH n,collect(r) AS edges \
+             FOREACH (x IN [1,2] | DETACH DELETE n FOREACH (r IN edges | DELETE r)) \
+             RETURN n,size(edges)",
+        );
+        let mut txn = db.begin(&contexts.txn()).unwrap();
+        let (_, rows, receipt) = txn
+            .execute_graph_write_chain_governed(
+                &mut db,
+                &contexts.query(),
+                &chain,
+                generous(),
+                |_| -> Result<ElementId, ()> { panic!("deletion reserves no identity") },
+            )
+            .unwrap();
+        assert_eq!(receipt.stats().mutation_effects, 6);
+        assert_eq!(rows.value.len(), 1);
+        assert_eq!(
+            rows.value[0].values(),
+            &[
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Scalar(CanonicalScalar::Int(2))
+            ]
+        );
+        assert!(txn.edges(&db).unwrap().is_empty());
+        assert!(txn.vertex(&db, VId(1)).unwrap().is_none());
+        assert_eq!(txn.vertices(&db).unwrap().len(), 1);
+        txn.finish(&mut db, &contexts.commit()).await.unwrap();
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        assert!(db.edges().unwrap().is_empty());
+        assert_eq!(pinned.edges().unwrap().len(), 4);
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn foreach_delete_failures_restore_the_entry_workspace_and_reads_remain_lazy() {
+    let ((), report) = run_async_under_lab(0xf0ec_0024, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        for (text, incident, effects, succeeds) in [
+            (
+                "MATCH (n:Counter) FOREACH (target IN [n,1] | DELETE target)",
+                false,
+                1000,
+                false,
+            ),
+            (
+                "MATCH (n:Counter) FOREACH (x IN [1] | DELETE n)",
+                true,
+                1000,
+                false,
+            ),
+            (
+                "MATCH (n:Counter) FOREACH (x IN [1,2] | DELETE n)",
+                false,
+                1,
+                false,
+            ),
+            (
+                "MATCH (n:Counter) FOREACH (x IN [1] | DELETE n) RETURN n.p",
+                false,
+                1000,
+                false,
+            ),
+            (
+                "MATCH (n:Counter) FOREACH (x IN [1] | DELETE n) RETURN properties(n).p",
+                false,
+                1000,
+                false,
+            ),
+            (
+                "MATCH (n:Counter) WITH n,n.p AS captured FOREACH (x IN [1] | DELETE n) \
+              RETURN CASE WHEN false THEN n.p ELSE captured END",
+                false,
+                1000,
+                true,
+            ),
+            (
+                "MATCH (n:Counter) WITH n,n.p AS captured FOREACH (x IN [1] | DELETE n) \
+              RETURN CASE WHEN false THEN properties(n).p ELSE captured END",
+                false,
+                1000,
+                true,
+            ),
+        ] {
+            let mut db = Database::open_memory(&contexts.commit(), keys())
+                .await
+                .unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(VId(1), vec![COUNTER], vec![(P, CanonicalScalar::Int(7))]);
+            if incident {
+                seed.add_edge(EId(1), VId(1), VId(1), vec![]);
+            }
+            db.write(&contexts.commit(), seed).await.unwrap();
+            let basis = db.frontier().unwrap();
+            let mut txn = db.begin(&contexts.txn()).unwrap();
+            let mut prefix = WriteBatch::new(R);
+            prefix.create_vertex(VId(50), vec![OUTER], vec![(P, CanonicalScalar::Int(99))]);
+            txn.write(&mut db, prefix).unwrap();
+            let entry = (
+                txn.staged_effect_digest().unwrap(),
+                txn.vertices(&db).unwrap(),
+                txn.edges(&db).unwrap(),
+            );
+            let result = txn.execute_graph_write_chain_governed(
+                &mut db,
+                &contexts.query(),
+                &prepare(text),
+                policy(HIGH, HIGH, HIGH, 0, effects),
+                |_| -> Result<ElementId, ()> { panic!("deletion reserves no identity") },
+            );
+            if succeeds {
+                let (_, rows, _) = result.unwrap_or_else(|error| panic!("{text}: {error:?}"));
+                assert_eq!(rows.value.len(), 1);
+                assert_eq!(
+                    rows.value[0].values(),
+                    &[GraphValue::Scalar(CanonicalScalar::Int(7))]
+                );
+                assert!(txn.vertex(&db, VId(1)).unwrap().is_none());
+            } else {
+                result.expect_err(text);
+                assert_eq!(
+                    (
+                        txn.staged_effect_digest().unwrap(),
+                        txn.vertices(&db).unwrap(),
+                        txn.edges(&db).unwrap()
+                    ),
+                    entry,
+                    "{text}"
+                );
+            }
+            assert_eq!(db.frontier().unwrap(), basis);
+            txn.finish(&mut db, &contexts.commit()).await.unwrap();
+            assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+            assert!(db.vertex(VId(50)).unwrap().is_some());
+            assert_eq!(db.vertex(VId(1)).unwrap().is_none(), succeeds);
+            assert_eq!(contexts.txn().outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

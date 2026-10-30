@@ -109,6 +109,9 @@ impl WriteTxn {
         use fgdb_gql::GraphElementMetadata;
         let _ = self.query_snapshot(database).map_err(source_error)?;
         control(SourceEvent::Work)?;
+        if scope.is_none() {
+            self.check_chain_element_read(element, control, source_error)?;
+        }
         let mut attempt = ProjectionReadAttempt {
             reads: &self.point_reads,
             element,

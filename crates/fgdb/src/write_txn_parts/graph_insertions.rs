@@ -395,7 +395,7 @@ impl WriteTxn {
             used.created_edges = used.created_edges.saturating_add(step.created_edges);
         };
         cx.with_restriction(|| {
-            let workspace = MutationProgramWorkspace::new(self);
+            let workspace = MutationProgramWorkspace::for_write_chain(self);
             // A chain is an ordered program whose steps may write different
             // relation types (`MERGE (a)-[:X]->(b) CREATE (b)-[:Y]->(c)`), each
             // seeing its predecessor, as a mixed write program's do.

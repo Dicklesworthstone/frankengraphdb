@@ -489,6 +489,26 @@ impl<'a> Parser<'a> {
         let mut deletion_mode = None;
         loop {
             let at = self.current.at;
+            // A chain owns sequential clauses, while each native mutation
+            // owns one simultaneous homogeneous proposal. Leave a different
+            // mode untouched so row_mutation can produce its implicit WITH
+            // continuation before the next owner parses it. This also keeps
+            // FOREACH's ordered update/delete body on the ordinary IR.
+            let next_mode = if self.is_word("SET") || self.is_word("REMOVE") {
+                Some((false, false))
+            } else if self.is_word("DETACH") {
+                Some((true, true))
+            } else if self.is_word("DELETE") {
+                Some((true, false))
+            } else {
+                None
+            };
+            if self.chain_write
+                && deletion_mode
+                    .is_some_and(|previous| next_mode.is_some_and(|next| previous != next))
+            {
+                break;
+            }
             // (setting, deleting, detach)
             let (setting, deleting, detach) = if self.take_word("SET")? {
                 (true, false, false)

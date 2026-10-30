@@ -211,7 +211,9 @@ impl PreparedGraphForeachText {
                     next = after;
                 }
                 TokenKind::Word(word)
-                    if word.eq_ignore_ascii_case("SET") || word.eq_ignore_ascii_case("REMOVE") =>
+                    if ["SET", "REMOVE", "DELETE", "DETACH"]
+                        .iter()
+                        .any(|clause| word.eq_ignore_ascii_case(clause)) =>
                 {
                     let (step, returning, after) =
                         crate::mutation_text::PreparedGraphMutationRowsText::prepare_chained(
@@ -499,14 +501,15 @@ impl Parser<'_> {
                         && !matches!(previous, Some(TokenKind::Word(prior))
                         if ["AS", "STARTS", "ENDS", "ON"].iter().any(|word| prior.eq_ignore_ascii_case(word))) =>
                 {
-                    if ["CREATE", "INSERT", "MERGE", "SET", "REMOVE", "FOREACH"]
-                        .iter()
-                        .any(|clause| word.eq_ignore_ascii_case(clause))
+                    if [
+                        "CREATE", "INSERT", "MERGE", "SET", "REMOVE", "DELETE", "DETACH", "FOREACH",
+                    ]
+                    .iter()
+                    .any(|clause| word.eq_ignore_ascii_case(clause))
                     {
                         clauses += 1;
                     } else if [
-                        "DELETE", "DETACH", "MATCH", "OPTIONAL", "WITH", "RETURN", "UNWIND",
-                        "CALL", "UNION",
+                        "MATCH", "OPTIONAL", "WITH", "RETURN", "UNWIND", "CALL", "UNION",
                     ]
                     .iter()
                     .any(|clause| word.eq_ignore_ascii_case(clause))
@@ -514,7 +517,7 @@ impl Parser<'_> {
                         return Err(error(
                             token.at,
                             GraphPatternTextErrorKind::Expected(
-                                "CREATE, INSERT, MERGE, SET, REMOVE or FOREACH in FOREACH",
+                                "CREATE, INSERT, MERGE, SET, REMOVE, DELETE, DETACH DELETE or FOREACH in FOREACH",
                             ),
                         ));
                     }
@@ -592,6 +595,26 @@ mod tests {
     }
 
     #[test]
+    fn deletion_bodies_use_native_mutations_and_preserve_clause_boundaries() {
+        for text in [
+            "FOREACH (x IN [] | DELETE x)",
+            "FOREACH (x IN [] | FOREACH (y IN [] | DETACH DELETE y))",
+            "MATCH (n:F) FOREACH (x IN [1,2] | DELETE n) RETURN n",
+            "MATCH (n:F) FOREACH (x IN [1,2] | DETACH DELETE n) RETURN 1",
+            "MATCH p=(a:F)-[r:R]->(b:F) FOREACH (x IN [p] | DELETE x)",
+            "MATCH (n:F) WITH collect(n) AS nodes FOREACH (x IN nodes | DELETE x)",
+            "FOREACH (x IN [1,2] | CREATE (local:F {p:x}) SET local.q=x DELETE local CREATE (:F {p:x}))",
+            "MATCH (a:F),(b:F) FOREACH (x IN [1] | SET a.p=x DELETE a SET b.q=x DETACH DELETE b)",
+        ] {
+            let template = PreparedGraphWriteChainText::prepare(text, RelationId(1), symbols)
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            template
+                .bind_parameters(&GqlParameters::new())
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        }
+    }
+
+    #[test]
     fn local_names_and_unsupported_bodies_refuse_even_when_the_collection_is_empty() {
         for text in [
             "FOREACH (x IN [] | CREATE (local:F)) RETURN local",
@@ -601,14 +624,14 @@ mod tests {
             "FOREACH (x IN [] | FOREACH (y IN [] | MATCH (n:F) SET n.p=1))",
             "FOREACH (x IN [] | FOREACH (y IN [] | CREATE (child:F)) SET child.p=1)",
             "FOREACH (x IN [] | FOREACH (y IN [] | CREATE (:F)) CREATE (:F {p:y}))",
-            "FOREACH (x IN [] | FOREACH (y IN [] | DELETE y))",
+            "FOREACH (x IN [] | FOREACH (y IN [] | DELETE missing))",
             "FOREACH (x IN [] | MERGE (local:F)) RETURN local",
             "FOREACH (x IN [] | MERGE (a:F)-[r:R]->(b:F)) RETURN a",
             "FOREACH (x IN [] | MERGE path=(a:F)-[r:R]->(b:F)) RETURN path",
             "FOREACH (x IN [] | MERGE (n:F {p:missing}))",
             "FOREACH (x IN [] | MERGE (n:F) MATCH (m:F) SET m.p=1)",
-            "MATCH (n:F) FOREACH (x IN [] | DELETE n)",
-            "MATCH (n:F) FOREACH (x IN [] | DETACH DELETE n)",
+            "MATCH (n:F) FOREACH (x IN [] | DELETE missing)",
+            "MATCH (n:F) FOREACH (x IN [] | DETACH DELETE missing)",
             "FOREACH (x IN [] | CREATE (:F) WITH x CREATE (:F))",
             "FOREACH (x IN [] | MATCH (n:F) SET n.p=1)",
             "FOREACH (x IN [] | CREATE (:F) RETURN x)",

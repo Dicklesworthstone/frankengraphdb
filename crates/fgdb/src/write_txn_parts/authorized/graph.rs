@@ -234,6 +234,15 @@ pub(super) fn stage_edge<V: Vfs + Clone, Clock: FnMut() -> u64>(
         } => (*eid, false, false, execution.fields([], [*key])?),
         _ => return Err(WriteTxnError::AuthorizedMutationRefused),
     };
+    if deletes
+        && transaction
+            .chain_element_retired(ElementId::Edge(eid), &mut |_| execution.checkpoint())?
+    {
+        // Only the current chain's successfully authorized retirements can
+        // take this path; missing/hidden first attempts still need an image.
+        execution.checkpoint()?;
+        return Ok(());
+    }
     let before = execution.edge(transaction, database, eid)?;
     if let Some(before) = &before {
         if deletes {
@@ -255,6 +264,18 @@ pub(super) fn delete_vertex<V: Vfs + Clone, Clock: FnMut() -> u64>(
     row: PendingRow,
     execution: &mut Execution<'_, '_, Clock>,
 ) -> Result<(), WriteTxnError> {
+    delete_vertex_retirements(transaction, database, relation, row, execution).map(|_| ())
+}
+
+/// Return the exact fully admitted cascade only after native retirement and
+/// all after-image checks succeed. The chain owner meters any retained proof.
+pub(super) fn delete_vertex_retirements<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    relation: RelationId,
+    row: PendingRow,
+    execution: &mut Execution<'_, '_, Clock>,
+) -> Result<Vec<EId>, WriteTxnError> {
     let PendingRow::DeleteVertex { vid, .. } = &row else {
         return Err(WriteTxnError::AuthorizedMutationRefused);
     };
@@ -269,6 +290,10 @@ pub(super) fn delete_vertex<V: Vfs + Clone, Clock: FnMut() -> u64>(
         return Err(denied());
     }
     let vid = *vid;
+    if transaction.chain_element_retired(ElementId::Vertex(vid), &mut |_| execution.checkpoint())? {
+        execution.checkpoint()?;
+        return Ok(Vec::new());
+    }
     let before = execution
         .vertex(transaction, database, vid)?
         .ok_or_else(denied)?;
@@ -302,10 +327,10 @@ pub(super) fn delete_vertex<V: Vfs + Clone, Clock: FnMut() -> u64>(
     }
     // Confirm the native cascade actually removed every authorized incidence;
     // no missing-edge interpretation or synthetic post-image reaches commit.
-    for eid in cascades {
+    for &eid in &cascades {
         if execution.edge_record(transaction, database, eid)?.is_some() {
             return Err(WriteTxnError::AuthorizedMutationRefused);
         }
     }
-    Ok(())
+    Ok(cascades)
 }

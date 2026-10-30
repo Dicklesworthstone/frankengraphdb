@@ -664,12 +664,18 @@ pub(super) fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
     returning: bool,
 ) -> Result<(GraphMutationStats, Vec<VId>, Vec<EId>), Fault> {
     let mut stats = proposal.stats();
-    if proposal.intents().iter().any(|intent| {
-        matches!(
-            intent,
-            GraphMutationIntent::Delete { .. } | GraphMutationIntent::DeleteEdge { .. }
-        )
-    }) {
+    let detaching = proposal
+        .intents()
+        .iter()
+        .any(|intent| matches!(intent, GraphMutationIntent::DetachDelete { .. }));
+    if !detaching
+        && proposal.intents().iter().any(|intent| {
+            matches!(
+                intent,
+                GraphMutationIntent::Delete { .. } | GraphMutationIntent::DeleteEdge { .. }
+            )
+        })
+    {
         // A plain DELETE statement has no other action: the same scope
         // rules, incidence proof and staging order as authorized DELETE.
         let mut vertices = Vec::new();
@@ -724,7 +730,14 @@ pub(super) fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
         return Ok((stats, vertices, edges));
     }
     let mut targets = BTreeSet::new();
-    for intent in proposal.into_intents() {
+    let mut intents = proposal.into_intents();
+    if detaching {
+        // An explicitly named edge needs its original endpoints for admission
+        // before any vertex cascade retires them. Native DELETE ordering uses
+        // this same edge-before-vertex rule.
+        intents.sort_by_key(|intent| !matches!(intent, GraphMutationIntent::DeleteEdge { .. }));
+    }
+    for intent in intents {
         query_cx
             .checkpoint()
             .map_err(WriteTxnError::Interrupted)
@@ -763,7 +776,11 @@ pub(super) fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
                 batch.delete_vertex(vertex);
                 ElementId::Vertex(vertex)
             }
-            GraphMutationIntent::Delete { .. } | GraphMutationIntent::DeleteEdge { .. } => {
+            GraphMutationIntent::DeleteEdge { edge } => {
+                batch.delete_edge(edge);
+                ElementId::Edge(edge)
+            }
+            GraphMutationIntent::Delete { .. } => {
                 unreachable!("plain DELETE statements complete above")
             }
         };
@@ -781,7 +798,45 @@ pub(super) fn stage_proposal<V: Vfs + Clone, Clock: FnMut() -> u64>(
             }
         }
         for row in batch.rows {
-            stage(transaction, database, batch.relation, row, execution).map_err(source)?;
+            let deletion = matches!(
+                &row,
+                crate::PendingRow::DeleteVertex { .. } | crate::PendingRow::DeleteEdge { .. }
+            );
+            let cascades = if transaction.chain_retirements.is_some()
+                && matches!(&row, crate::PendingRow::DeleteVertex { .. })
+            {
+                super::graph::delete_vertex_retirements(
+                    transaction,
+                    database,
+                    batch.relation,
+                    row,
+                    execution,
+                )
+                .map_err(source)?
+            } else {
+                stage(transaction, database, batch.relation, row, execution).map_err(source)?;
+                Vec::new()
+            };
+            if deletion {
+                for element in
+                    core::iter::once(target).chain(cascades.into_iter().map(ElementId::Edge))
+                {
+                    transaction.record_chain_retirement(element, &mut |event| {
+                        crate::write_txn::chain_retirement_event(
+                            &mut stats,
+                            policy,
+                            event,
+                            &mut || {
+                                query_cx
+                                    .checkpoint()
+                                    .map_err(WriteTxnError::Interrupted)
+                                    .map_err(source)?;
+                                execution.checkpoint().map_err(source)
+                            },
+                        )
+                    })?;
+                }
+            }
         }
     }
     // Build the complete private receipt before commit admission.

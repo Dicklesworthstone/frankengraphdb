@@ -763,6 +763,7 @@ impl<V: Vfs + Clone> Database<V> {
                         .map_err(|error| source(WriteTxnError::Write(error)))?,
                 ));
                 workspace.transaction().program_multi_relation = true;
+                workspace.transaction().chain_retirements = Some(Default::default());
                 let mut used = GraphInsertStats {
                     selection: GqlExecutionStats {
                         snapshot_records: 0,

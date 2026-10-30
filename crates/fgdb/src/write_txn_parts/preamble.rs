@@ -583,6 +583,9 @@ pub enum WriteTxnError {
         step: usize,
     },
     NoPreparedWrite,
+    /// A reached expression observes fields of an identity retired earlier
+    /// in this native write chain. Carrying its identity alone stays legal.
+    DeletedElementRead,
     Finished,
     /// The supplied database is not the opened handle that began this txn.
     /// Refusal preserves the transaction for use with its actual owner.
@@ -661,6 +664,7 @@ impl core::fmt::Display for WriteTxnError {
                 "authorized write chain step {step} is not a supported creation step"
             ),
             Self::NoPreparedWrite => formatter.write_str("write transaction has no batch"),
+            Self::DeletedElementRead => formatter.write_str("read of a deleted graph element"),
             Self::Finished => formatter.write_str("write transaction is already finished"),
             Self::WrongDatabase => {
                 formatter.write_str("write transaction belongs to a different database handle")
@@ -735,6 +739,7 @@ impl core::error::Error for WriteTxnError {
             | Self::AuthorizedClientIdentity
             | Self::AuthorizedChainStepUnsupported { .. }
             | Self::NoPreparedWrite
+            | Self::DeletedElementRead
             | Self::Finished
             | Self::WrongDatabase
             | Self::UnknownSavepoint
@@ -795,6 +800,10 @@ pub struct WriteTxn {
     // Program guards and savepoints retain this exact immutable prefix. Staging
     // replaces the handle; it never copies the accumulated delta to save it.
     prepared: Option<std::sync::Arc<PreparedWrite>>,
+    /// Successful retirements proved by the currently executing chain only.
+    /// Its workspace clears this ledger on success, refusal and unwinding;
+    /// it is not an inference from absence or raw staged instructions.
+    chain_retirements: Option<ChainRetirements>,
     savepoints: Vec<EmbeddedSavepoint>,
     /// Enabled only while a mixed write program owns its rollback workspace.
     program_multi_relation: bool,

@@ -64,6 +64,47 @@ fn merge_grant(rows: u64) -> Grant {
     scoped
 }
 
+fn deletion_grant(rows: u64) -> Grant {
+    let mut scoped = grant(Rights::ReadWrite, rows);
+    scoped.labels = Scope::All;
+    scoped.relations = Scope::All;
+    scoped.properties = Scope::All;
+    scoped
+}
+
+async fn deletion_database(commit: &fgdb_types::CommitCx) -> Database<MemVfs> {
+    let mut db = Database::open_memory(commit, keys()).await.unwrap();
+    let mut seed = WriteBatch::new(R);
+    for (id, label) in [(1, VISIBLE), (2, VISIBLE), (3, HIDDEN), (4, VISIBLE)] {
+        seed.create_vertex(
+            VId(id),
+            vec![label],
+            vec![
+                (P, CanonicalScalar::Int(id as i64)),
+                (SECRET, CanonicalScalar::Int(90 + id as i64)),
+            ],
+        );
+    }
+    for (id, src, dst) in [(11, 1, 2), (12, 1, 2), (13, 2, 1), (14, 1, 1), (15, 2, 2)] {
+        seed.add_edge(
+            EId(id),
+            VId(src),
+            VId(dst),
+            vec![(P, CanonicalScalar::Int(id as i64))],
+        );
+    }
+    db.write(commit, seed).await.unwrap();
+    let mut incoming = WriteBatch::new(S);
+    incoming.add_edge(
+        EId(16),
+        VId(3),
+        VId(1),
+        vec![(SECRET, CanonicalScalar::Int(99))],
+    );
+    db.write(commit, incoming).await.unwrap();
+    db
+}
+
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Label, "Visible") => Some(GraphSymbol::Label(VISIBLE)),
@@ -104,6 +145,476 @@ fn expression_error(error: &(dyn core::error::Error + 'static)) -> Option<GraphI
         cause = error.source();
     }
     None
+}
+
+fn deleted_element_read(error: &(dyn core::error::Error + 'static)) -> bool {
+    let mut cause = Some(error);
+    while let Some(error) = cause {
+        if matches!(
+            error.downcast_ref::<WriteTxnError>(),
+            Some(WriteTxnError::DeletedElementRead)
+        ) {
+            return true;
+        }
+        cause = error.source();
+    }
+    false
+}
+
+#[test]
+fn authorized_foreach_delete_reuses_only_successful_explicit_and_cascade_retirements() {
+    let ((), report) = run_async_under_lab(0xf0ea_c020, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&deletion_grant(0), NOW).unwrap();
+        for (text, removed_vertices, removed_edges) in [
+            (
+                "MATCH (:Visible {p:1})-[r:R]->(:Visible {p:2}) \
+                 FOREACH (i IN [1,2] | DELETE r)",
+                vec![],
+                vec![EId(11), EId(12)],
+            ),
+            (
+                "MATCH (n:Visible {p:4}) FOREACH (i IN [1,2] | DELETE n)",
+                vec![VId(4)],
+                vec![],
+            ),
+            (
+                // The two parallel matches carry the same vertex but distinct
+                // relationships. The first DETACH retires both relationships;
+                // later explicit DELETEs and outer occurrences have no live
+                // before-image and must reuse only this execution's proof.
+                "MATCH (n:Visible {p:1})-[r:R]->(:Visible {p:2}) \
+                 FOREACH (i IN [1,2] | DETACH DELETE n DELETE r)",
+                vec![VId(1)],
+                vec![EId(11), EId(12), EId(13), EId(14), EId(16)],
+            ),
+            (
+                // Explicit edges share a DETACH proposal with the vertex.
+                // Admit those original edge images before the cascade.
+                "MATCH (n:Visible {p:1})-[r:R]->(:Visible {p:2}) \\
+                 FOREACH (i IN [1,2] | DETACH DELETE n,r)",
+                vec![VId(1)],
+                vec![EId(11), EId(12), EId(13), EId(14), EId(16)],
+            ),
+        ] {
+            let mut db = deletion_database(&commit).await;
+            let before = db.frontier().unwrap();
+            let survivors: Vec<_> = db
+                .vertices()
+                .unwrap()
+                .into_iter()
+                .filter(|vertex| !removed_vertices.contains(&vertex.vid))
+                .collect();
+            let surviving_edges: Vec<_> = db
+                .edges()
+                .unwrap()
+                .into_iter()
+                .filter(|edge| !removed_edges.contains(&edge.entry.eid))
+                .collect();
+            let (stats, rows, completion) = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &chain(text),
+                    policy(0),
+                    || NOW,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            assert_eq!((stats.created_vertices, stats.created_edges), (0, 0));
+            assert!(rows.value.is_empty());
+            assert_eq!(db.vertices().unwrap(), survivors, "{text}");
+            assert_eq!(db.edges().unwrap(), surviving_edges, "{text}");
+            assert!(matches!(
+                completion,
+                EmbeddedTxnCompletion::WriteCommitted { commit_seq }
+                if commit_seq.0 == before.0 + 1
+            ));
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authorized_foreach_delete_late_bad_or_unproved_targets_rollback_prior_retirements() {
+    let ((), report) = run_async_under_lab(0xf0ea_c021, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let mut edge_scope = deletion_grant(0);
+        edge_scope.labels = Scope::only([VISIBLE]);
+        edge_scope.relations = Scope::only([R]);
+        for (targets, scoped, bad_type) in [
+            (
+                vec![
+                    GraphValue::Vertex(VId(4)),
+                    GraphValue::Scalar(CanonicalScalar::Int(7)),
+                ],
+                deletion_grant(0),
+                true,
+            ),
+            (
+                vec![GraphValue::Vertex(VId(4)), GraphValue::Vertex(VId(999))],
+                deletion_grant(0),
+                false,
+            ),
+            (
+                vec![GraphValue::Edge(EId(11)), GraphValue::Edge(EId(16))],
+                edge_scope,
+                false,
+            ),
+        ] {
+            let mut db = deletion_database(&commit).await;
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            let token = issuer.issue_at(&scoped, NOW).unwrap();
+            let program = PreparedGraphWriteChainText::prepare(
+                "FOREACH (target IN $targets | DELETE target)",
+                R,
+                symbols,
+            )
+            .unwrap()
+            .bind_parameters(&GqlParameters::new().with_list("targets", targets).unwrap())
+            .unwrap();
+            let error = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    policy(0),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            if bad_type {
+                assert!(
+                    matches!(
+                        &error,
+                        fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphWriteChainError::Mutation(
+                            fgdb_gql::GraphMutationQueryError::Mutation(
+                                fgdb_gql::GraphMutationError::NonElementDelete { .. }
+                            )
+                        ))
+                    ),
+                    "{error:?}"
+                );
+            } else {
+                assert_eq!(authorization(&error), Some(Error::ScopeDenied), "{error:?}");
+            }
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before,
+                "a prior successful retirement grants no authority over another identity"
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authorized_foreach_delete_keeps_cumulative_work_scratch_and_effect_limits() {
+    let ((), report) = run_async_under_lab(0xf0ea_c022, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&deletion_grant(1), NOW).unwrap();
+        let program =
+            chain("MATCH (n:Visible {p:4}) FOREACH (i IN [1,2,3] | DELETE n) RETURN 1 AS done");
+        let mut measured = None;
+        for attempt in 0..4 {
+            let mut db = deletion_database(&commit).await;
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            let mut bounded = policy(1).with_mutation_limit(3);
+            if let Some((work, scratch)) = measured {
+                match attempt {
+                    1 => bounded.query.evaluator.max_work_units = work - 1,
+                    2 => bounded.query.evaluator.max_scratch_entries = scratch - 1,
+                    _ => bounded.max_mutation_effects = 2,
+                }
+            }
+            let result = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    bounded,
+                    || NOW,
+                )
+                .await;
+            if attempt == 0 {
+                let (stats, rows, _) = result.unwrap();
+                assert_eq!(rows.value.len(), 1);
+                assert_eq!(
+                    rows.value[0].values(),
+                    &[GraphValue::Scalar(CanonicalScalar::Int(1))]
+                );
+                assert!(db.vertex(VId(4)).unwrap().is_none());
+                assert_eq!(db.edges().unwrap(), before.2);
+                assert_eq!(db.frontier().unwrap().0, before.0.0 + 1);
+                assert!(stats.evaluator.work_units > 0 && stats.evaluator.scratch_entries > 0);
+                measured = Some((stats.evaluator.work_units, stats.evaluator.scratch_entries));
+            } else {
+                let error = result.unwrap_err();
+                if attempt < 3 {
+                    assert!(
+                        matches!(&error, fgdb_gql::GqlQueryError::Evaluator(_)),
+                        "{error:?}"
+                    );
+                } else {
+                    assert!(
+                        matches!(
+                            &error,
+                            fgdb_gql::GqlQueryError::Source(
+                                fgdb_gql::GraphWriteChainError::Mutation(
+                                    fgdb_gql::GraphMutationQueryError::Mutation(
+                                        fgdb_gql::GraphMutationError::EffectLimit { .. }
+                                    )
+                                )
+                            )
+                        ),
+                        "{error:?}"
+                    );
+                }
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
+                    before,
+                    "attempt {attempt}: repeats still consume the one statement allowance"
+                );
+            }
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authorized_foreach_delete_keeps_scope_and_plain_incidence_refusals() {
+    let ((), report) = run_async_under_lab(0xf0ea_c023, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        for restriction in 0..4 {
+            let mut scoped = deletion_grant(0);
+            match restriction {
+                0 => scoped.labels = Scope::only([VISIBLE]),
+                1 => scoped.relations = Scope::only([R]),
+                2 => scoped.properties = Scope::only([P]),
+                _ => {}
+            }
+            let token = issuer.issue_at(&scoped, NOW).unwrap();
+            let mut db = deletion_database(&commit).await;
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            let program = chain(if restriction < 2 {
+                "MATCH (n:Visible {p:1}) FOREACH (i IN [1,2] | DETACH DELETE n)"
+            } else {
+                "MATCH (n:Visible {p:1}) FOREACH (i IN [1,2] | DELETE n)"
+            });
+            let error = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    policy(0),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            if restriction < 3 {
+                assert_eq!(authorization(&error), Some(Error::ScopeDenied), "{error:?}");
+            } else {
+                assert!(
+                    matches!(
+                        &error,
+                        fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphWriteChainError::Mutation(
+                            fgdb_gql::GraphMutationQueryError::Mutation(
+                                fgdb_gql::GraphMutationError::IncidentRelationships
+                            )
+                        ))
+                    ),
+                    "{error:?}"
+                );
+            }
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before,
+                "scope cannot conceal a cascade and plain DELETE never becomes DETACH"
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authorized_foreach_deleted_reads_are_lazy_and_cover_restored_rows_and_continuations() {
+    let ((), report) = run_async_under_lab(0xf0ea_c024, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&deletion_grant(1), NOW).unwrap();
+        let mut db = deletion_database(&commit).await;
+        let before = db.frontier().unwrap();
+        let (_, rows, _) = db
+            .execute_graph_write_chain_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &chain(
+                    "MATCH (n:Visible {p:4}) WITH n,n.p AS saved \
+                     FOREACH (i IN [1,2] | DELETE n) RETURN n AS identity,saved, \
+                     CASE WHEN false THEN n.p ELSE saved END AS lazy_property, \
+                     CASE WHEN false THEN properties(n).p ELSE 42 END AS lazy_metadata",
+                ),
+                policy(1),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.value.len(), 1);
+        assert_eq!(
+            rows.value[0].values(),
+            &[
+                GraphValue::Vertex(VId(4)),
+                GraphValue::Scalar(CanonicalScalar::Int(4)),
+                GraphValue::Scalar(CanonicalScalar::Int(4)),
+                GraphValue::Scalar(CanonicalScalar::Int(42)),
+            ]
+        );
+        assert!(db.vertex(VId(4)).unwrap().is_none());
+        assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+
+        // A DETACH proof names actual retired EIds. It must not poison a
+        // carried relationship that survived the cascade.
+        let mut db = deletion_database(&commit).await;
+        let (_, rows, _) = db
+            .execute_graph_write_chain_authorized(
+                &txn,
+                &query,
+                &commit,
+                &issuer,
+                &token,
+                "main",
+                &chain(
+                    "MATCH (n:Visible {p:1}),(a:Visible {p:2})-[safe:R]->(b:Visible {p:2}) \
+                     FOREACH (i IN [1,2] | DETACH DELETE n) RETURN safe.p AS value",
+                ),
+                policy(1),
+                || NOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.value.len(), 1);
+        assert_eq!(
+            rows.value[0].values(),
+            &[GraphValue::Scalar(CanonicalScalar::Int(15))]
+        );
+        assert_eq!(db.edges().unwrap().len(), 1);
+        assert_eq!(db.edges().unwrap()[0].entry.eid, EId(15));
+
+        for (text, terminal_read) in [
+            (
+                "MATCH (n:Visible {p:4}) FOREACH (i IN [1] | DELETE n) RETURN n.p",
+                false,
+            ),
+            (
+                "MATCH (n:Visible {p:4}) FOREACH (i IN [1] | DELETE n) RETURN properties(n).p",
+                false,
+            ),
+            (
+                "MATCH (n:Visible {p:4}) FOREACH (i IN [1] | DELETE n) \
+                 WITH n MATCH (m:Visible {p:2}) RETURN n.p",
+                true,
+            ),
+            (
+                "MATCH (n:Visible {p:4}) FOREACH (i IN [1] | DELETE n) \
+                 FOREACH (x IN [n.p] | CREATE (:Visible {p:x})) RETURN 1",
+                false,
+            ),
+        ] {
+            let mut db = deletion_database(&commit).await;
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            let program = chain(text);
+            if terminal_read {
+                assert!(program.read_continuation().is_some());
+            }
+            let error = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &program,
+                    policy(1),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            assert!(deleted_element_read(&error), "{text}: {error:?}");
+            assert_eq!(
+                (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap()
+                ),
+                before,
+                "a reached deleted-element read aborts the earlier retirement: {text}"
+            );
+            assert_eq!(txn.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

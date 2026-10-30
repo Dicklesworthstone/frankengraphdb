@@ -10,6 +10,8 @@ struct MutationProgramWorkspace<'txn> {
     prepared: Option<std::sync::Arc<PreparedWrite>>,
     independent_creates: Option<IndependentCreateWrites>,
     program_multi_relation: bool,
+    owns_chain_retirements: bool,
+    chain_retirements_len: Option<usize>,
     accepted: bool,
 }
 impl<'txn> MutationProgramWorkspace<'txn> {
@@ -20,14 +22,32 @@ impl<'txn> MutationProgramWorkspace<'txn> {
         // value keeps nested row/action guards independent of the prefix's size.
         let prepared = txn.prepared.clone();
         let program_multi_relation = txn.program_multi_relation;
+        let chain_retirements_len = txn
+            .chain_retirements
+            .as_ref()
+            .map(|retired| retired.journal.len());
         Self {
             txn,
             staged_len,
             prepared,
             independent_creates: None,
             program_multi_relation,
+            owns_chain_retirements: false,
+            chain_retirements_len,
             accepted: false,
         }
+    }
+    /// A nested prefix shares the outer write/read statement's proof until
+    /// its terminal read succeeds. Ordinary nested native owners neither
+    /// reset the ledger nor extend its lifetime outside this chain.
+    fn for_write_chain(txn: &'txn mut WriteTxn) -> Self {
+        let owns_chain_retirements = txn.chain_retirements.is_none();
+        if owns_chain_retirements {
+            txn.chain_retirements = Some(ChainRetirements::default());
+        }
+        let mut workspace = Self::new(txn);
+        workspace.owns_chain_retirements = owns_chain_retirements;
+        workspace
     }
     fn accept(mut self) {
         self.accepted = true;
@@ -37,6 +57,14 @@ impl Drop for MutationProgramWorkspace<'_> {
     fn drop(&mut self) {
         // Scope permission never escapes, including accepted or nested workspaces.
         self.txn.program_multi_relation = self.program_multi_relation;
+        if self.owns_chain_retirements {
+            self.txn.chain_retirements = None;
+        } else if !self.accepted
+            && let (Some(retired), Some(len)) =
+                (&mut self.txn.chain_retirements, self.chain_retirements_len)
+        {
+            retired.truncate(len);
+        }
         if self.accepted {
             return;
         }

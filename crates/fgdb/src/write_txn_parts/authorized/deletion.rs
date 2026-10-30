@@ -346,6 +346,21 @@ pub(super) fn complete<V: Vfs + Clone, Clock: FnMut() -> u64>(
         for row in batch.rows {
             stage(transaction, database, batch.relation, row, execution).map_err(source)?;
         }
+        transaction.record_chain_retirement(
+            fgdb_delta_types::ElementId::Edge(*edge),
+            &mut |kind| {
+                event(
+                    &mut stats,
+                    policy,
+                    query_cx,
+                    execution,
+                    match kind {
+                        fgdb_gql::GlaExecutionEvent::ScratchEntry => SourceEvent::ScratchEntry,
+                        _ => SourceEvent::Work,
+                    },
+                )
+            },
+        )?;
     }
     for vertex in &vertices {
         event(
@@ -360,6 +375,21 @@ pub(super) fn complete<V: Vfs + Clone, Clock: FnMut() -> u64>(
         for row in batch.rows {
             stage(transaction, database, batch.relation, row, execution).map_err(source)?;
         }
+        transaction.record_chain_retirement(
+            fgdb_delta_types::ElementId::Vertex(*vertex),
+            &mut |kind| {
+                event(
+                    &mut stats,
+                    policy,
+                    query_cx,
+                    execution,
+                    match kind {
+                        fgdb_gql::GlaExecutionEvent::ScratchEntry => SourceEvent::ScratchEntry,
+                        _ => SourceEvent::Work,
+                    },
+                )
+            },
+        )?;
     }
     if returning {
         Ok((stats, vertices, edges))
