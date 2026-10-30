@@ -13,7 +13,11 @@
 //! write before the next reads its rows, all inside one atomic workspace,
 //! under one cumulative allowance.
 
+mod foreach;
 mod read;
+
+pub(crate) use foreach::PreparedGraphForeachText;
+pub use foreach::{GraphWriteChainCursor, GraphWriteChainTask, PreparedGraphForeach};
 
 use crate::insertion::PreparedGraphInsert;
 use crate::insertion_query_text::InsertReturnTemplate;
@@ -32,6 +36,8 @@ use crate::{
 /// One parsed write of a chain.
 #[derive(Clone)]
 pub(crate) enum ChainTextStep {
+    /// A scoped iteration whose body never changes its outer occurrence bag.
+    Foreach(Box<PreparedGraphForeachText>),
     /// CREATE, with its WITH head (every step but the last) or RETURN.
     Insert(Box<(PreparedGraphInsertText, Option<InsertReturnTemplate>)>),
     /// A relationship MERGE over the previous write's rows (the last step).
@@ -74,6 +80,7 @@ impl PreparedGraphWriteChainText {
             return true;
         }
         match self.steps.last() {
+            Some(ChainTextStep::Foreach(step)) => step.returning,
             Some(ChainTextStep::Insert(step)) => step.1.is_some(),
             Some(ChainTextStep::EdgeMerge(step)) => step.1.is_some(),
             Some(ChainTextStep::Mutation(step)) => step.1.is_some(),
@@ -200,6 +207,9 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::err
 /// One bound write of a chain.
 #[derive(Clone, PartialEq, Eq)]
 pub enum GraphWriteChainStep {
+    /// Native scoped side effects over an evaluated collection. Hosts execute
+    /// this through GraphWriteChainCursor inside their existing workspace.
+    Foreach(Box<PreparedGraphForeach>),
     /// A CREATE with a WITH head (every step but the last) or a RETURN (the
     /// last step): it returns rows.
     Query(Box<PreparedGraphInsertQuery>),
@@ -245,6 +255,7 @@ pub enum GraphWriteChainStep {
 impl core::fmt::Debug for GraphWriteChainStep {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
+            Self::Foreach(_) => "Foreach([REDACTED])",
             Self::Query(_) => "Query([REDACTED])",
             Self::Insert(_) => "Insert([REDACTED])",
             Self::EdgeMerge(_) => "EdgeMerge([REDACTED])",
@@ -487,6 +498,7 @@ impl PreparedGraphWriteChain {
     /// The schema of the write prefix, before its optional terminal read.
     pub(crate) fn write_columns(&self) -> &[String] {
         match self.steps.last() {
+            Some(GraphWriteChainStep::Foreach(step)) => step.columns(),
             Some(GraphWriteChainStep::Query(query)) => query.columns(),
             Some(GraphWriteChainStep::EdgeMergeQuery(query)) => query.columns(),
             Some(GraphWriteChainStep::EdgeUpsertQuery { query, .. }) => query.columns(),
@@ -499,6 +511,9 @@ impl PreparedGraphWriteChain {
     /// Whether the statement returns rows (its last write has a RETURN).
     #[must_use]
     pub fn returns_rows(&self) -> bool {
+        if let Some(GraphWriteChainStep::Foreach(step)) = self.steps.last() {
+            return step.returns_rows();
+        }
         matches!(
             self.steps.last(),
             Some(

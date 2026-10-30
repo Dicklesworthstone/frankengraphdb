@@ -295,8 +295,9 @@ impl WriteTxn {
             GqlQueryExecution, GqlQueryPolicy, GraphEdgeMergePolicy, GraphEdgeMergeQueryError,
             GraphEdgeMergeStats, GraphInsertQueryError, GraphMutationPolicy,
             GraphMutationQueryError, GraphMutationStats, GraphVertexMergePolicy,
-            GraphVertexMergeRowsQueryError, GraphWriteChainError, GraphWriteChainStep,
-            GraphWriteProgramReceipt, GraphWriteProgramStats, GraphWriteStepReceipt,
+            GraphVertexMergeRowsQueryError, GraphWriteChainCursor, GraphWriteChainError,
+            GraphWriteChainStep, GraphWriteChainTask, GraphWriteProgramReceipt,
+            GraphWriteProgramStats, GraphWriteStepReceipt,
         };
         let source = |error| {
             GqlQueryError::Source(GraphWriteChainError::Insert(
@@ -415,26 +416,114 @@ impl WriteTxn {
                 }
                 None => None,
             };
-            let mut result = None;
             let mut mutation_effects = 0;
             let mut receipts = Vec::with_capacity(chain.steps().len());
-            let last = chain.steps().len().saturating_sub(1);
             // A chain of creating MERGEs (see frozen_chain) holds its effects
             // and stages them once after its last step (fgdb-0s2pq).
             let mut frozen = frozen_chain(chain).then(FrozenCreations::default);
-            for (at, step) in chain.steps().iter().enumerate() {
-                // Only a last step with RETURN delivers rows. A last write
-                // without one (`CREATE (a) WITH a CREATE (b)`) selects the
-                // statement's private input, as every earlier step does.
-                let delivers = at == last
-                    && matches!(
-                        step,
-                        GraphWriteChainStep::Query(_)
-                            | GraphWriteChainStep::EdgeMergeQuery(_)
-                            | GraphWriteChainStep::EdgeUpsertQuery { .. }
-                            | GraphWriteChainStep::VertexMergeQuery(_)
-                            | GraphWriteChainStep::MutationQuery(_)
-                    );
+            let mut cursor = GraphWriteChainCursor::new(chain, true);
+            while let Some(task) = cursor.next(&mut rows, &mut |event| {
+                vertex_targets_event::<GraphWriteChainError<WriteTxnError, A>>(
+                    cx,
+                    policy.query,
+                    &mut used.evaluator,
+                    event,
+                )
+            })? {
+                // FOREACH suspends this occurrence bag while its iterations
+                // use the SAME workspace and cumulative allowance. Its native
+                // body writes return here one at a time; the scheduler restores
+                // the original outer rows and drops body-local bindings.
+                let (step, delivers) = match task {
+                    GraphWriteChainTask::Write { step, delivers, .. } => (step, delivers),
+                    GraphWriteChainTask::ForeachInput { foreach } => {
+                        let allowance = remaining(&used, mutation_effects, false);
+                        let failure = std::cell::RefCell::new(None);
+                        let selected = foreach.execute_input_governed(
+                            rows.take(),
+                            allowance.query,
+                            chain_insert_source(workspace.txn, database, cx, &failure),
+                            || match failure.borrow_mut().take() {
+                                Some(error) => Err(error),
+                                None => cx.checkpoint(),
+                            },
+                        );
+                        let selected = match failure.into_inner() {
+                            Some(error) => Err(GqlQueryError::Interrupted(error)),
+                            None => selected,
+                        }
+                        .map_err(|error| error.map_source(GraphWriteChainError::Read))?;
+                        add(
+                            &mut used,
+                            &GraphInsertStats {
+                                selection: selected.rows,
+                                evaluator: selected.evaluator,
+                                created_vertices: 0,
+                                created_edges: 0,
+                            },
+                        );
+                        rows = Some(selected.value);
+                        continue;
+                    }
+                    GraphWriteChainTask::ForeachCollection { foreach } => {
+                        let allowance = remaining(&used, mutation_effects, false);
+                        let failure = std::cell::RefCell::new(None);
+                        let selected = foreach.execute_collection_governed(
+                            rows.take(),
+                            allowance.query,
+                            chain_insert_source(workspace.txn, database, cx, &failure),
+                            || match failure.borrow_mut().take() {
+                                Some(error) => Err(error),
+                                None => cx.checkpoint(),
+                            },
+                        );
+                        let selected = match failure.into_inner() {
+                            Some(error) => Err(GqlQueryError::Interrupted(error)),
+                            None => selected,
+                        }
+                        .map_err(|error| error.map_source(GraphWriteChainError::Read))?;
+                        add(
+                            &mut used,
+                            &GraphInsertStats {
+                                selection: selected.rows,
+                                evaluator: selected.evaluator,
+                                created_vertices: 0,
+                                created_edges: 0,
+                            },
+                        );
+                        rows = Some(selected.value);
+                        continue;
+                    }
+                    GraphWriteChainTask::ForeachOutput { foreach, delivers } => {
+                        let allowance = remaining(&used, mutation_effects, delivers);
+                        let failure = std::cell::RefCell::new(None);
+                        let selected = foreach.execute_output_governed(
+                            rows.take(),
+                            allowance.query,
+                            chain_insert_source(workspace.txn, database, cx, &failure),
+                            || match failure.borrow_mut().take() {
+                                Some(error) => Err(error),
+                                None => cx.checkpoint(),
+                            },
+                        );
+                        let selected = match failure.into_inner() {
+                            Some(error) => Err(GqlQueryError::Interrupted(error)),
+                            None => selected,
+                        }
+                        .map_err(|error| error.map_source(GraphWriteChainError::Read))?;
+                        add(
+                            &mut used,
+                            &GraphInsertStats {
+                                selection: selected.rows,
+                                evaluator: selected.evaluator,
+                                created_vertices: 0,
+                                created_edges: 0,
+                            },
+                        );
+                        rows = Some(selected.value);
+                        continue;
+                    }
+                };
                 let allowance = remaining(&used, mutation_effects, delivers);
                 let mut effects = 0;
                 // A step without RETURN rows: its own counters, no rows.
@@ -449,6 +538,11 @@ impl WriteTxn {
                 let edge_merge = GraphEdgeMergePolicy::new(allowance.query)
                     .with_creation_limit(allowance.max_edges);
                 let (stats, returning) = match step {
+                    // The shared cursor expands every FOREACH into governed
+                    // input/output tasks and ordinary native body writes.
+                    GraphWriteChainStep::Foreach(_) => {
+                        return Err(source(WriteTxnError::UnsupportedAtomicMutation));
+                    }
                     GraphWriteChainStep::EdgeUpsert(_)
                     | GraphWriteChainStep::EdgeUpsertRows { .. }
                     | GraphWriteChainStep::EdgeUpsertQuery { .. } => {
@@ -889,15 +983,11 @@ impl WriteTxn {
                     ..stats
                 };
                 add(&mut used, &complete);
-                if at == last {
-                    result = Some(returning);
-                } else {
-                    rows = Some(returning.value);
-                }
+                rows = Some(returning.value);
             }
-            // Only the gql compiler builds a chain, always with two or more
-            // steps; an empty one would have nothing to stage.
-            let Some(mut returning) = result else {
+            // After a FOREACH, these are the restored outer occurrences, not
+            // the last physical iteration's body-local continuation rows.
+            let Some(mut value) = rows else {
                 return Err(source(WriteTxnError::NoPreparedWrite));
             };
             // A frozen chain's creations, in creation order: every vertex
@@ -922,13 +1012,15 @@ impl WriteTxn {
             // implicit public RETURN. A terminal MERGE may retain them for
             // its private execution; keep that buffer behind this boundary.
             if !chain.returns_rows() {
-                returning.value.clear();
-                returning.rows.result_rows = 0;
+                value.clear();
             }
             // Whole-statement counters, as every write RETURN reports them.
-            returning.rows.snapshot_records = used.selection.snapshot_records;
-            returning.evaluator = used.evaluator;
-            used.selection.result_rows = returning.rows.result_rows;
+            used.selection.result_rows = value.len() as u64;
+            let returning = GqlQueryExecution {
+                value,
+                rows: used.selection,
+                evaluator: used.evaluator,
+            };
             let receipt = GraphWriteProgramReceipt::new(
                 GraphWriteProgramStats {
                     completed_statements: 1,

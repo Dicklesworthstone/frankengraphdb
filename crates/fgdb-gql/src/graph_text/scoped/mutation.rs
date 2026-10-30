@@ -2241,6 +2241,8 @@ impl<'a> Parser<'a> {
         Ok(self.at_chained_read()?
             || self.is_word("CREATE")
             || self.is_word("INSERT")
+            || (self.is_word("FOREACH")
+                && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
             || (self.is_word("MERGE")
                 && (matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
                     || crate::PreparedGraphWriteChainText::named_merge_pattern(

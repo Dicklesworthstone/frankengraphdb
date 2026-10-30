@@ -2499,9 +2499,11 @@ impl<'a> Parser<'a> {
         // writes do (ReadWriteKind::EdgeMerge); a vertex MERGE does not.
         self.write_prefix
             && !self.call_body
-            && (["CREATE", "INSERT", "SET", "REMOVE", "DELETE", "DETACH"]
-                .iter()
-                .any(|write| self.is_word(write))
+            && ([
+                "CREATE", "INSERT", "SET", "REMOVE", "DELETE", "DETACH", "FOREACH",
+            ]
+            .iter()
+            .any(|write| self.is_word(write))
                 || self.at_relationship_merge().unwrap_or(false))
     }
 

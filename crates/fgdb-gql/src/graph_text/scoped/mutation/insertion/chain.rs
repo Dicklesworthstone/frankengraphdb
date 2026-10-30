@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::mutation_text::PreparedGraphVertexMergeRowsText;
-use crate::write_chain::ChainTextStep;
+use crate::write_chain::{ChainTextStep, PreparedGraphForeachText};
 use crate::{
     GraphWriteChainStep, GraphWriteChainTextError, PreparedGraphWriteChain,
     PreparedGraphWriteChainText,
@@ -12,6 +12,7 @@ use crate::{
 use std::collections::BTreeSet;
 
 enum MatchedWrite {
+    Foreach,
     Insert,
     MultipartInsert,
     Mutation,
@@ -22,7 +23,7 @@ enum MatchedWrite {
 
 impl PreparedGraphWriteChainText {
     /// Classify with native token framing. A chain is a top-level write
-    /// followed by another write in the same statement:
+    /// followed by another write in the same statement, or a scoped FOREACH:
     /// - a CREATE, a WITH after it, then another CREATE;
     /// - a MERGE after a CREATE, with or without a WITH between;
     /// - a vertex MERGE first, then another CREATE or MERGE;
@@ -48,7 +49,7 @@ impl PreparedGraphWriteChainText {
         };
         // Peek the first clause without consuming it: it may be the write.
         let first = script::next_script_token(&mut lexer.clone())?;
-        if !matches!(first.kind, TokenKind::Word(word) if ["CREATE", "INSERT", "UNWIND", "MATCH", "OPTIONAL", "CALL", "MERGE", "WITH"].iter().any(|kind| word.eq_ignore_ascii_case(kind)))
+        if !matches!(first.kind, TokenKind::Word(word) if ["CREATE", "INSERT", "UNWIND", "MATCH", "OPTIONAL", "CALL", "MERGE", "WITH", "FOREACH"].iter().any(|kind| word.eq_ignore_ascii_case(kind)))
         {
             return Ok(false);
         }
@@ -127,6 +128,9 @@ impl PreparedGraphWriteChainText {
                             TokenKind::Punct(b'(')
                         ))
                     };
+                    if clause && word.eq_ignore_ascii_case("FOREACH") && pattern()? {
+                        return Ok(true);
+                    }
                     if clause {
                         if word.eq_ignore_ascii_case("MATCH")
                             && (pattern()? || Self::named_merge_pattern(lexer.clone())?)
@@ -559,7 +563,7 @@ impl PreparedGraphWriteChainText {
     /// Property keys, labels, aliases, map entries and STARTS/ENDS WITH are
     /// never clause boundaries.
     fn matched_write(mut lexer: Lexer<'_>) -> Result<Option<MatchedWrite>, GraphPatternTextError> {
-        const TERMINAL: [&str; 3] = ["RETURN", "UNION", "FOREACH"];
+        const TERMINAL: [&str; 2] = ["RETURN", "UNION"];
         let mut depth = 0_usize;
         let mut row_stages = false;
         let mut multipart = false;
@@ -577,6 +581,14 @@ impl PreparedGraphWriteChainText {
                         && !matches!(previous, Some(TokenKind::Word(prior))
                             if ["AS", "STARTS", "ENDS"].iter().any(|not| prior.eq_ignore_ascii_case(not))) =>
                 {
+                    if word.eq_ignore_ascii_case("FOREACH")
+                        && matches!(
+                            script::next_script_token(&mut lexer.clone())?.kind,
+                            TokenKind::Punct(b'(')
+                        )
+                    {
+                        return Ok(Some(MatchedWrite::Foreach));
+                    }
                     if (word.eq_ignore_ascii_case("CREATE") || word.eq_ignore_ascii_case("INSERT"))
                         && (matches!(
                             script::next_script_token(&mut lexer.clone())?.kind,
@@ -810,15 +822,25 @@ impl PreparedGraphWriteChainText {
         mut resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphWriteChainTextError> {
         let body = query::statement_body(statement)?;
+        let first_foreach = matches!(
+            Self::matched_write(Lexer {
+                text: body,
+                at: 0,
+                tokens: 0,
+            })?,
+            Some(MatchedWrite::Foreach)
+        );
         // The first write is a MERGE (`first_merge` is where it starts) when
         // it is the first clause or follows only a leading UNWIND, or a
         // leading MATCH and its read stages; otherwise it is a CREATE. A SET,
         // REMOVE or DELETE after a leading MATCH is a first mutation step
         // (`first_mutation`), which is_chain admits only before another write.
-        let mut first_mutation =
-            PreparedGraphInsertText::multipart_source_kind(body, declarations)?
+        let mut first_mutation = !first_foreach
+            && PreparedGraphInsertText::multipart_source_kind(body, declarations)?
                 == Some(ReadWriteKind::Mutation);
-        let first_merge = {
+        let first_merge = if first_foreach {
+            None
+        } else {
             let mut lexer = Lexer {
                 text: body,
                 at: 0,
@@ -888,7 +910,17 @@ impl PreparedGraphWriteChainText {
             None => false,
         };
         let mut steps = Vec::new();
-        let mut next = if first_mutation {
+        let mut next = if first_foreach {
+            let (foreach, after) = PreparedGraphForeachText::prepare_step(
+                body,
+                relation,
+                declarations,
+                &mut resolve,
+                None,
+            )?;
+            steps.push(ChainTextStep::Foreach(Box::new(foreach)));
+            after
+        } else if first_mutation {
             let (step, returning, after) =
                 crate::mutation_text::PreparedGraphMutationRowsText::prepare_first_step(
                     body,
@@ -962,6 +994,20 @@ impl PreparedGraphWriteChainText {
             } else {
                 None
             };
+            if matches!(matched, Some(MatchedWrite::Foreach))
+                || matches!(clause, TokenKind::Word(word) if word.eq_ignore_ascii_case("FOREACH"))
+            {
+                let (foreach, after) = PreparedGraphForeachText::prepare_step(
+                    body,
+                    relation,
+                    declarations,
+                    &mut resolve,
+                    Some(from),
+                )?;
+                steps.push(ChainTextStep::Foreach(Box::new(foreach)));
+                next = after;
+                continue;
+            }
             if reading && matched.is_none() {
                 let (columns, types) = from.owned_columns();
                 let parser = Parser::new_with_parameter_types(body, declarations)?
@@ -1078,7 +1124,7 @@ impl PreparedGraphWriteChainText {
         let unwound_merge = matches!(steps.as_slice(), [ChainTextStep::VertexMerge(merge)]
             if matches!(merge.input, crate::mutation_text::VertexMergeRowsTextInput::Relation(_)));
         let edge_merge = matches!(steps.as_slice(), [ChainTextStep::EdgeMerge(_)]);
-        if steps.len() < 2 && !unwound_merge && !edge_merge && read.is_none() {
+        if steps.len() < 2 && !first_foreach && !unwound_merge && !edge_merge && read.is_none() {
             return Err(expected(body.len(), "another write after the first").into());
         }
         let chain = Self {
@@ -1116,6 +1162,14 @@ impl PreparedGraphWriteChainText {
         let mut schema: Vec<GqlParameterSpec> = Vec::new();
         for step in &self.steps {
             let specs = match step {
+                ChainTextStep::Foreach(foreach) => {
+                    for spec in foreach.parameter_schema() {
+                        if !schema.iter().any(|known| known.name == spec.name) {
+                            schema.push(spec);
+                        }
+                    }
+                    continue;
+                }
                 ChainTextStep::Insert(step) => step.0.parameter_schema(),
                 ChainTextStep::EdgeMerge(step) => step.0.parameter_schema(),
                 ChainTextStep::EdgeMergeRows(step) => step.0.parameter_schema(),
@@ -1183,6 +1237,7 @@ impl PreparedGraphWriteChainText {
         }
         let mut template = self.clone();
         let input = match template.steps.first_mut() {
+            Some(ChainTextStep::Foreach(foreach)) => &mut foreach.input.first,
             Some(ChainTextStep::VertexMerge(merge)) => match &mut merge.input {
                 crate::mutation_text::VertexMergeRowsTextInput::Relation(input) => &mut **input,
                 _ => return Err(refused().into()),
@@ -1231,6 +1286,16 @@ impl PreparedGraphWriteChainText {
         &self,
         arguments: &GqlParameters,
     ) -> Result<PreparedGraphWriteChain, GraphWriteChainTextError> {
+        self.bind_parameters_with_input(arguments, None)
+    }
+
+    /// A scoped native body imports its checked outer row and loop member.
+    /// Ordinary statements have no external input schema.
+    pub(crate) fn bind_parameters_with_input(
+        &self,
+        arguments: &GqlParameters,
+        mut previous: Option<Vec<GraphSetColumnType>>,
+    ) -> Result<PreparedGraphWriteChain, GraphWriteChainTextError> {
         let mut named = std::collections::BTreeSet::new();
         // A step's own arguments, by its schema names: each was already
         // admitted into `arguments`, so the subset admits too.
@@ -1251,7 +1316,6 @@ impl PreparedGraphWriteChainText {
                 Ok(own)
             };
         let mut steps = Vec::with_capacity(self.steps.len());
-        let mut previous: Option<Vec<GraphSetColumnType>> = None;
         // The row a later step reads is exactly the previous step's output.
         let reads_previous = |owned: Option<&(Vec<String>, Vec<GraphSetColumnType>)>,
                               previous: &Option<Vec<GraphSetColumnType>>,
@@ -1266,6 +1330,12 @@ impl PreparedGraphWriteChainText {
         };
         for step in &self.steps {
             match step {
+                ChainTextStep::Foreach(foreach) => {
+                    let bound = foreach
+                        .bind_parameters(&own(&foreach.parameter_schema())?, previous.as_deref())?;
+                    previous = Some(bound.column_types().to_vec());
+                    steps.push(GraphWriteChainStep::Foreach(Box::new(bound)));
+                }
                 ChainTextStep::VertexMerge(merge) => {
                     let own = own(merge.parameter_schema())?;
                     if let Some(input) = merge.owned_column_types()
@@ -1448,6 +1518,38 @@ impl PreparedGraphWriteChainText {
 #[cfg(test)]
 mod tests {
     use super::PreparedGraphWriteChainText;
+
+    #[test]
+    fn foreach_routing_uses_a_real_outer_clause_and_stops_at_statement_boundaries() {
+        for text in [
+            "FOREACH (x IN [1,2] | CREATE (:F {p:x}))",
+            "WITH 1 AS value FOREACH (x IN [value] | CREATE (:F {p:x})) RETURN value",
+            "MATCH (n) WITH collect(n) AS ns FOREACH (n IN ns | SET n.p=1)",
+            "UNWIND $rows AS row FOREACH (x IN row.values | CREATE (:F {p:x}))",
+            "CREATE (n) FOREACH (x IN [] | SET n.p=x) RETURN n",
+            "MATCH (n) SET n.p=0 FOREACH (x IN [1] | SET n.p=x)",
+            "MERGE (n:F {p:1}) FOREACH (x IN [2] | SET n.p=x)",
+            "OPTIONAL MATCH (n) FOREACH (x IN [] | CREATE (:F)) RETURN n",
+        ] {
+            assert!(
+                PreparedGraphWriteChainText::is_chain(text).unwrap(),
+                "{text}"
+            );
+        }
+        for text in [
+            "CREATE (n {p:'FOREACH (x IN [1] | CREATE (:F))'})",
+            "MATCH (n) RETURN n.foreach",
+            "WITH 1 AS foreach RETURN foreach",
+            "WITH 1 AS `FOREACH` RETURN `FOREACH`",
+            "CREATE (n) /* FOREACH (x IN [1] | CREATE (:F)) */",
+            "MATCH (n) RETURN n; FOREACH (x IN [1] | CREATE (:F))",
+        ] {
+            assert!(
+                !PreparedGraphWriteChainText::is_chain(text).unwrap(),
+                "{text}"
+            );
+        }
+    }
 
     #[test]
     fn a_chain_is_a_create_then_with_then_another_create_at_top_level() {

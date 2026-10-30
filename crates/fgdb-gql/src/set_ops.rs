@@ -1521,6 +1521,35 @@ impl PreparedGraphSet {
         }
     }
 
+    /// Conservative demand for a carried-element reader, including lazy value
+    /// branches. Aggregate finalizers can also read carried elements, so their
+    /// host must admit that capability before evaluating their input.
+    pub(crate) fn reads_elements(&self) -> bool {
+        match &self.node {
+            SetNode::Pattern(_) | SetNode::ProcedureCall(_) => false,
+            SetNode::Aggregate(_) => true,
+            SetNode::Values | SetNode::Arguments | SetNode::Owned { .. } => false,
+            SetNode::Unwind { input, value } => {
+                input.reads_elements() || value.may_read_element_properties()
+            }
+            SetNode::Project {
+                input, projection, ..
+            } => {
+                input.reads_elements()
+                    || projection
+                        .iter()
+                        .any(|column| column.value().may_read_element_properties())
+            }
+            SetNode::Scope(input) | SetNode::Filter { input, .. } => input.reads_elements(),
+            SetNode::CrossJoin { left, right }
+            | SetNode::Apply { left, right, .. }
+            | SetNode::Join { left, right, .. }
+            | SetNode::Binary { left, right, .. } => {
+                left.reads_elements() || right.reads_elements()
+            }
+        }
+    }
+
     /// Whether any source of this relation is a procedure call.
     #[must_use]
     pub fn calls_procedure(&self) -> bool {

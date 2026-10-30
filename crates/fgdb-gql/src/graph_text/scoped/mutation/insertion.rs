@@ -3,6 +3,7 @@
 //! absent from parsing/binding; the ordinary insertion/write paths own both.
 
 mod chain;
+mod foreach;
 mod query;
 
 use super::*;

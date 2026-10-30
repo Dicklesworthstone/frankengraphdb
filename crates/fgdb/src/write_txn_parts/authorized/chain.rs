@@ -14,10 +14,11 @@ use fgdb_gql::insertion::{
     GraphInsertBatch, GraphInsertError, GraphInsertPolicy, GraphInsertStats, PreparedGraphInsert,
 };
 use fgdb_gql::{
-    GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
-    GraphInsertBinding, GraphInsertQueryError, GraphMutationBatch, GraphMutationError,
-    GraphMutationPolicy, GraphMutationQueryError, GraphPatternFactorExecution, GraphSetSource,
-    GraphWriteChainError, GraphWriteChainStep, PreparedGraphMutation, PreparedGraphPatternFactors,
+    GlaExecutionEvent, GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded, GqlExecutionStats,
+    GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphInsertBinding, GraphInsertQueryError,
+    GraphMutationBatch, GraphMutationError, GraphMutationPolicy, GraphMutationQueryError,
+    GraphPatternFactorExecution, GraphSetSource, GraphWriteChainCursor, GraphWriteChainError,
+    GraphWriteChainStep, GraphWriteChainTask, PreparedGraphMutation, PreparedGraphPatternFactors,
     PreparedGraphWriteChain,
 };
 use fgdb_types::{CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
@@ -177,6 +178,86 @@ fn admit_pattern(
         }
     }
     Ok(())
+}
+
+/// Visit the complete typed program before any identity allocation or source
+/// evaluation. Loop bodies use this same declaration admission even when their
+/// eventual input or list is empty; carrying a private row grants no authority.
+fn preflight_steps<Clock: FnMut() -> u64>(
+    steps: &[GraphWriteChainStep],
+    query_cx: &QueryCx,
+    scope: &PlannerPredicates,
+    execution: &mut Execution<'_, '_, Clock>,
+) -> Result<bool, Fault> {
+    let mut reads = false;
+    for (step, statement) in steps.iter().enumerate() {
+        execution.checkpoint().map_err(source)?;
+        if let GraphWriteChainStep::Foreach(foreach) = statement {
+            if foreach
+                .read_element_keys()
+                .iter()
+                .any(|key| !scope.allows_property(*key))
+            {
+                return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
+            }
+            foreach
+                .admit_patterns(|pattern| admit_pattern(pattern, scope))
+                .map_err(source)?;
+            reads |= foreach.requires_read();
+            reads |= preflight_steps(foreach.body().steps(), query_cx, scope, execution)?;
+            continue;
+        }
+        if merges::preflight(statement, scope)? || vertices::preflight(statement, scope)? {
+            reads = true;
+            continue;
+        }
+        let mutation = match statement {
+            GraphWriteChainStep::Mutation(mutation) => Some(mutation.as_ref()),
+            GraphWriteChainStep::MutationQuery(query) => Some(query.mutation()),
+            _ => None,
+        };
+        if let Some(mutation) = mutation {
+            // Match the standalone mutation contract even when the target
+            // identity comes from a creation earlier in this statement.
+            reads = true;
+            mutation::admit_declared_mutation_fields(query_cx, mutation, execution).map_err(
+                |error| {
+                    GqlQueryError::Source(GraphWriteChainError::Mutation(
+                        GraphMutationQueryError::Mutation(GraphMutationError::Source(error)),
+                    ))
+                },
+            )?;
+            mutation
+                .admit_patterns(|pattern| admit_pattern(pattern, scope))
+                .map_err(source)?;
+            continue;
+        }
+        let insertion = match statement {
+            GraphWriteChainStep::Insert(insertion) => insertion,
+            GraphWriteChainStep::Query(query) => {
+                for binding in query.bindings() {
+                    execution.checkpoint().map_err(source)?;
+                    if let GraphInsertBinding::VertexProperty { key, .. }
+                    | GraphInsertBinding::EdgeProperty { key, .. } = binding
+                        && !scope.allows_property(*key)
+                    {
+                        return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
+                    }
+                }
+                query.insertion()
+            }
+            _ => {
+                return Err(source(WriteTxnError::AuthorizedChainStepUnsupported {
+                    step,
+                }));
+            }
+        };
+        reads |= insertion.requires_read();
+        if let Some(pattern) = insertion.selection() {
+            admit_pattern(pattern, scope).map_err(source)?;
+        }
+    }
+    Ok(reads)
 }
 
 struct ChainSource<'s, 'db, 'run, 'cx, 'permit, V: Vfs, Clock> {
@@ -341,6 +422,47 @@ fn remaining(
     .with_mutation_limit(policy.max_mutation_effects.saturating_sub(mutation_effects))
 }
 
+/// Scheduling a loop and copying its private occurrences spend the same live
+/// signed work permit and cumulative native evaluator allowance as its writes.
+fn cursor_event<Clock: FnMut() -> u64>(
+    cx: &QueryCx,
+    execution: &mut Execution<'_, '_, Clock>,
+    policy: GqlQueryPolicy,
+    stats: &mut GlaExecutionStats,
+    event: GlaExecutionEvent,
+) -> Result<(), Fault> {
+    cx.checkpoint()
+        .map_err(WriteTxnError::Interrupted)
+        .map_err(GqlQueryError::Interrupted)?;
+    execution.checkpoint().map_err(GqlQueryError::Interrupted)?;
+    let work = u128::from(stats.work_units) + 1;
+    let scratch =
+        u128::from(stats.scratch_entries) + u128::from(event == GlaExecutionEvent::ScratchEntry);
+    for (observed, limit, dimension) in [
+        (
+            work,
+            policy.evaluator.max_work_units,
+            GlaLimitDimension::WorkUnits,
+        ),
+        (
+            scratch,
+            policy.evaluator.max_scratch_entries,
+            GlaLimitDimension::ScratchEntries,
+        ),
+    ] {
+        if observed > u128::from(limit) {
+            return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                dimension,
+                limit,
+                observed,
+            }));
+        }
+    }
+    stats.work_units = work as u64;
+    stats.scratch_entries = scratch as u64;
+    Ok(())
+}
+
 enum Proposal<'a> {
     Insert(&'a PreparedGraphInsert, GraphInsertBatch),
     Mutation(
@@ -348,6 +470,12 @@ enum Proposal<'a> {
         GraphMutationBatch,
         GraphMutationPolicy,
     ),
+}
+
+enum ForeachPhase {
+    Input,
+    Collection,
+    Output,
 }
 
 fn mutation_error(
@@ -606,58 +734,8 @@ impl<V: Vfs + Clone> Database<V> {
         }
         // Whole-program admission precedes even the first engine ID. The
         // chain is compiler-owned, but its unsupported family is not authority.
-        let mut reads = chain.returns_rows() || continuation.is_some();
-        for (step, statement) in chain.steps().iter().enumerate() {
-            execution.checkpoint().map_err(source)?;
-            if merges::preflight(statement, scope)? || vertices::preflight(statement, scope)? {
-                reads = true;
-                continue;
-            }
-            let mutation = match statement {
-                GraphWriteChainStep::Mutation(mutation) => Some(mutation.as_ref()),
-                GraphWriteChainStep::MutationQuery(query) => Some(query.mutation()),
-                _ => None,
-            };
-            if let Some(mutation) = mutation {
-                // Match the standalone mutation contract even when the target
-                // identity comes from a creation earlier in this statement.
-                reads = true;
-                mutation::admit_declared_mutation_fields(query_cx, mutation, &mut execution)
-                    .map_err(|error| {
-                        GqlQueryError::Source(GraphWriteChainError::Mutation(
-                            GraphMutationQueryError::Mutation(GraphMutationError::Source(error)),
-                        ))
-                    })?;
-                mutation
-                    .admit_patterns(|pattern| admit_pattern(pattern, scope))
-                    .map_err(source)?;
-                continue;
-            }
-            let insertion = match statement {
-                GraphWriteChainStep::Insert(insertion) => insertion,
-                GraphWriteChainStep::Query(query) => {
-                    for binding in query.bindings() {
-                        execution.checkpoint().map_err(source)?;
-                        if let GraphInsertBinding::VertexProperty { key, .. }
-                        | GraphInsertBinding::EdgeProperty { key, .. } = binding
-                            && !scope.allows_property(*key)
-                        {
-                            return Err(source(WriteTxnError::Authorization(Error::ScopeDenied)));
-                        }
-                    }
-                    query.insertion()
-                }
-                _ => {
-                    return Err(source(WriteTxnError::AuthorizedChainStepUnsupported {
-                        step,
-                    }));
-                }
-            };
-            reads |= insertion.requires_read();
-            if let Some(pattern) = insertion.selection() {
-                admit_pattern(pattern, scope).map_err(source)?;
-            }
-        }
+        let definition_reads = preflight_steps(chain.steps(), query_cx, scope, &mut execution)?;
+        let reads = chain.returns_rows() || continuation.is_some() || definition_reads;
         if reads && !scope.rights().can_read() {
             return Err(source(WriteTxnError::Authorization(
                 Error::PermissionDenied,
@@ -692,17 +770,94 @@ impl<V: Vfs + Clone> Database<V> {
                     }
                     None => None,
                 };
-                let mut result = None;
                 let mut mutation_effects = 0;
-                let last = chain.steps().len().saturating_sub(1);
                 let mut frozen = frozen_chain(chain).then(FrozenCreations::default);
-                for (at, statement) in chain.steps().iter().enumerate() {
-                    let allowance = remaining(
-                        policy,
-                        &used,
-                        mutation_effects,
-                        at == last && chain.returns_rows() && continuation.is_none(),
-                    );
+                let mut cursor = GraphWriteChainCursor::new(chain, continuation.is_none());
+                let mut at = 0;
+                while let Some(task) = cursor.next(&mut rows, &mut |event| {
+                    cursor_event(
+                        query_cx,
+                        &mut execution,
+                        policy.query,
+                        &mut used.evaluator,
+                        event,
+                    )
+                })? {
+                    let loop_phase = match &task {
+                        GraphWriteChainTask::ForeachInput { foreach } => {
+                            Some((*foreach, ForeachPhase::Input, false))
+                        }
+                        GraphWriteChainTask::ForeachCollection { foreach } => {
+                            Some((*foreach, ForeachPhase::Collection, false))
+                        }
+                        GraphWriteChainTask::ForeachOutput { foreach, delivers } => {
+                            Some((*foreach, ForeachPhase::Output, *delivers))
+                        }
+                        GraphWriteChainTask::Write { .. } => None,
+                    };
+                    if let Some((foreach, phase, delivers)) = loop_phase {
+                        let allowance = remaining(policy, &used, mutation_effects, delivers);
+                        let returning = query_cx
+                            .with_restriction(|| {
+                                let controls = RefCell::new(&mut execution);
+                                let database = RefCell::new(&mut *self);
+                                let graph = ChainSource {
+                                    transaction: workspace.transaction(),
+                                    database: &database,
+                                    cx: query_cx,
+                                    scope,
+                                    execution: &controls,
+                                };
+                                let checkpoint = || {
+                                    query_cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+                                    controls.borrow_mut().checkpoint()
+                                };
+                                match phase {
+                                    ForeachPhase::Input => foreach.execute_input_governed(
+                                        rows.take(),
+                                        allowance.query,
+                                        graph,
+                                        checkpoint,
+                                    ),
+                                    ForeachPhase::Collection => foreach.execute_collection_governed(
+                                        rows.take(),
+                                        allowance.query,
+                                        graph,
+                                        checkpoint,
+                                    ),
+                                    ForeachPhase::Output => foreach.execute_output_governed(
+                                        rows.take(),
+                                        allowance.query,
+                                        graph,
+                                        checkpoint,
+                                    ),
+                                }
+                            })
+                            .map_err(|error| error.map_source(GraphWriteChainError::Read))?;
+                        used.selection.snapshot_records = used
+                            .selection
+                            .snapshot_records
+                            .saturating_add(returning.rows.snapshot_records);
+                        used.evaluator.work_units = used
+                            .evaluator
+                            .work_units
+                            .saturating_add(returning.evaluator.work_units);
+                        used.evaluator.scratch_entries = used
+                            .evaluator
+                            .scratch_entries
+                            .saturating_add(returning.evaluator.scratch_entries);
+                        rows = Some(returning.value);
+                        continue;
+                    }
+                    let GraphWriteChainTask::Write {
+                        step: statement,
+                        continues,
+                        delivers,
+                    } = task
+                    else {
+                        unreachable!("FOREACH phases use the native relational collector above");
+                    };
+                    let allowance = remaining(policy, &used, mutation_effects, delivers);
                     let (stats, returning, effects) = if matches!(
                         statement,
                         GraphWriteChainStep::VertexMerge(_)
@@ -718,7 +873,7 @@ impl<V: Vfs + Clone> Database<V> {
                             scope,
                             &mut execution,
                             frozen.as_mut(),
-                            at != last,
+                            continues,
                         )?
                     } else if matches!(
                         statement,
@@ -1118,11 +1273,8 @@ impl<V: Vfs + Clone> Database<V> {
                     used.created_vertices =
                         used.created_vertices.saturating_add(stats.created_vertices);
                     used.created_edges = used.created_edges.saturating_add(stats.created_edges);
-                    if at == last {
-                        result = Some(returning);
-                    } else {
-                        rows = Some(returning.value);
-                    }
+                    rows = Some(returning.value);
+                    at += 1;
                 }
                 if let Some(frozen) = frozen {
                     finish_frozen(
@@ -1134,8 +1286,17 @@ impl<V: Vfs + Clone> Database<V> {
                     )
                     .map_err(source)?;
                 }
-                let Some(mut result) = result else {
+                let Some(value) = rows else {
                     return Err(source(WriteTxnError::NoPreparedWrite));
+                };
+                let mut result = GqlQueryExecution {
+                    rows: GqlExecutionStats {
+                        snapshot_records: used.selection.snapshot_records,
+                        result_rows: u64::try_from(value.len())
+                            .map_err(|_| source(WriteTxnError::Authorization(Error::TooLarge)))?,
+                    },
+                    evaluator: used.evaluator,
+                    value,
                 };
                 // A continuation is an input to another write, never an
                 // implicit public RETURN. Keep this boundary explicit even
