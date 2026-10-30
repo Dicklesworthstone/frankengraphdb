@@ -163,3 +163,5 @@ __pycache__/
 # lab-test crashpacks survive `cargo clean`; bundles stay untracked — only their
 # path stability is contractual, not their contents.
 /artifacts/
+# br doctor per-run artifacts
+.doctor/
