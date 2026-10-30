@@ -267,8 +267,7 @@ impl PreparedGraphWriteChainText {
                                 return Ok(true);
                             }
                             if !vertex
-                                && matched
-                                && !parameter_unwound
+                                && (matched || parameter_matched)
                                 && Self::edge_actions_need_rows(
                                     lookahead.clone(),
                                     Self::named_merge_pattern(lexer.clone())?,
@@ -423,6 +422,18 @@ impl PreparedGraphWriteChainText {
                     if let Some(TokenKind::Word(element)) = previous
                         && !matches!(before, Some(TokenKind::Punct(b'.')))
                         && Some(element) != relationship
+                    {
+                        return Ok(true);
+                    }
+                }
+                // Replacing the relationship's map needs a governed key
+                // read at each clause, which the row-action owner supplies.
+                // This also admits an empty map and a map parameter after
+                // the ordinary map-argument expansion.
+                TokenKind::Punct(b'=') if actions && depth == 0 => {
+                    if matches!(previous, Some(TokenKind::Word(element))
+                        if Some(element) == relationship)
+                        && !matches!(before, Some(TokenKind::Punct(b'.')))
                     {
                         return Ok(true);
                     }

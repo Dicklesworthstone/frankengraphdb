@@ -215,6 +215,7 @@ pub(crate) fn edge_merge_row_actions_controlled<E, A, C>(
     clauses: [&[fgdb_gql::GraphEdgeMergeRowAction]; 2],
     policy: fgdb_gql::GqlQueryPolicy,
     evaluator: &mut fgdb_gql::GlaExecutionStats,
+    (max_effects, effects): (u64, &mut u64),
     checkpoint: impl FnMut() -> Result<(), C>,
     mut read: impl FnMut(
         fgdb_delta_types::PropertyKeyId,
@@ -226,6 +227,9 @@ pub(crate) fn edge_merge_row_actions_controlled<E, A, C>(
         fgdb_delta_types::PropertyKeyId,
         &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> EdgeUpsertActionResult<(), E, A, C>,
     ) -> EdgeUpsertActionResult<Option<CanonicalPropertyValue>, E, A, C>,
+    mut keys: impl FnMut(
+        &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> EdgeUpsertActionResult<(), E, A, C>,
+    ) -> EdgeUpsertActionResult<Vec<fgdb_delta_types::PropertyKeyId>, E, A, C>,
     mut stage: impl FnMut(WriteBatch) -> EdgeUpsertActionResult<(), E, A, C>,
 ) -> EdgeUpsertActionResult<(), E, A, C> {
     use crate::gql_exec::source::SourceEvent;
@@ -299,6 +303,25 @@ pub(crate) fn edge_merge_row_actions_controlled<E, A, C>(
                 },
             };
             let (key, written) = match definition {
+                GraphEdgeMergeRowAction::ClearProperties { keep } => {
+                    for key in keys(&mut control)? {
+                        control(GlaExecutionEvent::Work)?;
+                        if keep.binary_search(&key).is_ok() {
+                            continue;
+                        }
+                        let observed = u128::from(*effects) + 1;
+                        if observed > u128::from(max_effects) {
+                            return Err(GqlQueryError::Source(GraphEdgeUpsertError::ActionLimit {
+                                limit: max_effects,
+                                observed,
+                            }));
+                        }
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        *effects = observed as u64;
+                        batch.set_edge_property(edge, key, None);
+                    }
+                    continue;
+                }
                 GraphEdgeMergeRowAction::Edge(definition) => {
                     let written = match &definition.value {
                         GraphEdgeUpsertValue::Literal(value) => {
@@ -459,6 +482,64 @@ fn edge_upsert_row_property_with<V: Vfs + Clone, A, C, T>(
     let value = copy(projected.property)?;
     attempt.accepted = true;
     Ok(value)
+}
+
+/// Borrow a resolved edge's visible keys at the current clause cut. The
+/// complete-element witness covers newly inserted keys as well as removals;
+/// hidden fields are never copied or charged to an authorized observer.
+fn edge_replacement_keys<V: Vfs + Clone, E>(
+    transaction: &WriteTxn,
+    database: &Database<V>,
+    edge: EId,
+    scope: Option<&fgdb_warden::PlannerPredicates>,
+    poll: impl FnMut() -> Result<(), E>,
+    control: &mut dyn FnMut(fgdb_gql::GlaExecutionEvent) -> Result<(), E>,
+    source_error: impl Fn(WriteTxnError) -> E,
+) -> Result<Vec<fgdb_delta_types::PropertyKeyId>, E> {
+    use crate::gql_exec::source::SourceEvent;
+    use fgdb_gql::GlaExecutionEvent;
+    let poll = std::cell::RefCell::new(poll);
+    let mut visible = |key| scope.is_none_or(|scope| scope.allows_property(key));
+    let element = ElementId::Edge(edge);
+    let mut attempt = ProjectionReadAttempt {
+        reads: &transaction.point_reads,
+        element,
+        accepted: false,
+    };
+    let projected = {
+        let mut source_control = |event| match event {
+            SourceEvent::ScratchEntry => control(GlaExecutionEvent::ScratchEntry),
+            SourceEvent::Work | SourceEvent::SnapshotRecord if scope.is_some() => {
+                poll.borrow_mut()()
+            }
+            SourceEvent::Work | SourceEvent::SnapshotRecord => control(GlaExecutionEvent::Work),
+        };
+        let projected = transaction.edge_metadata_with_control(
+            database,
+            edge,
+            &mut visible,
+            &mut || poll.borrow_mut()(),
+            &mut source_control,
+            &source_error,
+        )?;
+        source_control(SourceEvent::ScratchEntry)?;
+        transaction.read_set.borrow_mut().insert(element);
+        projected
+    };
+    let mut keys = Vec::new();
+    if let Some(projected) = projected {
+        for (key, _) in projected.properties.effective_properties() {
+            poll.borrow_mut()()?;
+            if !visible(key) {
+                continue;
+            }
+            control(GlaExecutionEvent::Work)?;
+            control(GlaExecutionEvent::ScratchEntry)?;
+            keys.push(key);
+        }
+    }
+    attempt.accepted = true;
+    Ok(keys)
 }
 
 type EdgeUpsertChainResult<A> = Result<
@@ -750,6 +831,7 @@ impl WriteTxn {
                             }),
                         )));
                     }
+                    effects = observed as u64;
                     let state = std::cell::RefCell::new((&mut *self, &mut *database));
                     edge_merge_row_actions_controlled::<WriteTxnError, A, _>(
                         (merge.relation(), edge),
@@ -757,6 +839,7 @@ impl WriteTxn {
                         [on, &upsert.actions().after],
                         private,
                         &mut stats.evaluator,
+                        (policy.max_mutation_effects, &mut effects),
                         || cx.checkpoint(),
                         |key, control| {
                             let state = state.borrow();
@@ -794,6 +877,18 @@ impl WriteTxn {
                                 )
                             })
                         },
+                        |control| {
+                            let state = state.borrow();
+                            edge_replacement_keys(
+                                state.0,
+                                state.1,
+                                edge,
+                                None,
+                                || cx.checkpoint().map_err(GqlQueryError::Interrupted),
+                                control,
+                                |error| GqlQueryError::Source(GraphEdgeUpsertError::Staging(error)),
+                            )
+                        },
                         |batch| {
                             let mut state = state.borrow_mut();
                             let (transaction, database) = &mut *state;
@@ -805,7 +900,6 @@ impl WriteTxn {
                         },
                     )
                     .map_err(|error| error.map_source(chained))?;
-                    effects = observed as u64;
                     if retain_receipt {
                         vertex_targets_event::<GraphWriteChainError<WriteTxnError, A>>(
                             cx,

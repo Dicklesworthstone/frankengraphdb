@@ -130,6 +130,10 @@ pub enum GraphEdgeUpsertBuildError {
     DuplicateProperty {
         branch: GraphEdgeUpsertBranch,
     },
+    PropertyReplacement {
+        branch: GraphEdgeUpsertBranch,
+        action: usize,
+    },
     TooManyInputs {
         branch: GraphEdgeUpsertBranch,
         action: usize,
@@ -152,6 +156,10 @@ impl core::fmt::Display for GraphEdgeUpsertBuildError {
             Self::DuplicateProperty { branch } => {
                 write!(f, "{branch} sets the same property twice")
             }
+            Self::PropertyReplacement { branch, action } => write!(
+                f,
+                "{branch} action {action} has an invalid relationship property replacement"
+            ),
             Self::TooManyInputs {
                 branch,
                 action,

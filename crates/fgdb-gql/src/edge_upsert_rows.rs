@@ -73,6 +73,10 @@ pub enum GraphEdgeMergeRowAction {
     /// A scalar or stored constant. Expression and Composite values are
     /// rejected by preparation; row expressions use the explicit input frame.
     Edge(GraphEdgeUpsertAction<GraphEdgeUpsertValue>),
+    /// Remove every visible relationship property outside `keep`. The key
+    /// set is sorted and unique and contains every edge assignment in the
+    /// same simultaneous clause. Actual removals spend the effect allowance.
+    ClearProperties { keep: Vec<PropertyKeyId> },
     Expression {
         key: PropertyKeyId,
         inputs: Vec<GraphEdgeMergeRowInput>,
@@ -94,12 +98,13 @@ pub enum GraphEdgeMergeRowAction {
 
 impl GraphEdgeMergeRowAction {
     #[must_use]
-    pub const fn key(&self) -> PropertyKeyId {
+    pub const fn key(&self) -> Option<PropertyKeyId> {
         match self {
-            Self::Edge(action) => action.key,
+            Self::Edge(action) => Some(action.key),
             Self::Expression { key, .. }
             | Self::Value { key, .. }
-            | Self::RowVertex { key, .. } => *key,
+            | Self::RowVertex { key, .. } => Some(*key),
+            Self::ClearProperties { .. } => None,
         }
     }
 
@@ -109,7 +114,10 @@ impl GraphEdgeMergeRowAction {
     pub const fn vertex_column(&self) -> Option<usize> {
         match self {
             Self::RowVertex { column, .. } => Some(*column),
-            Self::Edge(_) | Self::Expression { .. } | Self::Value { .. } => None,
+            Self::Edge(_)
+            | Self::Expression { .. }
+            | Self::Value { .. }
+            | Self::ClearProperties { .. } => None,
         }
     }
 }
@@ -118,6 +126,7 @@ impl core::fmt::Debug for GraphEdgeMergeRowAction {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
             Self::Edge(_) => "Edge([REDACTED])",
+            Self::ClearProperties { .. } => "ClearProperties([REDACTED])",
             Self::Expression { .. } => "Expression([REDACTED])",
             Self::Value { .. } => "Value([REDACTED])",
             Self::RowVertex { .. } => "RowVertex([REDACTED])",
@@ -175,11 +184,27 @@ impl PreparedGraphEdgeUpsertRows {
             }
             for clause in [selected, &actions.after] {
                 let mut keys = BTreeSet::new();
+                let mut replacement = None;
                 for (action, assignment) in clause.iter().enumerate() {
-                    if !keys.insert((assignment.vertex_column(), assignment.key())) {
+                    if let Some(key) = assignment.key()
+                        && !keys.insert((assignment.vertex_column(), key))
+                    {
                         return Err(GraphEdgeUpsertBuildError::DuplicateProperty { branch });
                     }
                     let valid = match assignment {
+                        GraphEdgeMergeRowAction::ClearProperties { keep } => {
+                            if replacement.is_some()
+                                || keep.len() > MAX_GRAPH_EDGE_UPSERT_ACTIONS
+                                || keep.windows(2).any(|keys| keys[0] >= keys[1])
+                            {
+                                return Err(GraphEdgeUpsertBuildError::PropertyReplacement {
+                                    branch,
+                                    action,
+                                });
+                            }
+                            replacement = Some((action, keep));
+                            true
+                        }
                         GraphEdgeMergeRowAction::Edge(action) => matches!(
                             action.value,
                             GraphEdgeUpsertValue::Literal(_) | GraphEdgeUpsertValue::Stored(_)
@@ -249,6 +274,13 @@ impl PreparedGraphEdgeUpsertRows {
                         });
                     }
                 }
+                if let Some((action, keep)) = replacement
+                    && keys
+                        .iter()
+                        .any(|(vertex, key)| vertex.is_none() && keep.binary_search(key).is_err())
+                {
+                    return Err(GraphEdgeUpsertBuildError::PropertyReplacement { branch, action });
+                }
             }
         }
         Ok(Self { merge, actions })
@@ -271,7 +303,11 @@ impl PreparedGraphEdgeUpsertRows {
             GraphEdgeUpsertBranch::Match => &self.actions.on_match,
             GraphEdgeUpsertBranch::Create => &self.actions.on_create,
         };
-        selected.len() + self.actions.after.len()
+        selected
+            .iter()
+            .chain(&self.actions.after)
+            .filter(|action| !matches!(action, GraphEdgeMergeRowAction::ClearProperties { .. }))
+            .count()
     }
 
     /// Bind identities, input positions, branch order and action bytecode to
@@ -291,8 +327,17 @@ impl PreparedGraphEdgeUpsertRows {
         ] {
             bytes.extend_from_slice(&(clause.len() as u64).to_be_bytes());
             for action in clause {
-                bytes.extend_from_slice(&action.key().0.to_be_bytes());
+                // The new tag 5 uses the otherwise ordinary key slot as a
+                // canonical zero prefix; it does not address property zero.
+                bytes.extend_from_slice(&action.key().map_or(0, |key| key.0).to_be_bytes());
                 match action {
+                    GraphEdgeMergeRowAction::ClearProperties { keep } => {
+                        bytes.push(5);
+                        bytes.extend_from_slice(&(keep.len() as u64).to_be_bytes());
+                        for key in keep {
+                            bytes.extend_from_slice(&key.0.to_be_bytes());
+                        }
+                    }
                     GraphEdgeMergeRowAction::Edge(action) => match &action.value {
                         GraphEdgeUpsertValue::Literal(value) => {
                             bytes.push(0);
@@ -395,6 +440,77 @@ mod tests {
     }
 
     #[test]
+    fn relationship_replacement_uses_rows_and_checks_simultaneous_keep_sets() {
+        for prefix in [
+            "MATCH (a:A), (b:A)",
+            "MATCH (a:A), (b:A) WITH a,b",
+            "UNWIND [1] AS x MATCH (a:A), (b:A)",
+        ] {
+            let program = bound(
+                &format!(
+                    "{prefix} MERGE (a)-[r:R]->(b) ON MATCH SET r = {{q:r.p}}, r.p = r.q SET r = {{}}"
+                ),
+                &GqlParameters::new(),
+            );
+            let upsert = definition(program.steps().last().unwrap());
+            assert!(upsert.actions().on_match.iter().any(|action| matches!(
+                action, GraphEdgeMergeRowAction::ClearProperties { keep } if keep == &[P, Q]
+            )));
+            assert!(matches!(&upsert.actions().after[..],
+                [GraphEdgeMergeRowAction::ClearProperties { keep }] if keep.is_empty()
+            ));
+            assert_eq!(upsert.action_count(GraphEdgeUpsertBranch::Match), 2);
+            assert_eq!(upsert.action_count(GraphEdgeUpsertBranch::Create), 0);
+            let bytes = upsert.canonical_bytes();
+            for keep in [vec![Q, P], vec![P, P], vec![], vec![P]] {
+                let mut actions = upsert.actions().clone();
+                let replacement = actions
+                    .on_match
+                    .iter_mut()
+                    .find(|action| {
+                        matches!(action, GraphEdgeMergeRowAction::ClearProperties { .. })
+                    })
+                    .unwrap();
+                *replacement = GraphEdgeMergeRowAction::ClearProperties { keep };
+                assert!(matches!(
+                    PreparedGraphEdgeUpsertRows::prepare(upsert.merge().clone(), actions),
+                    Err(GraphEdgeUpsertBuildError::PropertyReplacement { .. })
+                ));
+            }
+            let mut twice = upsert.actions().clone();
+            twice
+                .on_match
+                .push(GraphEdgeMergeRowAction::ClearProperties { keep: vec![P, Q] });
+            assert!(matches!(
+                PreparedGraphEdgeUpsertRows::prepare(upsert.merge().clone(), twice),
+                Err(GraphEdgeUpsertBuildError::PropertyReplacement { .. })
+            ));
+            // The clear may appear anywhere in a typed simultaneous clause;
+            // its valid keep set prevents action-vector order changing effects.
+            let mut reordered = upsert.actions().clone();
+            reordered.on_match.rotate_right(1);
+            let admitted =
+                PreparedGraphEdgeUpsertRows::prepare(upsert.merge().clone(), reordered).unwrap();
+            assert_ne!(admitted.canonical_bytes(), bytes);
+        }
+        assert!(
+            PreparedGraphWriteChainText::is_chain(
+                "UNWIND $rows AS row MATCH (a:A {p:row.p}), (b:A {p:row.q}) \
+             MERGE (a)-[r:R]->(b) SET r = {p:row.p}"
+            )
+            .unwrap()
+        );
+        assert!(
+            PreparedGraphWriteChainText::prepare(
+                "MATCH (a:A), (b:A) MERGE (a)-[r:R]->(b) ON MATCH SET r.p = 1, r = {}",
+                R,
+                symbols,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn parameter_map_actions_bind_shared_values_and_keep_return_metadata() {
         let row = GraphValue::map(vec![
             ("s".into(), scalar(1)),
@@ -460,7 +576,7 @@ mod tests {
             let target = |actions: &[GraphEdgeMergeRowAction]| {
                 actions
                     .iter()
-                    .map(|action| (action.vertex_column(), action.key()))
+                    .map(|action| (action.vertex_column(), action.key().expect("assignment")))
                     .collect::<Vec<_>>()
             };
             (

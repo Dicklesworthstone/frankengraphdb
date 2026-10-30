@@ -430,13 +430,20 @@ impl<'a> Parser<'a> {
                 (
                     &mut on_create,
                     GraphVertexUpsertBranch::Create,
-                    pattern_keys.map_or(UpsertReplacement::Refuse, UpsertReplacement::Created),
+                    if row_vertices {
+                        // A relationship row action has the same governed
+                        // current-key reader on both branches. Its pattern
+                        // map can itself be computed from the input row.
+                        UpsertReplacement::Current
+                    } else {
+                        pattern_keys.map_or(UpsertReplacement::Refuse, UpsertReplacement::Created)
+                    },
                 )
             } else {
                 (
                     &mut on_match,
                     GraphVertexUpsertBranch::Match,
-                    if pattern_keys.is_some() {
+                    if pattern_keys.is_some() || row_vertices {
                         UpsertReplacement::Current
                     } else {
                         UpsertReplacement::Refuse
@@ -455,7 +462,7 @@ impl<'a> Parser<'a> {
                 GraphVertexUpsertBranch::Match,
                 row,
                 row_vertices,
-                if pattern_keys.is_some() {
+                if pattern_keys.is_some() || row_vertices {
                     UpsertReplacement::Current
                 } else {
                     UpsertReplacement::Refuse

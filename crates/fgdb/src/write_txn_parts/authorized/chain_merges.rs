@@ -6,7 +6,7 @@ use super::super::{Database, Execution, Vfs, WriteTxn, WriteTxnError, edge_merge
 use super::{Fault, admit_pattern};
 use crate::write_txn::{
     EdgeUpsertResolvedRows, EdgeUpsertRowTargets, WholeEdgeMergeSource, edge_merge_path_value,
-    edge_merge_row_actions_controlled,
+    edge_merge_row_actions_controlled, edge_replacement_keys,
 };
 use fgdb_delta_types::ElementId;
 use fgdb_gql::algebra::{GraphValue, GraphValueRow};
@@ -68,7 +68,7 @@ fn admit_actions(
     // Only the selected branch is authority-relevant. Check every target key
     // before evaluating any RHS, including clauses whose value is unchanged.
     for action in clauses.into_iter().flatten() {
-        if !scope.allows_property(action.key()) {
+        if action.key().is_some_and(|key| !scope.allows_property(key)) {
             return Err(action_source(WriteTxnError::Authorization(
                 Error::ScopeDenied,
             )));
@@ -807,6 +807,7 @@ pub(super) fn execute_actions<V: Vfs + Clone, Clock: FnMut() -> u64>(
                             }),
                         )));
                     }
+                    effects = observed as u64;
                     let state = RefCell::new((&mut *transaction, &mut *database));
                     let controls = RefCell::new(&mut *execution);
                     edge_merge_row_actions_controlled::<WriteTxnError, WriteTxnError, _>(
@@ -815,6 +816,7 @@ pub(super) fn execute_actions<V: Vfs + Clone, Clock: FnMut() -> u64>(
                         clauses,
                         private,
                         &mut stats.evaluator,
+                        (policy.max_mutation_effects, &mut effects),
                         || {
                             cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
                             controls.borrow_mut().checkpoint()
@@ -882,6 +884,26 @@ pub(super) fn execute_actions<V: Vfs + Clone, Clock: FnMut() -> u64>(
                                 .map_err(action_source)
                             })
                         },
+                        |control| {
+                            let state = state.borrow();
+                            edge_replacement_keys(
+                                state.0,
+                                state.1,
+                                edge,
+                                Some(scope),
+                                || {
+                                    cx.checkpoint()
+                                        .map_err(WriteTxnError::Interrupted)
+                                        .map_err(GqlQueryError::Interrupted)?;
+                                    controls
+                                        .borrow_mut()
+                                        .poll()
+                                        .map_err(GqlQueryError::Interrupted)
+                                },
+                                control,
+                                action_source,
+                            )
+                        },
                         |batch| {
                             let mut state = state.borrow_mut();
                             let (transaction, database) = &mut *state;
@@ -897,7 +919,6 @@ pub(super) fn execute_actions<V: Vfs + Clone, Clock: FnMut() -> u64>(
                         },
                     )
                     .map_err(action_error)?;
-                    effects = observed as u64;
                 }
                 if !matches!(step, GraphWriteChainStep::EdgeUpsert(_)) {
                     event(

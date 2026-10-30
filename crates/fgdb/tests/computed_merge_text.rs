@@ -1009,8 +1009,7 @@ fn match_and_trailing_map_replacement_clear_the_keys_the_clause_does_not_assign(
         for refused in [
             // SET items apply in order: an earlier assignment would need erasing.
             "MERGE (n:Person {id: 1}) ON MATCH SET n.name = 'X', n = {id: 1}",
-            // A MERGE step over rows has no current-key read yet.
-            "MATCH (m:Person {id: 2}) MERGE (n:Person {id: m.id}) ON MATCH SET n = {id: 2}",
+            "MERGE (n:Person {id: 1}) SET n.count = 9, n = {id: 1}",
         ] {
             assert!(
                 db.query_write(
@@ -1029,6 +1028,22 @@ fn match_and_trailing_map_replacement_clear_the_keys_the_clause_does_not_assign(
                 "{refused}"
             );
         }
+        // A row-fed MERGE uses the same current-key reader as a singleton:
+        // replacing the map removes the count assigned above.
+        db.query_write(
+            &txn,
+            &query,
+            &commit,
+            "MATCH (m:Person {id: 2}) MERGE (n:Person {id: m.id}) ON MATCH SET n = {id: 2}",
+            &GqlParameters::new(),
+            symbols,
+            R,
+            program_policy(10),
+            |_| Err::<ElementId, _>(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(props(&db, 2), [(ID, Scalar::Int(2))]);
         assert_eq!(
             props(&db, 1),
             [(ID, Scalar::Int(1)), (COUNT, Scalar::Int(7))]

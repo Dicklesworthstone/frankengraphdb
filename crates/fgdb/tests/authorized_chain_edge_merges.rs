@@ -165,6 +165,355 @@ async fn whole_pattern_merge(
 }
 
 #[test]
+fn relationship_map_replacement_freezes_clauses_and_preserves_hidden_fields() {
+    lab(0xc4a1_3715, |contexts| async move {
+        let commit = contexts.commit();
+        for authorized in [false, true] {
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(1))]);
+            seed.create_vertex(VId(2), vec![L], vec![(P, CanonicalScalar::Int(2))]);
+            seed.add_edge(
+                EId(100),
+                VId(1),
+                VId(2),
+                vec![
+                    (P, CanonicalScalar::Int(5)),
+                    (SECRET, CanonicalScalar::Int(99)),
+                    (Q, CanonicalScalar::Int(8)),
+                ],
+            );
+            db.write(&commit, seed).await.unwrap();
+            let vertices = db.vertices().unwrap();
+            let statement = chain(
+                "MATCH (a:Visible {p:1}), (b:Visible {p:2}) \
+                 MERGE (a)-[r:R]->(b) \
+                 ON MATCH SET r = {q:r.p}, r.p = r.q \
+                 SET r = {p:r.q+1} RETURN r.p, r.q",
+            );
+            let (stats, rows) = whole_pattern_merge(
+                &contexts,
+                &mut db,
+                authorized,
+                &statement,
+                policy(1).with_mutation_limit(if authorized { 4 } else { 5 }),
+            )
+            .await
+            .unwrap();
+            assert_eq!((stats.created_vertices, stats.created_edges), (0, 0));
+            assert_eq!(
+                rows[0].values(),
+                &[int(6), GraphValue::Scalar(CanonicalScalar::Null)]
+            );
+            let expected = if authorized {
+                vec![
+                    (P, CanonicalScalar::Int(6).into()),
+                    (SECRET, CanonicalScalar::Int(99).into()),
+                ]
+            } else {
+                vec![(P, CanonicalScalar::Int(6).into())]
+            };
+            assert_eq!(db.edges().unwrap()[0].props, expected);
+            assert_eq!(db.vertices().unwrap(), vertices);
+
+            // An empty replacement visits the target even when it has no
+            // visible properties. Both executions return the selected edge.
+            let empty = chain(
+                "MATCH (a:Visible {p:1}), (b:Visible {p:2}) \
+                 MERGE (a)-[r:R]->(b) ON MATCH SET r = {} RETURN r.p",
+            );
+            for effects in [1, 0] {
+                let (stats, rows) = whole_pattern_merge(
+                    &contexts,
+                    &mut db,
+                    authorized,
+                    &empty,
+                    policy(1).with_mutation_limit(effects),
+                )
+                .await
+                .unwrap();
+                assert!(stats.evaluator.work_units > 0);
+                assert_eq!(rows.len(), 1);
+                assert_eq!(
+                    rows[0].values(),
+                    &[GraphValue::Scalar(CanonicalScalar::Null)]
+                );
+            }
+            assert_eq!(
+                db.edges().unwrap()[0].props,
+                if authorized {
+                    vec![(SECRET, CanonicalScalar::Int(99).into())]
+                } else {
+                    vec![]
+                }
+            );
+
+            // ON CREATE uses the same current-key semantics, including the
+            // original pattern fields that the map replaces.
+            let create = chain(
+                "MATCH (a:Visible {p:1}), (b:Visible {p:2}) \
+                 MERGE (a)-[r:S {p:11}]->(b) ON CREATE SET r = {q:r.p+1} RETURN r.q",
+            );
+            let (stats, rows) = whole_pattern_merge(
+                &contexts,
+                &mut db,
+                authorized,
+                &create,
+                policy(1).with_mutation_limit(2),
+            )
+            .await
+            .unwrap();
+            assert_eq!(stats.created_edges, 1);
+            assert_eq!(rows[0].values(), &[int(12)]);
+            let created = db
+                .edges()
+                .unwrap()
+                .into_iter()
+                .find(|edge| edge.entry.relation == S)
+                .unwrap();
+            assert_eq!(created.props, [(Q, CanonicalScalar::Int(12).into())]);
+            let expected = (db.vertices().unwrap(), db.edges().unwrap());
+            drop(db);
+            let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+                .await
+                .unwrap();
+            assert_eq!(
+                (reopened.vertices().unwrap(), reopened.edges().unwrap()),
+                expected
+            );
+        }
+    });
+}
+
+#[test]
+fn relationship_map_replacement_counts_parallel_removals_and_rolls_back_late_errors() {
+    lab(0xc4a1_3716, |contexts| async move {
+        let commit = contexts.commit();
+        for authorized in [false, true] {
+            for limit in [3, 4] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut seed = WriteBatch::new(R);
+                seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(1))]);
+                seed.create_vertex(VId(2), vec![L], vec![(P, CanonicalScalar::Int(2))]);
+                for edge in [100, 101] {
+                    seed.add_edge(
+                        EId(edge),
+                        VId(1),
+                        VId(2),
+                        vec![(P, CanonicalScalar::Int(5)), (Q, CanonicalScalar::Int(8))],
+                    );
+                }
+                db.write(&commit, seed).await.unwrap();
+                let before = (
+                    db.frontier().unwrap(),
+                    db.vertices().unwrap(),
+                    db.edges().unwrap(),
+                );
+                let replace = chain(
+                    "MATCH (a:Visible {p:1}), (b:Visible {p:2}) \
+                     MERGE (a)-[r:R]->(b) ON MATCH SET r = {} RETURN r",
+                );
+                let result = whole_pattern_merge(
+                    &contexts,
+                    &mut db,
+                    authorized,
+                    &replace,
+                    policy(2).with_mutation_limit(limit),
+                )
+                .await;
+                if limit == 4 {
+                    let (_, rows) = result.unwrap();
+                    assert_eq!(rows.len(), 2);
+                    assert!(db.edges().unwrap().iter().all(|edge| edge.props.is_empty()));
+                } else {
+                    let error = result.unwrap_err();
+                    assert!(error.contains("ActionLimit"), "{error}");
+                    assert_eq!(
+                        (
+                            db.frontier().unwrap(),
+                            db.vertices().unwrap(),
+                            db.edges().unwrap()
+                        ),
+                        before
+                    );
+                }
+            }
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let before = (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap(),
+            );
+            for statement in [
+                // A later occurrence fails after the first creates its edge
+                // and replaces the pattern map.
+                "UNWIND [1,2] AS x MERGE (a:Visible {p:1}) MERGE (b:Visible {p:2}) \
+                 MERGE (a)-[r:R]->(b) ON CREATE SET r = {p:7} \
+                 ON MATCH SET r = {q:r.p/(2-x)}",
+                // A RETURN failure must undo the replacement and creations.
+                "MERGE (a:Visible {p:1}) MERGE (b:Visible {p:2}) \
+                 MERGE (a)-[r:R {p:7}]->(b) ON CREATE SET r = {} RETURN 1/0",
+            ] {
+                let error = whole_pattern_merge(
+                    &contexts,
+                    &mut db,
+                    authorized,
+                    &chain(statement),
+                    policy(10),
+                )
+                .await
+                .unwrap_err();
+                assert!(error.contains("DivisionByZero"), "{statement}: {error}");
+                assert_eq!(
+                    (
+                        db.frontier().unwrap(),
+                        db.vertices().unwrap(),
+                        db.edges().unwrap()
+                    ),
+                    before
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn relationship_map_replacement_protects_absent_keys_and_hides_private_work() {
+    lab(0xc4a1_3717, |contexts| async move {
+        let (commit, txn, query) = (contexts.commit(), contexts.txn(), contexts.query());
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(Rights::ReadWrite, 1), NOW).unwrap();
+        let replace = chain(
+            "MATCH (a:Visible {p:1}), (b:Visible {p:2}) \
+             MERGE (a)-[r:R]->(b) ON MATCH SET r = {} RETURN r.p",
+        );
+        let mut visible_usage = None;
+        for hidden in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(1))]);
+            seed.create_vertex(VId(2), vec![L], vec![(P, CanonicalScalar::Int(2))]);
+            let mut props = vec![(P, CanonicalScalar::Int(5))];
+            if hidden {
+                props.push((SECRET, CanonicalScalar::bytes(vec![0x5a; 4096]).unwrap()));
+                for id in 3..35 {
+                    seed.create_vertex(VId(id), vec![HIDDEN], vec![]);
+                    seed.add_edge(EId(id), VId(1), VId(id), vec![]);
+                }
+            }
+            seed.add_edge(EId(100), VId(1), VId(2), props);
+            db.write(&commit, seed).await.unwrap();
+            if hidden {
+                for value in 0..8 {
+                    let mut edit = WriteBatch::new(R);
+                    edit.set_edge_property(EId(100), SECRET, Some(CanonicalScalar::Int(value)));
+                    db.write(&commit, edit).await.unwrap();
+                }
+            }
+            // A typed clear cannot smuggle an explicit hidden write into a
+            // replacement. Refusal occurs before publishing either action.
+            let before = (db.frontier().unwrap(), db.edges().unwrap());
+            let denied = chain(
+                "MATCH (a:Visible {p:1}), (b:Visible {p:2}) \
+                 MERGE (a)-[r:R]->(b) ON MATCH SET r = {secret:1}",
+            );
+            let error = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &denied,
+                    policy(1),
+                    || NOW,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(authorization(&error), Some(Error::ScopeDenied));
+            assert_eq!((db.frontier().unwrap(), db.edges().unwrap()), before);
+            let (stats, rows, _) = db
+                .execute_graph_write_chain_authorized(
+                    &txn,
+                    &query,
+                    &commit,
+                    &issuer,
+                    &token,
+                    "main",
+                    &replace,
+                    policy(1).with_mutation_limit(1),
+                    || NOW,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                rows.value[0].values(),
+                &[GraphValue::Scalar(CanonicalScalar::Null)]
+            );
+            if let Some(expected) = visible_usage {
+                assert_eq!(
+                    (stats.selection, stats.evaluator),
+                    expected,
+                    "hidden edge fields, history and endpoints cannot change visible work"
+                );
+            } else {
+                visible_usage = Some((stats.selection, stats.evaluator));
+            }
+            assert_eq!(
+                db.edge(EId(100)).unwrap().unwrap().props,
+                if hidden {
+                    vec![(SECRET, CanonicalScalar::Int(7).into())]
+                } else {
+                    vec![]
+                }
+            );
+        }
+
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = WriteBatch::new(R);
+        seed.create_vertex(VId(1), vec![L], vec![(P, CanonicalScalar::Int(1))]);
+        seed.create_vertex(VId(2), vec![L], vec![(P, CanonicalScalar::Int(2))]);
+        seed.add_edge(EId(100), VId(1), VId(2), vec![]);
+        db.write(&commit, seed).await.unwrap();
+        let mut stale = db.begin(&txn).unwrap();
+        let nonempty = chain(
+            "MATCH (a:Visible {p:1}), (b:Visible {p:2}) \
+             MERGE (a)-[r:R]->(b) ON MATCH SET r = {p:7}",
+        );
+        stale
+            .execute_graph_write_chain_engine_governed(
+                &mut db,
+                &query,
+                &nonempty,
+                policy(0).with_mutation_limit(1),
+            )
+            .unwrap();
+        let mut winner = WriteBatch::new(R);
+        winner.set_edge_property(EId(100), Q, Some(CanonicalScalar::Int(9)));
+        db.write(&commit, winner).await.unwrap();
+        let before = (db.frontier().unwrap(), db.edges().unwrap());
+        let result = stale.commit(&mut db, &commit).await;
+        assert!(
+            matches!(
+                result,
+                Err(WriteTxnError::Write(fgdb::WriteError::FirstCommitterWins {
+                    law: "FG-LAW-FCW-READ-01",
+                    ..
+                }))
+            ),
+            "{result:?}"
+        );
+        assert_eq!((db.frontier().unwrap(), db.edges().unwrap()), before);
+        assert_eq!(txn.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
 fn whole_pattern_merge_creates_missing_endpoints_without_reusing_partial_matches() {
     lab(0xc4a1_3810, |contexts| async move {
         let commit = contexts.commit();

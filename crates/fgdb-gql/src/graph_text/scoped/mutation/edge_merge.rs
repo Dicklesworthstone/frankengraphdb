@@ -1581,6 +1581,9 @@ impl PreparedGraphEdgeMergeText {
                                 value: GraphEdgeUpsertValue::Stored(value),
                             })
                         }
+                        VertexAction::Vertex(GraphVertexUpsertAction::ClearProperties { keep }) => {
+                            EdgeAction::ClearProperties { keep }
+                        }
                         VertexAction::Expression { key, inputs, value } => EdgeAction::Expression {
                             key,
                             inputs: inputs
