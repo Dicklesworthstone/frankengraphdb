@@ -1408,6 +1408,276 @@ fn composed_sealed_queries_keep_their_cut_after_writer_advance_drop_and_reopen()
 }
 
 #[test]
+fn composed_calls_reuse_one_projection_across_remaining_allowances() {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let database = seed(&contexts.commit(), &vfs).await;
+        let view = database
+            .prepare_sealed_read(
+                &cx,
+                None,
+                R,
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+        let arm = |source| {
+            format!(
+                "CALL fnx.single_source_shortest_path_length(args => [{source}], \
+             label => 'L', relation => 'R', direction => 'directed', \
+             parallel => 'collapse', self_loops => 'drop') YIELD vertex, distance \
+             RETURN vertex, distance"
+            )
+        };
+        let query = sealed_sql_rows(&format!("{} UNION ALL {}", arm(1), arm(2)));
+        cache_limit(&database, &cx, 0);
+        let cold_probe = Arc::new(SimulationCheckpointProbe::new(None));
+        let cold = view
+            .execute_graph_set_governed(
+                &cx.with_checkpoint_probe(Arc::clone(&cold_probe)),
+                &query,
+                sealed_sql_policy(),
+                memory(),
+            )
+            .unwrap();
+        assert_eq!(
+            cold.value,
+            sealed_sql_distances(&[(1, 0), (1, 2), (2, 0), (2, 1), (3, 1), (3, 2),])
+        );
+        assert_eq!(
+            database
+                .read_cache_status(&cx)
+                .unwrap()
+                .sealed_projections
+                .entries,
+            0
+        );
+
+        cache_limit(&database, &cx, 1 << 20);
+        let first_probe = Arc::new(SimulationCheckpointProbe::new(None));
+        let first = view
+            .execute_graph_set_governed(
+                &cx.with_checkpoint_probe(Arc::clone(&first_probe)),
+                &query,
+                sealed_sql_policy(),
+                memory(),
+            )
+            .unwrap();
+        assert_eq!(
+            first, cold,
+            "both kernels and all original construction charges remain"
+        );
+        assert!(
+            first_probe.calls() < cold_probe.calls(),
+            "the second CALL must avoid a physical projection rebuild"
+        );
+        let retained = database.read_cache_status(&cx).unwrap().sealed_projections;
+        assert_eq!(
+            retained.entries, 1,
+            "the second CALL has a smaller remaining allowance but the same projection"
+        );
+        assert!(retained.retained_bytes > 0);
+
+        let exact = GqlQueryPolicy::new(
+            sealed_sql_policy().rows.max_snapshot_records().unwrap(),
+            cold.rows.result_rows,
+            cold.evaluator.work_units,
+            cold.evaluator.scratch_entries,
+        );
+        let warm_probe = Arc::new(SimulationCheckpointProbe::new(None));
+        let warm = view
+            .execute_graph_set_governed(
+                &cx.with_checkpoint_probe(Arc::clone(&warm_probe)),
+                &query,
+                exact,
+                memory(),
+            )
+            .unwrap();
+        assert_eq!(warm, cold);
+        assert!(
+            warm_probe.calls() < first_probe.calls(),
+            "both complete projections can now be reused"
+        );
+        assert_eq!(
+            database.read_cache_status(&cx).unwrap().sealed_projections,
+            retained
+        );
+        for stop in [1, warm_probe.calls() / 2, warm_probe.calls()] {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let interrupted = cx.with_checkpoint_probe(Arc::clone(&probe));
+            assert!(matches!(
+                view.execute_graph_set_governed(&interrupted, &query, exact, memory()),
+                Err(fgdb_gql::GqlQueryError::Interrupted(_))
+            ));
+            assert_eq!(probe.calls(), stop);
+            assert_eq!(
+                database.read_cache_status(&cx).unwrap().sealed_projections,
+                retained
+            );
+        }
+        assert_eq!(
+            view.execute_graph_set_governed(&cx, &query, exact, memory())
+                .unwrap(),
+            cold
+        );
+    });
+}
+
+#[test]
+fn compatible_composed_reuse_keeps_the_first_cold_budget_refusal() {
+    #[derive(Debug, PartialEq, Eq)]
+    enum Refusal {
+        Rows(fgdb_gql::GqlBudgetExceeded),
+        Evaluator(fgdb_gql::GlaLimitExceeded),
+        Source(&'static str, u128, u128),
+        Kernel(&'static str, usize, usize),
+    }
+    fn refusal<C: core::fmt::Debug>(
+        error: fgdb_gql::GqlQueryError<fgdb_gql::GraphSetExecutionError<fgdb::GqlError>, C>,
+    ) -> Refusal {
+        use fgdb_gql::{GqlQueryError, GraphSetExecutionError};
+        match error {
+            GqlQueryError::Rows(error) => Refusal::Rows(error),
+            GqlQueryError::Evaluator(error) => Refusal::Evaluator(error),
+            GqlQueryError::Source(GraphSetExecutionError::Source(fgdb::GqlError::Procedure(
+                fgdb::ProcedureError::Read(error),
+            ))) => match *error {
+                fgdb_prism::FnxReadError::SourceLimit {
+                    resource,
+                    limit,
+                    requested,
+                } => Refusal::Source(resource, limit, requested),
+                other => panic!("unexpected source refusal: {other:?}"),
+            },
+            GqlQueryError::Source(GraphSetExecutionError::Source(fgdb::GqlError::Procedure(
+                fgdb::ProcedureError::SealedRead(error),
+            ))) => match *error {
+                FnxSealedReadError::Execution(fgdb_prism::FnxSealedExecutionError::Execution(
+                    fgdb_prism::FnxExecutionError::LimitExceeded {
+                        resource,
+                        limit,
+                        requested,
+                    },
+                )) => Refusal::Kernel(resource, limit, requested),
+                other => panic!("unexpected sealed refusal: {other:?}"),
+            },
+            other => panic!("unexpected refusal: {other:?}"),
+        }
+    }
+
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let database = seed(&contexts.commit(), &vfs).await;
+        let view = database
+            .prepare_sealed_read(
+                &cx,
+                None,
+                R,
+                SealedLimits::default(),
+                RootReadLimits::default(),
+            )
+            .await
+            .unwrap();
+        let query = sealed_sql_rows(&sealed_sql_bfs(
+            "vertex, distance",
+            "RETURN vertex, distance ORDER BY vertex",
+        ));
+        cache_limit(&database, &cx, 0);
+        let cold = view
+            .execute_graph_set_governed(&cx, &query, sealed_sql_policy(), memory())
+            .unwrap();
+        let exact = GqlQueryPolicy::new(
+            sealed_sql_policy().rows.max_snapshot_records().unwrap(),
+            cold.rows.result_rows,
+            cold.evaluator.work_units,
+            cold.evaluator.scratch_entries,
+        );
+        let mut policies = vec![
+            GqlQueryPolicy::new(0, 100, 100_000_000, 10_000_000),
+            GqlQueryPolicy::new(1_000_000, 100, 0, 10_000_000),
+            GqlQueryPolicy::new(1_000_000, 100, 100_000_000, 0),
+            GqlQueryPolicy::new(1_000_000, 0, 100_000_000, 10_000_000),
+            // Multiple insufficient dimensions must preserve the original
+            // source-before-GQL refusal, not just return some budget error.
+            GqlQueryPolicy::new(0, 0, 100_000_000, 0),
+        ];
+        let mut short_work = exact;
+        short_work.evaluator.max_work_units -= 1;
+        policies.push(short_work);
+        let mut short_scratch = exact;
+        short_scratch.evaluator.max_scratch_entries -= 1;
+        policies.push(short_scratch);
+        policies.push(GqlQueryPolicy::new(
+            exact.rows.max_snapshot_records().unwrap(),
+            cold.rows.result_rows - 1,
+            exact.evaluator.max_work_units,
+            exact.evaluator.max_scratch_entries,
+        ));
+        // This admits every GQL snapshot record but not the source visitor's
+        // additional work. Checking only AdmissionUsage would wrongly reuse.
+        policies.push(GqlQueryPolicy::new(
+            cold.rows.snapshot_records,
+            100,
+            100_000_000,
+            10_000_000,
+        ));
+        let expected: Vec<_> = policies
+            .iter()
+            .map(|&policy| {
+                refusal(
+                    view.execute_graph_set_governed(&cx, &query, policy, memory())
+                        .unwrap_err(),
+                )
+            })
+            .collect();
+        assert!(matches!(
+            expected.last(),
+            Some(Refusal::Source("work units", _, _))
+        ));
+        cache_limit(&database, &cx, 1 << 20);
+        assert_eq!(
+            view.execute_graph_set_governed(&cx, &query, sealed_sql_policy(), memory())
+                .unwrap(),
+            cold
+        );
+        let retained = database.read_cache_status(&cx).unwrap().sealed_projections;
+        assert_eq!(retained.entries, 1);
+        for (policy, expected) in policies.into_iter().zip(expected) {
+            let error = view
+                .execute_graph_set_governed(&cx, &query, policy, memory())
+                .unwrap_err();
+            assert_eq!(
+                refusal(error),
+                expected,
+                "cold and warm must name the same dimension, limit and first refused amount"
+            );
+            assert_eq!(
+                database.read_cache_status(&cx).unwrap().sealed_projections,
+                retained
+            );
+        }
+        assert_eq!(
+            view.execute_graph_set_governed(&cx, &query, exact, memory())
+                .unwrap(),
+            cold
+        );
+        assert_eq!(
+            database.read_cache_status(&cx).unwrap().sealed_projections,
+            retained
+        );
+    });
+}
+
+#[test]
 fn composed_sealed_queries_keep_exact_admission_and_source_failures_before_empty_pages() {
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
@@ -1463,9 +1733,9 @@ fn composed_sealed_queries_keep_exact_admission_and_source_failures_before_empty
             assert!(view.execute_graph_set_governed(&cx, &ranked, short, memory()).is_err(), "dimension {dimension}");
         }
         let after_short = database.read_cache_status(&cx).unwrap().sealed_projections;
-        // At most the original, exact, and three short-policy projections can
-        // have completed; no result or failed projection occupies a cache slot.
-        assert!((1..=5).contains(&after_short.entries));
+        // A fitting construction reuses the original owner; a construction
+        // that cannot fit fails cold and retains no partial projection.
+        assert_eq!(after_short, retained);
         assert!(after_short.retained_bytes <= after_short.max_bytes);
         assert_eq!(view.execute_graph_set_governed(&cx, &ranked, sealed_sql_policy(), memory()).unwrap(), cold);
 

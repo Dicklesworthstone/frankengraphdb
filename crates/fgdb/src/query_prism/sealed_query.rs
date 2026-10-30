@@ -590,7 +590,7 @@ impl SealedReadView {
         };
         let cache = &self.view.snapshot.read_caches.sealed;
         if let Some(retained) =
-            cache.lookup_controlled(&self.view.snapshot, request, &mut || {
+            cache.lookup_query_controlled(&self.view.snapshot, request, &mut || {
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)
             })?
         {
@@ -599,11 +599,11 @@ impl SealedReadView {
                     FnxExecutionError::InvalidUpstreamResult,
                 )));
             };
-            // The complete policy is in the key. The successful build's exact
-            // source/construction counters are prepaid again, never erased by
-            // reuse. No authority or result is stored in this shared sidecar.
+            // An exact request or a complete cost that fits the fresh bounds
+            // proves construction cannot refuse. Prepay its exact counters
+            // again; no authority, kernel or result is reused by this sidecar.
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-            return Ok((retained.graph, usage));
+            return Ok((retained.graph, usage.admission));
         }
         let mut usage = SourceUsage::new(policy, options.source_limits);
         let mut vertices = Vec::new();
@@ -660,7 +660,11 @@ impl SealedReadView {
         )
         .map_err(|error| sealed_failure(SealedReadError::Projection(error)))?;
         cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-        let usage = usage.admission;
+        let usage = sealed_cache::QueryUsage {
+            admission: usage.admission,
+            source_work: usage.work,
+            source_scratch: usage.scratch,
+        };
         let retained = sealed_cache::Retained {
             graph: graph.clone(),
             query_usage: Some(usage),
@@ -670,7 +674,7 @@ impl SealedReadView {
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)
             })?;
         }
-        Ok((graph, usage))
+        Ok((graph, usage.admission))
     }
 }
 

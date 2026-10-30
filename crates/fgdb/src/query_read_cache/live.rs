@@ -124,11 +124,25 @@ impl<Owner, Key: PartialEq, Value: Clone> LiveCache<Owner, Key, Value> {
         key: impl Borrow<Key>,
         poll: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<Option<Value>, E> {
+        self.lookup_controlled_by(owner, |candidate, _| candidate == key.borrow(), poll)
+    }
+
+    /// Select the first completed entry whose bounded metadata proves reuse.
+    /// The predicate runs under the metadata lock: it must only compare keys
+    /// and retained counters, never poll, allocate, visit source rows or build.
+    /// Owner identity, pruning and deterministic slot order remain mandatory.
+    pub(crate) fn lookup_controlled_by<E>(
+        &self,
+        owner: &Arc<Owner>,
+        matches: impl Fn(&Key, &Value) -> bool,
+        poll: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<Value>, E> {
         let mut entries = self.lock(poll)?;
         let retired = Self::prune(&mut entries);
         let owner = Arc::downgrade(owner);
         let found = entries.iter().flatten().find_map(|entry| {
-            (entry.owner.ptr_eq(&owner) && &entry.key == key.borrow()).then(|| entry.value.clone())
+            (entry.owner.ptr_eq(&owner) && matches(&entry.key, &entry.value))
+                .then(|| entry.value.clone())
         });
         drop(entries);
         drop(retired);

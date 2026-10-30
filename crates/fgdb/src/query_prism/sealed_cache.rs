@@ -1,14 +1,16 @@
 //! Owner-private reuse of completed compressed projections. No result, live
 //! permit, unverified source claim or partial build is retained here.
 //!
-//! Construction allowances are part of the exact key. A warm request therefore
-//! cannot borrow a looser source/image/projection admission. Physical build
+//! Standalone and buffered construction allowances remain exact keys. Composed
+//! queries may reuse the same image/projection when their complete measured
+//! construction cost fits every fresh source/GQL counter allowance. Otherwise
+//! the ordinary build reaches its original first refusal. Physical build
 //! checkpoints and I/O disappear on a hit; live entry/return checks and all
 //! kernel/result admissions remain the caller's responsibility. These owner
 //! APIs carry no capability charge transcript and are not authorized hosts.
 
 use super::cache::Request as ProjectionRequest;
-use super::{RootReadLimits, SealedGraphView, SealedLimits};
+use super::{FnxSourceLimits, RootReadLimits, SealedGraphView, SealedLimits};
 use crate::ReadCacheUsage;
 use crate::gql_exec::AdmissionUsage;
 use crate::query::read_cache::live::{CACHE_ENTRIES, LiveCache};
@@ -16,6 +18,7 @@ use fgdb_gql::GqlQueryPolicy;
 use fgdb_strata::tiered::memory::{MemoryCharge, MemoryPool};
 use fgdb_strata::tiered::sealed::SealedAnchor;
 use fgdb_types::QueryCx;
+use std::sync::Arc;
 
 pub(crate) const CACHE_BYTES: usize = 1 << 30;
 
@@ -42,15 +45,36 @@ pub(crate) struct Request {
     pub(crate) projection: ProjectionRequest,
     pub(crate) source: Source,
     /// A query retains its complete measured construction admission. Different
-    /// remaining allowances must rebuild and reach their own first refusal.
+    /// remaining allowances may reuse only when every construction counter
+    /// fits; otherwise they rebuild and reach their own first refusal.
     /// Standalone preparation has no GQL admission profile.
     pub(crate) query_policy: Option<GqlQueryPolicy>,
+}
+
+/// Exact counters from a successful composed projection build, before any
+/// kernel or result conversion. Construction only adds nonnegative amounts,
+/// so fitting these complete totals proves that no construction prefix can
+/// refuse under the new counter allowances. Staging and projection bounds
+/// remain exact key dimensions, not estimates reconstructed from the output.
+#[derive(Clone, Copy)]
+pub(crate) struct QueryUsage {
+    pub(crate) admission: AdmissionUsage,
+    pub(crate) source_work: u64,
+    pub(crate) source_scratch: u64,
+}
+
+impl QueryUsage {
+    fn fits(self, policy: GqlQueryPolicy, limits: FnxSourceLimits) -> bool {
+        self.source_work <= limits.max_work_units
+            && self.source_scratch <= limits.max_scratch_entries
+            && self.admission.absorbs(policy, 0, 0, 0)
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct Retained {
     pub(crate) graph: SealedGraphView,
-    pub(crate) query_usage: Option<AdmissionUsage>,
+    pub(crate) query_usage: Option<QueryUsage>,
 }
 
 impl Retained {
@@ -63,7 +87,7 @@ impl Retained {
 
     pub(crate) fn charged_bytes(&self) -> Option<usize> {
         let extra = if self.query_usage.is_some() {
-            std::mem::size_of::<Option<AdmissionUsage>>()
+            std::mem::size_of::<Option<QueryUsage>>()
                 + std::mem::size_of::<Option<GqlQueryPolicy>>()
         } else {
             0
@@ -73,6 +97,44 @@ impl Retained {
 }
 
 pub(crate) type SealedProjectionCache = LiveCache<crate::Snapshot, Request, Retained>;
+
+impl SealedProjectionCache {
+    /// Composed queries charge the saved construction totals again. Only
+    /// counter allowances may differ; owner, cut, earned anchor, selection,
+    /// graph laws, projection bounds and staging bytes must still match.
+    pub(crate) fn lookup_query_controlled<E>(
+        &self,
+        owner: &Arc<crate::Snapshot>,
+        request: Request,
+        poll: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<Retained>, E> {
+        self.lookup_controlled_by(
+            owner,
+            |cached, retained| {
+                if *cached == request {
+                    return true;
+                }
+                let (Some(policy), Some(usage)) = (request.query_policy, retained.query_usage)
+                else {
+                    return false;
+                };
+                if cached.query_policy.is_none() || !matches!(request.source, Source::Admitted(_)) {
+                    return false;
+                }
+                // Normalize only the three counter profiles. Equality still
+                // compares every other current or future request dimension.
+                let mut compatible = *cached;
+                compatible.query_policy = request.query_policy;
+                compatible.projection.source_limits.max_work_units =
+                    request.projection.source_limits.max_work_units;
+                compatible.projection.source_limits.max_scratch_entries =
+                    request.projection.source_limits.max_scratch_entries;
+                compatible == request && usage.fits(policy, request.projection.source_limits)
+            },
+            poll,
+        )
+    }
+}
 
 struct BufferedEntry {
     request: Request,
