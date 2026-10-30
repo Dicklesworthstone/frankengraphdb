@@ -66,11 +66,17 @@ mod procedures {
                 .evaluator
                 .max_scratch_entries
                 .min(options.source_limits.max_scratch_entries);
-            let source =
-                self.query_source_tables::<_, VId, _>(snapshot, None, None, false, &mut |event| {
+            let source = self.query_source_tables::<_, VId, _>(
+                snapshot,
+                None,
+                None,
+                false,
+                None,
+                &mut |event| {
                     cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
                     usage.observe(source_policy, event)
-                })?;
+                },
+            )?;
 
             // Project the canonical overlay, including staged label/weight
             // edits and isolated vertices. Keep the source's complete table

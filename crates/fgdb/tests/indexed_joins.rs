@@ -597,3 +597,175 @@ fn row_keyed_property_matches_admit_only_the_posted_roots() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn transaction_property_seeds_follow_staged_rekeys_creations_and_numeric_equality() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{GraphAggregate, PreparedGraphSetAggregate, PreparedGraphSetText};
+
+    let ((), report) = run_async_under_lab(0x10a1_2a80, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (cx, commit, txn_cx) = (contexts.query(), contexts.commit(), contexts.txn());
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        for id in 1..=400_i64 {
+            batch.create_vertex(
+                VId(id as u128),
+                vec![],
+                vec![(SCORE, CanonicalScalar::Int(id))],
+            );
+        }
+        db.write(&commit, batch).await.unwrap();
+        let mut txn = db.begin(&txn_cx).unwrap();
+        let mut staged = WriteBatch::new(R);
+        staged.set_vertex_property(VId(5), SCORE, Some(CanonicalScalar::Int(600)));
+        staged.set_vertex_property(VId(11), SCORE, Some(CanonicalScalar::Int(5)));
+        staged.delete_vertex(VId(300));
+        staged.create_vertex(VId(777), vec![], vec![(SCORE, CanonicalScalar::Int(900))]);
+        txn.write(&mut db, staged).unwrap();
+        let params = GqlParameters::new()
+            .with_list(
+                "keys",
+                [
+                    CanonicalScalar::Int(5),
+                    CanonicalScalar::Float(fgdb_types::CanonicalF64::new(7.0)),
+                    CanonicalScalar::Int(5),
+                    CanonicalScalar::Null,
+                    CanonicalScalar::Int(900),
+                    CanonicalScalar::Int(300),
+                ]
+                .into_iter()
+                .map(GraphValue::Scalar)
+                .collect(),
+            )
+            .unwrap();
+        let query = PreparedGraphSetText::prepare(
+            "UNWIND $keys AS key WITH key AS k MATCH (n {score: k}) \
+             RETURN n.score AS score ORDER BY score",
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&params)
+        .unwrap();
+        let tight = GqlQueryPolicy::new(20, 1000, 1_000_000, 1_000_000);
+        let result = txn
+            .execute_graph_set_governed(&db, &cx, &query, tight)
+            .unwrap();
+        let actual: Vec<_> = result
+            .value
+            .iter()
+            .map(|row| row.get(0).unwrap().as_scalar().unwrap().clone())
+            .collect();
+        assert_eq!(
+            actual,
+            [5, 5, 7, 900].map(CanonicalScalar::Int),
+            "the stale key, deleted vertex and NULL must not join"
+        );
+        assert!(result.rows.snapshot_records < 20);
+        let aggregate = PreparedGraphSetAggregate::prepare(
+            query,
+            &[],
+            &[GraphAggregate::count_rows("n")],
+            0,
+            None,
+        )
+        .unwrap();
+        let result = txn
+            .execute_graph_set_aggregate_governed(&db, &cx, &aggregate, tight)
+            .unwrap();
+        assert_eq!(result.value[0].get(0).unwrap().as_count(), Some(4));
+        assert!(result.rows.snapshot_records < 20);
+        txn.abort();
+        assert_eq!(txn_cx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn transaction_property_seed_witnesses_catch_empty_phantoms_and_refused_reads() {
+    use fgdb_gql::PreparedGraphSetText;
+    use fgdb_gql::algebra::GraphValue;
+
+    let ((), report) = run_async_under_lab(0x10a1_2a81, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (cx, commit, txn_cx) = (contexts.query(), contexts.commit(), contexts.txn());
+        for case in 0..5 {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut batch = WriteBatch::new(R);
+            for id in 1..=40_i64 {
+                batch.create_vertex(
+                    VId(id as u128),
+                    vec![],
+                    vec![(SCORE, CanonicalScalar::Int(id))],
+                );
+            }
+            db.write(&commit, batch).await.unwrap();
+            let mut txn = db.begin(&txn_cx).unwrap();
+            let mut staged = WriteBatch::new(R);
+            staged.create_vertex(VId(777), vec![], vec![]);
+            txn.write(&mut db, staged).unwrap();
+            let refused = case == 4;
+            let query = PreparedGraphSetText::prepare(
+                "UNWIND $keys AS key WITH key AS k MATCH (n {score: k}) RETURN n.score AS score",
+                symbols,
+            )
+            .unwrap()
+            .bind_parameters(
+                &GqlParameters::new()
+                    .with_list(
+                        "keys",
+                        vec![GraphValue::Scalar(CanonicalScalar::Int(if refused {
+                            5
+                        } else {
+                            500
+                        }))],
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+            let cap = GqlQueryPolicy::new(if refused { 0 } else { 10 }, 100, 1_000_000, 1_000_000);
+            let result = txn.execute_graph_set_governed(&db, &cx, &query, cap);
+            if refused {
+                assert!(result.is_err());
+            } else {
+                assert!(result.unwrap().value.is_empty());
+            }
+            let mut winner = WriteBatch::new(R);
+            match case {
+                0 => winner.set_vertex_property(VId(3), SCORE, Some(CanonicalScalar::Int(500))),
+                1 => winner.set_vertex_property(
+                    VId(3),
+                    SCORE,
+                    Some(CanonicalScalar::Float(fgdb_types::CanonicalF64::new(500.0))),
+                ),
+                2 => {
+                    winner.create_vertex(VId(901), vec![], vec![(SCORE, CanonicalScalar::Int(500))])
+                }
+                _ => winner.set_vertex_property(VId(3), SCORE, Some(CanonicalScalar::Int(499))),
+            }
+            db.write(&commit, winner).await.unwrap();
+            let frontier = db.frontier().unwrap();
+            // No getter or full scan may repair a missing membership witness.
+            let result = txn.commit(&mut db, &commit).await;
+            if case == 3 {
+                result.unwrap();
+                assert!(db.vertex(VId(777)).unwrap().is_some());
+            } else {
+                assert!(
+                    matches!(
+                        result,
+                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                            law: "FG-LAW-FCW-READ-01",
+                            ..
+                        }))
+                    ),
+                    "case {case}: {result:?}"
+                );
+                assert_eq!(db.frontier().unwrap(), frontier);
+                assert!(db.vertex(VId(777)).unwrap().is_none());
+            }
+            assert_eq!(txn_cx.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

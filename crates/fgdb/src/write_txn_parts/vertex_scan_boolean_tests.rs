@@ -514,6 +514,7 @@ fn a_later_label_never_hides_an_earlier_boolean_data_error() {
         row.props = vec![(P, CanonicalScalar::Int(0).into())];
         let mut scan = VertexScanRead {
             selections: VertexScanRead::predicates(query.plan()).unwrap().to_vec(),
+            property_seeds: None,
             complete: false,
             endpoint: None,
         };

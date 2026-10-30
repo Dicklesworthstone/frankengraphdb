@@ -115,32 +115,44 @@ impl WriteTxn {
             let result = query.execute_governed_from_source(
                 policy,
                 fgdb_gql::with_element_metadata(
-                    fgdb_gql::WithElementReads {
-                        source: fgdb_gql::WithProcedures {
-                            patterns: |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
-                                fgdb_gql::algebra::GraphValueRow,
-                            >,
-                                       allowance| {
-                                self.execute_graph_pattern_governed(
-                                    database, cx, pattern, allowance,
-                                )
-                            },
-                            procedures: |call: &fgdb_gql::PreparedProcedureCall,
-                                         arguments: &[fgdb_gql::algebra::GraphValue],
-                                         allowance| {
-                                self.execute_procedure_governed(
-                                    database, cx, call, arguments, allowance,
-                                )
-                            },
-                        },
-                        elements: |element, key| {
-                            self.element_property_with_checkpoint(
-                                database,
-                                cx,
-                                &element_failure,
-                                element,
-                                key,
+                    fgdb_gql::WithSeededPatterns {
+                        seeded: |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
+                            fgdb_gql::algebra::GraphValueRow,
+                        >,
+                                 seeds: fgdb_gql::GraphSeeds<'_>,
+                                 allowance| {
+                            self.execute_seeded_graph_pattern_governed(
+                                database, cx, pattern, seeds, allowance,
                             )
+                        },
+                        source: fgdb_gql::WithElementReads {
+                            source: fgdb_gql::WithProcedures {
+                                patterns: |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
+                                    fgdb_gql::algebra::GraphValueRow,
+                                >,
+                                           allowance| {
+                                    self.execute_graph_pattern_governed(
+                                        database, cx, pattern, allowance,
+                                    )
+                                },
+                                procedures:
+                                    |call: &fgdb_gql::PreparedProcedureCall,
+                                     arguments: &[fgdb_gql::algebra::GraphValue],
+                                     allowance| {
+                                        self.execute_procedure_governed(
+                                            database, cx, call, arguments, allowance,
+                                        )
+                                    },
+                            },
+                            elements: |element, key| {
+                                self.element_property_with_checkpoint(
+                                    database,
+                                    cx,
+                                    &element_failure,
+                                    element,
+                                    key,
+                                )
+                            },
                         },
                     },
                     |element, kind, catalog, control| {

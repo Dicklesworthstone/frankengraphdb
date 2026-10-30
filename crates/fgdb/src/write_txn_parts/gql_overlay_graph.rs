@@ -483,8 +483,7 @@ mod query_source {
                 }
                 VertexPredicate::ScalarProperty { predicate, .. } => {
                     let comparison = predicate.comparison();
-                    (comparison == IntegerComparison::Equal
-                        && !matches!(predicate.value(), CanonicalScalar::Null))
+                    comparison == IntegerComparison::Equal
                         || (comparison != IntegerComparison::NotEqual
                             && matches!(
                                 predicate.value(),
@@ -750,6 +749,86 @@ mod query_source {
     }
 
     impl WriteTxn {
+        /// A relational equality supplies a complete root candidate domain.
+        /// Property postings are historical supersets; every staged creation
+        /// or edit of that key joins them before the canonical overlay applies
+        /// effects. The unchanged relational join owns the final equality.
+        fn seeded_vertex_source<'a, E>(
+            &'a self,
+            snapshot: &'a Snapshot,
+            seeds: fgdb_gql::GraphSeeds<'_>,
+            control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+        ) -> Result<BoundOverlay<'a>, E> {
+            let mut vertices = BTreeSet::new();
+            let mut root_observations = Vec::new();
+            match seeds {
+                fgdb_gql::GraphSeeds::Identities(ids) => {
+                    let mut observed = BTreeSet::new();
+                    for &vid in ids {
+                        control(SourceEvent::Work)?;
+                        self.note_query_read(&mut observed, ElementId::Vertex(vid), control)?;
+                        if !vertices.contains(&vid) {
+                            control(SourceEvent::ScratchEntry)?;
+                            vertices.insert(vid);
+                        }
+                    }
+                }
+                fgdb_gql::GraphSeeds::Property { key, values } => {
+                    // Retain the dynamic membership witness before the first
+                    // index read. Only this successful execution can complete
+                    // it; quota or cancellation refusal remains conservative.
+                    control(SourceEvent::ScratchEntry)?;
+                    let mut retained = Vec::new();
+                    for value in values {
+                        control(SourceEvent::Work)?;
+                        control(SourceEvent::ScratchEntry)?;
+                        retained.push(value.clone());
+                    }
+                    control(SourceEvent::ScratchEntry)?;
+                    let observation = self
+                        .point_reads
+                        .borrow_mut()
+                        .begin_property_seed_scan(key, retained);
+                    control(SourceEvent::ScratchEntry)?;
+                    root_observations.push(observation);
+                    for vid in source::property_seed_roots(snapshot, key, values, control)? {
+                        control(SourceEvent::ScratchEntry)?;
+                        vertices.insert(vid);
+                    }
+                    if !values.is_empty()
+                        && let Some(prepared) = &self.prepared
+                    {
+                        for coordinate in prepared.template.coordinate_entries() {
+                            control(SourceEvent::Work)?;
+                            for effect in &coordinate.rows {
+                                control(SourceEvent::Work)?;
+                                let candidate = match effect {
+                                    DeltaRow::CreateVertex { vid, .. } => Some(*vid),
+                                    DeltaRow::Property {
+                                        elem: ElementId::Vertex(vid),
+                                        property,
+                                        ..
+                                    } if *property == key => Some(*vid),
+                                    _ => None,
+                                };
+                                if let Some(vid) = candidate
+                                    && !vertices.contains(&vid)
+                                {
+                                    control(SourceEvent::ScratchEntry)?;
+                                    vertices.insert(vid);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(BoundOverlay {
+                vertices,
+                edges: OverlayEdges::new(),
+                root_observations,
+            })
+        }
+
         /// Admit indexed flat patterns without scanning the two
         /// complete tables. Roots that gain a predicate field in this
         /// transaction join the historical index candidates. Walking the
@@ -1196,6 +1275,62 @@ mod query_source {
             fgdb_gql::GqlQueryExecution<Row>,
             fgdb_gql::GqlQueryError<WriteTxnError, Box<asupersync::error::Error>>,
         > {
+            self.execute_graph_pattern_with_seeds_governed(database, cx, pattern, None, policy)
+        }
+
+        /// Root seeds are a physical admission choice, not a new logical plan.
+        /// Decline unproved topologies before any source read or observation.
+        pub(super) fn execute_seeded_graph_pattern_governed<V: Vfs + Clone>(
+            &self,
+            database: &Database<V>,
+            cx: &fgdb_types::QueryCx,
+            pattern: &PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow>,
+            seeds: fgdb_gql::GraphSeeds<'_>,
+            policy: fgdb_gql::GqlQueryPolicy,
+        ) -> Option<
+            Result<
+                fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+                TxnGqlError<WriteTxnError>,
+            >,
+        > {
+            let [GlaOperator::ScanVertices, rest @ ..] = pattern.plan().operators() else {
+                return None;
+            };
+            if !rest.iter().all(|operator| match operator {
+                GlaOperator::Select { slot, .. } => slot.ordinal() == 0,
+                GlaOperator::Project { .. }
+                | GlaOperator::ProjectBindings { .. }
+                | GlaOperator::ProjectValues { .. }
+                | GlaOperator::Distinct
+                | GlaOperator::OrderByVertexId
+                | GlaOperator::OrderByBindings
+                | GlaOperator::OrderByValues
+                | GlaOperator::OrderByValueColumns { .. }
+                | GlaOperator::Limit { .. } => true,
+                _ => false,
+            }) {
+                return None;
+            }
+            Some(self.execute_graph_pattern_with_seeds_governed(
+                database,
+                cx,
+                pattern,
+                Some(seeds),
+                policy,
+            ))
+        }
+
+        fn execute_graph_pattern_with_seeds_governed<V: Vfs + Clone, Row: GlaOutput>(
+            &self,
+            database: &Database<V>,
+            cx: &fgdb_types::QueryCx,
+            pattern: &PreparedGraphPattern<Row>,
+            seeds: Option<fgdb_gql::GraphSeeds<'_>>,
+            policy: fgdb_gql::GqlQueryPolicy,
+        ) -> Result<
+            fgdb_gql::GqlQueryExecution<Row>,
+            fgdb_gql::GqlQueryError<WriteTxnError, Box<asupersync::error::Error>>,
+        > {
             cx.with_restriction(|| {
                 let snapshot = self
                     .query_snapshot(database)
@@ -1203,11 +1338,12 @@ mod query_source {
                 cx.checkpoint()
                     .map_err(fgdb_gql::GqlQueryError::Interrupted)?;
                 let mut usage = crate::gql_exec::AdmissionUsage::default();
-                let source = self.query_source_with_witnesses(
+                let source = self.query_source_with_seeds(
                     snapshot,
                     pattern.plan().clone(),
                     pattern.required_vertex_label(),
                     true,
+                    seeds,
                     &mut |event| {
                         cx.checkpoint()
                             .map_err(fgdb_gql::GqlQueryError::Interrupted)?;
@@ -1365,11 +1501,31 @@ mod query_source {
             precise: bool,
             control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
         ) -> Result<OverlayQuerySource<'a, Row>, E> {
+            self.query_source_with_seeds(
+                snapshot,
+                logical,
+                required_vertex_label,
+                precise,
+                None,
+                control,
+            )
+        }
+
+        fn query_source_with_seeds<'a, E, Row: GlaOutput>(
+            &'a self,
+            snapshot: &'a Snapshot,
+            logical: GlaPlan<Row>,
+            required_vertex_label: Option<LabelId>,
+            precise: bool,
+            seeds: Option<fgdb_gql::GraphSeeds<'_>>,
+            control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+        ) -> Result<OverlayQuerySource<'a, Row>, E> {
             let tables = self.query_source_tables(
                 snapshot,
                 Some(&logical),
                 required_vertex_label,
                 precise,
+                seeds,
                 control,
             )?;
             Ok(OverlayQuerySource { logical, tables })
@@ -1379,12 +1535,14 @@ mod query_source {
         /// procedure. It requires both table phantom witnesses even when the
         /// current graph is empty; existing query plans keep their narrower
         /// source requirements and precise acceptance protocol.
+        #[allow(clippy::too_many_arguments)]
         fn query_source_tables<'a, E, Row: GlaOutput, C>(
             &'a self,
             snapshot: &'a Snapshot,
             logical: Option<&GlaPlan<Row>>,
             required_vertex_label: Option<LabelId>,
             precise: bool,
+            seeds: Option<fgdb_gql::GraphSeeds<'_>>,
             control: &mut C,
         ) -> Result<OverlayGraphTables<'a>, E>
         where
@@ -1437,7 +1595,9 @@ mod query_source {
             // the old conservative refusal semantics; a completed domain does
             // not need an additional whole-table insertion witness. A precise
             // single-root selection already has its full predicate witness.
-            let vertex_bound = if precise && !reads_edges {
+            let vertex_bound = if let Some(seeds) = seeds {
+                Some(self.seeded_vertex_source(snapshot, seeds, control)?)
+            } else if precise && !reads_edges {
                 match logical {
                     Some(logical) => {
                         self.bound_vertex_sources(snapshot, logical, predicates.is_none(), control)?

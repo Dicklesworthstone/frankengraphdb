@@ -12,6 +12,10 @@ struct VertexScanRead {
     // Only Select/SelectBoolean operators. Boolean programs share their checked
     // immutable encoding; the transaction never owns an evaluator callback.
     selections: Vec<fgdb_gql::algebra::GlaOperator>,
+    // A leading relational bag can restrict a root by a dynamically computed
+    // property key. Keep that membership domain independently of the leaf's
+    // own predicates: an unobserved vertex can enter it by being re-keyed.
+    property_seeds: Option<(fgdb_delta_types::PropertyKeyId, Vec<CanonicalScalar>)>,
     // Only the originating call can complete this entry, AFTER execution and
     // all final quota checks. Refusal/unwind leaves a conservative vertex-domain
     // witness. A later successful call never completes an earlier failed read.
@@ -134,6 +138,11 @@ impl VertexScanRead {
         ) {
             return Ok(true);
         }
+        if let Some((key, _)) = &self.property_seeds
+            && matches!(row, DeltaRow::Property { property, .. } if property == key)
+        {
+            return Ok(true);
+        }
         for selection in &self.selections {
             checkpoint()?;
             match selection {
@@ -241,10 +250,27 @@ impl VertexScanRead {
         row: Option<&VertexRow>,
         checkpoint: &mut impl FnMut() -> Result<(), WriteTxnError>,
     ) -> Result<bool, WriteTxnError> {
-        match row {
-            Some(row) => Self::may_match(&self.selections, row, &mut |_| checkpoint()),
-            None => Ok(false),
+        let Some(row) = row else {
+            return Ok(false);
+        };
+        if let Some((key, values)) = &self.property_seeds {
+            let property = row
+                .props
+                .binary_search_by_key(key, |(key, _)| *key)
+                .ok()
+                .map(|at| &row.props[at].1);
+            for value in values {
+                checkpoint()?;
+                if fgdb_gql::algebra::IntegerComparison::Equal
+                    .evaluate_property_scalar(property, Some(value))
+                    == Some(true)
+                {
+                    return Self::may_match(&self.selections, row, &mut |_| checkpoint());
+                }
+            }
+            return Ok(false);
         }
+        Self::may_match(&self.selections, row, &mut |_| checkpoint())
     }
 
     /// Preserve the label-domain witness of an incomplete scan. Only primitive
@@ -281,8 +307,24 @@ impl PointReads {
         let index = self.2.len();
         self.2.push(VertexScanRead {
             selections: predicates.to_vec(),
+            property_seeds: None,
             complete: false,
             endpoint,
+        });
+        index
+    }
+
+    fn begin_property_seed_scan(
+        &mut self,
+        key: fgdb_delta_types::PropertyKeyId,
+        values: Vec<CanonicalScalar>,
+    ) -> usize {
+        let index = self.2.len();
+        self.2.push(VertexScanRead {
+            selections: Vec::new(),
+            property_seeds: Some((key, values)),
+            complete: false,
+            endpoint: None,
         });
         index
     }

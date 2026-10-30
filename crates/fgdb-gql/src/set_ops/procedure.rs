@@ -1027,9 +1027,9 @@ where
 
 /// A source plus the host's seeded single-root pattern reader (fgdb-2acff).
 /// The reader may decline a shape with `None`, keeping the unchanged leaf.
-pub(crate) struct WithSeededPatterns<S, F> {
-    pub(crate) source: S,
-    pub(crate) seeded: F,
+pub struct WithSeededPatterns<S, F> {
+    pub source: S,
+    pub seeded: F,
 }
 
 impl<E, C, S, F> GraphSetSource<E, C> for WithSeededPatterns<S, F>

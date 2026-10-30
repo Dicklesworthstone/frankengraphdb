@@ -4622,6 +4622,16 @@ pub(crate) fn indexed_roots<E>(
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
 ) -> Result<Option<Vec<VId>>, E> {
     use fgdb_gql::algebra::{IntegerComparison, VertexPredicate};
+    // A primitive conjunct comparing with NULL can never select a root,
+    // including one whose property is absent or itself NULL. Callers retain
+    // their normal membership witnesses and still evaluate the original plan.
+    if predicates.iter().any(|predicate| {
+        matches!(predicate, VertexPredicate::ScalarProperty { predicate, .. }
+            if matches!(predicate.value(), CanonicalScalar::Null))
+    }) {
+        control(SourceEvent::Work)?;
+        return Ok(Some(Vec::new()));
+    }
     // A probed root is not an admitted record: the predicate scan this
     // replaces charged root selection as work only, and every candidate here
     // still charges work, so the budget governs the probe.
@@ -4695,7 +4705,7 @@ fn root_endpoint_roles<Row>(
 /// does. Historical postings are only candidates; admission at `as_of`
 /// picks the visible rows and the join rechecks the equality, so this is a
 /// superset of the roots that can join. Ascending and distinct.
-pub(super) fn property_seed_roots<E>(
+pub(crate) fn property_seed_roots<E>(
     snapshot: &Snapshot,
     key: PropertyKeyId,
     values: &[CanonicalScalar],

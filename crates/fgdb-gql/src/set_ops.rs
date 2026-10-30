@@ -26,15 +26,13 @@ pub use aggregate::PreparedGraphSetAggregate;
 pub use filter::incremental as row_filter;
 pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
 pub(crate) use procedure::WithOwnedRows;
-pub(crate) use procedure::{
-    BorrowedSource, DynPatterns, DynProcedures, DynSeeded, PatternSource, WithSeededPatterns,
-};
+pub(crate) use procedure::{BorrowedSource, DynPatterns, DynProcedures, DynSeeded, PatternSource};
 pub use procedure::{
     GraphElementReader, GraphPatternFactorExecution, GraphProcedureExecution,
     GraphProcedureRowCursor, GraphSeeds, GraphSetSource, PreparedProcedureCall,
     ProcedureGraphDirection, ProcedureGraphProjection, ProcedureGraphWeight,
     ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops, WithElementMetadata,
-    WithElementReads, WithProcedureRows, WithProcedures, procedure_row_source,
+    WithElementReads, WithProcedureRows, WithProcedures, WithSeededPatterns, procedure_row_source,
     with_element_metadata,
 };
 pub(crate) use projection::{
