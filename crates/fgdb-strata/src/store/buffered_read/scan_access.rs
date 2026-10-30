@@ -309,9 +309,11 @@ impl<V: Vfs> BufferedPartition<V> {
             let bytes = self
                 .pin(cx, descriptor.extent, Admission::ScanBypass)
                 .await?;
-            // Both projections keep the admitted checksum, patch range and
-            // row framing checks. Only property decoding/copying is optional.
-            let rows = self.decode_scan_patch(at, bytes.as_ref(), properties)?;
+            // Every row keeps its framing and topology checks, but only the
+            // requested identity's properties can become an endpoint result.
+            // Initial admission and the current checksum still cover the
+            // complete patch, including all unrelated property payloads.
+            let rows = self.decode_scan_patch(at, bytes.as_ref(), properties, Some(vid))?;
             for row in &rows {
                 work.step(cx, observe)?;
                 if row.vid == vid

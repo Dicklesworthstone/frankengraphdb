@@ -819,11 +819,38 @@ impl<V: Vfs> BufferedPartition<V> {
         at: usize,
         bytes: &[u8],
         properties: VertexPropertyAccess,
+        selected_vertex: Option<VId>,
     ) -> Result<VertexPatchRows, BufferedReadError> {
         let descriptor = self.patches[at];
         let reference = &self.root.vertex_patches[at];
-        let rows = match properties {
-            VertexPropertyAccess::Read => crate::root::resolve_patch_ref(
+        let rows = match (properties, selected_vertex) {
+            (VertexPropertyAccess::Read, Some(vid)) => {
+                let rows = crate::vertex::read_admitted_patch_for_vertex(
+                    self.store.k_oid.expose(),
+                    self.store.namespace,
+                    bytes,
+                    crate::vertex::VertexPatchVersion(reference.patch_id),
+                    self.store.decode_resolver(),
+                    vid,
+                )
+                .map_err(|error| {
+                    StoreError::MalformedRoot(crate::root::RootError::Patch { at, error })
+                })?;
+                let actual = crate::vertex::span_of_rows(&rows);
+                let declared = (reference.first_seq, reference.last_seq);
+                if actual != Some(declared) {
+                    return Err(StoreError::MalformedRoot(
+                        crate::root::RootError::PatchRangeMismatch {
+                            at,
+                            declared,
+                            actual: actual.unwrap_or((CommitSeq(0), CommitSeq(0))),
+                        },
+                    )
+                    .into());
+                }
+                rows
+            }
+            (VertexPropertyAccess::Read, None) => crate::root::resolve_patch_ref(
                 self.store.k_oid.expose(),
                 self.store.namespace,
                 at,
@@ -832,7 +859,7 @@ impl<V: Vfs> BufferedPartition<V> {
                 self.store.decode_resolver(),
             )
             .map_err(StoreError::MalformedRoot)?,
-            VertexPropertyAccess::Skip => crate::vertex::decode_admitted_patch_topology(bytes)
+            (VertexPropertyAccess::Skip, _) => crate::vertex::decode_admitted_patch_topology(bytes)
                 .map_err(StoreError::MalformedPatch)?,
         };
         if rows.len() != descriptor.rows
@@ -873,15 +900,8 @@ impl<V: Vfs> BufferedPartition<V> {
             advance(&mut work, descriptor.rows, self.limits.max_work)?;
             let _workspace = self.buffer.reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)?;
             let bytes = self.pin(cx, descriptor.extent, Admission::Normal).await?;
-            let rows = crate::root::resolve_patch_ref(
-                self.store.k_oid.expose(),
-                self.store.namespace,
-                at,
-                &self.root.vertex_patches[at],
-                bytes.as_ref(),
-                self.store.decode_resolver(),
-            )
-            .map_err(StoreError::MalformedRoot)?;
+            let rows =
+                self.decode_scan_patch(at, bytes.as_ref(), VertexPropertyAccess::Read, Some(vid))?;
             if rows.len() != descriptor.rows {
                 return Err(BufferError::InvalidLoad.into());
             }
@@ -1129,7 +1149,7 @@ impl<V: Vfs> BufferedVertexScan<'_, V> {
             .await?;
         let rows = self
             .partition
-            .decode_scan_patch(at, bytes.as_ref(), properties)?;
+            .decode_scan_patch(at, bytes.as_ref(), properties, None)?;
         drop(bytes);
         cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
         self.active = Some(BufferedValue {

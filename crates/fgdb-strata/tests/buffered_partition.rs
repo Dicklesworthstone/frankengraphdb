@@ -2520,6 +2520,18 @@ fn vertex_topology_and_complete_pulls_can_share_a_patch_without_losing_propertie
             2,
             "Skip->Read refaults once; Read->Skip and the later Read reuse the full patch"
         );
+        // Point selection shares the admitted patch but must retain every
+        // requested property, even after another point omitted that row.
+        // Reading in reverse order catches accidental reuse of a prior
+        // identity's selectively decoded property vectors.
+        for expected in rows.iter().rev() {
+            let actual = view
+                .vertex_at(&cx, expected.vid, CommitSeq(1))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(actual.as_ref(), expected);
+        }
         drop(view);
         assert_eq!(
             pool.used(),
