@@ -13,7 +13,7 @@ fn build(snapshot: &crate::Snapshot, native_rows: bool) -> State {
         stats: StandingQueryStats::default(),
         checkpoint: &mut checkpoint,
     };
-    State::from_snapshot(snapshot, RelationId(1), native_rows, &mut meter).unwrap()
+    State::from_snapshot(snapshot, Some(RelationId(1)), native_rows, &mut meter).unwrap()
 }
 fn unchanged(actual: &State, before: &State) {
     assert_eq!(actual.input, before.input);
@@ -165,7 +165,8 @@ fn composed_refusals(native_rows: bool) {
                 stats: StandingQueryStats::default(),
                 checkpoint: &mut checkpoint,
             };
-            let result = State::from_snapshot(&baseline, RelationId(1), native_rows, &mut meter);
+            let result =
+                State::from_snapshot(&baseline, Some(RelationId(1)), native_rows, &mut meter);
             if allowance == records as u64 {
                 assert_eq!(result.unwrap().rows, before.rows);
             } else {

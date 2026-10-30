@@ -328,7 +328,8 @@ pub(crate) struct State {
     input: CommittedEdgeInput,
     triangles: IncrementalTriangles<VId>,
     counts: Counts,
-    pub(super) relation: RelationId,
+    // None retains the whole-graph selector, including future relation types.
+    pub(super) relation: Option<RelationId>,
     pub(super) policy: GqlQueryPolicy,
     pub(super) frontier: CommitSeq,
     pub(super) stats: StandingQueryStats,
@@ -374,7 +375,7 @@ impl State {
             .prepare_committed_successor(cx, batch, LIMBS, &mut |event| meter.charge(event))
             .map_err(components::input_error)?;
         let vertices = components::vertex_delta(batch, meter)?;
-        let edges = components::project(input.delta(), Some(self.relation), meter)?;
+        let edges = components::project(input.delta(), self.relation, meter)?;
         let triangles = self
             .triangles
             .prepare(&edges, LIMBS, &mut |event| meter.charge(event))
@@ -395,7 +396,7 @@ impl State {
 
     fn from_snapshot(
         snapshot: &crate::Snapshot,
-        relation: RelationId,
+        relation: Option<RelationId>,
         output: Output,
         meter: &mut Meter<'_>,
     ) -> Result<Self, StandingQueryFailure> {
@@ -403,7 +404,7 @@ impl State {
             input,
             vertices,
             edges,
-        } = components::topology_input(snapshot, Some(relation), meter)?;
+        } = components::topology_input(snapshot, relation, meter)?;
         let mut triangles = IncrementalTriangles::new(TriangleQuantifier::Distinct);
         let pending = triangles
             .prepare(&edges, LIMBS, &mut |event| meter.charge(event))
@@ -437,7 +438,7 @@ impl<V: Vfs + Clone> Database<V> {
     pub(super) fn prepare_standing_triangle_counts(
         &self,
         cx: &QueryCx,
-        relation: RelationId,
+        relation: Option<RelationId>,
         output: Output,
         policy: GqlQueryPolicy,
     ) -> Result<State, StandingQueryError> {

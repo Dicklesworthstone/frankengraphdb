@@ -84,11 +84,11 @@ fn eager(db: &Database<MemVfs>, cx: &QueryCx, text: &str) -> ZSet<Vec<QueryValue
 // Definition-level simple undirected oracle. Enumerate sorted unique triples
 // after collapsing physical edge support; initialize every live vertex to zero.
 // This shares neither the derivative kernel nor Prism's oriented intersection.
-fn oracle(db: &Database<MemVfs>) -> ZSet<Vec<QueryValue>> {
+pub(super) fn oracle(db: &Database<MemVfs>, relation: Option<RelationId>) -> ZSet<Vec<QueryValue>> {
     let live: BTreeSet<_> = db.vertices().unwrap().iter().map(|row| row.vid).collect();
     let mut edges = BTreeSet::new();
     for edge in db.edges().unwrap().iter().filter(|edge| {
-        edge.entry.relation == R
+        relation.is_none_or(|selected| edge.entry.relation == selected)
             && edge.entry.src != edge.entry.dst
             && live.contains(&edge.entry.src)
             && live.contains(&edge.entry.dst)
@@ -206,7 +206,7 @@ fn triangle_calls_and_downstream_stages_match_independent_triple_oracle() {
         );
 
         for tick in 0..=14 {
-            let expected = oracle(&db);
+            let expected = oracle(&db, Some(R));
             for (index, (text, handle)) in cases.iter().zip(&handles).enumerate() {
                 let (frontier, actual) = db.standing_native_bag(&cx, handle, policy()).unwrap();
                 assert_eq!(frontier, db.frontier().unwrap());
@@ -308,7 +308,7 @@ fn triangle_calls_and_downstream_stages_match_independent_triple_oracle() {
                 }
             }
             db.write(&commit, change).await.unwrap();
-            let successor = oracle(&db);
+            let successor = oracle(&db, Some(R));
             if tick == 6 {
                 assert_eq!(total_occurrences(&expected), 6);
                 assert_eq!(total_occurrences(&successor), 6);
@@ -391,7 +391,7 @@ fn triangle_subscription_replays_incidence_only_ticks_and_retractions_then_rebas
             .rows()
             .checked_clone(LIMBS, &mut |_| Ok::<_, ()>(()))
             .unwrap();
-        assert_eq!(delivered, oracle(&db));
+        assert_eq!(delivered, oracle(&db, Some(R)));
         subscriber.acknowledge(baseline.receipt()).unwrap();
         let mut expected = Vec::new();
         for tick in 0..5 {
@@ -414,7 +414,7 @@ fn triangle_subscription_replays_incidence_only_ticks_and_retractions_then_rebas
                 }
             }
             let at = db.write(&commit, change).await.unwrap();
-            expected.push((at, oracle(&db)));
+            expected.push((at, oracle(&db, Some(R))));
         }
         let mut after = start;
         for (tick, (at, expected)) in expected.iter().enumerate() {
@@ -444,7 +444,7 @@ fn triangle_subscription_replays_incidence_only_ticks_and_retractions_then_rebas
         subscriber.restart_from_current().unwrap();
         let fresh = subscriber.poll(&db, &cx, policy()).unwrap().unwrap();
         assert!(fresh.is_snapshot());
-        assert_eq!(fresh.rows(), &oracle(&db));
+        assert_eq!(fresh.rows(), &oracle(&db, Some(R)));
         subscriber.acknowledge(fresh.receipt()).unwrap();
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -474,7 +474,7 @@ fn dense_triangles_and_vertex_replacements_use_the_final_vertex_result_bound() {
         let handle = db
             .register_standing_native(&cx, &call(), &params, symbols, six)
             .unwrap();
-        let expected = oracle(&db);
+        let expected = oracle(&db, Some(R));
         assert_eq!(expected.len(), 6);
         assert_eq!(total_occurrences(&expected), 60); // K6 has 20 triangles, ten at each vertex.
         assert_eq!(
@@ -495,7 +495,7 @@ fn dense_triangles_and_vertex_replacements_use_the_final_vertex_result_bound() {
         replace.create_vertex(VId(0), vec![], vec![]);
         replace.delete_vertex(VId(6));
         db.write(&commit, replace).await.unwrap();
-        let expected = oracle(&db);
+        let expected = oracle(&db, Some(R));
         assert_eq!(expected.len(), 6);
         assert_eq!(total_occurrences(&expected), 30);
         assert_eq!(
@@ -530,7 +530,7 @@ fn dense_triangles_and_vertex_replacements_use_the_final_vertex_result_bound() {
         db.rebuild_standing_query(&cx, &handle, seven).unwrap();
         assert_eq!(
             db.standing_native_bag(&cx, &handle, seven).unwrap(),
-            (committed, oracle(&db))
+            (committed, oracle(&db, Some(R)))
         );
         let StandingQuery::TriangleCounts(source) = &db.standing_queries[first] else {
             panic!("rebuilt triangle source");
@@ -702,6 +702,216 @@ fn every_triangle_registration_and_rebuild_boundary_preserves_the_accepted_circu
                 db.standing_native_bag(&cx, &handle, policy()).unwrap(),
                 answer
             );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn graph_wide_analytics_replay_new_relation_types_and_cross_type_support() {
+    fn answer(db: &Database<MemVfs>, name: &str) -> ZSet<Vec<QueryValue>> {
+        match name {
+            "core_number" => super::core_tests::oracle(db, None),
+            "triangles" => oracle(db, None),
+            "clustering_coefficient" => super::clustering_tests::oracle(db, None),
+            _ => panic!("registered analytics test case"),
+        }
+    }
+    let ((), report) = run_async_under_lab(0x6e74_6306, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let params = GqlParameters::new();
+        let setup = NativeSubscriptionSetup {
+            maintenance: policy(),
+            delivery: policy(),
+            retention: [32, 10_000, 1_000_000],
+        };
+        let mut consumers = Vec::new();
+        for (name, field, loops) in [
+            ("core_number", "core", "drop"),
+            ("triangles", "triangles", "drop"),
+            ("clustering_coefficient", "score", "drop"),
+            ("clustering_coefficient", "score", "keep"),
+        ] {
+            let text = format!(
+                "CALL fnx.{name}({{direction:'undirected',parallel:'collapse',self_loops:'{loops}'}}) \
+                 YIELD {field} AS value,vertex AS node RETURN value,node"
+            );
+            let prepared = PreparedNativeRead::prepare_subscription(
+                &cx,
+                &format!("SUBSCRIBE TO {text}"),
+                &params,
+                symbols,
+            )
+            .unwrap();
+            let (bound, width) = prepared.subscription_footprint(&cx, &params).unwrap();
+            assert_eq!(width, 2);
+            let before = db.standing_queries.len();
+            let (mut consumer, baseline) = prepared
+                .subscribe_replaying(&mut db, &cx, &params, setup, |columns, batch| {
+                    assert_eq!(columns, &["value", "node"]);
+                    Ok::<_, SubscriptionError>(Arc::clone(batch))
+                })
+                .unwrap();
+            assert!(u64::try_from(db.standing_queries.len() - before).unwrap() <= bound + 1);
+            assert!(baseline.rows().is_empty());
+            assert_eq!(baseline.frontier(), CommitSeq::ORIGIN);
+            let delivered = baseline
+                .rows()
+                .checked_clone(LIMBS, &mut |_| Ok::<_, ()>(()))
+                .unwrap();
+            consumer.acknowledge(baseline.receipt()).unwrap();
+            consumers.push((name, text, consumer, delivered));
+        }
+        // Closing triangle sides arrive in new types after registration.
+        // Duplicate and opposite supports survive each other's retractions.
+        let mut expected = Vec::new();
+        for tick in 0..13 {
+            let mut change = WriteBatch::new(match tick {
+                1 | 3 | 6 | 12 => S,
+                2 | 4 | 5 => RelationId(3),
+                7 => RelationId(4),
+                _ => R,
+            });
+            match tick {
+                0 => {
+                    for vertex in [0, 1, 2, 3, 4, u128::MAX] {
+                        change.create_vertex(VId(vertex), vec![], vec![]);
+                    }
+                    for (id, a, b) in [
+                        (10, 0, 1),
+                        (11, 1, 2),
+                        (12, 3, 4),
+                        (13, u128::MAX, u128::MAX),
+                    ] {
+                        change.add_edge(EId(id), VId(a), VId(b), vec![]);
+                    }
+                }
+                1 => {
+                    change.add_edge(EId(20), VId(2), VId(0), vec![]);
+                }
+                2 => {
+                    change.add_edge(EId(30), VId(2), VId(0), vec![]);
+                    change.add_edge(EId(31), VId(0), VId(2), vec![]);
+                }
+                3 => {
+                    change.delete_edge(EId(20));
+                }
+                4 => {
+                    change.delete_edge(EId(30));
+                }
+                5 => {
+                    change.delete_edge(EId(31));
+                }
+                6 => {
+                    change.add_edge(EId(21), VId(2), VId(0), vec![]);
+                }
+                7 => {
+                    // Degree-only changes affect clustering but not core/counts.
+                    change.add_edge(EId(40), VId(0), VId(3), vec![]);
+                }
+                8 => {
+                    change.set_vertex_property(
+                        VId(0),
+                        PropertyKeyId(1),
+                        Some(CanonicalScalar::Int(99)),
+                    );
+                }
+                9 => {
+                    // Cascade retires edges in R, S and the fourth type.
+                    change.delete_vertex(VId(0));
+                }
+                10 => {
+                    change.delete_vertex(VId(u128::MAX));
+                }
+                11 => {
+                    change.create_vertex(VId(u128::MAX - 1), vec![], vec![]);
+                }
+                _ => {
+                    change.add_edge(EId(22), VId(1), VId(3), vec![]);
+                    change.add_edge(EId(23), VId(2), VId(3), vec![]);
+                }
+            }
+            let at = db.write(&commit, change).await.unwrap();
+            let mut answers = Vec::new();
+            for (name, text, consumer, _) in &consumers {
+                let oracle = answer(&db, name);
+                assert_eq!(
+                    oracle,
+                    eager(&db, &cx, text),
+                    "fresh query, tick {tick}: {text}"
+                );
+                assert_eq!(
+                    db.standing_native_bag(&cx, consumer.handle(), policy())
+                        .unwrap(),
+                    (
+                        at,
+                        oracle
+                            .checked_clone(LIMBS, &mut |_| Ok::<_, ()>(()))
+                            .unwrap()
+                    ),
+                    "maintained query, tick {tick}: {text}"
+                );
+                answers.push(oracle);
+            }
+            expected.push((at, answers));
+        }
+        // Slow consumers replay every atomic tick, including unchanged output.
+        for (index, (name, text, consumer, delivered)) in consumers.iter_mut().enumerate() {
+            let mut previous = CommitSeq::ORIGIN;
+            for (tick, (at, answers)) in expected.iter().enumerate() {
+                let frame = consumer.poll(&db, &cx, policy()).unwrap().unwrap();
+                assert_eq!((frame.from(), frame.frontier()), (Some(previous), *at));
+                assert!(Arc::ptr_eq(
+                    &frame,
+                    &consumer.poll(&db, &cx, policy()).unwrap().unwrap()
+                ));
+                if matches!(tick, 2 | 3 | 4 | 8) || (tick == 7 && *name != "clustering_coefficient")
+                {
+                    assert!(frame.rows().is_empty(), "unchanged tick {tick}: {text}");
+                }
+                if tick == 5 {
+                    assert!(
+                        frame
+                            .rows()
+                            .iter()
+                            .any(|(_, weight)| weight < &ZWeight::ZERO),
+                        "last support retracts an analytic value: {text}"
+                    );
+                }
+                delivered
+                    .integrate(frame.rows(), LIMBS, &mut |_| Ok::<_, ()>(()))
+                    .unwrap();
+                assert_eq!(delivered, &answers[index], "replay tick {tick}: {text}");
+                consumer.acknowledge(frame.receipt()).unwrap();
+                previous = *at;
+            }
+            assert!(consumer.poll(&db, &cx, policy()).unwrap().is_none());
+            db.rebuild_standing_query(&cx, consumer.handle(), policy())
+                .unwrap();
+            consumer.restart_from_current().unwrap();
+            let baseline = consumer.poll(&db, &cx, policy()).unwrap().unwrap();
+            assert!(baseline.is_snapshot());
+            assert_eq!(baseline.frontier(), previous);
+            assert_eq!(baseline.rows(), &answer(&db, name));
+            consumer.acknowledge(baseline.receipt()).unwrap();
+        }
+        // Rebuild retains all-types selection, including types absent at its cut.
+        let mut last = WriteBatch::new(RelationId(5));
+        last.add_edge(EId(50), VId(1), VId(u128::MAX - 1), vec![]);
+        last.add_edge(EId(51), VId(3), VId(u128::MAX - 1), vec![]);
+        let at = db.write(&commit, last).await.unwrap();
+        for (name, text, consumer, delivered) in &mut consumers {
+            let frame = consumer.poll(&db, &cx, policy()).unwrap().unwrap();
+            assert_eq!(frame.frontier(), at);
+            delivered
+                .integrate(frame.rows(), LIMBS, &mut |_| Ok::<_, ()>(()))
+                .unwrap();
+            assert_eq!(delivered, &answer(&db, name), "post-rebuild: {text}");
+            assert_eq!(delivered, &eager(&db, &cx, text));
+            consumer.acknowledge(frame.receipt()).unwrap();
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

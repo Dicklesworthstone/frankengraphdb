@@ -73,11 +73,15 @@ impl PreparedNativeRead {
     /// parallel edges and kept or dropped self-loops. YIELD aliases and downstream
     /// row stages retain their native schema; unsupported projection recipes refuse.
     /// Core-number CALLs use the existing exact affected-component maintainer
-    /// for one explicit relation with self-loops explicitly dropped.
+    /// for one explicit relation or all relation types, with self-loops dropped.
     /// Their checked integer rows and derivatives are retained only for native
     /// registration; typed core-number views do not acquire a second row sink.
-    /// Triangle CALLs for one relation under the undirected/unit/collapse/drop profile
-    /// maintain exact per-vertex counts, including live zero-count isolates.
+    /// Triangle and clustering CALLs admit one relation or all relation types
+    /// under the undirected/unit/collapse profile. Triangle CALLs require dropped
+    /// self-loops; clustering may also keep them and excludes them from degree.
+    /// Both maintain exact per-vertex values, including live zero-count isolates.
+    /// Whole-graph definitions retain cross-type support and admit new relation
+    /// types on later commits, including after a rebuild.
     /// The source retains linear vertex result/incidence state and consumes
     /// signed triangle changes; it does not retain the typed triple table or
     /// rescan it per tick. Bootstrap still materializes the initial triangle

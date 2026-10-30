@@ -20,8 +20,8 @@ use fgdb_prism::{
 
 pub(super) enum AnalyticSource {
     Components(components::ComponentRelation),
-    CoreNumbers(RelationId),
-    TriangleCounts(RelationId, triangle_counts::Output),
+    CoreNumbers(Option<RelationId>),
+    TriangleCounts(Option<RelationId>, triangle_counts::Output),
 }
 
 /// The compiler and subscription footprint share one source-free admission.
@@ -73,24 +73,18 @@ pub(super) fn analytic_procedure(
             if options.projection.self_loops == SelfLoopPolicy::Drop =>
         {
             (
-                AnalyticSource::CoreNumbers(relation.ok_or(StandingQueryError::Unsupported)?),
+                AnalyticSource::CoreNumbers(relation),
                 GraphSetColumnType::Scalar,
                 FnxOutput::Core,
             )
         }
         FnxAlgorithm::Triangles if options.projection.self_loops == SelfLoopPolicy::Drop => (
-            AnalyticSource::TriangleCounts(
-                relation.ok_or(StandingQueryError::Unsupported)?,
-                triangle_counts::Output::Triangles,
-            ),
+            AnalyticSource::TriangleCounts(relation, triangle_counts::Output::Triangles),
             GraphSetColumnType::Scalar,
             FnxOutput::Triangles,
         ),
         FnxAlgorithm::ClusteringCoefficient => (
-            AnalyticSource::TriangleCounts(
-                relation.ok_or(StandingQueryError::Unsupported)?,
-                triangle_counts::Output::Clustering,
-            ),
+            AnalyticSource::TriangleCounts(relation, triangle_counts::Output::Clustering),
             GraphSetColumnType::Scalar,
             FnxOutput::Score,
         ),

@@ -84,7 +84,7 @@ fn eager(db: &Database<MemVfs>, cx: &QueryCx, text: &str) -> ZSet<Vec<QueryValue
 // Definition-level oracle: enumerate every induced vertex subset, compute its
 // minimum degree, and retain each vertex's greatest such minimum. This shares
 // neither the maintained affected-component peeling nor Prism's bucket kernel.
-fn oracle(db: &Database<MemVfs>) -> ZSet<Vec<QueryValue>> {
+pub(super) fn oracle(db: &Database<MemVfs>, relation: Option<RelationId>) -> ZSet<Vec<QueryValue>> {
     let vertices: Vec<_> = db.vertices().unwrap().iter().map(|row| row.vid).collect();
     assert!(
         vertices.len() <= 12,
@@ -93,7 +93,7 @@ fn oracle(db: &Database<MemVfs>) -> ZSet<Vec<QueryValue>> {
     let live: BTreeSet<_> = vertices.iter().copied().collect();
     let mut adjacent = BTreeSet::new();
     for edge in db.edges().unwrap().iter().filter(|edge| {
-        edge.entry.relation == R
+        relation.is_none_or(|selected| edge.entry.relation == selected)
             && edge.entry.src != edge.entry.dst
             && live.contains(&edge.entry.src)
             && live.contains(&edge.entry.dst)
@@ -222,7 +222,7 @@ fn core_calls_and_downstream_stages_match_independent_induced_subgraph_oracle() 
         );
 
         for tick in 0..=12 {
-            let expected = oracle(&db);
+            let expected = oracle(&db, Some(R));
             for (index, (text, handle)) in cases.iter().zip(&handles).enumerate() {
                 let (frontier, actual) = db.standing_native_bag(&cx, handle, policy()).unwrap();
                 assert_eq!(frontier, db.frontier().unwrap());
@@ -384,7 +384,7 @@ fn core_subscription_replays_empty_ticks_and_shell_retractions_then_rebaselines(
             .rows()
             .checked_clone(LIMBS, &mut |_| Ok::<_, ()>(()))
             .unwrap();
-        assert_eq!(delivered, node_first(&oracle(&db)));
+        assert_eq!(delivered, node_first(&oracle(&db, Some(R))));
         subscriber.acknowledge(baseline.receipt()).unwrap();
         let mut expected = Vec::new();
         for tick in 0..4 {
@@ -408,7 +408,7 @@ fn core_subscription_replays_empty_ticks_and_shell_retractions_then_rebaselines(
                 }
             }
             let at = db.write(&commit, change).await.unwrap();
-            expected.push((at, node_first(&oracle(&db))));
+            expected.push((at, node_first(&oracle(&db, Some(R)))));
         }
         let mut after = start;
         for (tick, (at, expected)) in expected.iter().enumerate() {
@@ -438,7 +438,7 @@ fn core_subscription_replays_empty_ticks_and_shell_retractions_then_rebaselines(
         subscriber.restart_from_current().unwrap();
         let fresh = subscriber.poll(&db, &cx, policy()).unwrap().unwrap();
         assert!(fresh.is_snapshot());
-        assert_eq!(fresh.rows(), &node_first(&oracle(&db)));
+        assert_eq!(fresh.rows(), &node_first(&oracle(&db, Some(R))));
         subscriber.acknowledge(fresh.receipt()).unwrap();
     });
     assert!(report.lab_test_passed(), "{report:?}");

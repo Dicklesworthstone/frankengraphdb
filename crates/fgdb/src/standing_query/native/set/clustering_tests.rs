@@ -64,19 +64,17 @@ fn eager(db: &Database<MemVfs>, cx: &QueryCx, text: &str) -> ZSet<Vec<QueryValue
 // Definition-level oracle: collapse selected undirected supports and directly
 // count edges between every unordered pair of a vertex's distinct neighbors.
 // This shares neither the changed-side derivative nor Prism's CSR kernel.
-fn oracle(db: &Database<MemVfs>) -> ZSet<Vec<QueryValue>> {
+pub(super) fn oracle(db: &Database<MemVfs>, relation: Option<RelationId>) -> ZSet<Vec<QueryValue>> {
     let mut neighbors: BTreeMap<_, BTreeSet<_>> = db
         .vertices()
         .unwrap()
         .iter()
         .map(|row| (row.vid, BTreeSet::new()))
         .collect();
-    for edge in db
-        .edges()
-        .unwrap()
-        .iter()
-        .filter(|edge| edge.entry.relation == R && edge.entry.src != edge.entry.dst)
-    {
+    for edge in db.edges().unwrap().iter().filter(|edge| {
+        relation.is_none_or(|selected| edge.entry.relation == selected)
+            && edge.entry.src != edge.entry.dst
+    }) {
         neighbors
             .get_mut(&edge.entry.src)
             .unwrap()
@@ -178,7 +176,7 @@ fn clustering_calls_preserve_score_bits_for_degree_only_support_and_lifetime_cha
             ["local", "node"]
         );
         for tick in 0..=12 {
-            let expected = oracle(&db);
+            let expected = oracle(&db, Some(R));
             for (index, (text, handle)) in cases.iter().zip(&handles).enumerate() {
                 let (at, actual) = db.standing_native_bag(&cx, handle, policy()).unwrap();
                 assert_eq!(at, db.frontier().unwrap());
@@ -263,7 +261,7 @@ fn clustering_calls_preserve_score_bits_for_degree_only_support_and_lifetime_cha
                 }
             }
             db.write(&commit, change).await.unwrap();
-            let next = oracle(&db);
+            let next = oracle(&db, Some(R));
             if tick == 0 {
                 assert_eq!(score(&expected, VId(0)), 1.0_f64.to_bits());
                 assert_eq!(score(&next, VId(0)), (1.0_f64 / 3.0).to_bits());
@@ -330,7 +328,7 @@ fn every_four_vertex_simple_graph_matches_real_prism_and_independent_scores() {
                 db.write(&commit, change).await.unwrap();
             }
             let actual = db.standing_native_bag(&cx, &handle, policy()).unwrap().1;
-            assert_eq!(actual, oracle(&db), "simple graph {mask:#08b}");
+            assert_eq!(actual, oracle(&db, Some(R)), "simple graph {mask:#08b}");
             assert_eq!(
                 actual,
                 eager(&db, &cx, &call()),
@@ -425,7 +423,7 @@ fn clustering_projection_refusals_and_final_row_budgets_preserve_the_circuit() {
         db.rebuild_standing_query(&cx, &handle, four).unwrap();
         assert_eq!(
             db.standing_native_bag(&cx, &handle, four).unwrap(),
-            (at, oracle(&db))
+            (at, oracle(&db, Some(R)))
         );
         let StandingQuery::TriangleCounts(source) = &db.standing_queries[*first] else {
             panic!("rebuilt clustering owner");

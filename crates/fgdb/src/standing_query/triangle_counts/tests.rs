@@ -19,7 +19,7 @@ fn build_as(snapshot: &crate::Snapshot, output: Output) -> State {
         stats: StandingQueryStats::default(),
         checkpoint: &mut checkpoint,
     };
-    State::from_snapshot(snapshot, RelationId(1), output, &mut meter).unwrap()
+    State::from_snapshot(snapshot, Some(RelationId(1)), output, &mut meter).unwrap()
 }
 
 fn unchanged(actual: &State, before: &State) {

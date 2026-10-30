@@ -16,7 +16,8 @@ pub(crate) struct State {
     cores: IncrementalCoreNumbers<VId>,
     rows: ZSet<(VId, u64)>,
     relational: Option<rows::State>,
-    pub(super) relation: RelationId,
+    // None retains the whole-graph selector, including future relation types.
+    pub(super) relation: Option<RelationId>,
     pub(super) policy: GqlQueryPolicy,
     pub(super) frontier: CommitSeq,
     pub(super) stats: StandingQueryStats,
@@ -63,7 +64,7 @@ impl State {
             .map_err(components::input_error)?;
         // Global vertex membership is projected only after full batch admission.
         let vertices = components::vertex_delta(batch, meter)?;
-        let edges = components::project(input.delta(), Some(self.relation), meter)?;
+        let edges = components::project(input.delta(), self.relation, meter)?;
         let pending = self
             .cores
             .prepare(&vertices, &edges, LIMBS, &mut |event| meter.charge(event))
@@ -103,7 +104,7 @@ impl State {
 
     fn from_snapshot(
         snapshot: &crate::Snapshot,
-        relation: RelationId,
+        relation: Option<RelationId>,
         native_rows: bool,
         meter: &mut Meter<'_>,
     ) -> Result<Self, StandingQueryFailure> {
@@ -111,7 +112,7 @@ impl State {
             input,
             vertices,
             edges,
-        } = components::topology_input(snapshot, Some(relation), meter)?;
+        } = components::topology_input(snapshot, relation, meter)?;
         let mut cores = IncrementalCoreNumbers::new();
         let pending = cores
             .prepare(&vertices, &edges, LIMBS, &mut |event| meter.charge(event))
@@ -162,14 +163,14 @@ impl<V: Vfs + Clone> Database<V> {
         relation: RelationId,
         policy: GqlQueryPolicy,
     ) -> Result<StandingQueryHandle, StandingQueryError> {
-        let state = self.prepare_standing_core_numbers(cx, relation, policy, false)?;
+        let state = self.prepare_standing_core_numbers(cx, Some(relation), policy, false)?;
         Ok(self.store_standing_query(StandingQuery::CoreNumbers(Box::new(state))))
     }
 
     pub(super) fn prepare_standing_core_numbers(
         &self,
         cx: &QueryCx,
-        relation: RelationId,
+        relation: Option<RelationId>,
         policy: GqlQueryPolicy,
         native_rows: bool,
     ) -> Result<State, StandingQueryError> {
