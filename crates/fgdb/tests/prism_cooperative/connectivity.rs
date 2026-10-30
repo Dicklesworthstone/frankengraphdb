@@ -755,6 +755,50 @@ fn cooperative_cdlp_retains_exact_admission_and_zero_iteration_graph_laws() {
                 .await
                 .unwrap();
             compare_execution(&exact, &expected);
+            // Frontier storage is optional. Removing one byte from its peak
+            // selects the original full sweep; only falling below that sweep's
+            // mandatory label/reverse-projection footprint must refuse.
+            let frontier_bytes =
+                4 * size_of::<usize>() + 2 * (size_of::<u64>() + size_of::<usize>());
+            let baseline_bytes = mem.max_kernel_workspace_bytes - frontier_bytes;
+            let fallback_memory = FnxMemoryLimits {
+                max_kernel_workspace_bytes: baseline_bytes,
+                ..mem
+            };
+            let fallback = call
+                .execute_sealed(&cx, &graph, limits, fallback_memory)
+                .unwrap();
+            assert_eq!(fallback.rows, expected.rows);
+            assert_eq!(
+                fallback.certificate.result_digest,
+                expected.certificate.result_digest
+            );
+            assert_eq!(
+                fallback.certificate.estimated_work,
+                expected.certificate.estimated_work
+            );
+            assert_eq!(fallback.certificate.kernel_workspace_bytes, baseline_bytes);
+            assert_eq!(
+                fallback.certificate.witness.algorithm,
+                "cdlp_synchronous_minimum_vid_cursor"
+            );
+            for allowance in [baseline_bytes, mem.max_kernel_workspace_bytes - 1] {
+                let actual = call
+                    .execute_sealed_cooperative(
+                        &cx,
+                        &graph,
+                        limits,
+                        FnxMemoryLimits {
+                            max_kernel_workspace_bytes: allowance,
+                            ..mem
+                        },
+                        quantum(1),
+                        yield_now,
+                    )
+                    .await
+                    .unwrap();
+                compare_execution(&actual, &fallback);
+            }
             for (limits, mem) in [
                 (
                     FnxExecutionLimits {
@@ -787,7 +831,7 @@ fn cooperative_cdlp_retains_exact_admission_and_zero_iteration_graph_laws() {
                 (
                     limits,
                     FnxMemoryLimits {
-                        max_kernel_workspace_bytes: mem.max_kernel_workspace_bytes - 1,
+                        max_kernel_workspace_bytes: baseline_bytes - 1,
                         ..mem
                     },
                 ),
@@ -838,6 +882,85 @@ fn cooperative_cdlp_retains_exact_admission_and_zero_iteration_graph_laws() {
             assert_eq!(actual.unwrap().rows, community_reference(n, &[], false, 3));
             assert!(pending >= 4 * n, "scalar-only populations must cooperate");
         }
+    });
+}
+
+#[test]
+fn cooperative_cdlp_skips_settled_regions_while_preserving_oscillator_parity() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let cx = contexts.query();
+        let d = 17usize;
+        let n = d + 3;
+        for reverse_input in [false, true] {
+            let mut edges: Vec<_> = (0..d)
+                .flat_map(|source| (source + 1..d).map(move |target| (source, target)))
+                .chain([(d, d + 1)])
+                .collect();
+            if reverse_input {
+                edges.reverse();
+                for edge in &mut edges {
+                    *edge = (edge.1, edge.0);
+                }
+            }
+            let db = stored(&contexts.commit(), n, &edges).await;
+            for direction in [
+                Directedness::Directed,
+                Directedness::Reversed,
+                Directedness::Undirected,
+            ] {
+                let opt = options(direction);
+                let graph = projection(&db, &cx, opt).await;
+                for iterations in [3, 4, 17, 18] {
+                    let call = FnxCallSpec::cdlp(iterations);
+                    let sync = call
+                        .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                        .unwrap();
+                    assert_eq!(
+                        sync.rows,
+                        community_reference(
+                            n,
+                            &edges,
+                            direction != Directedness::Undirected,
+                            iterations
+                        )
+                    );
+                    assert_eq!(
+                        sync.certificate.witness.algorithm,
+                        "cdlp_synchronous_minimum_vid_active_cursor"
+                    );
+                    assert_eq!(
+                        sync.certificate.witness.nodes_touched,
+                        3 * d + 2 * iterations + 1
+                    );
+                    assert_eq!(
+                        sync.certificate.witness.edges_scanned,
+                        3 * d * (d - 1) + 2 * iterations
+                    );
+                    for q in [1, 7, 65] {
+                        let probe = Arc::new(SimulationCheckpointProbe::new(None));
+                        let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                        let (actual, pending) = drive(
+                            call.execute_sealed_cooperative(
+                                &controlled,
+                                &graph,
+                                opt.execution_limits,
+                                memory(),
+                                quantum(q),
+                                yield_now,
+                            ),
+                            &probe,
+                            q,
+                        );
+                        compare_execution(&actual.unwrap(), &sync);
+                        assert!(pending > 0);
+                    }
+                }
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
     });
 }
 

@@ -7,6 +7,13 @@
 //! construction peak participates in the kernel's workspace allowance.
 //! Immediate and cooperative drivers share vote arithmetic and round commits;
 //! scheduling never changes which previous-round labels a vertex observes.
+//!
+//! When optional frontier storage fits, only changed vertices and their weak
+//! neighbors need another update. Changed vertices form a frozen queue prefix:
+//! their ordinary vote scans also enqueue affected neighbors, so notification
+//! never opens another row. All candidates still read the previous round.
+//! Including changed vertices themselves ensures every inactive next-buffer
+//! slot already equals its current label when the buffers are swapped.
 
 use super::{
     ComplexityWitness, Cursor, Delivery, Directedness, ExecutionError, Finished, FnxAlgorithm,
@@ -64,6 +71,11 @@ fn work(
         add(forward, reverse)?,
         add(incidences, add(mul(n, 2)?, 4)?)?,
     )?;
+    // The optional frontier opens each row at most once per round. Scheduling
+    // is part of that row's existing vote step; its extra scalar clear visits
+    // at most one touched bitmap word per updated vertex. Thus 2V + 4 still
+    // covers row steps, word clears and round boundaries. Initialization adds
+    // V queue entries and ceil(V/64) word pairs inside the base's 12V allowance.
     add(base, add(setup, mul(round, iterations)?)?)
 }
 
@@ -82,12 +94,186 @@ fn reserved(n: usize, live: &mut usize, limit: usize) -> Result<Vec<usize>> {
     Ok(values)
 }
 
+fn bitmap_words(n: usize) -> usize {
+    n.div_ceil(64)
+}
+
+fn frontier_workspace(n: usize) -> Result<usize> {
+    add(
+        mul(n, size_of::<usize>())?,
+        mul(bitmap_words(n), 2 * (size_of::<u64>() + size_of::<usize>()))?,
+    )
+}
+
+fn optional_reserved<T>(n: usize, live: &mut usize, limit: usize) -> Result<Option<Vec<T>>> {
+    optional_reserved_with(n, live, limit, reserve)
+}
+
+fn optional_reserved_with<T>(
+    n: usize,
+    live: &mut usize,
+    limit: usize,
+    allocate: impl FnOnce(usize) -> Result<Vec<T>>,
+) -> Result<Option<Vec<T>>> {
+    if add(*live, mul(n, size_of::<T>())?)? > limit {
+        return Ok(None);
+    }
+    let values = match allocate(n) {
+        Ok(values) => values,
+        Err(super::Error::Execution(ExecutionError::AllocationFailed)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let actual = add(*live, mul(values.capacity(), size_of::<T>())?)?;
+    // A real allocation above the allowance cannot become a successful
+    // fallback: its transient backing already exceeded the admitted bound.
+    admit("kernel workspace bytes", actual, limit)?;
+    *live = actual;
+    Ok(Some(values))
+}
+
+struct Marks {
+    words: Vec<u64>,
+    touched: Vec<usize>,
+}
+
+impl Marks {
+    fn reserve(n: usize, live: &mut usize, limit: usize) -> Result<Option<Self>> {
+        let n = bitmap_words(n);
+        let Some(words) = optional_reserved(n, live, limit)? else {
+            return Ok(None);
+        };
+        let Some(touched) = optional_reserved(n, live, limit)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self { words, touched }))
+    }
+
+    fn insert(&mut self, vertex: usize) -> bool {
+        let word = vertex / 64;
+        let bit = 1u64 << (vertex % 64);
+        if self.words[word] & bit != 0 {
+            return false;
+        }
+        if self.words[word] == 0 {
+            self.touched.push(word);
+        }
+        self.words[word] |= bit;
+        true
+    }
+
+    fn clear_one(&mut self) {
+        if let Some(word) = self.touched.pop() {
+            self.words[word] = 0;
+        }
+    }
+}
+
+struct ActiveRows {
+    queue: Vec<usize>,
+    queued: Marks,
+    changed: Marks,
+    head: usize,
+    changes: usize,
+    notify_end: usize,
+}
+
+impl ActiveRows {
+    fn reserve(n: usize, peak: &mut usize, limit: usize) -> Result<Option<Self>> {
+        Self::reserve_with_queue(n, peak, limit, reserve)
+    }
+
+    fn reserve_with_queue(
+        n: usize,
+        peak: &mut usize,
+        limit: usize,
+        allocate_queue: impl FnOnce(usize) -> Result<Vec<usize>>,
+    ) -> Result<Option<Self>> {
+        if add(*peak, frontier_workspace(n)?)? > limit {
+            return Ok(None);
+        }
+        // Each successful allocation raises the caller's high-water charge
+        // immediately. A later fallback drops the partial frontier but must
+        // still report the temporary backing that was actually live.
+        let Some(queue) = optional_reserved_with(n, peak, limit, allocate_queue)? else {
+            return Ok(None);
+        };
+        let Some(queued) = Marks::reserve(n, peak, limit)? else {
+            return Ok(None);
+        };
+        let Some(changed) = Marks::reserve(n, peak, limit)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            queue,
+            queued,
+            changed,
+            head: 0,
+            changes: 0,
+            // Every row is initially queued; the first full sweep needs
+            // no notification work, even though initial labels differ.
+            notify_end: 0,
+        }))
+    }
+
+    fn initialize_word(&mut self) {
+        self.queued.words.push(0);
+        self.changed.words.push(0);
+    }
+
+    fn initialize_vertex(&mut self, vertex: usize) {
+        self.queued.insert(vertex);
+        self.queue.push(vertex);
+    }
+
+    fn pop(&mut self) -> Option<(usize, bool)> {
+        let source = *self.queue.get(self.head)?;
+        let notify = self.head < self.notify_end;
+        self.head += 1;
+        Some((source, notify))
+    }
+
+    fn schedule(&mut self, vertex: usize, n: usize) -> Result<()> {
+        if self.queued.insert(vertex) {
+            if self.queue.len() == n {
+                return Err(ExecutionError::InvalidUpstreamResult.into());
+            }
+            self.queue.push(vertex);
+        }
+        Ok(())
+    }
+
+    fn record_change(&mut self, source: usize) -> Result<()> {
+        // Only consumed queue slots may be overwritten. Unvisited members of
+        // the frozen notification prefix and newly appended rows stay intact.
+        if self.changes >= self.head || self.head > self.queue.len() {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        }
+        self.queue[self.changes] = source;
+        self.changes += 1;
+        self.changed.insert(source);
+        Ok(())
+    }
+
+    fn finish_round(&mut self) -> Result<()> {
+        if self.head != self.queue.len() {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        }
+        self.queue.truncate(self.changes);
+        self.head = 0;
+        self.changes = 0;
+        self.notify_end = self.queue.len();
+        std::mem::swap(&mut self.queued, &mut self.changed);
+        Ok(())
+    }
+}
+
 struct Labels {
     labels: Vec<usize>,
     next: Vec<usize>,
     counts: Vec<usize>,
     generations: Vec<usize>,
     generation: usize,
+    frontier: Option<ActiveRows>,
     peak: usize,
     witness: ComplexityWitness,
 }
@@ -112,6 +298,7 @@ impl Labels {
             counts,
             generations,
             generation: 0,
+            frontier: None,
             peak: live,
             witness: ComplexityWitness {
                 algorithm: "cdlp_synchronous_minimum_vid_cursor".to_owned(),
@@ -121,6 +308,44 @@ impl Labels {
                 queue_peak: 0,
             },
         })
+    }
+
+    fn reserve_frontier(&mut self, iterations: usize, limit: usize) -> Result<()> {
+        if iterations < 2 || self.labels.is_empty() {
+            return Ok(());
+        }
+        if let Some(frontier) = ActiveRows::reserve(self.labels.len(), &mut self.peak, limit)? {
+            self.frontier = Some(frontier);
+            self.witness.algorithm = "cdlp_synchronous_minimum_vid_active_cursor".to_owned();
+            self.witness.queue_peak = self.labels.len();
+        }
+        Ok(())
+    }
+
+    fn initialize_frontier(&mut self, control: &mut impl FnMut() -> Result<()>) -> Result<()> {
+        if let Some(frontier) = &mut self.frontier {
+            for _ in 0..bitmap_words(self.labels.len()) {
+                control()?;
+                frontier.initialize_word();
+            }
+            for vertex in 0..self.labels.len() {
+                control()?;
+                frontier.initialize_vertex(vertex);
+            }
+        }
+        Ok(())
+    }
+
+    fn next_row(&mut self, source: &mut usize) -> Option<(usize, bool)> {
+        if let Some(frontier) = &mut self.frontier {
+            frontier.pop()
+        } else if *source < self.labels.len() {
+            let vertex = *source;
+            *source += 1;
+            Some((vertex, false))
+        } else {
+            None
+        }
     }
 
     fn prepare(
@@ -163,11 +388,12 @@ impl Labels {
         mut row: impl Cursor,
         best: &mut usize,
         best_count: &mut usize,
+        notify: bool,
         control: &mut impl FnMut() -> Result<()>,
     ) -> Result<()> {
         while let Some((neighbor, _)) = row.next()? {
             control()?;
-            self.vote(neighbor, best, best_count)?;
+            self.vote(neighbor, best, best_count, notify)?;
         }
         Ok(())
     }
@@ -181,11 +407,23 @@ impl Labels {
         Ok((best, 0))
     }
 
-    fn vote(&mut self, neighbor: usize, best: &mut usize, best_count: &mut usize) -> Result<()> {
+    fn vote(
+        &mut self,
+        neighbor: usize,
+        best: &mut usize,
+        best_count: &mut usize,
+        notify: bool,
+    ) -> Result<()> {
         let label = *self
             .labels
             .get(neighbor)
             .ok_or(ExecutionError::InvalidUpstreamResult)?;
+        if notify {
+            self.frontier
+                .as_mut()
+                .ok_or(ExecutionError::InvalidUpstreamResult)?
+                .schedule(neighbor, self.labels.len())?;
+        }
         if self.generations[label] != self.generation {
             self.generations[label] = self.generation;
             self.counts[label] = 0;
@@ -205,13 +443,24 @@ impl Labels {
             .next
             .get_mut(source)
             .ok_or(ExecutionError::InvalidUpstreamResult)? = best;
+        if best != self.labels[source]
+            && let Some(frontier) = &mut self.frontier
+        {
+            frontier.record_change(source)?;
+        }
         self.witness.nodes_touched = add(self.witness.nodes_touched, 1)?;
         Ok(())
     }
 
-    fn finish_round(&mut self) {
+    fn finish_round(&mut self) -> Result<()> {
         // No vertex in this round can see another vertex's new label.
+        // Every inactive vertex was unchanged last round AND has no changed
+        // neighbor. Its old next-buffer entry is already the exact new label.
         std::mem::swap(&mut self.labels, &mut self.next);
+        if let Some(frontier) = &mut self.frontier {
+            frontier.finish_round()?;
+        }
+        Ok(())
     }
 
     fn finish(self) -> (KernelOutput, usize) {
@@ -240,16 +489,38 @@ impl Labels {
         if n != 0 {
             for _ in 0..iterations {
                 control()?;
-                for source in 0..n {
+                let mut fallback_source = 0;
+                while let Some((source, notify)) = self.next_row(&mut fallback_source) {
                     control()?;
                     let (mut best, mut best_count) = self.begin_row(source)?;
-                    self.votes(graph.open(source)?, &mut best, &mut best_count, control)?;
+                    self.votes(
+                        graph.open(source)?,
+                        &mut best,
+                        &mut best_count,
+                        notify,
+                        control,
+                    )?;
                     if let Some(reverse) = reverse {
-                        self.votes(reverse.open(source)?, &mut best, &mut best_count, control)?;
+                        self.votes(
+                            reverse.open(source)?,
+                            &mut best,
+                            &mut best_count,
+                            notify,
+                            control,
+                        )?;
                     }
                     self.finish_row(source, best)?;
                 }
-                self.finish_round();
+                self.finish_round()?;
+                if let Some(frontier) = &mut self.frontier {
+                    while !frontier.changed.touched.is_empty() {
+                        control()?;
+                        frontier.changed.clear_one();
+                    }
+                    if frontier.queue.is_empty() {
+                        break;
+                    }
+                }
             }
         }
         control()?;
@@ -313,13 +584,17 @@ pub(super) fn execute(
             None
         };
     let reverse_rows = reverse.as_ref().map(|graph| SealedRows { cx, graph });
+    // The mandatory reverse projection keeps its existing admission first;
+    // optional frontier storage must never make a formerly admitted call fail.
+    state.reserve_frontier(max_iter, memory.max_kernel_workspace_bytes)?;
+    state.initialize_frontier(&mut control)?;
     let (output, peak) = state.iterate(&rows, reverse_rows.as_ref(), max_iter, &mut control)?;
     drop(reverse);
     finish(
         call,
         graph,
         output,
-        "fgdb-prism/sealed-cdlp-synchronous-v1",
+        "fgdb-prism/sealed-cdlp-synchronous-v2",
         estimated,
         peak,
         admission,
@@ -390,22 +665,43 @@ where
         } else {
             None
         };
+    state.reserve_frontier(max_iter, memory.max_kernel_workspace_bytes)?;
+    if let Some(frontier) = &mut state.frontier {
+        for _ in 0..bitmap_words(n) {
+            control.tick().await?;
+            frontier.initialize_word();
+        }
+        for vertex in 0..n {
+            control.tick().await?;
+            frontier.initialize_vertex(vertex);
+        }
+    }
     if n != 0 {
         for _ in 0..max_iter {
             control.tick().await?;
-            for source in 0..n {
+            let mut fallback_source = 0;
+            while let Some((source, notify)) = state.next_row(&mut fallback_source) {
                 control.tick().await?;
                 let (mut best, mut best_count) = state.begin_row(source)?;
                 for face in std::iter::once(graph).chain(reverse.as_ref()) {
                     let mut row = face.neighbor_cursor_controlled(control.cx, source, None)?;
                     while let Some((neighbor, _)) = control.next(&mut row).await? {
                         control.tick().await?;
-                        state.vote(neighbor, &mut best, &mut best_count)?;
+                        state.vote(neighbor, &mut best, &mut best_count, notify)?;
                     }
                 }
                 state.finish_row(source, best)?;
             }
-            state.finish_round();
+            state.finish_round()?;
+            if let Some(frontier) = &mut state.frontier {
+                while !frontier.changed.touched.is_empty() {
+                    control.tick().await?;
+                    frontier.changed.clear_one();
+                }
+                if frontier.queue.is_empty() {
+                    break;
+                }
+            }
         }
     }
     control.tick().await?;
@@ -425,7 +721,7 @@ where
         encoded,
         output.values,
         output.witness,
-        "fgdb-prism/sealed-cdlp-cooperative-v1",
+        "fgdb-prism/sealed-cdlp-cooperative-v2",
         estimated,
         peak,
         &mut || checkpoint(control.cx),
@@ -447,14 +743,17 @@ mod tests {
     struct Fixture {
         rows: Vec<Vec<usize>>,
         source_steps: Cell<usize>,
+        opens: Vec<Cell<usize>>,
         fail_at: usize,
     }
 
     impl Fixture {
         fn new(rows: Vec<Vec<usize>>) -> Self {
+            let opens = (0..rows.len()).map(|_| Cell::new(0)).collect();
             Self {
                 rows,
                 source_steps: Cell::new(0),
+                opens,
                 fail_at: usize::MAX,
             }
         }
@@ -500,6 +799,7 @@ mod tests {
                 .rows
                 .get(source)
                 .ok_or(ExecutionError::InvalidUpstreamResult)?;
+            self.opens[source].set(self.opens[source].get() + 1);
             Ok(Row {
                 graph: self,
                 values: values.iter(),
@@ -516,6 +816,8 @@ mod tests {
     ) -> Result<(KernelOutput, usize)> {
         let mut state = Labels::new(graph.node_count(), iterations, limit)?;
         state.prepare(graph, iterations, control)?;
+        state.reserve_frontier(iterations, limit)?;
+        state.initialize_frontier(control)?;
         state.iterate(graph, reverse, iterations, control)
     }
 
@@ -643,8 +945,44 @@ mod tests {
                             reference(&graph, iterations)
                         );
                         assert_eq!(peak, workspace(n, iterations).unwrap());
+                        // The same fixture also exercises the optional queue,
+                        // including exact iteration parity on oscillators.
+                        let mut active_ticks = 0;
+                        let (active, active_peak) = run(
+                            &outgoing,
+                            graph.is_directed().then_some(&incoming),
+                            iterations,
+                            usize::MAX,
+                            &mut || {
+                                active_ticks += 1;
+                                Ok(())
+                            },
+                        )
+                        .unwrap();
+                        assert_eq!(component_labels(active), labels);
+                        assert_eq!(
+                            active_peak,
+                            workspace(n, iterations).unwrap()
+                                + if n != 0 && iterations >= 2 {
+                                    frontier_workspace(n).unwrap()
+                                } else {
+                                    0
+                                }
+                        );
                         assert!(
                             ticks
+                                <= work(
+                                    n,
+                                    edges.len(),
+                                    outgoing.rows.iter().map(Vec::len).sum(),
+                                    direction,
+                                    iterations,
+                                    2,
+                                )
+                                .unwrap()
+                        );
+                        assert!(
+                            active_ticks
                                 <= work(
                                     n,
                                     edges.len(),
@@ -661,6 +999,241 @@ mod tests {
             }
         }
         assert_eq!(cases, 840);
+    }
+
+    #[test]
+    fn settled_cliques_leave_only_oscillating_rows_active_without_extra_source_scans() {
+        for d in [3, 17, 64, 129] {
+            let n = d + 3;
+            for iterations in [3, 4, 17, 100] {
+                let mut rows: Vec<_> = (0..d)
+                    .map(|source| (0..d).filter(|&target| target != source).collect())
+                    .collect();
+                rows.extend([vec![d + 1], vec![d], vec![]]);
+                let graph = Fixture::new(rows);
+                let mut ticks = 0;
+                let (output, peak) = run(&graph, None, iterations, usize::MAX, &mut || {
+                    ticks += 1;
+                    Ok(())
+                })
+                .unwrap();
+                assert_eq!(
+                    output.witness.algorithm,
+                    "cdlp_synchronous_minimum_vid_active_cursor"
+                );
+                assert_eq!(output.witness.nodes_touched, 3 * d + 2 * iterations + 1);
+                assert_eq!(output.witness.queue_peak, n);
+                assert_eq!(
+                    output.witness.edges_scanned,
+                    3 * d * (d - 1) + 2 * iterations
+                );
+                let visits = output.witness.edges_scanned;
+                let opened = output.witness.nodes_touched + n;
+                assert_eq!(graph.opens.iter().map(Cell::get).sum::<usize>(), opened);
+                assert!(graph.opens[..d].iter().all(|opens| opens.get() == 4));
+                assert_eq!(graph.opens[d].get(), iterations + 1);
+                assert_eq!(graph.opens[d + 1].get(), iterations + 1);
+                assert_eq!(graph.opens[d + 2].get(), 2);
+                // Every open has its real EOF pull. Planning visits every arc;
+                // notifications add no row opens or pulls to the vote scans.
+                let arcs = d * (d - 1) + 2;
+                assert_eq!(graph.source_steps.get(), 2 * opened + arcs + visits);
+                let labels = component_labels(output);
+                assert!(labels[..d].iter().all(|&label| label == 0));
+                assert_eq!(labels[d], d + iterations % 2);
+                assert_eq!(labels[d + 1], d + 1 - iterations % 2);
+                assert_eq!(labels[d + 2], d + 2);
+                assert_eq!(
+                    peak,
+                    workspace(n, iterations).unwrap() + frontier_workspace(n).unwrap()
+                );
+                assert!(
+                    ticks
+                        <= work(n, arcs / 2, arcs, Directedness::Undirected, iterations, 2)
+                            .unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_dense_and_relabelled_frontiers_match_independent_full_round_votes() {
+        let mut random = 0x6364_6c70_6163_7469u64;
+        for n in [9, 17, 65] {
+            for density in [1, 5] {
+                let mut original = vec![Vec::new(); n];
+                for (source, row) in original.iter_mut().enumerate() {
+                    for target in 0..n {
+                        random = random
+                            .wrapping_mul(6_364_136_223_846_793_005)
+                            .wrapping_add(1);
+                        if source != target && (random >> 32) % 8 < density {
+                            row.push(target);
+                        }
+                    }
+                }
+                for relabel in [false, true] {
+                    let ordinal = |vertex| if relabel { n - 1 - vertex } else { vertex };
+                    let mut outgoing = vec![Vec::new(); n];
+                    let mut incoming = vec![Vec::new(); n];
+                    for (source, row) in original.iter().enumerate() {
+                        for &target in row.iter().rev() {
+                            outgoing[ordinal(source)].push(ordinal(target));
+                            incoming[ordinal(target)].push(ordinal(source));
+                        }
+                    }
+                    for rows in [&mut outgoing, &mut incoming] {
+                        for row in rows {
+                            row.sort_unstable();
+                        }
+                    }
+                    let outgoing = Fixture::new(outgoing);
+                    let incoming = Fixture::new(incoming);
+                    for iterations in [0, 1, 2, 3, 8, 17] {
+                        let mut expected: Vec<_> = (0..n).collect();
+                        for _ in 0..iterations {
+                            expected = (0..n)
+                                .map(|source| {
+                                    let mut votes =
+                                        std::collections::BTreeMap::<usize, usize>::new();
+                                    for &neighbor in
+                                        outgoing.rows[source].iter().chain(&incoming.rows[source])
+                                    {
+                                        *votes.entry(expected[neighbor]).or_default() += 1;
+                                    }
+                                    votes
+                                        .into_iter()
+                                        .min_by_key(|&(label, count)| {
+                                            (std::cmp::Reverse(count), label)
+                                        })
+                                        .map_or(expected[source], |(label, _)| label)
+                                })
+                                .collect();
+                        }
+                        let (actual, _) = run(
+                            &outgoing,
+                            Some(&incoming),
+                            iterations,
+                            usize::MAX,
+                            &mut || Ok(()),
+                        )
+                        .unwrap();
+                        assert!(actual.witness.nodes_touched <= n * iterations);
+                        assert!(
+                            actual.witness.edges_scanned
+                                <= 2 * outgoing.rows.iter().map(Vec::len).sum::<usize>()
+                                    * iterations
+                        );
+                        assert_eq!(
+                            component_labels(actual),
+                            expected,
+                            "n={n}, density={density}, relabel={relabel}, iterations={iterations}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn optional_frontier_preserves_the_exact_full_sweep_memory_fallback() {
+        let graph = Fixture::new(vec![vec![1, 2], vec![0, 2], vec![0, 1], vec![]]);
+        let n = graph.node_count();
+        let iterations = 20;
+        let baseline = workspace(n, iterations).unwrap();
+        let active = baseline + frontier_workspace(n).unwrap();
+        for limit in [baseline, active - 1, active] {
+            let (actual, peak) = run(&graph, None, iterations, limit, &mut || Ok(())).unwrap();
+            let frontier = limit == active;
+            assert_eq!(peak, if frontier { active } else { baseline });
+            assert_eq!(
+                actual.witness.nodes_touched,
+                if frontier { 10 } else { n * iterations }
+            );
+            assert_eq!(actual.witness.queue_peak, if frontier { n } else { 0 });
+            assert_eq!(component_labels(actual), [0, 0, 0, 3]);
+        }
+        // Vec cannot represent a byte allocation above isize::MAX. This
+        // deterministically exercises allocation refusal without exhausting
+        // the test process; optional storage must leave the sweep admissible.
+        let mut live = 0;
+        assert!(
+            optional_reserved::<u8>(usize::MAX, &mut live, usize::MAX)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(live, 0);
+        assert!(matches!(
+            optional_reserved::<usize>(usize::MAX, &mut live, usize::MAX),
+            Err(super::super::Error::Execution(ExecutionError::SizeOverflow))
+        ));
+        assert_eq!(live, 0);
+        assert!(matches!(
+            run(&graph, None, iterations, baseline - 1, &mut || Ok(())),
+            Err(super::super::Error::Execution(
+                ExecutionError::LimitExceeded {
+                    resource: "kernel workspace bytes",
+                    ..
+                }
+            ))
+        ));
+
+        // The mandatory validation still reaches a late loop before any
+        // frontier can omit a settled or isolated population.
+        let loops = Fixture::new(vec![vec![1, 2], vec![0, 2], vec![0, 1], vec![3]]);
+        assert!(matches!(
+            run(&loops, None, iterations, usize::MAX, &mut || Ok(())),
+            Err(super::super::Error::Execution(
+                ExecutionError::SelfLoopRefused
+            ))
+        ));
+        assert_eq!(loops.opens[3].get(), 1);
+    }
+
+    #[test]
+    fn optional_partial_allocation_keeps_its_peak_and_over_capacity_refuses() {
+        let graph = Fixture::new(vec![vec![1, 2], vec![0, 2], vec![0, 1], vec![]]);
+        let n = graph.node_count();
+        let iterations = 20;
+        let baseline = workspace(n, iterations).unwrap();
+        let extra = frontier_workspace(n).unwrap();
+        let limit = baseline + extra;
+        let mut state = Labels::new(n, iterations, limit).unwrap();
+        state.prepare(&graph, iterations, &mut || Ok(())).unwrap();
+
+        // An allocator may return more capacity than requested. Fill the
+        // optional allowance with the queue alone, so the next bitmap cannot
+        // fit. The queue is dropped, but its observed peak must survive into
+        // the successfully completed full-sweep result.
+        assert!(
+            ActiveRows::reserve_with_queue(n, &mut state.peak, limit, |requested| {
+                assert_eq!(requested, n);
+                reserve(extra / size_of::<usize>())
+            })
+            .unwrap()
+            .is_none()
+        );
+        let (actual, peak) = state
+            .iterate(&graph, None, iterations, &mut || Ok(()))
+            .unwrap();
+        assert_eq!(peak, limit);
+        assert_eq!(actual.witness.nodes_touched, n * iterations);
+        assert_eq!(actual.witness.queue_peak, 0);
+        assert_eq!(component_labels(actual), [0, 0, 0, 3]);
+
+        // Returning even one more integer of capacity exceeds the real
+        // admitted peak. A successful fallback would hide that violation.
+        let mut peak = baseline;
+        assert!(matches!(
+            ActiveRows::reserve_with_queue(n, &mut peak, limit, |_| {
+                reserve(extra / size_of::<usize>() + 1)
+            }),
+            Err(super::super::Error::Execution(ExecutionError::LimitExceeded {
+                resource: "kernel workspace bytes",
+                requested,
+                limit: actual_limit,
+            })) if requested == limit + size_of::<usize>() && actual_limit == limit
+        ));
     }
 
     #[test]
