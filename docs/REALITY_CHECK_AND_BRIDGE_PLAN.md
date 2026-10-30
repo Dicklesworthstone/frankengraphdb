@@ -375,14 +375,23 @@ tracks that work; checked investigation is not delivered capability.
 - [x] Preserve the two original fault/invalid-ordinal tests without weakening.
 - [x] Extend independent topology parity to admitted and unadmitted providers;
   add malformed late-row and false-symmetry controls.
-- [ ] Run all Prism tests, public sealed/composed paths, cancellation and
-  resource controls; keep original failing receipts and exact source subjects.
+- [x] Run the full Prism library: 269 passed, zero failed, 13 ignored. Keep
+  both original failing assertions intact; all scan-count controls for admitted
+  projections still pass. The separate public cooperative target passed
+  72 tests (one ignored), and read-only source/open tests passed all twelve.
 - [ ] Discharge the independent companion `fgdb-epic-verif-phi.1` after its
   implementation prerequisite and complete qualification; its claim remains
   blocked by the open implementation issue, and no force-claim was used.
-- [ ] Select and implement the next bounded product integration from existing
-  Warden/sealed-query ownership, preserving existing masking and admission.
-- [ ] Run focused positive/negative/public tests for that capability.
+- [x] Claim `fgdb-epic-w8-syz.2` and connect all seven native read classes to
+  the existing sealed owner. Non-CALL engines use its exact resident cut;
+  temporal CALLs retain compressed execution and reject mismatched selectors.
+  Wire temporal composed CLI reads to their bound cut before opening storage.
+- [x] Run public owner tests at current/historical cuts, parameter rebinds,
+  post-writer advancement/drop, source mismatch and compressed-memory refusal:
+  the full sealed-cache integration target passed nineteen tests. Connect
+  missing facade re-exports for the concurrently integrated buffered cache;
+  its nine public integration tests also passed.
+- [ ] Complete the CLI binary/unit and real-process robot test targets.
 - [ ] Resolve formatting and complete the mandatory chain on a stable source.
 - [ ] Reconcile tracker publication without dropping JSONL-only records or
   peer changes; export only the attributable exact set through `br_sync.sh`.
