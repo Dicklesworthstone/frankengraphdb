@@ -1136,10 +1136,11 @@ fn composed_sealed_open_retains_unselected_history_and_rejects_its_corruption() 
         ));
         assert!(vfs.take_object_paths().contains(&damaged_path));
         assert!(
-            Database::open_read_view_with_vfs(&commit, vfs.clone(), &path, keys())
-                .await
-                .is_err(),
-            "the ordinary read oracle must independently reject the same corrupt source"
+            matches!(
+                Database::open_read_view_with_vfs(&commit, vfs.clone(), &path, keys()).await,
+                Err(OpenError::Store(_))
+            ),
+            "the ordinary read oracle must preserve the storage error family for the same corrupt source"
         );
         assert!(vfs.take_writes().is_empty());
     });

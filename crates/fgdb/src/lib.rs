@@ -242,6 +242,7 @@ use fgdb_types::{
     BranchId, CanonicalPropertyValue, CanonicalScalar, CommitSeq, EId, GraphId, MarkerRef,
     ObligationAcquireError, ObligationId, VId,
 };
+use gql_exec::source::exact_counts::ExactCounts;
 use std::borrow::Borrow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -3146,9 +3147,30 @@ impl<V: Vfs + Clone> Database<V> {
                 manifest,
                 ..
             } = published;
-            let (root, blocks, block_props, patches) = store.reopen(cx, root_id).await?;
+            // The normal read-only walk releases edge admission before
+            // admitting vertices. Keep only bounded provisional counters
+            // between those phases, and attach them after complete admission.
+            cx.checkpoint().map_err(RebuildError::Interrupted)?;
+            let mut collector = ExactCounts::default()
+                .collector(true)
+                .expect("an unknown complete population needs collection");
+            let mut count_events = 0;
+            let mut control = |_| recovery_count_checkpoint(cx, &mut count_events);
+            let (root, blocks, block_props, patches) = store
+                .reopen_counted::<RebuildError>(cx, root_id, |event| {
+                    collector.observe_admitted(event, &mut control)
+                })
+                .await
+                .map_err(|error| match error {
+                    // Preserve read-only open's existing storage refusal family.
+                    RebuildError::Store(error) => OpenError::Store(error),
+                    error => OpenError::Rebuild(error),
+                })?;
+            let exact_counts = collector.finish(&mut control)?;
+            cx.checkpoint().map_err(RebuildError::Interrupted)?;
             let mut snapshot =
                 current_generation(manifest, root_id, &root, blocks, block_props, patches);
+            snapshot.exact_counts = exact_counts;
             snapshot.delta_index = LocalDeltaBatchIndex::empty_at(snapshot.frontier);
             Ok(EmbeddedReadView {
                 snapshot: Arc::new(snapshot),
@@ -5677,6 +5699,7 @@ impl<V: Vfs + Clone> Database<V> {
             &self.store,
             &self.keys,
             writer,
+            self.snapshot.exact_counts.clone(),
             frontier,
             published_chain_hash,
             std::mem::take(&mut self.receipts),
@@ -5686,7 +5709,6 @@ impl<V: Vfs + Clone> Database<V> {
         .await?;
         snapshot.delta_index = self.snapshot.delta_index.clone();
         snapshot.read_caches = Arc::clone(&self.snapshot.read_caches);
-        snapshot.exact_counts = self.snapshot.exact_counts.clone();
         let versions = VersionHeads::from_checkpoint(&snapshot);
         // The slot advances so the compacted generation is what the next
         // checkpoint-selected open lands on.
@@ -6294,6 +6316,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
         admission,
     } = store.reopen_sealed(cx, root_id).await?;
     let published_at = root.published_at;
+    let mut exact_counts = counts_from_admission(cx, &admission)?;
 
     // The walk above already validated the whole published edge history and
     // retained each EId's latest row coordinate. Reconstruct directly from
@@ -6313,7 +6336,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     // statement histories or retaining an extra strong spent-set handle.
     let mut next_birth_ordinal =
         writer.spent_vertices().len() as u64 + writer.spent_edges().len() as u64;
-    let snapshot = current_generation(manifest, root_id, &root, blocks, block_props, patches);
+    let mut snapshot = current_generation(manifest, root_id, &root, blocks, block_props, patches);
     let mut versions = VersionHeads::from_checkpoint(&snapshot);
 
     // The SUFFIX: everything the crash window or plain lag left past the
@@ -6324,6 +6347,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
         keys,
         &mut FoldState {
             writer: &mut writer,
+            exact_counts: &mut exact_counts,
             versions: &mut versions,
             next_birth_ordinal: &mut next_birth_ordinal,
             crypto_verification_events,
@@ -6348,6 +6372,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
             store,
             keys,
             writer,
+            exact_counts,
             frontier,
             published_chain_hash,
             PublishReceipts::default(),
@@ -6371,6 +6396,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     // from that admission instead of re-syncing all of them on the first
     // commit. A copy made without syncing must be adopted before this open
     // ([`Database::adopt`]).
+    snapshot.exact_counts = exact_counts;
     let receipts = PublishReceipts::for_published_root(admission);
     Ok((snapshot, writer, heads, receipts, root))
 }
@@ -6723,6 +6749,33 @@ async fn ensure_slot_target_resolves<V: Vfs>(
     }
 }
 
+/// Recovery already governs the root walk and bounds retained counters. Poll
+/// once per 64 metadata events rather than reading the clock for every label,
+/// tree comparison or allocation unit. Callers checkpoint before and after
+/// the complete collection; query admission and its per-event controls do not
+/// use this recovery-only pacing.
+fn recovery_count_checkpoint(cx: &CommitCx, events: &mut u8) -> Result<(), RebuildError> {
+    *events += 1;
+    if *events == 64 {
+        *events = 0;
+        cx.checkpoint().map_err(RebuildError::Interrupted)?;
+    }
+    Ok(())
+}
+
+fn counts_from_admission(
+    cx: &CommitCx,
+    admission: &fgdb_strata::store::RootAdmission,
+) -> Result<ExactCounts, RebuildError> {
+    cx.checkpoint().map_err(RebuildError::Interrupted)?;
+    let mut events = 0;
+    let counts = ExactCounts::from_admission(admission, &mut |_| {
+        recovery_count_checkpoint(cx, &mut events)
+    })?;
+    cx.checkpoint().map_err(RebuildError::Interrupted)?;
+    Ok(counts)
+}
+
 /// `manifest` is the identity of the STORED manifest that selected this
 /// checkpoint, never a re-encoding of its record. A re-encoding names the same
 /// record only while the encoder writes the stored manifest's format; once it
@@ -6770,6 +6823,7 @@ async fn rebuild<V: Vfs>(
     replay_capacity: ReplayRootCapacity,
 ) -> Result<OpenedGeneration, RebuildError> {
     let mut writer = BlockWriter::new(GRAPH, BRANCH, PARTITION);
+    let mut exact_counts = ExactCounts::new(true);
     let mut next_birth_ordinal = 0u64;
     let mut versions = VersionHeads::default();
     let frontier = fold_stream(
@@ -6778,6 +6832,7 @@ async fn rebuild<V: Vfs>(
         keys,
         &mut FoldState {
             writer: &mut writer,
+            exact_counts: &mut exact_counts,
             versions: &mut versions,
             next_birth_ordinal: &mut next_birth_ordinal,
             crypto_verification_events,
@@ -6793,6 +6848,7 @@ async fn rebuild<V: Vfs>(
         store,
         keys,
         writer,
+        exact_counts,
         frontier,
         published_chain_hash,
         PublishReceipts::default(),
@@ -7192,6 +7248,7 @@ fn decode_sealed_partition(
 /// replay past `published_at` (fgdb-ge6a).
 struct FoldState<'a> {
     writer: &'a mut BlockWriter,
+    exact_counts: &'a mut ExactCounts,
     versions: &'a mut VersionHeads,
     next_birth_ordinal: &'a mut u64,
     crypto_verification_events: &'a mut Vec<CryptoVerificationEvent>,
@@ -7257,6 +7314,7 @@ async fn fold_stream<V: Vfs>(
                 continue;
             }
             for row in &coordinate.rows {
+                state.exact_counts.apply_before(state.writer, row);
                 state
                     .writer
                     .apply(keys.block_keys(), commit_seq, row)
@@ -7329,6 +7387,7 @@ fn publish_and_snapshot<'a, V: Vfs>(
     store: &'a BlockStore<V>,
     keys: &'a DatabaseKeys,
     writer: BlockWriter,
+    exact_counts: ExactCounts,
     frontier: CommitSeq,
     published_chain_hash: Digest,
     receipts: PublishReceipts,
@@ -7340,6 +7399,7 @@ fn publish_and_snapshot<'a, V: Vfs>(
         store,
         keys,
         writer,
+        exact_counts,
         frontier,
         published_chain_hash,
         receipts,
@@ -7354,6 +7414,7 @@ async fn publish_and_snapshot_inner<V: Vfs>(
     store: &BlockStore<V>,
     keys: &DatabaseKeys,
     writer: BlockWriter,
+    exact_counts: ExactCounts,
     frontier: CommitSeq,
     published_chain_hash: Digest,
     receipts: PublishReceipts,
@@ -7417,9 +7478,7 @@ async fn publish_and_snapshot_inner<V: Vfs>(
     Ok((
         Snapshot {
             read_caches: Arc::default(),
-            exact_counts: gql_exec::source::exact_counts::ExactCounts::new(
-                decoded.is_empty() && decoded_patches.is_empty(),
-            ),
+            exact_counts,
             adjacency: if build_adjacency {
                 std::sync::OnceLock::from(Arc::new(gql_exec::source::AdjacencyIndex::build(
                     &decoded,

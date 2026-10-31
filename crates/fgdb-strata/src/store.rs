@@ -3160,6 +3160,75 @@ impl<V: Vfs> BlockStore<V> {
         Ok((root, blocks, block_props, patches))
     }
 
+    /// Reopen a whole partition while deriving current-count inputs from the
+    /// same admitted histories. The callback borrows only live vertex labels
+    /// and edge relations at the root's own publication frontier.
+    ///
+    /// Edge history is dropped before vertex admission starts, preserving
+    /// `reopen`'s two-phase memory bound. No writer, copied history, sorting,
+    /// sealed payload retention, or second object read is needed.
+    ///
+    /// The initial and final work events fence even an empty pass; every
+    /// examined statement/head also emits work before its visibility test.
+    /// Events are provisional until this entire call succeeds. A caller must
+    /// discard its accumulated summary if admission or the callback fails.
+    #[allow(clippy::type_complexity)]
+    pub async fn reopen_counted<E: From<StoreError>>(
+        &self,
+        cx: &impl StorageReadCx,
+        id: PartitionRootVersion,
+        mut visit: impl FnMut(AdmittedCountEvent<'_>) -> Result<(), E>,
+    ) -> Result<
+        (
+            crate::root::PartitionRoot,
+            Vec<Vec<crate::AdjacencyEntry>>,
+            Vec<Option<BlockProps>>,
+            Vec<VertexPatchRows>,
+        ),
+        E,
+    > {
+        visit(AdmittedCountEvent::Work)?;
+        let root = self.get_root(cx, id).await?;
+        let resolved = {
+            let mut walk = RootWalk::default();
+            let resolved = self
+                .inspect_root_blocks_observed(
+                    cx,
+                    &root,
+                    |_, _, read| Some(decoded_block(read)),
+                    &mut |_| Ok::<(), E>(()),
+                    OPEN_READS_IN_FLIGHT,
+                    &mut walk,
+                )
+                .await?;
+            walk.visit_current_edges(root.published_at, &mut visit)?;
+            resolved
+        };
+        let mut blocks = Vec::with_capacity(resolved.len());
+        let mut block_props = Vec::with_capacity(resolved.len());
+        for (entries, props) in resolved {
+            blocks.push(entries);
+            block_props.push(props);
+        }
+        let patches = {
+            let mut walk = RootWalk::default();
+            let patches = self
+                .inspect_root_patches_observed(
+                    cx,
+                    &root,
+                    |_, _, (rows, _)| Some(rows),
+                    &mut |_| Ok::<(), E>(()),
+                    OPEN_READS_IN_FLIGHT,
+                    &mut walk,
+                )
+                .await?;
+            walk.visit_current_vertices(root.published_at, &mut visit)?;
+            patches
+        };
+        visit(AdmittedCountEvent::Work)?;
+        Ok((root, blocks, block_props, patches))
+    }
+
     /// [`BlockStore::reopen`], also returning the sealed bytes a retained
     /// writer needs, taken from the same identity-verified reads. A caller that
     /// rebuilds a writer from a reopened partition must not read and verify
@@ -3426,6 +3495,51 @@ struct RootWalk {
     vertex_history: crate::root::VertexHistoryValidator,
 }
 
+/// Borrowed inputs for a bounded current-cut cardinality summary.
+///
+/// These events grant no durability or query authority. They are valid only
+/// for the exact root whose complete admission succeeded, and never substitute
+/// for admission of the underlying objects.
+#[derive(Clone, Copy, Debug)]
+pub enum AdmittedCountEvent<'a> {
+    /// A cancellation/work boundary, including for a retired statement.
+    Work,
+    /// The labels of one live vertex at the admitted root's frontier.
+    Vertex(&'a [fgdb_delta_types::LabelId]),
+    /// The relation of one live edge at the admitted root's frontier.
+    Edge(fgdb_delta_types::RelationId),
+}
+
+impl RootWalk {
+    fn visit_current_edges<E>(
+        &self,
+        frontier: CommitSeq,
+        visit: &mut impl FnMut(AdmittedCountEvent<'_>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        for entry in self.history.latest_statements() {
+            visit(AdmittedCountEvent::Work)?;
+            if entry.visible_at(frontier) {
+                visit(AdmittedCountEvent::Edge(entry.relation))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn visit_current_vertices<E>(
+        &self,
+        frontier: CommitSeq,
+        visit: &mut impl FnMut(AdmittedCountEvent<'_>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        for row in self.vertex_history.statements() {
+            visit(AdmittedCountEvent::Work)?;
+            if row.visible_at(frontier) {
+                visit(AdmittedCountEvent::Vertex(&row.labels))?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// What [`BlockStore::reopen_sealed`] proved about one root, besides the
 /// objects it returned. For each named block: its identity, claimed span and
 /// chain fields. For each named vertex patch: its identity and claimed span.
@@ -3456,6 +3570,23 @@ pub struct RootAdmission {
 }
 
 impl RootAdmission {
+    /// Visit count inputs at this admission's immutable publication frontier.
+    /// Histories are borrowed directly; labels, properties, and older edge
+    /// statements are neither cloned nor sorted. Work is reported before each
+    /// examined row/head and at both ends, including for an empty root.
+    /// A refused visit leaves the admission unchanged and publishes no summary.
+    pub fn visit_current_counts<E>(
+        &self,
+        mut visit: impl FnMut(AdmittedCountEvent<'_>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        visit(AdmittedCountEvent::Work)?;
+        self.walk
+            .visit_current_edges(self.binding.published_at, &mut visit)?;
+        self.walk
+            .visit_current_vertices(self.binding.published_at, &mut visit)?;
+        visit(AdmittedCountEvent::Work)
+    }
+
     /// The canonical edge history this walk admitted: one row per content
     /// statement, keyed `(eid, created_at)`, exactly the collapse of the
     /// root's blocks in order. A writable open builds its writer from it

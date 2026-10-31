@@ -3131,6 +3131,293 @@ fn a_bounded_root_read_charges_every_segment_it_names() {
     );
 }
 
+mod admitted_counts {
+    use super::*;
+    use fgdb_delta_types::LabelId;
+    use fgdb_strata::root::PatchRef;
+    use fgdb_strata::store::AdmittedCountEvent;
+    use fgdb_strata::vertex::{VertexRow, encode_patch};
+    use std::collections::BTreeMap;
+
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct Counts {
+        work: usize,
+        vertices: u64,
+        edges: u64,
+        labels: BTreeMap<LabelId, u64>,
+        relations: BTreeMap<RelationId, u64>,
+    }
+
+    impl Counts {
+        fn observe(&mut self, event: AdmittedCountEvent<'_>) -> Result<(), StoreError> {
+            match event {
+                AdmittedCountEvent::Work => self.work += 1,
+                AdmittedCountEvent::Vertex(labels) => {
+                    self.vertices += 1;
+                    for &label in labels {
+                        *self.labels.entry(label).or_default() += 1;
+                    }
+                }
+                AdmittedCountEvent::Edge(relation) => {
+                    self.edges += 1;
+                    *self.relations.entry(relation).or_default() += 1;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn vertex(vid: u128, created: u64, retired: Option<u64>, labels: &[u64]) -> VertexRow {
+        VertexRow {
+            vid: VId(vid),
+            birth_ordinal: vid as u64,
+            created_at: CommitSeq(created),
+            retired_at: retired.map(CommitSeq),
+            labels: labels.iter().copied().map(LabelId).collect(),
+            props: vec![],
+        }
+    }
+
+    #[test]
+    fn current_counts_reuse_admission_without_counting_versions_or_restatements() {
+        let dir = scratch_dir("admitted-current-counts");
+        under_lab(0xc017, move |cx| async move {
+            let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE).await.unwrap();
+            let first = store
+                .put(
+                    &cx,
+                    &encode_block(0, None, &[edge(10, 1, 2, 1, None), edge(11, 1, 2, 1, None)])
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let loop_edge = AdjacencyEntry {
+                relation: RelationId(2),
+                ..edge(12, 1, 1, 1, None)
+            };
+            let second = store
+                .put(&cx, &encode_block(0, None, &[loop_edge]).unwrap())
+                .await
+                .unwrap();
+            let first_patch = store
+                .put_patch(
+                    &cx,
+                    &encode_patch(&[
+                        vertex(1, 1, None, &[1]),
+                        vertex(2, 1, None, &[2]),
+                        vertex(4, 1, None, &[1]),
+                    ])
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            let mut root = PartitionRoot {
+                graph: GraphId(1),
+                branch: BranchId(1),
+                partition: 0,
+                published_at: CommitSeq(1),
+                blocks: vec![
+                    BlockRef {
+                        block_id: first.0,
+                        first_seq: CommitSeq(1),
+                        last_seq: CommitSeq(1),
+                    },
+                    BlockRef {
+                        block_id: second.0,
+                        first_seq: CommitSeq(1),
+                        last_seq: CommitSeq(1),
+                    },
+                ],
+                vertex_patches: vec![PatchRef {
+                    patch_id: first_patch.0,
+                    first_seq: CommitSeq(1),
+                    last_seq: CommitSeq(1),
+                }],
+            };
+            let original = store.put_root(&cx, &root).await.unwrap();
+            let changed = store
+                .put(
+                    &cx,
+                    &encode_block(
+                        0,
+                        Some(first),
+                        &[
+                            edge(10, 1, 2, 1, Some(3)),
+                            edge(10, 1, 2, 3, None),
+                            edge(11, 1, 2, 1, Some(4)),
+                        ],
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            let added = store
+                .put(
+                    &cx,
+                    &encode_block(
+                        0,
+                        None,
+                        &[AdjacencyEntry {
+                            relation: RelationId(2),
+                            ..edge(13, 3, 3, 5, None)
+                        }],
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            let changed_patch = store
+                .put_patch(
+                    &cx,
+                    &encode_patch(&[
+                        vertex(1, 1, Some(3), &[1]),
+                        vertex(1, 3, None, &[2, 3]),
+                        vertex(3, 5, None, &[]),
+                        vertex(4, 1, Some(4), &[1]),
+                    ])
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            root.published_at = CommitSeq(5);
+            root.blocks.extend([
+                BlockRef {
+                    block_id: changed.0,
+                    first_seq: CommitSeq(1),
+                    last_seq: CommitSeq(4),
+                },
+                BlockRef {
+                    block_id: added.0,
+                    first_seq: CommitSeq(5),
+                    last_seq: CommitSeq(5),
+                },
+            ]);
+            root.vertex_patches.push(PatchRef {
+                patch_id: changed_patch.0,
+                first_seq: CommitSeq(1),
+                last_seq: CommitSeq(5),
+            });
+            let updated = store.put_root(&cx, &root).await.unwrap();
+
+            for (id, expected) in [
+                (
+                    original,
+                    Counts {
+                        work: 8,
+                        vertices: 3,
+                        edges: 3,
+                        labels: BTreeMap::from([(LabelId(1), 2), (LabelId(2), 1)]),
+                        relations: BTreeMap::from([(REL, 2), (RelationId(2), 1)]),
+                    },
+                ),
+                (
+                    updated,
+                    Counts {
+                        work: 11,
+                        vertices: 3,
+                        edges: 3,
+                        labels: BTreeMap::from([(LabelId(2), 2), (LabelId(3), 1)]),
+                        relations: BTreeMap::from([(REL, 1), (RelationId(2), 2)]),
+                    },
+                ),
+            ] {
+                let ordinary = store.reopen(&cx, id).await.unwrap();
+                let mut counted = Counts::default();
+                let reopened = store
+                    .reopen_counted(&cx, id, |event| counted.observe(event))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    reopened, ordinary,
+                    "counting preserves admitted source rows"
+                );
+                assert_eq!(counted, expected, "counts belong to the selected root");
+
+                let sealed = store.reopen_sealed(&cx, id).await.unwrap();
+                let mut from_admission = Counts::default();
+                sealed
+                    .admission
+                    .visit_current_counts(|event| from_admission.observe(event))
+                    .unwrap();
+                assert_eq!(
+                    from_admission, expected,
+                    "both open owners use the same heads"
+                );
+
+                let mut visited = 0;
+                let refused = sealed.admission.visit_current_counts(|_| {
+                    visited += 1;
+                    if visited == 4 { Err(17u8) } else { Ok(()) }
+                });
+                assert_eq!(refused, Err(17));
+                assert_eq!(visited, 4, "refusal stops before another callback");
+                let mut retry = Counts::default();
+                sealed
+                    .admission
+                    .visit_current_counts(|event| retry.observe(event))
+                    .unwrap();
+                assert_eq!(retry, expected, "refusal cannot alter the admitted history");
+            }
+        });
+    }
+
+    #[test]
+    fn empty_count_admission_has_refusable_initial_and_final_fences() {
+        let dir = scratch_dir("admitted-empty-count-fences");
+        under_lab(0xc018, move |cx| async move {
+            let store = BlockStore::open(&cx, &dir, K_OID, NAMESPACE).await.unwrap();
+            let root = PartitionRoot {
+                graph: GraphId(1),
+                branch: BranchId(1),
+                partition: 0,
+                published_at: CommitSeq(0),
+                blocks: vec![],
+                vertex_patches: vec![],
+            };
+            let id = store.put_root(&cx, &root).await.unwrap();
+            for refuse_at in [1, 2] {
+                let mut work = 0;
+                let result = store
+                    .reopen_counted(&cx, id, |event| {
+                        assert!(matches!(event, AdmittedCountEvent::Work));
+                        work += 1;
+                        if work == refuse_at {
+                            Err(StoreError::Io(std::io::Error::new(
+                                std::io::ErrorKind::Interrupted,
+                                "count admission refused",
+                            )))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .await;
+                assert!(matches!(result, Err(StoreError::Io(error))
+                    if error.kind() == std::io::ErrorKind::Interrupted));
+                assert_eq!(work, refuse_at);
+            }
+            let mut counted = Counts::default();
+            store
+                .reopen_counted(&cx, id, |event| counted.observe(event))
+                .await
+                .unwrap();
+            assert_eq!(
+                counted,
+                Counts {
+                    work: 2,
+                    ..Counts::default()
+                }
+            );
+            let sealed = store.reopen_sealed(&cx, id).await.unwrap();
+            let mut from_admission = Counts::default();
+            sealed
+                .admission
+                .visit_current_counts(|event| from_admission.observe(event))
+                .unwrap();
+            assert_eq!(from_admission, counted);
+        });
+    }
+}
+
 /// **THE WRITER'S SEGMENT CACHE NEVER CHANGES WHAT IS PUBLISHED.** A warm root
 /// memo seals only the segment an extension fills; a root at another branch
 /// over the very same references extends the memo's prefix exactly, yet every

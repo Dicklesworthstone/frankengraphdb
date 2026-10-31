@@ -553,7 +553,7 @@ fn maintained_authorized_counts_admit_one_metadata_record_independent_of_graph_s
 }
 
 #[test]
-fn reopened_authorized_counts_publish_only_after_delivery_and_keep_full_scope_proofs() {
+fn recovered_authorized_counts_keep_delivery_fences_and_full_scope_proofs() {
     let ((), report) = run_async_under_lab(0xc161_0012, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let cx = c.query();
@@ -597,20 +597,29 @@ fn reopened_authorized_counts_publish_only_after_delivery_and_keep_full_scope_pr
                 || 100,
             )
         };
-        let unknown = |db: &Database<MemVfs>| {
-            assert!(matches!(
-                db.execute_graph_aggregate_governed(&cx, &query, one),
-                Err(GqlQueryError::Rows(error)) if error.dimension == GqlBudgetDimension::SnapshotRecords
-            ));
+        let recovered = |db: &Database<MemVfs>| {
+            let result = db
+                .execute_graph_aggregate_governed(&cx, &query, one)
+                .unwrap();
+            assert_eq!(count(&result.value), 65);
+            assert_eq!(result.rows.snapshot_records, 1);
         };
-        unknown(&db);
+        // This is the first query after open: it cannot depend on an owner
+        // query or a prior successful authorized delivery warming metadata.
+        assert_eq!(count(&run(&db, &full, &query, one).unwrap()), 65);
+        recovered(&db);
         let scoped = full
             .attenuate(Restriction::Properties(Scope::only([])))
             .unwrap();
+        assert!(matches!(
+            run(&db, &scoped, &query, one),
+            Err(QueryError::Aggregate(GqlQueryError::Rows(error)))
+                if error.dimension == GqlBudgetDimension::SnapshotRecords
+        ));
         assert_eq!(count(&run(&db, &scoped, &query, policy()).unwrap()), 65);
-        unknown(&db);
+        recovered(&db);
         // A historical empty source is complete at its cut, never at the
-        // current generation. Its zero must not become current metadata.
+        // current generation. Its zero must not replace recovered metadata.
         assert_eq!(
             count(
                 &db.execute_graph_aggregate_authorized_at(
@@ -627,7 +636,7 @@ fn reopened_authorized_counts_publish_only_after_delivery_and_keep_full_scope_pr
             ),
             0
         );
-        unknown(&db);
+        recovered(&db);
         let no_rows = full.attenuate(Restriction::MaxRows(0)).unwrap();
         assert!(matches!(
             run(&db, &no_rows, &query, policy()),
@@ -635,16 +644,16 @@ fn reopened_authorized_counts_publish_only_after_delivery_and_keep_full_scope_pr
                 fgdb_warden::Error::LimitExceeded(fgdb_warden::LimitDimension::Rows)
             ))
         ));
-        unknown(&db);
-        // The failed query may retain an ordinary admitted core. Measure that
-        // same core path's final delivery checkpoint, then cancel and expire
-        // there; neither refusal may publish the privately completed counts.
+        recovered(&db);
+        // Recovered metadata still crosses the signed delivery checkpoint.
+        // Cancellation and expiry there refuse the result and leave the
+        // immutable generation's complete metadata intact.
         let refused = footprint(&db, &cx, &no_rows, &query, policy(), None);
         assert!(refused.0.is_err());
         let cancelled = footprint(&db, &cx, &full, &query, policy(), Some(refused.1));
         assert!(cancelled.0.is_err());
         assert_eq!(cancelled.1, refused.1);
-        unknown(&db);
+        recovered(&db);
         let mut samples = 0;
         assert!(matches!(
             db.execute_graph_aggregate_authorized(
@@ -661,7 +670,7 @@ fn reopened_authorized_counts_publish_only_after_delivery_and_keep_full_scope_pr
             ),
             Err(QueryError::Authorization(fgdb_warden::Error::Expired))
         ));
-        unknown(&db);
+        recovered(&db);
         let broken = prepare("MATCH (a)-[:R]->(b) RETURN 1 / (COUNT(*) - COUNT(*)) AS n LIMIT 0");
         assert!(matches!(
             run(&db, &full, &broken, policy()),
@@ -669,10 +678,9 @@ fn reopened_authorized_counts_publish_only_after_delivery_and_keep_full_scope_pr
                 fgdb_gql::GraphAggregateError::OutputExpression { .. }
             )))
         ));
-        unknown(&db);
-        assert_eq!(count(&run(&db, &full, &query, policy()).unwrap()), 65);
-        // No owner count warmed these populations: successful authorized
-        // delivery published the complete source, including another relation.
+        recovered(&db);
+        // Admission reconstructs the whole bounded population, including
+        // relations and labels no earlier query requested.
         for (text, expected) in [
             (VERTICES, 64),
             (R_EDGES, 65),
@@ -744,15 +752,12 @@ fn reopened_authorized_counts_publish_only_after_delivery_and_keep_full_scope_pr
         restored.set_vertex_label(VId(2), A, true);
         db.write(&commit, restored).await.unwrap();
         assert_eq!(count(&run(&db, &full, &labeled, four).unwrap()), 63);
-        // Exercise the cold collector too: the earlier successful publication
-        // reused the core retained by a failed delivery. Reopening has neither
-        // that core nor process-local exact counts.
+        // A second open reconstructs the changed generation, independently of
+        // both the prior reader and every failed or successful query above.
         drop(db);
         let cold = Database::open_with_vfs(&commit, vfs, &dir, keys())
             .await
             .unwrap();
-        unknown(&cold);
-        assert_eq!(count(&run(&cold, &full, &query, policy()).unwrap()), 63);
         assert_eq!(count(&run(&cold, &full, &query, one).unwrap()), 63);
         assert_eq!(count(&run(&cold, &full, &labeled, four).unwrap()), 63);
         assert_eq!(c.outstanding_obligations(), 0);

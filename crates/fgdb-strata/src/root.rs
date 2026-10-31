@@ -2328,6 +2328,20 @@ impl EdgeHistoryValidator {
         self.chains.iter().map(EdgeChain::eid)
     }
 
+    /// One borrowed current head per admitted identity, in admission order.
+    /// Root admission proves no statement starts after its frontier, so a
+    /// current-cut summary never needs to sort or copy older versions.
+    pub(crate) fn latest_statements(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &crate::AdjacencyEntry> + '_ {
+        self.chains.iter().map(|chain| {
+            chain
+                .statements()
+                .last()
+                .expect("an admitted edge chain is nonempty")
+        })
+    }
+
     /// Admit one block at its publication position.
     pub(crate) fn observe_block(
         &mut self,
@@ -2661,6 +2675,14 @@ pub(crate) struct VertexHistoryValidator {
 }
 
 impl VertexHistoryValidator {
+    /// Borrow every collapsed statement without cloning labels or properties.
+    /// A governed caller can poll before testing each row's visibility.
+    pub(crate) fn statements(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &crate::vertex::VertexRow> + '_ {
+        self.rows.values()
+    }
+
     /// The already admitted collapse, in canonical identity order. Reusing it
     /// avoids rebuilding a second map from every published vertex restatement
     /// solely to recover the current writer's live rows.

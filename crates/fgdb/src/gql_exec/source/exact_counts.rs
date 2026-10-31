@@ -5,6 +5,7 @@
 use super::{IndexMap, SourceEvent};
 use fgdb_delta_types::{DeltaRow, LabelId, RelationId};
 use fgdb_gql::GraphCountSource;
+use fgdb_strata::store::{AdmittedCountEvent, RootAdmission};
 use fgdb_strata::writer::BlockWriter;
 use std::sync::OnceLock;
 
@@ -33,6 +34,20 @@ impl ExactCounts {
         } else {
             Self::default()
         }
+    }
+
+    /// Rebuild from the root walk's already authenticated history, at that
+    /// admission's own publication frontier. Only bounded counters are kept;
+    /// payloads, source identities and historical rows remain borrowed.
+    pub(crate) fn from_admission<E>(
+        admission: &RootAdmission,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<Self, E> {
+        let mut collector = Self::default()
+            .collector(true)
+            .expect("an unknown complete population needs collection");
+        admission.visit_current_counts(|event| collector.observe_admitted(event, control))?;
+        collector.finish(control)
     }
 
     /// Collect a complete unrestricted source without retaining its records.
@@ -288,6 +303,20 @@ pub(crate) struct CountCollector {
 }
 
 impl CountCollector {
+    /// Consume only the exact current-cut contribution selected by Strata's
+    /// admitted history. Work also covers examined but retired statements.
+    pub(crate) fn observe_admitted<E>(
+        &mut self,
+        event: AdmittedCountEvent<'_>,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
+        match event {
+            AdmittedCountEvent::Work => control(SourceEvent::Work),
+            AdmittedCountEvent::Vertex(labels) => self.vertex(labels, control),
+            AdmittedCountEvent::Edge(relation) => self.edges(relation, 1, control),
+        }
+    }
+
     pub(crate) fn vertex<E>(
         &mut self,
         labels: &[LabelId],

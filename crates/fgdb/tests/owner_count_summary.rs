@@ -345,7 +345,7 @@ fn owner_count_history_fences_precede_cancellation_and_empty_page_limits() {
 }
 
 #[test]
-fn exact_current_counts_do_not_grow_with_graph_and_reopen_rebuilds_before_reuse() {
+fn exact_current_counts_do_not_grow_with_graph_or_require_query_warmup_after_reopen() {
     let ((), report) = run_async_under_lab(0xc017_0022, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let vfs = MemVfs::new().unwrap();
@@ -427,16 +427,28 @@ fn exact_current_counts_do_not_grow_with_graph_and_reopen_rebuilds_before_reuse(
             maintained
         );
         drop(db);
+        let one = GqlQueryPolicy::new(1, 10, 1000, 1000);
+        let reader =
+            Database::open_read_view_with_vfs(&contexts.commit(), vfs.clone(), &dir, keys())
+                .await
+                .unwrap();
+        for (query, expected) in [(&vertices, 511), (&edges, 510)] {
+            let first = reader
+                .execute_graph_aggregate_governed(&contexts.query(), query, one)
+                .unwrap();
+            assert_eq!(first.rows.snapshot_records, 1);
+            assert_eq!(first.value[0].values()[0].as_count(), Some(expected));
+        }
         let mut reopened = Database::open_with_vfs(&contexts.commit(), vfs, &dir, keys())
             .await
             .unwrap();
         let cold = reopened
-            .execute_graph_aggregate_governed(&contexts.query(), &edges, policy())
+            .execute_graph_aggregate_governed(&contexts.query(), &edges, one)
             .unwrap();
         assert_eq!(cold.value, maintained.value);
         assert_eq!(
-            cold.rows.snapshot_records, 510,
-            "reopen discards process-local metadata"
+            cold.rows.snapshot_records, 1,
+            "the admitted checkpoint reconstructs counts before any query"
         );
         let warm = reopened
             .execute_graph_aggregate_governed(&contexts.query(), &edges, policy())
@@ -450,6 +462,13 @@ fn exact_current_counts_do_not_grow_with_graph_and_reopen_rebuilds_before_reuse(
             .unwrap();
         assert_eq!(next.value[0].values()[0].as_count(), Some(511));
         assert_eq!(next.rows.snapshot_records, 1);
+        // The read-only opener pins the old generation while the recovered
+        // writer extends its own independently reconstructed metadata.
+        let old = reader
+            .execute_graph_aggregate_governed(&contexts.query(), &edges, one)
+            .unwrap();
+        assert_eq!(old.value[0].values()[0].as_count(), Some(510));
+        assert_eq!(old.rows.snapshot_records, 1);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -767,21 +786,44 @@ fn exact_label_counts_track_membership_without_graph_sized_query_admission() {
         let reopened = Database::open_with_vfs(&contexts.commit(), vfs, &dir, keys())
             .await
             .unwrap();
-        assert!(
-            matches!(reopened.execute_graph_aggregate_governed(&contexts.query(), &labeled, small), Err(GqlQueryError::Rows(error)) if error.dimension == GqlBudgetDimension::SnapshotRecords)
-        );
-        let cold = reopened
-            .execute_graph_aggregate_governed(&contexts.query(), &labeled, policy())
-            .unwrap();
-        assert_eq!(cold.rows.snapshot_records, 511);
-        assert_eq!(cold.value[0].values()[0].as_count(), Some(510));
         for (query, expected) in [(&labeled, 510), (&other, 170), (&absent, 0)] {
-            let warm = reopened
+            let first = reopened
                 .execute_graph_aggregate_governed(&contexts.query(), query, small)
                 .unwrap();
-            assert_eq!(warm.rows.snapshot_records, 1);
-            assert_eq!(warm.value[0].values()[0].as_count(), Some(expected));
+            assert_eq!(first.rows.snapshot_records, 1);
+            assert_eq!(first.value[0].values()[0].as_count(), Some(expected));
         }
+        // A recovered label population proves neither intersections nor past
+        // membership. Those shapes still admit their actual source records.
+        assert!(matches!(
+            reopened.execute_graph_aggregate_governed(&contexts.query(), &intersection, small),
+            Err(GqlQueryError::Rows(error))
+                if error.dimension == GqlBudgetDimension::SnapshotRecords
+        ));
+        assert!(matches!(
+            reopened.execute_graph_aggregate_governed_at(
+                &contexts.query(),
+                &labeled,
+                CommitSeq(2),
+                small
+            ),
+            Err(GqlQueryError::Rows(error))
+                if error.dimension == GqlBudgetDimension::SnapshotRecords
+        ));
+        assert_eq!(
+            reopened
+                .execute_graph_aggregate_governed_at(
+                    &contexts.query(),
+                    &labeled,
+                    CommitSeq(2),
+                    policy()
+                )
+                .unwrap()
+                .value[0]
+                .values()[0]
+                .as_count(),
+            Some(32)
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

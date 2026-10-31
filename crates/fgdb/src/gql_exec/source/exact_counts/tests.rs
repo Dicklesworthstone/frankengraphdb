@@ -691,3 +691,106 @@ fn inconsistent_label_before_images_and_overflow_discard_only_label_metadata() {
     );
     assert_eq!(read(&counts, GraphCountSource::Label(LabelId(1))), None);
 }
+
+#[test]
+fn admitted_count_events_keep_exact_multiplicities_and_control_every_step() {
+    let run = |stop| {
+        let original = ExactCounts::default();
+        let mut collector = original.collector(true).unwrap();
+        let mut seen = 0;
+        let mut control = |_| {
+            seen += 1;
+            if stop == Some(seen) {
+                Err(seen)
+            } else {
+                Ok(())
+            }
+        };
+        let result = (|| {
+            collector.observe_admitted(AdmittedCountEvent::Work, &mut control)?;
+            for relation in [RelationId(u64::MAX), RelationId(3), RelationId(u64::MAX)] {
+                collector.observe_admitted(AdmittedCountEvent::Work, &mut control)?;
+                collector.observe_admitted(AdmittedCountEvent::Edge(relation), &mut control)?;
+            }
+            for labels in [
+                &[][..],
+                &[LabelId(1), LabelId(u64::MAX)][..],
+                &[LabelId(1)][..],
+            ] {
+                collector.observe_admitted(AdmittedCountEvent::Work, &mut control)?;
+                collector.observe_admitted(AdmittedCountEvent::Vertex(labels), &mut control)?;
+            }
+            collector.observe_admitted(AdmittedCountEvent::Work, &mut control)?;
+            collector.finish(&mut control)
+        })();
+        (result, seen, original)
+    };
+    let (result, events, original) = run(None);
+    let completed = result.unwrap();
+    for (source, expected) in [
+        (GraphCountSource::Vertices, 3),
+        (GraphCountSource::Edges, 3),
+        (GraphCountSource::Relation(RelationId(u64::MAX)), 2),
+        (GraphCountSource::Relation(RelationId(3)), 1),
+        (GraphCountSource::Relation(RelationId(4)), 0),
+        (GraphCountSource::Label(LabelId(1)), 2),
+        (GraphCountSource::Label(LabelId(u64::MAX)), 1),
+        (GraphCountSource::Label(LabelId(2)), 0),
+    ] {
+        assert_eq!(read(&completed, source), Some(expected));
+        assert_eq!(read(&original, source), None);
+    }
+    for stop in 1..=events {
+        let (result, seen, original) = run(Some(stop));
+        assert!(matches!(result, Err(actual) if actual == stop));
+        assert_eq!(seen, stop);
+        for source in [
+            GraphCountSource::Vertices,
+            GraphCountSource::Edges,
+            GraphCountSource::Relation(RelationId(3)),
+            GraphCountSource::Label(LabelId(1)),
+        ] {
+            assert_eq!(read(&original, source), None);
+        }
+    }
+}
+
+#[test]
+fn admitted_count_collection_bounds_maps_without_discarding_exact_totals() {
+    let mut collector = ExactCounts::default().collector(true).unwrap();
+    let mut control = |_| Ok::<_, ()>(());
+    for id in 0..=MAX_COUNTERS {
+        collector
+            .observe_admitted(
+                AdmittedCountEvent::Vertex(&[LabelId(id as u64)]),
+                &mut control,
+            )
+            .unwrap();
+        collector
+            .observe_admitted(
+                AdmittedCountEvent::Edge(RelationId(id as u64)),
+                &mut control,
+            )
+            .unwrap();
+    }
+    for builder in [
+        collector.labels.as_ref().unwrap().rows.capacity(),
+        collector.relations.as_ref().unwrap().rows.capacity(),
+    ] {
+        assert!(builder <= MAX_COUNTERS);
+    }
+    let counts = collector.finish(&mut control).unwrap();
+    assert_eq!(
+        read(&counts, GraphCountSource::Vertices),
+        Some(MAX_COUNTERS as u64 + 1)
+    );
+    assert_eq!(
+        read(&counts, GraphCountSource::Edges),
+        Some(MAX_COUNTERS as u64 + 1)
+    );
+    assert_eq!(read(&counts, GraphCountSource::Label(LabelId(0))), None);
+    assert_eq!(
+        read(&counts, GraphCountSource::Relation(RelationId(0))),
+        None
+    );
+}

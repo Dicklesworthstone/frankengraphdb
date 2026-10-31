@@ -392,22 +392,47 @@ fn wildcard_counts_follow_commits_pins_failed_writes_and_reopen() {
             assert_eq!(historical.value, old.value);
         }
         drop(db);
-        let reopened = Database::open_with_vfs(&contexts.commit(), vfs, &path, keys)
-            .await
-            .unwrap();
+        let reopened =
+            Database::open_with_vfs(&contexts.commit(), vfs.clone(), &path, keys.clone())
+                .await
+                .unwrap();
         assert_eq!(
             reopened
                 .snapshot
                 .exact_counts
                 .lookup(GraphCountSource::Edges, &mut |_| Ok::<_, ()>(()))
                 .unwrap(),
-            None
+            Some(1)
         );
-        let cold = execute_at(&reopened, &queries[0], latest, wide, || Ok::<_, ()>(())).unwrap();
+        let cold = execute_at(&reopened, &queries[0], latest, tight, || Ok::<_, ()>(())).unwrap();
         assert_eq!(cold.value[0].values()[0].as_count(), Some(1));
+        assert_eq!(cold.rows.snapshot_records, 1);
         let warm = execute_at(&reopened, &queries[1], latest, tight, || Ok::<_, ()>(())).unwrap();
         assert_eq!(warm.value, cold.value);
         assert_eq!(warm.rows.snapshot_records, 1);
+        drop(reopened);
+        // Force the actual complete Chronicle fold, independently of both
+        // checkpoint admission and the previous handle's query metadata.
+        let rebuilt = Database::bind_with_vfs(&contexts.commit(), vfs, &path, keys, true)
+            .await
+            .unwrap();
+        assert_eq!(rebuilt.snapshot.frontier, latest);
+        for (source, expected) in [
+            (GraphCountSource::Vertices, 2),
+            (GraphCountSource::Edges, 1),
+        ] {
+            assert_eq!(
+                rebuilt
+                    .snapshot
+                    .exact_counts
+                    .lookup(source, &mut |_| Ok::<_, ()>(()))
+                    .unwrap(),
+                Some(expected)
+            );
+        }
+        let first = execute_at(&rebuilt, &queries[0], latest, tight, || Ok::<_, ()>(())).unwrap();
+        assert_eq!(first.value[0].values()[0].as_count(), Some(1));
+        assert_eq!(first.rows.snapshot_records, 1);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
