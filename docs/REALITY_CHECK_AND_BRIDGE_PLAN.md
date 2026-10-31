@@ -523,6 +523,46 @@ gate verdict was never reached. Preserve that qualification alongside the
 earlier VOID125 run. Neither is a completed mandatory proof; all implementation
 and qualification items remain open until the exact integrated tree passes.
 
+The fifth complete proof is a stable **RED1**, independently verifiable as a
+red receipt, on `bb5f7ba4453e2683fc84446a1a24b91642d39fb7`. Coverage, shell,
+formatting and all-target compilation passed, as did both actual Miri
+workloads. The whole test command failed before executing a test: the library
+test binary exceeded x86-64's signed PC32 link range. Two independent ELF
+audits found 2,181,114,817 executable input bytes across seventeen root
+objects. A package-specific test-profile optimization now preserves debug
+assertions, checked overflow, unwind and every test; its actual link and
+complete test verdict still require the next proof. This is build maintenance,
+not a performance win or a replacement for the broader `fgdb-2goz` work.
+
+The same proof found two incoming Clippy failures, an incomplete installed
+scanner, four unlabeled new Beads, a real missing historical record and an
+identity-fixture cross-filesystem hardlink error. Registered determinism
+qualification was interrupted while redundantly rebuilding the same doomed
+test binary and remains red. Incoming API call sites and fixture types now
+use the existing native owned/value APIs; all-target/all-feature Clippy exits0.
+The default scanner's 16 MiB output cap is fixed in the existing canonical
+UBS source; its two regression tests pass. The next run uses that source tool
+without changing this project's rules or critical ratchet. Identity fixtures
+use their existing same-filesystem workdir override. None of these repairs
+counts as a passing full gate yet.
+
+Native recovery now restores the genuine `fgdb-load-beats-memgraph-xf2n8`
+record and all three original comments from its authenticated original writer.
+All previous database rows survive; the issue's original incumbent comparison
+acceptance remains unchanged and open. New work has honest architecture labels.
+The exact-ID publication contains only the eight reviewed records; no task
+closure is claimed before the mandatory green bar.
+
+A fresh release witness from unchanged `943d08a46231a2858faf9ba9dbcd29de4e3d4b5f`
+passes the corrected end-to-end driver from an empty database: 986 vertices,
+seventeen strictly separated timestamp windows, all 332,334 official edges,
+and 68 fresh-process historical oracle queries after all writes. All 89
+commands have retained terminals (88 successes and one expected malformed
+append refusal); a separate reviewer recomputed every input and result from
+the official gzip. This satisfies the named functional acceptance, subject to
+the current mandatory full gate, and makes no Memgraph or external-memory win
+claim. `fgdb-ewc7i` remains in progress until qualification is complete.
+
 The longer bridge above remains open work. The checklist consumer is the
 owner and this execution session; it is the explicitly requested TODO list,
 not a new gate or capability. Retire it from active use when these work units

@@ -2344,7 +2344,14 @@ fn temporal_aggregate_relations_share_historical_scope_and_one_live_permit() {
                     assert_eq!(
                         query
                             .execute_authorized(
-                                &db, &cx, &issuer, &token, BRANCH, params, policy(), || 100
+                                &db,
+                                &cx,
+                                &issuer,
+                                &token,
+                                BRANCH,
+                                params,
+                                policy(),
+                                || 100
                             )
                             .unwrap(),
                         expected,
@@ -2352,7 +2359,15 @@ fn temporal_aggregate_relations_share_historical_scope_and_one_live_permit() {
                     );
                     assert_eq!(
                         db.query_authorized(
-                            &cx, &issuer, &token, BRANCH, text, params, symbols, policy(), || 100
+                            &cx,
+                            &issuer,
+                            &token,
+                            BRANCH,
+                            text,
+                            params,
+                            symbols,
+                            policy(),
+                            || 100
                         )
                         .unwrap(),
                         expected,
@@ -2367,9 +2382,18 @@ fn temporal_aggregate_relations_share_historical_scope_and_one_live_permit() {
         for query in &queries {
             assert!(matches!(
                 query.execute_authorized(
-                    &db, &cx, &issuer, &no_nodes, BRANCH, &old, policy(), || 100
+                    &db,
+                    &cx,
+                    &issuer,
+                    &no_nodes,
+                    BRANCH,
+                    &old,
+                    policy(),
+                    || 100
                 ),
-                Err(QueryError::Authorization(Error::LimitExceeded(LimitDimension::Nodes)))
+                Err(QueryError::Authorization(Error::LimitExceeded(
+                    LimitDimension::Nodes
+                )))
             ));
             assert!(matches!(
                 query.execute_authorized(
@@ -2379,9 +2403,8 @@ fn temporal_aggregate_relations_share_historical_scope_and_one_live_permit() {
                     if asked.0 == after.0 + 1 && frontier == after
             ));
             assert!(matches!(
-                query.execute_authorized(
-                    &db, &cx, &issuer, &token, BRANCH, &old, policy(), || 1000
-                ),
+                query
+                    .execute_authorized(&db, &cx, &issuer, &token, BRANCH, &old, policy(), || 1000),
                 Err(QueryError::Authorization(Error::Expired))
             ));
         }

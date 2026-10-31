@@ -215,7 +215,12 @@ impl PreparedNativeRead {
                     fgdb_gql::TemporalAggregatePlan::Graph(aggregate) => view
                         .execute_graph_aggregate_governed_at(cx, aggregate, snapshot_seq, policy),
                     fgdb_gql::TemporalAggregatePlan::Relation(aggregate) => view
-                        .execute_graph_set_aggregate_governed_at(cx, aggregate, snapshot_seq, policy),
+                        .execute_graph_set_aggregate_governed_at(
+                            cx,
+                            aggregate,
+                            snapshot_seq,
+                            policy,
+                        ),
                 }
                 .map_err(QueryError::Aggregate)?;
                 aggregates(

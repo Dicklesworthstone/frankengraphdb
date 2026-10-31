@@ -667,8 +667,7 @@ fn cold_edge_filtered_paths_preserve_history_routes_scalar_equality_and_zero_hop
                     case(&db, &mut latest, &cx, &text, expected.clone(), cut).await;
                 }
             }
-            let text =
-                format!("MATCH p = {mode} (a {{p:1}})-[:R*0..3 {{p:7}}]->(b) {CAPTURE}");
+            let text = format!("MATCH p = {mode} (a {{p:1}})-[:R*0..3 {{p:7}}]->(b) {CAPTURE}");
             for run_rows in [1, 3] {
                 spooled(&mut pinned, &cx, &text, &before, 3, run_rows).await;
             }
@@ -694,11 +693,7 @@ fn cold_edge_filtered_paths_preserve_history_routes_scalar_equality_and_zero_hop
             ),
             (
                 "(a)-[*1..1 {p:7}]->(b)",
-                paths(&[
-                    (A, &[(PARALLEL, B)]),
-                    (B, &[(BC, C)]),
-                    (A, &[(OTHER, C)]),
-                ]),
+                paths(&[(A, &[(PARALLEL, B)]), (B, &[(BC, C)]), (A, &[(OTHER, C)])]),
             ),
         ] {
             case(
@@ -735,9 +730,7 @@ fn cold_edge_filtered_paths_preserve_history_routes_scalar_equality_and_zero_hop
         // Native eager collection filtering can raise a value-bound error on
         // an unreachable edge; a local scalar predicate makes no such claim.
         for bounds in ["0..0", "0..2"] {
-            let text = format!(
-                "MATCH p = WALK (a)-[:R*{bounds} {{p:[7]}}]->(b) RETURN p LIMIT 0"
-            );
+            let text = format!("MATCH p = WALK (a)-[:R*{bounds} {{p:[7]}}]->(b) RETURN p LIMIT 0");
             let parameters = GqlParameters::new();
             let prepared = PreparedNativeRead::prepare(&text, &parameters, resolve).unwrap();
             assert!(prepared.prepare_buffered_order(&parameters).is_err());

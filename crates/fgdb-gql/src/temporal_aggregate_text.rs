@@ -372,7 +372,9 @@ impl AggregateTemplate {
             Self::Pipeline(inner) if inner.requires_relational_input() => Ok(
                 TemporalAggregatePlan::Relation(inner.bind_relation_parameters(arguments)?),
             ),
-            _ => Ok(TemporalAggregatePlan::Graph(self.bind_parameters(arguments)?)),
+            _ => Ok(TemporalAggregatePlan::Graph(
+                self.bind_parameters(arguments)?,
+            )),
         }
     }
 }
@@ -1053,7 +1055,10 @@ mod tests {
         .unwrap()
         .bind_source_parameters(&GqlParameters::new())
         .unwrap();
-        assert!(matches!(direct.aggregate(), TemporalAggregatePlan::Graph(_)));
+        assert!(matches!(
+            direct.aggregate(),
+            TemporalAggregatePlan::Graph(_)
+        ));
 
         let inline = PreparedTemporalGraphAggregateText::prepare(
             "CALL { RETURN 1 AS x UNION ALL RETURN 2 AS x } \

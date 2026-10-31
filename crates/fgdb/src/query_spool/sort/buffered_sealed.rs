@@ -81,9 +81,8 @@ impl PreparedNativeRead {
             }
             _ => return Err(unsupported()),
         };
-        let plan =
-            AsyncSpillSetPlan::compile_with_independent_procedures_and_bounded_walks(&query)
-                .map_err(|_| unsupported())?;
+        let plan = AsyncSpillSetPlan::compile_with_independent_procedures_and_bounded_walks(&query)
+            .map_err(|_| unsupported())?;
         PreparedBufferedSealedOrder::from_relation(
             plan,
             as_of,

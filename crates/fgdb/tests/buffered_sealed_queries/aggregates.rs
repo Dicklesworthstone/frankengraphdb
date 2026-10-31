@@ -679,19 +679,16 @@ fn temporal_terminal_aggregates_pin_both_procedures_and_properties_before_spilli
         );
         assert!(
             matches!(
-                resident.execute_prepared(
-                    &cx, &native, &parameters_at(3), policy(), memory(),
-                ),
+                resident.execute_prepared(&cx, &native, &parameters_at(3), policy(), memory(),),
                 Err(fgdb::SealedQueryError::SnapshotMismatch {
-                    requested: CommitSeq(3), retained: CommitSeq(2),
+                    requested: CommitSeq(3),
+                    retained: CommitSeq(2),
                 })
             ),
             "a temporal binding cannot replace the resident sealed owner's cut"
         );
 
-        for (at, count, weighted, hops) in
-            [(2, 6, 180, 6), (3, 8, 1110, 12), (2, 6, 180, 6)]
-        {
+        for (at, count, weighted, hops) in [(2, 6, 180, 6), (3, 8, 1110, 12), (2, 6, 180, 6)] {
             let params = parameters_at(at);
             let prepared = native
                 .prepare_buffered_sealed_aggregate(&params, R, memory(), sealing(), RAW)
@@ -784,9 +781,7 @@ fn temporal_terminal_aggregates_pin_both_procedures_and_properties_before_spilli
         .unwrap();
         for (at, weighted) in [(2, 450), (3, 1260)] {
             let prepared = ordinary
-                .prepare_buffered_aggregate(
-                    &GqlParameters::new().with_uint64("at", at).unwrap(),
-                )
+                .prepare_buffered_aggregate(&GqlParameters::new().with_uint64("at", at).unwrap())
                 .unwrap();
             let (mut source, _) = file(&cx, &spill_pool).await;
             let (mut partition, _) = file(&cx, &spill_pool).await;

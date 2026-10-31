@@ -383,8 +383,9 @@ impl SealedReadView {
                     fgdb_gql::TemporalAggregatePlan::Graph(aggregate) => self
                         .view
                         .execute_graph_aggregate_governed_at(cx, aggregate, self.as_of, policy),
-                    fgdb_gql::TemporalAggregatePlan::Relation(aggregate) => self
-                        .execute_graph_set_aggregate_governed(cx, aggregate, policy, memory),
+                    fgdb_gql::TemporalAggregatePlan::Relation(aggregate) => {
+                        self.execute_graph_set_aggregate_governed(cx, aggregate, policy, memory)
+                    }
                 }
                 .map_err(QueryError::Aggregate)?;
                 Ok(crate::query::aggregates(

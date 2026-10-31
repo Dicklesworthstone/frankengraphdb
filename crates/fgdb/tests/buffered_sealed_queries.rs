@@ -371,10 +371,22 @@ fn sealed_bfs_and_components_compose_with_properties_matches_and_grouping() {
                     vec![vertex(1), vertex(SECOND), path(1, &[(BASE + 1, SECOND)])],
                     vec![vertex(1), vertex(SECOND), path(1, &[(BASE + 2, SECOND)])],
                     vec![vertex(SECOND), vertex(SECOND), path(SECOND, &[])],
-                    vec![vertex(SECOND), vertex(THIRD), path(SECOND, &[(BASE + 3, THIRD)])],
+                    vec![
+                        vertex(SECOND),
+                        vertex(THIRD),
+                        path(SECOND, &[(BASE + 3, THIRD)]),
+                    ],
                     vec![vertex(THIRD), vertex(THIRD), path(THIRD, &[])],
-                    vec![vertex(THIRD), vertex(SECOND), path(THIRD, &[(BASE + 4, SECOND)])],
-                    vec![vertex(THIRD), vertex(THIRD), path(THIRD, &[(BASE + 5, THIRD)])],
+                    vec![
+                        vertex(THIRD),
+                        vertex(SECOND),
+                        path(THIRD, &[(BASE + 4, SECOND)]),
+                    ],
+                    vec![
+                        vertex(THIRD),
+                        vertex(THIRD),
+                        path(THIRD, &[(BASE + 5, THIRD)]),
+                    ],
                 ],
                 0,
             ),
@@ -703,8 +715,20 @@ fn independent_algorithms_and_property_reads_share_one_exact_historical_cut() {
         let prepared = prepare(&text, &params);
         let earlier = vec![
             vec![vertex(1), integer(0), vertex(1), integer(10), integer(3)],
-            vec![vertex(SECOND), integer(1), vertex(1), integer(20), integer(2)],
-            vec![vertex(THIRD), integer(2), vertex(1), integer(30), integer(3)],
+            vec![
+                vertex(SECOND),
+                integer(1),
+                vertex(1),
+                integer(20),
+                integer(2),
+            ],
+            vec![
+                vertex(THIRD),
+                integer(2),
+                vertex(1),
+                integer(30),
+                integer(3),
+            ],
         ];
         assert_eq!(
             resident_rows(
@@ -741,9 +765,27 @@ fn independent_algorithms_and_property_reads_share_one_exact_historical_cut() {
         }
         let later = vec![
             vec![vertex(1), integer(0), vertex(1), integer(10), integer(3)],
-            vec![vertex(SECOND), integer(1), vertex(1), integer(20), integer(2)],
-            vec![vertex(THIRD), integer(2), vertex(1), integer(300), integer(4)],
-            vec![vertex(FOURTH), integer(3), vertex(1), integer(40), integer(1)],
+            vec![
+                vertex(SECOND),
+                integer(1),
+                vertex(1),
+                integer(20),
+                integer(2),
+            ],
+            vec![
+                vertex(THIRD),
+                integer(2),
+                vertex(1),
+                integer(300),
+                integer(4),
+            ],
+            vec![
+                vertex(FOURTH),
+                integer(3),
+                vertex(1),
+                integer(40),
+                integer(1),
+            ],
         ];
         let latest = execute(&prepared, &mut current, &cx, policy(), &spill_pool, 1, WORK)
             .await
@@ -1443,13 +1485,11 @@ fn explicit_owner_admission_does_not_broaden_default_or_terminal_aggregate_paths
     assert!(AsyncSpillSetPlan::compile_with_single_procedure(&bound).is_err());
     assert!(AsyncSpillSetPlan::compile_with_independent_procedures(&bound).is_err());
     assert!(
-        AsyncSpillSetPlan::compile_with_independent_procedures_and_bounded_walks(&bound)
-            .is_ok()
+        AsyncSpillSetPlan::compile_with_independent_procedures_and_bounded_walks(&bound).is_ok()
     );
     let empty = fgdb_gql::PreparedGraphSet::singleton();
     assert!(
-        AsyncSpillSetPlan::compile_with_independent_procedures_and_bounded_walks(&empty)
-            .is_err()
+        AsyncSpillSetPlan::compile_with_independent_procedures_and_bounded_walks(&empty).is_err()
     );
     for apply in [
         empty.clone().apply(bound.clone(), Vec::new()).unwrap(),
@@ -1476,13 +1516,7 @@ fn explicit_owner_admission_does_not_broaden_default_or_terminal_aggregate_paths
             .unwrap_or_else(|error| panic!("{text}: {error:?}"));
         assert!(
             native
-                .prepare_buffered_sealed_order(
-                    &GqlParameters::new(),
-                    R,
-                    memory(),
-                    sealing(),
-                    RAW,
-                )
+                .prepare_buffered_sealed_order(&GqlParameters::new(), R, memory(), sealing(), RAW,)
                 .is_err(),
             "{text}",
         );

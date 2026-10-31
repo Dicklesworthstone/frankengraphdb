@@ -379,11 +379,10 @@ impl AsyncSpillAggregatePlan {
     pub fn compile_relation_with_independent_procedures_and_bounded_walks(
         aggregate: &PreparedGraphSetAggregate,
     ) -> Result<Self, SpillAggregateBuildError> {
-        let input =
-            AsyncSpillSetPlan::compile_with_independent_procedures_and_bounded_walks(
-                aggregate.input(),
-            )
-            .map_err(SpillAggregateBuildError::Relation)?;
+        let input = AsyncSpillSetPlan::compile_with_independent_procedures_and_bounded_walks(
+            aggregate.input(),
+        )
+        .map_err(SpillAggregateBuildError::Relation)?;
         let definition = SpillAggregateDefinition::from_relation(aggregate)?;
         Ok(Self::Relation {
             input: Box::new(input),

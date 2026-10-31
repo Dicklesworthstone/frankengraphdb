@@ -217,7 +217,10 @@ fn temporal_leading_unwind_aggregates_keep_the_selected_generation_after_rebindi
                     RETURN COUNT(*) AS c,SUM(n.p*factor) AS s";
         let arguments = |at: CommitSeq| GqlParameters::new().with_uint64("at", at.0).unwrap();
         let prepared = PreparedNativeRead::prepare(text, &arguments(earlier), symbols).unwrap();
-        assert!(matches!(&prepared, PreparedNativeRead::TemporalAggregate(_)));
+        assert!(matches!(
+            &prepared,
+            PreparedNativeRead::TemporalAggregate(_)
+        ));
 
         let mut second = WriteBatch::new(R);
         second.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(20)));

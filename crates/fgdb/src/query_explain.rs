@@ -774,8 +774,9 @@ impl PreparedNativeRead {
                     .bind_source_parameters(params)
                     .map_err(QueryError::TemporalText)?;
                 let result = match query.aggregate() {
-                    TemporalAggregatePlan::Graph(aggregate) => db
-                        .execute_graph_aggregate_governed_at(cx, aggregate, query.as_of(), budget),
+                    TemporalAggregatePlan::Graph(aggregate) => {
+                        db.execute_graph_aggregate_governed_at(cx, aggregate, query.as_of(), budget)
+                    }
                     TemporalAggregatePlan::Relation(aggregate) => db
                         .execute_graph_set_aggregate_evidenced_at(
                             cx,

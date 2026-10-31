@@ -573,14 +573,16 @@ pub(super) fn prepare_sealed_read(options: &Options) -> Result<PreparedSealedRea
                 .calls_procedure(),
             None,
         ),
-        PreparedNativeRead::PipelineAggregate(prepared) if prepared.requires_relational_input() => (
-            prepared
-                .bind_relation_parameters(params)
-                .map_err(|error| super::read_failure(options, QueryError::PipelineText(error)))?
-                .input()
-                .calls_procedure(),
-            None,
-        ),
+        PreparedNativeRead::PipelineAggregate(prepared) if prepared.requires_relational_input() => {
+            (
+                prepared
+                    .bind_relation_parameters(params)
+                    .map_err(|error| super::read_failure(options, QueryError::PipelineText(error)))?
+                    .input()
+                    .calls_procedure(),
+                None,
+            )
+        }
         PreparedNativeRead::TemporalSet(prepared) => {
             let query = prepared.bind_parameters(params).map_err(|error| {
                 super::read_failure(options, QueryError::TemporalSetText(error))
@@ -588,9 +590,9 @@ pub(super) fn prepare_sealed_read(options: &Options) -> Result<PreparedSealedRea
             (query.query().calls_procedure(), Some(query.as_of()))
         }
         PreparedNativeRead::TemporalAggregate(prepared) => {
-            let query = prepared.bind_source_parameters(params).map_err(|error| {
-                super::read_failure(options, QueryError::TemporalText(error))
-            })?;
+            let query = prepared
+                .bind_source_parameters(params)
+                .map_err(|error| super::read_failure(options, QueryError::TemporalText(error)))?;
             let calls = match query.aggregate() {
                 fgdb_gql::TemporalAggregatePlan::Graph(_) => false,
                 fgdb_gql::TemporalAggregatePlan::Relation(aggregate) => {
@@ -1203,7 +1205,12 @@ mod tests {
                             panic!("historical terminal groups require the sealed aggregate owner");
                         };
                         let prepared = *prepared;
-                        assert!(prepared.clone().with_as_of(fgdb_types::CommitSeq(7)).is_ok());
+                        assert!(
+                            prepared
+                                .clone()
+                                .with_as_of(fgdb_types::CommitSeq(7))
+                                .is_ok()
+                        );
                         assert!(matches!(
                             prepared.with_as_of(fgdb_types::CommitSeq(8)),
                             Err(super::SealedQueryError::SnapshotMismatch {
@@ -1241,7 +1248,9 @@ mod tests {
                     ] {
                         options.params = params;
                         let failure = if buffered {
-                            super::super::spill::prepare_buffered(&options).err().unwrap()
+                            super::super::spill::prepare_buffered(&options)
+                                .err()
+                                .unwrap()
                         } else {
                             super::prepare_sealed_read(&options).err().unwrap()
                         };
@@ -1259,7 +1268,9 @@ mod tests {
                     .with_int64("top", 0)
                     .unwrap();
                 let failure = if buffered {
-                    super::super::spill::prepare_buffered(&options).err().unwrap()
+                    super::super::spill::prepare_buffered(&options)
+                        .err()
+                        .unwrap()
                 } else {
                     super::prepare_sealed_read(&options).err().unwrap()
                 };
@@ -1269,8 +1280,7 @@ mod tests {
         }
 
         let text = "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 7 RETURN COUNT(*) AS n";
-        let options =
-            composed_options(text, &["--sealed", "--graph-relation", "KNOWS"]).unwrap();
+        let options = composed_options(text, &["--sealed", "--graph-relation", "KNOWS"]).unwrap();
         assert_eq!(
             super::prepare_sealed_read(&options).err().unwrap().refusal,
             super::super::refusal::Code::Unsupported
