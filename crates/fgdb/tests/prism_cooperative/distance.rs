@@ -1,7 +1,7 @@
 //! Distance centralities through authenticated history and compressed rows.
 
 use super::*;
-use fgdb_prism::{AdapterPath, FnxGraphKind, FnxValue};
+use fgdb_prism::{AdapterPath, FnxGraphKind, FnxValue, ProjectionError};
 
 fn call(harmonic: bool) -> FnxCallSpec {
     FnxCallSpec::bind(
@@ -177,12 +177,53 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
     runtime.block_on(async {
         let cx = contexts.query();
         let db = small_database(&contexts.commit(), 3, true).await;
-        let opt = options(Directedness::Undirected);
-        let graph = projection(&db, &cx, opt).await;
-        for call in [call(false), call(true), FnxCallSpec::bind(
-            "CALL fnx.load_centrality() YIELD score AS rank,vertex AS id", &FnxParameters::new(),
-        ).unwrap()] {
+        // The literal source is 0 -> 1 -> 2. Incoming closeness uses the
+        // reachable-set correction; harmonic adds 1 and 1/2 in that order.
+        let two_thirds = 2.0 / 3.0;
+        let four_ninths = two_thirds * two_thirds;
+        for (direction, call, literal) in [
+            (Directedness::Undirected, call(false), None),
+            (Directedness::Undirected, call(true), None),
+            (Directedness::Undirected, FnxCallSpec::bind(
+                "CALL fnx.load_centrality() YIELD score AS rank,vertex AS id",
+                &FnxParameters::new(),
+            ).unwrap(), None),
+            (Directedness::Directed, call(false), Some([0.0, 0.5, four_ninths])),
+            (Directedness::Directed, call(true), Some([0.0, 1.0, 1.5])),
+            (Directedness::Reversed, call(false), Some([four_ninths, 0.5, 0.0])),
+            (Directedness::Reversed, call(true), Some([1.5, 1.0, 0.0])),
+        ] {
+            let opt = options(direction);
+            let graph = projection(&db, &cx, opt).await;
             let expected = call.execute_sealed(&cx, &graph, opt.execution_limits, memory()).unwrap();
+            if let Some(scores) = literal {
+                let rows: Vec<_> = scores.into_iter().enumerate().map(|(vertex, score)| {
+                    vec![FnxValue::Score(score), FnxValue::Vertex(VId(vertex as u128))]
+                }).collect();
+                assert_eq!(expected.rows, rows, "{direction:?}");
+            }
+            assert_eq!(expected.certificate.snapshot, graph.binding());
+            assert_eq!(expected.certificate.projection_digest, graph.digest());
+            let opposite = if direction == Directedness::Undirected {
+                None
+            } else {
+                let opposite_direction = if direction == Directedness::Directed {
+                    Directedness::Reversed
+                } else {
+                    Directedness::Directed
+                };
+                let opposite = projection(&db, &cx, options(opposite_direction)).await;
+                assert_eq!(opposite.binding(), graph.binding());
+                assert_eq!(opposite.vertex_ids(), graph.vertex_ids());
+                assert_ne!(opposite.digest(), graph.digest());
+                // An independently admitted opposite face prices the actual
+                // source directory/index beside the three scalar vectors.
+                let scalar = graph.node_count()
+                    * (2 * size_of::<usize>() + size_of::<f64>());
+                assert_eq!(expected.certificate.kernel_workspace_bytes,
+                    scalar + opposite.charged_workspace_bytes());
+                Some(opposite)
+            };
             let columns = call.outputs().len() * size_of::<String>()
                 + call.outputs().iter().map(|column| column.name.len()).sum::<usize>();
             let exact = FnxExecutionLimits {
@@ -210,14 +251,49 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
                     _ => unreachable!(),
                 }
                 for cooperative in [false, true] {
+                    let directed_workspace = resource == "kernel workspace bytes"
+                        && direction != Directedness::Undirected;
                     let result = if cooperative {
-                        call.execute_sealed_cooperative(&cx, &graph, limits, memory, quantum(1),
-                            || -> std::future::Ready<()> { panic!("admission precedes yield") }).await
+                        if directed_workspace {
+                            // The auxiliary constructor checks its own exact
+                            // bound while running the normal bounded driver.
+                            call.execute_sealed_cooperative(&cx, &graph, limits, memory,
+                                quantum(1), yield_now).await
+                        } else {
+                            call.execute_sealed_cooperative(&cx, &graph, limits, memory, quantum(1),
+                                || -> std::future::Ready<()> { panic!("admission precedes yield") }).await
+                        }
                     } else {
                         call.execute_sealed(&cx, &graph, limits, memory)
                     };
-                    assert!(matches!(result, Err(FnxSealedExecutionError::Execution(
-                        FnxExecutionError::LimitExceeded { resource: actual, .. })) if actual == resource));
+                    if directed_workspace {
+                        let opposite = opposite.as_ref().unwrap();
+                        match direction {
+                            Directedness::Directed => {
+                                let incoming = opposite.incoming_index_stats().unwrap()
+                                    .charged_workspace_bytes;
+                                assert!(matches!(result, Err(FnxSealedExecutionError::Source(
+                                    SealedProjectionError::Read(
+                                        fgdb_strata::tiered::sealed::SealedError::Limit {
+                                            resource: "incoming workspace bytes", requested, limit,
+                                        }
+                                    )
+                                )) if requested == incoming && limit == incoming - 1));
+                            }
+                            Directedness::Reversed => {
+                                let auxiliary = opposite.charged_workspace_bytes();
+                                assert!(matches!(result, Err(FnxSealedExecutionError::Source(
+                                    SealedProjectionError::Projection(ProjectionError::LimitExceeded {
+                                        resource: "workspace bytes", observed, limit,
+                                    })
+                                )) if observed == auxiliary && limit == auxiliary - 1));
+                            }
+                            Directedness::Undirected => unreachable!(),
+                        }
+                    } else {
+                        assert!(matches!(result, Err(FnxSealedExecutionError::Execution(
+                            FnxExecutionError::LimitExceeded { resource: actual, .. })) if actual == resource));
+                    }
                 }
             }
         }
@@ -653,18 +729,25 @@ fn compressed_distance_centralities_cancel_or_drop_at_every_checkpoint_and_suspe
     runtime.block_on(async {
         let cx = contexts.query();
         let db = small_database(&contexts.commit(), 3, false).await;
-        let opt = options(Directedness::Undirected);
-        let graph = projection(&db, &cx, opt).await;
         let root_before = db.read_session().unwrap().partition_root();
-        for call in [
-            call(false),
-            call(true),
-            FnxCallSpec::bind(
-                "CALL fnx.load_centrality() YIELD score AS rank,vertex AS id",
-                &FnxParameters::new(),
-            )
-            .unwrap(),
+        for (direction, call) in [
+            (Directedness::Undirected, call(false)),
+            (Directedness::Undirected, call(true)),
+            (
+                Directedness::Undirected,
+                FnxCallSpec::bind(
+                    "CALL fnx.load_centrality() YIELD score AS rank,vertex AS id",
+                    &FnxParameters::new(),
+                )
+                .unwrap(),
+            ),
+            (Directedness::Directed, call(false)),
+            (Directedness::Directed, call(true)),
+            (Directedness::Reversed, call(false)),
+            (Directedness::Reversed, call(true)),
         ] {
+            let opt = options(direction);
+            let graph = projection(&db, &cx, opt).await;
             let probe = Arc::new(SimulationCheckpointProbe::new(None));
             let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
             let (expected, yields) = drive(
@@ -680,6 +763,57 @@ fn compressed_distance_centralities_cancel_or_drop_at_every_checkpoint_and_suspe
                 7,
             );
             let expected = expected.unwrap();
+            assert_eq!(expected.certificate.snapshot, graph.binding());
+            assert_eq!(expected.certificate.projection_digest, graph.digest());
+            if direction != Directedness::Undirected {
+                // Count every reached live guard in the real opposite-face
+                // constructor, raw pulls and scalar/output phases. The
+                // original suspension and QueryCx sweeps below stay intact.
+                let total_guards = Cell::new(0);
+                let guarded = call
+                    .execute_sealed_cooperative_with_checkpoint(
+                        &cx,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(7),
+                        yield_now,
+                        || {
+                            total_guards.set(total_guards.get() + 1);
+                            Ok(())
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(guarded, expected);
+                assert!(total_guards.get() > 0);
+                for stop in 1..=total_guards.get() {
+                    let seen = Cell::new(0);
+                    let error = call
+                        .execute_sealed_cooperative_with_checkpoint(
+                            &cx,
+                            &graph,
+                            opt.execution_limits,
+                            memory(),
+                            quantum(7),
+                            yield_now,
+                            || {
+                                seen.set(seen.get() + 1);
+                                if seen.get() == stop {
+                                    Err(SealedProjectionError::Guard(Box::new(LiveRefusal(stop))))
+                                } else {
+                                    Ok(())
+                                }
+                            },
+                        )
+                        .await
+                        .unwrap_err();
+                    live_refusal(error, stop);
+                    assert_eq!(seen.get(), stop);
+                    assert_eq!(contexts.outstanding_obligations(), 0);
+                    assert_eq!(db.read_session().unwrap().partition_root(), root_before);
+                }
+            }
             for stop in 1..=probe.calls() {
                 let stop_probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
                 let controlled = cx.with_checkpoint_probe(Arc::clone(&stop_probe));
