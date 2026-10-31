@@ -2,8 +2,9 @@ use super::*;
 use crate::{
     GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
     GraphIntegerBinary, GraphIntegerErrorKind, GraphIntegerExpression, GraphIntegerOp,
-    GraphSetOperand, GraphSetPredicateOp, ProcedureGraphDirection, ProcedureGraphProjection,
-    ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges, ProcedureSelfLoops,
+    GraphSetBuildError, GraphSetOperand, GraphSetPredicateOp, ProcedureGraphDirection,
+    ProcedureGraphProjection, ProcedureGraphWeight, ProcedureMissingWeight, ProcedureParallelEdges,
+    ProcedureSelfLoops,
 };
 use fgdb_delta_types::{LabelId, RelationId};
 use fgdb_types::CanonicalScalar;

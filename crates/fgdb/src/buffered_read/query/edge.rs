@@ -30,6 +30,8 @@ use std::cell::RefCell;
 type EdgeQueryError = GqlQueryError<EdgeScanError<BufferedReadError>, Cancel>;
 type CandidateResult<C> =
     Result<Option<AsyncEdgeCandidate<Record>>, EdgeScanSourceError<BufferedReadError, C>>;
+type VertexProbeResult<S, C> =
+    Result<AsyncVertexProbeCursor<S, C, GraphValueRow>, super::BufferedQueryError>;
 
 struct Record {
     image: BufferedEdgeEndpoints,
@@ -209,16 +211,12 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         cx: &'q QueryCx,
         pattern: &PreparedGraphPattern<GraphValueRow>,
         policy: GqlQueryPolicy,
-    ) -> Result<
-        AsyncVertexProbeCursor<
-            impl fgdb_gql::edge_stream::AsyncGraphWalkSource<
-                Error = BufferedReadError,
-                OutputGuard = MemoryCharge,
-            > + use<'view, 'q, V>,
-            impl FnMut() -> Result<(), Cancel> + Send + use<'view, 'q, V>,
-            GraphValueRow,
-        >,
-        super::BufferedQueryError,
+    ) -> VertexProbeResult<
+        impl fgdb_gql::edge_stream::AsyncGraphWalkSource<
+            Error = BufferedReadError,
+            OutputGuard = MemoryCharge,
+        > + use<'view, 'q, V>,
+        impl FnMut() -> Result<(), Cancel> + Send + use<'view, 'q, V>,
     > {
         let as_of = self.frontier();
         self.stream_graph_probes_governed_at(cx, pattern, as_of, policy)
@@ -233,16 +231,12 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         pattern: &PreparedGraphPattern<GraphValueRow>,
         as_of: CommitSeq,
         policy: GqlQueryPolicy,
-    ) -> Result<
-        AsyncVertexProbeCursor<
-            impl fgdb_gql::edge_stream::AsyncGraphWalkSource<
-                Error = BufferedReadError,
-                OutputGuard = MemoryCharge,
-            > + use<'view, 'q, V>,
-            impl FnMut() -> Result<(), Cancel> + Send + use<'view, 'q, V>,
-            GraphValueRow,
-        >,
-        super::BufferedQueryError,
+    ) -> VertexProbeResult<
+        impl fgdb_gql::edge_stream::AsyncGraphWalkSource<
+            Error = BufferedReadError,
+            OutputGuard = MemoryCharge,
+        > + use<'view, 'q, V>,
+        impl FnMut() -> Result<(), Cancel> + Send + use<'view, 'q, V>,
     > {
         let plan = AsyncVertexProbePlan::compile(pattern.plan())
             .map_err(|error| GqlQueryError::Source(VertexScanError::Plan(error)))?;
@@ -255,16 +249,12 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         plan: AsyncVertexProbePlan<GraphValueRow>,
         as_of: CommitSeq,
         policy: GqlQueryPolicy,
-    ) -> Result<
-        AsyncVertexProbeCursor<
-            impl fgdb_gql::edge_stream::AsyncGraphWalkSource<
-                Error = BufferedReadError,
-                OutputGuard = MemoryCharge,
-            > + use<'view, 'q, V>,
-            impl FnMut() -> Result<(), Cancel> + Send + use<'view, 'q, V>,
-            GraphValueRow,
-        >,
-        super::BufferedQueryError,
+    ) -> VertexProbeResult<
+        impl fgdb_gql::edge_stream::AsyncGraphWalkSource<
+            Error = BufferedReadError,
+            OutputGuard = MemoryCharge,
+        > + use<'view, 'q, V>,
+        impl FnMut() -> Result<(), Cancel> + Send + use<'view, 'q, V>,
     > {
         let (source, checkpoint) = self
             .edge_input_source(cx, as_of, EdgeRelation::Any)

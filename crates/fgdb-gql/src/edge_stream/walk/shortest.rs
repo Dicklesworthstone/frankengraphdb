@@ -214,14 +214,15 @@ where
         for prefix in &frame.frontier {
             meter.event(GlaExecutionEvent::Work)?;
             let endpoint = prefix.endpoint();
-            if !frame.settled.contains_key(&endpoint) {
+            if let std::collections::btree_map::Entry::Vacant(entry) = frame.settled.entry(endpoint)
+            {
                 let bytes = core::mem::size_of::<(VId, S::TraversalGuard)>()
                     .checked_mul(16)
                     .and_then(|bytes| bytes.checked_add(512))
                     .ok_or_else(overflow)?;
                 let guard =
                     flatten(source.reserve_shortest_state(bytes, &mut |event| meter.event(event)))?;
-                frame.settled.insert(endpoint, guard);
+                entry.insert(guard);
             }
         }
     }
@@ -233,7 +234,7 @@ where
     // its guard across awaits even when almost every prefix has been dropped.
     let previous_guard = frame.frontier_guard.take();
     let mut previous = core::mem::take(&mut frame.frontier).into_iter();
-    while let Some(prefix) = previous.next() {
+    for prefix in previous.by_ref() {
         meter.event(GlaExecutionEvent::Work)?;
         let endpoint = prefix.endpoint();
         if frame.depth < plan.maximum_hops() {

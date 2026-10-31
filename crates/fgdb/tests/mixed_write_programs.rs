@@ -719,7 +719,7 @@ mod independent_edges {
         PreparedGraphInsertText::prepare(
             &format!("MATCH (n:Base) WHERE n.p={value} CREATE (n)-[:Selected {{p:n.p}}]->(n)"),
             R,
-            |kind, name| {
+            &mut |kind: GraphSymbolKind, name: &str| {
                 if kind == GraphSymbolKind::Relation && name == "Selected" {
                     Some(GraphSymbol::Relation(relation))
                 } else {
@@ -929,7 +929,7 @@ mod independent_edges {
                         "MATCH (n:Base) WHERE n.p=10 CREATE (n)-[:Selected {p:$bad}]->(n)",
                         R,
                         &declarations,
-                        |kind, name| {
+                        &mut |kind: GraphSymbolKind, name: &str| {
                             if kind == GraphSymbolKind::Relation && name == "Selected" {
                                 Some(GraphSymbol::Relation(relation))
                             } else {

@@ -487,33 +487,35 @@ impl<V: Vfs + Clone> ExternalOrderHost for SealedHost<'_, V> {
                 size_of::<Vec<GraphValue>>(),
             )?;
             let mut arguments_used = GlaExecutionStats::default();
-            let mut elements =
-                staged::ElementSource::new(self.ordinary.view, cx, snapshot, policy.rows);
-            let arguments = source
-                .evaluate_arguments_with_async_elements(
-                    frame,
-                    &mut |event| {
-                        staged::native_event(cx, policy, &mut arguments_used, event)?;
-                        if event == GlaExecutionEvent::ScratchEntry {
-                            argument_charge
-                                .grow(
-                                    cx,
-                                    8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES),
-                                )
-                                .map_err(SpillError::Memory)?;
-                        }
-                        Ok(())
-                    },
-                    &mut elements,
-                    &|bytes| {
-                        pool.reserve(cx, bytes)
-                            .map_err(|error| NativeSpoolError::Spill(SpillError::Memory(error)))
-                    },
-                )
-                .await
-                .map_err(argument_error)?;
-            let argument_records = elements.records();
-            drop(elements);
+            let (arguments, argument_records) = {
+                let mut elements =
+                    staged::ElementSource::new(self.ordinary.view, cx, snapshot, policy.rows);
+                let arguments = source
+                    .evaluate_arguments_with_async_elements(
+                        frame,
+                        &mut |event| {
+                            staged::native_event(cx, policy, &mut arguments_used, event)?;
+                            if event == GlaExecutionEvent::ScratchEntry {
+                                argument_charge
+                                    .grow(
+                                        cx,
+                                        8 * size_of::<GraphValue>()
+                                            .max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES),
+                                    )
+                                    .map_err(SpillError::Memory)?;
+                            }
+                            Ok(())
+                        },
+                        &mut elements,
+                        &|bytes| {
+                            pool.reserve(cx, bytes)
+                                .map_err(|error| NativeSpoolError::Spill(SpillError::Memory(error)))
+                        },
+                    )
+                    .await
+                    .map_err(argument_error)?;
+                (arguments, elements.records())
+            };
             let remaining = GqlQueryPolicy {
                 rows: if argument_records == 0 {
                     policy.rows

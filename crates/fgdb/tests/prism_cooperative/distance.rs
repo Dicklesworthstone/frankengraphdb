@@ -240,12 +240,75 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
             compare_execution(&call.execute_sealed_cooperative(
                 &cx, &graph, exact, mem, quantum(1), yield_now,
             ).await.unwrap(), &expected);
+            let minimum_workspace = if let Some(opposite) = &opposite {
+                assert_eq!(graph.node_count(), 3);
+                let scalar = 3 * (2 * size_of::<usize>() + size_of::<f64>());
+                // Three full-width IDs and three degree slots are mandatory.
+                // The public opposite-face build supplies the separately
+                // admitted index peak; neither optional directory is needed.
+                let directory = 3 * (size_of::<VId>() + size_of::<usize>());
+                let incoming = opposite.incoming_index_stats().map_or(0, |stats| {
+                    assert_eq!(stats.rows, 2);
+                    assert_eq!(stats.incidences, 2);
+                    stats.charged_workspace_bytes
+                });
+                let mandatory_auxiliary = directory + incoming;
+                let mut bounded = options(opposite.spec().directedness);
+                bounded.projection_limits.max_workspace_bytes = mandatory_auxiliary;
+                let admitted = projection(&db, &cx, bounded).await;
+                assert_eq!(admitted.charged_workspace_bytes(), mandatory_auxiliary);
+                assert_eq!(admitted.incoming_index_stats(), opposite.incoming_index_stats());
+                assert_eq!(admitted.binding(), opposite.binding());
+                assert_eq!(admitted.digest(), opposite.digest());
+                assert_eq!(admitted.vertex_ids(), &[VId(0), VId(1), VId(2)]);
+                for source in 0_usize..3 {
+                    let target = if opposite.spec().directedness == Directedness::Directed {
+                        (source < 2).then_some(source + 1)
+                    } else {
+                        source.checked_sub(1)
+                    };
+                    let literal: Vec<_> = target.into_iter()
+                        .map(|target| (VId(target as u128), (-1.0_f64).to_bits()))
+                        .collect();
+                    assert_eq!(row(&admitted, &cx, source, None, 1).0, literal);
+                    assert_eq!(row(opposite, &cx, source, None, 1).0, literal);
+                }
+                // This tiny population retains no ordinal-prefix accelerator.
+                // The complete build's only optional backing is one incoming
+                // degree per vertex; losing it must preserve the result.
+                let degree_bytes = 3 * size_of::<usize>();
+                assert_eq!(opposite.charged_workspace_bytes(),
+                    mandatory_auxiliary + degree_bytes);
+                let minimum = scalar + mandatory_auxiliary;
+                for bytes in [mem.max_kernel_workspace_bytes - 1, minimum] {
+                    let fallback_memory = FnxMemoryLimits {
+                        max_kernel_workspace_bytes: bytes,
+                        ..mem
+                    };
+                    let fallback = call.execute_sealed(&cx, &graph, exact, fallback_memory).unwrap();
+                    assert_eq!(fallback.columns, expected.columns);
+                    assert_eq!(fallback.rows, expected.rows);
+                    assert_eq!(fallback.certificate.result_digest, expected.certificate.result_digest);
+                    assert_eq!(fallback.certificate.snapshot, expected.certificate.snapshot);
+                    assert_eq!(fallback.certificate.projection_digest, expected.certificate.projection_digest);
+                    assert_eq!(fallback.certificate.execution_kernel, expected.certificate.execution_kernel);
+                    assert_eq!(fallback.certificate.witness, expected.certificate.witness);
+                    assert_eq!(fallback.certificate.estimated_work, expected.certificate.estimated_work);
+                    assert_eq!(fallback.certificate.kernel_workspace_bytes, minimum);
+                    compare_execution(&call.execute_sealed_cooperative(
+                        &cx, &graph, exact, fallback_memory, quantum(1), yield_now,
+                    ).await.unwrap(), &fallback);
+                }
+                minimum
+            } else {
+                mem.max_kernel_workspace_bytes
+            };
             for resource in ["estimated work", "kernel workspace bytes", "result rows", "result bytes"] {
                 let mut limits = exact;
                 let mut memory = mem;
                 match resource {
                     "estimated work" => limits.max_estimated_work -= 1,
-                    "kernel workspace bytes" => memory.max_kernel_workspace_bytes -= 1,
+                    "kernel workspace bytes" => memory.max_kernel_workspace_bytes = minimum_workspace - 1,
                     "result rows" => limits.max_result_rows -= 1,
                     "result bytes" => memory.max_result_bytes -= 1,
                     _ => unreachable!(),
@@ -281,7 +344,7 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
                                 )) if requested == incoming && limit == incoming - 1));
                             }
                             Directedness::Reversed => {
-                                let auxiliary = opposite.charged_workspace_bytes();
+                                let auxiliary = 3 * (size_of::<VId>() + size_of::<usize>());
                                 assert!(matches!(result, Err(FnxSealedExecutionError::Source(
                                     SealedProjectionError::Projection(ProjectionError::LimitExceeded {
                                         resource: "workspace bytes", observed, limit,
