@@ -1694,34 +1694,232 @@ fn whole_pattern_merge_authorization_hides_candidates_and_refuses_denied_creatio
     });
 }
 
-/// A named relationship MERGE path with ON actions whose WITH tail reads to
-/// the statement's end, with no further write, refuses before any catalog or
-/// execution: the chain hosts run no read tail for a relationship MERGE step
-/// (fgdb-at06q; vertex MERGE steps gained one in 60d60df1). The positive law
-/// this replaces, action results and authorized masking of `edge.secret` in
-/// both hosts, is recorded on fgdb-at06q for when the tail is built.
 #[test]
-fn named_relationship_path_read_tails_refuse_until_the_chain_runs_them() {
-    let text = "MATCH (a:Visible {p:1}),(b:Visible {p:2}) MERGE route=(a)<-[r:R]-(b) \
-                ON CREATE SET r.q=7 ON MATCH SET r.q=r.q+1 \
-                WITH route AS saved UNWIND relationships(saved) AS edge \
-                RETURN saved,edge.q AS value,edge.secret AS masked,length(saved) AS hops";
-    assert!(PreparedGraphWriteChainText::is_chain(text).unwrap());
-    let refused = PreparedGraphWriteChainText::prepare(text, R, symbols).unwrap_err();
-    assert!(
-        matches!(
-            refused,
-            fgdb_gql::GraphWriteChainTextError::EdgeMerge(fgdb_gql::GraphEdgeMergeTextError {
-                offset,
-                kind: fgdb_gql::GraphEdgeMergeTextErrorKind::Query(
-                    fgdb_gql::GraphPatternTextErrorKind::Expected(
-                        "a CREATE or MERGE after the WITH of a MERGE step"
+fn named_relationship_path_read_tails_keep_actions_masking_and_reopen() {
+    lab(0xc4a1_3920, |contexts| async move {
+        let commit = contexts.commit();
+        let text = "MATCH (a:Visible {p:1}),(b:Visible {p:2}) MERGE route=(a)<-[r:R]-(b) \
+                    ON CREATE SET r.q=7 ON MATCH SET r.q=r.q+1 \
+                    WITH route AS saved UNWIND relationships(saved) AS edge \
+                    RETURN saved,edge.q AS value,edge.secret AS masked,length(saved) AS hops";
+        let program = chain(text);
+        for authorized in [false, true] {
+            for existing in [false, true] {
+                let mut absent = None;
+                for hidden in [false, true] {
+                    let vfs = MemVfs::new().unwrap();
+                    let path = vfs.database_dir();
+                    let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+                        .await
+                        .unwrap();
+                    let mut seed = WriteBatch::new(R);
+                    for id in 1..=2 {
+                        seed.create_vertex(
+                            VId(id as u128),
+                            vec![L],
+                            vec![(P, CanonicalScalar::Int(id))],
+                        );
+                    }
+                    if existing {
+                        let mut properties = Vec::new();
+                        if hidden {
+                            properties.push((SECRET, CanonicalScalar::Int(42)));
+                        }
+                        properties.push((Q, CanonicalScalar::Int(7)));
+                        seed.add_edge(EId(71), VId(2), VId(1), properties);
+                    }
+                    db.write(&commit, seed).await.unwrap();
+                    let before = db.frontier().unwrap();
+                    let (stats, rows) = whole_pattern_merge(
+                        &contexts,
+                        &mut db,
+                        authorized,
+                        &program,
+                        policy(1).with_mutation_limit(2),
                     )
-                ),
-            }) if offset == text.len()
-        ),
-        "{refused:?}"
-    );
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        (stats.created_vertices, stats.created_edges),
+                        (0, u64::from(!existing))
+                    );
+                    assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+                    let edges = db.edges().unwrap();
+                    assert_eq!(edges.len(), 1);
+                    let edge = &edges[0];
+                    let expected = 7 + i64::from(existing);
+                    assert_eq!(
+                        rows,
+                        vec![GraphValueRow::from_owned_values(vec![
+                            GraphValue::Path(fgdb_gql::algebra::GraphPath::new(
+                                VId(1),
+                                vec![(edge.entry.eid, VId(2))].into(),
+                            )),
+                            int(expected),
+                            if existing && hidden && !authorized {
+                                int(42)
+                            } else {
+                                GraphValue::Scalar(CanonicalScalar::Null)
+                            },
+                            int(1),
+                        ])]
+                    );
+                    assert_eq!(
+                        edge.props
+                            .iter()
+                            .find(|(key, _)| *key == Q)
+                            .map(|(_, value)| value),
+                        Some(&CanonicalPropertyValue::Scalar(CanonicalScalar::Int(
+                            expected
+                        )))
+                    );
+                    if authorized {
+                        if let Some(expected) = &absent {
+                            assert_eq!(
+                                &(stats, rows.clone()),
+                                expected,
+                                "hidden fields cannot change output or charged work"
+                            );
+                        } else {
+                            absent = Some((stats, rows));
+                        }
+                    }
+                    let durable = (db.frontier().unwrap(), db.vertices().unwrap(), edges);
+                    drop(db);
+                    let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        (
+                            reopened.frontier().unwrap(),
+                            reopened.vertices().unwrap(),
+                            reopened.edges().unwrap()
+                        ),
+                        durable
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn relationship_merge_final_tails_keep_null_occurrences_and_private_aggregate_inputs() {
+    lab(0xc4a1_3921, |contexts| async move {
+        let commit = contexts.commit();
+        for authorized in [false, true] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let prefix = "MERGE (a:Visible {p:1})-[r:R]->(b:Visible {p:2}) \
+                ON CREATE SET r.q=7 ON MATCH SET r.q=r.q+1 \
+                WITH r AS saved UNWIND [saved,null,saved] AS edge ";
+            let program = chain(&format!(
+                "{prefix} RETURN edge.q AS value ORDER BY value ASC"
+            ));
+            let (stats, rows) =
+                whole_pattern_merge(&contexts, &mut db, authorized, &program, policy(3))
+                    .await
+                    .unwrap();
+            assert_eq!((stats.created_vertices, stats.created_edges), (2, 1));
+            assert_eq!(
+                rows,
+                vec![
+                    GraphValueRow::from_owned_values(vec![int(7)]),
+                    GraphValueRow::from_owned_values(vec![int(7)]),
+                    GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+                        CanonicalScalar::Null
+                    )]),
+                ]
+            );
+            let program = chain(&format!(
+                "{prefix} RETURN count(edge) AS copies,sum(edge.q) AS total"
+            ));
+            let (stats, rows) =
+                whole_pattern_merge(&contexts, &mut db, authorized, &program, policy(1))
+                    .await
+                    .unwrap();
+            assert_eq!((stats.created_vertices, stats.created_edges), (0, 0));
+            assert_eq!(
+                rows,
+                vec![GraphValueRow::from_owned_values(vec![int(2), int(16)])]
+            );
+            assert_eq!(db.vertices().unwrap().len(), 2);
+            assert_eq!(db.edges().unwrap().len(), 1);
+        }
+    });
+}
+
+#[test]
+fn relationship_merge_final_tail_refusals_rollback_every_write_and_keep_exact_limits() {
+    async fn attempt(
+        contexts: &PurposeContexts,
+        authorized: bool,
+        tail: &str,
+        allowance: GraphInsertPolicy,
+    ) -> Result<GraphInsertStats, String> {
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let before = db.frontier().unwrap();
+        let program = chain(&format!(
+            "CREATE (marker:Visible {{p:99}}) \
+             MERGE (a:Visible {{p:1}})-[r:R]->(b:Visible {{p:2}}) ON CREATE SET r.q=7 \
+             WITH r AS saved UNWIND [saved,saved] AS edge {tail}"
+        ));
+        match whole_pattern_merge(contexts, &mut db, authorized, &program, allowance).await {
+            Ok((stats, rows)) => {
+                assert_eq!((stats.created_vertices, stats.created_edges), (3, 1));
+                assert_eq!(
+                    rows,
+                    vec![GraphValueRow::from_owned_values(vec![int(7)]); 2]
+                );
+                assert_eq!(db.frontier().unwrap().0, before.0 + 1);
+                Ok(stats)
+            }
+            Err(error) => {
+                assert_eq!(db.frontier().unwrap(), before, "{error}");
+                assert!(db.vertices().unwrap().is_empty(), "{error}");
+                assert!(db.edges().unwrap().is_empty(), "{error}");
+                Err(error)
+            }
+        }
+    }
+    lab(0xc4a1_3922, |contexts| async move {
+        for authorized in [false, true] {
+            let tail = "RETURN edge.q AS value";
+            let allowance = policy(2);
+            let measured = attempt(&contexts, authorized, tail, allowance)
+                .await
+                .unwrap();
+            let mut exact = allowance;
+            exact.query.evaluator.max_work_units = measured.evaluator.work_units;
+            exact.query.evaluator.max_scratch_entries = measured.evaluator.scratch_entries;
+            assert_eq!(
+                attempt(&contexts, authorized, tail, exact).await.unwrap(),
+                measured
+            );
+            for dimension in 0..3 {
+                let mut short = exact;
+                match dimension {
+                    0 => short.query.rows.max_result_rows -= 1,
+                    1 => short.query.evaluator.max_work_units -= 1,
+                    2 => short.query.evaluator.max_scratch_entries -= 1,
+                    _ => unreachable!(),
+                }
+                assert!(
+                    attempt(&contexts, authorized, tail, short).await.is_err(),
+                    "dimension {dimension}"
+                );
+            }
+            let error = attempt(
+                &contexts,
+                authorized,
+                "WITH edge UNWIND [1,0] AS divisor RETURN edge.q/divisor AS value LIMIT 0",
+                policy(0),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains("DivisionByZero"), "{error}");
+        }
+    });
 }
 
 #[test]

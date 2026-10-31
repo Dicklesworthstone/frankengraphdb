@@ -1184,11 +1184,18 @@ impl PreparedGraphEdgeMergeText {
             parsed.actions = Some(actions?);
         }
         let continues = parser.chain_write && parser.at_chained_write()?;
-        // In a chain, a WITH head after the pattern is a query step whose
-        // output row the next write reads.
+        // In a chain, a WITH head owns its complete native row tail. That
+        // tail either returns this statement's rows or stops at the next
+        // graph/read-write clause; a WITH does not itself imply another write.
         let headed = !continues && parser.chain_write && parser.is_word("WITH");
         let returning =
             !continues && !headed && returning.unwrap_or_else(|| parser.is_word("RETURN"));
+        // These chain query owners already supply a governed final-state
+        // element reader. An identity obtained by UNWIND (including an edge
+        // from a named path) has no hoisted input cell and must use that reader.
+        // Keep action evaluation on its existing frozen occurrence scope.
+        let element_reads = parser.call_element_reads;
+        parser.call_element_reads |= parser.chain_write;
         let mut parsed_return = if headed {
             let head = parser.edge_merge_return(
                 "WITH",
@@ -1197,15 +1204,6 @@ impl PreparedGraphEdgeMergeText {
                 &mut Vec::new(),
                 Some(schema),
             )?;
-            if !parser.at_chained_write()? {
-                return Err(error(
-                    parser.current.at,
-                    GraphPatternTextErrorKind::Expected(
-                        "a CREATE or MERGE after the WITH of a MERGE step",
-                    ),
-                )
-                .into());
-            }
             Some(head)
         } else if returning {
             Some(parser.edge_merge_return(
@@ -1218,7 +1216,7 @@ impl PreparedGraphEdgeMergeText {
         } else {
             None
         };
-        let continues = continues || headed;
+        let continues = continues || headed && parser.at_chained_write()?;
         if continues && parsed_return.is_none() {
             let keep = parser.visible_width(schema);
             let mut output = schema[..keep].to_vec();
@@ -1250,6 +1248,7 @@ impl PreparedGraphEdgeMergeText {
                 parsed_return = Some(head);
             }
         }
+        parser.call_element_reads = element_reads;
         if !continues {
             parser.end()?;
         }
