@@ -578,14 +578,12 @@ impl NativeResultSpool {
             return Err(SpillError::InvalidLimits.into());
         }
         let prefix = u64::try_from(prefix_rows).map_err(|_| SpillError::SizeOverflow)?;
-        let capacity = usize::try_from(prefix.min(self.row_count()))
-            .map_err(|_| SpillError::SizeOverflow)?;
+        let capacity =
+            usize::try_from(prefix.min(self.row_count())).map_err(|_| SpillError::SizeOverflow)?;
         let pool = source.memory_pool().clone();
-        let Some(mut rows) = prefix_reservation(ChargedVec::<TrackedBytes>::new(
-            &pool,
-            work.cx,
-            capacity,
-        ))? else {
+        let Some(mut rows) =
+            prefix_reservation(ChargedVec::<TrackedBytes>::new(&pool, work.cx, capacity))?
+        else {
             return Ok(None);
         };
         let mut input = Input::new(
@@ -655,7 +653,8 @@ impl NativeResultSpool {
             destination
                 .paged_writer(work.cx, page_bytes)
                 .map_err(NativeSpoolError::Spill),
-        )? else {
+        )?
+        else {
             return Ok(None);
         };
         let mut largest = 0;
@@ -685,9 +684,9 @@ impl NativeResultSpool {
 fn prefix_reservation<T>(result: Result<T>) -> Result<Option<T>> {
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(NativeSpoolError::Spill(SpillError::Memory(
-            MemoryError::ResourceExhausted { .. },
-        ))) => Ok(None),
+        Err(NativeSpoolError::Spill(SpillError::Memory(MemoryError::ResourceExhausted {
+            ..
+        }))) => Ok(None),
         Err(error) => Err(error),
     }
 }

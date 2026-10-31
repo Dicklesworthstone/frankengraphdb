@@ -26,6 +26,7 @@ pub struct SpillSetProcedurePlan {
     pub(super) call: Box<PreparedProcedureCall>,
     pub(super) columns: Vec<String>,
     pub(super) types: Vec<GraphSetColumnType>,
+    pub(super) reads_elements: bool,
 }
 
 impl SpillSetProcedurePlan {
@@ -45,8 +46,9 @@ impl SpillSetProcedurePlan {
         self.call.arguments.len()
     }
 
-    /// Evaluate the original constant arguments once per reached invocation
-    /// against the native unit row. Compilation never evaluates them:
+    /// Evaluate the original arguments once per reached invocation. Constant
+    /// calls use the unit row; correlated calls require their owning Apply's
+    /// imported frame. Compilation never evaluates them:
     /// a late argument failure must not move ahead of an earlier child failure.
     /// Named arguments, schema bindings and projection metadata stay in `call`.
     ///
@@ -58,30 +60,80 @@ impl SpillSetProcedurePlan {
     /// This helper emits no ResultRow event and opens no source.
     pub fn evaluate_arguments<E>(
         &self,
+        frame: Option<&GraphValueRow>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Vec<GraphValue>, SpillSetRowError<E>> {
-        control(GlaExecutionEvent::ScratchEntry).map_err(SpillSetRowError::Control)?;
         let unit = GraphValueRow::unit();
+        let row = self
+            .call
+            .argument_input(frame, &unit)
+            .map_err(SpillSetRowError::Native)?;
+        control(GlaExecutionEvent::ScratchEntry).map_err(SpillSetRowError::Control)?;
         let mut arguments = Vec::with_capacity(self.call.arguments.len());
         for (column, argument) in self.call.arguments.iter().enumerate() {
-            let value =
-                projection::evaluate_value(argument, &unit, column, control).map_err(|error| {
-                    match error {
-                        projection::ProjectionFailure::Control(error) => {
-                            SpillSetRowError::Control(error)
-                        }
-                        projection::ProjectionFailure::Arithmetic { column, error } => {
-                            SpillSetRowError::Native(GraphSetExecutionError::Projection {
-                                row: 0,
-                                column,
-                                error,
-                            })
-                        }
-                    }
-                })?;
+            let value = projection::evaluate_value(argument, row, column, control)
+                .map_err(argument_failure)?;
             arguments.push(value);
         }
         Ok(arguments)
+    }
+
+    /// The same evaluation with reached element reads at the invocation's
+    /// pinned cut. Reader-free calls retain the synchronous path. The host
+    /// owns the imported row and all ScratchEntry reservations through source
+    /// opening; reserve_frame admits each recursive future before allocation.
+    /// Property-read records spend the same residual allowance as the call.
+    pub async fn evaluate_arguments_with_async_elements<E, S, M, G>(
+        &self,
+        frame: Option<&GraphValueRow>,
+        control: &mut (impl FnMut(GlaExecutionEvent) -> Result<(), E> + Send),
+        source: &mut S,
+        reserve_frame: &M,
+    ) -> Result<Vec<GraphValue>, SpillSetRowError<E>>
+    where
+        E: Send,
+        S: AsyncSpillElementSource<Error = E>,
+        M: Fn(usize) -> Result<G, E> + Sync,
+        G: Send,
+    {
+        if !self.reads_elements {
+            return self.evaluate_arguments(frame, control);
+        }
+        let unit = GraphValueRow::unit();
+        let row = self
+            .call
+            .argument_input(frame, &unit)
+            .map_err(SpillSetRowError::Native)?;
+        control(GlaExecutionEvent::ScratchEntry).map_err(SpillSetRowError::Control)?;
+        let mut arguments = Vec::with_capacity(self.call.arguments.len());
+        for (column, argument) in self.call.arguments.iter().enumerate() {
+            let value = projection::evaluate_value_async(
+                argument,
+                row,
+                column,
+                None,
+                control,
+                source,
+                reserve_frame,
+            )
+            .await
+            .map_err(argument_failure)?;
+            arguments.push(value);
+        }
+        Ok(arguments)
+    }
+}
+
+fn argument_failure<E>(error: projection::ProjectionFailure<E>) -> SpillSetRowError<E> {
+    match error {
+        projection::ProjectionFailure::Control(error) => SpillSetRowError::Control(error),
+        projection::ProjectionFailure::Arithmetic { column, error } => {
+            SpillSetRowError::Native(GraphSetExecutionError::Projection {
+                row: 0,
+                column,
+                error,
+            })
+        }
     }
 }
 

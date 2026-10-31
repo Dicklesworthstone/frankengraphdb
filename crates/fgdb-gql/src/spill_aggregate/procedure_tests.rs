@@ -136,7 +136,7 @@ fn empty_terminal_pages_never_evaluate_or_hide_call_argument_failures() {
         input
             .procedure_source()
             .unwrap()
-            .evaluate_arguments(&mut |_| Ok::<_, ()>(())),
+            .evaluate_arguments(None, &mut |_| Ok::<_, ()>(())),
         Err(SpillSetRowError::Native(GraphSetExecutionError::Projection {
             row: 0,
             column: 0,
@@ -152,12 +152,10 @@ fn repeated_terminal_capabilities_keep_complete_body_admission() {
         .unwrap()
         .with_page(0, Some(0));
     let aggregates = [GraphAggregate::count_rows("n")];
-    let direct = PreparedGraphAggregate::prepare_set_relation(
-        input.clone(), &[], &aggregates, 0, Some(0),
-    ).unwrap();
-    let relation = PreparedGraphSetAggregate::prepare(
-        input, &[], &aggregates, 0, Some(0),
-    ).unwrap();
+    let direct =
+        PreparedGraphAggregate::prepare_set_relation(input.clone(), &[], &aggregates, 0, Some(0))
+            .unwrap();
+    let relation = PreparedGraphSetAggregate::prepare(input, &[], &aggregates, 0, Some(0)).unwrap();
     assert!(AsyncSpillAggregatePlan::compile(&direct).is_err());
     assert!(AsyncSpillAggregatePlan::compile_relation(&relation).is_err());
     assert!(AsyncSpillAggregatePlan::compile_with_independent_procedures(&direct).is_err());
@@ -171,7 +169,8 @@ fn repeated_terminal_capabilities_keep_complete_body_admission() {
     assert!(
         AsyncSpillAggregatePlan::compile_relation_with_independent_procedures_and_bounded_walks(
             &relation,
-        ).is_err()
+        )
+        .is_err()
     );
     for plan in [
         AsyncSpillAggregatePlan::compile_with_repeated_procedures(&direct).unwrap(),
@@ -180,7 +179,8 @@ fn repeated_terminal_capabilities_keep_complete_body_admission() {
             .unwrap(),
         AsyncSpillAggregatePlan::compile_relation_with_repeated_procedures_and_bounded_walks(
             &relation,
-        ).unwrap(),
+        )
+        .unwrap(),
     ] {
         let AsyncSpillAggregatePlan::Relation { input, definition } = plan else {
             unreachable!()

@@ -121,13 +121,16 @@ impl ProcedureGraphProjection {
     }
 }
 
-/// A prepared, bound procedure invocation. Arguments are constant values
-/// (literals or bound parameters), evaluated once per execution.
+/// A prepared, bound procedure invocation. Constant arguments evaluate once
+/// per execution. Row-dependent arguments evaluate against the imported frame
+/// of the owning Apply, once for every reached input occurrence.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedProcedureCall {
     pub(super) namespace: String,
     pub(super) name: String,
     pub(super) arguments: Vec<GraphSetValue>,
+    /// Empty for a constant call; otherwise the exact imported Apply schema.
+    pub(super) input_types: Vec<super::GraphSetColumnType>,
     /// One name per argument for a named call; empty for a positional one.
     pub(super) names: Vec<String>,
     /// Catalog-bound graph argument, separate from runtime algorithm values.
@@ -139,6 +142,34 @@ pub struct PreparedProcedureCall {
 }
 
 impl PreparedProcedureCall {
+    /// The lexical input schema used by row-dependent argument expressions.
+    /// An empty schema denotes a constant invocation, even inside Apply.
+    #[must_use]
+    pub fn argument_input_types(&self) -> &[super::GraphSetColumnType] {
+        &self.input_types
+    }
+
+    pub(super) fn argument_input<'r, E>(
+        &self,
+        frame: Option<&'r GraphValueRow>,
+        unit: &'r GraphValueRow,
+    ) -> Result<&'r GraphValueRow, super::GraphSetExecutionError<E>> {
+        if self.input_types.is_empty() {
+            return Ok(unit);
+        }
+        let row = frame.ok_or(super::GraphSetExecutionError::ArgumentsUnavailable)?;
+        if row.len() != self.input_types.len()
+            || self
+                .input_types
+                .iter()
+                .zip(row.values())
+                .any(|(kind, value)| !kind.accepts(value))
+        {
+            return Err(super::GraphSetExecutionError::InputSchema { operand: 0 });
+        }
+        Ok(row)
+    }
+
     #[must_use]
     pub fn namespace(&self) -> &str {
         &self.namespace
@@ -196,7 +227,20 @@ impl PreparedProcedureCall {
         } else {
             0
         };
-        bytes.extend_from_slice(&(self.arguments.len() as u64 | named | projected).to_be_bytes());
+        let correlated = if self.input_types.is_empty() {
+            0
+        } else {
+            1 << 61
+        };
+        bytes.extend_from_slice(
+            &(self.arguments.len() as u64 | named | projected | correlated).to_be_bytes(),
+        );
+        if correlated != 0 {
+            bytes.extend_from_slice(&(self.input_types.len() as u64).to_be_bytes());
+            for kind in &self.input_types {
+                bytes.push(kind.tag());
+            }
+        }
         if let Some(projection) = &self.graph_projection {
             projection.append_transcript(bytes);
         }
@@ -1172,6 +1216,7 @@ mod tests {
             namespace: "fnx".to_owned(),
             name: "p".to_owned(),
             arguments: Vec::new(),
+            input_types: Vec::new(),
             names: Vec::new(),
             graph_projection: None,
             outputs: vec!["v".to_owned()],

@@ -325,7 +325,7 @@ fn staged_plan_with_arguments(
             assert_eq!(plan.source_columns(), procedure.columns());
             assert_eq!(plan.source_count(), 1);
             assert_eq!(plan.source().kind(), fgdb_gql::scan_stream::ScanKind::Set);
-            let arguments = procedure.evaluate_arguments(&mut |_| Ok::<_, ()>(()))?;
+            let arguments = procedure.evaluate_arguments(arguments, &mut |_| Ok::<_, ()>(()))?;
             procedure_rows(procedure.call(), &arguments)
         }
         AsyncSpillSetSourcePlan::Apply(apply) => {
@@ -693,7 +693,11 @@ fn independent_procedures_preserve_union_bags_selected_products_and_source_order
         assert_eq!(plan.source_count(), 2);
         let mut inspected = Vec::new();
         assert!(plan.all_procedure_sources(&mut |source| {
-            inspected.push(source.evaluate_arguments(&mut |_| Ok::<_, ()>(())).unwrap());
+            inspected.push(
+                source
+                    .evaluate_arguments(None, &mut |_| Ok::<_, ()>(()))
+                    .unwrap(),
+            );
             true
         }));
         assert_eq!(
@@ -3347,6 +3351,111 @@ mod async_elements {
             }
             Ok(rows)
         })
+    }
+
+    #[test]
+    fn correlated_procedure_arguments_use_guarded_async_reads_and_refund_cancelled_frames() {
+        let query = prepare("UNWIND [] AS seed CALL test.rows(seed.p) YIELD score RETURN score");
+        let plan = AsyncSpillSetPlan::compile_with_repeated_procedures(&query).unwrap();
+        let source = plan.procedure_source().unwrap();
+        let input = row(vec![GraphValue::Vertex(VId(u128::MAX))]);
+        let frames = Frames::new(usize::MAX, None);
+        let reserve = |bytes| frames.reserve(bytes);
+        let mut reader = Reader::default();
+        let mut events = control(Arc::clone(&reader.trace), None);
+        assert_eq!(
+            finish(source.evaluate_arguments_with_async_elements(
+                Some(&input),
+                &mut events,
+                &mut reader,
+                &reserve,
+            ))
+            .unwrap(),
+            [scalar(7)],
+        );
+        assert_eq!(
+            reader
+                .trace
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|effect| match effect {
+                    Effect::Read(element, key) => Some((*element, *key)),
+                    Effect::Event(_) => None,
+                })
+                .collect::<Vec<_>>(),
+            [(ElementId::Vertex(VId(u128::MAX)), P)],
+        );
+        frames.assert_released(&reader);
+
+        let mut reader = Reader::default();
+        let frames = Frames::new(usize::MAX, None);
+        let reserve = |bytes| frames.reserve(bytes);
+        let mut events = control(Arc::clone(&reader.trace), None);
+        let mut pending = Box::pin(source.evaluate_arguments_with_async_elements(
+            Some(&input),
+            &mut events,
+            &mut reader,
+            &reserve,
+        ));
+        assert!(
+            pending
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        drop(pending);
+        assert!(frames.state.peak.load(AtomicOrdering::SeqCst) > 0);
+        frames.assert_released(&reader);
+
+        let mut reader = Reader::default();
+        let frames = Frames::new(0, None);
+        let reserve = |bytes| frames.reserve(bytes);
+        let mut events = control(Arc::clone(&reader.trace), None);
+        assert!(matches!(
+            finish(source.evaluate_arguments_with_async_elements(
+                Some(&input),
+                &mut events,
+                &mut reader,
+                &reserve,
+            )),
+            Err(SpillSetRowError::Control("frame refused")),
+        ));
+        assert!(
+            !reader
+                .trace
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|effect| matches!(effect, Effect::Read(..)))
+        );
+        frames.assert_released(&reader);
+
+        let pure = prepare("UNWIND [] AS seed CALL test.rows(seed) YIELD score RETURN score");
+        let pure = AsyncSpillSetPlan::compile_with_repeated_procedures(&pure).unwrap();
+        assert_eq!(
+            finish(
+                pure.procedure_source()
+                    .unwrap()
+                    .evaluate_arguments_with_async_elements(
+                        Some(&input),
+                        &mut events,
+                        &mut reader,
+                        &reserve,
+                    )
+            )
+            .unwrap(),
+            [GraphValue::Vertex(VId(u128::MAX))],
+        );
+        assert!(
+            !reader
+                .trace
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|effect| matches!(effect, Effect::Read(..)))
+        );
+        frames.assert_released(&reader);
     }
 
     #[test]

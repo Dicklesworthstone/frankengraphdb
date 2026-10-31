@@ -1055,7 +1055,9 @@ fn directed_distance_centralities_preserve_incoming_scores_history_and_projectio
             let call = call(harmonic);
             assert_eq!(call.signature().graph_kind, FnxGraphKind::Any);
             assert_eq!(
-                FnxReadOptions::whole_graph_for(&call, None).projection.directedness,
+                FnxReadOptions::whole_graph_for(&call, None)
+                    .projection
+                    .directedness,
                 Directedness::Undirected
             );
             for direction in [Directedness::Directed, Directedness::Reversed] {
@@ -1109,7 +1111,10 @@ fn directed_distance_centralities_preserve_incoming_scores_history_and_projectio
                     assert_eq!(expected.certificate.snapshot, graph.binding());
                     let native = view.execute_fnx(&cx, &call, opt).unwrap().analytics;
                     assert_eq!(native.rows, literal);
-                    assert_eq!(native.certificate.result_digest, expected.certificate.result_digest);
+                    assert_eq!(
+                        native.certificate.result_digest,
+                        expected.certificate.result_digest
+                    );
                     let exact = expected.certificate.estimated_work;
                     assert!(matches!(
                         call.execute_sealed(

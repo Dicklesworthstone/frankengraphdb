@@ -443,8 +443,10 @@ fn bounded_query_prefix_matches_native_order_and_writes_one_run() {
             GraphValue::Scalar(CanonicalScalar::Int(-4)),
             GraphValue::List(vec![GraphValue::Scalar(CanonicalScalar::Int(7))].into_boxed_slice()),
             GraphValue::List(
-                vec![GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(7.0)))]
-                    .into_boxed_slice(),
+                vec![GraphValue::Scalar(CanonicalScalar::Float(
+                    CanonicalF64::new(7.0),
+                ))]
+                .into_boxed_slice(),
             ),
         ];
         let mut input: Vec<_> = (0..70)
@@ -501,8 +503,16 @@ fn bounded_query_prefix_matches_native_order_and_writes_one_run() {
                     let spool = seed(&cx, &mut source, &input).await;
                     let (complete, _) = spool
                         .sort_query_continuing(
-                            &cx, &mut source, &mut destination, order, true,
-                            9, 8, 127, u64::MAX, 0,
+                            &cx,
+                            &mut source,
+                            &mut destination,
+                            order,
+                            true,
+                            9,
+                            8,
+                            127,
+                            u64::MAX,
+                            0,
                         )
                         .await
                         .unwrap();
@@ -511,8 +521,17 @@ fn bounded_query_prefix_matches_native_order_and_writes_one_run() {
                         let before = destination.stats().published_runs;
                         let (selected, _) = spool
                             .sort_query_window_continuing(
-                                &cx, &mut source, &mut destination, order, true,
-                                Some(prefix), prefix + 1, 1, 127, u64::MAX, 23,
+                                &cx,
+                                &mut source,
+                                &mut destination,
+                                order,
+                                true,
+                                Some(prefix),
+                                prefix + 1,
+                                1,
+                                127,
+                                u64::MAX,
+                                23,
                             )
                             .await
                             .unwrap();
@@ -556,8 +575,17 @@ fn bounded_query_prefix_rejects_discarded_malformed_frames_and_false_counts() {
                 let before = destination.stats();
                 let error = forged
                     .sort_query_window_continuing(
-                        &cx, &mut source, &mut destination, &keys, true,
-                        Some(prefix), 8, 1, 127, u64::MAX, 0,
+                        &cx,
+                        &mut source,
+                        &mut destination,
+                        &keys,
+                        true,
+                        Some(prefix),
+                        8,
+                        1,
+                        127,
+                        u64::MAX,
+                        0,
                     )
                     .await
                     .unwrap_err();
@@ -576,7 +604,10 @@ fn bounded_query_prefix_rejects_discarded_malformed_frames_and_false_counts() {
         frames.last_mut().unwrap().push(0);
         let mut writer = source.paged_writer(&cx, 127).unwrap();
         for frame in &frames {
-            writer.write(&cx, &(frame.len() as u64).to_be_bytes()).await.unwrap();
+            writer
+                .write(&cx, &(frame.len() as u64).to_be_bytes())
+                .await
+                .unwrap();
             writer.write(&cx, frame).await.unwrap();
         }
         let mut malformed = good.clone();
@@ -587,8 +618,17 @@ fn bounded_query_prefix_rejects_discarded_malformed_frames_and_false_counts() {
             assert!(matches!(
                 malformed
                     .sort_query_window_continuing(
-                        &cx, &mut source, &mut destination, &keys, true,
-                        Some(prefix), 8, 1, 127, u64::MAX, 0,
+                        &cx,
+                        &mut source,
+                        &mut destination,
+                        &keys,
+                        true,
+                        Some(prefix),
+                        8,
+                        1,
+                        127,
+                        u64::MAX,
+                        0,
                     )
                     .await,
                 Err(NativeSpoolError::Spill(SpillError::InvalidRun))
@@ -616,8 +656,7 @@ fn bounded_query_prefix_memory_fallback_keeps_original_work_allowance() {
                 GraphValueRow::from_owned_values(vec![
                     GraphValue::Scalar(CanonicalScalar::Int(if wide { -1 } else { 0 })),
                     GraphValue::Scalar(
-                        CanonicalScalar::bytes(if wide { vec![7; 8000] } else { vec![] })
-                            .unwrap(),
+                        CanonicalScalar::bytes(if wide { vec![7; 8000] } else { vec![] }).unwrap(),
                     ),
                 ])
             })
@@ -626,16 +665,33 @@ fn bounded_query_prefix_memory_fallback_keeps_original_work_allowance() {
         let order = [GraphValueOrder::ascending(0)];
         let (complete, complete_work) = spool
             .sort_query_continuing(
-                &cx, &mut source, &mut destination, &order, true,
-                8, 8, 127, u64::MAX, 0,
+                &cx,
+                &mut source,
+                &mut destination,
+                &order,
+                true,
+                8,
+                8,
+                127,
+                u64::MAX,
+                0,
             )
             .await
             .unwrap();
         let expected = read(&cx, &mut destination, &complete).await;
         let (fallback, measured) = spool
             .sort_query_window_continuing(
-                &cx, &mut source, &mut destination, &order, true,
-                Some(7), 8, 8, 127, u64::MAX, 29,
+                &cx,
+                &mut source,
+                &mut destination,
+                &order,
+                true,
+                Some(7),
+                8,
+                8,
+                127,
+                u64::MAX,
+                29,
             )
             .await
             .unwrap();
@@ -647,8 +703,17 @@ fn bounded_query_prefix_memory_fallback_keeps_original_work_allowance() {
         assert_eq!(pool.used(), 0);
         let (exact, exact_work) = spool
             .sort_query_window_continuing(
-                &cx, &mut source, &mut destination, &order, true,
-                Some(7), 8, 8, 127, measured, 29,
+                &cx,
+                &mut source,
+                &mut destination,
+                &order,
+                true,
+                Some(7),
+                8,
+                8,
+                127,
+                measured,
+                29,
             )
             .await
             .unwrap();

@@ -8,7 +8,10 @@ use crate::query::ProcedureRows;
 use fgdb_delta_types::RelationId;
 use fgdb_gql::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue};
 use fgdb_gql::spill_set::SpillSetRowError;
-use fgdb_gql::{GlaExecutionLimits, GlaLimitDimension, GlaLimitExceeded, GraphProcedureRowCursor};
+use fgdb_gql::{
+    GlaExecutionLimits, GlaLimitDimension, GlaLimitExceeded, GqlBudgetExceeded,
+    GraphProcedureRowCursor,
+};
 use fgdb_prism::{FnxMemoryLimits, FnxValue};
 use fgdb_strata::tiered::memory::MemoryPool;
 use fgdb_strata::tiered::sealed::SealedLimits;
@@ -379,14 +382,25 @@ fn argument_error(error: SpillSetRowError<NativeSpoolError>) -> NativeSpoolError
     }
 }
 
-// Arguments spend evaluator allowance before the physical source begins.
+// Arguments spend record/evaluator allowance before the physical source begins.
 // A source refusal must name the complete invocation's allowance/counter.
 fn rebase_arguments(
     error: GqlQueryError<GqlError, Cancel>,
     policy: GqlQueryPolicy,
     arguments: GlaExecutionStats,
+    argument_records: u64,
 ) -> NativeSpoolError {
     let error = match error {
+        GqlQueryError::Rows(error) if error.dimension == GqlBudgetDimension::SnapshotRecords => {
+            let Some(observed) = error.observed.checked_add(argument_records) else {
+                return SpillError::SizeOverflow.into();
+            };
+            GqlQueryError::Rows(GqlBudgetExceeded {
+                dimension: error.dimension,
+                limit: policy.rows.max_snapshot_records().unwrap_or(u64::MAX),
+                observed,
+            })
+        }
         GqlQueryError::Evaluator(error) => {
             let (used, limit) = match error.dimension {
                 GlaLimitDimension::WorkUnits => {
@@ -438,6 +452,7 @@ impl<V: Vfs + Clone> ExternalOrderHost for SealedHost<'_, V> {
     fn leaf<'q, A, B>(
         &'q mut self,
         plan: &'q AsyncSpillSetPlan,
+        frame: Option<&'q GraphValueRow>,
         snapshot: CommitSeq,
         cx: &'q QueryCx,
         policy: GqlQueryPolicy,
@@ -453,6 +468,7 @@ impl<V: Vfs + Clone> ExternalOrderHost for SealedHost<'_, V> {
         let AsyncSpillSetSourcePlan::Procedure(source) = plan.source() else {
             return self.ordinary.leaf(
                 plan,
+                frame,
                 snapshot,
                 cx,
                 policy,
@@ -472,22 +488,47 @@ impl<V: Vfs + Clone> ExternalOrderHost for SealedHost<'_, V> {
                 size_of::<Vec<GraphValue>>(),
             )?;
             let mut arguments_used = GlaExecutionStats::default();
+            let mut elements =
+                staged::ElementSource::new(self.ordinary.view, cx, snapshot, policy.rows);
             let arguments = source
-                .evaluate_arguments(&mut |event| {
-                    staged::native_event(cx, policy, &mut arguments_used, event)?;
-                    if event == GlaExecutionEvent::ScratchEntry {
-                        argument_charge
-                            .grow(
-                                cx,
-                                8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES),
-                            )
-                            .map_err(SpillError::Memory)?;
-                    }
-                    Ok(())
-                })
+                .evaluate_arguments_with_async_elements(
+                    frame,
+                    &mut |event| {
+                        staged::native_event(cx, policy, &mut arguments_used, event)?;
+                        if event == GlaExecutionEvent::ScratchEntry {
+                            argument_charge
+                                .grow(
+                                    cx,
+                                    8 * size_of::<GraphValue>().max(GRAPH_VALUE_PAYLOAD_UNIT_BYTES),
+                                )
+                                .map_err(SpillError::Memory)?;
+                        }
+                        Ok(())
+                    },
+                    &mut elements,
+                    &|bytes| {
+                        pool.reserve(cx, bytes)
+                            .map_err(|error| NativeSpoolError::Spill(SpillError::Memory(error)))
+                    },
+                )
+                .await
                 .map_err(argument_error)?;
+            let argument_records = elements.records();
+            drop(elements);
             let remaining = GqlQueryPolicy {
-                rows: policy.rows,
+                rows: if argument_records == 0 {
+                    policy.rows
+                } else {
+                    GqlExecutionBudget::new(
+                        policy
+                            .rows
+                            .max_snapshot_records()
+                            .unwrap_or(u64::MAX)
+                            .checked_sub(argument_records)
+                            .ok_or(NativeSpoolError::IncompleteCursor)?,
+                        policy.rows.max_result_rows().unwrap_or(u64::MAX),
+                    )
+                },
                 evaluator: GlaExecutionLimits::new(
                     policy
                         .evaluator
@@ -501,7 +542,7 @@ impl<V: Vfs + Clone> ExternalOrderHost for SealedHost<'_, V> {
                         .ok_or(NativeSpoolError::IncompleteCursor)?,
                 ),
             };
-            let (cursor, rows, mut evaluator) = self
+            let (cursor, mut rows, mut evaluator) = self
                 .ordinary
                 .view
                 .execute_fnx_sealed_query_rows(
@@ -516,9 +557,15 @@ impl<V: Vfs + Clone> ExternalOrderHost for SealedHost<'_, V> {
                     self.options.max_source_incidences,
                 )
                 .await
-                .map_err(|error| rebase_arguments(error, policy, arguments_used))?;
+                .map_err(|error| {
+                    rebase_arguments(error, policy, arguments_used, argument_records)
+                })?;
             drop(arguments);
             drop(argument_charge);
+            rows.snapshot_records = rows
+                .snapshot_records
+                .checked_add(argument_records)
+                .ok_or(SpillError::SizeOverflow)?;
             evaluator.work_units = evaluator
                 .work_units
                 .checked_add(arguments_used.work_units)

@@ -321,16 +321,7 @@ where
         SetNode::ProcedureCall(call) => {
             let at = *operand;
             *operand += 1;
-            let unit = GraphValueRow::unit();
-            let mut arguments = Vec::with_capacity(call.arguments.len());
-            for (column, argument) in call.arguments.iter().enumerate() {
-                arguments.push(
-                    projection::evaluate_value(argument, &unit, column, &mut |event| {
-                        meter.event(event)
-                    })
-                    .map_err(|error| projected(error, 0))?,
-                );
-            }
+            let arguments = procedure_arguments(call, source, meter)?;
             if source.supports_procedure_rows() && canonical_vertex_call(call) {
                 let execution = source
                     .procedure_rows(call, &arguments, meter.remaining())

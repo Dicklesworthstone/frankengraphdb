@@ -422,6 +422,52 @@ where
     Ok(())
 }
 
+/// Evaluate one reached call against its own lexical frame. Borrowing the
+/// frame's Arc keeps it live while the common meter and element reader mutate;
+/// neither an outer row nor a completed call result is cached across invocations.
+fn procedure_arguments<E, C, S, Checkpoint>(
+    call: &PreparedProcedureCall,
+    source: &mut S,
+    meter: &mut Meter<Checkpoint>,
+) -> SetResult<Vec<GraphValue>, E, C>
+where
+    S: GraphSetSource<E, C> + ?Sized,
+    Checkpoint: FnMut() -> Result<(), C>,
+{
+    let frame = meter.arguments.last().cloned();
+    let unit = GraphValueRow::unit();
+    let row = call
+        .argument_input(frame.as_deref(), &unit)
+        .map_err(GqlQueryError::Source)?;
+    let mut elements = projection::SourceElements::new(source);
+    let mut read = projection::MappedElements {
+        read: &mut elements,
+        error: |error| GqlQueryError::Source(GraphSetExecutionError::Source(error)),
+    };
+    let mut arguments = Vec::with_capacity(call.arguments.len());
+    for (column, argument) in call.arguments.iter().enumerate() {
+        let value = projection::evaluate_value_reading(
+            argument,
+            row,
+            column,
+            &mut |event| meter.event(event),
+            &mut read,
+        )
+        .map_err(|error| match error {
+            projection::ProjectionFailure::Control(error) => error,
+            projection::ProjectionFailure::Arithmetic { column, error } => {
+                GqlQueryError::Source(GraphSetExecutionError::Projection {
+                    row: 0,
+                    column,
+                    error,
+                })
+            }
+        })?;
+        arguments.push(value);
+    }
+    Ok(arguments)
+}
+
 fn run_node<E, C, S, Checkpoint>(
     query: &PreparedGraphSet,
     source: &mut S,
@@ -716,25 +762,7 @@ where
         SetNode::ProcedureCall(call) => {
             let at = *operand;
             *operand += 1;
-            // Arguments are constants: evaluate each once, against no row.
-            let unit = GraphValueRow::unit();
-            let mut arguments = Vec::with_capacity(call.arguments.len());
-            for (column, argument) in call.arguments.iter().enumerate() {
-                let value = projection::evaluate_value(argument, &unit, column, &mut |event| {
-                    meter.event(event)
-                })
-                .map_err(|error| match error {
-                    projection::ProjectionFailure::Control(error) => error,
-                    projection::ProjectionFailure::Arithmetic { column, error } => {
-                        GqlQueryError::Source(GraphSetExecutionError::Projection {
-                            row: 0,
-                            column,
-                            error,
-                        })
-                    }
-                })?;
-                arguments.push(value);
-            }
+            let arguments = procedure_arguments(call, source, meter)?;
             let execution = source
                 .procedure(call, &arguments, meter.remaining())
                 .ok_or(GqlQueryError::Source(

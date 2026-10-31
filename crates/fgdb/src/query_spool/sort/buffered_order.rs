@@ -543,6 +543,7 @@ impl<V: Vfs + Clone> ExternalOrderHost for BufferedHost<'_, V> {
     fn leaf<'q, A, B>(
         &'q mut self,
         plan: &'q AsyncSpillSetPlan,
+        _arguments: Option<&'q GraphValueRow>,
         snapshot: CommitSeq,
         cx: &'q QueryCx,
         policy: GqlQueryPolicy,

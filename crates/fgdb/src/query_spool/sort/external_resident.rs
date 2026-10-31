@@ -154,6 +154,7 @@ impl ExternalOrderHost for ResidentHost {
     fn leaf<'q, A, B>(
         &'q mut self,
         plan: &'q AsyncSpillSetPlan,
+        _arguments: Option<&'q GraphValueRow>,
         snapshot: CommitSeq,
         cx: &'q QueryCx,
         policy: GqlQueryPolicy,

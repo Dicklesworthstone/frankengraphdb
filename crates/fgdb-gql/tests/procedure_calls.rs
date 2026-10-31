@@ -563,6 +563,137 @@ fn constant_and_parameter_arguments_reach_the_host_evaluated() {
 }
 
 #[test]
+fn row_arguments_preserve_duplicate_null_and_nested_occurrences() {
+    let query = prepare(
+        "UNWIND [2,2,null] AS x CALL t.echo(x, [x,x+1]) YIELD value,items \
+         RETURN x,value,items",
+        &GqlParameters::new(),
+    );
+    let mut arguments_seen = Vec::new();
+    let result = query
+        .execute_governed_with_procedures(
+            wide(),
+            no_graph,
+            |call, arguments, _| {
+                arguments_seen.push(arguments.to_vec());
+                host(call, arguments)
+            },
+            || Ok::<_, usize>(()),
+        )
+        .unwrap();
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    let pair = |a, b| GraphValue::List(vec![a, b].into_boxed_slice());
+    assert_eq!(
+        arguments_seen,
+        [
+            vec![int(2), pair(int(2), int(3))],
+            vec![int(2), pair(int(2), int(3))],
+            vec![null.clone(), pair(null.clone(), null.clone())],
+        ],
+    );
+    assert_eq!(result.rows.snapshot_records, 3);
+    assert_eq!(
+        result
+            .value
+            .iter()
+            .map(|row| row.values().to_vec())
+            .collect::<Vec<_>>(),
+        [
+            vec![int(2), int(2), pair(int(2), int(3))],
+            vec![int(2), int(2), pair(int(2), int(3))],
+            vec![null.clone(), null.clone(), pair(null.clone(), null)],
+        ],
+    );
+
+    let query = prepare(
+        "UNWIND [3,1] AS seed CALL (seed) { WITH seed+10 AS inner_seed \
+         CALL t.echo(inner_seed) YIELD value RETURN value \
+         } RETURN seed,value ORDER BY seed",
+        &GqlParameters::new(),
+    );
+    let result = call(&query).unwrap();
+    assert_eq!(column(&result, 0), [int(1), int(3)]);
+    assert_eq!(column(&result, 1), [int(11), int(13)]);
+
+    let query = prepare(
+        "CALL t.scores() YIELD vertex,score \
+         CALL t.echo(vertex, score+1) YIELD echoed,increment \
+         RETURN vertex,echoed,increment ORDER BY vertex",
+        &GqlParameters::new(),
+    );
+    let result = call(&query).unwrap();
+    assert_eq!(
+        column(&result, 0),
+        [1, 2, 3, 4].map(|id| GraphValue::Vertex(VId(id)))
+    );
+    assert_eq!(column(&result, 1), column(&result, 0));
+    assert_eq!(column(&result, 2), [2, 4, 3, 6].map(int));
+}
+
+#[test]
+fn correlated_argument_failures_follow_reached_invocations_even_under_limit_zero() {
+    use std::cell::Cell;
+
+    let empty = prepare(
+        "UNWIND [] AS x CALL t.echo(1/x) YIELD value RETURN value LIMIT 0",
+        &GqlParameters::new(),
+    );
+    let execution = empty
+        .execute_governed_with_procedures(
+            wide(),
+            no_graph,
+            |_, _, _| -> Rows { panic!("empty input cannot invoke a correlated call") },
+            || Ok::<_, usize>(()),
+        )
+        .unwrap();
+    assert!(execution.value.is_empty());
+    assert_eq!(execution.rows.snapshot_records, 0);
+
+    let query = prepare(
+        "UNWIND [1,0] AS x CALL t.echo(1/x) YIELD value RETURN value LIMIT 0",
+        &GqlParameters::new(),
+    );
+    for failure in ["arithmetic", "source", "cancel"] {
+        let calls = Cell::new(0);
+        let result = query.execute_governed_with_procedures(
+            wide(),
+            no_graph,
+            |call, arguments, _| {
+                calls.set(calls.get() + 1);
+                assert_eq!(arguments, [int(1)]);
+                if failure == "source" {
+                    Err(GqlQueryError::Source("first invocation failed"))
+                } else {
+                    host(call, arguments)
+                }
+            },
+            || {
+                if failure == "cancel" && calls.get() == 1 {
+                    Err(71_usize)
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        match failure {
+            "source" => assert!(matches!(
+                result,
+                Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+                    "first invocation failed"
+                ))),
+            )),
+            "cancel" => assert!(matches!(result, Err(GqlQueryError::Interrupted(71)))),
+            _ => assert!(matches!(
+                result,
+                Err(GqlQueryError::Source(GraphSetExecutionError::Projection { error, .. }))
+                    if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero,
+            )),
+        }
+        assert_eq!(calls.get(), 1);
+    }
+}
+
+#[test]
 fn empty_results_errors_and_width_violations_publish_no_rows() {
     let empty = prepare("CALL t.empty() YIELD v RETURN v", &GqlParameters::new());
     assert!(call(&empty).unwrap().is_empty());

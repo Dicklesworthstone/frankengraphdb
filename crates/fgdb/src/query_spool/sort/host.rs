@@ -31,6 +31,7 @@ pub(crate) trait ExternalOrderHost: Send {
     fn leaf<'q, A, B>(
         &'q mut self,
         plan: &'q AsyncSpillSetPlan,
+        arguments: Option<&'q GraphValueRow>,
         snapshot: CommitSeq,
         cx: &'q QueryCx,
         policy: GqlQueryPolicy,
@@ -309,6 +310,7 @@ where
         | AsyncSpillSetSourcePlan::Walk(_)
         | AsyncSpillSetSourcePlan::Procedure(_) => host.leaf(
             plan,
+            arguments,
             snapshot,
             cx,
             policy,

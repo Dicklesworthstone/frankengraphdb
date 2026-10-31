@@ -644,9 +644,11 @@ impl PreparedGraphSet {
 
     /// A registered procedure's rows joined to this pipeline (Appendix C
     /// `ProcedureCall`). Constant arguments run once per execution; an
-    /// existing input composes through the ordinary CrossJoin. `outputs` pairs
+    /// existing input composes through the ordinary CrossJoin. Arguments that
+    /// read input columns instead lower to Apply and run once per selected
+    /// input occurrence, including duplicates. `outputs` pairs
     /// each procedure output with its column alias; every column is the Any
-    /// domain. Arguments are constants: literals or bound parameters.
+    /// domain. Argument expressions retain the input's checked row schema.
     /// `vertices` lists, ascending, the YIELD positions the statement matches
     /// as vertices; the host must refuse unless each is vertex-valued.
     pub fn procedure_call(
@@ -677,6 +679,30 @@ impl PreparedGraphSet {
         vertices: Vec<usize>,
         graph_projection: Option<ProcedureGraphProjection>,
     ) -> Result<Self, GraphSetProjectionError> {
+        self.procedure_call_in_frame(
+            namespace,
+            name,
+            arguments,
+            names,
+            outputs,
+            vertices,
+            graph_projection,
+            Vec::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn procedure_call_in_frame(
+        self,
+        namespace: String,
+        name: String,
+        arguments: Vec<GraphSetValue>,
+        names: Vec<String>,
+        outputs: Vec<(String, String)>,
+        vertices: Vec<usize>,
+        graph_projection: Option<ProcedureGraphProjection>,
+        input_types: Vec<GraphSetColumnType>,
+    ) -> Result<Self, GraphSetProjectionError> {
         use GraphSetProjectionError as Error;
         if !matches!(self.node, SetNode::Values)
             || !self.columns.is_empty()
@@ -698,7 +724,21 @@ impl PreparedGraphSet {
                     });
                 }
             }
-            let right = Self::singleton().procedure_call_with_projection(
+            // Type every expression, including lazy branches, against the
+            // actual incoming schema before choosing its invocation scope.
+            // Rechecking against an empty schema detects input references
+            // without evaluating literals, errors or lexical list locals.
+            let mut correlated = false;
+            for (column, argument) in arguments.iter().enumerate() {
+                projection::value_type(argument, &self.types, column)?;
+                correlated |= projection::value_type(argument, &[], column).is_err();
+            }
+            let frame_types = if correlated {
+                self.types.clone()
+            } else {
+                Vec::new()
+            };
+            let right = Self::singleton().procedure_call_in_frame(
                 namespace,
                 name,
                 arguments,
@@ -706,7 +746,12 @@ impl PreparedGraphSet {
                 outputs,
                 vertices,
                 graph_projection,
+                frame_types,
             )?;
+            if correlated {
+                let imports = (0..self.types.len()).collect();
+                return self.apply(right, imports).map_err(Error::SetBuild);
+            }
             return self.cross_join(right).map_err(Error::SetBuild);
         }
         if outputs.is_empty() {
@@ -725,7 +770,7 @@ impl PreparedGraphSet {
             });
         }
         for (column, argument) in arguments.iter().enumerate() {
-            projection::value_type(argument, &[], column)?;
+            projection::value_type(argument, &input_types, column)?;
         }
         // Named arguments name every argument, each once.
         if !names.is_empty() {
@@ -762,6 +807,7 @@ impl PreparedGraphSet {
                 namespace,
                 name,
                 arguments,
+                input_types,
                 names,
                 graph_projection,
                 outputs: output_names,
@@ -943,6 +989,24 @@ impl PreparedGraphSet {
             | SetNode::Binary { left, right, .. } => {
                 left.check_arguments(arguments)?;
                 right.check_arguments(arguments)?;
+            }
+            SetNode::ProcedureCall(call) if !call.input_types.is_empty() => {
+                if arguments.len() != call.input_types.len() {
+                    return Err(GraphSetBuildError::ColumnCount {
+                        left: arguments.len(),
+                        right: call.input_types.len(),
+                    });
+                }
+                for (column, (&left, &right)) in arguments.iter().zip(&call.input_types).enumerate()
+                {
+                    if left != right {
+                        return Err(GraphSetBuildError::ColumnType {
+                            column,
+                            left,
+                            right,
+                        });
+                    }
+                }
             }
             SetNode::Pattern(_)
             | SetNode::Values

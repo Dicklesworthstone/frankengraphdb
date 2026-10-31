@@ -1132,6 +1132,7 @@ impl<C: FnMut() -> u64 + Send> ExternalOrderHost for ScopedOrderHost<'_, C> {
     fn leaf<'q, A, B>(
         &'q mut self,
         plan: &'q AsyncSpillSetPlan,
+        _arguments: Option<&'q GraphValueRow>,
         snapshot: CommitSeq,
         cx: &'q QueryCx,
         policy: GqlQueryPolicy,

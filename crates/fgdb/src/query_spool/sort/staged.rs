@@ -15,7 +15,7 @@ use fgdb_types::CanonicalScalarResolver;
 // A property lends its scalar while owning the authenticated cold record and
 // that record's byte grant. The evaluator reserves its destination copy before
 // cloning; neither a property table nor an uncharged scalar crosses the seam.
-enum PinnedProperty {
+pub(super) enum PinnedProperty {
     Vertex(BufferedValue<VertexRow>, usize),
     Edge(BufferedValue<BufferedEdge>, usize),
 }
@@ -29,7 +29,7 @@ impl std::borrow::Borrow<fgdb_types::CanonicalPropertyValue> for PinnedProperty 
     }
 }
 
-struct ElementSource<'v, 'q, V: Vfs> {
+pub(super) struct ElementSource<'v, 'q, V: Vfs> {
     view: &'v mut BufferedReadView<V>,
     cx: &'q QueryCx,
     as_of: CommitSeq,
@@ -37,7 +37,26 @@ struct ElementSource<'v, 'q, V: Vfs> {
     records: u64,
 }
 
-impl<V: Vfs> ElementSource<'_, '_, V> {
+impl<'v, 'q, V: Vfs> ElementSource<'v, 'q, V> {
+    pub(super) fn new(
+        view: &'v mut BufferedReadView<V>,
+        cx: &'q QueryCx,
+        as_of: CommitSeq,
+        budget: GqlExecutionBudget,
+    ) -> Self {
+        Self {
+            view,
+            cx,
+            as_of,
+            budget,
+            records: 0,
+        }
+    }
+
+    pub(super) fn records(&self) -> u64 {
+        self.records
+    }
+
     fn admit_record(&mut self) -> Result<()> {
         // A reached identity is one logical record even when absent, retired,
         // or repeated. Keep every stage on the completed source's allowance,

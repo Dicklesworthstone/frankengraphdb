@@ -534,9 +534,9 @@ impl AsyncSpillSetPlan {
     /// Admit procedure sources inside Apply bodies as well as independent
     /// sources. Every reached outer occurrence executes its complete body with
     /// the same pinned cut and the enclosing query's remaining allowances.
-    /// Procedure arguments remain constant expressions over the native unit
-    /// row; imported values may filter or project their output, not become
-    /// procedure arguments. No kernel or completed result is reused.
+    /// Correlated arguments evaluate against the body's explicit imported
+    /// frame; constants still use the native unit row. Reached element reads
+    /// use the same pinned source. No kernel or completed result is reused.
     ///
     /// Before I/O, the host must admit EVERY definition through
     /// `all_procedure_sources`, including bodies skipped by empty or NULL input.
@@ -1537,6 +1537,10 @@ fn compile_stages<'a>(
                     call: call.clone(),
                     columns: query.columns.clone(),
                     types: query.types.clone(),
+                    reads_elements: call
+                        .arguments
+                        .iter()
+                        .any(GraphSetValue::may_read_element_properties),
                 }),
                 query.types.clone(),
                 Operation::Identity,

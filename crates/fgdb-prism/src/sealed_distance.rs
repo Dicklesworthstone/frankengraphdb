@@ -17,10 +17,11 @@
 //! added. Both drivers share the word frontier and every scalar transition.
 
 use super::{
-    ComplexityWitness, Cursor, Delivery, Directedness, ExecutionError, Finished, FnxAlgorithm, FnxCallSpec,
-    FnxExecutionLimits, FnxMemoryLimits, FoundationAlgorithm, KernelOutput, KernelValues, Result,
-    ResultAdmission, Rows, SealedGraphView, SealedRows, add, admit, checkpoint,
-    directional_pass_work, finish, finish_encoded, mul, require_loop_free_degree, reserve,
+    ComplexityWitness, Cursor, Delivery, Directedness, ExecutionError, Finished, FnxAlgorithm,
+    FnxCallSpec, FnxExecutionLimits, FnxMemoryLimits, FoundationAlgorithm, KernelOutput,
+    KernelValues, Result, ResultAdmission, Rows, SealedGraphView, SealedRows, add, admit,
+    checkpoint, directional_pass_work, finish, finish_encoded, mul, require_loop_free_degree,
+    reserve,
 };
 use crate::sealed_control::Control;
 use std::future::Future;

@@ -2528,7 +2528,7 @@ impl<'a> Parser<'a> {
     }
 
     /// `CALL namespace.name(arguments) YIELD output [AS alias], ...` after the
-    /// CALL keyword. Arguments are constant row values (literals, parameters),
+    /// CALL keyword. Arguments are checked expressions over the incoming row,
     /// either all positional or all named (`name => value`, each name once);
     /// each yielded output becomes an Any-domain column, as UNWIND's does.
     /// The host resolves the procedure and checks its arguments at execution,

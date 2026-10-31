@@ -132,7 +132,7 @@ fn external(
     assert_eq!(source.columns(), ["g", "x"]);
     assert!(
         source
-            .evaluate_arguments(&mut |_| Ok::<_, ()>(()))
+            .evaluate_arguments(None, &mut |_| Ok::<_, ()>(()))
             .unwrap()
             .is_empty()
     );
@@ -539,7 +539,9 @@ fn independent_procedure_text_summaries_preserve_exact_group_domains() {
                     ("test", "rows")
                 );
                 assert_eq!(source.call().outputs(), ["vertex", "score"]);
-                let arguments = source.evaluate_arguments(&mut |_| Ok::<_, ()>(())).unwrap();
+                let arguments = source
+                    .evaluate_arguments(None, &mut |_| Ok::<_, ()>(()))
+                    .unwrap();
                 let rows = supplied_rows(&arguments);
                 calls.push(arguments);
                 rows

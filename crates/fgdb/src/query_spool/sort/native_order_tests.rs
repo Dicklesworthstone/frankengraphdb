@@ -1310,7 +1310,10 @@ fn small_native_windows_use_one_sort_run_but_distinct_keeps_full_sort_admission(
             if distinct && max_runs == 1 {
                 assert!(matches!(
                     result,
-                    Err(NativeSpoolError::SortRunLimit { required: 8, limit: 1 })
+                    Err(NativeSpoolError::SortRunLimit {
+                        required: 8,
+                        limit: 1
+                    })
                 ));
             } else {
                 let (spool, _) = result.unwrap();

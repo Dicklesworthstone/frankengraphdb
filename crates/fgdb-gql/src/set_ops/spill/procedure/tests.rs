@@ -277,7 +277,7 @@ fn lazy_arguments_equal_the_native_host_values_and_every_control_can_refuse() {
         .unwrap();
     let mut events = Vec::new();
     let actual = source
-        .evaluate_arguments(&mut |event| {
+        .evaluate_arguments(None, &mut |event| {
             assert_ne!(event, GlaExecutionEvent::ResultRow);
             events.push(event);
             Ok::<_, usize>(())
@@ -288,7 +288,7 @@ fn lazy_arguments_equal_the_native_host_values_and_every_control_can_refuse() {
     assert_eq!(events.first(), Some(&GlaExecutionEvent::ScratchEntry));
     for stop in 0..events.len() {
         let mut seen = 0;
-        assert!(matches!(source.evaluate_arguments(&mut |event| {
+        assert!(matches!(source.evaluate_arguments(None, &mut |event| {
             assert_eq!(event, events[seen]);
             let current = seen;
             seen += 1;
@@ -299,7 +299,7 @@ fn lazy_arguments_equal_the_native_host_values_and_every_control_can_refuse() {
     }
     assert_eq!(
         source
-            .evaluate_arguments(&mut |_| Ok::<_, usize>(()))
+            .evaluate_arguments(None, &mut |_| Ok::<_, usize>(()))
             .unwrap(),
         actual
     );
@@ -320,7 +320,7 @@ fn argument_failures_stay_lazy_typed_and_visible_beneath_empty_pages() {
     let error = plan
         .procedure_source()
         .unwrap()
-        .evaluate_arguments(&mut |_| Ok::<_, ()>(()))
+        .evaluate_arguments(None, &mut |_| Ok::<_, ()>(()))
         .unwrap_err();
     let SpillSetRowError::Native(expected) = error else {
         panic!("native argument arithmetic must remain typed");
@@ -364,12 +364,18 @@ fn repeated_capability_admits_all_apply_kinds_without_widening_existing_profiles
         )
         .unwrap();
     let queries = [
-        PreparedGraphSet::singleton().apply(single(), Vec::new()).unwrap(),
-        PreparedGraphSet::singleton().optional_apply(single(), Vec::new()).unwrap(),
+        PreparedGraphSet::singleton()
+            .apply(single(), Vec::new())
+            .unwrap(),
+        PreparedGraphSet::singleton()
+            .optional_apply(single(), Vec::new())
+            .unwrap(),
         lists.collect_apply(single(), Vec::new(), 0).unwrap(),
         PreparedGraphSet::singleton()
             .apply(
-                PreparedGraphSet::singleton().apply(single(), Vec::new()).unwrap(),
+                PreparedGraphSet::singleton()
+                    .apply(single(), Vec::new())
+                    .unwrap(),
                 Vec::new(),
             )
             .unwrap(),
@@ -418,10 +424,9 @@ fn repeated_capability_admits_all_apply_kinds_without_widening_existing_profiles
 }
 
 #[test]
-fn repeated_procedure_arguments_remain_constant_and_lazy() {
+fn unbound_procedure_arguments_refuse_and_constant_errors_remain_lazy() {
     assert!(
-        PreparedGraphSet::arguments(vec!["outer".into()], vec![GraphSetColumnType::Any])
-            .unwrap()
+        PreparedGraphSet::singleton()
             .procedure_call(
                 "fnx".into(),
                 "rows".into(),
@@ -434,16 +439,126 @@ fn repeated_procedure_arguments_remain_constant_and_lazy() {
     );
     let query = PreparedGraphSet::singleton()
         .apply(
-            call("fnx", "value", vec![expression(1, GraphIntegerBinary::Divide, 0)]),
+            call(
+                "fnx",
+                "value",
+                vec![expression(1, GraphIntegerBinary::Divide, 0)],
+            ),
             Vec::new(),
         )
         .unwrap()
         .with_page(0, Some(0));
     let plan = AsyncSpillSetPlan::compile_with_repeated_procedures(&query).unwrap();
     assert!(matches!(
-        plan.procedure_source().unwrap().evaluate_arguments(&mut |_| Ok::<_, ()>(())),
+        plan.procedure_source().unwrap().evaluate_arguments(None, &mut |_| Ok::<_, ()>(())),
         Err(SpillSetRowError::Native(GraphSetExecutionError::Projection { error, .. }))
             if error.kind == GraphIntegerErrorKind::DivisionByZero
+    ));
+}
+
+#[test]
+fn correlated_procedure_leaves_require_their_exact_frame_and_explicit_capability() {
+    let query = PreparedGraphSet::arguments(
+        vec!["seed".into(), "bias".into()],
+        vec![GraphSetColumnType::Vertex, GraphSetColumnType::Scalar],
+    )
+    .unwrap()
+    .procedure_call(
+        "fnx".into(),
+        "rows".into(),
+        vec![
+            GraphSetValue::Column(0),
+            GraphSetValue::List(vec![GraphSetValue::Column(1), GraphSetValue::Column(1)]),
+        ],
+        Vec::new(),
+        vec![("value".into(), "result".into())],
+        Vec::new(),
+    )
+    .unwrap();
+    assert!(AsyncSpillSetPlan::compile(&query).is_err());
+    assert!(AsyncSpillSetPlan::compile_with_single_procedure(&query).is_err());
+    assert!(AsyncSpillSetPlan::compile_with_independent_procedures(&query).is_err());
+    let plan = AsyncSpillSetPlan::compile_with_repeated_procedures(&query).unwrap();
+    let AsyncSpillSetSourcePlan::Apply(apply) = plan.source() else {
+        panic!("row-dependent arguments require per-occurrence Apply");
+    };
+    assert_eq!(apply.imports(), [0, 1]);
+    let source = apply.right().procedure_source().unwrap();
+    assert_eq!(
+        source.call().argument_input_types(),
+        [GraphSetColumnType::Vertex, GraphSetColumnType::Scalar],
+    );
+    let vertex = GraphValue::Vertex(fgdb_types::VId(u128::MAX - 17));
+    let frame = GraphValueRow::from_owned_values(vec![vertex.clone(), scalar(9)]);
+    let expected = vec![
+        vertex,
+        GraphValue::List(vec![scalar(9), scalar(9)].into_boxed_slice()),
+    ];
+    let mut events = Vec::new();
+    assert_eq!(
+        source
+            .evaluate_arguments(Some(&frame), &mut |event| {
+                events.push(event);
+                Ok::<_, usize>(())
+            })
+            .unwrap(),
+        expected,
+    );
+    assert!(!events.is_empty());
+    assert!(!events.contains(&GlaExecutionEvent::ResultRow));
+    for stop in 0..events.len() {
+        let mut reached = 0;
+        let error = source.evaluate_arguments(Some(&frame), &mut |_| {
+            let event = reached;
+            reached += 1;
+            if event == stop { Err(stop) } else { Ok(()) }
+        });
+        assert!(matches!(error, Err(SpillSetRowError::Control(at)) if at == stop));
+        assert_eq!(reached, stop + 1);
+    }
+    assert!(matches!(
+        source.evaluate_arguments(None, &mut |_| Ok::<_, ()>(())),
+        Err(SpillSetRowError::Native(
+            GraphSetExecutionError::ArgumentsUnavailable
+        )),
+    ));
+    for frame in [
+        GraphValueRow::unit(),
+        GraphValueRow::from_owned_values(vec![scalar(1), scalar(9)]),
+    ] {
+        let mut events = 0;
+        assert!(matches!(
+            source.evaluate_arguments(Some(&frame), &mut |_| {
+                events += 1;
+                Ok::<_, ()>(())
+            }),
+            Err(SpillSetRowError::Native(
+                GraphSetExecutionError::InputSchema { .. }
+            )),
+        ));
+        assert_eq!(
+            events, 0,
+            "an invalid frame must not evaluate an expression"
+        );
+    }
+    assert_eq!(
+        source
+            .evaluate_arguments(Some(&frame), &mut |_| Ok::<_, ()>(()))
+            .unwrap(),
+        expected,
+    );
+
+    let SetNode::Apply { right, .. } = query.node else {
+        unreachable!()
+    };
+    assert!(matches!(
+        PreparedGraphSet::arguments(
+            vec!["seed".into(), "bias".into()],
+            vec![GraphSetColumnType::Scalar, GraphSetColumnType::Scalar],
+        )
+        .unwrap()
+        .apply(*right, vec![0, 1]),
+        Err(GraphSetBuildError::ColumnType { column: 0, .. }),
     ));
 }
 
@@ -451,20 +566,24 @@ fn repeated_procedure_arguments_remain_constant_and_lazy() {
 fn repeated_optional_and_null_collection_keep_native_body_invocation_laws() {
     let null = GraphValue::Scalar(CanonicalScalar::Null);
     let optional = PreparedGraphSet::singleton()
-        .optional_apply(call("fnx", "value", Vec::new()).with_page(0, Some(0)), Vec::new())
+        .optional_apply(
+            call("fnx", "value", Vec::new()).with_page(0, Some(0)),
+            Vec::new(),
+        )
         .unwrap();
     let mut calls = 0;
     let answer = optional
         .execute_governed_with_procedures(
             wide(),
-            |_, _| -> Result<_, GqlQueryError<Infallible, ()>> {
-                panic!("no graph source")
-            },
+            |_, _| -> Result<_, GqlQueryError<Infallible, ()>> { panic!("no graph source") },
             |_, _, _| {
                 calls += 1;
                 Ok(GqlQueryExecution {
                     value: vec![GraphValueRow::from_owned_values(vec![scalar(7)])],
-                    rows: GqlExecutionStats { snapshot_records: 1, result_rows: 1 },
+                    rows: GqlExecutionStats {
+                        snapshot_records: 1,
+                        result_rows: 1,
+                    },
                     evaluator: GlaExecutionStats::default(),
                 })
             },
@@ -474,32 +593,45 @@ fn repeated_optional_and_null_collection_keep_native_body_invocation_laws() {
     assert_eq!(calls, 1);
     assert_eq!(answer.value[0].values(), [null.clone()]);
     let plan = AsyncSpillSetPlan::compile_with_repeated_procedures(&optional).unwrap();
-    let AsyncSpillSetSourcePlan::Apply(apply) = plan.source() else { unreachable!() };
+    let AsyncSpillSetSourcePlan::Apply(apply) = plan.source() else {
+        unreachable!()
+    };
     assert_eq!(apply.kind(), SpillSetApplyKind::Optional);
     assert_eq!(
-        apply.null_extend(&GraphValueRow::unit(), &mut |_| Ok::<_, ()>(())).unwrap().values(),
+        apply
+            .null_extend(&GraphValueRow::unit(), &mut |_| Ok::<_, ()>(()))
+            .unwrap()
+            .values(),
         answer.value[0].values(),
     );
 
     let collected = PreparedGraphSet::singleton()
-        .unwind("items".into(), GraphSetValue::List(vec![GraphSetValue::Value(null.clone())]))
+        .unwind(
+            "items".into(),
+            GraphSetValue::List(vec![GraphSetValue::Value(null.clone())]),
+        )
         .unwrap()
         .collect_apply(
-            call("fnx", "value", vec![expression(1, GraphIntegerBinary::Divide, 0)]),
+            call(
+                "fnx",
+                "value",
+                vec![expression(1, GraphIntegerBinary::Divide, 0)],
+            ),
             Vec::new(),
             0,
         )
         .unwrap();
     let plan = AsyncSpillSetPlan::compile_with_repeated_procedures(&collected).unwrap();
     let mut definitions = 0;
-    assert!(plan.all_procedure_sources(&mut |_| { definitions += 1; true }));
+    assert!(plan.all_procedure_sources(&mut |_| {
+        definitions += 1;
+        true
+    }));
     assert_eq!(definitions, 1);
     let answer = collected
         .execute_governed_with_procedures(
             wide(),
-            |_, _| -> Result<_, GqlQueryError<Infallible, ()>> {
-                panic!("no graph source")
-            },
+            |_, _| -> Result<_, GqlQueryError<Infallible, ()>> { panic!("no graph source") },
             |_, _, _| {
                 panic!("a saved NULL list cannot evaluate its failing procedure body");
             },
@@ -507,11 +639,20 @@ fn repeated_optional_and_null_collection_keep_native_body_invocation_laws() {
         )
         .unwrap();
     assert_eq!(answer.value[0].values(), [null.clone(), null.clone()]);
-    let AsyncSpillSetSourcePlan::Apply(apply) = plan.source() else { unreachable!() };
+    let AsyncSpillSetSourcePlan::Apply(apply) = plan.source() else {
+        unreachable!()
+    };
     let left = GraphValueRow::from_owned_values(vec![null]);
-    assert!(apply.collect_input_is_null(&left, &mut |_| Ok::<_, ()>(())).unwrap());
+    assert!(
+        apply
+            .collect_input_is_null(&left, &mut |_| Ok::<_, ()>(()))
+            .unwrap()
+    );
     assert_eq!(
-        apply.null_collect(&left, &mut |_| Ok::<_, ()>(())).unwrap().values(),
+        apply
+            .null_collect(&left, &mut |_| Ok::<_, ()>(()))
+            .unwrap()
+            .values(),
         answer.value[0].values(),
     );
 }
