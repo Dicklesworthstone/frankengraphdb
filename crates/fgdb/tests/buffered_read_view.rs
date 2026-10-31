@@ -7,6 +7,8 @@
 
 #[path = "buffered_read_view/edge_query.rs"]
 mod edge_query;
+#[path = "buffered_read_view/property_free.rs"]
+mod property_free;
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{

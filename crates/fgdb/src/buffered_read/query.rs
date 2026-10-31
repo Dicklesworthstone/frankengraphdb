@@ -17,7 +17,9 @@ use fgdb_gql::stream::{
     VertexScanOutput, VertexScanRow, VertexScanSourceError, VertexScanState,
 };
 use fgdb_gql::{GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryPolicy};
-use fgdb_strata::store::{BufferedScanError, BufferedScanEvent, BufferedVertexScan};
+use fgdb_strata::store::{
+    BufferedScanError, BufferedScanEvent, BufferedVertexScan, BufferedVertexTopology,
+};
 use fgdb_strata::tiered::edge_scan::BufferedEdgeJoinScan;
 use fgdb_strata::tiered::memory::MemoryCharge;
 use fgdb_types::{CommitSeq, QueryCx, VId};
@@ -136,6 +138,34 @@ impl AsyncVertexScanRecord for BufferedQueryRecord {
     }
 }
 
+// Only a compiled vertex-local plan can authorize the topology alternative.
+// Keep the complete record above for walk/probe roots, whose downstream reads
+// have a different authority. No incomplete public VertexRow is constructed.
+enum BufferedVertexFields {
+    Complete(BufferedValue<VertexRow>),
+    Topology(BufferedVertexTopology),
+}
+
+struct BufferedVertexQueryRecord {
+    fields: BufferedVertexFields,
+    scratch: RefCell<MemoryCharge>,
+}
+
+impl AsyncVertexScanRecord for BufferedVertexQueryRecord {
+    fn as_row(&self) -> VertexScanRow<'_> {
+        match &self.fields {
+            BufferedVertexFields::Complete(row) => VertexScanRow {
+                labels: &row.labels,
+                properties: &row.props,
+            },
+            BufferedVertexFields::Topology(row) => VertexScanRow {
+                labels: row.labels(),
+                properties: &[],
+            },
+        }
+    }
+}
+
 /// Owned selected roots. Empty and singleton inputs need no seed allocation;
 /// a larger admitted batch drops its capacity before resolving its last root.
 /// Declaration order releases the iterator before refunding its reservations.
@@ -209,7 +239,10 @@ fn seed_capacity_is_available_before_the_last_point_read_in_a_full_pool() {
 }
 
 enum BufferedVertexInput<'view, V: Vfs> {
-    Scan(BufferedVertexScan<'view, V>),
+    Scan {
+        scan: BufferedVertexScan<'view, V>,
+        requires_properties: bool,
+    },
     Seeds {
         scan: BufferedEdgeJoinScan<'view, V>,
         seeds: BufferedVertexSeeds,
@@ -224,12 +257,12 @@ struct BufferedVertexQuerySource<'view, 'q, V: Vfs> {
 
 impl<V: Vfs + Clone> AsyncVertexScanSource for BufferedVertexQuerySource<'_, '_, V> {
     type Error = BufferedReadError;
-    type Record = BufferedQueryRecord;
+    type Record = BufferedVertexQueryRecord;
     type OutputGuard = MemoryCharge;
 
     fn snapshot_seq(&self) -> CommitSeq {
         match &self.input {
-            BufferedVertexInput::Scan(scan) => scan.snapshot_seq(),
+            BufferedVertexInput::Scan { scan, .. } => scan.snapshot_seq(),
             BufferedVertexInput::Seeds { scan, .. } => scan.snapshot_seq(),
         }
     }
@@ -246,14 +279,48 @@ impl<V: Vfs + Clone> AsyncVertexScanSource for BufferedVertexQuerySource<'_, '_,
             })
         };
         let candidate = match &mut self.input {
-            BufferedVertexInput::Scan(scan) => {
-                scan.next_candidate_with(self.cx, &mut observe).await
-            }
+            BufferedVertexInput::Scan {
+                scan,
+                requires_properties: false,
+            } => scan
+                .next_topology_candidate_with(self.cx, &mut observe)
+                .await
+                .map(|candidate| {
+                    candidate.map(|candidate| {
+                        (
+                            candidate.vid,
+                            candidate.row.map(BufferedVertexFields::Topology),
+                        )
+                    })
+                }),
+            BufferedVertexInput::Scan {
+                scan,
+                requires_properties: true,
+            } => scan
+                .next_candidate_with(self.cx, &mut observe)
+                .await
+                .map(|candidate| {
+                    candidate.map(|candidate| {
+                        (
+                            candidate.vid,
+                            candidate.row.map(BufferedVertexFields::Complete),
+                        )
+                    })
+                }),
             BufferedVertexInput::Seeds { scan, seeds } => {
                 let Some(vid) = seeds.next() else {
                     return Ok(None);
                 };
-                scan.vertex_candidate_with(self.cx, vid, &mut observe).await
+                scan.vertex_candidate_with(self.cx, vid, &mut observe)
+                    .await
+                    .map(|candidate| {
+                        candidate.map(|candidate| {
+                            (
+                                candidate.vid,
+                                candidate.row.map(BufferedVertexFields::Complete),
+                            )
+                        })
+                    })
             }
         }
         .map_err(|error| match error {
@@ -261,25 +328,21 @@ impl<V: Vfs + Clone> AsyncVertexScanSource for BufferedVertexQuerySource<'_, '_,
             BufferedScanError::Control(error) => VertexScanSourceError::Control(error),
         })?;
         candidate
-            .map(|candidate| {
-                let record = candidate
-                    .row
-                    .map(|row| {
+            .map(|(vid, fields)| {
+                let record = fields
+                    .map(|fields| {
                         let scratch = self
                             .pool
                             .reserve(self.cx, 0)
                             .map_err(BufferedReadError::Memory)
                             .map_err(VertexScanSourceError::Source)?;
-                        Ok::<_, VertexScanSourceError<Self::Error, C>>(BufferedQueryRecord {
-                            row,
+                        Ok::<_, VertexScanSourceError<Self::Error, C>>(BufferedVertexQueryRecord {
+                            fields,
                             scratch: RefCell::new(scratch),
                         })
                     })
                     .transpose()?;
-                Ok(AsyncVertexCandidate {
-                    vid: candidate.vid,
-                    record,
-                })
+                Ok(AsyncVertexCandidate { vid, record })
             })
             .transpose()
     }
@@ -309,7 +372,7 @@ impl<V: Vfs + Clone> AsyncVertexScanSource for BufferedVertexQuerySource<'_, '_,
         // this one row. A conservative row-local bound permits sources larger
         // than RAM; it never reserves max_source_bytes for an individual row.
         let mut bytes = 1024usize;
-        for (_, value) in &record.row.props {
+        for (_, value) in record.as_row().properties {
             control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
             let payload = value
                 .canonical_encoded_len()
@@ -369,7 +432,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         as_of: CommitSeq,
         policy: GqlQueryPolicy,
     ) -> Result<BufferedQueryCursor<'view, 'q, V, Row>, BufferedQueryError> {
-        let (source, metadata) = self.vertex_input_source(cx, as_of)?;
+        let (source, metadata) = self.vertex_input_source(cx, as_of, plan.requires_properties())?;
         let checkpoint: Checkpoint<'q> = Box::new(move || cx.with_restriction(|| cx.checkpoint()));
         Ok(BufferedQueryCursor {
             inner: AsyncVertexScanCursor::new(source, plan, policy, checkpoint),
@@ -434,7 +497,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         >,
         BufferedQueryError,
     > {
-        let (source, metadata) = self.vertex_input_source(cx, as_of)?;
+        let (source, metadata) = self.vertex_input_source(cx, as_of, plan.requires_properties())?;
         let checkpoint: Checkpoint<'q> = Box::new(move || {
             let _retained = &metadata;
             cx.with_restriction(|| cx.checkpoint())
@@ -448,6 +511,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         &'view mut self,
         cx: &'q QueryCx,
         as_of: CommitSeq,
+        requires_properties: bool,
     ) -> Result<(BufferedVertexQuerySource<'view, 'q, V>, MemoryCharge), BufferedQueryError> {
         if as_of > self.frontier() {
             return Err(source_error(BufferedReadError::BeyondPublication {
@@ -462,11 +526,13 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
             .map_err(BufferedReadError::Memory)
             .map_err(source_error)?;
         let source = BufferedVertexQuerySource {
-            input: BufferedVertexInput::Scan(
-                self.partition
+            input: BufferedVertexInput::Scan {
+                scan: self
+                    .partition
                     .vertex_scan(cx, as_of)
                     .map_err(source_error)?,
-            ),
+                requires_properties,
+            },
             cx,
             pool,
         };

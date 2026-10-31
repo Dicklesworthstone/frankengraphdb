@@ -98,6 +98,13 @@ pub struct AsyncVertexScanPlan<Row = VId> {
 }
 
 impl<Row: VertexScanOutput> AsyncVertexScanPlan<Row> {
+    /// Whether this complete compiled source projection can read properties.
+    /// Hosts may use authenticated topology rows only when this returns false.
+    #[must_use]
+    pub fn requires_properties(&self) -> bool {
+        self.inner.requires_properties()
+    }
+
     pub fn compile(plan: &GlaPlan<Row>) -> Result<Self, VertexScanBuildError> {
         let inner = VertexScanPlan::compile(plan)?;
         Self::check_source(plan)?;
