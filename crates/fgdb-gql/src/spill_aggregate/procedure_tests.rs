@@ -144,3 +144,49 @@ fn empty_terminal_pages_never_evaluate_or_hide_call_argument_failures() {
         })) if error.kind == GraphIntegerErrorKind::DivisionByZero
     ));
 }
+
+#[test]
+fn repeated_terminal_capabilities_keep_complete_body_admission() {
+    let input = PreparedGraphSet::singleton()
+        .apply(call("value", Vec::new()), Vec::new())
+        .unwrap()
+        .with_page(0, Some(0));
+    let aggregates = [GraphAggregate::count_rows("n")];
+    let direct = PreparedGraphAggregate::prepare_set_relation(
+        input.clone(), &[], &aggregates, 0, Some(0),
+    ).unwrap();
+    let relation = PreparedGraphSetAggregate::prepare(
+        input, &[], &aggregates, 0, Some(0),
+    ).unwrap();
+    assert!(AsyncSpillAggregatePlan::compile(&direct).is_err());
+    assert!(AsyncSpillAggregatePlan::compile_relation(&relation).is_err());
+    assert!(AsyncSpillAggregatePlan::compile_with_independent_procedures(&direct).is_err());
+    assert!(
+        AsyncSpillAggregatePlan::compile_relation_with_independent_procedures(&relation).is_err()
+    );
+    assert!(
+        AsyncSpillAggregatePlan::compile_with_independent_procedures_and_bounded_walks(&direct)
+            .is_err()
+    );
+    assert!(
+        AsyncSpillAggregatePlan::compile_relation_with_independent_procedures_and_bounded_walks(
+            &relation,
+        ).is_err()
+    );
+    for plan in [
+        AsyncSpillAggregatePlan::compile_with_repeated_procedures(&direct).unwrap(),
+        AsyncSpillAggregatePlan::compile_relation_with_repeated_procedures(&relation).unwrap(),
+        AsyncSpillAggregatePlan::compile_with_repeated_procedures_and_bounded_walks(&direct)
+            .unwrap(),
+        AsyncSpillAggregatePlan::compile_relation_with_repeated_procedures_and_bounded_walks(
+            &relation,
+        ).unwrap(),
+    ] {
+        let AsyncSpillAggregatePlan::Relation { input, definition } = plan else {
+            unreachable!()
+        };
+        assert_eq!(input.source_count(), 1);
+        assert_eq!(input.procedure_source().unwrap().columns(), ["value"]);
+        assert_eq!(definition.result_window(), (0, Some(0)));
+    }
+}

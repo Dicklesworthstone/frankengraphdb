@@ -1,6 +1,6 @@
-//! Terminal exact aggregates over independent sealed analytics sources. The input uses
-//! the existing external relational host; completed groups retain the native
-//! aggregate domain and never pass through a scalar-row conversion.
+//! Terminal exact aggregates over sealed analytics sources and repeated Apply bodies.
+//! The existing external relational host retains completed groups in the native
+//! aggregate domain without a scalar-row conversion.
 
 use super::*;
 use crate::PreparedBufferedSealedOrder;
@@ -8,7 +8,7 @@ use fgdb_delta_types::RelationId;
 use fgdb_prism::FnxMemoryLimits;
 use fgdb_strata::tiered::sealed::SealedLimits;
 
-/// Independent sealed FnX sources feeding native external grouping.
+/// Sealed FnX sources, including repeated Apply bodies, feeding native grouping.
 /// Wide sums, exact averages and ordered collections retain their native output
 /// domains. The input may include supported external relational stages, and
 /// both input and final aggregate output must complete before a handle escapes.
@@ -31,8 +31,8 @@ impl core::fmt::Debug for PreparedBufferedSealedAggregate {
 }
 
 impl PreparedNativeRead {
-    /// Explicit privileged admission for terminal aggregates over independent
-    /// sealed procedure sources. Ordinary buffered preparation remains unchanged.
+    /// Explicit privileged admission for terminal aggregates over sealed sources,
+    /// including repeated Apply bodies. Ordinary buffered preparation is unchanged.
     /// Binding and registry-shape admission perform no graph or scratch IO;
     /// argument evaluation remains at the reached procedure source.
     pub fn prepare_buffered_sealed_aggregate(
@@ -49,7 +49,7 @@ impl PreparedNativeRead {
                     NativeAggregateSpoolError::Prepare(Box::new(QueryError::PipelineText(error)))
                 })?;
                 (
-                    AsyncSpillAggregatePlan::compile_relation_with_independent_procedures_and_bounded_walks(
+                    AsyncSpillAggregatePlan::compile_relation_with_repeated_procedures_and_bounded_walks(
                         &aggregate,
                     )
                     .map_err(|_| NativeAggregateSpoolError::Unsupported)?,
@@ -64,12 +64,12 @@ impl PreparedNativeRead {
                 })?;
                 let plan = match aggregate.aggregate() {
                     fgdb_gql::TemporalAggregatePlan::Graph(definition) => {
-                        AsyncSpillAggregatePlan::compile_with_independent_procedures_and_bounded_walks(
+                        AsyncSpillAggregatePlan::compile_with_repeated_procedures_and_bounded_walks(
                             definition,
                         )
                     }
                     fgdb_gql::TemporalAggregatePlan::Relation(definition) => {
-                        AsyncSpillAggregatePlan::compile_relation_with_independent_procedures_and_bounded_walks(
+                        AsyncSpillAggregatePlan::compile_relation_with_repeated_procedures_and_bounded_walks(
                             definition,
                         )
                     }
@@ -90,7 +90,7 @@ impl PreparedNativeRead {
                     as_of,
                 } = bind(self, params)?;
                 (
-                    AsyncSpillAggregatePlan::compile_with_independent_procedures_and_bounded_walks(
+                    AsyncSpillAggregatePlan::compile_with_repeated_procedures_and_bounded_walks(
                         &definition,
                     )
                     .map_err(|_| NativeAggregateSpoolError::Unsupported)?,

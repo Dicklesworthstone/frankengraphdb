@@ -459,6 +459,7 @@ struct SourceAdmission {
     max_count: usize,
     count: usize,
     bounded_walks: bool,
+    repeated_procedures: bool,
 }
 
 impl AsyncSpillSetPlan {
@@ -498,7 +499,7 @@ impl AsyncSpillSetPlan {
     pub fn compile_with_single_procedure(
         query: &PreparedGraphSet,
     ) -> Result<Self, SpillSetBuildError> {
-        Self::compile_with_procedure_limit(query, 1, false)
+        Self::compile_with_procedure_limit(query, 1, false, false)
     }
 
     /// Admit one or more independent procedure sources, each executed once
@@ -515,7 +516,7 @@ impl AsyncSpillSetPlan {
     pub fn compile_with_independent_procedures(
         query: &PreparedGraphSet,
     ) -> Result<Self, SpillSetBuildError> {
-        Self::compile_with_procedure_limit(query, usize::MAX, false)
+        Self::compile_with_procedure_limit(query, usize::MAX, false, false)
     }
 
     /// Combine independent procedures with the buffered host's bounded path
@@ -526,18 +527,44 @@ impl AsyncSpillSetPlan {
     pub fn compile_with_independent_procedures_and_bounded_walks(
         query: &PreparedGraphSet,
     ) -> Result<Self, SpillSetBuildError> {
-        Self::compile_with_procedure_limit(query, usize::MAX, true)
+        Self::compile_with_procedure_limit(query, usize::MAX, true, false)
+    }
+
+    /// Admit procedure sources inside Apply bodies as well as independent
+    /// sources. Every reached outer occurrence executes its complete body with
+    /// the same pinned cut and the enclosing query's remaining allowances.
+    /// Procedure arguments remain constant expressions over the native unit
+    /// row; imported values may filter or project their output, not become
+    /// procedure arguments. No kernel or completed result is reused.
+    ///
+    /// Before I/O, the host must admit EVERY definition through
+    /// `all_procedure_sources`, including bodies skipped by empty or NULL input.
+    /// Ordinary, single-source and independent-source profiles remain unchanged.
+    pub fn compile_with_repeated_procedures(
+        query: &PreparedGraphSet,
+    ) -> Result<Self, SpillSetBuildError> {
+        Self::compile_with_procedure_limit(query, usize::MAX, false, true)
+    }
+
+    /// Combine repeated procedures with bounded path leaves for a host that
+    /// implements both capabilities under one snapshot and cumulative policy.
+    pub fn compile_with_repeated_procedures_and_bounded_walks(
+        query: &PreparedGraphSet,
+    ) -> Result<Self, SpillSetBuildError> {
+        Self::compile_with_procedure_limit(query, usize::MAX, true, true)
     }
 
     fn compile_with_procedure_limit(
         query: &PreparedGraphSet,
         max_count: usize,
         bounded_walks: bool,
+        repeated_procedures: bool,
     ) -> Result<Self, SpillSetBuildError> {
         let mut admission = SourceAdmission {
             max_count,
             count: 0,
             bounded_walks,
+            repeated_procedures,
         };
         let plan = Self::compile_at(query, 0, &mut admission, false)?;
         if admission.count == 0 {
@@ -690,7 +717,10 @@ impl AsyncSpillSetPlan {
                 .procedure_source()
                 .or_else(|| join.right().procedure_source()),
             AsyncSpillSetSourcePlan::Aggregate(aggregate) => aggregate.input().procedure_source(),
-            AsyncSpillSetSourcePlan::Apply(apply) => apply.left().procedure_source(),
+            AsyncSpillSetSourcePlan::Apply(apply) => apply
+                .left()
+                .procedure_source()
+                .or_else(|| apply.right().procedure_source()),
             _ => None,
         }
     }
@@ -700,8 +730,8 @@ impl AsyncSpillSetPlan {
     /// predicate refuses one definition. Empty source sets return true without
     /// invoking the predicate; a host requiring a procedure must track whether
     /// it saw one. Every child is inspected even when a page or empty sibling
-    /// would suppress its output. The compiler independently rejects every
-    /// procedure inside an Apply body.
+    /// would suppress its output. Apply bodies are included even when their
+    /// runtime invocation is skipped; this visits definitions, not invocations.
     pub fn all_procedure_sources(
         &self,
         predicate: &mut impl FnMut(&SpillSetProcedurePlan) -> bool,
@@ -1477,7 +1507,9 @@ fn compile_stages<'a>(
             )
         }
         SetNode::ProcedureCall(call) => {
-            if in_apply_body || admission.count >= admission.max_count {
+            if (in_apply_body && !admission.repeated_procedures)
+                || admission.count >= admission.max_count
+            {
                 return Err(SpillSetBuildError::Unsupported { depth });
             }
             admission.count = admission

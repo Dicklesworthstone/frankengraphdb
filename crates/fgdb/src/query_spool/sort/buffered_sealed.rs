@@ -1,4 +1,4 @@
-//! Explicit owner-level composition of independent compressed analytics sources with
+//! Explicit owner-level composition of compressed analytics sources with
 //! the shared external relational executor. The kernel remains resident and
 //! bounded; ordinary graph reads and intermediate relations remain buffered.
 
@@ -21,11 +21,11 @@ struct SealedOptions {
     max_source_incidences: usize,
 }
 
-/// Independent FnX CALLs composed through supported external query stages.
+/// FnX CALLs composed through supported external stages and Apply bodies.
 /// Preparation binds the complete physical shape without graph or scratch IO.
 /// Procedure arguments execute only when their source is reached, preserving
-/// earlier child failures. Calls inside Apply bodies refuse. Every call must
-/// select this owner's admitted relation at the same pinned historical cut.
+/// earlier child failures. Each reached Apply occurrence runs its body afresh.
+/// Every call selects this owner's admitted relation at the same historical cut.
 /// Bounded path leaves use the ordinary buffered traversal and external tail;
 /// every native route occurrence remains distinct until its query clauses act.
 ///
@@ -48,7 +48,8 @@ impl core::fmt::Debug for PreparedBufferedSealedOrder {
 }
 
 impl PreparedNativeRead {
-    /// Explicit privileged admission for independent sealed procedure sources.
+    /// Explicit privileged admission for sealed procedure sources, including
+    /// repeated invocations inside supported Apply bodies.
     /// Ordinary buffered and authorized compilers do not acquire this ability.
     /// The selected relation must also be present in the CALL's own projection;
     /// it is an admission boundary, never an implicit projection override.
@@ -81,7 +82,7 @@ impl PreparedNativeRead {
             }
             _ => return Err(unsupported()),
         };
-        let plan = AsyncSpillSetPlan::compile_with_independent_procedures_and_bounded_walks(&query)
+        let plan = AsyncSpillSetPlan::compile_with_repeated_procedures_and_bounded_walks(&query)
             .map_err(|_| unsupported())?;
         PreparedBufferedSealedOrder::from_relation(
             plan,

@@ -868,3 +868,62 @@ fn temporal_terminal_aggregates_pin_both_procedures_and_properties_before_spilli
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn repeated_analytics_feed_exact_and_temporal_terminal_aggregates() {
+    let ((), report) = run_async_under_lab(0x6273_5303, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx) = (contexts.commit(), contexts.query());
+        let (vfs, mut writer) = fixture(&commit).await;
+        let mut change = WriteBatch::new(R);
+        change.add_edge(EId(BASE + 8), VId(THIRD), VId(FOURTH), vec![]);
+        assert_eq!(writer.write(&commit, change).await.unwrap(), CommitSeq(3));
+        writer.compact(&commit).await.unwrap();
+        let source_pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+        let mut current = view(&commit, &vfs, &source_pool).await;
+        let params = parameters();
+        for (selector, snapshot, distances) in [
+            ("", CommitSeq(3), vec![1,1,2,2,2,3,3,3]),
+            ("FOR SYSTEM_TIME AS OF SEQ 2", CommitSeq(2), vec![1,1,2,2,2]),
+        ] {
+            let text = format!(
+                "UNWIND [1,1,2] AS cutoff CALL (cutoff) {{ \
+                 {BFS} YIELD distance WHERE distance>=cutoff RETURN distance }} \
+                 {selector} WITH distance ORDER BY distance \
+                 RETURN COUNT(*) AS n,SUM(distance) AS total, \
+                 SUM(9223372036854775807) AS wide,COLLECT(distance) AS bag"
+            );
+            let native = PreparedNativeRead::prepare(&text, &params, resolve).unwrap();
+            assert!(native.prepare_buffered_aggregate(&params).is_err());
+            let prepared = native.prepare_buffered_sealed_aggregate(
+                &params, R, memory(), sealing(), RAW,
+            ).unwrap();
+            if !selector.is_empty() {
+                assert!(prepared.clone().with_as_of(CommitSeq(3)).is_err());
+            }
+            let result = execute_aggregate(
+                &prepared, &mut current, &cx,
+                GqlQueryPolicy::new(10_000, 1, WORK, WORK), &spill_pool,
+                Limits { run_rows: 4, ..Limits::default() },
+            ).await.unwrap();
+            let count = distances.len() as u64;
+            assert_eq!(result.snapshot, snapshot);
+            assert_eq!(result.rows, vec![vec![
+                QueryValue::Count(count),
+                QueryValue::Integer(distances.iter().copied().map(i128::from).sum()),
+                QueryValue::Integer(i128::from(count) * i128::from(i64::MAX)),
+                values(distances.into_iter().map(integer).collect()),
+            ]]);
+            assert_resident(&writer, &cx, &text, &params, &result);
+            assert!(execute_aggregate(
+                &prepared, &mut current, &cx, policy(), &spill_pool,
+                Limits { input_rows: 4, ..Limits::default() },
+            ).await.is_err());
+            assert_eq!(spill_pool.used(), 0);
+        }
+        drop(current);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

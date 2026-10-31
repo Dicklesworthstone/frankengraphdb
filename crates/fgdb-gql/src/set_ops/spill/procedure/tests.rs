@@ -351,3 +351,167 @@ fn argument_failures_stay_lazy_typed_and_visible_beneath_empty_pages() {
     assert_eq!(actual, expected);
     assert!(!called);
 }
+
+#[test]
+fn repeated_capability_admits_all_apply_kinds_without_widening_existing_profiles() {
+    let single = || call("fnx", "value", Vec::new());
+    let lists = PreparedGraphSet::singleton()
+        .unwind(
+            "items".into(),
+            GraphSetValue::List(vec![GraphSetValue::Value(GraphValue::Scalar(
+                CanonicalScalar::Null,
+            ))]),
+        )
+        .unwrap();
+    let queries = [
+        PreparedGraphSet::singleton().apply(single(), Vec::new()).unwrap(),
+        PreparedGraphSet::singleton().optional_apply(single(), Vec::new()).unwrap(),
+        lists.collect_apply(single(), Vec::new(), 0).unwrap(),
+        PreparedGraphSet::singleton()
+            .apply(
+                PreparedGraphSet::singleton().apply(single(), Vec::new()).unwrap(),
+                Vec::new(),
+            )
+            .unwrap(),
+    ];
+    for query in queries {
+        for query in [query.clone(), query.with_page(0, Some(0))] {
+            assert!(AsyncSpillSetPlan::compile(&query).is_err());
+            assert!(AsyncSpillSetPlan::compile_with_single_procedure(&query).is_err());
+            assert!(AsyncSpillSetPlan::compile_with_independent_procedures(&query).is_err());
+            assert!(
+                AsyncSpillSetPlan::compile_with_independent_procedures_and_bounded_walks(&query)
+                    .is_err()
+            );
+            for plan in [
+                AsyncSpillSetPlan::compile_with_repeated_procedures(&query).unwrap(),
+                AsyncSpillSetPlan::compile_with_repeated_procedures_and_bounded_walks(&query)
+                    .unwrap(),
+            ] {
+                assert_eq!(plan.source_count(), 1);
+                assert_eq!(plan.procedure_source().unwrap().columns(), ["value"]);
+                let mut visited = 0;
+                assert!(plan.all_procedure_sources(&mut |source| {
+                    assert_eq!(source.call().namespace(), "fnx");
+                    visited += 1;
+                    true
+                }));
+                assert_eq!(visited, 1);
+                assert!(!plan.all_procedure_sources(&mut |_| false));
+            }
+        }
+    }
+    assert!(
+        AsyncSpillSetPlan::compile_with_repeated_procedures(&PreparedGraphSet::singleton())
+            .is_err()
+    );
+    let unsupported = PreparedGraphSet::singleton()
+        .apply(
+            PreparedGraphSet::owned(Vec::new(), Vec::new())
+                .cross_join(single())
+                .unwrap(),
+            Vec::new(),
+        )
+        .unwrap()
+        .with_page(0, Some(0));
+    assert!(AsyncSpillSetPlan::compile_with_repeated_procedures(&unsupported).is_err());
+}
+
+#[test]
+fn repeated_procedure_arguments_remain_constant_and_lazy() {
+    assert!(
+        PreparedGraphSet::arguments(vec!["outer".into()], vec![GraphSetColumnType::Any])
+            .unwrap()
+            .procedure_call(
+                "fnx".into(),
+                "rows".into(),
+                vec![GraphSetValue::Column(0)],
+                Vec::new(),
+                vec![("value".into(), "result".into())],
+                Vec::new(),
+            )
+            .is_err()
+    );
+    let query = PreparedGraphSet::singleton()
+        .apply(
+            call("fnx", "value", vec![expression(1, GraphIntegerBinary::Divide, 0)]),
+            Vec::new(),
+        )
+        .unwrap()
+        .with_page(0, Some(0));
+    let plan = AsyncSpillSetPlan::compile_with_repeated_procedures(&query).unwrap();
+    assert!(matches!(
+        plan.procedure_source().unwrap().evaluate_arguments(&mut |_| Ok::<_, ()>(())),
+        Err(SpillSetRowError::Native(GraphSetExecutionError::Projection { error, .. }))
+            if error.kind == GraphIntegerErrorKind::DivisionByZero
+    ));
+}
+
+#[test]
+fn repeated_optional_and_null_collection_keep_native_body_invocation_laws() {
+    let null = GraphValue::Scalar(CanonicalScalar::Null);
+    let optional = PreparedGraphSet::singleton()
+        .optional_apply(call("fnx", "value", Vec::new()).with_page(0, Some(0)), Vec::new())
+        .unwrap();
+    let mut calls = 0;
+    let answer = optional
+        .execute_governed_with_procedures(
+            wide(),
+            |_, _| -> Result<_, GqlQueryError<Infallible, ()>> {
+                panic!("no graph source")
+            },
+            |_, _, _| {
+                calls += 1;
+                Ok(GqlQueryExecution {
+                    value: vec![GraphValueRow::from_owned_values(vec![scalar(7)])],
+                    rows: GqlExecutionStats { snapshot_records: 1, result_rows: 1 },
+                    evaluator: GlaExecutionStats::default(),
+                })
+            },
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(answer.value[0].values(), [null.clone()]);
+    let plan = AsyncSpillSetPlan::compile_with_repeated_procedures(&optional).unwrap();
+    let AsyncSpillSetSourcePlan::Apply(apply) = plan.source() else { unreachable!() };
+    assert_eq!(apply.kind(), SpillSetApplyKind::Optional);
+    assert_eq!(
+        apply.null_extend(&GraphValueRow::unit(), &mut |_| Ok::<_, ()>(())).unwrap().values(),
+        answer.value[0].values(),
+    );
+
+    let collected = PreparedGraphSet::singleton()
+        .unwind("items".into(), GraphSetValue::List(vec![GraphSetValue::Value(null.clone())]))
+        .unwrap()
+        .collect_apply(
+            call("fnx", "value", vec![expression(1, GraphIntegerBinary::Divide, 0)]),
+            Vec::new(),
+            0,
+        )
+        .unwrap();
+    let plan = AsyncSpillSetPlan::compile_with_repeated_procedures(&collected).unwrap();
+    let mut definitions = 0;
+    assert!(plan.all_procedure_sources(&mut |_| { definitions += 1; true }));
+    assert_eq!(definitions, 1);
+    let answer = collected
+        .execute_governed_with_procedures(
+            wide(),
+            |_, _| -> Result<_, GqlQueryError<Infallible, ()>> {
+                panic!("no graph source")
+            },
+            |_, _, _| {
+                panic!("a saved NULL list cannot evaluate its failing procedure body");
+            },
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    assert_eq!(answer.value[0].values(), [null.clone(), null.clone()]);
+    let AsyncSpillSetSourcePlan::Apply(apply) = plan.source() else { unreachable!() };
+    let left = GraphValueRow::from_owned_values(vec![null]);
+    assert!(apply.collect_input_is_null(&left, &mut |_| Ok::<_, ()>(())).unwrap());
+    assert_eq!(
+        apply.null_collect(&left, &mut |_| Ok::<_, ()>(())).unwrap().values(),
+        answer.value[0].values(),
+    );
+}

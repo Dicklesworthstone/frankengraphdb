@@ -1,11 +1,12 @@
-//! Explicit, once-executed procedure leaves for a capable external host.
+//! Explicit procedure leaves for a capable external host.
 
 use super::*;
 use crate::PreparedProcedureCall;
 
 /// The original bound call and its YIELD aliases, admitted only by the explicit
 /// [`AsyncSpillSetPlan::compile_with_single_procedure`] or
-/// [`AsyncSpillSetPlan::compile_with_independent_procedures`] capability.
+/// [`AsyncSpillSetPlan::compile_with_independent_procedures`] capability, or an
+/// explicit repeated-procedure capability for sources inside Apply bodies.
 /// This definition does not confer authority or validate a host's procedure
 /// implementation.
 ///
@@ -44,8 +45,8 @@ impl SpillSetProcedurePlan {
         self.call.arguments.len()
     }
 
-    /// Evaluate the original constant arguments once, when this leaf is
-    /// reached, against the native unit row. Compilation never evaluates them:
+    /// Evaluate the original constant arguments once per reached invocation
+    /// against the native unit row. Compilation never evaluates them:
     /// a late argument failure must not move ahead of an earlier child failure.
     /// Named arguments, schema bindings and projection metadata stay in `call`.
     ///

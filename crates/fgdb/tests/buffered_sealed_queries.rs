@@ -5,6 +5,8 @@
 
 #[path = "buffered_sealed_queries/aggregates.rs"]
 mod aggregates;
+#[path = "buffered_sealed_queries/repeated.rs"]
+mod repeated;
 
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use asupersync::lab::run_async_under_lab;
