@@ -463,6 +463,42 @@ committed bridge, and retains both owners after another write and writer drop.
 Whole-map upsert routing, primitive NULL accounting, optional-query paths and
 newly integrated FOREACH cases still require the next runtime verdict.
 
+The next focused run executed eighteen targets: 238 passed and fifteen failed.
+It confirmed the NULL resume, composite spill, metadata, standing-group,
+optional-query, boolean and scalar repairs, while isolating the remaining
+FOREACH and two new fixture errors. Native owned mutation tails still demanded
+legacy preimage slots, and separate chained CREATE clauses shared a scope that
+could not read newly created elements. Both now reuse their existing native
+owners and post-write readers. Simultaneous comma proposals, selected ON
+branches, capability masking and the peer creation optimization remain intact.
+The fixture repairs retain typed conflicts, exact rollback state and the live
+transaction pin until explicit abort. Canonical projected-value ordering is
+distinct from an ordinary UNWIND read's preserved input order.
+
+On unchanged commit `25a0a1e4ede67a6b550f2b737f65d1efe6586875`, all five
+affected public targets pass: authorized FOREACH 28, query facade eight,
+FOREACH chains 32, scalar-map writes 25 and sealed owners twenty. Every native
+owner class now has independent literal typed results at both cuts as well as
+ordinary-engine parity. Separately, all 200 delta-type library tests and eight
+doctests pass, including the count/sum profile's compile-fail boundaries.
+These focused results do not replace the complete mandatory gate.
+
+Later proof attempts remain explicitly invalid: proof3 and proof4 each exit125
+and verify as VOID after concurrent source movement. Proof4's Cargo compilation
+also mixed newly landed tests with an older compiled API. Root stopped only its
+obsolete Cargo process and allowed the wrapper to finish normal accounting;
+root's later server type-alias edit also disqualified that run. The small
+Clippy repair was committed after the landing lease released, without bypass.
+The owner identified the concurrent committer as theirs and instructed us to
+work around it; no further pause request or alternate checkout was used.
+
+The second exact-ID native tracker publication declares all 1,353 changed
+records and completes with helper exit0. It omits 1,352 legacy machine-local
+path fields in the standard portable format. Every prior issue, label,
+dependency, comment and local audit-event row survives; the portable corpus
+retains 1,361 issues, 3,901 labels, 2,371 dependencies and 3,335 comments.
+The historical tracker audit and broad performance work remain open.
+
 Two new private structural-admission tests pass for inline and CSR owners.
 Process-local mutants ignoring the actual finish/reload validator refusal
 fail both tests, and normal execution passes again with unchanged disk hashes.
