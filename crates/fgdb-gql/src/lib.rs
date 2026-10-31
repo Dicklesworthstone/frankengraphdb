@@ -173,7 +173,7 @@ pub use graph_text::{
     GraphAggregateTextSlot, GraphPatternTextError, GraphPatternTextErrorKind, GraphSymbol,
     GraphSymbolKind, GraphSymbolResolver, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS,
     PreparedGraphAggregateText, PreparedGraphText, ReverseSymbolCatalog, reads_element_identity,
-    starts_fnx_graph_projection,
+    starts_fnx_graph_projection, statement_time_required,
 };
 pub use identified::IdentifiedNeighbors;
 pub use insertion_query::{

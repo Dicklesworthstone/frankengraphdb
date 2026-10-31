@@ -22,6 +22,8 @@ use fgdb_types::CanonicalScalar;
 /// Coordinates address the script's parameter schema, never user values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphQueryWriteBuildError {
+    /// The script requires a host-captured instant, including for an empty source.
+    StatementTimeRequired,
     MissingColumn {
         parameter: usize,
     },
@@ -38,6 +40,9 @@ pub enum GraphQueryWriteBuildError {
 impl core::fmt::Display for GraphQueryWriteBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::StatementTimeRequired => {
+                f.write_str("statement time must be supplied by the host")
+            }
             Self::MissingColumn { parameter } => write!(
                 f,
                 "write parameter {parameter} has no column of the same name in the source query"
@@ -58,6 +63,16 @@ impl core::fmt::Display for GraphQueryWriteBuildError {
     }
 }
 impl core::error::Error for GraphQueryWriteBuildError {}
+
+impl GraphQueryWriteBuildError {
+    #[must_use]
+    pub fn class(&self) -> crate::GqlRefusalClass {
+        match self {
+            Self::StatementTimeRequired => crate::GqlRefusalClass::InvalidValue,
+            _ => crate::GqlRefusalClass::Statement,
+        }
+    }
+}
 
 /// A retained logical entry consumes one work unit and one scratch entry.
 /// Zero entries is a checkpoint only. This is not an allocator-byte bound.
@@ -173,7 +188,7 @@ impl<C: core::error::Error + 'static> core::error::Error for GraphQueryWriteBind
 
 /// A read query followed by a write script once per source occurrence.
 ///
-/// Each script parameter must name a source projection. Extra source columns
+/// Each named script parameter must name a source projection. Extra source columns
 /// are allowed and are not copied into arguments. Scalar, list and map arguments
 /// retain their native parameter domains. Concrete incompatible source domains
 /// refuse even for empty sources; Stored and Any columns are checked per row.
@@ -190,6 +205,7 @@ pub struct PreparedGraphQueryWrite {
     source: PreparedGraphSet,
     script: PreparedGraphWriteScript,
     columns: Box<[usize]>,
+    context: GqlParameters,
 }
 impl core::fmt::Debug for PreparedGraphQueryWrite {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -205,8 +221,35 @@ impl PreparedGraphQueryWrite {
         source: PreparedGraphSet,
         script: PreparedGraphWriteScript,
     ) -> Result<Self, GraphQueryWriteBuildError> {
+        Self::prepare_with_context(source, script, &GqlParameters::new())
+    }
+
+    /// Compose an already-bound source with a script using the same captured
+    /// execution instant. Only statement context is retained from `context`;
+    /// source column names still supply every named script argument. Preparing
+    /// a later execution binds a fresh source and context through this method.
+    /// Missing required context refuses here even when the source is empty.
+    /// No clock is read by composition, row binding or evaluation.
+    pub fn prepare_with_context(
+        source: PreparedGraphSet,
+        script: PreparedGraphWriteScript,
+        context: &GqlParameters,
+    ) -> Result<Self, GraphQueryWriteBuildError> {
+        if context.statement_time().is_none()
+            && script
+                .parameter_schema()
+                .iter()
+                .any(crate::GqlParameterSpec::is_statement_time)
+        {
+            return Err(GraphQueryWriteBuildError::StatementTimeRequired);
+        }
         let mut columns = Vec::with_capacity(script.parameter_schema().len());
-        for (parameter, spec) in script.parameter_schema().iter().enumerate() {
+        for (parameter, spec) in script
+            .parameter_schema()
+            .iter()
+            .enumerate()
+            .filter(|(_, spec)| !spec.is_statement_time())
+        {
             let column = source
                 .columns()
                 .iter()
@@ -230,6 +273,7 @@ impl PreparedGraphQueryWrite {
             source,
             script,
             columns: columns.into_boxed_slice(),
+            context: context.subset_for(&[]),
         })
     }
 
@@ -295,12 +339,20 @@ impl PreparedGraphQueryWrite {
         let mut arguments = Vec::with_capacity(rows.len());
         let mut transcript_bytes = 0_u128;
         for (row, input) in rows.iter().enumerate() {
-            retain(Some(row), 1)?;
+            retain(
+                Some(row),
+                1 + u64::from(self.context.statement_time().is_some()),
+            )?;
             if input.values().len() != self.source.columns().len() {
                 return Err(GraphQueryWriteBindError::RowShape { row });
             }
-            let mut values = GqlParameters::new();
-            for (&column, spec) in self.columns.iter().zip(self.script.parameter_schema()) {
+            let mut values = self.context.clone();
+            for (&column, spec) in self.columns.iter().zip(
+                self.script
+                    .parameter_schema()
+                    .iter()
+                    .filter(|spec| !spec.is_statement_time()),
+            ) {
                 let parameter = values::bind_cell(
                     &input.values()[column],
                     spec.parameter_type,

@@ -38,7 +38,7 @@ pub struct CsvParameterLimits {
     pub max_input_bytes: usize,
     /// Data records only; the mandatory header is not a data record.
     pub max_records: usize,
-    /// Columns in both the schema and every input record.
+    /// Named columns in both the schema and every input record.
     pub max_columns: usize,
     /// Decoded UTF-8 bytes per field, including header fields.
     pub max_field_bytes: usize,
@@ -390,7 +390,7 @@ fn bind_field(
 
 /// Decode all records into the existing canonical argument maps.
 ///
-/// The header must contain every declared parameter exactly once. Unsupported,
+/// The header must contain every named parameter exactly once. Unsupported,
 /// duplicate or invalid declarations refuse before input field decoding. This
 /// does not perform template binding or execute any statement. The returned
 /// records can be passed to an ordinary prepared query or atomic write batch.
@@ -398,6 +398,20 @@ pub fn decode_csv_parameters(
     input: &str,
     schema: &[GqlParameterSpec],
     limits: CsvParameterLimits,
+) -> Result<Vec<GqlParameters>, CsvParameterError> {
+    decode_csv_parameters_with_context(input, schema, limits, &GqlParameters::new())
+}
+
+/// Decode named CSV columns while carrying an explicit statement instant to
+/// every record. Compiler-generated context requirements are not CSV columns.
+/// Only the context is copied from `context`; its named arguments are ignored.
+/// The complete per-record transcript, including context, spends the same
+/// native and cumulative byte/count allowances before any record is retained.
+pub fn decode_csv_parameters_with_context(
+    input: &str,
+    schema: &[GqlParameterSpec],
+    limits: CsvParameterLimits,
+    context: &GqlParameters,
 ) -> Result<Vec<GqlParameters>, CsvParameterError> {
     let limits = limits.effective();
     if input.len() > limits.max_input_bytes {
@@ -410,22 +424,36 @@ pub fn decode_csv_parameters(
             input.len(),
         ));
     }
-    if schema.is_empty() {
+    let columns = schema
+        .iter()
+        .filter(|spec| !spec.is_statement_time())
+        .count();
+    if columns == 0 {
         return Err(error(0, None, 0, CsvParameterErrorKind::EmptySchema));
     }
-    if schema.len() > limits.max_columns {
+    if columns > limits.max_columns {
         return Err(limit_error(
             0,
             None,
             0,
             CsvParameterLimit::Columns,
             limits.max_columns,
-            schema.len(),
+            columns,
         ));
     }
     let mut names = BTreeMap::new();
-    let mut name_probe = GqlParameters::new();
+    let mut name_probe = context.subset_for(&[]);
+    let mut implicit = false;
     for (index, spec) in schema.iter().enumerate() {
+        if spec.is_statement_time() {
+            if implicit
+                || spec.parameter_type != GqlParameterType::Scalar(CanonicalScalarKind::Timestamp)
+            {
+                return Err(error(0, None, 0, CsvParameterErrorKind::InvalidSchema));
+            }
+            implicit = true;
+            continue;
+        }
         if spec.name.len() > crate::parameters::MAX_GQL_PARAMETER_NAME_BYTES
             || name_probe
                 .insert(spec.name.as_str(), GqlParameterValue::Int64(0))
@@ -462,18 +490,18 @@ pub fn decode_csv_parameters(
     let header = reader
         .next(0)?
         .ok_or_else(|| error(0, None, reader.at, CsvParameterErrorKind::MissingHeader))?;
-    if header.len() != schema.len() {
+    if header.len() != columns {
         return Err(error(
             0,
             None,
             0,
             CsvParameterErrorKind::Width {
-                expected: schema.len(),
+                expected: columns,
                 observed: header.len(),
             },
         ));
     }
-    let mut order = Vec::with_capacity(schema.len());
+    let mut order = Vec::with_capacity(columns);
     let mut seen = vec![false; schema.len()];
     for (column, field) in header.iter().enumerate() {
         let index = *names.get(field.text.as_ref()).ok_or_else(|| {
@@ -512,18 +540,18 @@ pub fn decode_csv_parameters(
             ));
         }
         let fields = reader.next(record)?.expect("nonempty input suffix");
-        if fields.len() != schema.len() {
+        if fields.len() != columns {
             return Err(error(
                 record,
                 None,
                 offset,
                 CsvParameterErrorKind::Width {
-                    expected: schema.len(),
+                    expected: columns,
                     observed: fields.len(),
                 },
             ));
         }
-        let mut arguments = GqlParameters::new();
+        let mut arguments = context.subset_for(&[]);
         for (column, field) in fields.iter().enumerate() {
             arguments = bind_field(arguments, field, &schema[order[column]], record, column)?;
         }

@@ -2482,37 +2482,15 @@ impl PreparedGraphSetText {
         let admitted = arguments.admit_unsigned(&self.parameters);
         let arguments: &GqlParameters = &admitted;
         // Reject the complete argument map before constructing any leaf plan.
-        for (spec, &offset) in self.parameters.iter().zip(&self.parameter_offsets) {
-            let value = arguments
-                .get(&spec.name)
-                .ok_or_else(|| pattern_kind(offset, GraphPatternTextErrorKind::MissingParameter))?;
-            if !spec.parameter_type.accepts(value.parameter_type()) {
-                return Err(pattern_kind(
-                    offset,
-                    GraphPatternTextErrorKind::ParameterTypeMismatch {
-                        expected: spec.parameter_type,
-                        found: value.parameter_type(),
-                    },
-                ));
-            }
-        }
-        if arguments.len() != self.parameters.len() {
-            return Err(pattern_kind(
-                self.statement.len(),
-                GraphPatternTextErrorKind::UnexpectedArguments,
-            ));
-        }
+        crate::graph_text::checked_parameter_values(
+            &self.parameters,
+            &self.parameter_offsets,
+            self.statement.len(),
+            arguments,
+        )?;
         let mut inputs = Vec::new();
         for (offset, input) in &self.inputs {
-            let mut local = GqlParameters::new();
-            for spec in input.parameter_schema() {
-                local
-                    .insert(
-                        spec.name.clone(),
-                        arguments.get(&spec.name).expect("validated argument"),
-                    )
-                    .expect("prepared local names are valid and unique");
-            }
+            let local = arguments.subset_for(input.parameter_schema());
             let bound = input
                 .bind_parameters(&local)
                 .map_err(|error| rebase_error(*offset, error))?;

@@ -10,9 +10,11 @@
 
 use crate::algebra::{GraphValue, GraphValueRow};
 use crate::csv_parameters::CsvParameterLimits;
-use crate::csv_write_script::{GraphWriteScriptCsvStreamError, stream_csv_parameters_controlled};
+use crate::csv_write_script::{
+    GraphWriteScriptCsvStreamError, stream_csv_parameters_with_context_controlled,
+};
 use crate::{
-    GqlMapParameter, GqlParameterError, GqlParameterSpec, GqlParameterValue,
+    GqlMapParameter, GqlParameterError, GqlParameterSpec, GqlParameterValue, GqlParameters,
     GraphWriteChainTextError, PreparedGraphWriteChain, PreparedGraphWriteChainText,
 };
 use fgdb_types::CanonicalScalar;
@@ -65,7 +67,7 @@ pub type GraphWriteChainCsvStreamError<C> =
 
 impl PreparedGraphWriteChainText {
     /// Bind `UNWIND $row_parameter AS row ...` to one streamed CSV relation.
-    /// The parameter must be the statement's sole parameter and occur only in
+    /// The parameter must be the statement's sole named parameter and occur only in
     /// that first UNWIND; CSV fields are accessed through `row.field` later.
     /// All already-supported MATCH/WITH/UNWIND prefixes and chained writes keep
     /// their native lowering. Each clause runs over all input occurrences
@@ -84,6 +86,29 @@ impl PreparedGraphWriteChainText {
         schema: &[GqlParameterSpec],
         limits: CsvParameterLimits,
         read: impl FnMut(&mut [u8]) -> Result<usize, C>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<(PreparedGraphWriteChain, usize), GraphWriteChainCsvStreamError<C>> {
+        self.bind_csv_rows_stream_with_context_controlled(
+            row_parameter,
+            schema,
+            &GqlParameters::new(),
+            limits,
+            read,
+            checkpoint,
+        )
+    }
+
+    /// Bind a CSV row relation with one explicit execution instant shared by
+    /// every clause and record. The context is not a CSV field or source-list
+    /// parameter, and callers may rebind the template with a fresh instant.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bind_csv_rows_stream_with_context_controlled<C>(
+        &self,
+        row_parameter: &str,
+        schema: &[GqlParameterSpec],
+        context: &GqlParameters,
+        limits: CsvParameterLimits,
+        read: impl FnMut(&mut [u8]) -> Result<usize, C>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<(PreparedGraphWriteChain, usize), GraphWriteChainCsvStreamError<C>> {
         use GraphWriteChainCsvBindingError as Binding;
@@ -91,11 +116,12 @@ impl PreparedGraphWriteChainText {
         // Definition refusal must precede even the first source read (stdin
         // included), and no input value participates in planning or typing.
         let mut chain = self
-            .bind_csv_row_source(row_parameter)
+            .bind_csv_row_source(row_parameter, context)
             .map_err(|source| Error::Binding(Binding::Definition(source)))?;
         let mut rows = Vec::new();
-        let records = stream_csv_parameters_controlled(
+        let records = stream_csv_parameters_with_context_controlled(
             schema,
+            context,
             limits,
             read,
             &mut checkpoint,
@@ -104,7 +130,11 @@ impl PreparedGraphWriteChainText {
                 fields
                     .try_reserve(schema.len())
                     .map_err(|_| Error::Allocation { record })?;
-                for (column, spec) in schema.iter().enumerate() {
+                for (column, spec) in schema
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, spec)| !spec.is_statement_time())
+                {
                     let value = match arguments.get(&spec.name) {
                         Some(GqlParameterValue::Int64(value)) => {
                             GraphValue::Scalar(CanonicalScalar::Int(value))

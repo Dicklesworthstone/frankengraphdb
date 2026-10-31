@@ -1249,10 +1249,15 @@ impl PreparedGraphWriteChainText {
     pub(crate) fn bind_csv_row_source(
         &self,
         parameter: &str,
+        context: &GqlParameters,
     ) -> Result<PreparedGraphWriteChain, GraphWriteChainTextError> {
         use crate::set_text::{ReadStageTemplate, ReadValueTemplate};
         let refused = || expected(0, "one leading UNWIND of the CSV row source");
-        let schema = self.parameter_schema();
+        let schema = self
+            .parameter_schema()
+            .into_iter()
+            .filter(|spec| !spec.is_statement_time())
+            .collect::<Vec<_>>();
         if schema.len() != 1
             || schema[0].name != parameter
             || schema[0].parameter_type != GqlParameterType::List
@@ -1337,7 +1342,8 @@ impl PreparedGraphWriteChainText {
             return Err(refused().into());
         }
         stages[0] = ReadStageTemplate::InputRows { name: name.clone() };
-        let arguments = GqlParameters::new()
+        let arguments = context
+            .subset_for(&[])
             .with_list(parameter, Vec::new())
             .map_err(|_| refused())?;
         template.bind_parameters(&arguments)
@@ -1364,19 +1370,10 @@ impl PreparedGraphWriteChainText {
         // admitted into `arguments`, so the subset admits too.
         let mut own =
             |schema: &[GqlParameterSpec]| -> Result<GqlParameters, GraphPatternTextError> {
-                let mut own = GqlParameters::new();
                 for spec in schema {
                     named.insert(spec.name.clone());
-                    if let Some(value) = arguments.get(&spec.name) {
-                        own.insert(spec.name.clone(), value).map_err(|_| {
-                            error(
-                                self.statement.len(),
-                                GraphPatternTextErrorKind::UnexpectedArguments,
-                            )
-                        })?;
-                    }
                 }
-                Ok(own)
+                Ok(arguments.subset_for(schema))
             };
         let mut steps = Vec::with_capacity(self.steps.len());
         // The row a later step reads is exactly the previous step's output.

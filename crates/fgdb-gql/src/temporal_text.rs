@@ -657,19 +657,12 @@ impl PreparedTemporalGraphText {
                 }
             },
         };
-        let mut local = GqlParameters::new();
-        for spec in self.inner.parameter_schema() {
-            if let Some(value) = arguments.get(&spec.name) {
-                local
-                    .insert(spec.name.clone(), value)
-                    .expect("prepared parameter names are valid and unique");
-            }
-        }
+        let local = arguments.subset_for(self.inner.parameter_schema());
         let pattern = self.inner.bind_parameters(&local)?;
         let recognized = self
             .parameters
             .iter()
-            .filter(|spec| arguments.get(&spec.name).is_some())
+            .filter(|spec| !spec.is_statement_time() && arguments.get(&spec.name).is_some())
             .count();
         if recognized != arguments.len() {
             return Err(failure(

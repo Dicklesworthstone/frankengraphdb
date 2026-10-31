@@ -200,6 +200,9 @@ impl GraphUnwindWriteText {
         }
 
         let mut globals = GqlParameters::new();
+        globals
+            .copy_statement_time_from(arguments)
+            .map_err(|source| GraphUnwindWriteError::Parameter { row: 0, source })?;
         for name in self.external_parameters.iter() {
             work(&mut control, name.len() as u64 + 1)?;
             // Independent source lists are borrowed once by expansion. They
