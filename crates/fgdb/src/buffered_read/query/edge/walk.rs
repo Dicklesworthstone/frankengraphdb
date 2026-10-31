@@ -9,6 +9,7 @@ use fgdb_gql::edge_stream::{
 };
 use fgdb_gql::stream::{AsyncVertexCandidate, AsyncVertexScanEvent};
 use fgdb_strata::store::BufferedScanEvent;
+use fgdb_types::EId;
 
 impl<V: Vfs + Clone> AsyncGraphWalkSource for Source<'_, '_, V> {
     type RootRecord = BufferedQueryRecord;
@@ -96,6 +97,43 @@ impl<V: Vfs + Clone> AsyncGraphWalkSource for Source<'_, '_, V> {
         }
         let bytes = bytes
             .checked_mul(columns.max(1))
+            .ok_or(EdgeScanSourceError::Source(BufferedReadError::SizeOverflow))?;
+        control(GlaExecutionEvent::ScratchEntry).map_err(EdgeScanSourceError::Control)?;
+        guard
+            .grow(self.cx, bytes)
+            .map_err(BufferedReadError::Memory)
+            .map_err(EdgeScanSourceError::Source)?;
+        Ok(guard)
+    }
+
+    fn reserve_shortest_state<C>(
+        &self,
+        bytes: usize,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<MemoryCharge, EdgeScanSourceError<Self::Error, C>> {
+        control(GlaExecutionEvent::ScratchEntry).map_err(EdgeScanSourceError::Control)?;
+        self.pool
+            .reserve(self.cx, bytes)
+            .map_err(BufferedReadError::Memory)
+            .map_err(EdgeScanSourceError::Source)
+    }
+
+    fn reserve_shortest_output<C>(
+        &self,
+        root: &Self::RootRecord,
+        records: &[Self::Record],
+        hops: usize,
+        columns: usize,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<MemoryCharge, EdgeScanSourceError<Self::Error, C>> {
+        let mut guard = self.reserve_walk_output(root, records, columns, control)?;
+        // ANY retains one final record, not one source record per path hop.
+        // Reserve complete path/node-list/edge-list cells and encoding backing
+        // independently of the breadth layer and every source record.
+        let bytes = hops
+            .checked_mul(core::mem::size_of::<GraphValue>().max(core::mem::size_of::<(EId, VId)>()))
+            .and_then(|bytes| bytes.checked_mul(8))
+            .and_then(|bytes| bytes.checked_mul(columns.max(1)))
             .ok_or(EdgeScanSourceError::Source(BufferedReadError::SizeOverflow))?;
         control(GlaExecutionEvent::ScratchEntry).map_err(EdgeScanSourceError::Control)?;
         guard

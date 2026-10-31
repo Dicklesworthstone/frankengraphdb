@@ -453,97 +453,102 @@ fn cold_returned_paths_keep_complete_intake_errors_and_input_quota_before_zero_p
         let mut view = view(&contexts.commit(), &vfs, &source_pool).await;
         let baseline = source_pool.used();
         for run_rows in [1, 3] {
-            for (limit, inputs, success) in
-                [(1, 7, true), (1, 6, false), (0, 7, true), (0, 6, false)]
-            {
-                let text = format!(
-                    "MATCH p = WALK (a {{p:1}})-[:R*0..2]->(b) RETURN b.p AS value ORDER BY value DESC LIMIT {limit}"
-                );
-                let expected = if limit == 0 {
-                    vec![]
-                } else {
-                    frames(vec![scalar(3)])
-                };
-                assert_eq!(native(&db, &cx, &text), expected);
-                let prepared = prepare(&text);
-                let (mut scratch, _) = file(&cx, &spill_pool).await;
-                let (mut destination, _) = file(&cx, &spill_pool).await;
-                let (mut auxiliary, _) = file(&cx, &spill_pool).await;
-                let result = prepared
-                    .spool_in_view(
-                        &mut view,
-                        &cx,
-                        policy(limit),
-                        &mut scratch,
-                        &mut destination,
-                        &mut auxiliary,
-                        2,
-                        32,
-                        run_rows,
-                        256,
-                        31,
-                        8192,
-                        inputs,
-                        WORK,
-                    )
-                    .await;
-                if success {
-                    let (spool, _) = result.unwrap();
-                    assert_eq!(contents(&spool, &mut destination, &cx).await, expected);
-                } else {
+            for (mode, total_inputs) in [("WALK", 7), ("ANY SHORTEST", 3)] {
+                for (limit, inputs, success) in [
+                    (1, total_inputs, true),
+                    (1, total_inputs - 1, false),
+                    (0, total_inputs, true),
+                    (0, total_inputs - 1, false),
+                ] {
+                    let text = format!(
+                        "MATCH p = {mode} (a {{p:1}})-[:R*0..2]->(b) RETURN b.p AS value ORDER BY value DESC LIMIT {limit}"
+                    );
+                    let expected = if limit == 0 {
+                        vec![]
+                    } else {
+                        frames(vec![scalar(3)])
+                    };
+                    assert_eq!(native(&db, &cx, &text), expected);
+                    let prepared = prepare(&text);
+                    let (mut scratch, _) = file(&cx, &spill_pool).await;
+                    let (mut destination, _) = file(&cx, &spill_pool).await;
+                    let (mut auxiliary, _) = file(&cx, &spill_pool).await;
+                    let result = prepared
+                        .spool_in_view(
+                            &mut view,
+                            &cx,
+                            policy(limit),
+                            &mut scratch,
+                            &mut destination,
+                            &mut auxiliary,
+                            2,
+                            32,
+                            run_rows,
+                            256,
+                            31,
+                            8192,
+                            inputs,
+                            WORK,
+                        )
+                        .await;
+                    if success {
+                        let (spool, _) = result.unwrap();
+                        assert_eq!(contents(&spool, &mut destination, &cx).await, expected);
+                    } else {
+                        assert!(
+                            matches!(result, Err(NativeSpoolError::BufferedExecute(error)) if matches!(*error, GqlQueryError::Rows(_))),
+                            "{text}"
+                        );
+                        assert_eq!(destination.stats().published_runs, 0);
+                    }
+                    assert_eq!(source_pool.used(), baseline);
+                    assert_eq!(spill_pool.used(), 0);
+                }
+                for limit in [0, 1] {
+                    // A and B emit valid rows before the first two-hop C route
+                    // raises division by zero. A final empty page cannot hide it.
+                    let text = format!(
+                        "MATCH p = {mode} (a {{p:1}})-[:R*0..2]->(b) WHERE 12/(3-b.p)>0 {CAPTURE} LIMIT {limit}"
+                    );
                     assert!(
-                        matches!(result, Err(NativeSpoolError::BufferedExecute(error)) if matches!(*error, GqlQueryError::Rows(_))),
+                        db.query(&cx, &text, &GqlParameters::new(), resolve, policy(1_000))
+                            .is_err()
+                    );
+                    let prepared = prepare(&text);
+                    let (mut scratch, _) = file(&cx, &spill_pool).await;
+                    let (mut destination, backing) = file(&cx, &spill_pool).await;
+                    let (mut auxiliary, _) = file(&cx, &spill_pool).await;
+                    backing.0.lock().unwrap().writes = 0;
+                    let result = prepared
+                        .spool_in_view(
+                            &mut view,
+                            &cx,
+                            policy(limit),
+                            &mut scratch,
+                            &mut destination,
+                            &mut auxiliary,
+                            2,
+                            32,
+                            run_rows,
+                            256,
+                            1,
+                            8192,
+                            100,
+                            WORK,
+                        )
+                        .await;
+                    assert!(
+                        matches!(result, Err(NativeSpoolError::BufferedExecute(error)) if matches!(*error, GqlQueryError::Data(error) if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero)),
                         "{text}"
                     );
+                    assert!(
+                        backing.0.lock().unwrap().writes > 0,
+                        "earlier native occurrences were encoded before the failure"
+                    );
                     assert_eq!(destination.stats().published_runs, 0);
+                    assert_eq!(source_pool.used(), baseline);
+                    assert_eq!(spill_pool.used(), 0);
                 }
-                assert_eq!(source_pool.used(), baseline);
-                assert_eq!(spill_pool.used(), 0);
-            }
-            for limit in [0, 1] {
-                // A and B emit valid rows before the first two-hop C route
-                // raises division by zero. A final empty page cannot hide it.
-                let text = format!(
-                    "MATCH p = WALK (a {{p:1}})-[:R*0..2]->(b) WHERE 12/(3-b.p)>0 {CAPTURE} LIMIT {limit}"
-                );
-                assert!(
-                    db.query(&cx, &text, &GqlParameters::new(), resolve, policy(1_000))
-                        .is_err()
-                );
-                let prepared = prepare(&text);
-                let (mut scratch, _) = file(&cx, &spill_pool).await;
-                let (mut destination, backing) = file(&cx, &spill_pool).await;
-                let (mut auxiliary, _) = file(&cx, &spill_pool).await;
-                backing.0.lock().unwrap().writes = 0;
-                let result = prepared
-                    .spool_in_view(
-                        &mut view,
-                        &cx,
-                        policy(limit),
-                        &mut scratch,
-                        &mut destination,
-                        &mut auxiliary,
-                        2,
-                        32,
-                        run_rows,
-                        256,
-                        1,
-                        8192,
-                        100,
-                        WORK,
-                    )
-                    .await;
-                assert!(
-                    matches!(result, Err(NativeSpoolError::BufferedExecute(error)) if matches!(*error, GqlQueryError::Data(error) if error.kind == fgdb_gql::GraphIntegerErrorKind::DivisionByZero)),
-                    "{text}"
-                );
-                assert!(
-                    backing.0.lock().unwrap().writes > 0,
-                    "earlier native occurrences were encoded before the failure"
-                );
-                assert_eq!(destination.stats().published_runs, 0);
-                assert_eq!(source_pool.used(), baseline);
-                assert_eq!(spill_pool.used(), 0);
             }
         }
         drop(view);
@@ -562,9 +567,14 @@ fn pending_returned_path_spill_releases_zero_hop_roots_routes_and_output_guards(
         let spill_pool = MemoryPool::new(2_000_000, 0).unwrap();
         let mut view = view(&contexts.commit(), &vfs, &source_pool).await;
         let baseline = source_pool.used();
-        for (root_value, bounds) in [(4, "0..0"), (1, "2..2")] {
+        for (mode, match_mode, root_value, bounds) in [
+            ("WALK", "", 4, "0..0"),
+            ("WALK", "", 1, "2..2"),
+            ("ANY SHORTEST", "", 4, "0..0"),
+            ("ANY SHORTEST", "REPEATABLE ELEMENTS ", 1, "2..2"),
+        ] {
             let prepared = prepare(&format!(
-                "MATCH p = WALK (a {{p:{root_value}}})-[:R*{bounds}]->(b) {CAPTURE}"
+                "MATCH {match_mode}p = {mode} (a {{p:{root_value}}})-[:R*{bounds}]->(b) {CAPTURE}"
             ));
             let (mut scratch, _) = file(&cx, &spill_pool).await;
             let (mut destination, backing) = file(&cx, &spill_pool).await;
@@ -620,6 +630,123 @@ async fn graph_with_edge_filters(cx: &CommitCx) -> (Database<MemVfs>, MemVfs) {
     }
     assert_eq!(db.write(cx, properties).await.unwrap(), CommitSeq(3));
     (db, vfs)
+}
+
+#[test]
+fn cold_shortest_paths_choose_real_routes_across_history_edge_filters_and_pinned_cuts() {
+    let ((), report) = run_async_under_lab(0xc01d_4001, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let (mut db, vfs) = graph_with_edge_filters(&contexts.commit()).await;
+        let pinned_pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let mut pinned = view(&contexts.commit(), &vfs, &pinned_pool).await;
+        assert_eq!(pinned.frontier(), CommitSeq(3));
+        let mut update = WriteBatch::new(RelationId(1));
+        update.set_edge_property(AB, PropertyKeyId(1), Some(CanonicalScalar::Int(8)));
+        update.set_vertex_property(C, PropertyKeyId(1), Some(CanonicalScalar::Int(30)));
+        update.add_edge(
+            EId(17),
+            C,
+            ISOLATE,
+            vec![(PropertyKeyId(1), CanonicalScalar::Int(7))],
+        );
+        assert_eq!(
+            db.write(&contexts.commit(), update).await.unwrap(),
+            CommitSeq(4)
+        );
+        let pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let mut latest = view(&contexts.commit(), &vfs, &pool).await;
+        let before = paths(&[(A, &[]), (A, &[(AB, B)]), (A, &[(AB, B), (BC, C)])]);
+        let after = paths(&[
+            (A, &[]),
+            (A, &[(PARALLEL, B)]),
+            (A, &[(PARALLEL, B), (BC, C)]),
+            (A, &[(PARALLEL, B), (BC, C), (EId(17), ISOLATE)]),
+        ]);
+        for match_mode in ["", "REPEATABLE ELEMENTS "] {
+            for wanted in ["7", "7.0"] {
+                for (cut, expected) in [(3, &before), (4, &after)] {
+                    let text = format!(
+                        "MATCH {match_mode}p = ANY SHORTEST (a {{p:1}})-[:R*0..4 {{p:{wanted}}}]->(b) \
+                         FOR SYSTEM_TIME AS OF SEQ {cut} {CAPTURE}"
+                    );
+                    case(&db, &mut latest, &cx, &text, expected.clone(), cut).await;
+                }
+            }
+            let text = format!(
+                "MATCH {match_mode}p = ANY SHORTEST (a {{p:1}})-[:R*0..4 {{p:7}}]->(b) {CAPTURE}"
+            );
+            for run_rows in [1, 3] {
+                spooled(&mut pinned, &cx, &text, &before, 3, run_rows).await;
+            }
+        }
+        // Changing the winning edge's historical property selects the next
+        // real parallel edge. B still transits even though only C is returned.
+        for (cut, edge, end_value) in [(3, AB, 3), (4, PARALLEL, 30)] {
+            let mut row = capture(A, &[(edge, B), (BC, C)]);
+            row.extend([scalar(1), scalar(end_value)]);
+            let text = format!(
+                "MATCH p = ANY SHORTEST (a {{p:1}})-[:R*0..4 {{p:7}}]->(b {{p:{end_value}}}) \
+                 FOR SYSTEM_TIME AS OF SEQ {cut} WHERE length(p)>=2 {CAPTURE}, a.p AS start_value, b.p AS end_value"
+            );
+            case(&db, &mut latest, &cx, &text, row_bytes(vec![row]), cut).await;
+        }
+        // With no relation constraint, the direct R2 edge beats the two-hop
+        // R path regardless of its larger edge identity.
+        case(
+            &db,
+            &mut latest,
+            &cx,
+            &format!("MATCH p = ANY SHORTEST (a {{p:1}})-[*0..4 {{p:7}}]->(b) {CAPTURE}"),
+            paths(&[
+                (A, &[]),
+                (A, &[(PARALLEL, B)]),
+                (A, &[(OTHER, C)]),
+                (A, &[(OTHER, C), (EId(17), ISOLATE)]),
+            ]),
+            4,
+        )
+        .await;
+        case(
+            &db,
+            &mut latest,
+            &cx,
+            &format!("MATCH p = ANY SHORTEST (a)-[:R*0..0]->(b) {CAPTURE}"),
+            paths(&[(A, &[]), (B, &[]), (C, &[]), (ISOLATE, &[])]),
+            4,
+        )
+        .await;
+        // The positive lower bound delays settlement. A two-hop prefix to B
+        // through its loop is valid in REPEATABLE ELEMENTS and remains visible.
+        case(
+            &db,
+            &mut latest,
+            &cx,
+            &format!(
+                "MATCH REPEATABLE ELEMENTS p = ANY SHORTEST (a {{p:1}})-[:R*2..2]->(b) {CAPTURE}"
+            ),
+            paths(&[(A, &[(AB, B), (BC, C)]), (A, &[(AB, B), (LOOP, B)])]),
+            4,
+        )
+        .await;
+        for text in [
+            "MATCH p = ANY SHORTEST (a)-[:R*1..3]->(b) RETURN p LIMIT 0",
+            "MATCH REPEATABLE ELEMENTS p = ALL SHORTEST (a)-[:R*0..3]->(b) RETURN p LIMIT 0",
+            "MATCH REPEATABLE ELEMENTS p = ANY SHORTEST (a)-[:R*]->(b) RETURN p LIMIT 0",
+        ] {
+            let parameters = GqlParameters::new();
+            let prepared = PreparedNativeRead::prepare(text, &parameters, resolve).unwrap();
+            assert!(
+                prepared.prepare_buffered_order(&parameters).is_err(),
+                "{text}"
+            );
+        }
+        drop(pinned);
+        drop(latest);
+        assert_eq!(pinned_pool.used(), 0);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

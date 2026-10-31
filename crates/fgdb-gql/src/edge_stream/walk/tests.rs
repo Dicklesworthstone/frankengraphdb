@@ -85,6 +85,9 @@ struct Counts {
     roots: AtomicUsize,
     seeks: AtomicUsize,
     drops: AtomicUsize,
+    state_bytes: AtomicUsize,
+    state_peak: AtomicUsize,
+    state_charges: std::sync::Mutex<BTreeMap<usize, usize>>,
 }
 struct Data {
     edges: Vec<(EId, VId, VId)>,
@@ -154,9 +157,18 @@ impl Drop for Record {
         self.counts.records.fetch_sub(1, Ordering::SeqCst);
     }
 }
-struct Guard(Arc<Counts>);
+struct Guard(Arc<Counts>, usize);
 impl Drop for Guard {
     fn drop(&mut self) {
+        if self.1 != 0 {
+            self.0.state_bytes.fetch_sub(self.1, Ordering::SeqCst);
+            let mut charges = self.0.state_charges.lock().unwrap();
+            let count = charges.get_mut(&self.1).expect("admitted byte guard");
+            *count -= 1;
+            if *count == 0 {
+                charges.remove(&self.1);
+            }
+        }
         self.0.guards.fetch_sub(1, Ordering::SeqCst);
     }
 }
@@ -184,6 +196,8 @@ struct Source {
     refuse_output: bool,
     refuse_evaluation: bool,
     scratch_limit: usize,
+    state_limit: usize,
+    pending_after: usize,
 }
 impl Source {
     fn new(mask: usize) -> Self {
@@ -211,6 +225,8 @@ impl Source {
             refuse_output: false,
             refuse_evaluation: false,
             scratch_limit: usize::MAX,
+            state_limit: usize::MAX,
+            pending_after: usize::MAX,
         }
     }
     fn with_edge_properties(
@@ -230,7 +246,7 @@ impl Source {
     ) -> Result<Guard, EdgeScanSourceError<&'static str, C>> {
         control(GlaExecutionEvent::ScratchEntry).map_err(EdgeScanSourceError::Control)?;
         self.counts.guards.fetch_add(1, Ordering::SeqCst);
-        Ok(Guard(self.counts.clone()))
+        Ok(Guard(self.counts.clone(), 0))
     }
     fn scratch(&self, scratch: &Cell<usize>, event: GlaExecutionEvent) -> Result<(), &'static str> {
         if event == GlaExecutionEvent::ScratchEntry {
@@ -290,8 +306,8 @@ impl AsyncEdgeJoinSource for Source {
         after: Option<EId>,
         control: &mut (impl FnMut(AsyncEdgeScanEvent) -> Result<(), C> + Send),
     ) -> AsyncIncidentCandidateResult<Record, Self::Error, C> {
-        self.counts.seeks.fetch_add(1, Ordering::SeqCst);
-        if self.edge_fault == Fault::Pending {
+        let seek = self.counts.seeks.fetch_add(1, Ordering::SeqCst);
+        if self.edge_fault == Fault::Pending || seek == self.pending_after {
             std::future::pending::<()>().await;
         }
         if self.edge_fault == Fault::Unavailable {
@@ -436,12 +452,59 @@ impl AsyncGraphWalkSource for Source {
         }
         self.guard(control)
     }
+
+    fn reserve_shortest_state<C>(
+        &self,
+        bytes: usize,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Guard, EdgeScanSourceError<Self::Error, C>> {
+        if self.refuse_backing {
+            return Err(EdgeScanSourceError::Source("shortest backing refused"));
+        }
+        let next = self
+            .counts
+            .state_bytes
+            .load(Ordering::SeqCst)
+            .checked_add(bytes)
+            .filter(|next| *next <= self.state_limit)
+            .ok_or(EdgeScanSourceError::Source("shortest state bytes refused"))?;
+        let mut guard = self.guard(control)?;
+        guard.1 = bytes;
+        self.counts.state_bytes.fetch_add(bytes, Ordering::SeqCst);
+        self.counts.state_peak.fetch_max(next, Ordering::SeqCst);
+        if bytes != 0 {
+            *self
+                .counts
+                .state_charges
+                .lock()
+                .unwrap()
+                .entry(bytes)
+                .or_default() += 1;
+        }
+        Ok(guard)
+    }
+
+    fn reserve_shortest_output<C>(
+        &self,
+        root: &Root,
+        records: &[Record],
+        _: usize,
+        columns: usize,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Guard, EdgeScanSourceError<Self::Error, C>> {
+        self.reserve_walk_output(root, records, columns, control)
+    }
 }
 
 fn drain(plan: GlaPlan<GraphValueRow>, source: Source) -> Vec<Vec<GraphValue>> {
     let (physical, _) = AsyncGraphWalkPlan::compile_sort_input(&plan).unwrap();
     let counts = source.counts.clone();
-    let maximum = physical.maximum_hops();
+    let record_bound = if physical.search == GraphWalkSearch::AnyShortest {
+        // Two breadth layers, one root, and one rejected next candidate.
+        2 * source.data.vertices.len() + 2
+    } else {
+        physical.maximum_hops() + 2
+    };
     let mut cursor = AsyncGraphWalkCursor::new(source, physical, wide(), ok);
     let mut rows = Vec::new();
     while let Some(row) = run(cursor.next()) {
@@ -450,7 +513,7 @@ fn drain(plan: GlaPlan<GraphValueRow>, source: Source) -> Vec<Vec<GraphValue>> {
     assert_eq!(cursor.state(), EdgeScanState::Exhausted);
     assert_eq!(cursor.snapshot_seq(), CommitSeq(41));
     assert_eq!(cursor.row_stats().result_rows, rows.len() as u64);
-    assert!(counts.peak.load(Ordering::SeqCst) <= maximum + 2); // rejected next candidate can coexist
+    assert!(counts.peak.load(Ordering::SeqCst) <= record_bound);
     assert_eq!(counts.records.load(Ordering::SeqCst), 0);
     assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
     assert_eq!(counts.drops.load(Ordering::SeqCst), 1);
@@ -490,7 +553,7 @@ fn oracle(
                 });
                 let valid = (!different || edge_unique)
                     && match search {
-                        GraphWalkSearch::All => true,
+                        GraphWalkSearch::All | GraphWalkSearch::AnyShortest => true,
                         GraphWalkSearch::Trail => edge_unique,
                         GraphWalkSearch::Acyclic => vertex_unique,
                         GraphWalkSearch::Simple => simple,
@@ -537,6 +600,27 @@ fn oracle(
             }
             frontier = next;
         }
+    }
+    if search == GraphWalkSearch::AnyShortest {
+        let mut selected = BTreeMap::<(VId, VId), Vec<GraphValue>>::new();
+        for row in rows {
+            let (GraphValue::Vertex(start), GraphValue::Vertex(end), GraphValue::Path(path)) =
+                (&row[0], &row[1], &row[2])
+            else {
+                unreachable!();
+            };
+            let key = (*start, *end);
+            let replace = selected.get(&key).is_none_or(|previous| {
+                let GraphValue::Path(previous) = &previous[2] else {
+                    unreachable!();
+                };
+                (path.len(), path) < (previous.len(), previous)
+            });
+            if replace {
+                selected.insert(key, row);
+            }
+        }
+        rows = selected.into_values().collect();
     }
     rows.sort();
     rows
@@ -666,7 +750,8 @@ fn complete_input_precedes_limit_distinct_and_hidden_sort_keys() {
 fn unsupported_definitions_refuse_before_a_zero_limit_or_source() {
     for text in [
         "MATCH p = (a)-[:R*]->(b) RETURN p LIMIT 0",
-        "MATCH p = shortestPath((a)-[:R*0..3]->(b)) RETURN p LIMIT 0",
+        "MATCH p = shortestPath((a)-[:R*1..3]->(b)) RETURN p LIMIT 0",
+        "MATCH p = ALL SHORTEST (a)-[:R*0..3]->(b) RETURN p LIMIT 0",
         "MATCH p = (a)-[:R*1..2]->(b)-[:R]->(c) RETURN p LIMIT 0",
         "MATCH (a)-[:R*0..2 {p:[]}]->(b) RETURN b LIMIT 0",
         "MATCH (a)-[:R*0..2 {p:{nested:1}}]->(b) RETURN b LIMIT 0",
@@ -1120,4 +1205,365 @@ fn scalar_edge_filter_charges_payloads_and_propagates_candidate_control() {
     assert_eq!(counts.records.load(Ordering::SeqCst), 0);
     assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
     assert_eq!(counts.drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn shortest_captures_match_independent_complete_routes_and_native_selection() {
+    let mut cases = 0;
+    for mask in 0..32 {
+        for direction in [
+            GlaDirection::Forward,
+            GlaDirection::Reverse,
+            GlaDirection::Undirected,
+        ] {
+            for (minimum, maximum) in [(0, 0), (0, 3), (1, 2), (2, 3), (3, 3)] {
+                for different in [false, true] {
+                    if different && minimum != 0 {
+                        continue;
+                    }
+                    let source = Source::new(mask);
+                    let text = statement(direction, minimum, maximum);
+                    let logical = definition(&text, GraphWalkSearch::AnyShortest, different);
+                    let expected = oracle(
+                        &source.data,
+                        direction,
+                        minimum,
+                        maximum,
+                        GraphWalkSearch::AnyShortest,
+                        different,
+                    );
+                    assert_eq!(
+                        native_with_edge_properties(&logical, &source.data),
+                        expected,
+                        "native shortest {text}, mask={mask}, different={different}"
+                    );
+                    assert_eq!(
+                        drain(logical, source),
+                        expected,
+                        "cold shortest {text}, mask={mask}, different={different}"
+                    );
+                    cases += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 672);
+}
+
+#[test]
+fn shortest_canonical_ties_compare_the_complete_real_edge_prefix() {
+    let mut source = Source::new(0);
+    Arc::get_mut(&mut source.data).unwrap().edges = vec![
+        (EId(0), IDS[2], IDS[3]),
+        (EId(1), IDS[0], IDS[1]),
+        (EId(2), IDS[0], IDS[2]),
+        (EId(u128::MAX), IDS[1], IDS[3]),
+    ];
+    let logical = definition(
+        "MATCH p = (a {p:1})-[:R*0..4]->(b {p:4}) RETURN p",
+        GraphWalkSearch::AnyShortest,
+        true,
+    );
+    // The route ending in the greatest EId wins because its FIRST EId is
+    // smaller. Endpoint predicates cannot prune the intermediate vertices.
+    let expected = vec![vec![GraphValue::Path(GraphPath::new(
+        IDS[0],
+        vec![(EId(1), IDS[1]), (EId(u128::MAX), IDS[3])].into(),
+    ))]];
+    assert_eq!(
+        native_with_edge_properties(&logical, &source.data),
+        expected
+    );
+    assert_eq!(drain(logical, source), expected);
+}
+
+#[test]
+fn shortest_positive_lower_bound_dominates_parallel_walks_before_copying() {
+    const HOPS: u32 = 64;
+    const PARALLEL: usize = 8;
+    let mut source = Source::new(0);
+    Arc::get_mut(&mut source.data).unwrap().edges = (0..PARALLEL)
+        .map(|at| (EId(at as u128), IDS[0], IDS[0]))
+        .collect();
+    let counts = source.counts.clone();
+    let logical = definition(
+        &format!("MATCH p = (a {{p:1}})-[:R*{HOPS}..{HOPS}]->(b) RETURN p"),
+        GraphWalkSearch::AnyShortest,
+        false,
+    );
+    let expected = vec![vec![GraphValue::Path(GraphPath::new(
+        IDS[0],
+        vec![(EId(0), IDS[0]); HOPS as usize].into(),
+    ))]];
+    assert_eq!(
+        native_with_edge_properties(&logical, &source.data),
+        expected
+    );
+    assert_eq!(drain(logical, source), expected);
+    // There are 8^64 legal walks. The cold cursor makes exactly one indexed
+    // candidate pass per depth, never materializing the exponentially tied bag.
+    assert_eq!(
+        counts.seeks.load(Ordering::SeqCst),
+        (PARALLEL + 1) * HOPS as usize
+    );
+    assert!(counts.peak.load(Ordering::SeqCst) <= 4);
+}
+
+#[test]
+fn shortest_scalar_edge_filters_precede_canonical_selection() {
+    for direction in [
+        GlaDirection::Forward,
+        GlaDirection::Reverse,
+        GlaDirection::Undirected,
+    ] {
+        for (minimum, maximum) in [(0, 3), (2, 3)] {
+            let source = scalar_edges(31);
+            let text = statement(direction, minimum, maximum).replacen(']', " {p:7,q:false}]", 1);
+            let logical = definition(&text, GraphWalkSearch::AnyShortest, false);
+            let selected = Data {
+                edges: vec![(EId(5), IDS[0], IDS[1])],
+                edge_properties: BTreeMap::new(),
+                vertices: source.data.vertices.clone(),
+            };
+            let expected = oracle(
+                &selected,
+                direction,
+                minimum,
+                maximum,
+                GraphWalkSearch::AnyShortest,
+                false,
+            );
+            assert_eq!(
+                native_with_edge_properties(&logical, &source.data),
+                expected
+            );
+            assert_eq!(drain(logical, source), expected);
+        }
+    }
+}
+
+#[test]
+fn shortest_live_checkpoints_and_exact_cumulative_limits_are_terminal() {
+    for (minimum, maximum) in [(0, 3), (2, 3)] {
+        let logical = definition(
+            &statement(GlaDirection::Undirected, minimum, maximum),
+            GraphWalkSearch::AnyShortest,
+            false,
+        );
+        let plan = AsyncGraphWalkPlan::compile_sort_input(&logical).unwrap().0;
+        check_all_live_limits(plan, || Source::new(3));
+    }
+}
+
+#[test]
+fn shortest_errors_and_pending_drop_release_all_breadth_and_output_guards() {
+    let logical = definition(
+        &statement(GlaDirection::Forward, 0, 3),
+        GraphWalkSearch::AnyShortest,
+        false,
+    );
+    let plan = AsyncGraphWalkPlan::compile_sort_input(&logical).unwrap().0;
+    let source = Source::new(31);
+    let counts = source.counts.clone();
+    let mut cursor = AsyncGraphWalkCursor::new(source, plan.clone(), wide(), ok);
+    let row = run(cursor.next()).unwrap().unwrap();
+    cursor.close();
+    assert_eq!(counts.records.load(Ordering::SeqCst), 0);
+    assert_eq!(counts.guards.load(Ordering::SeqCst), 1);
+    drop(row);
+    assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
+    for root_fault in [false, true] {
+        for fault in [
+            Fault::Io,
+            Fault::Missing,
+            Fault::Twice,
+            Fault::Mismatch,
+            Fault::FalseEof,
+            Fault::Repeat,
+            Fault::Pending,
+            Fault::Dangling,
+            Fault::Unavailable,
+        ] {
+            if root_fault && matches!(fault, Fault::Dangling | Fault::Unavailable) {
+                continue;
+            }
+            let mut source = Source::new(31);
+            if root_fault {
+                source.root_fault = fault;
+            } else {
+                source.edge_fault = fault;
+            }
+            let counts = source.counts.clone();
+            let mut cursor = AsyncGraphWalkCursor::new(source, plan.clone(), wide(), ok);
+            if fault == Fault::Pending {
+                drop(cursor.next::<usize>());
+                assert_eq!(cursor.state(), EdgeScanState::Open);
+                let mut future = Box::pin(cursor.next::<usize>());
+                fn assert_send<T: Send>(_: &T) {}
+                assert_send(&future);
+                assert!(
+                    future
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
+                drop(future);
+            } else {
+                let mut failed = false;
+                while let Some(row) = run(cursor.next()) {
+                    if row.is_err() {
+                        failed = true;
+                        break;
+                    }
+                }
+                assert!(failed);
+            }
+            assert_eq!(cursor.state(), EdgeScanState::Failed);
+            assert!(run(cursor.next()).is_none());
+            assert_eq!(counts.records.load(Ordering::SeqCst), 0);
+            assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
+            assert_eq!(counts.drops.load(Ordering::SeqCst), 1);
+        }
+    }
+    for kind in 0..4 {
+        let mut source = Source::new(31);
+        match kind {
+            0 => source.refuse_backing = true,
+            1 => source.refuse_output = true,
+            2 => source.refuse_evaluation = true,
+            _ => source.scratch_limit = 0,
+        }
+        let counts = source.counts.clone();
+        let mut cursor = AsyncGraphWalkCursor::new(source, plan.clone(), wide(), ok);
+        let mut failed = false;
+        while let Some(row) = run(cursor.next()) {
+            if row.is_err() {
+                failed = true;
+                break;
+            }
+        }
+        assert!(failed);
+        assert_eq!(cursor.state(), EdgeScanState::Failed);
+        assert!(run(cursor.next()).is_none());
+        assert_eq!(counts.records.load(Ordering::SeqCst), 0);
+        assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn shortest_vector_capacity_stays_admitted_after_entries_leave_and_across_awaits() {
+    const WIDTH: usize = 257;
+    let source = || {
+        let mut source = Source::new(0);
+        let data = Arc::get_mut(&mut source.data).unwrap();
+        for at in 0..WIDTH {
+            let vid = VId(at as u128 + 1);
+            data.vertices
+                .insert(vid, vec![(P, CanonicalScalar::Int(10).into())]);
+            data.edges.push((EId(at as u128), IDS[0], vid));
+        }
+        source
+    };
+    let plan = AsyncGraphWalkPlan::compile_sort_input(&definition(
+        "MATCH (a {p:1})-[:R*0..1]->(b) RETURN ALL b",
+        GraphWalkSearch::AnyShortest,
+        false,
+    ))
+    .unwrap()
+    .0;
+    let vector_bytes = WIDTH * core::mem::size_of::<shortest::Prefix<Record, Guard>>();
+    let input = source();
+    let counts = input.counts.clone();
+    let mut cursor = AsyncGraphWalkCursor::new(input, plan.clone(), wide(), ok);
+    drop(run(cursor.next()).unwrap().unwrap()); // zero-hop root
+    for _ in 0..WIDTH - 1 {
+        drop(run(cursor.next()).unwrap().unwrap());
+    }
+    assert_eq!(counts.records.load(Ordering::SeqCst), 2); // root + final pending prefix
+    assert_eq!(
+        counts.state_charges.lock().unwrap().get(&vector_bytes),
+        Some(&1),
+        "one remaining pending entry still owns the full original Vec allocation"
+    );
+    cursor.close();
+    assert_eq!(counts.state_bytes.load(Ordering::SeqCst), 0);
+    assert!(counts.state_charges.lock().unwrap().is_empty());
+    assert_eq!(counts.records.load(Ordering::SeqCst), 0);
+    assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
+
+    let finish = |input: Source| {
+        let counts = input.counts.clone();
+        let mut cursor = AsyncGraphWalkCursor::new(input, plan.clone(), wide(), ok);
+        let mut rows = 0;
+        let mut failed = false;
+        while let Some(row) = run(cursor.next()) {
+            match row {
+                Ok(row) => {
+                    drop(row);
+                    rows += 1;
+                }
+                Err(error) => {
+                    assert!(matches!(
+                        error,
+                        GqlQueryError::Source(EdgeScanError::Source(
+                            "shortest state bytes refused"
+                        ))
+                    ));
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        if !failed {
+            assert_eq!(rows, WIDTH + 1);
+        }
+        assert_eq!(counts.state_bytes.load(Ordering::SeqCst), 0);
+        assert!(counts.state_charges.lock().unwrap().is_empty());
+        assert_eq!(counts.records.load(Ordering::SeqCst), 0);
+        assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
+        (counts.state_peak.load(Ordering::SeqCst), failed)
+    };
+    let (peak, failed) = finish(source());
+    assert!(!failed);
+    assert!(peak > vector_bytes);
+    for (limit, expected_failure) in [(peak, false), (peak - 1, true)] {
+        let mut input = source();
+        input.state_limit = limit;
+        assert_eq!(finish(input).1, expected_failure);
+    }
+
+    // Below the lower bound, consumed frontier entries are dropped rather
+    // than becoming pending output. Pause on the last leaf's incidence: the
+    // empty old IntoIter still has WIDTH slots and must retain its guard.
+    let plan = AsyncGraphWalkPlan::compile_sort_input(&definition(
+        "MATCH (a {p:1})-[:R*2..2]->(b) RETURN ALL b",
+        GraphWalkSearch::AnyShortest,
+        false,
+    ))
+    .unwrap()
+    .0;
+    let mut input = source();
+    input.pending_after = 2 * WIDTH;
+    let counts = input.counts.clone();
+    let mut cursor = AsyncGraphWalkCursor::new(input, plan, wide(), ok);
+    let mut future = Box::pin(cursor.next::<usize>());
+    fn assert_send<T: Send>(_: &T) {}
+    assert_send(&future);
+    assert!(
+        future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    assert_eq!(counts.records.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        counts.state_charges.lock().unwrap().get(&vector_bytes),
+        Some(&1)
+    );
+    drop(future);
+    assert_eq!(cursor.state(), EdgeScanState::Failed);
+    assert_eq!(counts.state_bytes.load(Ordering::SeqCst), 0);
+    assert!(counts.state_charges.lock().unwrap().is_empty());
+    assert_eq!(counts.records.load(Ordering::SeqCst), 0);
+    assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
 }

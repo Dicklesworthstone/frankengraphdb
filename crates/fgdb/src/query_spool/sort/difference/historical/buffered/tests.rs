@@ -252,6 +252,7 @@ fn complete_cold_relations_match_historical_queries_not_their_first_leaf() {
             "MATCH (n) RETURN n.p AS p ORDER BY n.q DESC SKIP 1 LIMIT 2",
             "MATCH (a)-[r:R]->(b) RETURN a.p AS a, b.p AS b",
             "MATCH route = WALK (a)-[:R*0..2]->(b) RETURN route",
+            "MATCH route = ANY SHORTEST (a)-[:R*0..2]->(b) RETURN route",
             "MATCH route = TRAIL (a)-[:R*0..2]->(b) RETURN b.p AS p",
             "MATCH route = ACYCLIC (a)-[:R*0..2]->(b) RETURN DISTINCT b.p AS p",
             "MATCH route = SIMPLE (a)-[:R*0..2]->(b) WITH b.p AS p ORDER BY p DESC SKIP 1 LIMIT 3 RETURN p",
@@ -616,7 +617,7 @@ fn admission_precedes_binding_and_io_including_empty_and_source_free_results() {
             "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n.p AS p",
             "MATCH (n) RETURN COUNT(*) AS n",
             "MATCH route = WALK (a)-[:R*]->(b) RETURN route LIMIT 0",
-            "MATCH route = ANY SHORTEST (a)-[:R*0..2]->(b) RETURN route LIMIT 0",
+            "MATCH route = ANY SHORTEST (a)-[:R*1..2]->(b) RETURN route LIMIT 0",
             "MATCH route = WALK (a)-[:R*0..2]->(b)-[:R]->(c) RETURN route LIMIT 0",
         ] {
             let error = plan(text)

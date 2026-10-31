@@ -1,13 +1,15 @@
 //! Awaitable, occurrence-preserving bounded paths for a blocking consumer.
 //!
-//! The cursor keeps one route and its admitted records. It never coalesces
-//! endpoints: two parallel edges or two routes are two input occurrences.
+//! Occurrence modes retain one route and its admitted records. ANY SHORTEST
+//! instead retains a canonical breadth frontier, preserving real path IDs.
 //! Complete rows enter the ordinary external sort before DISTINCT or paging.
 
 use super::*;
 use crate::GraphWalkBounds;
 use crate::algebra::{EdgeRelation, GraphWalkSearch, IntegerComparison, WalkEdgePredicate};
 use crate::stream::{AsyncVertexCandidate, AsyncVertexScanEvent, AsyncVertexScanRecord};
+
+mod shortest;
 
 type AsyncRootCandidateResult<Record, Error, Control> =
     Result<Option<AsyncVertexCandidate<Record>>, EdgeScanSourceError<Error, Control>>;
@@ -47,6 +49,27 @@ pub trait AsyncGraphWalkSource: AsyncEdgeJoinSource {
         columns: usize,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Self::OutputGuard, EdgeScanSourceError<Self::Error, C>>;
+
+    /// Admit retained breadth-first state before allocating its path, map or
+    /// vector backing. Each guard follows its entry across frontier moves and
+    /// survives every await; replacing a canonical prefix releases its guard.
+    fn reserve_shortest_state<C>(
+        &self,
+        bytes: usize,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Self::TraversalGuard, EdgeScanSourceError<Self::Error, C>>;
+
+    /// Admit a selected shortest result independently of its frontier. Only
+    /// the final incoming record is retained, so the complete path's identity
+    /// payload must be reserved explicitly as well as root/endpoint fields.
+    fn reserve_shortest_output<C>(
+        &self,
+        root: &Self::RootRecord,
+        records: &[Self::Record],
+        hops: usize,
+        columns: usize,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Self::OutputGuard, EdgeScanSourceError<Self::Error, C>>;
 }
 
 /// A single finite variable-length atom rooted at an admitted vertex scan.
@@ -57,10 +80,12 @@ pub trait AsyncGraphWalkSource: AsyncEdgeJoinSource {
 ///
 /// This is a private input contract for a blocking consumer. There is no
 /// canonical-order claim about DFS output. The returned ScanSortTail must be
-/// applied once after complete intake, even for LIMIT zero. Shortest selectors,
-/// unbounded intervals, further atoms, OPTIONAL/probes and collection-valued
-/// edge predicates refuse during preparation, before any source or budget is
-/// observed.
+/// applied once after complete intake, even for LIMIT zero. ANY SHORTEST keeps
+/// one canonical prefix per endpoint/depth; DIFFERENT EDGES is admitted there
+/// only with a zero lower bound, when every shortest path is vertex-simple.
+/// ALL SHORTEST, unbounded intervals, further atoms, OPTIONAL/probes and
+/// collection-valued edge predicates refuse during preparation, before any
+/// source or budget is observed.
 #[derive(Clone)]
 pub struct AsyncGraphWalkPlan {
     relation: EdgeRelation,
@@ -121,6 +146,7 @@ impl AsyncGraphWalkPlan {
                     | GraphWalkSearch::Trail
                     | GraphWalkSearch::Acyclic
                     | GraphWalkSearch::Simple
+                    | GraphWalkSearch::AnyShortest
             )
         {
             return Err(EdgeScanBuildError { operator: at });
@@ -203,6 +229,13 @@ impl AsyncGraphWalkPlan {
             at += 1;
         }
         let projection = at;
+        // With a positive lower bound, a shortest WALK may repeat an edge.
+        // Coalescing those histories would lose the shortest valid TRAIL.
+        if *search == GraphWalkSearch::AnyShortest && different_edges && bounds.minimum() != 0 {
+            return Err(EdgeScanBuildError {
+                operator: expansion,
+            });
+        }
         at += 1;
         if matches!(ops.get(at), Some(GlaOperator::Distinct)) {
             at += 1;
@@ -326,9 +359,11 @@ impl<Root, Record, Guard> Frame<Root, Record, Guard> {
 
 /// Awaitable bounded path occurrences, never a complete ordered query result.
 /// Source, evaluator, candidates and emitted input occurrences share one
-/// cumulative policy. The retained route has one root and at most maximum_hops
-/// edge records; one candidate may coexist while it is checked or rejected.
-/// Source payloads and output guards have independent host-owned admissions.
+/// cumulative policy. Occurrence modes retain one root and at most maximum_hops
+/// edge records. ANY SHORTEST retains two breadth layers with at most one
+/// incoming record per endpoint in each layer. One candidate may coexist while
+/// it is checked or rejected. Source payloads, frontier state and output guards
+/// have independent host-owned admissions.
 ///
 /// A polled pending pull owns the entire source and route. Cancellation, error,
 /// close or drop releases them without draining; subsequent pulls are inert.
@@ -336,6 +371,7 @@ impl<Root, Record, Guard> Frame<Root, Record, Guard> {
 pub struct AsyncGraphWalkCursor<S: AsyncGraphWalkSource, F> {
     source: Option<S>,
     frame: Option<Frame<S::RootRecord, S::Record, S::TraversalGuard>>,
+    shortest: Option<shortest::Breadth<S::RootRecord, S::Record, S::TraversalGuard>>,
     plan: AsyncGraphWalkPlan,
     meter: Meter<F>,
     seq: CommitSeq,
@@ -349,6 +385,7 @@ impl<S: AsyncGraphWalkSource, F> AsyncGraphWalkCursor<S, F> {
             seq: source.snapshot_seq(),
             source: Some(source),
             frame: None,
+            shortest: None,
             plan,
             meter: Meter {
                 checkpoint,
@@ -380,6 +417,7 @@ impl<S: AsyncGraphWalkSource, F> AsyncGraphWalkCursor<S, F> {
             self.state = EdgeScanState::Closed;
         }
         self.frame = None;
+        self.shortest = None;
         self.source = None;
     }
 
@@ -396,10 +434,17 @@ impl<S: AsyncGraphWalkSource, F> AsyncGraphWalkCursor<S, F> {
         self.state = EdgeScanState::Failed;
         let mut source = self.source.take().expect("open cursor owns source");
         let mut frame = self.frame.take();
-        match self.advance(&mut source, &mut frame).await {
+        let mut shortest = self.shortest.take();
+        let result = if self.plan.search == GraphWalkSearch::AnyShortest {
+            self.advance_shortest(&mut source, &mut shortest).await
+        } else {
+            self.advance(&mut source, &mut frame).await
+        };
+        match result {
             Ok(Some(output)) => {
                 self.source = Some(source);
                 self.frame = frame;
+                self.shortest = shortest;
                 self.state = EdgeScanState::Open;
                 Some(Ok(output))
             }
@@ -629,59 +674,11 @@ impl<S: AsyncGraphWalkSource, F> AsyncGraphWalkCursor<S, F> {
             let Some(record) = candidate.record else {
                 continue;
             };
-            meter.event(GlaExecutionEvent::Work)?;
-            let edge = record.edge();
-            if !self.plan.relation.matches(edge.relation) {
+            let Some(target) = accepted_target(&self.plan, source, &record, endpoint, meter)?
+            else {
                 continue;
-            }
-            let target = match self.plan.direction {
-                GlaDirection::Forward if edge.source == endpoint => edge.target,
-                GlaDirection::Reverse if edge.target == endpoint => edge.source,
-                GlaDirection::Undirected if edge.source == endpoint => edge.target,
-                GlaDirection::Undirected if edge.target == endpoint => edge.source,
-                _ => continue,
             };
-            for vertex in [endpoint, target] {
-                meter.event(GlaExecutionEvent::Work)?;
-                if record.vertex(vertex).is_none() {
-                    return Err(GqlQueryError::Source(EdgeScanError::DanglingEndpoint));
-                }
-            }
             let mut keep = true;
-            // Filter the admitted edge before path-local uniqueness checks or
-            // retaining it as transit. The parent EId continuation has already
-            // advanced, so a rejected edge cannot be retried indefinitely.
-            for predicate in self.plan.edge_predicates.iter() {
-                let mut control = |event| {
-                    meter.event(event)?;
-                    source
-                        .evaluation_event(&record, event)
-                        .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
-                };
-                control(GlaExecutionEvent::Work)?;
-                let actual = seek(
-                    edge.properties,
-                    &predicate.key,
-                    |entry| entry.0,
-                    &mut control,
-                )?
-                .map(|(_, value)| value);
-                if let Some(actual) = actual {
-                    crate::algebra_exec::charge_stored_payload(actual, &mut control)?;
-                }
-                crate::algebra_exec::charge_stored_payload(&predicate.value, &mut control)?;
-                if !IntegerComparison::Equal.accepts_property_pair(
-                    actual,
-                    Some(&predicate.value),
-                    &mut control,
-                )? {
-                    keep = false;
-                    break;
-                }
-            }
-            if !keep {
-                continue;
-            }
             if self.plan.different_edges || self.plan.search == GraphWalkSearch::Trail {
                 for &(eid, _) in &active.steps {
                     meter.event(GlaExecutionEvent::Work)?;
@@ -721,6 +718,66 @@ impl<S: AsyncGraphWalkSource, F> AsyncGraphWalkCursor<S, F> {
             });
         }
     }
+}
+
+// Both depth-first occurrences and breadth-first shortest prefixes use the
+// same admitted candidate semantics. Endpoint predicates are deliberately not
+// part of this seam: a rejected result remains a valid transit vertex.
+fn accepted_target<S: AsyncGraphWalkSource, F: FnMut() -> Result<(), C>, C>(
+    plan: &AsyncGraphWalkPlan,
+    source: &S,
+    record: &S::Record,
+    endpoint: VId,
+    meter: &mut Meter<F>,
+) -> ScanResult<Option<VId>, S::Error, C> {
+    meter.event(GlaExecutionEvent::Work)?;
+    let edge = record.edge();
+    if !plan.relation.matches(edge.relation) {
+        return Ok(None);
+    }
+    let target = match plan.direction {
+        GlaDirection::Forward if edge.source == endpoint => edge.target,
+        GlaDirection::Reverse if edge.target == endpoint => edge.source,
+        GlaDirection::Undirected if edge.source == endpoint => edge.target,
+        GlaDirection::Undirected if edge.target == endpoint => edge.source,
+        _ => return Ok(None),
+    };
+    for vertex in [endpoint, target] {
+        meter.event(GlaExecutionEvent::Work)?;
+        if record.vertex(vertex).is_none() {
+            return Err(GqlQueryError::Source(EdgeScanError::DanglingEndpoint));
+        }
+    }
+    // Continuation already advanced before this scalar per-hop filter. A
+    // rejected edge cannot be retried and never becomes a retained prefix.
+    for predicate in plan.edge_predicates.iter() {
+        let mut control = |event| {
+            meter.event(event)?;
+            source
+                .evaluation_event(record, event)
+                .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
+        };
+        control(GlaExecutionEvent::Work)?;
+        let actual = seek(
+            edge.properties,
+            &predicate.key,
+            |entry| entry.0,
+            &mut control,
+        )?
+        .map(|(_, value)| value);
+        if let Some(actual) = actual {
+            crate::algebra_exec::charge_stored_payload(actual, &mut control)?;
+        }
+        crate::algebra_exec::charge_stored_payload(&predicate.value, &mut control)?;
+        if !IntegerComparison::Equal.accepts_property_pair(
+            actual,
+            Some(&predicate.value),
+            &mut control,
+        )? {
+            return Ok(None);
+        }
+    }
+    Ok(Some(target))
 }
 
 fn observe<S: AsyncGraphWalkSource, F: FnMut() -> Result<(), C>, C>(
