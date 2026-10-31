@@ -272,7 +272,7 @@ fn compressed_bfs_optional_pull_respects_cutoff_and_independent_resource_limits(
             if cutoff.is_some_and(|limit| limit <= 1) {
                 assert_eq!(
                     expected.certificate.execution_kernel,
-                    "fgdb-prism/sealed-bfs-v1"
+                    "fgdb-prism/sealed-bfs-complete-population-v2"
                 );
                 assert!(expected.certificate.bfs_decision_card.is_none());
             }
@@ -393,9 +393,192 @@ fn compressed_bfs_optional_pull_respects_cutoff_and_independent_resource_limits(
         );
         assert_eq!(
             actual.certificate.execution_kernel,
-            "fgdb-prism/sealed-bfs-v1"
+            "fgdb-prism/sealed-bfs-complete-population-v2"
         );
         assert!(actual.certificate.bfs_decision_card.is_none());
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn compressed_bfs_complete_population_preserves_direction_history_and_retained_results() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(
+            &commit,
+            DatabaseKeys::new(
+                [0xb4; 32],
+                DatabaseSecurityNamespaceId([0xb5; 32]),
+                [0xb6; 32],
+            ),
+        )
+        .await
+        .unwrap();
+        const N: usize = 12;
+        let mut initial = WriteBatch::new(RelationId(1));
+        for index in 0..N {
+            initial.create_vertex(vertex(index), vec![LabelId(1)], vec![]);
+        }
+        initial.create_vertex(vertex(500), vec![LabelId(2)], vec![]);
+        let mut retire = Vec::new();
+        for source in 0..N {
+            for target in 0..N {
+                let edge = EId(1 + (source * N + target) as u128);
+                initial.add_edge(edge, vertex(source), vertex(target), vec![]);
+                if source == N - 1 || target == N - 1 {
+                    retire.push(edge);
+                }
+            }
+        }
+        // Parallel and excluded rows participate in projection admission,
+        // but neither creates another selected vertex or hop-distance row.
+        initial.add_edge(EId(10_000), vertex(0), vertex(1), vec![]);
+        for index in 0..64 {
+            initial.add_edge(EId(11_000 + index), vertex(0), vertex(500), vec![]);
+            initial.add_edge(EId(12_000 + index), vertex(500), vertex(0), vec![]);
+        }
+        let original = db.write(&commit, initial).await.unwrap();
+        let mut change = WriteBatch::new(RelationId(1));
+        for edge in retire {
+            change.delete_edge(edge);
+        }
+        let current = db.write(&commit, change).await.unwrap();
+        let mut retained = Vec::new();
+        for direction in [Directedness::Directed, Directedness::Reversed] {
+            for loops in [SelfLoopPolicy::Keep, SelfLoopPolicy::Drop] {
+                for at in [original, current] {
+                    let mut opt = read_options();
+                    opt.as_of = Some(at);
+                    opt.projection.directedness = direction;
+                    opt.projection.self_loops = loops;
+                    let graph = projection(&db, &cx, opt).await;
+                    assert_eq!(graph.node_count(), N);
+                    let population = if at == original { N } else { N - 1 };
+                    let degree = if loops == SelfLoopPolicy::Keep {
+                        population
+                    } else {
+                        population - 1
+                    };
+                    let mut retained_result = None;
+                    for cutoff in [Some(0), Some(1), None] {
+                        let call =
+                            FnxCallSpec::single_source_shortest_path_length(vertex(0), cutoff);
+                        let actual = call
+                            .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                            .unwrap();
+                        let reached = if cutoff == Some(0) { 1 } else { population };
+                        let expected: Vec<_> = (0..reached)
+                            .map(|index| {
+                                vec![
+                                    FnxValue::Vertex(vertex(index)),
+                                    FnxValue::Integer(if index == 0 { 0 } else { 1 }),
+                                ]
+                            })
+                            .collect();
+                        assert_eq!(actual.rows, expected);
+                        assert_eq!(actual.certificate.snapshot, graph.binding());
+                        assert_eq!(actual.certificate.projection_digest, graph.digest());
+                        assert_eq!(
+                            actual.certificate.execution_kernel,
+                            "fgdb-prism/sealed-bfs-complete-population-v2"
+                        );
+                        assert!(actual.certificate.bfs_decision_card.is_none());
+                        let expansions = if cutoff == Some(0) {
+                            0
+                        } else if at == original || cutoff == Some(1) {
+                            1
+                        } else {
+                            population
+                        };
+                        assert_eq!(
+                            actual.certificate.witness.edges_scanned,
+                            expansions * degree
+                        );
+                        if at == original && cutoff.is_none() {
+                            assert_eq!(actual.certificate.witness.nodes_touched, 1);
+                            assert_eq!(graph.adjacency_entry_count(), N * degree);
+                            assert!(
+                                actual.certificate.witness.edges_scanned
+                                    < graph.adjacency_entry_count()
+                            );
+                        }
+                        let native = db
+                            .read_session()
+                            .unwrap()
+                            .execute_fnx(&cx, &call, opt)
+                            .unwrap()
+                            .analytics;
+                        assert_eq!(native.rows, expected);
+                        assert_eq!(
+                            native.certificate.result_digest,
+                            actual.certificate.result_digest
+                        );
+                        for q in [1, 7, 257] {
+                            let cooperative = call
+                                .execute_sealed_cooperative(
+                                    &cx,
+                                    &graph,
+                                    opt.execution_limits,
+                                    memory(),
+                                    quantum(q),
+                                    yield_now,
+                                )
+                                .await
+                                .unwrap();
+                            compare_execution(&cooperative, &actual);
+                        }
+                        if cutoff.is_none() {
+                            // Invoke the database owner twice: source preparation,
+                            // retained admission reuse, execution and consumption.
+                            for _ in 0..2 {
+                                assert_eq!(
+                                    db.execute_fnx_sealed(
+                                        &cx,
+                                        &call,
+                                        opt,
+                                        memory(),
+                                        SealedLimits::default(),
+                                    )
+                                    .await
+                                    .unwrap()
+                                    .analytics,
+                                    actual
+                                );
+                            }
+                            retained_result = Some(actual);
+                        }
+                    }
+                    retained.push((graph, opt.execution_limits, retained_result.unwrap()));
+                }
+            }
+        }
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        let call = FnxCallSpec::single_source_shortest_path_length(vertex(0), None);
+        for (graph, limits, expected) in retained {
+            assert_eq!(
+                call.execute_sealed(&cx, &graph, limits, memory()).unwrap(),
+                expected
+            );
+            compare_execution(
+                &call
+                    .execute_sealed_cooperative(
+                        &cx,
+                        &graph,
+                        limits,
+                        memory(),
+                        quantum(7),
+                        yield_now,
+                    )
+                    .await
+                    .unwrap(),
+                &expected,
+            );
+        }
         assert_eq!(contexts.outstanding_obligations(), 0);
     });
 }

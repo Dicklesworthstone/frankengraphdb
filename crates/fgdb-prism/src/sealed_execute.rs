@@ -190,7 +190,7 @@ trait Rows {
     }
     /// Complete admission validated every target ordinal and exact degree in
     /// this immutable projection, including the symmetry law when undirected.
-    /// Only then may connectivity omit rows whose edges cannot change labels.
+    /// Only then may kernels omit rows whose edges cannot change their result.
     /// Unknown providers must still expose malformed rows and source failures.
     fn has_validated_adjacency(&self) -> bool {
         false
@@ -725,8 +725,16 @@ fn bfs(
         edges_scanned: 0,
         queue_peak: 1,
     };
+    let admitted = graph.has_validated_adjacency();
     while head < queue.len() {
         checkpoint()?;
+        // BFS discovery fixes each hop distance. Once every admitted vertex
+        // has been discovered, later rows cannot change any distance. Check
+        // only between rows: the last reached row must still drain its EOF.
+        // Unknown providers retain every remaining source/ordinal failure.
+        if admitted && queue.len() == n {
+            break;
+        }
         let vertex = queue[head];
         head += 1;
         witness.nodes_touched = add(witness.nodes_touched, 1)?;
@@ -1038,7 +1046,7 @@ impl FnxCallSpec {
                     .ok_or(ExecutionError::UnknownSource(source))?;
                 admission.rows(1)?;
                 (
-                    "fgdb-prism/sealed-bfs-v1",
+                    "fgdb-prism/sealed-bfs-complete-population-v2",
                     pass,
                     mul(n, size_of::<usize>() + size_of::<Option<HopDistance>>())?,
                     Some(ordinal),
@@ -2100,6 +2108,13 @@ mod tests {
         projection_with_weights(mask, |bit| [0.0, 0.1, 0.3, 1.0, 7.0][bit % 5])
     }
     fn projection_with_weights(mask: u16, weight: impl Fn(usize) -> f64) -> SnapshotGraphView {
+        projection_in_direction(mask, weight, Directedness::Directed)
+    }
+    fn projection_in_direction(
+        mask: u16,
+        weight: impl Fn(usize) -> f64,
+        direction: Directedness,
+    ) -> SnapshotGraphView {
         let vertices = [VId(0), VId(17), VId(u128::MAX)];
         let edges: Vec<_> = (0..9)
             .filter(|bit| mask & (1 << bit) != 0)
@@ -2118,7 +2133,7 @@ mod tests {
             &vertices,
             &edges,
             ProjectionSpec {
-                directedness: Directedness::Directed,
+                directedness: direction,
                 parallel_edges: ParallelEdgePolicy::Sum,
                 self_loops: SelfLoopPolicy::Keep,
             },
@@ -2598,14 +2613,14 @@ mod tests {
                 for cutoff in [None, Some(0), Some(1), Some(2), Some(1000)] {
                     let call = bfs_call(graph.vertex_id(source).unwrap(), cutoff);
                     let admission = ResultAdmission::new(&call, limits(), memory()).unwrap();
-                    let output = bfs(
-                        &DecodedRows(&graph),
-                        source,
-                        cutoff,
-                        &admission,
-                        &mut || Ok(()),
-                    )
-                    .unwrap();
+                    // Retain the original full-scan witness oracle for a
+                    // provider without complete adjacency admission evidence.
+                    let rows = FaultRows {
+                        graph: &graph,
+                        calls: std::cell::Cell::new(0),
+                        fail_at: usize::MAX,
+                    };
+                    let output = bfs(&rows, source, cutoff, &admission, &mut || Ok(())).unwrap();
                     let expected = call
                         .execute(&graph, limits(), || Ok::<(), Infallible>(()))
                         .unwrap();
@@ -2643,6 +2658,318 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn admitted_bfs_matches_floyd_warshall_for_every_small_direction_and_cutoff() {
+        let mut omitted = 0;
+        for mask in 0_u16..512 {
+            for direction in [
+                Directedness::Directed,
+                Directedness::Reversed,
+                Directedness::Undirected,
+            ] {
+                // Independent all-pairs oracle over the raw adjacency mask.
+                // It has no frontier, queue, discovery order or admission facts.
+                let mut hops = [[4_usize; 3]; 3];
+                for (vertex, row) in hops.iter_mut().enumerate() {
+                    row[vertex] = 0;
+                }
+                for bit in 0..9 {
+                    if mask & (1 << bit) == 0 {
+                        continue;
+                    }
+                    let (source, target) = (bit / 3, bit % 3);
+                    if direction != Directedness::Reversed {
+                        hops[source][target] = hops[source][target].min(1);
+                    }
+                    if direction != Directedness::Directed {
+                        hops[target][source] = hops[target][source].min(1);
+                    }
+                }
+                for via in 0..3 {
+                    for source in 0..3 {
+                        for target in 0..3 {
+                            hops[source][target] =
+                                hops[source][target].min(hops[source][via] + hops[via][target]);
+                        }
+                    }
+                }
+                // Hop distance ignores finite weight values, including negatives.
+                let graph = projection_in_direction(mask, |bit| bit as f64 - 4.0, direction);
+                for source in 0..3 {
+                    for cutoff in [None, Some(0), Some(1), Some(2), Some(1000)] {
+                        let call = bfs_call(graph.vertex_id(source).unwrap(), cutoff);
+                        let admission = ResultAdmission::new(&call, limits(), memory()).unwrap();
+                        let rows = AdmittedFaultRows::new(&graph, usize::MAX).unwrap();
+                        assert_eq!(rows.calls.get(), 0, "admission precedes source tracing");
+                        let output =
+                            bfs(&rows, source, cutoff, &admission, &mut || Ok(())).unwrap();
+                        let KernelValues::Distances(distances) = &output.values else {
+                            panic!("distances");
+                        };
+                        let actual: Vec<_> = distances
+                            .iter()
+                            .map(|distance| distance.map(HopDistance::hops))
+                            .collect();
+                        let expected: Vec<_> = hops[source]
+                            .iter()
+                            .map(|&distance| {
+                                (distance < 4 && cutoff.is_none_or(|limit| distance <= limit))
+                                    .then_some(distance)
+                            })
+                            .collect();
+                        assert_eq!(
+                            actual, expected,
+                            "mask={mask} {direction:?} source={source} cutoff={cutoff:?}"
+                        );
+                        assert_eq!(output.row_count, expected.iter().flatten().count());
+                        let full_scan: usize = hops[source]
+                            .iter()
+                            .enumerate()
+                            .filter(|&(_, &distance)| {
+                                distance < 4 && cutoff.is_none_or(|limit| distance < limit)
+                            })
+                            .map(|(vertex, _)| graph.neighbors_indices(vertex).unwrap().len())
+                            .sum();
+                        assert!(output.witness.edges_scanned <= full_scan);
+                        if output.row_count < graph.node_count() {
+                            assert_eq!(
+                                output.witness.edges_scanned, full_scan,
+                                "a disconnected or cutoff-limited search cannot omit reachable rows"
+                            );
+                        }
+                        assert_eq!(
+                            output.witness.edges_scanned,
+                            rows.events
+                                .borrow()
+                                .iter()
+                                .filter(|(kind, _)| *kind == "pull")
+                                .count()
+                        );
+                        omitted += usize::from(output.witness.edges_scanned < full_scan);
+                    }
+                }
+            }
+        }
+        assert!(
+            omitted > 0,
+            "the exhaustive corpus must exercise omitted expansions"
+        );
+    }
+
+    #[test]
+    fn admitted_bfs_drains_the_final_row_and_keeps_every_reached_fault_and_checkpoint() {
+        for (mask, opened, edges) in [
+            (511, vec![2], 3),
+            // Vertex 1 is isolated: discovering the reachable component does
+            // not prove that every selected vertex has been discovered.
+            (1 | (1 << 2) | (1 << 6) | (1 << 8), vec![2, 0], 4),
+        ] {
+            let graph = projection(mask);
+            let call = bfs_call(VId(u128::MAX), None);
+            let admission = ResultAdmission::new(&call, limits(), memory()).unwrap();
+            let rows = AdmittedFaultRows::new(&graph, usize::MAX).unwrap();
+            let mut checkpoints = 0;
+            let output = bfs(&rows, 2, None, &admission, &mut || {
+                checkpoints += 1;
+                Ok(())
+            })
+            .unwrap();
+            let events = rows.events.borrow().clone();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter_map(|(kind, source)| (*kind == "open").then_some(*source))
+                    .collect::<Vec<_>>(),
+                opened
+            );
+            assert_eq!(output.witness.nodes_touched, opened.len());
+            assert_eq!(output.witness.edges_scanned, edges);
+            assert_eq!(rows.calls.get(), 2 * opened.len() + edges);
+            assert_eq!(events.last(), Some(&("eof", *opened.last().unwrap())));
+            if mask == 511 {
+                // Source 2 discovers the last new vertex on its second pull.
+                // Its third pull (a loop) and EOF are still mandatory.
+                assert_eq!(
+                    events,
+                    vec![
+                        ("open", 2),
+                        ("pull", 2),
+                        ("pull", 2),
+                        ("pull", 2),
+                        ("eof", 2),
+                    ]
+                );
+                let incumbent = FaultRows {
+                    graph: &graph,
+                    calls: std::cell::Cell::new(0),
+                    fail_at: usize::MAX,
+                };
+                let full = bfs(&incumbent, 2, None, &admission, &mut || Ok(())).unwrap();
+                assert_eq!(full.witness.edges_scanned, 9);
+                assert_eq!(full.witness.nodes_touched, 3);
+                assert_eq!(incumbent.calls.get(), 3 + 9 + 3);
+                let (KernelValues::Distances(actual), KernelValues::Distances(expected)) =
+                    (&output.values, &full.values)
+                else {
+                    panic!("distances");
+                };
+                assert_eq!(actual, expected);
+            }
+            for fail_at in 1..=events.len() {
+                let rows = AdmittedFaultRows::new(&graph, fail_at).unwrap();
+                assert!(matches!(
+                    bfs(&rows, 2, None, &admission, &mut || Ok(())),
+                    Err(Error::Source(SealedProjectionError::UnknownOrdinal(
+                        usize::MAX
+                    )))
+                ));
+                assert_eq!(rows.calls.get(), fail_at);
+                assert_eq!(rows.events.borrow().as_slice(), &events[..fail_at]);
+            }
+            for stop in 1..=checkpoints {
+                let rows = AdmittedFaultRows::new(&graph, usize::MAX).unwrap();
+                let mut reached = 0;
+                let result = bfs(&rows, 2, None, &admission, &mut || {
+                    reached += 1;
+                    if reached == stop {
+                        Err(Error::Cancelled(std::io::Error::other("BFS stop").into()))
+                    } else {
+                        Ok(())
+                    }
+                });
+                assert!(matches!(result, Err(Error::Cancelled(_))));
+                assert_eq!(reached, stop);
+                let attempted = rows.events.borrow();
+                assert_eq!(attempted.as_slice(), &events[..attempted.len()]);
+                if mask == 511 && stop == checkpoints {
+                    assert_eq!(
+                        attempted.as_slice(),
+                        events.as_slice(),
+                        "completion must poll the live guard after the last required EOF"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bfs_without_complete_admission_keeps_later_source_and_ordinal_failures() {
+        let graph = projection(511);
+        let call = bfs_call(VId(u128::MAX), None);
+        let admission = ResultAdmission::new(&call, limits(), memory()).unwrap();
+        for fail_at in 1..=15 {
+            // three opens, nine edges, three EOFs
+            let rows = FaultRows {
+                graph: &graph,
+                calls: std::cell::Cell::new(0),
+                fail_at,
+            };
+            assert!(matches!(
+                bfs(&rows, 2, None, &admission, &mut || Ok(())),
+                Err(Error::Source(SealedProjectionError::UnknownOrdinal(
+                    usize::MAX
+                )))
+            ));
+            assert_eq!(rows.calls.get(), fail_at);
+        }
+        struct MalformedRows;
+        impl Rows for MalformedRows {
+            type Cursor<'a>
+                = PathRow
+            where
+                Self: 'a;
+            fn node_count(&self) -> usize {
+                2
+            }
+            fn degree(&self, source: usize) -> Option<usize> {
+                (source < 2).then_some(1)
+            }
+            fn open(&self, source: usize) -> Result<PathRow> {
+                // Row zero discovers the complete stated population. Row one
+                // then exposes an invalid ordinal; no admission certified it.
+                Ok(PathRow(Some((source + 1, 1.0))))
+            }
+        }
+        assert!(matches!(
+            bfs(&MalformedRows, 0, None, &admission, &mut || Ok(())),
+            Err(Error::Execution(ExecutionError::InvalidUpstreamResult))
+        ));
+    }
+
+    #[test]
+    fn admitted_bfs_keeps_discovery_limits_and_singleton_completion_control() {
+        let graph = projection(511);
+        let call = bfs_call(VId(u128::MAX), None);
+        for resource in ["result rows", "result bytes"] {
+            let mut admission = ResultAdmission::new(&call, limits(), memory()).unwrap();
+            let (limit, requested) = if resource == "result rows" {
+                admission.max_rows = 2;
+                (2, 3)
+            } else {
+                let bytes = admission.column_bytes + 3 * admission.row_bytes;
+                admission.max_bytes = bytes - 1;
+                (bytes - 1, bytes)
+            };
+            for admitted in [false, true] {
+                let result = if admitted {
+                    bfs(
+                        &AdmittedFaultRows::new(&graph, usize::MAX).unwrap(),
+                        2,
+                        None,
+                        &admission,
+                        &mut || Ok(()),
+                    )
+                } else {
+                    bfs(
+                        &FaultRows {
+                            graph: &graph,
+                            calls: std::cell::Cell::new(0),
+                            fail_at: usize::MAX,
+                        },
+                        2,
+                        None,
+                        &admission,
+                        &mut || Ok(()),
+                    )
+                };
+                assert!(
+                    matches!(result, Err(Error::Execution(ExecutionError::LimitExceeded {
+                    resource: actual, limit: actual_limit, requested: actual_requested,
+                })) if actual == resource && actual_limit == limit && actual_requested == requested)
+                );
+            }
+        }
+        let call = bfs_call(VId(0), None);
+        let admission = ResultAdmission::new(&call, limits(), memory()).unwrap();
+        for cycle in [false, true] {
+            let singleton = PathRows { n: 1, cycle };
+            let mut checkpoints = 0;
+            let output = bfs(&singleton, 0, None, &admission, &mut || {
+                checkpoints += 1;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(output.row_count, 1);
+            assert_eq!(output.witness.nodes_touched, 0);
+            assert_eq!(output.witness.edges_scanned, 0);
+            assert_eq!(checkpoints, 2); // initialization, controlled completion
+            let mut reached = 0;
+            assert!(matches!(
+                bfs(&singleton, 0, None, &admission, &mut || {
+                    reached += 1;
+                    if reached == checkpoints {
+                        Err(Error::Cancelled(
+                            std::io::Error::other("singleton stop").into(),
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(Error::Cancelled(_))
+            ));
         }
     }
 

@@ -602,7 +602,7 @@ impl FnxCallSpec {
                         .ok_or(ExecutionError::UnknownSource(source))?;
                     admission.rows(1)?;
                     (
-                        "fgdb-prism/sealed-bfs-cooperative-v1",
+                        "fgdb-prism/sealed-bfs-complete-population-cooperative-v2",
                         pass,
                         mul(n, size_of::<usize>() + size_of::<Option<HopDistance>>())?,
                         Some(ordinal),
@@ -1263,6 +1263,13 @@ where
     };
     while head < queue.len() {
         control.tick().await?;
+        // The immutable projection admitted all adjacency before this call.
+        // Every discovered vertex already has its final BFS distance. Keep
+        // this boundary after the current row's EOF, with a live fuel/guard
+        // check before omitting the remaining row opens.
+        if queue.len() == n {
+            break;
+        }
         let vertex = queue[head];
         head += 1;
         witness.nodes_touched = add(witness.nodes_touched, 1)?;
