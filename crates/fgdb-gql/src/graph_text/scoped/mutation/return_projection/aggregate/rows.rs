@@ -170,36 +170,25 @@ pub(super) fn prefix<'a>(
     // A leading procedure shares the read parser's identity binding when a
     // following MATCH or output expression needs its yielded vertex. The
     // aggregate must retain that real graph source and its correlations.
-    let mut schema = Vec::new();
-    let call = if parser.is_word("CALL") {
-        let at = parser.current.at;
-        parser.advance()?;
-        Some(parser.call_stage(&mut schema, at)?)
+    let (schema, leading) = parser.leading_row_prefix()?;
+    let implied = if parser.is_word("MATCH") {
+        Vec::new()
     } else {
-        None
+        parser.implied_call_vertices(&schema, &leading)?
     };
-    if let Some(call) = &call {
-        let leading = vec![call.clone()];
-        let implied = if parser.is_word("MATCH") {
-            Vec::new()
-        } else {
-            parser.implied_call_vertices(&schema, &leading)?
-        };
-        if parser.is_word("MATCH") || !implied.is_empty() {
-            let at = parser.current.at;
-            let (part, tail) =
-                parser.leading_graph_part(statement, schema, leading, implied, true)?;
-            let schema = tail.ok_or_else(|| expected(at, "aggregate input row schema"))?;
-            let depth = part.depth();
-            return Ok((
-                Head::Multipart(Box::new(UnresolvedReadInput::from_first(part))),
-                Vec::new(),
-                schema,
-                depth,
-            ));
-        }
+    if parser.is_word("MATCH") || !implied.is_empty() {
+        let at = parser.current.at;
+        let (part, tail) = parser.leading_graph_part(statement, schema, leading, implied, true)?;
+        let schema = tail.ok_or_else(|| expected(at, "aggregate input row schema"))?;
+        let depth = part.depth();
+        return Ok((
+            Head::Multipart(Box::new(UnresolvedReadInput::from_first(part))),
+            Vec::new(),
+            schema,
+            depth,
+        ));
     }
-    if call.is_none()
+    if leading.is_empty()
         && !parser.is_word("WITH")
         && !parser.is_word("UNWIND")
         && !parser.is_word("RETURN")
@@ -214,11 +203,11 @@ pub(super) fn prefix<'a>(
     // The shared prefix starts at depth two (graph leaf + first projection).
     // This input starts with only Singleton. Its Aggregate parent uses the
     // freed level, so the prefix's existing early depth refusal stays sound.
-    // A CALL source is one more level above that Singleton.
-    let depth = depth - 1 + usize::from(call.is_some());
+    // Every leading CALL or UNWIND contributes its unchanged native node.
+    let depth = depth - 1 + leading.iter().map(ReadStageTemplate::depth).sum::<usize>();
     Ok((
         Head::Single(None),
-        call.into_iter().chain(stages).collect(),
+        leading.into_iter().chain(stages).collect(),
         schema,
         depth,
     ))

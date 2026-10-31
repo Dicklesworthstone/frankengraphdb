@@ -733,19 +733,7 @@ impl<'a> Parser<'a> {
         mut self,
         statement: &'a str,
     ) -> Result<UnresolvedGraphText<'a>, GraphSetTextError> {
-        let mut schema = Vec::new();
-        let mut leading = Vec::new();
-        // A procedure is a source: it can only start the pipeline.
-        if self.is_word("CALL") {
-            let at = self.current.at;
-            self.advance()?;
-            leading.push(self.call_stage(&mut schema, at)?);
-        }
-        while self.is_word("UNWIND") {
-            let at = self.current.at;
-            self.advance()?;
-            leading.push(self.unwind_stage(&mut schema, at)?);
-        }
+        let (schema, leading) = self.leading_row_prefix()?;
         let implied = if self.is_word("MATCH") {
             Vec::new()
         } else {
@@ -892,17 +880,24 @@ impl<'a> Parser<'a> {
         // A CALL output matched as a vertex must be one (fgdb-luq0b):
         // record it, so the host refuses a scalar instead of letting the
         // identity join drop every row.
-        if let Some(ReadStageTemplate::Call {
-            outputs, vertices, ..
-        }) = leading.first_mut()
-        {
-            let mut rows: Vec<usize> = (identity.iter())
-                .map(|&(row, _)| row)
-                .filter(|&row| row < outputs.len())
-                .collect();
-            rows.sort_unstable();
-            rows.dedup();
-            *vertices = rows;
+        for stage in &mut leading {
+            if let ReadStageTemplate::Call {
+                outputs, vertices, ..
+            } = stage
+            {
+                // UNWIND and earlier CALLs may precede this source. Match
+                // each alias to its own YIELD position, never a row offset.
+                *vertices = outputs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(column, (_, alias))| {
+                        identity
+                            .iter()
+                            .any(|&(row, _)| self.read_row_bindings[row].text == alias.as_str())
+                            .then_some(column)
+                    })
+                    .collect();
+            }
         }
         // The first WITH is the graph-to-row boundary, exactly as it is
         // for a statement that starts at MATCH: `n.p` there reads a graph
@@ -1053,13 +1048,7 @@ impl<'a> Parser<'a> {
         &mut self,
         statement: &'a str,
     ) -> Result<(UnresolvedGraphText<'a>, pipeline::RowSchema<'a>, usize), GraphSetTextError> {
-        let mut schema = Vec::new();
-        let mut leading = Vec::new();
-        while self.is_word("UNWIND") {
-            let at = self.current.at;
-            self.advance()?;
-            leading.push(self.unwind_stage(&mut schema, at)?);
-        }
+        let (schema, leading) = self.leading_row_prefix()?;
         let at = self.current.at;
         let (part, tail) = self.leading_graph_part(statement, schema, leading, Vec::new(), true)?;
         let schema = tail.ok_or(GraphSetTextError {
@@ -2287,6 +2276,91 @@ impl<'a> Parser<'a> {
         Ok(element(right, &lexer)? && !tighter_than_comparison(&mut lexer)?)
     }
 
+    /// Whole-value equality between a bare open/element value and a named
+    /// subscript, in either order. The subscript may yield a graph identity;
+    /// a scalar comparison cannot load it. This is lexical routing only:
+    /// the existing value parser validates the complete operands and indexes.
+    fn indexed_element_compared_at(
+        &self,
+        first: Token<'a>,
+        lexer: &Lexer<'a>,
+        route: Route<'_, 'a>,
+    ) -> Result<bool, GraphPatternTextError> {
+        // Leave the lexer immediately after each admitted operand. At least
+        // one operand is indexed and the other is a bare dynamic/element
+        // value; scalar-only comparisons keep their existing compiler.
+        let operand = |token: Token<'a>,
+                       lexer: &mut Lexer<'a>|
+         -> Result<Option<bool>, GraphPatternTextError> {
+            let TokenKind::Word(word) = token.kind else {
+                return Ok(None);
+            };
+            let local = self.elements.contains(&word);
+            let kind = route.row.and_then(|schema| {
+                schema[..self.visible_width(schema)]
+                    .iter()
+                    .find(|(name, _)| name.text == word)
+                    .map(|(_, kind)| *kind)
+            });
+            if matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'[')) {
+                if !local
+                    && !matches!(
+                        kind,
+                        Some(
+                            GraphSetColumnType::Any
+                                | GraphSetColumnType::List
+                                | GraphSetColumnType::Vertices
+                                | GraphSetColumnType::Edges
+                        )
+                    )
+                {
+                    return Ok(None);
+                }
+                while matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'[')) {
+                    lexer.next()?;
+                    skip_group(lexer)?;
+                }
+                return Ok(Some(true));
+            }
+            if matches!(
+                lexer.clone().next()?.kind,
+                TokenKind::Punct(b'(' | b'.' | b':')
+            ) {
+                return Ok(None);
+            }
+            let bare = local
+                || kind
+                    .is_some_and(|kind| kind == GraphSetColumnType::Any || is_element_column(kind))
+                || (kind.is_none() && route.graph.is_some_and(|parser| parser.graph_element(word)));
+            Ok(bare.then_some(false))
+        };
+        let mut lexer = lexer.clone();
+        let Some(left_indexed) = operand(first, &mut lexer)? else {
+            return Ok(false);
+        };
+        let equality = match lexer.next()?.kind {
+            TokenKind::Punct(b'=') => true,
+            TokenKind::Punct(b'<') => matches!(lexer.next()?.kind, TokenKind::Punct(b'>')),
+            TokenKind::Punct(b'!') => matches!(lexer.next()?.kind, TokenKind::Punct(b'=')),
+            _ => false,
+        };
+        if !equality {
+            return Ok(false);
+        }
+        let right = lexer.next()?;
+        let Some(right_indexed) = operand(right, &mut lexer)? else {
+            return Ok(false);
+        };
+        let after = lexer.clone().next()?;
+        if left_indexed == right_indexed
+            || matches!(after.kind, TokenKind::Punct(b'(' | b'.' | b':' | b'['))
+            || matches!(after.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT"))
+        {
+            return Ok(false);
+        }
+        Ok(!tighter_than_comparison(&mut lexer)?)
+    }
+
     /// Whether two open (Any) row columns, or an open column and an
     /// element-typed row column, are compared here with `=`, `<>` or `!=`, in
     /// either order. Both open values may hold graph identities, lists or
@@ -2301,6 +2375,9 @@ impl<'a> Parser<'a> {
         &self,
         route: Route<'_, 'a>,
     ) -> Result<bool, GraphPatternTextError> {
+        if self.indexed_element_compared_at(self.current, &self.lexer, route)? {
+            return Ok(true);
+        }
         let bare = |token: Token<'a>,
                     lexer: &Lexer<'a>|
          -> Result<Option<&'a str>, GraphPatternTextError> {
@@ -2675,6 +2752,11 @@ impl<'a> Parser<'a> {
                     if self.whole_case_value_operand(value, &ahead, route, "THEN")? {
                         return Ok(true);
                     }
+                }
+                // A comparison let slot belongs to the reached WHEN. In a
+                // scalar CASE it would otherwise be hoisted before all arms.
+                if self.indexed_element_compared_at(token, &lexer, route)? {
+                    return Ok(true);
                 }
                 if self.elements.contains(&word) {
                     return Ok(true);
@@ -5036,6 +5118,142 @@ mod graph_scope_tests {
             )])]
         );
         assert_eq!(result.rows.result_rows, 1);
+    }
+
+    #[test]
+    fn indexed_element_equality_preserves_domains_case_laziness_and_precedence() {
+        use crate::{GraphIntegerErrorKind, GraphSetExecutionError};
+        use fgdb_types::{CanonicalF64, EId, VId};
+
+        fn int(value: i64) -> GraphValue {
+            GraphValue::Scalar(CanonicalScalar::Int(value))
+        }
+        fn one(value: GraphValue) -> Vec<GraphValueRow> {
+            vec![GraphValueRow::from_owned_values(vec![value])]
+        }
+        fn execute(
+            text: &str,
+            values: Vec<GraphValue>,
+        ) -> Result<Vec<GraphValueRow>, GqlQueryError<GraphSetExecutionError<()>, ()>> {
+            let parameters = GqlParameters::new().with_list("items", values).unwrap();
+            let query = PreparedGraphSetText::prepare_with_parameter_types(
+                text,
+                &[("items", GqlParameterType::List)],
+                symbols,
+            )
+            .unwrap_or_else(|error| panic!("{text}: {error:?}"))
+            .bind_parameters(&parameters)
+            .unwrap();
+            query
+                .execute_governed(
+                    GqlQueryPolicy::new(100, 100, 100_000, 100_000),
+                    |_, _| -> Result<_, GqlQueryError<(), ()>> {
+                        panic!("this value fixture has no graph source")
+                    },
+                    || Ok::<_, ()>(()),
+                )
+                .map(|execution| execution.value)
+        }
+
+        let vertex = GraphValue::Vertex(VId((1_u128 << 100) | 7));
+        let other = GraphValue::Vertex(VId((2_u128 << 100) | 7));
+        let edge = GraphValue::Edge(EId((1_u128 << 100) | 7));
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        for (left, right, equal) in [
+            (vertex.clone(), vertex.clone(), Some(true)),
+            (vertex.clone(), other.clone(), Some(false)),
+            (edge.clone(), edge.clone(), Some(true)),
+            (vertex.clone(), edge, Some(false)),
+            (
+                GraphValue::List(vec![int(2)].into_boxed_slice()),
+                GraphValue::List(vec![int(2)].into_boxed_slice()),
+                Some(true),
+            ),
+            (
+                int(2),
+                GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(2.0))),
+                Some(true),
+            ),
+            (null.clone(), vertex.clone(), None),
+            (vertex.clone(), null, None),
+        ] {
+            for (comparison, negate) in [
+                ("x = xs[1]", false),
+                ("xs[1] = x", false),
+                ("x <> xs[1]", true),
+                ("xs[1] != x", true),
+            ] {
+                let text = format!(
+                    "WITH $items AS xs WITH xs,xs[0] AS x RETURN \
+                     CASE WHEN {comparison} THEN 7 ELSE 9 END AS value"
+                );
+                let selected = equal.map(|value| value != negate) == Some(true);
+                assert_eq!(
+                    execute(&text, vec![left.clone(), right.clone()]).unwrap(),
+                    one(int(if selected { 7 } else { 9 })),
+                    "{text}"
+                );
+            }
+        }
+
+        let values = vec![vertex.clone(), vertex.clone()];
+        for expression in [
+            "CASE WHEN true THEN 7 WHEN x = xs[1/0] THEN 8 ELSE 9 END",
+            "CASE WHEN false THEN 1/0 WHEN xs[1] = x THEN 7 ELSE 9 END",
+        ] {
+            let text = format!("WITH $items AS xs WITH xs,xs[0] AS x RETURN {expression} AS value");
+            assert_eq!(
+                execute(&text, values.clone()).unwrap(),
+                one(int(7)),
+                "{text}"
+            );
+        }
+        for expression in [
+            "CASE WHEN false THEN 7 WHEN x = xs[1/0] THEN 8 ELSE 9 END",
+            "CASE WHEN x = xs[1] THEN 1/0 ELSE 7 END",
+        ] {
+            for suffix in ["", " LIMIT 0"] {
+                let text = format!(
+                    "WITH $items AS xs WITH xs,xs[0] AS x RETURN {expression} AS value{suffix}"
+                );
+                let error = execute(&text, values.clone()).unwrap_err();
+                assert!(
+                    matches!(&error, GqlQueryError::Source(
+                        GraphSetExecutionError::Projection { error, .. }
+                    ) if error.kind == GraphIntegerErrorKind::DivisionByZero),
+                    "{text}: {error:?}"
+                );
+            }
+        }
+
+        // Arithmetic and IS retain their tighter precedence; the lookahead
+        // must not route a prefix of either complete right operand.
+        for (condition, values) in [
+            ("x = xs[1] + 1", vec![int(5), int(4)]),
+            (
+                "x = xs[1] IS NULL",
+                vec![GraphValue::Scalar(CanonicalScalar::Bool(false)), int(4)],
+            ),
+            (
+                "x = xs[1] IN [1,2]",
+                vec![GraphValue::Scalar(CanonicalScalar::Bool(true)), int(2)],
+            ),
+        ] {
+            let text = format!(
+                "WITH $items AS xs WITH xs,xs[0] AS x RETURN \
+                 CASE WHEN {condition} THEN 7 ELSE 9 END AS value"
+            );
+            assert_eq!(execute(&text, values).unwrap(), one(int(7)), "{text}");
+        }
+
+        // The list-local x shadows a different outer element. Whole-value
+        // comparison must read that lexical local, not the outer row column.
+        let text = "WITH $items AS xs WITH xs,xs[0] AS x RETURN \
+                    [x IN [xs[1]] | CASE WHEN xs[1] = x THEN 7 ELSE 9 END] AS value";
+        assert_eq!(
+            execute(text, vec![vertex, other]).unwrap(),
+            one(GraphValue::List(vec![int(7)].into_boxed_slice()))
+        );
     }
 
     #[test]

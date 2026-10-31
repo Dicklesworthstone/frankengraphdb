@@ -3963,3 +3963,186 @@ mod async_elements {
         }
     }
 }
+
+#[test]
+fn leading_call_unwind_prefix_preserves_each_procedures_vertex_aliases() {
+    use fgdb_gql::PreparedGraphPipelineAggregateText;
+    use fgdb_gql::spill_aggregate::AsyncSpillAggregatePlan;
+
+    let graph = Graph::sample();
+    let mut joined = Vec::new();
+    let mut unwound = Vec::new();
+    for marker in [7, 7] {
+        for (_, from, _, to) in &graph.edges {
+            unwound.push(row(vec![
+                scalar(marker),
+                GraphValue::Vertex(*from),
+                GraphValue::Vertex(*to),
+            ]));
+            joined.push(row(vec![
+                scalar(marker),
+                GraphValue::Vertex(*from),
+                scalar(if from.0 == 1 { 17 } else { 12 }),
+                GraphValue::Vertex(*to),
+                scalar(if to.0 == 2 { 22 } else { 25 }),
+            ]));
+        }
+    }
+    joined.sort();
+    unwound.sort();
+    let mut implied = Vec::new();
+    for _ in 0..3 {
+        for (property, second) in [(3, 27), (1, 22), (4, 25)] {
+            implied.push(row(vec![scalar(7), scalar(property), scalar(second)]));
+        }
+    }
+    implied.sort();
+    for (text, expected, profiles, sources, aggregate) in [
+        (
+            "CALL test.rows(10) YIELD score AS first,vertex AS n \
+             UNWIND [7,7] AS marker \
+             CALL test.rows(20) YIELD vertex AS other,score AS second \
+             MATCH (n)-[:R]->(other) \
+             RETURN marker,n,first,other,second ORDER BY marker,n,first,other,second",
+            joined,
+            vec![vec![1], vec![0]],
+            3,
+            "count(*)",
+        ),
+        (
+            "UNWIND [7,7] AS marker MATCH (n)-[:R]->(m) \
+             RETURN marker,n,m ORDER BY marker,n,m",
+            unwound,
+            vec![],
+            1,
+            "count(*)",
+        ),
+        (
+            "CALL test.rows(10) YIELD vertex AS ignored,score AS first \
+             UNWIND [7] AS marker \
+             CALL test.rows(20) YIELD score AS second,vertex AS n \
+             RETURN marker,n.p,second ORDER BY marker,n.p,second",
+            implied,
+            vec![vec![], vec![1]],
+            3,
+            "count(n.p)",
+        ),
+    ] {
+        let query = prepare(text);
+        let plan = if profiles.is_empty() {
+            AsyncSpillSetPlan::compile(&query)
+        } else {
+            assert!(AsyncSpillSetPlan::compile(&query).is_err());
+            assert!(AsyncSpillSetPlan::compile_with_single_procedure(&query).is_err());
+            AsyncSpillSetPlan::compile_with_independent_procedures(&query)
+        }
+        .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+        assert_eq!(plan.source_count(), sources, "{text}");
+        let mut marked = Vec::new();
+        assert!(plan.all_procedure_sources(&mut |source| {
+            marked.push(source.call().vertex_outputs().to_vec());
+            true
+        }));
+        assert_eq!(marked, profiles, "{text}");
+        assert_eq!(staged_plan(&graph, &plan).unwrap(), expected, "{text}");
+        let mut calls = Vec::new();
+        let native = query
+            .execute_governed_with_procedures(
+                policy(),
+                |pattern, policy| graph.execute(pattern, policy),
+                |call, arguments, _| {
+                    calls.push(call.vertex_outputs().to_vec());
+                    let value = procedure_rows(call, arguments);
+                    Ok(GqlQueryExecution {
+                        rows: GqlExecutionStats {
+                            snapshot_records: 0,
+                            result_rows: value.len() as u64,
+                        },
+                        evaluator: GlaExecutionStats::default(),
+                        value,
+                    })
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(calls, profiles, "{text}");
+        assert_eq!(native.value, expected, "{text}");
+
+        // The same leading relation must reach the terminal aggregate owner.
+        let (prefix, _) = text.split_once(" RETURN ").unwrap();
+        let count_text = format!("{prefix} RETURN {aggregate} AS total");
+        let count = PreparedGraphPipelineAggregateText::prepare(&count_text, symbols)
+            .unwrap_or_else(|error| panic!("{count_text}: {error:?}"))
+            .bind_relation_parameters(&GqlParameters::new())
+            .unwrap();
+        let count_plan = if profiles.is_empty() {
+            AsyncSpillAggregatePlan::compile_relation(&count)
+        } else {
+            assert!(AsyncSpillAggregatePlan::compile_relation(&count).is_err());
+            AsyncSpillAggregatePlan::compile_relation_with_independent_procedures(&count)
+        }
+        .unwrap();
+        let AsyncSpillAggregatePlan::Relation { input, .. } = count_plan else {
+            panic!("the complete leading relation must remain the aggregate input");
+        };
+        assert_eq!(input.source_count(), sources, "{count_text}");
+        let mut marked = Vec::new();
+        assert!(input.all_procedure_sources(&mut |source| {
+            marked.push(source.call().vertex_outputs().to_vec());
+            true
+        }));
+        assert_eq!(marked, profiles, "{count_text}");
+        let native = count
+            .execute_governed_with_procedures(
+                policy(),
+                |pattern, policy| graph.execute(pattern, policy),
+                |call, arguments, _| {
+                    let value = procedure_rows(call, arguments);
+                    Ok(GqlQueryExecution {
+                        rows: GqlExecutionStats {
+                            snapshot_records: 0,
+                            result_rows: value.len() as u64,
+                        },
+                        evaluator: GlaExecutionStats::default(),
+                        value,
+                    })
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(native.value.len(), 1, "{count_text}");
+        assert_eq!(
+            native.value[0].values(),
+            [GraphAggregateValue::Count(expected.len() as u64)],
+            "{count_text}"
+        );
+    }
+
+    // A list-local name shadows the procedure's alias; its map property is
+    // not a reason to add a graph source or require the procedure value as a vertex.
+    let shadowed = prepare(
+        "CALL test.rows(10) YIELD vertex AS n,score UNWIND [7] AS marker \
+         RETURN [n IN [{p:1}] | n.p] AS shadow",
+    );
+    let plan = AsyncSpillSetPlan::compile_with_single_procedure(&shadowed).unwrap();
+    assert_eq!(plan.source_count(), 1);
+    assert!(
+        plan.procedure_source()
+            .unwrap()
+            .call()
+            .vertex_outputs()
+            .is_empty()
+    );
+    assert_eq!(
+        staged_plan(&graph, &plan).unwrap(),
+        vec![row(vec![GraphValue::List(vec![scalar(1)].into())]); 3]
+    );
+
+    // Inline CALL keeps its existing correlated Apply parser and default plan.
+    let inline = prepare("UNWIND [7,7] AS x CALL (x) { RETURN x AS y } RETURN y");
+    let plan = AsyncSpillSetPlan::compile(&inline).unwrap();
+    assert_eq!(
+        staged_plan(&graph, &plan).unwrap(),
+        [row(vec![scalar(7)]), row(vec![scalar(7)])]
+    );
+}

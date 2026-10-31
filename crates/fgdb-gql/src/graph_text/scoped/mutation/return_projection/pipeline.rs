@@ -2471,6 +2471,33 @@ impl<'a> Parser<'a> {
         Ok((projection, next_schema))
     }
 
+    /// Named procedure sources and UNWIND may interleave before the first
+    /// MATCH. Inline CALL bodies remain with the multipart Apply parser.
+    pub(in crate::graph_text) fn leading_row_prefix(
+        &mut self,
+    ) -> Result<(RowSchema<'a>, Vec<ReadStageTemplate>), GraphSetTextError> {
+        let mut schema = Vec::new();
+        let mut stages = Vec::new();
+        loop {
+            let at = self.current.at;
+            if self.is_word("CALL")
+                && !matches!(
+                    self.lexer.clone().next()?.kind,
+                    TokenKind::Punct(b'{' | b'(')
+                )
+            {
+                self.advance()?;
+                stages.push(self.call_stage(&mut schema, at)?);
+            } else if self.is_word("UNWIND") {
+                self.advance()?;
+                stages.push(self.unwind_stage(&mut schema, at)?);
+            } else {
+                break;
+            }
+        }
+        Ok((schema, stages))
+    }
+
     pub(in crate::graph_text) fn unwind_stage(
         &mut self,
         schema: &mut RowSchema<'a>,
@@ -2622,10 +2649,19 @@ impl<'a> Parser<'a> {
         schema: &[(Name<'a>, GraphSetColumnType)],
         leading: &[ReadStageTemplate],
     ) -> Result<Vec<Name<'a>>, GraphPatternTextError> {
-        let Some(ReadStageTemplate::Call { outputs, .. }) = leading.first() else {
+        if !leading
+            .iter()
+            .any(|stage| matches!(stage, ReadStageTemplate::Call { .. }))
+        {
             return Ok(Vec::new());
+        }
+        let yielded = |source: &str| {
+            schema.iter().any(|(name, _)| name.text == source)
+                && leading.iter().any(|stage| {
+                    matches!(stage, ReadStageTemplate::Call { outputs, .. }
+                        if outputs.iter().any(|(_, alias)| alias == source))
+                })
         };
-        let yielded = &schema[..outputs.len()];
         let mut implied: Vec<Name<'a>> = Vec::new();
         let mut lexer = self.lexer.clone();
         let mut token = self.current;
@@ -2663,7 +2699,7 @@ impl<'a> Parser<'a> {
                     };
                     if let Some(source) = source
                         && !locals.shadows(source.text)
-                        && yielded.iter().any(|(name, _)| name.text == source.text)
+                        && yielded(source.text)
                         && !implied.iter().any(|seen| seen.text == source.text)
                     {
                         implied.push(source);
