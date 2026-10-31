@@ -1210,6 +1210,82 @@ impl<V: Vfs> BufferedPartition<V> {
             })
     }
 
+    /// Resolve one property of the winning visible edge without decoding its
+    /// other values. Complete root admission and authenticated topology still
+    /// establish the exact historical winner and its positional sidecar row.
+    /// A propertyless newer statement never falls back to an older sidecar.
+    ///
+    /// None means no visible edge or no requested key. An explicit NULL is a
+    /// present value. The returned property's affine charge is independent of
+    /// this reader; no partial edge or sidecar row is exposed.
+    pub async fn edge_property_at(
+        &mut self,
+        cx: &QueryCx,
+        eid: EId,
+        key: PropertyKeyId,
+        as_of: CommitSeq,
+    ) -> Result<Option<BufferedValue<CanonicalPropertyValue>>, BufferedReadError> {
+        self.begin(cx, as_of)?;
+        let result_charge = self.buffer.reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)?;
+        let mut result: Option<(AdjacencyEntry, usize, u8)> = None;
+        let mut work = 0;
+        let mut candidates = self.block_directory.edge_candidates(eid);
+        while let Some(at) = self.block_directory.next_edge(&mut candidates, &mut || {
+            cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+            advance(&mut work, 1, self.limits.max_work)
+        })? {
+            let descriptor = self.blocks[at];
+            if self.root.blocks[at].first_seq.0 > as_of.0
+                || descriptor
+                    .summary
+                    .is_none_or(|summary| !summary.may_contain_edge(eid))
+            {
+                continue;
+            }
+            advance(&mut work, descriptor.rows, self.limits.max_work)?;
+            let _workspace = self.buffer.reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)?;
+            let (entries, locators) = self.block_keys(cx, at, Admission::Normal).await?;
+            for (index, entry) in entries.iter().enumerate() {
+                if entry.eid == eid
+                    && entry.created_at.0 <= as_of.0
+                    && result.as_ref().is_none_or(|(old, old_at, _)| {
+                        (old.created_at, *old_at) <= (entry.created_at, at)
+                    })
+                {
+                    let locator = locators.as_ref().map_or(0, |locators| locators[index]);
+                    result = Some((*entry, at, locator));
+                }
+            }
+        }
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+        let Some((_, block, locator)) = result.filter(|(entry, _, _)| entry.visible_at(as_of))
+        else {
+            return Ok(None);
+        };
+        let value = if locator == 0 {
+            None
+        } else {
+            advance(&mut work, 1, self.limits.max_work)?;
+            let _workspace = self.buffer.reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)?;
+            self.block_property_value(cx, block, locator, key, Admission::Normal)
+                .await?
+        };
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+        value
+            .map(|value| {
+                BufferedValue::from_reserved(value, result_charge).retain_scan_property(&mut || {
+                    cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+                    advance(&mut work, 1, self.limits.max_work)?;
+                    Ok::<(), BufferedScanError<core::convert::Infallible>>(())
+                })
+            })
+            .transpose()
+            .map_err(|error| match error {
+                BufferedScanError::Read(error) => error,
+                BufferedScanError::Control(never) => match never {},
+            })
+    }
+
     /// Bounded winning adjacency, in the canonical (src, relation, dst, eid)
     /// order. The cap bounds candidate identities, including later-retired
     /// ones: exceeding it refuses the whole read, never returns a prefix.
@@ -1968,6 +2044,224 @@ mod tests {
             }
             let selected = view
                 .vertex_property_at(&query, VID, PropertyKeyId(1), CommitSeq(1))
+                .await
+                .unwrap()
+                .unwrap();
+            let charge = selected.charged_bytes();
+            drop(view);
+            assert_eq!(pool.used(), charge);
+            assert_eq!(selected.as_ref(), &CanonicalScalar::Int(7).into());
+            drop(selected);
+            assert_eq!(pool.used(), 0);
+        });
+        assert!(report.invariant_violations.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn selected_edge_property_preserves_locator_history_and_point_read_grants() {
+        const EID: EId = EId(u128::MAX);
+        let dir = std::env::temp_dir().join(format!(
+            "fgdb-cold-selected-edge-property-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_, report) = run_async_under_lab(0xb0_16, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let query = contexts.query();
+            let store = BlockStore::open(
+                &commit,
+                &dir,
+                [0x31; 32],
+                DatabaseSecurityNamespaceId([0x32; 32]),
+            )
+            .await
+            .unwrap();
+            let birth = AdjacencyEntry {
+                src: VId(1),
+                relation: RelationId(1),
+                dst: VId(2),
+                eid: EID,
+                created_at: CommitSeq(1),
+                retired_at: None,
+            };
+            let original = vec![
+                (PropertyKeyId(1), CanonicalScalar::Int(7).into()),
+                (
+                    PropertyKeyId(2),
+                    CanonicalScalar::bytes(vec![0x71; 2048]).unwrap().into(),
+                ),
+            ];
+            let nullable = vec![(PropertyKeyId(1), CanonicalScalar::Null.into())];
+            let gap = AdjacencyEntry {
+                created_at: CommitSeq(3),
+                ..birth
+            };
+            let later = AdjacencyEntry {
+                created_at: CommitSeq(5),
+                ..birth
+            };
+            let mut blocks = Vec::new();
+            let mut predecessor = None;
+            for (entry, props) in [
+                (birth, original.clone()),
+                (
+                    AdjacencyEntry {
+                        retired_at: Some(CommitSeq(3)),
+                        ..birth
+                    },
+                    original,
+                ),
+                (gap, vec![]),
+                (
+                    AdjacencyEntry {
+                        retired_at: Some(CommitSeq(5)),
+                        ..gap
+                    },
+                    vec![],
+                ),
+                (later, nullable.clone()),
+                (
+                    AdjacencyEntry {
+                        retired_at: Some(CommitSeq(7)),
+                        ..later
+                    },
+                    nullable,
+                ),
+            ] {
+                let bytes = if props.is_empty() {
+                    crate::encode_block(0, predecessor, &[entry]).unwrap()
+                } else {
+                    let rows = vec![props];
+                    let patch = store
+                        .put_edge_property_patch(
+                            &commit,
+                            &crate::edge_props::encode_property_patch(&rows).unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    crate::encode_block_with_properties(
+                        0,
+                        predecessor,
+                        &[entry],
+                        patch.0,
+                        &[1],
+                        &rows,
+                    )
+                    .unwrap()
+                };
+                let block = store.put(&commit, &bytes).await.unwrap();
+                predecessor = Some(block);
+                blocks.push(crate::root::BlockRef {
+                    block_id: block.0,
+                    first_seq: entry.created_at,
+                    last_seq: entry.retired_at.unwrap_or(entry.created_at),
+                });
+            }
+            let id = store
+                .put_root(
+                    &commit,
+                    &PartitionRoot {
+                        graph: GraphId(1),
+                        branch: BranchId(1),
+                        partition: 0,
+                        published_at: CommitSeq(7),
+                        blocks,
+                        vertex_patches: vec![],
+                    },
+                )
+                .await
+                .unwrap();
+            let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+            let limits = BufferedReadLimits {
+                max_root_bytes: 64 * 1024,
+                max_source_bytes: 1024 * 1024,
+                max_blocks: 6,
+                max_vertex_patches: 0,
+                max_work: 10_000,
+                buffer: BufferLimits {
+                    max_frames: 1,
+                    max_ghost_entries: 1,
+                    max_extent_bytes: 16 * 1024,
+                },
+            };
+            let mut view = store
+                .open_buffered_root(&query, id, pool.clone(), limits)
+                .await
+                .unwrap();
+            let before = (view.stats().hits, view.stats().misses, pool.used());
+            view.limits.max_work = 0;
+            assert!(matches!(
+                view.edge_property_at(&query, EID, PropertyKeyId(1), CommitSeq(1))
+                    .await,
+                Err(BufferedReadError::Limit {
+                    resource: "buffered source work",
+                    requested: 1,
+                    limit: 0,
+                })
+            ));
+            assert_eq!(
+                (view.stats().hits, view.stats().misses, pool.used()),
+                before
+            );
+            view.limits.max_work = limits.max_work;
+
+            // A missing key in a real row is not a missing/invalid locator.
+            // The helper receives the same prepaid workspace as a point read.
+            {
+                let _workspace = view
+                    .buffer
+                    .reserve_scratch(&query, OBJECT_WORKSPACE_BYTES)
+                    .unwrap();
+                for locator in [0, 2] {
+                    assert!(matches!(
+                        view.block_property_value(
+                            &query,
+                            0,
+                            locator,
+                            PropertyKeyId(1),
+                            Admission::Normal,
+                        )
+                        .await,
+                        Err(BufferedReadError::Buffer(BufferError::InvalidLoad)),
+                    ));
+                }
+                assert!(
+                    view.block_property_value(&query, 0, 1, PropertyKeyId(99), Admission::Normal,)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            for cut in [1, 3, 5, 7, 1, 0] {
+                for eid in [EID, EId(42)] {
+                    for key in [PropertyKeyId(1), PropertyKeyId(2), PropertyKeyId(99)] {
+                        let full = view.edge_at(&query, eid, CommitSeq(cut)).await.unwrap();
+                        let expected = full.as_ref().and_then(|row| {
+                            row.props
+                                .iter()
+                                .find(|(candidate, _)| *candidate == key)
+                                .map(|(_, value)| value.clone())
+                        });
+                        let selected = view
+                            .edge_property_at(&query, eid, key, CommitSeq(cut))
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            selected.as_ref().map(|value| value.as_ref()),
+                            expected.as_ref()
+                        );
+                        if eid == EID && cut == 1 && key == PropertyKeyId(1) {
+                            assert!(
+                                selected.as_ref().unwrap().charged_bytes() + 2048
+                                    <= full.as_ref().unwrap().charged_bytes()
+                            );
+                        }
+                    }
+                }
+            }
+            let selected = view
+                .edge_property_at(&query, EID, PropertyKeyId(1), CommitSeq(1))
                 .await
                 .unwrap()
                 .unwrap();

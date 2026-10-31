@@ -240,6 +240,31 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         self.partition.edge_at(cx, eid, as_of).await
     }
 
+    /// Read one current edge property while retaining its resident charge.
+    /// The authenticated edge winner selects its sidecar before the requested
+    /// value is decoded; unrelated property values are not materialized.
+    pub async fn edge_property(
+        &mut self,
+        cx: &QueryCx,
+        eid: EId,
+        key: PropertyKeyId,
+    ) -> Result<Option<BufferedValue<CanonicalPropertyValue>>, BufferedReadError> {
+        self.edge_property_at(cx, eid, key, self.frontier()).await
+    }
+
+    /// Read one property at an exact historical cut of this view. A missing
+    /// edge or key returns None; a stored NULL remains a present value.
+    /// The returned value keeps its reservation after this view is dropped.
+    pub async fn edge_property_at(
+        &mut self,
+        cx: &QueryCx,
+        eid: EId,
+        key: PropertyKeyId,
+        as_of: CommitSeq,
+    ) -> Result<Option<BufferedValue<CanonicalPropertyValue>>, BufferedReadError> {
+        self.partition.edge_property_at(cx, eid, key, as_of).await
+    }
+
     /// Read bounded outgoing incidence. Parallel edges remain distinct and
     /// rows use canonical (source, relation, destination, EId) order. None selects all
     /// relation types; this owner-level API is not a capability-masked session.

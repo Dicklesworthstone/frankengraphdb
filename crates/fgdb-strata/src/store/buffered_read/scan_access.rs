@@ -197,6 +197,33 @@ impl<V: Vfs> BufferedPartition<V> {
         .ok_or_else(|| BufferError::InvalidLoad.into())
     }
 
+    pub(super) async fn block_property_value(
+        &mut self,
+        cx: &QueryCx,
+        at: usize,
+        locator: u8,
+        property: PropertyKeyId,
+        admission: Admission,
+    ) -> Result<Option<CanonicalPropertyValue>, BufferedReadError> {
+        let row = usize::from(locator)
+            .checked_sub(1)
+            .ok_or(BufferError::InvalidLoad)?;
+        let key = self.blocks[at].properties.ok_or(BufferError::InvalidLoad)?;
+        let bytes = self.pin(cx, key, admission).await?;
+        crate::edge_props::read_admitted_property_value(
+            self.store.k_oid.expose(),
+            self.store.namespace,
+            bytes.as_ref(),
+            crate::edge_props::EdgePropertyPatchVersion(key.object()),
+            self.store.decode_resolver(),
+            row,
+            property,
+        )
+        .map_err(StoreError::MalformedEdgePropertyPatch)
+        .map_err(BufferedReadError::from)?
+        .ok_or_else(|| BufferError::InvalidLoad.into())
+    }
+
     // Streaming callers still receive the complete native block image. Both
     // lanes share the exact same topology/property decoders and reservations.
     // The hosted property's additional visit is admitted before its pin.
