@@ -2,6 +2,7 @@
 //! Correlation changes an explicit argument frame, never the pinned source.
 
 use super::*;
+use crate::buffered_read::BufferedVertexSeeds;
 use fgdb_gql::spill_set::{AsyncSpillSetPlan, AsyncSpillSetSourcePlan};
 use fgdb_types::CanonicalScalarResolver;
 
@@ -26,6 +27,32 @@ pub(crate) trait ExternalOrderHost: Send {
     fn check_snapshot(&mut self, snapshot: CommitSeq) -> Result<()>;
     fn checkpoint(&mut self) -> Result<()>;
     fn native_event(&mut self, event: GlaExecutionEvent) -> Result<()>;
+
+    /// Only owners with governed exact-cut point candidates may narrow a
+    /// compiler-proved vertex leaf. Signed/resident hosts retain their own
+    /// ordinary admission until they explicitly implement this capability.
+    fn supports_vertex_seeds(&self) -> bool {
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seeded_vertex_leaf<'q, A, B>(
+        &'q mut self,
+        _plan: &'q AsyncSpillSetPlan,
+        _seeds: BufferedVertexSeeds,
+        _snapshot: CommitSeq,
+        _cx: &'q QueryCx,
+        _policy: GqlQueryPolicy,
+        _scratch: &'q mut SpillFile<A>,
+        _destination: &'q mut SpillFile<B>,
+        _limits: ExternalOrderLimits,
+    ) -> crate::SendFuture<'q, Result<(NativeResultSpool, u64)>>
+    where
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+    {
+        Box::pin(async { Err(SpillError::InvalidRun.into()) })
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn leaf<'q, A, B>(

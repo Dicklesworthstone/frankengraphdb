@@ -294,6 +294,79 @@ fn allow(_: GlaExecutionEvent) -> Result<(), usize> {
 }
 
 #[test]
+fn vertex_seed_proof_keeps_root_columns_and_expression_window_boundaries() {
+    let pattern = |text| -> PreparedGraphSet {
+        PreparedGraphText::prepare(text, |kind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            _ => None,
+        })
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
+        .with_duplicates()
+        .into()
+    };
+    let left = pattern("MATCH (a) RETURN a,a.p AS value");
+    let right = pattern("MATCH (b) RETURN b.p AS value,b");
+    let selected = |right: PreparedGraphSet, code: &[GraphSetPredicateOp]| {
+        cross(
+            &left
+                .clone()
+                .cross_join(right)
+                .unwrap()
+                .filter(code)
+                .unwrap(),
+        )
+    };
+    assert_eq!(
+        selected(right.clone(), &[equal(0, 3)]).vertex_seed_column(),
+        Some(0)
+    );
+    assert_eq!(
+        selected(right.clone(), &[equal(1, 2)]).vertex_seed_column(),
+        None
+    );
+    assert_eq!(
+        selected(
+            right.clone(),
+            &[
+                equal(0, 3),
+                GraphSetPredicateOp::Truth(Some(true)),
+                GraphSetPredicateOp::Or
+            ]
+        )
+        .vertex_seed_column(),
+        None,
+    );
+    for right in [
+        right.clone().with_page(0, Some(0)),
+        right.clone().with_page(1, None),
+        right
+            .clone()
+            .with_order_by(&[GraphValueOrder::ascending(0)])
+            .unwrap(),
+        pattern("MATCH (b) WHERE 1/(b.p-2)>0 RETURN b.p AS value,b"),
+    ] {
+        assert_eq!(selected(right, &[equal(0, 3)]).vertex_seed_column(), None);
+    }
+    let projected = left
+        .cross_join(right)
+        .unwrap()
+        .project(
+            vec![
+                GraphSetProjection::new("root", GraphSetValue::Column(3)),
+                GraphSetProjection::new("wanted", GraphSetValue::Column(0)),
+                GraphSetProjection::new("again", GraphSetValue::Column(3)),
+            ],
+            GraphSetQuantifier::All,
+        )
+        .unwrap()
+        .filter(&[equal(0, 1)])
+        .unwrap();
+    assert_eq!(cross(&projected).vertex_seed_column(), Some(0));
+}
+
+#[test]
 fn keyed_selection_uses_native_boolean_proof_and_counts_every_physical_barrier() {
     use GraphSetPredicateOp::{And, Not, Or, Truth};
     assert!(!cross(&product()).supports_keyed_selection());

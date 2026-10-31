@@ -448,6 +448,37 @@ impl<V: Vfs + Clone> ExternalOrderHost for SealedHost<'_, V> {
         self.ordinary.native_event(event)
     }
 
+    fn supports_vertex_seeds(&self) -> bool {
+        self.ordinary.supports_vertex_seeds()
+    }
+
+    fn seeded_vertex_leaf<'q, A, B>(
+        &'q mut self,
+        plan: &'q AsyncSpillSetPlan,
+        seeds: BufferedVertexSeeds,
+        snapshot: CommitSeq,
+        cx: &'q QueryCx,
+        policy: GqlQueryPolicy,
+        scratch: &'q mut SpillFile<A>,
+        destination: &'q mut SpillFile<B>,
+        limits: ExternalOrderLimits,
+    ) -> crate::SendFuture<'q, Result<(NativeResultSpool, u64)>>
+    where
+        A: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+        B: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + 'q,
+    {
+        self.ordinary.seeded_vertex_leaf(
+            plan,
+            seeds,
+            snapshot,
+            cx,
+            policy,
+            scratch,
+            destination,
+            limits,
+        )
+    }
+
     fn leaf<'q, A, B>(
         &'q mut self,
         plan: &'q AsyncSpillSetPlan,

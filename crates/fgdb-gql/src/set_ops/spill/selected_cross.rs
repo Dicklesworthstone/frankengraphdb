@@ -6,6 +6,7 @@ use crate::GraphSetPredicateOp;
 pub(super) struct Selection {
     code: Box<[GraphSetPredicateOp]>,
     columns: Option<Box<[usize]>>,
+    vertex_seed_column: Option<usize>,
 }
 
 // Reuse the native eligibility proof: only unpaged transparent scopes and one
@@ -52,6 +53,27 @@ pub(super) fn compile(
             .collect::<Vec<_>>()
             .into_boxed_slice()
     });
+    let vertex_seed_column = if right.order.is_empty() && right.offset == 0 && right.count.is_none()
+    {
+        if let SetNode::Pattern(pattern) = &right.node {
+            pattern.seeded_root_column().and_then(|root| {
+                let mut free = |_| Ok::<(), core::convert::Infallible>(());
+                super::super::execute::selected_cross_probe_keys(
+                    left.types.len(),
+                    code,
+                    columns.as_deref(),
+                    &mut free,
+                )
+                .unwrap_or_else(|never| match never {})
+                .into_iter()
+                .find_map(|(left, right)| (right == root).then_some(left))
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let plan = SpillSetCrossPlan {
         left: Box::new(AsyncSpillSetPlan::compile_at(
             left,
@@ -70,6 +92,7 @@ pub(super) fn compile(
         selection: Some(Selection {
             code: code.into(),
             columns,
+            vertex_seed_column,
         }),
     };
     // The physical source already applied the filter and optional copies.
@@ -89,6 +112,21 @@ pub(super) fn compile(
 }
 
 impl SpillSetCrossPlan {
+    /// The original left column whose vertex identities necessarily equal the
+    /// right pattern's root in every accepted pair. Only a plain vertex leaf
+    /// with the resident single-root proof qualifies: no right page, ordered
+    /// source, expression or probe may be skipped by candidate admission.
+    /// A host may restrict that leaf to the sorted distinct vertex identities
+    /// from the COMPLETE left bag, then run the original pair selection. NULL
+    /// and other value domains seed nothing; original left occurrences remain.
+    /// Hosts without governed same-cut point reads keep the ordinary leaf.
+    pub fn vertex_seed_column(&self) -> Option<usize> {
+        if !matches!(self.right().source(), AsyncSpillSetSourcePlan::Vertex(_)) {
+            return None;
+        }
+        self.selection.as_ref()?.vertex_seed_column
+    }
+
     /// TRUE means only accepted pairs form this physical source's output.
     /// The host must not admit the unselected L*R count as retained rows.
     /// Candidate work remains metered; both original children still complete.

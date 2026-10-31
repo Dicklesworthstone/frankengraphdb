@@ -813,6 +813,100 @@ fn vertex_roots_and_incident_positions_share_one_cut_and_cumulative_work() {
 }
 
 #[test]
+fn point_vertex_candidates_preserve_history_admission_and_cumulative_work() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        for cut in [0, 1, 3] {
+            let mut scan = view
+                .edge_scan(&cx, CommitSeq(cut))
+                .unwrap()
+                .into_join_scan();
+            let mut work = 0;
+            for (vid, expected) in [
+                (VId(1), Some(if cut == 3 { 11 } else { 10 })),
+                (VId(9), Some(90)),
+                (VId(u128::MAX), None),
+            ] {
+                let mut events = Vec::new();
+                let candidate = scan
+                    .vertex_candidate_with(&cx, vid, &mut |event| {
+                        events.push(event);
+                        work += usize::from(event == BufferedScanEvent::Work);
+                        Ok::<_, ()>(())
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(events.first(), Some(&BufferedScanEvent::Identity(vid)));
+                assert!(
+                    events[1..]
+                        .iter()
+                        .all(|event| *event == BufferedScanEvent::Work)
+                );
+                assert_eq!(candidate.vid, vid);
+                let expected = (cut != 0).then_some(expected).flatten();
+                assert_eq!(
+                    candidate.row.as_ref().map(|row| row.props.clone()),
+                    expected.map(|value| vec![(
+                        P,
+                        CanonicalPropertyValue::Scalar(CanonicalScalar::Int(value))
+                    )])
+                );
+                assert_eq!(scan.work_used(), work);
+                let driver = scan.driver.as_ref().unwrap();
+                assert!(driver.vertices.is_none());
+                assert!(!driver.root.state.as_ref().unwrap().initialized);
+            }
+            // A second point request cannot obtain a fresh source-work limit.
+            scan.driver.as_mut().unwrap().root.work.limit = work;
+            let result = scan
+                .vertex_candidate_with(&cx, VId(2), &mut |_| Ok::<_, ()>(()))
+                .await;
+            assert!(
+                matches!(result, Err(BufferedScanError::Read(BufferedReadError::Limit { resource: "buffered source work", requested, limit })) if requested == work + 1 && limit == work)
+            );
+            assert!(scan.is_closed());
+            assert!(
+                scan.vertex_candidate_with(&cx, VId(2), &mut |_| Err::<(), _>("closed"))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            drop(scan);
+            assert_eq!(pool.used(), baseline);
+        }
+        let mut scan = view.edge_scan(&cx, CommitSeq(3)).unwrap().into_join_scan();
+        let result = scan
+            .vertex_candidate_with(&cx, VId(1), &mut |event| {
+                assert_eq!(event, BufferedScanEvent::Identity(VId(1)));
+                Err::<(), _>("candidate refused")
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(BufferedScanError::Control("candidate refused"))
+        ));
+        assert_eq!(
+            scan.work_used(),
+            0,
+            "candidate admission precedes all history work"
+        );
+        assert!(scan.is_closed());
+        drop(scan);
+        assert_eq!(pool.used(), baseline);
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
 fn vertex_and_edge_work_cannot_restart_each_others_allowance() {
     run(|contexts, path| async move {
         let (store, id) = fixture(&contexts, &path).await;

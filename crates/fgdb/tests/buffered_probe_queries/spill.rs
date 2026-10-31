@@ -104,10 +104,24 @@ async fn ordered(
     text: &str,
     policy: GqlQueryPolicy,
 ) -> Result<(Vec<Vec<u8>>, CommitSeq), NativeSpoolError> {
+    ordered_parameters(view, cx, text, &GqlParameters::new(), policy, 2)
+        .await
+        .map(|(rows, cut, _)| (rows, cut))
+}
+
+async fn ordered_parameters(
+    view: &mut BufferedReadView<MemVfs>,
+    cx: &QueryCx,
+    text: &str,
+    parameters: &GqlParameters,
+    policy: GqlQueryPolicy,
+    run_rows: usize,
+) -> Result<(Vec<Vec<u8>>, CommitSeq, fgdb_gql::GqlExecutionStats), NativeSpoolError> {
     // A physical-plan refusal must fail the test here, not masquerade as the
     // execution refusal expected by the caller's LIMIT-zero/anti cases.
-    let prepared = native(text)
-        .prepare_buffered_order(&GqlParameters::new())
+    let prepared = PreparedNativeRead::prepare(text, parameters, resolve)
+        .unwrap()
+        .prepare_buffered_order(parameters)
         .unwrap();
     let pool = MemoryPool::new(4_000_000, 0).unwrap();
     let mut scratch = file(cx, &pool).await;
@@ -123,7 +137,7 @@ async fn ordered(
             &mut auxiliary,
             4,
             64,
-            2,
+            run_rows,
             256,
             1024,
             65_536,
@@ -138,7 +152,247 @@ async fn ordered(
     }
     assert_eq!(reader.state(), ScanState::Exhausted);
     assert_eq!(spool.row_count(), rows.len() as u64);
-    Ok((rows, spool.snapshot_seq()))
+    Ok((rows, spool.snapshot_seq(), spool.row_stats()))
+}
+
+#[test]
+fn external_identity_roots_preserve_duplicates_nulls_and_history_with_bounded_fallback() {
+    let ((), report) = run_async_under_lab(0xe6_71, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let mut db = seed(&contexts, &vfs).await;
+        let mut extra = WriteBatch::new(R);
+        extra.create_vertex(VId(13), vec![], vec![(P, CanonicalScalar::Int(13))]);
+        for id in 100..164 {
+            extra.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(id as i64))]);
+        }
+        assert_eq!(
+            db.write(&contexts.commit(), extra).await.unwrap(),
+            CommitSeq(2)
+        );
+        let mut change = WriteBatch::new(R);
+        change.delete_vertex(VId(13));
+        change.set_vertex_property(IDS[2], P, Some(CanonicalScalar::Int(33)));
+        assert_eq!(
+            db.write(&contexts.commit(), change).await.unwrap(),
+            CommitSeq(3)
+        );
+        let parameters = GqlParameters::new()
+            .with_list(
+                "ids",
+                vec![
+                    GraphValue::Vertex(IDS[2]),
+                    GraphValue::Vertex(IDS[0]),
+                    GraphValue::Vertex(IDS[2]),
+                    GraphValue::Vertex(VId(13)),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                    GraphValue::Scalar(CanonicalScalar::Int(42)),
+                    GraphValue::Vertex(VId(7)),
+                ],
+            )
+            .unwrap();
+        let source_pool = memory();
+        let mut view = cold(&contexts, &vfs, source_pool.clone()).await;
+        for cut in [2, 3] {
+            let text = format!(
+                "UNWIND $ids AS wanted MATCH (n) WHERE n=wanted FOR SYSTEM_TIME AS OF SEQ {cut} RETURN n"
+            );
+            let logical = PreparedGraphSetText::prepare(
+                "UNWIND $ids AS wanted MATCH (n) WHERE n=wanted RETURN n",
+                resolve,
+            )
+            .unwrap()
+            .bind_parameters(&parameters)
+            .unwrap();
+            let physical = AsyncSpillSetPlan::compile(&logical).unwrap();
+            assert!(
+                matches!(physical.source(), AsyncSpillSetSourcePlan::Cross(plan) if plan.vertex_seed_column() == Some(0))
+            );
+            let ids = if cut == 2 {
+                vec![IDS[2], IDS[0], IDS[2], VId(13)]
+            } else {
+                vec![IDS[2], IDS[0], IDS[2]]
+            };
+            let expected: Vec<_> = ids
+                .iter()
+                .map(|id| {
+                    GraphValueRow::from_owned_values(vec![GraphValue::Vertex(*id)])
+                        .canonical_bytes()
+                        .unwrap()
+                })
+                .collect();
+            let (rows, snapshot, stats) = ordered_parameters(
+                &mut view,
+                &cx,
+                &text,
+                &parameters,
+                GqlQueryPolicy::new(4, 100, SORT_WORK, SORT_WORK),
+                8,
+            )
+            .await
+            .unwrap();
+            assert_eq!(rows, expected);
+            assert_eq!(snapshot, CommitSeq(cut));
+            assert_eq!(
+                stats.snapshot_records, 4,
+                "only distinct vertex seeds, including missing/retired identities"
+            );
+            for run_rows in [1, 2] {
+                let (rows, _, stats) =
+                    ordered_parameters(&mut view, &cx, &text, &parameters, policy(), run_rows)
+                        .await
+                        .unwrap();
+                assert_eq!(
+                    rows, expected,
+                    "the ordinary larger-bag fallback preserves occurrences"
+                );
+                assert_eq!(stats.snapshot_records, 68);
+            }
+            let property = text.replace("RETURN n", "RETURN n,n.p AS value ORDER BY n");
+            let (rows, _, _) =
+                ordered_parameters(&mut view, &cx, &property, &parameters, policy(), 8)
+                    .await
+                    .unwrap();
+            let mut fields: Vec<_> = ids
+                .iter()
+                .map(|id| {
+                    let value = if *id == IDS[2] {
+                        if cut == 2 { 3 } else { 33 }
+                    } else if *id == IDS[0] {
+                        1
+                    } else {
+                        13
+                    };
+                    (*id, value)
+                })
+                .collect();
+            fields.sort();
+            let expected: Vec<_> = fields
+                .into_iter()
+                .map(|(id, value)| {
+                    GraphValueRow::from_owned_values(vec![
+                        GraphValue::Vertex(id),
+                        GraphValue::Scalar(CanonicalScalar::Int(value)),
+                    ])
+                    .canonical_bytes()
+                    .unwrap()
+                })
+                .collect();
+            assert_eq!(
+                rows, expected,
+                "all property reads keep the selected historical cut"
+            );
+        }
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn external_apply_identity_roots_do_not_rescan_the_graph_or_hide_late_errors() {
+    let ((), report) = run_async_under_lab(0xe6_72, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let mut db = seed(&contexts, &vfs).await;
+        let mut unrelated = WriteBatch::new(R);
+        for id in 100..164 {
+            unrelated.create_vertex(VId(id), vec![], vec![]);
+        }
+        db.write(&contexts.commit(), unrelated).await.unwrap();
+        let parameters = GqlParameters::new()
+            .with_list(
+                "ids",
+                vec![
+                    GraphValue::Vertex(IDS[2]),
+                    GraphValue::Vertex(IDS[0]),
+                    GraphValue::Vertex(IDS[2]),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                    GraphValue::Scalar(CanonicalScalar::Int(42)),
+                    GraphValue::Vertex(VId(7)),
+                ],
+            )
+            .unwrap();
+        let source_pool = memory();
+        let mut view = cold(&contexts, &vfs, source_pool.clone()).await;
+        let text =
+            "UNWIND $ids AS wanted CALL (wanted) { MATCH (n) WHERE n=wanted RETURN n } RETURN n";
+        let (rows, _, stats) = ordered_parameters(
+            &mut view,
+            &cx,
+            text,
+            &parameters,
+            GqlQueryPolicy::new(4, 100, SORT_WORK, SORT_WORK),
+            1,
+        )
+        .await
+        .unwrap();
+        let expected: Vec<_> = [IDS[2], IDS[0], IDS[2]]
+            .into_iter()
+            .map(|id| {
+                GraphValueRow::from_owned_values(vec![GraphValue::Vertex(id)])
+                    .canonical_bytes()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(rows, expected);
+        assert_eq!(
+            stats.snapshot_records, 4,
+            "each reached body spends only its bound root, duplicates included"
+        );
+        let limited = format!("{text} LIMIT 0");
+        let error = ordered_parameters(
+            &mut view,
+            &cx,
+            &limited,
+            &parameters,
+            GqlQueryPolicy::new(3, 0, SORT_WORK, SORT_WORK),
+            1,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, NativeSpoolError::BufferedExecute(ref error) if matches!(**error, GqlQueryError::Rows(ref error) if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords && error.limit == 3 && error.observed == 4)),
+            "{error:?}"
+        );
+        let groups = GqlParameters::new()
+            .with_list(
+                "groups",
+                vec![
+                    GraphValue::List(vec![GraphValue::Vertex(IDS[2])].into_boxed_slice()),
+                    GraphValue::Scalar(CanonicalScalar::Int(2)),
+                ],
+            )
+            .unwrap();
+        let before = view.buffer_stats();
+        let error = ordered_parameters(&mut view, &cx, "UNWIND $groups AS items UNWIND items AS wanted MATCH (n) WHERE n=wanted RETURN n LIMIT 0", &groups, policy(), 8).await.unwrap_err();
+        assert!(
+            matches!(error, NativeSpoolError::SetExecution(fgdb_gql::GraphSetExecutionError::Projection { error, .. }) if error.kind == fgdb_gql::GraphIntegerErrorKind::IncompatibleOperands)
+        );
+        assert_eq!(
+            view.buffer_stats(),
+            before,
+            "all left errors precede point reads"
+        );
+        let empty = GqlParameters::new().with_list("ids", vec![]).unwrap();
+        let (rows, _, stats) = ordered_parameters(
+            &mut view,
+            &cx,
+            text,
+            &empty,
+            GqlQueryPolicy::new(0, 0, SORT_WORK, SORT_WORK),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(rows.is_empty());
+        assert_eq!(stats.snapshot_records, 0);
+        drop(view);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 async fn aggregate(
     view: &mut BufferedReadView<MemVfs>,

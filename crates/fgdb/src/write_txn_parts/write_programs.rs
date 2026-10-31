@@ -34,7 +34,7 @@ impl IndependentCreateWrites {
         if !txn.staged.is_empty() || txn.prepared.is_some() || program.statements().len() < 2 {
             return None;
         }
-        let mut profile = None;
+        let mut profile: Option<(IndependentCreateKind, Option<RelationId>)> = None;
         for statement in program.statements() {
             let fgdb_gql::GraphWriteStatement::Insert(insertion) = statement else {
                 return None;

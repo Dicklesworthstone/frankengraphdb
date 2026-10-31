@@ -18,6 +18,7 @@ use fgdb_gql::stream::{
 };
 use fgdb_gql::{GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryPolicy};
 use fgdb_strata::store::{BufferedScanError, BufferedScanEvent, BufferedVertexScan};
+use fgdb_strata::tiered::edge_scan::BufferedEdgeJoinScan;
 use fgdb_strata::tiered::memory::MemoryCharge;
 use fgdb_types::{CommitSeq, QueryCx, VId};
 use std::cell::RefCell;
@@ -135,8 +136,88 @@ impl AsyncVertexScanRecord for BufferedQueryRecord {
     }
 }
 
+/// Owned selected roots. Empty and singleton inputs need no seed allocation;
+/// a larger admitted batch drops its capacity before resolving its last root.
+/// Declaration order releases the iterator before refunding its reservations.
+pub(crate) enum BufferedVertexSeeds {
+    Empty,
+    One(VId),
+    Many {
+        remaining: std::vec::IntoIter<VId>,
+        _charge: MemoryCharge,
+        _extra: Option<MemoryCharge>,
+    },
+}
+
+impl BufferedVertexSeeds {
+    fn next(&mut self) -> Option<VId> {
+        match self {
+            Self::Empty => None,
+            Self::One(vid) => {
+                let vid = *vid;
+                *self = Self::Empty;
+                Some(vid)
+            }
+            Self::Many { remaining, .. } => {
+                let vid = remaining.next();
+                if remaining.len() == 0 {
+                    *self = Self::Empty;
+                }
+                vid
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn seed_capacity_is_available_before_the_last_point_read_in_a_full_pool() {
+    let ((), report) = asupersync::lab::run_async_under_lab(0xe6_73, |root| async move {
+        let contexts = fgdb_types::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let bytes = 3 * core::mem::size_of::<VId>();
+        let pool = MemoryPool::new(bytes, 0).unwrap();
+        let charge = pool.reserve(&cx, bytes).unwrap();
+        let values: Box<[VId]> = Box::new([VId(0), VId(1_u128 << 100), VId(u128::MAX)]);
+        let mut seeds = BufferedVertexSeeds::Many {
+            remaining: values.into_vec().into_iter(),
+            _charge: charge,
+            _extra: None,
+        };
+        assert_eq!(pool.available(), 0);
+        // A singleton body needs no seed capacity, even while another owner
+        // holds every available byte. Full-width IDs survive the inline path.
+        let mut one = BufferedVertexSeeds::One(VId(u128::MAX));
+        assert_eq!(one.next(), Some(VId(u128::MAX)));
+        assert_eq!(one.next(), None);
+        assert_eq!(pool.used(), bytes);
+        assert_eq!(seeds.next(), Some(VId(0)));
+        assert_eq!(seeds.next(), Some(VId(1_u128 << 100)));
+        assert!(
+            pool.reserve(&cx, 1).is_err(),
+            "unread seeds retain admission"
+        );
+        assert_eq!(seeds.next(), Some(VId(u128::MAX)));
+        // next_candidate calls point I/O only AFTER this selection returns.
+        // Its complete workspace can reuse all seed capacity immediately.
+        let point_workspace = pool.reserve(&cx, bytes).unwrap();
+        assert_eq!(seeds.next(), None);
+        drop(point_workspace);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+enum BufferedVertexInput<'view, V: Vfs> {
+    Scan(BufferedVertexScan<'view, V>),
+    Seeds {
+        scan: BufferedEdgeJoinScan<'view, V>,
+        seeds: BufferedVertexSeeds,
+    },
+}
+
 struct BufferedVertexQuerySource<'view, 'q, V: Vfs> {
-    scan: BufferedVertexScan<'view, V>,
+    input: BufferedVertexInput<'view, V>,
     cx: &'q QueryCx,
     pool: MemoryPool,
 }
@@ -147,7 +228,10 @@ impl<V: Vfs + Clone> AsyncVertexScanSource for BufferedVertexQuerySource<'_, '_,
     type OutputGuard = MemoryCharge;
 
     fn snapshot_seq(&self) -> CommitSeq {
-        self.scan.snapshot_seq()
+        match &self.input {
+            BufferedVertexInput::Scan(scan) => scan.snapshot_seq(),
+            BufferedVertexInput::Seeds { scan, .. } => scan.snapshot_seq(),
+        }
     }
 
     async fn next_candidate<C: Send>(
@@ -155,19 +239,27 @@ impl<V: Vfs + Clone> AsyncVertexScanSource for BufferedVertexQuerySource<'_, '_,
         control: &mut (impl FnMut(AsyncVertexScanEvent) -> Result<(), C> + Send),
     ) -> Result<Option<AsyncVertexCandidate<Self::Record>>, VertexScanSourceError<Self::Error, C>>
     {
-        let candidate = self
-            .scan
-            .next_candidate_with(self.cx, &mut |event| {
-                control(match event {
-                    BufferedScanEvent::Work => AsyncVertexScanEvent::Work,
-                    BufferedScanEvent::Identity(vid) => AsyncVertexScanEvent::Candidate(vid),
-                })
+        let mut observe = |event| {
+            control(match event {
+                BufferedScanEvent::Work => AsyncVertexScanEvent::Work,
+                BufferedScanEvent::Identity(vid) => AsyncVertexScanEvent::Candidate(vid),
             })
-            .await
-            .map_err(|error| match error {
-                BufferedScanError::Read(error) => VertexScanSourceError::Source(error),
-                BufferedScanError::Control(error) => VertexScanSourceError::Control(error),
-            })?;
+        };
+        let candidate = match &mut self.input {
+            BufferedVertexInput::Scan(scan) => {
+                scan.next_candidate_with(self.cx, &mut observe).await
+            }
+            BufferedVertexInput::Seeds { scan, seeds } => {
+                let Some(vid) = seeds.next() else {
+                    return Ok(None);
+                };
+                scan.vertex_candidate_with(self.cx, vid, &mut observe).await
+            }
+        }
+        .map_err(|error| match error {
+            BufferedScanError::Read(error) => VertexScanSourceError::Source(error),
+            BufferedScanError::Control(error) => VertexScanSourceError::Control(error),
+        })?;
         candidate
             .map(|candidate| {
                 let record = candidate
@@ -286,6 +378,48 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         })
     }
 
+    /// The selected-product compiler has proved these sorted distinct roots
+    /// contain every possible matching pair. The cursor owns their byte
+    /// reservation through the last root selection. Only admission changes:
+    /// native predicates, fields, source tail and counters still run in full.
+    pub(crate) fn open_seeded_vertex_input<'view, 'q>(
+        &'view mut self,
+        cx: &'q QueryCx,
+        plan: AsyncVertexScanPlan<GraphValueRow>,
+        seeds: BufferedVertexSeeds,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+    ) -> Result<BufferedQueryCursor<'view, 'q, V>, BufferedQueryError> {
+        if as_of > self.frontier() {
+            return Err(source_error(BufferedReadError::BeyondPublication {
+                requested: as_of,
+                publication: self.frontier(),
+            }));
+        }
+        cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+        let pool = self.memory_pool().clone();
+        let metadata = pool
+            .reserve(cx, 1024)
+            .map_err(BufferedReadError::Memory)
+            .map_err(source_error)?;
+        let scan = self
+            .partition
+            .edge_scan(cx, as_of)
+            .map_err(source_error)?
+            .into_join_scan();
+        let source = BufferedVertexQuerySource {
+            input: BufferedVertexInput::Seeds { scan, seeds },
+            cx,
+            pool,
+        };
+        let checkpoint: Checkpoint<'q> = Box::new(move || cx.with_restriction(|| cx.checkpoint()));
+        Ok(BufferedQueryCursor {
+            inner: AsyncVertexScanCursor::new(source, plan, policy, checkpoint),
+            cx,
+            _metadata: metadata,
+        })
+    }
+
     pub(crate) fn open_vertex_aggregate_input<'view, 'q>(
         &'view mut self,
         cx: &'q QueryCx,
@@ -328,10 +462,11 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
             .map_err(BufferedReadError::Memory)
             .map_err(source_error)?;
         let source = BufferedVertexQuerySource {
-            scan: self
-                .partition
-                .vertex_scan(cx, as_of)
-                .map_err(source_error)?,
+            input: BufferedVertexInput::Scan(
+                self.partition
+                    .vertex_scan(cx, as_of)
+                    .map_err(source_error)?,
+            ),
             cx,
             pool,
         };

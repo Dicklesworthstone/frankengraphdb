@@ -125,6 +125,45 @@ impl<V: Vfs> BufferedEdgeJoinScan<'_, V> {
         self.driver = None;
     }
 
+    /// Resolve an explicitly selected vertex at this driver's retained cut.
+    /// Candidate admission precedes history lookup and every source operation
+    /// shares the ordinary cumulative work limit. No vertex or edge root heap
+    /// is constructed. The caller owns candidate ordering and deduplication;
+    /// this is a point read, not a new root-scan position.
+    ///
+    /// An absent or retired identity still returns its admitted candidate with
+    /// no row. Error or dropping a polled pending read closes the whole driver,
+    /// as with ordinary root and incidence pulls. No partial read can resume.
+    pub async fn vertex_candidate_with<C: Send>(
+        &mut self,
+        cx: &QueryCx,
+        vid: VId,
+        observe: &mut (impl FnMut(BufferedScanEvent) -> Result<(), C> + Send),
+    ) -> Result<Option<BufferedVertexCandidate>, BufferedScanError<C>> {
+        let Some(mut driver) = self.driver.take() else {
+            return Ok(None);
+        };
+        self.continuation = None;
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+        observe(BufferedScanEvent::Identity(vid)).map_err(BufferedScanError::Control)?;
+        let used = &mut self.work;
+        let result = driver
+            .root
+            .partition
+            .edge_scan_vertex(cx, vid, self.as_of, &mut driver.root.work, &mut |event| {
+                debug_assert_eq!(event, BufferedEdgeScanEvent::Work);
+                observe(BufferedScanEvent::Work)?;
+                *used = used.saturating_add(1);
+                Ok(())
+            })
+            .await;
+        self.work = driver.root.work.used;
+        if result.is_ok() {
+            self.driver = Some(driver);
+        }
+        result.map(|row| Some(BufferedVertexCandidate { vid, row }))
+    }
+
     /// The next canonical vertex identity at this source's exact cut, including
     /// isolates and invisible historical candidates. The ordinary vertex merge
     /// owns its strict successor position, independently of edge root and

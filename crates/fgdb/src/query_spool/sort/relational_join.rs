@@ -337,6 +337,7 @@ where
     } = binary::complete_children(
         plan.left(),
         plan.right(),
+        None,
         arguments,
         snapshot,
         host,

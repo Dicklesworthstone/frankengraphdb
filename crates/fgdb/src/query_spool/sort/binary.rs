@@ -155,6 +155,7 @@ pub(super) struct CompletedChildren {
 pub(super) async fn complete_children<H, A, B, C>(
     left_plan: &AsyncSpillSetPlan,
     right_plan: &AsyncSpillSetPlan,
+    seed_plan: Option<&fgdb_gql::spill_set::SpillSetCrossPlan>,
     arguments: Option<&GraphValueRow>,
     snapshot: CommitSeq,
     host: &mut H,
@@ -194,7 +195,7 @@ where
         max_input_rows,
         max_sort_work,
     };
-    let (left, left_work) = execute_relation(
+    let (mut left, mut left_work) = execute_relation(
         left_plan,
         arguments,
         snapshot,
@@ -208,30 +209,91 @@ where
         resolver,
     )
     .await?;
+    // Only a selected product's single-root proof permits source narrowing.
+    // The complete leading relation (including late errors) precedes every
+    // seed decision. Large/unaffordable bags preserve the ordinary path.
+    let seeds = if let Some(plan) = seed_plan {
+        cross::seeds::prepare(
+            plan,
+            &mut left,
+            host,
+            cx,
+            policy,
+            destination,
+            run_rows,
+            &mut left_work,
+            max_sort_work,
+            resolver,
+        )
+        .await?
+    } else {
+        None
+    };
     let right_policy = remaining_policy(policy, &left)?;
     let right_work_limit = max_sort_work
         .checked_sub(left_work)
         .ok_or(NativeSpoolError::IncompleteCursor)?;
     // Append-only files keep the complete left result alive while the right
     // child runs through the same files. Empty left bags do not skip it.
-    let (right, right_work) = execute_relation(
-        right_plan,
-        arguments,
-        snapshot,
-        host,
-        cx,
-        right_policy,
-        scratch,
-        destination,
-        auxiliary,
-        ExternalOrderLimits {
-            max_sort_work: right_work_limit,
-            ..limits
-        },
-        resolver,
-    )
-    .await
-    .map_err(|error| rebase_error(error, policy, &left, left_work, max_sort_work))?;
+    let right_limits = ExternalOrderLimits {
+        max_sort_work: right_work_limit,
+        ..limits
+    };
+    let right_result = if let Some(seeds) = seeds {
+        async {
+            host.checkpoint()?;
+            host.check_snapshot(snapshot)?;
+            validate_spill_limits(
+                right_limits.run_rows,
+                right_limits.max_runs,
+                right_limits.page_bytes,
+                right_limits.max_sort_work,
+            )?;
+            let (input, work) = host
+                .seeded_vertex_leaf(
+                    right_plan,
+                    seeds,
+                    snapshot,
+                    cx,
+                    input_policy(right_policy, max_input_rows),
+                    scratch,
+                    destination,
+                    right_limits,
+                )
+                .await?;
+            host.checkpoint()?;
+            host.stages(
+                right_plan,
+                input,
+                cx,
+                right_policy,
+                scratch,
+                destination,
+                right_limits,
+                work,
+                resolver,
+            )
+            .await
+        }
+        .await
+    } else {
+        execute_relation(
+            right_plan,
+            arguments,
+            snapshot,
+            host,
+            cx,
+            right_policy,
+            scratch,
+            destination,
+            auxiliary,
+            right_limits,
+            resolver,
+        )
+        .await
+    };
+    let (right, right_work) = right_result
+        .map_err(|error| rebase_error(error, policy, &left, left_work, max_sort_work))?;
     if left.snapshot != snapshot
         || right.snapshot != snapshot
         || left.encoded_columns != left_width
@@ -318,6 +380,7 @@ where
     } = complete_children(
         plan.left(),
         plan.right(),
+        None,
         arguments,
         snapshot,
         host,
