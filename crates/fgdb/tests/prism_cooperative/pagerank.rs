@@ -87,6 +87,10 @@ async fn assert_normalizers(
     );
     assert_eq!(expected.certificate.kernel_workspace_bytes, bytes);
     assert_eq!(expected.certificate.call_digest, call.digest());
+    assert_eq!(
+        expected.certificate.execution_kernel,
+        "fgdb-prism/sealed-pagerank-nonempty-rows-v3"
+    );
     for q in [1, 7] {
         let probe = Arc::new(SimulationCheckpointProbe::new(None));
         let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
@@ -102,7 +106,12 @@ async fn assert_normalizers(
             &probe,
             q,
         );
-        compare_execution(&actual.unwrap(), &expected);
+        let actual = actual.unwrap();
+        assert_eq!(
+            actual.certificate.execution_kernel,
+            "fgdb-prism/sealed-pagerank-nonempty-rows-cooperative-v3"
+        );
+        compare_execution(&actual, &expected);
         assert!(pending > 0, "scalar and row work must remain cooperative");
     }
     let denied = FnxMemoryLimits {
@@ -247,6 +256,230 @@ fn sealed_pagerank_degree_normalizers_preserve_scalar_bits_and_exact_workspace()
             2,
         )
         .await;
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn sealed_pagerank_omits_admitted_empty_history_rows_and_retains_exact_results() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let mut db = Database::<MemVfs>::open_memory(
+            &commit,
+            DatabaseKeys::new(
+                [0x94; 32],
+                DatabaseSecurityNamespaceId([0x95; 32]),
+                [0x96; 32],
+            ),
+        )
+        .await
+        .unwrap();
+        let vertices = [
+            VId(0),
+            VId(17),
+            VId(1 << 100),
+            VId((1 << 100) + 1),
+            VId(u128::MAX),
+        ];
+        const HISTORY: usize = 256;
+        const ITERATIONS: usize = 2;
+        let mut initial = WriteBatch::new(RelationId(1));
+        for vertex in vertices {
+            initial.create_vertex(vertex, vec![LabelId(1)], vec![]);
+        }
+        initial.create_vertex(VId(99), vec![LabelId(2)], vec![]);
+        for (id, source, target, weight) in [(1, 0, 1, 0), (2, 1, 0, 3)] {
+            initial.add_edge(
+                EId(id),
+                vertices[source],
+                vertices[target],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(weight))],
+            );
+        }
+        let mut retire = Vec::new();
+        for source in 2..vertices.len() {
+            let target = 2 + (source - 1) % (vertices.len() - 2);
+            for offset in 0..HISTORY {
+                let suffix = (source * HISTORY + offset) as u128;
+                let edge = EId(1000 + suffix);
+                initial.add_edge(
+                    edge,
+                    vertices[source],
+                    vertices[target],
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(1))],
+                );
+                retire.push(edge);
+                // Excluded endpoints must be masked before their deliberately
+                // nonnumeric weights are read, on both incidence faces.
+                for (base, from, to) in [
+                    (10_000, vertices[source], VId(99)),
+                    (20_000, VId(99), vertices[source]),
+                ] {
+                    initial.add_edge(
+                        EId(base + suffix),
+                        from,
+                        to,
+                        vec![(PropertyKeyId(1), CanonicalScalar::Bool(true))],
+                    );
+                }
+            }
+        }
+        let original = db.write(&commit, initial).await.unwrap();
+        let mut change = WriteBatch::new(RelationId(1));
+        for edge in retire {
+            change.delete_edge(edge);
+        }
+        let current = db.write(&commit, change).await.unwrap();
+        let mut retained = Vec::new();
+        for direction in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            for at in [original, current] {
+                let mut opt = options(direction);
+                opt.as_of = Some(at);
+                let graph = projection(&db, &cx, opt).await;
+                assert_eq!(graph.node_count(), vertices.len());
+                let mut omitted_raw_work = 0;
+                for source in 2..vertices.len() {
+                    if at == original {
+                        assert!(graph.degree(source).unwrap() > 0);
+                    } else {
+                        assert_eq!(graph.degree(source), Some(0));
+                        let (neighbors, spent, _) = row(&graph, &cx, source, None, 7);
+                        assert!(neighbors.is_empty());
+                        assert!(spent >= HISTORY, "an empty row still has real source work");
+                        omitted_raw_work += spent;
+                    }
+                }
+                let mut last = None;
+                for weighted in [false, true] {
+                    for source in [None, Some(VId(u128::MAX))] {
+                        let rank =
+                            PageRankOptions::fixed_iterations(0.85, ITERATIONS, weighted).unwrap();
+                        let rank = source.map_or(rank, |source| rank.with_source(source));
+                        let call = FnxCallSpec::pagerank(rank);
+                        let (expected, checkpoints) = assert_normalizers(
+                            &db,
+                            &cx,
+                            &graph,
+                            opt,
+                            &call,
+                            if weighted { 3 } else { 2 },
+                        )
+                        .await;
+                        assert_eq!(
+                            expected.certificate.witness.edges_scanned,
+                            ITERATIONS * graph.adjacency_entry_count(),
+                            "nonempty zero-weight rows remain actual edge visits"
+                        );
+                        if at == current {
+                            // This counts the entire controlled execution, not
+                            // wall time. Even one scan of the admitted empty
+                            // rows costs more raw work than the whole kernel.
+                            assert!(
+                                checkpoints < omitted_raw_work,
+                                "direction={direction:?} weighted={weighted} source={source:?}: \
+                                 checkpoints={checkpoints}, empty-row raw work={omitted_raw_work}"
+                            );
+                        }
+                        if weighted && source.is_some() {
+                            if at == current {
+                                // Omission changes actual source work, not
+                                // conservative admission of retained history.
+                                let requested = expected.certificate.estimated_work;
+                                let exact = FnxExecutionLimits {
+                                    max_estimated_work: requested,
+                                    ..opt.execution_limits
+                                };
+                                assert_eq!(
+                                    call.execute_sealed(&cx, &graph, exact, memory()).unwrap(),
+                                    expected
+                                );
+                                let denied = FnxExecutionLimits {
+                                    max_estimated_work: requested - 1,
+                                    ..exact
+                                };
+                                for result in [
+                                    call.execute_sealed(&cx, &graph, denied, memory()),
+                                    call.execute_sealed_cooperative(
+                                        &cx,
+                                        &graph,
+                                        denied,
+                                        memory(),
+                                        quantum(1),
+                                        || -> std::future::Ready<()> {
+                                            panic!("work admission must precede yielding")
+                                        },
+                                    )
+                                    .await,
+                                ] {
+                                    assert!(matches!(
+                                        result,
+                                        Err(FnxSealedExecutionError::Execution(
+                                            FnxExecutionError::LimitExceeded {
+                                                resource: "estimated work",
+                                                limit,
+                                                requested: actual,
+                                            }
+                                        )) if limit == requested - 1 && actual == requested
+                                    ));
+                                }
+                            }
+                            for _ in 0..2 {
+                                assert_eq!(
+                                    db.execute_fnx_sealed(
+                                        &cx,
+                                        &call,
+                                        opt,
+                                        memory(),
+                                        SealedLimits::default(),
+                                    )
+                                    .await
+                                    .unwrap()
+                                    .analytics,
+                                    expected
+                                );
+                            }
+                            last = Some(expected);
+                        }
+                    }
+                }
+                retained.push((graph, opt.execution_limits, last.unwrap()));
+            }
+        }
+        db.compact(&commit).await.unwrap();
+        drop(db);
+        let call = FnxCallSpec::pagerank(
+            PageRankOptions::fixed_iterations(0.85, ITERATIONS, true)
+                .unwrap()
+                .with_source(VId(u128::MAX)),
+        );
+        for (graph, limits, expected) in retained {
+            assert_eq!(
+                call.execute_sealed(&cx, &graph, limits, memory()).unwrap(),
+                expected
+            );
+            compare_execution(
+                &call
+                    .execute_sealed_cooperative(
+                        &cx,
+                        &graph,
+                        limits,
+                        memory(),
+                        quantum(7),
+                        yield_now,
+                    )
+                    .await
+                    .unwrap(),
+                &expected,
+            );
+        }
         assert_eq!(contexts.outstanding_obligations(), 0);
     });
 }

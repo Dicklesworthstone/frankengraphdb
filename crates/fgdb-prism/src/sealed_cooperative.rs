@@ -585,7 +585,7 @@ impl FnxCallSpec {
                         })
                         .transpose()?;
                     (
-                        "fgdb-prism/sealed-pagerank-cooperative-v2",
+                        "fgdb-prism/sealed-pagerank-nonempty-rows-cooperative-v3",
                         mul(pass, add(options.max_iter(), 1)?)?,
                         super::PageRankNormalization::select(
                             n,
@@ -1338,15 +1338,19 @@ where
         control.tick().await?;
         if normalization == super::PageRankNormalization::WeightedSums {
             let mut sum = 0.0;
-            let mut row = graph.neighbor_cursor_controlled(control.cx, source, None)?;
-            while let Some((_, weight)) = control.next(&mut row).await? {
-                control.tick().await?;
-                if weight < 0.0 {
-                    return Err(ExecutionError::NegativeWeight.into());
-                }
-                sum += weight;
-                if !sum.is_finite() {
-                    return Err(ExecutionError::NonFiniteWeightSum.into());
+            // Projection admission already proved that degree-zero rows
+            // contain no selected weights, even if raw history is nonempty.
+            if graph.degree(source) != Some(0) {
+                let mut row = graph.neighbor_cursor_controlled(control.cx, source, None)?;
+                while let Some((_, weight)) = control.next(&mut row).await? {
+                    control.tick().await?;
+                    if weight < 0.0 {
+                        return Err(ExecutionError::NegativeWeight.into());
+                    }
+                    sum += weight;
+                    if !sum.is_finite() {
+                        return Err(ExecutionError::NonFiniteWeightSum.into());
+                    }
                 }
             }
             sums.push(sum);
@@ -1381,6 +1385,11 @@ where
             control.tick().await?;
             let push = options.alpha() * ranks[source];
             let sum = normalization.sum(&sums, source, || graph.degree(source))?;
+            // The live vertex tick survives omission. Zero-weight nonempty
+            // rows retain their ordered contributions and final EOF.
+            if graph.degree(source) == Some(0) {
+                continue;
+            }
             let mut row = graph.neighbor_cursor_controlled(control.cx, source, None)?;
             while let Some((target, weight)) = control.next(&mut row).await? {
                 control.tick().await?;

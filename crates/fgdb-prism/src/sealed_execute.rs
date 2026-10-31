@@ -610,20 +610,26 @@ fn pagerank(
     let mut sums = normalization.reserve_sums(n)?;
     let mut ranks = reserve(n)?;
     let mut next = reserve(n)?;
+    let admitted = graph.has_validated_adjacency();
     let population = n as f64;
     for source in 0..n {
         checkpoint()?;
         if normalization == PageRankNormalization::WeightedSums {
             let mut sum = 0.0;
-            let mut row = graph.open(source)?;
-            while let Some((_, weight)) = row.next()? {
-                checkpoint()?;
-                if weight < 0.0 {
-                    return Err(ExecutionError::NegativeWeight.into());
-                }
-                sum += weight;
-                if !sum.is_finite() {
-                    return Err(ExecutionError::NonFiniteWeightSum.into());
+            // A fully admitted empty row has no weights to validate. Its raw
+            // source may still contain substantial excluded/retired history.
+            // Unknown providers must retain their open and EOF failures.
+            if !admitted || graph.degree(source) != Some(0) {
+                let mut row = graph.open(source)?;
+                while let Some((_, weight)) = row.next()? {
+                    checkpoint()?;
+                    if weight < 0.0 {
+                        return Err(ExecutionError::NegativeWeight.into());
+                    }
+                    sum += weight;
+                    if !sum.is_finite() {
+                        return Err(ExecutionError::NonFiniteWeightSum.into());
+                    }
                 }
             }
             sums.push(sum);
@@ -654,6 +660,12 @@ fn pagerank(
             checkpoint()?;
             let push = options.alpha() * ranks[source];
             let sum = normalization.sum(&sums, source, || graph.degree(source))?;
+            // Keep the vertex checkpoint and all scalar passes. Only exact
+            // degree zero proves there is no contribution: a nonempty row
+            // with zero total weight must still be opened and drained.
+            if admitted && graph.degree(source) == Some(0) {
+                continue;
+            }
             let mut row = graph.open(source)?;
             while let Some((target, weight)) = row.next()? {
                 checkpoint()?;
@@ -1033,7 +1045,7 @@ impl FnxCallSpec {
                     })
                     .transpose()?;
                 (
-                    "fgdb-prism/sealed-pagerank-v2",
+                    "fgdb-prism/sealed-pagerank-nonempty-rows-v3",
                     mul(pass, add(options.max_iter(), 1)?)?,
                     PageRankNormalization::select(n, options.weighted(), graph.has_unit_weights())
                         .workspace(n)?,
@@ -1924,11 +1936,12 @@ mod tests {
             })
         }
     }
-    // The trusted adapter independently checks every final projected weight.
-    // DecodedRows deliberately retains the default unknown-evidence behavior.
+    // Unit-weight evidence and complete adjacency admission are independent.
+    // The ordinary constructor retains every row as the full-scan oracle.
     struct CountedRankRows<'a> {
         graph: &'a SnapshotGraphView,
         unit_weights: bool,
+        admitted: bool,
         opens: std::cell::Cell<usize>,
     }
     impl<'a> CountedRankRows<'a> {
@@ -1942,7 +1955,17 @@ mod tests {
             Self {
                 graph,
                 unit_weights,
+                admitted: false,
                 opens: std::cell::Cell::new(0),
+            }
+        }
+        fn new_admitted(graph: &'a SnapshotGraphView, unit_weights: bool) -> Self {
+            // Independently validate all row ordinals/degrees before enabling
+            // omission, just as the fault-injecting admitted adapter does.
+            AdmittedFaultRows::new(graph, usize::MAX).unwrap();
+            Self {
+                admitted: true,
+                ..Self::new(graph, unit_weights)
             }
         }
     }
@@ -1959,6 +1982,9 @@ mod tests {
         }
         fn has_unit_weights(&self) -> bool {
             self.unit_weights
+        }
+        fn has_validated_adjacency(&self) -> bool {
+            self.admitted
         }
         fn open(&self, source: usize) -> Result<Self::Cursor<'_>> {
             self.opens.set(self.opens.get() + 1);
@@ -2522,6 +2548,181 @@ mod tests {
                 assert_eq!(output.witness.nodes_touched, 9);
                 assert_eq!(output.witness.edges_scanned, 9);
             }
+        }
+    }
+
+    #[test]
+    fn pagerank_admitted_empty_rows_match_full_scans_and_exact_open_counts() {
+        const ITERATIONS: usize = 3;
+        let mut omitted = 0;
+        for direction in [
+            Directedness::Directed,
+            Directedness::Reversed,
+            Directedness::Undirected,
+        ] {
+            for mask in 0..512 {
+                let graph = projection_in_direction(mask, |_| 1.0, direction);
+                let n = graph.node_count();
+                let nonempty = (0..n)
+                    .filter(|&source| !graph.projected_row(source).unwrap().0.is_empty())
+                    .count();
+                // Undirected Sum can reduce two unit incidences to weight 2.
+                let unit = (0..n).all(|source| {
+                    graph
+                        .projected_row(source)
+                        .unwrap()
+                        .1
+                        .iter()
+                        .all(|&weight| weight == 1.0)
+                });
+                for weighted in [false, true] {
+                    for source in [None, Some(2)] {
+                        let options =
+                            PageRankOptions::fixed_iterations(0.85, ITERATIONS, weighted).unwrap();
+                        let options = source.map_or(options, |source| {
+                            options.with_source(graph.vertex_id(source).unwrap())
+                        });
+                        let admitted = CountedRankRows::new_admitted(&graph, unit);
+                        let unknown = CountedRankRows::new(&graph, unit);
+                        let mut admitted_checks = 0;
+                        let fast = pagerank(&admitted, options, source, &mut || {
+                            admitted_checks += 1;
+                            Ok(())
+                        })
+                        .unwrap();
+                        let mut unknown_checks = 0;
+                        let slow = pagerank(&unknown, options, source, &mut || {
+                            unknown_checks += 1;
+                            Ok(())
+                        })
+                        .unwrap();
+                        assert_eq!(
+                            rank_score_bits(&fast),
+                            rank_score_bits(&slow),
+                            "direction={direction:?} mask={mask} weighted={weighted} source={source:?}"
+                        );
+                        assert_eq!(fast.witness, slow.witness);
+                        assert_eq!(fast.row_count, n);
+                        // Omitting empty cursors removes no scalar checkpoint
+                        // or logical edge visit, including weighted sums.
+                        assert_eq!(admitted_checks, unknown_checks);
+                        let passes = ITERATIONS + usize::from(weighted && !unit);
+                        assert_eq!(admitted.opens.get(), nonempty * passes);
+                        assert_eq!(unknown.opens.get(), n * passes);
+                        omitted += unknown.opens.get() - admitted.opens.get();
+                        assert_rank_matches_decoded(&graph, options, &fast);
+                    }
+                }
+            }
+        }
+        assert!(omitted > 0, "the corpus must actually omit empty rows");
+    }
+
+    #[test]
+    fn pagerank_admitted_empty_rows_keep_nonempty_eof_faults_and_live_checkpoints() {
+        // Rows 0 and 2 are empty. Row 1 contains three selected zero-weight
+        // edges, so its weighted sum is also zero but it must still drain.
+        let graph = projection_with_weights(0b000_111_000, |_| 0.0);
+        for weighted in [false, true] {
+            let options = PageRankOptions::fixed_iterations(0.85, 2, weighted)
+                .unwrap()
+                .with_source(VId(u128::MAX));
+            let rows = AdmittedFaultRows::new(&graph, usize::MAX).unwrap();
+            let mut checkpoints = 0;
+            let expected = pagerank(&rows, options, Some(2), &mut || {
+                checkpoints += 1;
+                Ok(())
+            })
+            .unwrap();
+            let passes = 2 + usize::from(weighted);
+            let one_row = [
+                ("open", 1),
+                ("pull", 1),
+                ("pull", 1),
+                ("pull", 1),
+                ("eof", 1),
+            ];
+            let events: Vec<_> = one_row
+                .into_iter()
+                .cycle()
+                .take(passes * one_row.len())
+                .collect();
+            assert_eq!(rows.events.borrow().as_slice(), events.as_slice());
+            assert_eq!(rows.calls.get(), passes * 5);
+            assert_eq!(expected.witness.edges_scanned, 6);
+            assert_eq!(expected.witness.nodes_touched, 6);
+            assert_rank_matches_decoded(&graph, options, &expected);
+            for fail_at in 1..=events.len() {
+                let rows = AdmittedFaultRows::new(&graph, fail_at).unwrap();
+                assert!(matches!(
+                    pagerank(&rows, options, Some(2), &mut || Ok(())),
+                    Err(Error::Source(SealedProjectionError::UnknownOrdinal(
+                        usize::MAX
+                    )))
+                ));
+                assert_eq!(rows.calls.get(), fail_at);
+                assert_eq!(rows.events.borrow().as_slice(), &events[..fail_at]);
+            }
+            for stop in 1..=checkpoints {
+                let rows = AdmittedFaultRows::new(&graph, usize::MAX).unwrap();
+                let mut seen = 0;
+                assert!(matches!(
+                    pagerank(&rows, options, Some(2), &mut || {
+                        seen += 1;
+                        if seen == stop {
+                            Err(Error::Cancelled(
+                                std::io::Error::other("empty row stop").into(),
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    }),
+                    Err(Error::Cancelled(_))
+                ));
+                assert_eq!(seen, stop);
+                assert_eq!(rows.events.borrow().as_slice(), &events[..rows.calls.get()]);
+            }
+        }
+    }
+
+    #[test]
+    fn pagerank_without_complete_admission_keeps_empty_row_source_failures() {
+        let graph = projection_with_weights(0, |_| 1.0);
+        for weighted in [false, true] {
+            let options = PageRankOptions::fixed_iterations(0.85, 2, weighted).unwrap();
+            let operations = 2 * graph.node_count() * (2 + usize::from(weighted));
+            let full_scan = FaultRows {
+                graph: &graph,
+                calls: std::cell::Cell::new(0),
+                fail_at: usize::MAX,
+            };
+            let expected = pagerank(&full_scan, options, None, &mut || Ok(())).unwrap();
+            assert_eq!(full_scan.calls.get(), operations);
+            for fail_at in 1..=operations {
+                let rows = FaultRows {
+                    graph: &graph,
+                    calls: std::cell::Cell::new(0),
+                    fail_at,
+                };
+                assert!(matches!(
+                    pagerank(&rows, options, None, &mut || Ok(())),
+                    Err(Error::Source(SealedProjectionError::UnknownOrdinal(
+                        usize::MAX
+                    )))
+                ));
+                assert_eq!(rows.calls.get(), fail_at);
+            }
+            let admitted = AdmittedFaultRows::new(&graph, 1).unwrap();
+            let mut checkpoints = 0;
+            let actual = pagerank(&admitted, options, None, &mut || {
+                checkpoints += 1;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(admitted.calls.get(), 0);
+            assert_eq!(rank_score_bits(&actual), rank_score_bits(&expected));
+            assert_eq!(actual.witness, expected.witness);
+            assert_eq!(checkpoints, graph.node_count() * (1 + 4 * 2));
         }
     }
 
