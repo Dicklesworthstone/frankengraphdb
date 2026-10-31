@@ -7,6 +7,8 @@ use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
+mod vertex_probe;
+
 const R: RelationId = RelationId(7);
 const P: PropertyKeyId = PropertyKeyId(3);
 const Q: PropertyKeyId = PropertyKeyId(4);

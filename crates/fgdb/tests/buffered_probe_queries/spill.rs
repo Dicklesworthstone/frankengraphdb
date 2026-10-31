@@ -381,3 +381,152 @@ fn external_probe_refusals_are_not_hidden_by_zero_windows_or_absence() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn vertex_probe_sources_feed_ordered_stages_finite_paths_and_exact_aggregates() {
+    let ((), report) = run_async_under_lab(0xe6_59, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let mut db = seed(&contexts, &vfs).await;
+        let mut change = WriteBatch::new(R);
+        change.set_vertex_property(IDS[2], P, Some(CanonicalScalar::Int(13)));
+        db.write(&contexts.commit(), change).await.unwrap();
+        let pool = memory();
+        let mut view = cold(&contexts, &vfs, pool.clone()).await;
+        for cut in [1, 2] {
+            let end = if cut == 1 { 3 } else { 13 };
+            for (mode, interval, anti, expected) in [
+                ("WALK", "2..2", false, vec![2, 1]),
+                ("TRAIL", "2..2", false, vec![2, 1]),
+                ("ACYCLIC", "2..2", false, vec![1]),
+                ("SIMPLE", "2..2", false, vec![1]),
+                ("WALK", "0..0", false, vec![end]),
+                ("WALK", "1..2", true, vec![end]),
+            ] {
+                let text = format!(
+                    "MATCH (a) FOR SYSTEM_TIME AS OF SEQ {cut} WHERE {}EXISTS {{ MATCH {mode} (a)-[:R*{interval}]->(b) WHERE b.p={end} }} WITH a.p AS value ORDER BY value DESC RETURN value ORDER BY value DESC",
+                    if anti { "NOT " } else { "" }
+                );
+                let (rows, snapshot) = ordered(&mut view, &cx, &text, policy()).await.unwrap();
+                assert_eq!(rows, encoded(&expected), "{text}");
+                assert_eq!(snapshot, CommitSeq(cut));
+            }
+            let head = format!(
+                "MATCH (a) FOR SYSTEM_TIME AS OF SEQ {cut} WHERE EXISTS {{ MATCH WALK (a)-[:R*1..2]->(b) WHERE b.p={end} }}"
+            );
+            for tail in [
+                "RETURN COUNT(*) AS hits,SUM(a.p) AS total,AVG(a.p) AS average",
+                "WITH a.p AS value RETURN COUNT(*) AS hits,SUM(value) AS total,AVG(value) AS average",
+            ] {
+                assert_eq!(
+                    aggregate(
+                        &mut view,
+                        &cx,
+                        &format!("{head} {tail}"),
+                        GqlQueryPolicy::new(100_000, 1, 10_000_000, 10_000_000)
+                    )
+                    .await
+                    .unwrap(),
+                    vec![(
+                        vec![],
+                        vec![
+                            GraphAggregateValue::Count(2),
+                            GraphAggregateValue::Integer(3),
+                            GraphAggregateValue::Average(GraphExactAverage::new(3, 2).unwrap())
+                        ]
+                    )]
+                );
+            }
+            let text = format!(
+                "{head} RETURN a.p AS value UNION ALL MATCH (x) FOR SYSTEM_TIME AS OF SEQ {cut} WHERE NOT EXISTS {{ MATCH (x)-[:R]->(y) WHERE y.p={end} }} RETURN x.p AS value ORDER BY value DESC"
+            );
+            assert_eq!(
+                ordered(&mut view, &cx, &text, policy()).await.unwrap().0,
+                encoded(&[end, 2, 1, 1])
+            );
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn vertex_probe_external_errors_preserve_predicate_order_and_zero_window_barriers() {
+    let ((), report) = run_async_under_lab(0xe6_5a, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let _db = seed(&contexts, &vfs).await;
+        let pool = memory();
+        let mut view = cold(&contexts, &vfs, pool.clone()).await;
+        // The native predicate preceding the probe excludes every root. Its
+        // unreachable local arithmetic must not be speculatively evaluated.
+        let skipped =
+            "MATCH (a) WHERE a.p<0 AND EXISTS { MATCH (a) WHERE 1/(a.p-a.p)=0 } RETURN a LIMIT 0";
+        assert!(
+            ordered(&mut view, &cx, skipped, policy())
+                .await
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        for anti in ["", "NOT "] {
+            for body in [
+                "MATCH (a) WHERE 1/(a.p-a.p)=0",
+                "MATCH (a)-[:R]->(b) WHERE 1/(b.p-b.p)=0",
+            ] {
+                let head = format!("MATCH (a) WHERE {anti}EXISTS {{ {body} }}");
+                for tail in ["RETURN a LIMIT 0", "WITH a AS x RETURN x LIMIT 0"] {
+                    assert!(matches!(
+                        ordered(&mut view, &cx, &format!("{head} {tail}"), policy()).await,
+                        Err(NativeSpoolError::BufferedExecute(_))
+                    ));
+                }
+                assert!(
+                    aggregate(
+                        &mut view,
+                        &cx,
+                        &format!("{head} RETURN COUNT(*) AS hits LIMIT 0"),
+                        policy()
+                    )
+                    .await
+                    .is_err()
+                );
+            }
+        }
+        let anti =
+            "MATCH (a) WHERE NOT EXISTS { MATCH (a)-[:R]->(b) WHERE b.p=999 } RETURN a LIMIT 0";
+        let refused = ordered(
+            &mut view,
+            &cx,
+            anti,
+            GqlQueryPolicy::new(1, 100, 10_000_000, 10_000_000),
+        )
+        .await;
+        assert!(
+            matches!(refused, Err(NativeSpoolError::BufferedExecute(error)) if matches!(*error, GqlQueryError::Rows(_)))
+        );
+        for head in [
+            "MATCH (a) WHERE NOT EXISTS { MATCH (x) }",
+            "MATCH (a) WHERE EXISTS { MATCH WALK (a)-[:R*]->(b) }",
+        ] {
+            for tail in ["RETURN a LIMIT 0", "WITH a AS x RETURN x LIMIT 0"] {
+                assert!(
+                    native(&format!("{head} {tail}"))
+                        .prepare_buffered_order(&GqlParameters::new())
+                        .is_err()
+                );
+            }
+            assert!(
+                native(&format!("{head} RETURN COUNT(*) AS hits LIMIT 0"))
+                    .prepare_buffered_aggregate(&GqlParameters::new())
+                    .is_err()
+            );
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

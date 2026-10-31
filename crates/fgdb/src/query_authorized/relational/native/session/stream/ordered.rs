@@ -542,11 +542,11 @@ enum BoundExternalOrder {
 // a resident evaluator after a sibling has already consumed private input.
 fn admit_external_sources(plan: &AsyncSpillSetPlan) -> core::result::Result<(), QueryError> {
     match plan.source() {
-        AsyncSpillSetSourcePlan::Procedure(_) | AsyncSpillSetSourcePlan::Walk(_) => {
-            Err(QueryError::StreamingUnsupported {
-                facade: crate::NativeReadClass::Set,
-            })
-        }
+        AsyncSpillSetSourcePlan::Procedure(_)
+        | AsyncSpillSetSourcePlan::Walk(_)
+        | AsyncSpillSetSourcePlan::VertexProbe(_) => Err(QueryError::StreamingUnsupported {
+            facade: crate::NativeReadClass::Set,
+        }),
         AsyncSpillSetSourcePlan::Values(_) | AsyncSpillSetSourcePlan::Arguments(_) => Ok(()),
         AsyncSpillSetSourcePlan::Vertex(_)
         | AsyncSpillSetSourcePlan::Edge(_)

@@ -303,6 +303,7 @@ where
         }),
         // The host boxes its own leaves.
         AsyncSpillSetSourcePlan::Vertex(_)
+        | AsyncSpillSetSourcePlan::VertexProbe(_)
         | AsyncSpillSetSourcePlan::Edge(_)
         | AsyncSpillSetSourcePlan::Join(_)
         | AsyncSpillSetSourcePlan::Walk(_)

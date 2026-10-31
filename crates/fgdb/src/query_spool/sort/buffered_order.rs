@@ -8,7 +8,7 @@ use fgdb_gql::edge_stream::{
     AsyncGraphWalkCursor, AsyncGraphWalkPlan, AsyncGraphWalkSource,
 };
 use fgdb_gql::spill_set::{AsyncSpillSetPlan, AsyncSpillSetSourcePlan};
-use fgdb_gql::stream::AsyncVertexScanPlan;
+use fgdb_gql::stream::{AsyncVertexProbeCursor, AsyncVertexProbePlan, AsyncVertexScanPlan};
 use fgdb_strata::tiered::memory::MemoryCharge;
 use fgdb_types::CanonicalScalarResolver;
 
@@ -19,6 +19,7 @@ pub use sealed::PreparedBufferedSealedOrder;
 #[derive(Clone)]
 enum Input {
     Vertex(AsyncVertexScanPlan<GraphValueRow>, ScanSortTail),
+    VertexProbe(AsyncVertexProbePlan<GraphValueRow>, ScanSortTail),
     Edge(AsyncEdgeScanPlan, ScanSortTail),
     Join(AsyncEdgeJoinPlan, ScanSortTail),
     Walk(AsyncGraphWalkPlan, ScanSortTail),
@@ -129,6 +130,22 @@ impl PreparedNativeRead {
             }
         };
         let input = if matches!(
+            query.plan().operators().first(),
+            Some(GlaOperator::ScanVertices)
+        ) && query
+            .plan()
+            .operators()
+            .iter()
+            .any(|op| matches!(op, GlaOperator::Probe { .. }))
+        {
+            let (plan, tail) =
+                AsyncVertexProbePlan::compile_sort_input(query.plan()).map_err(|error| {
+                    prepare(QueryError::Stream(GqlQueryError::Source(
+                        VertexScanError::Plan(error),
+                    )))
+                })?;
+            Input::VertexProbe(plan, tail)
+        } else if matches!(
             query.plan().operators().first(),
             Some(GlaOperator::ScanVertices)
         ) && query
@@ -357,6 +374,33 @@ impl PreparedBufferedOrder {
                     .await
                 })
             }
+            Input::VertexProbe(plan, tail) => {
+                let tail = tail.clone();
+                let opened = view
+                    .open_vertex_probe_input(cx, plan.clone(), as_of, input_policy)
+                    .map_err(|error| {
+                        NativeSpoolError::BufferedExecute(Box::new(
+                            error.map_source(ScanError::Vertex),
+                        ))
+                    });
+                Box::pin(async move {
+                    ordered_input(
+                        cx,
+                        columns,
+                        opened?,
+                        tail,
+                        policy,
+                        scratch,
+                        destination,
+                        run_rows,
+                        max_runs,
+                        page_bytes,
+                        max_row_bytes,
+                        max_sort_work,
+                    )
+                    .await
+                })
+            }
             Input::Vertex(plan, tail) => {
                 let tail = tail.clone();
                 let opened = view
@@ -516,6 +560,31 @@ impl<V: Vfs + Clone> ExternalOrderHost for BufferedHost<'_, V> {
             let tail = plan.source_tail().cloned().ok_or(SpillError::InvalidRun)?;
             let columns = plan.source_columns().to_vec();
             match plan.source() {
+                AsyncSpillSetSourcePlan::VertexProbe(source) => {
+                    let cursor = self
+                        .view
+                        .open_vertex_probe_input(cx, source.clone(), snapshot, policy)
+                        .map_err(|error| {
+                            NativeSpoolError::BufferedExecute(Box::new(
+                                error.map_source(ScanError::Vertex),
+                            ))
+                        })?;
+                    ordered_input(
+                        cx,
+                        columns,
+                        cursor,
+                        tail,
+                        policy,
+                        scratch,
+                        destination,
+                        limits.run_rows,
+                        limits.max_runs,
+                        limits.page_bytes,
+                        limits.max_row_bytes,
+                        limits.max_sort_work,
+                    )
+                    .await
+                }
                 AsyncSpillSetSourcePlan::Vertex(source) => {
                     let cursor = self
                         .view
@@ -735,6 +804,45 @@ where
         (
             self.snapshot_seq(),
             ScanKind::Edge,
+            self.row_stats(),
+            self.evaluator_stats(),
+        )
+    }
+}
+
+impl<S, C> SpoolInput for AsyncVertexProbeCursor<S, C, GraphValueRow>
+where
+    S: AsyncGraphWalkSource<Error = crate::BufferedReadError, OutputGuard = MemoryCharge>,
+    C: FnMut() -> core::result::Result<(), Cancel> + Send,
+{
+    fn pull(&mut self) -> impl Future<Output = Option<Result<SpoolRow>>> + Send {
+        let pulled: crate::SendFuture<'_, _> = Box::pin(async move {
+            self.next().await.map(|row| {
+                row.map(|row| SpoolRow::buffered(row.into_parts()))
+                    .map_err(|error| {
+                        NativeSpoolError::BufferedExecute(Box::new(
+                            error.map_source(ScanError::Vertex),
+                        ))
+                    })
+            })
+        });
+        pulled
+    }
+
+    fn spool_state(&self) -> ScanState {
+        use fgdb_gql::stream::VertexScanState;
+        match self.state() {
+            VertexScanState::Open => ScanState::Open,
+            VertexScanState::Exhausted => ScanState::Exhausted,
+            VertexScanState::Closed => ScanState::Closed,
+            VertexScanState::Failed => ScanState::Failed,
+        }
+    }
+
+    fn spool_stats(&self) -> (CommitSeq, ScanKind, GqlExecutionStats, GlaExecutionStats) {
+        (
+            self.snapshot_seq(),
+            ScanKind::Vertex,
             self.row_stats(),
             self.evaluator_stats(),
         )

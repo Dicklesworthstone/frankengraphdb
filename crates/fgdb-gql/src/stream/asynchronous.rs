@@ -6,6 +6,8 @@ use super::*;
 
 mod aggregate;
 pub use aggregate::{AsyncVertexSpillAggregateCursor, AsyncVertexSpillAggregatePlan};
+mod probe;
+pub use probe::{AsyncVertexProbeCursor, AsyncVertexProbePlan};
 
 /// One owned, admitted vertex record. A host can keep its byte reservation in
 /// this object while the ordinary GLA evaluator borrows its canonical fields.

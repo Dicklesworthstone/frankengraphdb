@@ -183,7 +183,12 @@ impl AsyncSpillAggregatePlan {
                 .plan()
                 .operators()
                 .iter()
-                .any(|operator| matches!(operator, GlaOperator::VarLengthExpand { .. }))
+                .any(|operator| {
+                    matches!(
+                        operator,
+                        GlaOperator::VarLengthExpand { .. } | GlaOperator::Probe { .. }
+                    )
+                })
         {
             let relation = aggregate
                 .complete_group_relation()
@@ -433,9 +438,8 @@ impl AsyncSpillAggregatePlan {
         let relation = aggregate
             .input_relation()
             .ok_or(SpillAggregateBuildError::Unsupported)?;
-        let input =
-            AsyncSpillSetPlan::compile_with_repeated_procedures_and_bounded_walks(relation)
-                .map_err(SpillAggregateBuildError::Relation)?;
+        let input = AsyncSpillSetPlan::compile_with_repeated_procedures_and_bounded_walks(relation)
+            .map_err(SpillAggregateBuildError::Relation)?;
         let physical = aggregate
             .prepare_complete_group_output()
             .ok_or(SpillAggregateBuildError::Unsupported)?;
@@ -450,11 +454,10 @@ impl AsyncSpillAggregatePlan {
     pub fn compile_relation_with_repeated_procedures_and_bounded_walks(
         aggregate: &PreparedGraphSetAggregate,
     ) -> Result<Self, SpillAggregateBuildError> {
-        let input =
-            AsyncSpillSetPlan::compile_with_repeated_procedures_and_bounded_walks(
-                aggregate.input(),
-            )
-            .map_err(SpillAggregateBuildError::Relation)?;
+        let input = AsyncSpillSetPlan::compile_with_repeated_procedures_and_bounded_walks(
+            aggregate.input(),
+        )
+        .map_err(SpillAggregateBuildError::Relation)?;
         let definition = SpillAggregateDefinition::from_relation(aggregate)?;
         Ok(Self::Relation {
             input: Box::new(input),

@@ -219,15 +219,16 @@ impl Endpoints {
     /// That record outlives the complete probe, including backtracking across
     /// local atoms and awaits. Charges are conservative until the outer binding
     /// completes; dropping a transit record cannot refund retained history.
-    pub(super) async fn next_async<S, F, C>(
+    pub(super) async fn next_async<S, O, F, C>(
         &mut self,
         expansion: Expansion,
         source: &mut S,
         meter: &mut Meter<F>,
-        owner: &mut S::Record,
+        owner: &mut O,
     ) -> ScanResult<Option<(VId, Option<S::Record>)>, S::Error, C>
     where
         S: AsyncEdgeJoinSource,
+        O: super::asynchronous::Outer<S>,
         F: FnMut() -> Result<(), C> + Send,
         C: Send,
     {
@@ -313,19 +314,20 @@ impl Endpoints {
     }
 }
 
-pub(super) fn async_event<S, F, C>(
+pub(super) fn async_event<S, O, F, C>(
     source: &S,
-    owner: &S::Record,
+    owner: &O,
     meter: &mut Meter<F>,
     event: GlaExecutionEvent,
 ) -> ScanResult<(), S::Error, C>
 where
     S: AsyncEdgeJoinSource,
+    O: super::asynchronous::Outer<S>,
     F: FnMut() -> Result<(), C>,
 {
     meter.event(event)?;
-    source
-        .evaluation_event(owner, event)
+    owner
+        .observe(source, event)
         .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
 }
 

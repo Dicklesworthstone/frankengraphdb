@@ -19,7 +19,7 @@ use crate::edge_stream::{
 };
 use crate::scan_stream::{ScanKind, ScanSortTail};
 use crate::spill_aggregate::SpillAggregateDefinition;
-use crate::stream::{AsyncVertexScanPlan, VertexScanBuildError};
+use crate::stream::{AsyncVertexProbePlan, AsyncVertexScanPlan, VertexScanBuildError};
 use crate::{GlaExecutionEvent, GraphAggregateError, GraphAggregateRow};
 use core::convert::Infallible;
 use fgdb_delta_types::{ElementId, PropertyKeyId};
@@ -137,6 +137,7 @@ impl core::error::Error for SpillSetBuildError {}
 pub enum AsyncSpillSetSourcePlan {
     Values(SpillSetValuesPlan),
     Vertex(AsyncVertexScanPlan<GraphValueRow>),
+    VertexProbe(AsyncVertexProbePlan<GraphValueRow>),
     Edge(AsyncEdgeScanPlan),
     Join(AsyncEdgeJoinPlan),
     Walk(AsyncGraphWalkPlan),
@@ -152,7 +153,7 @@ impl AsyncSpillSetSourcePlan {
     pub fn kind(&self) -> ScanKind {
         match self {
             Self::Values(_) | Self::Arguments(_) => ScanKind::Values,
-            Self::Vertex(_) => ScanKind::Vertex,
+            Self::Vertex(_) | Self::VertexProbe(_) => ScanKind::Vertex,
             Self::Edge(_) | Self::Join(_) | Self::Walk(_) => ScanKind::Edge,
             Self::Binary(_)
             | Self::Cross(_)
@@ -648,6 +649,20 @@ impl AsyncSpillSetPlan {
                 .plan()
                 .operators()
                 .iter()
+                .any(|op| matches!(op, GlaOperator::Probe { .. }))
+        {
+            let (plan, tail) = AsyncVertexProbePlan::compile_sort_input(pattern.plan())
+                .map_err(SpillSetBuildError::Vertex)?;
+            (AsyncSpillSetSourcePlan::VertexProbe(plan), tail)
+        } else if admission.bounded_walks
+            && matches!(
+                pattern.plan().operators().first(),
+                Some(GlaOperator::ScanVertices)
+            )
+            && pattern
+                .plan()
+                .operators()
+                .iter()
                 .any(|op| matches!(op, GlaOperator::VarLengthExpand { .. }))
         {
             let (plan, tail) = AsyncGraphWalkPlan::compile_sort_input(pattern.plan())
@@ -789,6 +804,7 @@ impl AsyncSpillSetPlan {
     pub fn source_count(&self) -> usize {
         match &self.source {
             AsyncSpillSetSourcePlan::Vertex(_)
+            | AsyncSpillSetSourcePlan::VertexProbe(_)
             | AsyncSpillSetSourcePlan::Edge(_)
             | AsyncSpillSetSourcePlan::Join(_)
             | AsyncSpillSetSourcePlan::Walk(_)

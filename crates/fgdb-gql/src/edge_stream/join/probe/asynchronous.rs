@@ -2,8 +2,19 @@
 //! Only the active local binding owns records. A first TRUE witness finishes;
 //! anti joins complement successful exhaustion, never a source/control error.
 
-use super::super::asynchronous::{FrameSource, admit, check_admission};
+use super::super::asynchronous::{admit, check_admission};
 use super::*;
+use crate::edge_stream::AsyncGraphWalkSource;
+use crate::stream::AsyncVertexScanRecord;
+
+/// A loan of the already admitted outer binding. The mutable record loan
+/// makes the future Send without requiring its guarded payload to be Sync.
+/// Local incidence records remain separately owned by the probe itself.
+pub(super) trait Outer<S: AsyncEdgeJoinSource>:
+    EdgeScanSource<Error = S::Error> + Send
+{
+    fn observe(&self, source: &S, event: GlaExecutionEvent) -> Result<(), S::Error>;
+}
 
 impl Probe {
     pub(in crate::edge_stream::join) async fn accepts_async<S, F, C>(
@@ -19,7 +30,47 @@ impl Probe {
         F: FnMut() -> Result<(), C> + Send,
         C: Send,
     {
-        debug_assert_eq!(outer.bindings.len(), self.outer_width);
+        let frame = EdgeOuter::<S> {
+            records: outer_records,
+            choices: &outer.choices,
+            seq,
+        };
+        self.accepts_async_outer(&outer.bindings, frame, source, meter)
+            .await
+    }
+
+    pub(crate) async fn accepts_vertex_async<S, F, C>(
+        &self,
+        vid: VId,
+        root: &mut S::RootRecord,
+        source: &mut S,
+        meter: &mut Meter<F>,
+        seq: CommitSeq,
+    ) -> ScanResult<bool, S::Error, C>
+    where
+        S: AsyncGraphWalkSource,
+        F: FnMut() -> Result<(), C> + Send,
+        C: Send,
+    {
+        let frame = VertexOuter::<S> { vid, root, seq };
+        self.accepts_async_outer(&[Some(vid)], frame, source, meter)
+            .await
+    }
+
+    async fn accepts_async_outer<S, O, F, C>(
+        &self,
+        bindings: &[Option<VId>],
+        mut outer: O,
+        source: &mut S,
+        meter: &mut Meter<F>,
+    ) -> ScanResult<bool, S::Error, C>
+    where
+        S: AsyncEdgeJoinSource,
+        O: Outer<S>,
+        F: FnMut() -> Result<(), C> + Send,
+        C: Send,
+    {
+        debug_assert_eq!(bindings.len(), self.outer_width);
         // Admission precedes vectors and payloads. This guard covers fixed
         // slots; every awaited record brings its own source payload guard.
         // Declare the guard first so local records/vectors drop before refund.
@@ -32,7 +83,7 @@ impl Probe {
             meter.event(GlaExecutionEvent::ScratchEntry)?;
         }
         let mut ids = Vec::with_capacity(self.outer_width + self.steps.len());
-        for id in &outer.bindings {
+        for id in bindings {
             meter.event(GlaExecutionEvent::Work)?;
             ids.push(*id);
         }
@@ -144,28 +195,22 @@ impl Probe {
                             // an index. Existing local/outer records are the
                             // only authority for this correlated seed.
                             {
-                                let loan = Records::<_, S::Error> {
-                                    outer: FrameSource {
-                                        records: outer_records,
-                                        choices: &outer.choices,
-                                        seq,
-                                        error: core::marker::PhantomData,
-                                    },
+                                let loan = Records {
+                                    outer: &outer,
                                     records: &records,
                                     positions: &positions,
                                 };
                                 vertex(&loan, from, &mut |event| meter.event(event))?;
                             }
-                            let owner = outer_records.last().expect("outer record");
                             let walk = walk::Endpoints::from_admitted_start(
                                 from,
                                 bounds,
                                 search,
-                                &mut |event| walk::async_event(source, owner, meter, event),
+                                &mut |event| walk::async_event(source, &outer, meter, event),
                             )?;
                             walk::async_event(
                                 source,
-                                owner,
+                                &outer,
                                 meter,
                                 GlaExecutionEvent::ScratchEntry,
                             )?;
@@ -174,12 +219,7 @@ impl Probe {
                         let candidate = walks
                             .get_mut(&depth)
                             .expect("initialized path support")
-                            .next_async(
-                                expansion,
-                                source,
-                                meter,
-                                outer_records.last_mut().expect("outer record"),
-                            )
+                            .next_async(expansion, source, meter, &mut outer)
                             .await?;
                         candidate.map(|(vertex, record)| {
                             records[depth] = record;
@@ -204,13 +244,8 @@ impl Probe {
             };
             ids.push(candidate);
             let passed = {
-                let loan = Records::<_, S::Error> {
-                    outer: FrameSource {
-                        records: outer_records,
-                        choices: &outer.choices,
-                        seq,
-                        error: core::marker::PhantomData,
-                    },
+                let loan = Records {
+                    outer: &outer,
                     records: &records,
                     positions: &positions,
                 };
@@ -220,15 +255,11 @@ impl Probe {
                     // Charge the deepest retained local record when possible,
                     // rather than accumulating every sibling's charge on the
                     // outer row. A copy-only prefix still has an outer owner.
-                    let owner = records
-                        .iter()
-                        .rev()
-                        .flatten()
-                        .next()
-                        .unwrap_or_else(|| outer_records.last().expect("outer record"));
-                    source
-                        .evaluation_event(owner, event)
-                        .map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
+                    let observed = match records.iter().rev().flatten().next() {
+                        Some(owner) => source.evaluation_event(owner, event),
+                        None => outer.observe(source, event),
+                    };
+                    observed.map_err(|error| GqlQueryError::Source(EdgeScanError::Source(error)))
                 })?
             };
             if !passed {
@@ -247,27 +278,27 @@ impl Probe {
 // Loan only records already admitted by the real async source, at one cut.
 // It performs no I/O and has no incidence/index implementation. This is the
 // probe analogue of FrameSource, not a second graph snapshot or evaluator.
-struct Records<'a, R, E> {
-    outer: FrameSource<'a, R, E>,
+struct Records<'a, O, R> {
+    outer: &'a O,
     records: &'a [Option<R>],
     positions: &'a [Position],
 }
-impl<R: AsyncEdgeScanRecord, E> EdgeScanSource for Records<'_, R, E> {
-    type Error = E;
+impl<O: EdgeScanSource, R: AsyncEdgeScanRecord> EdgeScanSource for Records<'_, O, R> {
+    type Error = O::Error;
     fn snapshot_seq(&self) -> CommitSeq {
         self.outer.snapshot_seq()
     }
     fn next_edge<C>(
         &mut self,
         _control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<EId>, EdgeScanSourceError<E, C>> {
+    ) -> Result<Option<EId>, EdgeScanSourceError<Self::Error, C>> {
         unreachable!("admitted probe records are not a graph source")
     }
     fn edge<'a, C>(
         &'a self,
         eid: EId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<E, C>> {
+    ) -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<Self::Error, C>> {
         for (position, record) in self.positions.iter().zip(self.records) {
             control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
             if matches!(position, Position::Edge(Some(current)) if *current == eid)
@@ -282,7 +313,7 @@ impl<R: AsyncEdgeScanRecord, E> EdgeScanSource for Records<'_, R, E> {
         &'a self,
         vid: VId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<VertexScanRow<'a>>, EdgeScanSourceError<E, C>> {
+    ) -> Result<Option<VertexScanRow<'a>>, EdgeScanSourceError<Self::Error, C>> {
         for record in self.records {
             control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
             if let Some(record) = record {
@@ -293,6 +324,107 @@ impl<R: AsyncEdgeScanRecord, E> EdgeScanSource for Records<'_, R, E> {
             }
         }
         self.outer.vertex(vid, control)
+    }
+}
+
+struct EdgeOuter<'a, S: AsyncEdgeJoinSource> {
+    records: &'a mut [S::Record],
+    choices: &'a [Choice],
+    seq: CommitSeq,
+}
+
+impl<S: AsyncEdgeJoinSource> Outer<S> for EdgeOuter<'_, S> {
+    fn observe(&self, source: &S, event: GlaExecutionEvent) -> Result<(), S::Error> {
+        source.evaluation_event(self.records.last().expect("outer record"), event)
+    }
+}
+
+impl<S: AsyncEdgeJoinSource> EdgeScanSource for EdgeOuter<'_, S> {
+    type Error = S::Error;
+
+    fn snapshot_seq(&self) -> CommitSeq {
+        self.seq
+    }
+
+    fn next_edge<C>(
+        &mut self,
+        _control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EId>, EdgeScanSourceError<Self::Error, C>> {
+        unreachable!("an outer binding is never a graph scan")
+    }
+
+    fn edge<'a, C>(
+        &'a self,
+        eid: EId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<Self::Error, C>> {
+        for (choice, record) in self.choices.iter().zip(self.records.iter()) {
+            control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
+            if choice.eid == eid {
+                return Ok(Some(record.edge()));
+            }
+        }
+        Ok(None)
+    }
+
+    fn vertex<'a, C>(
+        &'a self,
+        vid: VId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<VertexScanRow<'a>>, EdgeScanSourceError<Self::Error, C>> {
+        for record in self.records.iter() {
+            control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
+            let edge = record.edge();
+            if vid == edge.source || vid == edge.target {
+                return Ok(record.vertex(vid));
+            }
+        }
+        Ok(None)
+    }
+}
+
+struct VertexOuter<'a, S: AsyncGraphWalkSource> {
+    vid: VId,
+    root: &'a mut S::RootRecord,
+    seq: CommitSeq,
+}
+
+impl<S: AsyncGraphWalkSource> Outer<S> for VertexOuter<'_, S> {
+    fn observe(&self, source: &S, event: GlaExecutionEvent) -> Result<(), S::Error> {
+        source.root_evaluation_event(self.root, event)
+    }
+}
+
+impl<S: AsyncGraphWalkSource> EdgeScanSource for VertexOuter<'_, S> {
+    type Error = S::Error;
+
+    fn snapshot_seq(&self) -> CommitSeq {
+        self.seq
+    }
+
+    fn next_edge<C>(
+        &mut self,
+        _control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EId>, EdgeScanSourceError<Self::Error, C>> {
+        unreachable!("an outer vertex is never a graph scan")
+    }
+
+    fn edge<'a, C>(
+        &'a self,
+        _eid: EId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<Self::Error, C>> {
+        control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
+        Ok(None)
+    }
+
+    fn vertex<'a, C>(
+        &'a self,
+        vid: VId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<VertexScanRow<'a>>, EdgeScanSourceError<Self::Error, C>> {
+        control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
+        Ok((vid == self.vid).then(|| self.root.as_row()))
     }
 }
 

@@ -33,9 +33,9 @@ use std::sync::Arc;
 pub mod aggregate;
 mod asynchronous;
 pub use asynchronous::{
-    AsyncVertexCandidate, AsyncVertexScanCursor, AsyncVertexScanEvent, AsyncVertexScanOutput,
-    AsyncVertexScanPlan, AsyncVertexScanRecord, AsyncVertexScanSource,
-    AsyncVertexSpillAggregateCursor, AsyncVertexSpillAggregatePlan,
+    AsyncVertexCandidate, AsyncVertexProbeCursor, AsyncVertexProbePlan, AsyncVertexScanCursor,
+    AsyncVertexScanEvent, AsyncVertexScanOutput, AsyncVertexScanPlan, AsyncVertexScanRecord,
+    AsyncVertexScanSource, AsyncVertexSpillAggregateCursor, AsyncVertexSpillAggregatePlan,
 };
 mod output;
 mod probe;
@@ -274,34 +274,8 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
                         return Ok(false);
                     }
                 }
-                Test::Identity(false) => return Ok(false),
-                Test::Identity(true) => {}
-                Test::Binding(operator) => {
-                    if !accepts_binding(operator, vid, row, control)? {
-                        return Ok(false);
-                    }
-                }
-                Test::Predicate(predicate) => {
-                    for _ in 0..predicate.comparison_work_units() {
-                        control(VertexScanEvent::Work)?;
-                    }
-                    // Govern each field lookup, then use the SAME canonical
-                    // predicate evaluator as the ordinary GLA execution path.
-                    let (label, property) = match predicate {
-                        VertexPredicate::HasLabel(wanted) => {
-                            let found = seek(row.labels, wanted, |label| *label, control)?;
-                            (found.copied(), None)
-                        }
-                        _ => {
-                            let key = predicate.property_key().expect("property predicate");
-                            let found = seek(row.properties, &key, |entry| entry.0, control)?;
-                            (None, found.map(|(key, value)| (*key, value)))
-                        }
-                    };
-                    if !predicate.matches_borrowed(label, property) {
-                        return Ok(false);
-                    }
-                }
+                native if !accepts_native_test(native, vid, row, control)? => return Ok(false),
+                _ => {}
             }
         }
         Ok(true)
@@ -347,6 +321,26 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
         if !accepted {
             return Ok(None);
         }
+        self.project_accepted::<EMIT, _, _, _, _>(vid, row, skip, meter, (reserve, observe))
+    }
+
+    // Both asynchronous intake contracts reuse this exact post-predicate
+    // kernel. Probe completion cannot skip window, budget or projection work.
+    fn project_accepted<const EMIT: bool, E, F, C, Guard>(
+        &self,
+        vid: VId,
+        row: VertexScanRow<'_>,
+        skip: &mut u64,
+        meter: &mut Meter<F>,
+        controls: (
+            impl FnOnce(&mut Meter<F>) -> ScanResult<Guard, E, C>,
+            impl FnMut(VertexScanEvent) -> Result<(), E>,
+        ),
+    ) -> ScanResult<Option<(Row, Guard)>, E, C>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        let (reserve, mut observe) = controls;
         meter.event(VertexScanEvent::Work)?;
         if *skip != 0 {
             *skip -= 1;
@@ -365,6 +359,36 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
             meter.event(VertexScanEvent::Work)?;
         }
         Ok(Some((value.retain_visible(self.visible_columns), guard)))
+    }
+}
+
+fn accepts_native_test<E, C>(
+    test: &Test,
+    vid: VId,
+    row: VertexScanRow<'_>,
+    control: &mut impl FnMut(VertexScanEvent) -> ScanResult<(), E, C>,
+) -> ScanResult<bool, E, C> {
+    match test {
+        Test::Identity(equal) => Ok(*equal),
+        Test::Binding(operator) => accepts_binding(operator, vid, row, control),
+        Test::Predicate(predicate) => {
+            for _ in 0..predicate.comparison_work_units() {
+                control(VertexScanEvent::Work)?;
+            }
+            let (label, property) = match predicate {
+                VertexPredicate::HasLabel(wanted) => {
+                    let found = seek(row.labels, wanted, |label| *label, control)?;
+                    (found.copied(), None)
+                }
+                _ => {
+                    let key = predicate.property_key().expect("property predicate");
+                    let found = seek(row.properties, &key, |entry| entry.0, control)?;
+                    (None, found.map(|(key, value)| (*key, value)))
+                }
+            };
+            Ok(predicate.matches_borrowed(label, property))
+        }
+        Test::Probe(_) => unreachable!("the selected source contract owns graph probes"),
     }
 }
 

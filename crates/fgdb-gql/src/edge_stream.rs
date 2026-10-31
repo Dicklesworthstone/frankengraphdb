@@ -566,11 +566,11 @@ fn flatten<T, E, C>(
     })
 }
 
-struct Meter<F> {
-    checkpoint: F,
-    policy: GqlQueryPolicy,
-    rows: GqlExecutionStats,
-    evaluator: GlaExecutionStats,
+pub(crate) struct Meter<F> {
+    pub(crate) checkpoint: F,
+    pub(crate) policy: GqlQueryPolicy,
+    pub(crate) rows: GqlExecutionStats,
+    pub(crate) evaluator: GlaExecutionStats,
 }
 impl<F> Meter<F> {
     fn control<C>(

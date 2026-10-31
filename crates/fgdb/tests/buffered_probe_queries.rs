@@ -508,3 +508,259 @@ fn anti_probe_refusal_cannot_publish_absence_or_revoke_prior_delivered_rows() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+async fn collect_vertices(
+    view: &mut BufferedReadView<MemVfs>,
+    cx: &QueryCx,
+    plan: &PreparedGraphPattern<GraphValueRow>,
+    cut: CommitSeq,
+) -> Vec<Vec<GraphValue>> {
+    let mut cursor = view
+        .stream_graph_probes_governed_at(cx, plan, cut, policy())
+        .unwrap();
+    assert_eq!(cursor.snapshot_seq(), cut);
+    let mut rows = Vec::new();
+    while let Some(output) = cursor.next().await {
+        let (row, charge) = output.unwrap().into_parts();
+        rows.push(row.values().to_vec());
+        drop(row);
+        drop(charge);
+    }
+    assert_eq!(cursor.state(), fgdb_gql::stream::VertexScanState::Exhausted);
+    assert!(cursor.next().await.is_none());
+    rows
+}
+
+#[test]
+fn cold_vertex_probes_match_historical_products_and_keep_isolated_root_records() {
+    let ((), report) = run_async_under_lab(0xe6_57, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let mut db = seed(&contexts, &vfs).await;
+        let pinned_pool = memory();
+        let mut pinned = cold(&contexts, &vfs, pinned_pool.clone()).await;
+        let mut change = WriteBatch::new(R);
+        change.set_vertex_property(IDS[0], P, Some(CanonicalScalar::Int(21)));
+        change.delete_edge(EId(2));
+        change.create_vertex(VId(1), vec![], vec![(P, CanonicalScalar::Null)]);
+        db.write(&contexts.commit(), change).await.unwrap();
+        let pool = memory();
+        let mut view = cold(&contexts, &vfs, pool.clone()).await;
+        for cut in 0..=2 {
+            for direction in 0..3 {
+                for two_hops in [false, true] {
+                    for anti in [false, true] {
+                        for repeatable in [false, true] {
+                            let child = atom("s", "c", direction);
+                            let tail = if two_hops {
+                                atom("t", "a", direction)
+                            } else {
+                                String::new()
+                            };
+                            let text = format!(
+                                "MATCH (a) WHERE {}EXISTS {{ MATCH {}(a){child}{tail} WHERE s.p>=9 }} RETURN a,a.p AS value",
+                                if anti { "NOT " } else { "" },
+                                if repeatable {
+                                    "REPEATABLE ELEMENTS "
+                                } else {
+                                    ""
+                                },
+                            );
+                            let plan = prepare(&text);
+                            let edges: Vec<_> = EDGES
+                                .iter()
+                                .filter(|(id, ..)| cut < 2 || *id != 2)
+                                .collect();
+                            let mut expected = Vec::new();
+                            if cut != 0 {
+                                for (a, vid) in IDS.into_iter().enumerate() {
+                                    let witness = edges.iter().any(|&&(s, x, y, p)| {
+                                        p >= 9
+                                            && orient(x, y, direction).into_iter().any(
+                                                |(from, c)| {
+                                                    from == a
+                                                        && (!two_hops
+                                                            || edges.iter().any(
+                                                                |&&(t, x, y, _)| {
+                                                                    (repeatable || s != t)
+                                                                        && orient(x, y, direction)
+                                                                            .contains(&(c, a))
+                                                                },
+                                                            ))
+                                                },
+                                            )
+                                    });
+                                    if witness != anti {
+                                        let value =
+                                            if cut == 2 && a == 0 { 21 } else { a as i64 + 1 };
+                                        expected.push(vec![
+                                            GraphValue::Vertex(vid),
+                                            GraphValue::Scalar(CanonicalScalar::Int(value)),
+                                        ]);
+                                    }
+                                }
+                                if cut == 2 && anti {
+                                    expected.push(vec![
+                                        GraphValue::Vertex(VId(1)),
+                                        GraphValue::Scalar(CanonicalScalar::Null),
+                                    ]);
+                                }
+                            }
+                            expected.sort();
+                            let resident = db
+                                .execute_graph_pattern_governed_at(
+                                    &cx,
+                                    &plan,
+                                    CommitSeq(cut),
+                                    policy(),
+                                )
+                                .unwrap();
+                            assert_eq!(
+                                resident
+                                    .value
+                                    .iter()
+                                    .map(|row| row.values().to_vec())
+                                    .collect::<Vec<_>>(),
+                                expected,
+                                "resident {text} at {cut}"
+                            );
+                            assert_eq!(
+                                collect_vertices(&mut view, &cx, &plan, CommitSeq(cut)).await,
+                                expected,
+                                "cold {text} at {cut}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // Copy-only and identity paths must see the real isolated root. The
+        // selected property is NULL; no edge endpoint can supply its record.
+        for text in [
+            "MATCH (a) WHERE EXISTS { MATCH (a) WHERE a.p IS NULL } RETURN a,a.p AS value",
+            "MATCH (a) WHERE EXISTS { MATCH WALK (a)-[:R*0..0]->(b) WHERE b.p IS NULL } RETURN a,a.p AS value",
+        ] {
+            assert_eq!(
+                collect_vertices(&mut view, &cx, &prepare(text), CommitSeq(2)).await,
+                vec![vec![
+                    GraphValue::Vertex(VId(1)),
+                    GraphValue::Scalar(CanonicalScalar::Null)
+                ]]
+            );
+        }
+        let plan = prepare(
+            "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->(b) WHERE b.p=3 } RETURN a,a.p AS value",
+        );
+        let old = vec![vec![
+            GraphValue::Vertex(IDS[1]),
+            GraphValue::Scalar(CanonicalScalar::Int(2)),
+        ]];
+        assert_eq!(
+            collect_vertices(&mut pinned, &cx, &plan, CommitSeq(1)).await,
+            old
+        );
+        db.compact(&contexts.commit()).await.unwrap();
+        drop(view);
+        let mut compacted = cold(&contexts, &vfs, pool.clone()).await;
+        assert!(
+            collect_vertices(&mut compacted, &cx, &plan, CommitSeq(2))
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            collect_vertices(&mut pinned, &cx, &plan, CommitSeq(1)).await,
+            old
+        );
+        drop(compacted);
+        drop(pinned);
+        assert_eq!(pool.used(), 0);
+        assert_eq!(pinned_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn vertex_probe_admission_budgets_and_output_guards_keep_the_original_stream_contract() {
+    let ((), report) = run_async_under_lab(0xe6_58, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let _db = seed(&contexts, &vfs).await;
+        let pool = memory();
+        let mut view = cold(&contexts, &vfs, pool.clone()).await;
+        let copied = prepare("MATCH (a) WHERE EXISTS { MATCH (a) } RETURN a");
+        assert!(
+            fgdb_gql::stream::AsyncVertexScanPlan::compile(copied.plan()).is_err(),
+            "the ordinary source contract still refuses graph probes"
+        );
+        let mut cursor = view
+            .stream_graph_probes_governed(&cx, &copied, policy())
+            .unwrap();
+        while let Some(output) = cursor.next().await {
+            drop(output.unwrap());
+        }
+        assert_eq!(
+            cursor.row_stats().snapshot_records,
+            3,
+            "copy probes never readmit their captured root"
+        );
+        assert_eq!(cursor.row_stats().result_rows, 3);
+        drop(cursor);
+        for text in [
+            "MATCH (a) WHERE NOT EXISTS { MATCH (x) } RETURN a LIMIT 0",
+            "MATCH (a) WHERE EXISTS { MATCH WALK (a)-[:R*]->(b) } RETURN a LIMIT 0",
+        ] {
+            let plan = prepare(text);
+            let before = pool.used();
+            assert!(
+                view.stream_graph_probes_governed(&cx, &plan, policy())
+                    .is_err(),
+                "{text}"
+            );
+            assert_eq!(pool.used(), before, "refusal precedes source construction");
+        }
+        let plan =
+            prepare("MATCH (a) WHERE NOT EXISTS { MATCH (a)-[:R]->(b) WHERE b.p=999 } RETURN a");
+        let mut refused = view
+            .stream_graph_probes_governed(
+                &cx,
+                &plan,
+                GqlQueryPolicy::new(1, 100, 10_000_000, 10_000_000),
+            )
+            .unwrap();
+        assert!(matches!(
+            refused.next().await,
+            Some(Err(GqlQueryError::Rows(_)))
+        ));
+        assert_eq!(refused.row_stats().result_rows, 0);
+        assert!(refused.next().await.is_none());
+        drop(refused);
+        let mut cursor = view
+            .stream_graph_probes_governed(
+                &cx,
+                &plan,
+                GqlQueryPolicy::new(100_000, 1, 10_000_000, 10_000_000),
+            )
+            .unwrap();
+        let held = cursor.next().await.unwrap().unwrap();
+        assert!(matches!(
+            cursor.next().await,
+            Some(Err(GqlQueryError::Rows(_)))
+        ));
+        assert!(cursor.next().await.is_none());
+        assert_eq!(cursor.row_stats().result_rows, 1);
+        drop(cursor);
+        drop(view);
+        assert!(
+            pool.used() > 0,
+            "delivered output retains its own byte guard"
+        );
+        let (row, charge) = held.into_parts();
+        assert_eq!(row.values(), &[GraphValue::Vertex(IDS[0])]);
+        drop(row);
+        drop(charge);
+        assert_eq!(pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

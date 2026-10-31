@@ -17,6 +17,7 @@ use fgdb_gql::edge_stream::{
     VertexScanRow,
 };
 use fgdb_gql::spill_aggregate::{AsyncEdgeSpillAggregateCursor, AsyncEdgeSpillAggregatePlan};
+use fgdb_gql::stream::{AsyncVertexProbeCursor, AsyncVertexProbePlan, VertexScanError};
 use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GqlQueryPolicy};
 use fgdb_strata::store::BufferedScanError;
 use fgdb_strata::tiered::edge_scan::{
@@ -200,6 +201,84 @@ fn source_error(error: BufferedReadError) -> EdgeQueryError {
 }
 
 impl<V: Vfs + Clone> BufferedReadView<V> {
+    /// Stream a vertex-rooted query with correlated EXISTS/NOT EXISTS through
+    /// the same cold root/incidence source used by bounded graph traversal.
+    /// The ordinary vertex scan remains a separate local-only capability.
+    pub fn stream_graph_probes_governed<'view, 'q>(
+        &'view mut self,
+        cx: &'q QueryCx,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
+    ) -> Result<
+        AsyncVertexProbeCursor<
+            impl fgdb_gql::edge_stream::AsyncGraphWalkSource<
+                Error = BufferedReadError,
+                OutputGuard = MemoryCharge,
+            > + use<'view, 'q, V>,
+            impl FnMut() -> Result<(), Cancel> + Send + use<'view, 'q, V>,
+            GraphValueRow,
+        >,
+        super::BufferedQueryError,
+    > {
+        let as_of = self.frontier();
+        self.stream_graph_probes_governed_at(cx, pattern, as_of, policy)
+    }
+
+    /// The same indexed semi/anti source at one exact historical cut. A first
+    /// witness finishes EXISTS; NOT EXISTS requires successful exhaustion.
+    /// Read, cancellation, quota and arithmetic errors never establish absence.
+    pub fn stream_graph_probes_governed_at<'view, 'q>(
+        &'view mut self,
+        cx: &'q QueryCx,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+    ) -> Result<
+        AsyncVertexProbeCursor<
+            impl fgdb_gql::edge_stream::AsyncGraphWalkSource<
+                Error = BufferedReadError,
+                OutputGuard = MemoryCharge,
+            > + use<'view, 'q, V>,
+            impl FnMut() -> Result<(), Cancel> + Send + use<'view, 'q, V>,
+            GraphValueRow,
+        >,
+        super::BufferedQueryError,
+    > {
+        let plan = AsyncVertexProbePlan::compile(pattern.plan())
+            .map_err(|error| GqlQueryError::Source(VertexScanError::Plan(error)))?;
+        self.open_vertex_probe_input(cx, plan, as_of, policy)
+    }
+
+    pub(crate) fn open_vertex_probe_input<'view, 'q>(
+        &'view mut self,
+        cx: &'q QueryCx,
+        plan: AsyncVertexProbePlan<GraphValueRow>,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+    ) -> Result<
+        AsyncVertexProbeCursor<
+            impl fgdb_gql::edge_stream::AsyncGraphWalkSource<
+                Error = BufferedReadError,
+                OutputGuard = MemoryCharge,
+            > + use<'view, 'q, V>,
+            impl FnMut() -> Result<(), Cancel> + Send + use<'view, 'q, V>,
+            GraphValueRow,
+        >,
+        super::BufferedQueryError,
+    > {
+        let (source, checkpoint) = self
+            .edge_input_source(cx, as_of, EdgeRelation::Any)
+            .map_err(|error| {
+                error.map_source(|error| match error {
+                    EdgeScanError::Source(source) => VertexScanError::Source(source),
+                    error => VertexScanError::Probe(error),
+                })
+            })?;
+        Ok(AsyncVertexProbeCursor::new(
+            source, plan, policy, checkpoint,
+        ))
+    }
+
     /// Execute the existing ordered single-edge GLA profile through buffered
     /// storage. RETURN begins with the edge and oriented source identities.
     /// Directed, incoming, undirected, typed/Any relations, local vertex/edge
