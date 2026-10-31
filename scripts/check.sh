@@ -112,6 +112,7 @@ COV_EXEMPT=0
 
 CORE_GATE_FILE_COVERAGE="file-coverage closure (every tracked file inspected or declared)"
 CORE_GATE_SHELL_LINT="shell lint (bash -n + shellcheck) over tracked shell deliverables"
+CORE_GATE_STUDIO_NODE="Studio Node tests (executed modules and committed Wasm behavior)"
 CORE_GATE_VERDICT_CONTRACT="verdict-contract closure (every gate reports under one token on one stream)"
 CORE_GATE_DOMAIN_CLOSURE="gate-domain closure (every verdict declares its tracked input domain)"
 CORE_GATE_FMT="cargo fmt --check"
@@ -134,6 +135,7 @@ CORE_GATE_UBS="UBS over every tracked Rust source"
 CORE_GATE_ROSTER=(
   "$CORE_GATE_FILE_COVERAGE"
   "$CORE_GATE_SHELL_LINT"
+  "$CORE_GATE_STUDIO_NODE"
   "$CORE_GATE_VERDICT_CONTRACT"
   "$CORE_GATE_DOMAIN_CLOSURE"
   "$CORE_GATE_FMT"
@@ -141,6 +143,13 @@ CORE_GATE_ROSTER=(
   "$CORE_GATE_CLIPPY"
   "$CORE_GATE_TEST"
   "$CORE_GATE_UBS"
+)
+
+STUDIO_NODE_TESTS=(
+  crates/fgdb-server/src/studio/tests/experience.test.mjs
+  crates/fgdb-server/src/studio/tests/flow.test.mjs
+  crates/fgdb-server/src/studio/tests/force.test.mjs
+  crates/fgdb-server/src/studio/tests/model.test.mjs
 )
 
 # fgdb-fa3k: this is deliberately a positive, mechanical scope rather than a
@@ -242,6 +251,7 @@ core_gate_domain() {
   case "$1" in
     "$CORE_GATE_FILE_COVERAGE")  printf 'all-tracked\n' ;;
     "$CORE_GATE_SHELL_LINT")     printf 'tracked-shell\n' ;;
+    "$CORE_GATE_STUDIO_NODE")    printf 'all-tracked\n' ;;
     "$CORE_GATE_VERDICT_CONTRACT") printf 'verdict-shell\n' ;;
     "$CORE_GATE_DOMAIN_CLOSURE") printf 'domain-closure\n' ;;
     "$CORE_GATE_FMT")            printf 'rust-format\n' ;;
@@ -332,10 +342,11 @@ run_core_gate() {
     else
       gate_rc=${PIPESTATUS[0]}
     fi
-    # A truncated UBS scan is a property of the tree and the tool, not of load:
-    # a retry would rescan for the same partial result (zww2g).
+    # Incomplete UBS scans and unavailable/empty Node runs are deterministic
+    # prerequisites, so retrying cannot turn them into executed assertions.
     if [ "$gate_rc" -ne 0 ] && [ "$(gate_env_failure_class "$core_log")" != "none" ] \
-      && [ "$(gate_env_failure_class "$core_log")" != "ubs-partial-scan" ]; then
+      && [ "$(gate_env_failure_class "$core_log")" != "ubs-partial-scan" ] \
+      && [ "$(gate_env_failure_class "$core_log")" != "studio-node-unrun" ]; then
       printf '    core retry 1/1: attempt 1 hit %s; retrying once\n' "$(gate_env_failure_class "$core_log")"
       if "$@" 2>&1 | tee -- "$core_log"; then
         gate_rc=0
@@ -370,7 +381,7 @@ run_core_gate() {
     # still non-green at every tally that consumes it.
     CORE_UNRUN=$((CORE_UNRUN + 1))
     LAST_GATE_RC="$GATE_EXIT_UNRUN"
-    gate_unrun "core: $label — command did not execute ($(gate_env_failure_class "$core_log")); retryable, not a product verdict; log: $core_log"
+    gate_unrun "core: $label — assertions did not execute ($(gate_env_failure_class "$core_log")); no product verdict; log: $core_log"
     outcome=unrun
   else
     CORE_EXECUTED=$((CORE_EXECUTED + 1))
@@ -410,6 +421,16 @@ coverage_of() {
   case "$1" in
     *.rs)                                echo "cargo fmt/check/clippy/test" ;;
     *.sh|*.bash)                         echo "bash -n + shellcheck (next step)" ;;
+    crates/fgdb-server/src/studio/tests/experience.test.mjs|\
+    crates/fgdb-server/src/studio/tests/flow.test.mjs|\
+    crates/fgdb-server/src/studio/tests/force.test.mjs|\
+    crates/fgdb-server/src/studio/tests/model.test.mjs|\
+    crates/fgdb-server/src/studio/experience.mjs|\
+    crates/fgdb-server/src/studio/model.mjs|\
+    crates/fgdb-server/src/studio/layout.mjs|\
+    crates/fgdb-server/src/studio/demo.mjs|\
+    crates/fgdb-server/src/studio/wasm/force.wasm)
+      echo "Studio Node tests (module and Wasm behavior; NOT browser DOM or C/Wasm source correspondence)" ;;
     Cargo.toml|*/Cargo.toml)             echo "registry-check all (workspace topology)" ;;
     Cargo.lock)                          echo "cargo check --all-targets" ;;
     .cargo/config.toml)                  echo "cargo check/clippy/test (workspace rustc configuration)" ;;
@@ -536,27 +557,19 @@ coverage_exempt_reason() {
     # EXACT paths, not studio/*: a glob would silently exempt the next Studio
     # file too, and `*` crosses `/` in a case pattern.
     crates/fgdb-server/src/studio/app.mjs|\
-    crates/fgdb-server/src/studio/demo.mjs|\
-    crates/fgdb-server/src/studio/experience.mjs|\
     crates/fgdb-server/src/studio/graph.mjs|\
-    crates/fgdb-server/src/studio/layout.mjs|\
-    crates/fgdb-server/src/studio/model.mjs|\
     crates/fgdb-server/src/studio/studio.css|\
     crates/fgdb-server/src/studio/index.html|\
-    crates/fgdb-server/src/studio/favicon.svg|\
-    crates/fgdb-server/src/studio/wasm/force.wasm)
+    crates/fgdb-server/src/studio/favicon.svg)
       echo "Studio browser asset embedded in fgdbd by include_bytes! (studio/mod.rs): \
-           cargo proves it exists, NOTHING checks its content; force.wasm is a \
-           committed binary no gate rebuilds from wasm/force.c \
+           Node source-text assertions read app/graph/index, but no gate executes \
+           their browser DOM behavior or checks CSS/SVG rendering \
            (fgdb-rc1017-bridge-wvze5.12)" ;;
-    crates/fgdb-server/src/studio/tests/experience.test.mjs|\
-    crates/fgdb-server/src/studio/tests/flow.test.mjs|\
-    crates/fgdb-server/src/studio/tests/force.test.mjs|\
-    crates/fgdb-server/src/studio/tests/model.test.mjs|\
     crates/fgdb-server/src/studio/tests/browser_client.py|\
     crates/fgdb-server/src/studio/wasm/force.c)
       echo "Studio test or kernel source that NO gate executes or compiles \
-           (node --test, Playwright, clang): unchecked until \
+           (Playwright, clang); Node checks committed Wasm behavior, not its \
+           correspondence to this C source: unchecked until \
            fgdb-rc1017-bridge-wvze5.12 gates it" ;;
     .cargo/macos-lld.toml)
       echo "macOS-only linker override for the documented fgdb lib test \
@@ -669,6 +682,119 @@ run_shell_lint() {
   }
   echo "    shellcheck: 0 SC2015 across ${#shell_files[@]} file(s)"
 }
+
+run_studio_node() {
+  local file tap_log passed node_rc
+
+  if [ "${#STUDIO_NODE_TESTS[@]}" -eq 0 ]; then
+    printf 'STUDIO_NODE_UNRUN reason=no-selected-tests\n'
+    return "$GATE_EXIT_UNRUN"
+  fi
+  for file in "${STUDIO_NODE_TESTS[@]}"; do
+    if ! git ls-files --error-unmatch -- "$file" >/dev/null 2>&1 || [ ! -f "$file" ]; then
+      printf 'ERROR: Studio test is not a present tracked deliverable: %s\n' "$file" >&2
+      return 1
+    fi
+  done
+  if ! command -v node >/dev/null 2>&1 || ! node --version; then
+    printf 'STUDIO_NODE_UNRUN reason=node-unavailable\n'
+    return "$GATE_EXIT_UNRUN"
+  fi
+  tap_log="$(mktemp "${GATE_LOG_DIR:-${TMPDIR:-/tmp}}/studio-node.XXXXXX")" || return 1
+  if node --test --test-reporter=tap "${STUDIO_NODE_TESTS[@]}" 2>&1 | tee -- "$tap_log"; then
+    node_rc=0
+  else
+    node_rc=${PIPESTATUS[0]}
+    # A failed transcript writer is also non-green, even if Node exited zero.
+    if [ "$node_rc" -eq 0 ]; then return 1; fi
+  fi
+  if [ "$node_rc" -ne 0 ]; then return "$node_rc"; fi
+  passed="$(awk '/^# pass [0-9]+$/ { count=$3; summaries++ }
+    END { if (summaries == 1) print count; else print 0 }' "$tap_log")" || return 1
+  if [ "$passed" -eq 0 ]; then
+    printf 'STUDIO_NODE_UNRUN reason=no-executed-tests\n'
+    return "$GATE_EXIT_UNRUN"
+  fi
+  return 0
+}
+
+# These stubs verify orchestration only. Studio semantics are supplied by the
+# real tracked Node suites, never by these synthetic TAP transcripts.
+studio_node_orchestration_fixture() (
+  local work="$1" scenario case_dir rc expected attempts
+  mkdir -p "$work" || return 1
+  for scenario in pass missing version-failure empty zero assertion-failure; do
+    case_dir="$work/$scenario"
+    mkdir -p "$case_dir" || return 1
+    rc=0
+    (
+      GATE_LOG_DIR="$case_dir"
+      GATE_SCOPE_TRACKING=0
+      GATE_SCOPE_ABORTED=0
+      CORE_EXPECTED=0
+      CORE_EXECUTED=0
+      CORE_PASSED=0
+      CORE_RED=0
+      CORE_UNRUN=0
+      node() {
+        if [ "$1" = --version ]; then
+          if [ "$scenario" = version-failure ]; then return 127; fi
+          printf 'v-orchestration-fixture\n'
+          return 0
+        fi
+        [ "$1" = --test ] && [ "$2" = --test-reporter=tap ] || return 31
+        printf 'called\n' >>"$case_dir/native-calls"
+        case "$scenario" in
+          assertion-failure)
+            printf 'TAP version 13\nnot ok 1 - real child failure\n# tests 1\n# pass 0\n# fail 1\n'
+            return 23
+            ;;
+          zero)
+            printf 'TAP version 13\n1..0\n# tests 0\n# pass 0\n# fail 0\n'
+            ;;
+          *) printf 'TAP version 13\nok 1 - orchestration only\n# tests 1\n# pass 1\n# fail 0\n' ;;
+        esac
+      }
+      if [ "$scenario" = missing ]; then
+        command() {
+          if [ "$#" -eq 2 ] && [ "$1" = -v ] && [ "$2" = node ]; then return 1; fi
+          builtin command "$@"
+        }
+      fi
+      if [ "$scenario" = empty ]; then STUDIO_NODE_TESTS=(); fi
+      run_core_gate "$CORE_GATE_STUDIO_NODE" run_studio_node
+      printf 'COUNTERS %s %s %s %s %s\n' \
+        "$CORE_EXPECTED" "$CORE_EXECUTED" "$CORE_PASSED" "$CORE_RED" "$CORE_UNRUN"
+      exit "$LAST_GATE_RC"
+    ) >"$case_dir/stdout" 2>"$case_dir/stderr" || rc=$?
+    if grep -Fq 'core retry' "$case_dir/stdout"; then return 1; fi
+    attempts=0
+    if [ -f "$case_dir/native-calls" ]; then attempts="$(wc -l <"$case_dir/native-calls")"; fi
+    case "$scenario" in
+      pass)
+        [ "$rc" -eq 0 ] && [ "$attempts" -eq 1 ] || return 1
+        grep -qx 'COUNTERS 1 1 1 0 0' "$case_dir/stdout" || return 1
+        grep -q '^PASS core:' "$case_dir/stdout" || return 1
+        ;;
+      assertion-failure)
+        [ "$rc" -eq 23 ] && [ "$attempts" -eq 1 ] || return 1
+        grep -qx 'COUNTERS 1 1 0 1 0' "$case_dir/stdout" || return 1
+        grep -q '^RED core:' "$case_dir/stdout" || return 1
+        ! grep -q '^UNRUN\|^PASS' "$case_dir/stdout" || return 1
+        ;;
+      *)
+        [ "$rc" -eq "$GATE_EXIT_UNRUN" ] || return 1
+        expected=0
+        if [ "$scenario" = zero ]; then expected=1; fi
+        [ "$attempts" -eq "$expected" ] || return 1
+        grep -qx 'COUNTERS 1 0 0 0 1' "$case_dir/stdout" || return 1
+        grep -q '^UNRUN core:.*studio-node-unrun' "$case_dir/stdout" || return 1
+        grep -q '^FAIL core:' "$case_dir/stdout" || return 1
+        ! grep -q '^PASS\|^RED' "$case_dir/stdout" || return 1
+        ;;
+    esac
+  done
+)
 
 # =============================================================================
 # THE VERDICT-CONTRACT CLOSURE (bead fgdb-udco)
@@ -1913,7 +2039,7 @@ live_gate_inventory() {
 
 gate_domain_wiring_complete() {
   local source="$1"
-  local tracking_calls finalize_calls closure_calls ledger_calls checkpoint_calls failures=0
+  local tracking_calls finalize_calls closure_calls ledger_calls checkpoint_calls node_calls node_runner_calls failures=0
 
   if [ ! -r "$source" ]; then
     echo "ERROR: gate-domain wiring source is unreadable: $source" >&2
@@ -1925,6 +2051,8 @@ gate_domain_wiring_complete() {
     '^run_core_gate "\$CORE_GATE_DOMAIN_CLOSURE" run_gate_domain_closure$' \
     "$source")"
   ledger_calls="$(grep -c '^  if ! gate_scope_records_complete; then$' "$source")"
+  node_calls="$(grep -c '^run_core_gate "\$CORE_GATE_STUDIO_NODE" run_studio_node$' "$source")"
+  node_runner_calls="$(grep -Fxc '  if node --test --test-reporter=tap "${STUDIO_NODE_TESTS[@]}" 2>&1 | tee -- "$tap_log"; then' "$source")"
   checkpoint_calls="$(grep -c '^[[:space:]]*gate_scope_abort_if_tree_moved ' "$source")"
   if [ "$tracking_calls" -ne 1 ]; then
     echo "ERROR: check.sh enables scoped result recording $tracking_calls time(s), expected 1" >&2
@@ -1942,11 +2070,19 @@ gate_domain_wiring_complete() {
     echo "ERROR: check.sh checks scoped result-ledger closure $ledger_calls time(s), expected 1" >&2
     failures=$((failures + 1))
   fi
-  # Nine core gates, all three registered-artifact control-flow exits, and one
+  if [ "$node_calls" -ne 1 ]; then
+    echo "ERROR: check.sh invokes Studio Node tests $node_calls time(s), expected 1" >&2
+    failures=$((failures + 1))
+  fi
+  if [ "$node_runner_calls" -ne 1 ]; then
+    echo "ERROR: check.sh invokes the real Node test runner $node_runner_calls time(s), expected 1" >&2
+    failures=$((failures + 1))
+  fi
+  # Ten core gates, all three registered-artifact control-flow exits, and one
   # after the registered inventory runner returns. A moved worktree must stop
   # the remaining chain at the first completed boundary (fgdb-3e12).
-  if [ "$checkpoint_calls" -ne 13 ]; then
-    echo "ERROR: check.sh wires $checkpoint_calls early tree checkpoint(s), expected 13" >&2
+  if [ "$checkpoint_calls" -ne 14 ]; then
+    echo "ERROR: check.sh wires $checkpoint_calls early tree checkpoint(s), expected 14" >&2
     failures=$((failures + 1))
   fi
   [ "$failures" -eq 0 ]
@@ -3346,7 +3482,7 @@ landing_guidance_control() {
 tree_scope_control() {
   local work="$1"
   local closure_listing _closure_fp mutant_source ledger_mutant_source
-  local checkpoint_mutant_source mutated_abort mutation_count
+  local checkpoint_mutant_source node_mutant_source mutated_abort mutation_count
 
   gate_tree_snapshot_into closure_listing _closure_fp
   GATE_TREE_LIST_START="$closure_listing"
@@ -3396,6 +3532,22 @@ tree_scope_control() {
   if gate_domain_wiring_complete "$checkpoint_mutant_source" \
       >"$work/checkpoint-wiring-mutant.out" 2>"$work/checkpoint-wiring-mutant.err"; then
     echo "SELF-TEST RED: deleting every early tree checkpoint left wiring green" >&2
+    return 1
+  fi
+  node_mutant_source="$work/check-no-studio-node-call.sh"
+  if ! sed '/^run_core_gate "\$CORE_GATE_STUDIO_NODE" run_studio_node$/d' \
+      "$ROOT/scripts/check.sh" >"$node_mutant_source"; then return 1; fi
+  if gate_domain_wiring_complete "$node_mutant_source" \
+      >"$work/node-call-mutant.out" 2>"$work/node-call-mutant.err"; then
+    echo "SELF-TEST RED: deleting the Studio invocation left closure green" >&2
+    return 1
+  fi
+  node_mutant_source="$work/check-no-native-node-runner.sh"
+  if ! sed '/^  if node --test --test-reporter=tap /s/.*/  if true; then/' \
+      "$ROOT/scripts/check.sh" >"$node_mutant_source"; then return 1; fi
+  if gate_domain_wiring_complete "$node_mutant_source" \
+      >"$work/node-runner-mutant.out" 2>"$work/node-runner-mutant.err"; then
+    echo "SELF-TEST RED: deleting the native Node runner left closure green" >&2
     return 1
   fi
   if ! tree_scope_early_abort_fixture "$work/early-abort"; then
@@ -3449,6 +3601,18 @@ tree_scope_control() {
     run_gate_domain_closure
   ) >"$work/domain-closure-mutant.out" 2>"$work/domain-closure-mutant.err"; then
     echo "SELF-TEST RED: deleting the UBS domain declaration left closure green" >&2
+    return 1
+  fi
+  if (
+    eval "$(declare -f core_gate_domain \
+      | sed '1s/^core_gate_domain /core_gate_domain_original /')"
+    core_gate_domain() {
+      if [ "$1" = "$CORE_GATE_STUDIO_NODE" ]; then return 1; fi
+      core_gate_domain_original "$@"
+    }
+    run_gate_domain_closure
+  ) >"$work/node-domain-mutant.out" 2>"$work/node-domain-mutant.err"; then
+    echo "SELF-TEST RED: deleting the Studio domain declaration left closure green" >&2
     return 1
   fi
 
@@ -3521,6 +3685,10 @@ run_mutation_self_test() {
   fi
   if ! ubs_partial_scan_fixture "$work"; then
     echo "SELF-TEST RED: a truncated UBS scan was not UNRUN, or a complete one was" >&2
+    return 1
+  fi
+  if ! studio_node_orchestration_fixture "$work/studio-node"; then
+    echo "SELF-TEST RED: Studio Node orchestration lost pass/red/unrun or retried a deterministic prerequisite" >&2
     return 1
   fi
 
@@ -3918,6 +4086,8 @@ EOF
   echo "  landing guidance: main-checkout edits warn before commit; scratch remedy pinned"
   echo "  UBS partial scan: UBS's truncation lines classify ubs-partial-scan and the"
   echo "    core gate reports UNRUN without a retry; a prefilter bypass alone stays a verdict"
+  echo "  Studio Node orchestration: positive child passes; assertion failure stays RED;"
+  echo "    unavailable Node, empty roster and zero tests are UNRUN without retry"
   echo "  evidence retained at $work"
   echo "  include enumeration: nonempty source retained; an early resolver failure stays red"
 }
@@ -3972,6 +4142,8 @@ run_core_gate "$CORE_GATE_FILE_COVERAGE" run_file_coverage
 gate_scope_abort_if_tree_moved "$CORE_GATE_FILE_COVERAGE"
 run_core_gate "$CORE_GATE_SHELL_LINT" run_shell_lint
 gate_scope_abort_if_tree_moved "$CORE_GATE_SHELL_LINT"
+run_core_gate "$CORE_GATE_STUDIO_NODE" run_studio_node
+gate_scope_abort_if_tree_moved "$CORE_GATE_STUDIO_NODE"
 run_core_gate "$CORE_GATE_VERDICT_CONTRACT" run_verdict_contract
 gate_scope_abort_if_tree_moved "$CORE_GATE_VERDICT_CONTRACT"
 run_core_gate "$CORE_GATE_DOMAIN_CLOSURE" run_gate_domain_closure

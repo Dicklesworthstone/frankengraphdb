@@ -689,6 +689,33 @@ All32 partitions must still run afresh in the mandatory chain. The original
 separate maintenance. The whole-workspace Rust run began clean on `e5389e9e8`;
 the later Bash edit means that warm run cannot be the final exact-tree proof.
 
+Further qualification preparation adds143 exact public component-query
+witnesses from175 native CLI processes across six fresh databases and eleven
+retained cuts. Independent readback recomputes every answer from the actual
+load inputs and issued vertex IDs. This is explicitly immutable `943d08a462`
+execution, with current source differences recorded; it is not a current-main
+proof. Ten additional linked integration targets pass47 tests, and the large
+multipart target passes18, all unfiltered. These are diagnostics while the
+parent workspace command remains active.
+
+The existing four Studio Node suites pass49 tests. Their mandatory wiring now
+lives in the existing check driver and verdict library: missing Node, an empty
+test selection or zero executed tests are UNRUN without a retry; assertion
+failures remain RED. Each of the nine newly claimed input files has a real
+single-input corruption control: all nine fail the same native command while
+the unchanged fixture passes49. This covers module evaluation and committed
+Wasm behavior, leaving browser DOM execution and C/Wasm source correspondence
+unclaimed. Studio's broader scope and opt-out task remains in progress; the
+historical JavaScript simulation lacks current physics and was not restored.
+
+The queued seventh proof was deliberately stopped before its waiting Cargo
+check could acquire the build lock, allowing this Bash-only wiring to finish
+before one integrated proof. Its wrapper exits143 on stable `a20cdcc94`, but
+the verifier exits1 because the interrupted transcript lacks the required
+aggregate verdict. It is incomplete evidence, never qualification. The warm
+Rust compiler was not signaled and its source inputs remain unchanged. The
+next clean committed-tree run must execute every original gate plus Node.
+
 The longer bridge above remains open work. The checklist consumer is the
 owner and this execution session; it is the explicitly requested TODO list,
 not a new gate or capability. Retire it from active use when these work units

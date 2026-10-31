@@ -625,6 +625,11 @@ gate_diag() {
 #                 Sentinels, UBS's own words: "Partial run:" and "analysis
 #                 incomplete:". NOT "output exceeds", which UBS also prints
 #                 when only its prefilter is bypassed and the scan completes.
+#   studio-node-unrun  the required Node executable was unavailable, the
+#                 selected test roster was empty, or a successful runner
+#                 reported zero passing tests. Only the gate helper emits the
+#                 anchored STUDIO_NODE_UNRUN marker; normal TAP diagnostics
+#                 cannot borrow it. These prerequisites are not retryable.
 #
 # Any other content — including unreadable or absent logs — prints "none" and
 # returns 1: the failure stays a product verdict. This function reads logs and
@@ -662,6 +667,12 @@ gate_env_failure_class() {
   for log in "$@"; do
     if grep -Fq 'Partial run:' "$log" || grep -Fq 'analysis incomplete:' "$log"; then
       printf 'ubs-partial-scan'
+      return 0
+    fi
+  done
+  for log in "$@"; do
+    if grep -Eq '^STUDIO_NODE_UNRUN reason=(node-unavailable|no-selected-tests|no-executed-tests)$' "$log"; then
+      printf 'studio-node-unrun'
       return 0
     fi
   done
