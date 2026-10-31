@@ -1643,11 +1643,9 @@ impl<'a> Parser<'a> {
 
     pub(super) fn positive_predicate(&mut self) -> Result<(), GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
-        let left = if matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.')) {
-            self.property_variable()?
-        } else {
-            self.variable()?
-        };
+        // Both properties and bare identity operands may name a vertex or a
+        // fixed-length relationship. Paths and quantified edges still refuse.
+        let left = self.property_variable()?;
         if self.take(b'.')? {
             self.capacity(
                 self.predicates,
@@ -1684,10 +1682,12 @@ impl<'a> Parser<'a> {
             ) {
                 return Err(error(
                     left.at,
-                    GraphPatternTextErrorKind::Expected("vertex equality or inequality"),
+                    GraphPatternTextErrorKind::Expected(
+                        "vertex or relationship equality or inequality",
+                    ),
                 ));
             }
-            let right = self.variable()?;
+            let right = self.property_variable()?;
             self.syntax.filters.push(Filter::Identity {
                 left,
                 right,

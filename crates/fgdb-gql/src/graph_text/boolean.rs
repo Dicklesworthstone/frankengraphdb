@@ -668,7 +668,17 @@ impl<'a> Parser<'a> {
             .filters
             .pop()
             .expect("one positive predicate was just parsed");
-        parsed.extended |= matches!(filter, Filter::VertexNull { .. });
+        parsed.extended |= match &filter {
+            Filter::VertexNull { .. } => true,
+            // Vertex identity can retain the original structural shortcut.
+            // Relationship identity needs the existing typed Boolean operands,
+            // including mixed vertex/edge domains and nullable captures.
+            Filter::Identity { left, right, .. } => {
+                self.syntax.visible_edge(left.text).is_some()
+                    || self.syntax.visible_edge(right.text).is_some()
+            }
+            _ => false,
+        };
         parsed.push(SyntaxItem::Atom(filter), at)
     }
 
@@ -1680,11 +1690,12 @@ impl BoundBooleanTemplate {
                     Item::Atom(
                         Atom::Property { variable, .. }
                         | Atom::Scalar { variable, .. }
-                        | Atom::Null { variable, .. },
+                        | Atom::Null { variable, .. }
+                        | Atom::VertexNull { variable, .. },
                     ) => variable == name.text,
-                    Item::Atom(Atom::Properties { left, right, .. }) => {
-                        left == name.text || right == name.text
-                    }
+                    Item::Atom(
+                        Atom::Properties { left, right, .. } | Atom::Identity { left, right, .. },
+                    ) => left == name.text || right == name.text,
                     Item::Expression { columns, .. } => {
                         columns.iter().any(|(variable, _)| variable == name.text)
                     }
@@ -1836,12 +1847,12 @@ impl BoundBooleanTemplate {
                         is_null: *is_null,
                     },
                     Atom::VertexNull { variable, is_null } => Op::IsNull {
-                        operand: Operand::Vertex(variable),
+                        operand: self.element_operand(variable),
                         is_null: *is_null,
                     },
                     Atom::Identity { left, right, equal } => Op::Compare {
-                        left: Operand::Vertex(left),
-                        right: Operand::Vertex(right),
+                        left: self.element_operand(left),
+                        right: self.element_operand(right),
                         comparison: if *equal {
                             IntegerComparison::Equal
                         } else {

@@ -146,8 +146,10 @@ fn scalar_text_preserves_types_and_nulls_on_all_five_read_entrypoints() {
         // that exact key value in the seed batch below (V0..V4 and HIGH;
         // rows [V0,V1], [V2,HIGH], [HIGH], [V0,V2,HIGH], [V0,V2,HIGH],
         // [V3], and none for the note/NULL shapes). Non-equality and
-        // null-comparison shapes never consult the index: 7 full-domain
-        // records. The ruling (fgdb-bupm 2026-09-17): an equality lookup
+        // IS NULL/IS NOT NULL scan 7 full-domain records. Equality with NULL
+        // admits zero source records at all five entrypoints. Inequality
+        // still scans all seven: no indexed predicate admits that shortcut.
+        // The ruling (fgdb-bupm 2026-09-17): an equality lookup
         // charges only the candidates it resolves. V3's Int status and
         // active are of another domain than the literals (fgdb-v6ku6): never
         // `=`, always `<>`.
@@ -160,7 +162,7 @@ fn scalar_text_preserves_types_and_nulls_on_all_five_read_entrypoints() {
             ("n.active = 1", vec![VId(3)], 1),
             ("n.note IS NULL", vec![VId(0), VId(1), HIGH], 7),
             ("n.note IS NOT NULL", vec![VId(2), VId(3)], 7),
-            ("n.note = NULL", vec![], 7),
+            ("n.note = NULL", vec![], 0),
             ("n.note <> NULL", vec![], 7),
         ] {
             let pattern = query(&format!("MATCH (n:Person) WHERE {predicate} RETURN n"));

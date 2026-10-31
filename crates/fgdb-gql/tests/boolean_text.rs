@@ -496,6 +496,113 @@ fn inline_collection_relationship_predicates_keep_the_edge_property_domain() {
 }
 
 #[test]
+fn bare_relationship_identities_use_typed_boolean_operands_and_optional_nulls() {
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_types::EId;
+    let fields = [
+        CanonicalPropertyValue::from(CanonicalScalar::Int(10)),
+        CanonicalPropertyValue::from(CanonicalScalar::Int(20)),
+    ];
+    let execute = |text: &str| {
+        let edge_reads = Cell::new(0);
+        let rows = query(text)
+            .plan()
+            .execute_governed_with_element_properties(
+                4,
+                [VId(0), VId(1)],
+                [
+                    (EId(0), VId(0), R, VId(0)),
+                    (EId(u128::MAX), VId(0), R, VId(0)),
+                ],
+                |_, _| Ok::<_, &'static str>(true),
+                |_, _| Err("relationship predicates must not read vertex fields"),
+                |eid, key| {
+                    assert_eq!(key, P);
+                    edge_reads.set(edge_reads.get() + 1);
+                    Ok(Some(&fields[usize::from(eid != EId(0))]))
+                },
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value;
+        if !text.contains(".n") {
+            assert_eq!(edge_reads.get(), 0, "identity needs no property reads");
+        }
+        rows.into_iter()
+            .map(|row| row.values().to_vec())
+            .collect::<Vec<_>>()
+    };
+    let edges = [EId(0), EId(u128::MAX)];
+    for predicate in [
+        "r=s",
+        "r<>s",
+        "NOT(r=s)",
+        "r=s OR r<>s",
+        "(r=s OR r<>s) AND r.n>s.n",
+        "r=a",
+        "r<>a",
+    ] {
+        let mut expected = Vec::new();
+        for (left, r) in edges.iter().enumerate() {
+            for (right, s) in edges.iter().enumerate() {
+                let keep = match predicate {
+                    "r=s" => r == s,
+                    "r<>s" | "NOT(r=s)" => r != s,
+                    "r=s OR r<>s" | "r<>a" => true,
+                    "(r=s OR r<>s) AND r.n>s.n" => left > right,
+                    // VId(0) and EId(0) remain distinct typed identities.
+                    "r=a" => false,
+                    _ => unreachable!(),
+                };
+                if keep {
+                    expected.push(vec![GraphValue::Edge(*r), GraphValue::Edge(*s)]);
+                }
+            }
+        }
+        let text = format!(
+            "MATCH REPEATABLE ELEMENTS (a)-[r:R]->(b)-[s:R]->(c) \
+             WHERE {predicate} RETURN r,s ORDER BY r,s"
+        );
+        assert_eq!(execute(&text), expected, "{predicate}");
+    }
+    assert_eq!(
+        execute(
+            "MATCH (a) OPTIONAL MATCH REPEATABLE ELEMENTS (a)-[r:R]->(b)-[s:R]->(c) \
+             WHERE r=s RETURN a,r,s ORDER BY a,r,s"
+        ),
+        vec![
+            vec![
+                GraphValue::Vertex(VId(0)),
+                GraphValue::Edge(EId(0)),
+                GraphValue::Edge(EId(0))
+            ],
+            vec![
+                GraphValue::Vertex(VId(0)),
+                GraphValue::Edge(EId(u128::MAX)),
+                GraphValue::Edge(EId(u128::MAX))
+            ],
+            vec![
+                GraphValue::Vertex(VId(1)),
+                GraphValue::Scalar(CanonicalScalar::Null),
+                GraphValue::Scalar(CanonicalScalar::Null)
+            ],
+        ],
+    );
+    for text in [
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) WHERE r<s RETURN r,s",
+        "MATCH (a)-[r:R*1..2]->(b) WHERE r=r RETURN a",
+        "MATCH p=(a)-[r:R]->(b) WHERE p=p RETURN a",
+    ] {
+        assert!(PreparedGraphText::prepare(text, symbols).is_err(), "{text}");
+    }
+    assert!(matches!(
+        PreparedGraphText::prepare("MATCH (a)-[r:R]->(b) WHERE r=missing RETURN a", symbols),
+        Err(error) if error.kind == GraphPatternTextErrorKind::UnknownVariable
+    ));
+}
+
+#[test]
 fn precedence_parentheses_and_negation_match_independent_multigraph_oracles() {
     let choices = [
         None,
