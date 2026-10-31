@@ -338,6 +338,20 @@ fn decode_property_patch_fields(
     resolver: Option<&dyn CanonicalScalarResolver>,
     selected: Option<(usize, Option<PropertyKeyId>)>,
 ) -> Result<Vec<EdgePropertyRow>, EdgePropertyPatchError> {
+    decode_property_patch_selection(
+        bytes,
+        resolver,
+        selected.map(|(row, _)| row),
+        selected.and_then(|(_, key)| key),
+    )
+}
+
+fn decode_property_patch_selection(
+    bytes: &[u8],
+    resolver: Option<&dyn CanonicalScalarResolver>,
+    selected_row: Option<usize>,
+    selected_key: Option<PropertyKeyId>,
+) -> Result<Vec<EdgePropertyRow>, EdgePropertyPatchError> {
     let mut at = 0usize;
     let take = |at: &mut usize, n: usize| -> Result<usize, EdgePropertyPatchError> {
         let end = at
@@ -365,15 +379,14 @@ fn decode_property_patch_fields(
     if declared > MAX_PROPERTY_PATCH_ROWS {
         return Err(EdgePropertyPatchError::ImplausibleRowCount { declared });
     }
-    let capacity = selected.map_or(declared as usize, |(row, _)| {
+    let capacity = selected_row.map_or(declared as usize, |row| {
         usize::from(row < declared as usize)
     });
-    let selected_key = selected.and_then(|(_, key)| key);
     let mut rows = Vec::with_capacity(capacity);
     for row_at in 0..declared as usize {
         let start = take(&mut at, 4)?;
         let props = u32::from_le_bytes(bytes[start..start + 4].try_into().expect("four bytes"));
-        let decode = selected.is_none_or(|(selected, _)| selected == row_at);
+        let decode = selected_row.is_none_or(|selected| selected == row_at);
         let mut row: EdgePropertyRow = Vec::with_capacity(if !decode {
             0
         } else if selected_key.is_some() {
@@ -444,7 +457,7 @@ fn decode_property_patch_fields(
     // An admitted selection cannot infer the complete patch's required format
     // from one row. Initial admission already proved that exact format, and the
     // keyed identity plus current extent checksum bind all skipped payloads.
-    if selected.is_none() {
+    if selected_row.is_none() && selected_key.is_none() {
         let required = property_patch_format_for(&rows);
         if format != required {
             return Err(EdgePropertyPatchError::FormatMismatch { format, required });
@@ -564,6 +577,33 @@ pub(crate) fn read_admitted_property_value(
             .pop()
             .map(|mut row| row.pop().map(|(_, value)| value)),
     )
+}
+
+/// Select one property in every physical row of an already admitted sidecar.
+///
+/// Complete root admission proved every value, profile and locator binding;
+/// the current fault must match its admitted extent checksum. Reauthenticate
+/// the entire patch and check every row's framing and key order. Empty stored
+/// rows remain errors. Returned rows preserve their original positions but
+/// contain at most the requested key; an empty projected row means that key is
+/// absent. These partial rows must stay behind the buffered scan's opaque
+/// selected-property owner, never become complete edge records.
+pub(crate) fn read_admitted_property_column(
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    bytes: &[u8],
+    expected: EdgePropertyPatchVersion,
+    resolver: Option<&dyn CanonicalScalarResolver>,
+    key: PropertyKeyId,
+) -> Result<Vec<EdgePropertyRow>, EdgePropertyPatchError> {
+    let actual = property_patch_id(k_oid, namespace, bytes);
+    if actual != expected.0 {
+        return Err(EdgePropertyPatchError::IdentityMismatch {
+            expected: expected.0,
+            actual,
+        });
+    }
+    decode_property_patch_selection(bytes, resolver, None, Some(key))
 }
 
 /// The locator column's own canonical law: non-zero locators are exactly
@@ -1120,5 +1160,215 @@ mod selected_row_tests {
             );
             assert!(resolver.calls.get() > before);
         }
+    }
+
+    fn select_column(
+        bytes: &[u8],
+        key: PropertyKeyId,
+    ) -> Result<Vec<EdgePropertyRow>, EdgePropertyPatchError> {
+        read_admitted_property_column(
+            &KEY,
+            NS,
+            bytes,
+            EdgePropertyPatchVersion(property_patch_id(&KEY, NS, bytes)),
+            None,
+            key,
+        )
+    }
+
+    #[test]
+    fn selected_columns_preserve_every_locator_across_formats_and_absence() {
+        for value in values().into_iter().chain([CanonicalScalar::Null.into()]) {
+            for count in [0, 1, 17, MAX_PROPERTY_PATCH_ROWS as usize] {
+                let rows: Vec<_> = (0..count)
+                    .map(|at| {
+                        vec![
+                            (PropertyKeyId(3), CanonicalScalar::Int(at as i64).into()),
+                            (PropertyKeyId(u64::MAX), value.clone()),
+                        ]
+                    })
+                    .collect();
+                let bytes = encode_property_patch(&rows).unwrap();
+                let complete = decode_property_patch(&bytes).unwrap();
+                for key in [PropertyKeyId(0), PropertyKeyId(3), PropertyKeyId(u64::MAX)] {
+                    let expected: Vec<EdgePropertyRow> = complete
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .filter(|(candidate, _)| *candidate == key)
+                                .cloned()
+                                .collect()
+                        })
+                        .collect();
+                    let selected = select_column(&bytes, key).unwrap();
+                    assert_eq!(selected, expected);
+                    assert_eq!(selected.len(), count, "missing keys keep physical row positions");
+                    let locators: Vec<_> = std::iter::once(0)
+                        .chain((1..=count).map(|at| at as u8))
+                        .collect();
+                    validate_block_patch_consistency(&locators, selected.len()).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selected_columns_authenticate_skipped_bytes_and_validate_all_framing() {
+        let rows = vec![
+            vec![(PropertyKeyId(5), CanonicalScalar::Int(-7).into())],
+            vec![
+                (PropertyKeyId(11), CanonicalScalar::Bool(true).into()),
+                (PropertyKeyId(19), CanonicalScalar::Int(29).into()),
+            ],
+            vec![(PropertyKeyId(31), CanonicalScalar::Null.into())],
+        ];
+        let bytes = encode_property_patch(&rows).unwrap();
+        let id = EdgePropertyPatchVersion(property_patch_id(&KEY, NS, &bytes));
+        for key in [PropertyKeyId(11), PropertyKeyId(19), PropertyKeyId(99)] {
+            for cut in 0..bytes.len() {
+                assert!(matches!(
+                    select_column(&bytes[..cut], key),
+                    Err(EdgePropertyPatchError::Truncated { .. })
+                ));
+            }
+            let mut extra = bytes.clone();
+            extra.push(0);
+            assert_eq!(
+                select_column(&extra, key),
+                Err(EdgePropertyPatchError::TrailingBytes { extra: 1 })
+            );
+            for at in 0..bytes.len() {
+                let mut changed = bytes.clone();
+                changed[at] ^= 1;
+                assert!(matches!(
+                    read_admitted_property_column(&KEY, NS, &changed, id, None, key),
+                    Err(EdgePropertyPatchError::IdentityMismatch { .. })
+                ));
+            }
+            for (secret, namespace) in [
+                ([0x39; 32], NS),
+                (KEY, DatabaseSecurityNamespaceId([0x98; 32])),
+            ] {
+                assert!(matches!(
+                    read_admitted_property_column(&secret, namespace, &bytes, id, None, key),
+                    Err(EdgePropertyPatchError::IdentityMismatch { .. })
+                ));
+            }
+        }
+        // These self-identified mutations exercise the private parser's checks;
+        // they are not evidence that a malformed image can pass root admission.
+        let second = encode_property_patch(&rows[..1]).unwrap().len();
+        let second_key =
+            second + 4 + 8 + 4 + CanonicalScalar::Bool(true).encode().unwrap().len();
+        for replacement in [11_u64, 7] {
+            let mut malformed = bytes.clone();
+            malformed[second_key..second_key + 8].copy_from_slice(&replacement.to_le_bytes());
+            for key in [PropertyKeyId(11), PropertyKeyId(19), PropertyKeyId(99)] {
+                assert_eq!(
+                    select_column(&malformed, key),
+                    Err(EdgePropertyPatchError::NonCanonicalRow { at: 1 })
+                );
+            }
+        }
+        let mut empty = bytes[..second].to_vec();
+        empty.extend_from_slice(&0_u32.to_le_bytes());
+        empty.extend_from_slice(&encode_property_patch(&rows[2..]).unwrap()[10..]);
+        for key in [PropertyKeyId(5), PropertyKeyId(31), PropertyKeyId(99)] {
+            assert_eq!(
+                select_column(&empty, key),
+                Err(EdgePropertyPatchError::EmptyRow { at: 1 })
+            );
+        }
+        let mut wrong_format = bytes.clone();
+        wrong_format[4..6].copy_from_slice(&99_u16.to_le_bytes());
+        assert_eq!(
+            select_column(&wrong_format, PropertyKeyId(99)),
+            Err(EdgePropertyPatchError::UnsupportedFormat { format: 99 })
+        );
+        let mut wrong_count = bytes;
+        wrong_count[6..10].copy_from_slice(&256_u32.to_le_bytes());
+        assert_eq!(
+            select_column(&wrong_count, PropertyKeyId(99)),
+            Err(EdgePropertyPatchError::ImplausibleRowCount { declared: 256 })
+        );
+    }
+
+    #[test]
+    fn selected_columns_decode_only_the_requested_values_after_complete_admission() {
+        let resolver = Resolver::default();
+        let timestamp = CanonicalScalar::Timestamp(
+            CanonicalTimestamp::zoned(
+                1_735_689_600_123_456_789,
+                -18_000,
+                "America/New_York",
+                ObjectId([9; 32]),
+                &resolver,
+            )
+            .unwrap(),
+        );
+        let rows = vec![
+            vec![
+                (PropertyKeyId(3), timestamp.clone().into()),
+                (PropertyKeyId(7), CanonicalScalar::Int(101).into()),
+            ],
+            vec![
+                (
+                    PropertyKeyId(3),
+                    CanonicalPropertyValue::List(
+                        CanonicalList::try_new(vec![timestamp.into()]).unwrap(),
+                    ),
+                ),
+                (PropertyKeyId(7), CanonicalScalar::Null.into()),
+            ],
+            vec![(PropertyKeyId(7), CanonicalScalar::Int(103).into())],
+        ];
+        let bytes = encode_property_patch(&rows).unwrap();
+        let id = EdgePropertyPatchVersion(property_patch_id(&KEY, NS, &bytes));
+        assert_eq!(
+            decode_property_patch_with_resolver(&bytes, &resolver).unwrap(),
+            rows
+        );
+        resolver.calls.set(0);
+        resolver.reject.set(true);
+        for key in [PropertyKeyId(7), PropertyKeyId(99)] {
+            let expected: Vec<EdgePropertyRow> = rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .filter(|(candidate, _)| *candidate == key)
+                        .cloned()
+                        .collect()
+                })
+                .collect();
+            assert_eq!(
+                read_admitted_property_column(&KEY, NS, &bytes, id, Some(&resolver), key)
+                    .unwrap(),
+                expected
+            );
+        }
+        assert_eq!(resolver.calls.get(), 0, "unselected artifacts are not decoded");
+        assert!(
+            read_admitted_property_column(
+                &KEY,
+                NS,
+                &bytes,
+                id,
+                Some(&resolver),
+                PropertyKeyId(3),
+            )
+            .is_err()
+        );
+        assert!(decode_property_patch_with_resolver(&bytes, &resolver).is_err());
+        resolver.reject.set(false);
+        let selected = read_admitted_property_column(
+            &KEY,
+            NS,
+            &bytes,
+            id,
+            Some(&resolver),
+            PropertyKeyId(3),
+        )
+        .unwrap();
+        assert_eq!(selected, vec![vec![rows[0][0].clone()], vec![rows[1][0].clone()], vec![]]);
     }
 }

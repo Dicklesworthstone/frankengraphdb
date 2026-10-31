@@ -1705,3 +1705,356 @@ fn one_row_blocks_are_read_once_and_the_source_budget_is_cumulative() {
         assert_eq!(pool.used(), 0);
     });
 }
+
+#[test]
+fn selected_property_candidates_preserve_history_and_mode_upgrades() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path, false).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        let absent = PropertyKeyId(12);
+        for cut in 0..=5 {
+            for key in [P, absent] {
+                let mut scan = view.edge_scan(&cx, CommitSeq(cut)).unwrap();
+                let mut ids = Vec::new();
+                let mut admitted = Vec::new();
+                let mut rows = Vec::new();
+                while let Some(candidate) = scan
+                    .next_property_candidate_with(&cx, key, &mut |event| {
+                        if let BufferedEdgeScanEvent::Identity(eid) = event {
+                            admitted.push(eid);
+                        }
+                        Ok::<_, ()>(())
+                    })
+                    .await
+                    .unwrap()
+                {
+                    ids.push(candidate.eid);
+                    if let Some(row) = candidate.row {
+                        rows.push((*row.entry(), row.value().cloned()));
+                    }
+                }
+                assert_eq!(ids, [EId(0), EId(2), EId(4), EId(6), EId(8), EId(90), EId(u128::MAX)]);
+                assert_eq!(admitted, ids, "one admission per identity, including invisible histories");
+                let oracle: Vec<_> = expected(cut)
+                    .into_iter()
+                    .map(|row| {
+                        let value = row.props.into_iter()
+                            .find(|(candidate, _)| *candidate == key)
+                            .map(|(_, value)| value);
+                        (row.entry, value)
+                    })
+                    .collect();
+                assert_eq!(rows, oracle, "cut {cut}, property {key:?}");
+                drop(scan);
+                assert_eq!(pool.used(), baseline);
+            }
+        }
+
+        use EdgePropertyAccess::{Property, Read, Skip};
+        let cases = [
+            [Property(P), Property(absent), Read],
+            [Read, Property(absent), Property(P)],
+            [Skip, Property(P), Property(absent)],
+            [Property(P), Skip, Property(P)],
+            [Property(absent), Property(P), Read],
+            [Property(absent), Read, Property(absent)],
+        ];
+        for (case, modes) in cases.into_iter().enumerate() {
+            let mut scan = view.edge_scan_relation(&cx, CommitSeq(5), S).unwrap();
+            for (ordinal, mode) in modes.into_iter().enumerate() {
+                let before = scan.partition.stats().misses;
+                let (eid, row) = match mode {
+                    Read => {
+                        let candidate = scan.next_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
+                            .await.unwrap().unwrap();
+                        (candidate.eid, candidate.row.map(|row| (row.entry, row.props.clone())))
+                    }
+                    Property(key) => {
+                        let candidate = scan.next_property_candidate_with(
+                            &cx, key, &mut |_| Ok::<_, ()>(()),
+                        ).await.unwrap().unwrap();
+                        (candidate.eid, candidate.row.map(|row| (
+                            *row.entry(),
+                            row.value().cloned().map(|value| vec![(key, value)]).unwrap_or_default(),
+                        )))
+                    }
+                    Skip => {
+                        let candidate = scan.next_topology_candidate_with(
+                            &cx, &mut |_| Ok::<_, ()>(()),
+                        ).await.unwrap().unwrap();
+                        (candidate.eid, candidate.row.map(|row| (*row.entry(), Vec::new())))
+                    }
+                };
+                let expected_id = [EId(0), EId(2), EId(8)][ordinal];
+                assert_eq!(eid, expected_id);
+                let mut expected = expected(5).into_iter()
+                    .find(|row| row.entry.eid == expected_id).unwrap();
+                match mode {
+                    Read => {}
+                    Property(key) => expected.props.retain(|(candidate, _)| *candidate == key),
+                    Skip => expected.props.clear(),
+                }
+                assert_eq!(row, Some((expected.entry, expected.props)), "case {case}, row {ordinal}");
+                if case == 3 && ordinal != 0 {
+                    assert_eq!(scan.partition.stats().misses, before, "same-key/topology reuse");
+                }
+            }
+            assert!(scan.next_property_candidate_with(&cx, P, &mut |_| Ok::<_, ()>(()))
+                .await.unwrap().is_none());
+            drop(scan);
+            assert_eq!(pool.used(), baseline);
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn selected_property_controls_and_work_limits_refuse_without_leaking_state() {
+    run(|contexts, path| async move {
+        let (store, id) = fixture(&contexts, &path, false).await;
+        let cx = contexts.query();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store
+            .open_buffered_root(&cx, id, pool.clone(), limits())
+            .await
+            .unwrap();
+        let baseline = pool.used();
+        // Exercise the actual QueryCx checkpoint boundary before the first
+        // payload read; this simulation probe does not cancel the whole task.
+        let probe = std::sync::Arc::new(fgdb_types::context::SimulationCheckpointProbe::new(Some(1)));
+        let interrupted = cx.with_checkpoint_probe(probe.clone());
+        let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap();
+        assert!(matches!(
+            scan.next_property_candidate_with(&interrupted, P, &mut |_| -> Result<(), ()> {
+                panic!("the first checkpoint must refuse before source consumption")
+            }).await,
+            Err(BufferedScanError::Read(_))
+        ));
+        assert_eq!(probe.calls(), 1);
+        assert!(scan.is_finished());
+        drop(scan);
+        assert_eq!(view.stats().misses, 0);
+        assert_eq!(pool.used(), baseline);
+
+        // Refuse the first identity before either topology or sidecar I/O.
+        let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap();
+        {
+            let mut observe = |_| Ok::<_, ()>(());
+            drop(scan.next_property_candidate_with(&cx, P, &mut observe));
+        }
+        assert_eq!(scan.work_used(), 0);
+        assert!(!scan.is_finished());
+        assert!(matches!(
+            scan.next_property_candidate_with(&cx, P, &mut |event| {
+                if event == BufferedEdgeScanEvent::Identity(EId(0)) {
+                    Err(7)
+                } else {
+                    Ok(())
+                }
+            }).await,
+            Err(BufferedScanError::Control(7))
+        ));
+        assert!(scan.is_finished());
+        drop(scan);
+        assert_eq!(view.stats().misses, 0);
+        assert_eq!(pool.used(), baseline);
+
+        for key in [P, PropertyKeyId(12)] {
+            let mut total = 0;
+            let work = {
+                let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap();
+                while scan.next_property_candidate_with(&cx, key, &mut |_| {
+                    total += 1;
+                    Ok::<_, usize>(())
+                }).await.unwrap().is_some() {}
+                scan.work_used()
+            };
+            assert!(total > 0 && work > 0);
+            for stop in 0..total {
+                let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap();
+                let mut seen = 0;
+                loop {
+                    match scan.next_property_candidate_with(&cx, key, &mut |_| {
+                        let at = seen;
+                        seen += 1;
+                        if at == stop { Err(stop) } else { Ok(()) }
+                    }).await {
+                        Ok(Some(_)) => {}
+                        Err(BufferedScanError::Control(at)) => {
+                            assert_eq!(at, stop);
+                            assert_eq!(seen, stop + 1);
+                            break;
+                        }
+                        other => panic!("expected selected-property refusal {stop}, got {other:?}"),
+                    }
+                }
+                assert!(scan.is_finished());
+                assert!(scan.next_property_candidate_with(&cx, key, &mut |_| -> Result<(), ()> {
+                    panic!("fused selected-property source")
+                }).await.unwrap().is_none());
+                drop(scan);
+                assert_eq!(pool.used(), baseline, "property {key:?}, control {stop}");
+            }
+            for limit in [work - 1, work] {
+                let mut scan = view.edge_scan(&cx, CommitSeq(5)).unwrap();
+                scan.work.limit = limit;
+                let mut refused = false;
+                loop {
+                    match scan.next_property_candidate_with(&cx, key, &mut |_| Ok::<_, ()>(())).await {
+                        Ok(Some(_)) => {}
+                        Ok(None) => break,
+                        Err(BufferedScanError::Read(BufferedReadError::Limit {
+                            resource: "buffered source work", requested, limit: found,
+                        })) => {
+                            assert_eq!((requested, found), (work, work - 1));
+                            refused = true;
+                            break;
+                        }
+                        other => panic!("unexpected selected-property source result {other:?}"),
+                    }
+                }
+                assert_eq!(refused, limit < work);
+                assert!(scan.is_finished());
+                drop(scan);
+                assert_eq!(pool.used(), baseline);
+            }
+        }
+        drop(view);
+        assert_eq!(pool.used(), 0);
+    });
+}
+
+#[test]
+fn selected_property_rows_clear_old_values_and_retain_only_the_requested_payload() {
+    run(|contexts, path| async move {
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let store = BlockStore::open(
+            &commit, &path, [0x37; 32], DatabaseSecurityNamespaceId([0x63; 32]),
+        ).await.unwrap();
+        let unrelated = PropertyKeyId(10); // Before P: selecting the first value would be wrong.
+        let wide = || CanonicalPropertyValue::from(
+            CanonicalScalar::bytes(vec![0x6d; 2048]).unwrap()
+        );
+        let properties = |value: CanonicalPropertyValue| vec![(unrelated, wide()), (P, value)];
+        let definitions = [
+            (
+                vec![
+                    entry(0, 1, 1, R, 1, None),
+                    entry(1, 1, 2, R, 1, None),
+                    entry(2, 1, 2, R, 1, None),
+                    entry(3, 1, 3, R, 1, None),
+                    entry(u128::MAX, 1, 3, R, 1, None),
+                ],
+                vec![1, 2, 0, 3, 4],
+                vec![
+                    properties(CanonicalScalar::Int(0).into()),
+                    properties(CanonicalScalar::Null.into()),
+                    properties(CanonicalScalar::Int(3).into()),
+                    properties(CanonicalScalar::Int(99).into()),
+                ],
+            ),
+            (
+                vec![
+                    entry(3, 1, 3, R, 1, Some(3)),
+                    entry(3, 1, 3, R, 3, None),
+                    entry(u128::MAX, 1, 3, R, 1, Some(3)),
+                    entry(u128::MAX, 1, 3, R, 3, None),
+                ],
+                vec![1, 2, 3, 0],
+                vec![
+                    properties(CanonicalScalar::Int(3).into()),
+                    vec![(unrelated, wide())],
+                    properties(CanonicalScalar::Int(99).into()),
+                ],
+            ),
+        ];
+        let mut predecessor = None;
+        let mut blocks = Vec::new();
+        for (entries, locators, rows) in definitions {
+            let bytes = encode_property_patch(&rows).unwrap();
+            assert!(bytes.len() <= limits().buffer.max_extent_bytes);
+            let patch = store.put_edge_property_patch(&commit, &bytes).await.unwrap();
+            let encoded = encode_block_with_properties(
+                0, predecessor, &entries, patch.0, &locators, &rows,
+            ).unwrap();
+            let block = store.put(&commit, &encoded).await.unwrap();
+            blocks.push(BlockRef {
+                block_id: block.0,
+                first_seq: CommitSeq(1),
+                last_seq: entries.iter()
+                    .map(|row| row.retired_at.unwrap_or(row.created_at))
+                    .max().unwrap(),
+            });
+            predecessor = Some(block);
+        }
+        let vertices = [vertex(1, 1, None, 10), vertex(2, 1, None, 20), vertex(3, 1, None, 30)];
+        let patch = store.put_patch(&commit, &encode_patch(&vertices).unwrap()).await.unwrap();
+        let id = store.put_root(&commit, &PartitionRoot {
+            graph: GraphId(1), branch: BranchId(2), partition: 0,
+            published_at: CommitSeq(3), blocks,
+            vertex_patches: vec![PatchRef {
+                patch_id: patch.0, first_seq: CommitSeq(1), last_seq: CommitSeq(1),
+            }],
+        }).await.unwrap();
+        let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+        let mut view = store.open_buffered_root(&cx, id, pool.clone(), limits()).await.unwrap();
+        let baseline = pool.used();
+        for cut in [1, 3, 1] {
+            let mut scan = view.edge_scan(&cx, CommitSeq(cut)).unwrap();
+            let mut found = Vec::new();
+            while let Some(candidate) = scan.next_property_candidate_with(
+                &cx, P, &mut |_| Ok::<_, ()>(()),
+            ).await.unwrap() {
+                let row = candidate.row.unwrap();
+                let changed = matches!(candidate.eid, EId(3) | EId(u128::MAX));
+                assert_eq!(row.entry().created_at, CommitSeq(if cut >= 3 && changed { 3 } else { 1 }));
+                assert_eq!(row.entry().retired_at, (cut < 3 && changed).then_some(CommitSeq(3)));
+                found.push((candidate.eid, row.value().cloned()));
+            }
+            assert_eq!(found, vec![
+                (EId(0), Some(CanonicalScalar::Int(0).into())),
+                (EId(1), Some(CanonicalScalar::Null.into())),
+                (EId(2), None),
+                (EId(3), (cut < 3).then(|| CanonicalScalar::Int(3).into())),
+                (EId(u128::MAX), (cut < 3).then(|| CanonicalScalar::Int(99).into())),
+            ], "a newer missing key or locator zero must clear the earlier value");
+            drop(scan);
+            assert_eq!(pool.used(), baseline);
+        }
+
+        let mut complete = view.edge_scan(&cx, CommitSeq(1)).unwrap();
+        let full = complete.next_candidate_with(&cx, &mut |_| Ok::<_, ()>(()))
+            .await.unwrap().unwrap().row.unwrap();
+        let full_charge = full.charged_bytes();
+        // A full active image can serve a selected pull, but only P may escape.
+        let next = complete.next_property_candidate_with(&cx, P, &mut |_| Ok::<_, ()>(()))
+            .await.unwrap().unwrap().row.unwrap();
+        assert_eq!(next.entry().eid, EId(1));
+        assert_eq!(next.value(), Some(&CanonicalPropertyValue::Scalar(CanonicalScalar::Null)));
+        drop(next);
+        drop(full);
+        drop(complete);
+        assert_eq!(pool.used(), baseline);
+        let mut selected = view.edge_scan(&cx, CommitSeq(1)).unwrap();
+        let held = selected.next_property_candidate_with(&cx, P, &mut |_| Ok::<_, ()>(()))
+            .await.unwrap().unwrap().row.unwrap();
+        assert_eq!(held.entry().eid, EId(0));
+        assert_eq!(held.value(), Some(&CanonicalPropertyValue::Scalar(CanonicalScalar::Int(0))));
+        assert!(held.charged_bytes() + 2048 <= full_charge, "unrelated payload stays unmaterialized");
+        assert_eq!(format!("{held:?}"), "BufferedEdgeProperty([REDACTED])");
+        drop(selected);
+        assert_eq!(pool.used(), baseline + held.charged_bytes());
+        drop(view);
+        assert_eq!(pool.used(), held.charged_bytes(), "returned value owns its reservation");
+        drop(held);
+        assert_eq!(pool.used(), 0);
+    });
+}

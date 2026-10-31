@@ -172,6 +172,27 @@ impl<V: Vfs> BufferedPartition<V> {
         .map_err(BufferedReadError::from)
     }
 
+    async fn block_property_column(
+        &mut self,
+        cx: &QueryCx,
+        at: usize,
+        property: PropertyKeyId,
+        admission: Admission,
+    ) -> Result<Vec<EdgePropertyRow>, BufferedReadError> {
+        let key = self.blocks[at].properties.ok_or(BufferError::InvalidLoad)?;
+        let bytes = self.pin(cx, key, admission).await?;
+        crate::edge_props::read_admitted_property_column(
+            self.store.k_oid.expose(),
+            self.store.namespace,
+            bytes.as_ref(),
+            crate::edge_props::EdgePropertyPatchVersion(key.object()),
+            self.store.decode_resolver(),
+            property,
+        )
+        .map_err(StoreError::MalformedEdgePropertyPatch)
+        .map_err(BufferedReadError::from)
+    }
+
     pub(super) async fn block_property_row(
         &mut self,
         cx: &QueryCx,
@@ -268,6 +289,24 @@ impl<V: Vfs> BufferedPartition<V> {
                     work.step(cx, observe)
                 })
                 .await?
+            }
+            EdgePropertyAccess::Property(property) => {
+                let (entries, locators) =
+                    self.block_keys(cx, at, Admission::ScanBypass).await?;
+                let properties = if let Some(locators) = locators {
+                    // The same sidecar visit is admitted before its pin.
+                    work.step(cx, observe)?;
+                    let rows = self
+                        .block_property_column(cx, at, property, Admission::ScanBypass)
+                        .await?;
+                    crate::edge_props::validate_block_patch_consistency(&locators, rows.len())
+                        .map_err(StoreError::MalformedEdgePropertyPatch)
+                        .map_err(BufferedReadError::from)?;
+                    Some(BlockProps { locators, rows })
+                } else {
+                    None
+                };
+                (entries, properties)
             }
             EdgePropertyAccess::Skip => {
                 // Admission proved the joint block/property digest. Refault the

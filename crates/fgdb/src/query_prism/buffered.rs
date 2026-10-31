@@ -27,10 +27,10 @@ use fgdb_prism::{
     ProjectionLimits, ProjectionSpec, SealedGraphView, SealedProjectionError, SealedProjectionMask,
     SealedProjectionSpec, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView, SortedVertexLookup,
 };
-use fgdb_strata::store::{BufferedEdge, BufferedScanError, BufferedScanEvent, BufferedValue};
+use fgdb_strata::store::{BufferedScanError, BufferedScanEvent};
 use fgdb_strata::tiered::buffer::BufferError;
 use fgdb_strata::tiered::edge_scan::{
-    BufferedEdgeCandidate, BufferedEdgeScanEvent, BufferedEdgeTopology,
+    BufferedEdgeCandidate, BufferedEdgeProperty, BufferedEdgeScanEvent, BufferedEdgeTopology,
 };
 use fgdb_strata::tiered::sealed::{SealedError, SealedLimits};
 use fgdb_types::{CommitSeq, QueryCx, VId};
@@ -41,14 +41,14 @@ type Error = FnxReadError<BufferedReadError, Cancel>;
 type QueryFailure = GqlQueryError<GqlError, Cancel>;
 
 enum ProjectionSourceEdge {
-    Complete(BufferedValue<BufferedEdge>),
+    Property(BufferedEdgeProperty),
     Topology(BufferedEdgeTopology),
 }
 
 impl ProjectionSourceEdge {
     fn entry(&self) -> &fgdb_strata::AdjacencyEntry {
         match self {
-            Self::Complete(row) => &row.entry,
+            Self::Property(row) => row.entry(),
             Self::Topology(row) => row.entry(),
         }
     }
@@ -701,7 +701,9 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     /// the complete root; all histories of the selected relation remain visible
     /// to the same-cut merge, including later retirement restatements.
     /// Unit weights and CollapseUnit do not fault edge-property sidecars. A
-    /// property-weighted projection retains the complete-record source path.
+    /// property-weighted projection authenticates each reached sidecar but
+    /// materializes only its requested key. Missing keys remain absent in the
+    /// winning historical row, even when an older version carried a value.
     ///
     /// Every buffered Work event and selection visit charges source work. Each
     /// merged VId/EId candidate charges one source scratch entry, including
@@ -774,8 +776,10 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                 .await?;
             let selected_vertices = SortedVertexLookup::from_sorted(&vertices);
             let mut edges = Vec::new();
-            let needs_properties = selection.weight.property_key().is_some()
-                && spec.parallel_edges != ParallelEdgePolicy::CollapseUnit;
+            let property = selection
+                .weight
+                .property_key()
+                .filter(|_| spec.parallel_edges != ParallelEdgePolicy::CollapseUnit);
             {
                 let mut scan = match selection.relation {
                     Some(relation) => self.partition.edge_scan_relation(cx, as_of, relation),
@@ -789,13 +793,13 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                             BufferedEdgeScanEvent::Identity(_) => SourceEvent::ScratchEntry,
                         })
                     };
-                    if needs_properties {
-                        scan.next_candidate_with(cx, &mut observe)
+                    if let Some(key) = property {
+                        scan.next_property_candidate_with(cx, key, &mut observe)
                             .await
                             .map(|candidate| {
                                 candidate.map(|candidate| BufferedEdgeCandidate {
                                     eid: candidate.eid,
-                                    row: candidate.row.map(ProjectionSourceEdge::Complete),
+                                    row: candidate.row.map(ProjectionSourceEdge::Property),
                                 })
                             })
                     } else {
@@ -839,14 +843,7 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
                         1.0
                     } else {
                         let value = match &row {
-                            ProjectionSourceEdge::Complete(row) => {
-                                selection.weight.property_key().and_then(|key| {
-                                    row.props
-                                        .binary_search_by_key(&key, |(key, _)| *key)
-                                        .ok()
-                                        .map(|index| &row.props[index].1)
-                                })
-                            }
+                            ProjectionSourceEdge::Property(row) => row.value(),
                             ProjectionSourceEdge::Topology(_) => None,
                         };
                         selection
