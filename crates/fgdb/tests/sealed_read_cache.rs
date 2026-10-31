@@ -1152,17 +1152,49 @@ fn sealed_owners_execute_every_native_class_at_current_and_historical_cuts() {
                     .execute_prepared(&cx, &prepared, arguments, sealed_sql_policy(), memory())
                     .unwrap();
                 assert_eq!(actual, expected, "{class:?} at {selected:?}");
-                if class == Class::Aggregate || class == Class::TemporalAggregate {
-                    assert_eq!(
-                        actual,
+                let literal = match class {
+                    Class::Aggregate | Class::PipelineAggregate | Class::TemporalAggregate => {
                         fgdb::QueryResult::Rows {
                             columns: vec!["n".into()],
                             rows: vec![vec![fgdb::QueryValue::Count(
-                                if selected == CommitSeq(1) { 4 } else { 5 }
+                                if selected == CommitSeq(1) { 4 } else { 5 },
                             )]],
-                        },
-                    );
-                }
+                        }
+                    }
+                    Class::Pattern | Class::TemporalPattern => {
+                        let null =
+                            fgdb::QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Null));
+                        let mut rows = vec![vec![null.clone()]; 3];
+                        if selected == CommitSeq(4) {
+                            rows.push(vec![fgdb::QueryValue::Value(GraphValue::Scalar(
+                                CanonicalScalar::Int(99),
+                            ))]);
+                        }
+                        rows.push(vec![null]);
+                        fgdb::QueryResult::Rows {
+                            columns: vec!["n.p".into()],
+                            rows,
+                        }
+                    }
+                    Class::Set | Class::TemporalSet => {
+                        let ids: &[u128] = if selected == CommitSeq(1) {
+                            &[1, 2, 3, u128::MAX]
+                        } else {
+                            &[1, 2, 3, 4, u128::MAX]
+                        };
+                        fgdb::QueryResult::Rows {
+                            columns: vec!["id".into()],
+                            rows: ids
+                                .iter()
+                                .flat_map(|&id| [id, id])
+                                .map(|id| {
+                                    vec![fgdb::QueryValue::Value(GraphValue::Vertex(VId(id)))]
+                                })
+                                .collect(),
+                        }
+                    }
+                };
+                assert_eq!(actual, literal, "literal {class:?} at {selected:?}");
                 results.push((prepared, arguments.clone(), expected));
             }
             retained.push((view, results));
