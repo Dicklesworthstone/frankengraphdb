@@ -3,8 +3,9 @@
 
 use super::super::super::{AuthorizedPreparedRead, check_branch, selector_error};
 use super::*;
+use crate::gql_exec::property_maps::{self, MetadataRecord};
 use crate::gql_exec::{AdmissionUsage, source};
-use crate::query::authorized::relational::{aggregate_gql_error, set_error};
+use crate::query::authorized::relational::{aggregate_gql_error, seeded, set_error};
 use crate::query::authorized::{Tables, WorkCheckpoint, execute_tables};
 use crate::query::{EndpointFilter, HybridCallError, HybridSearch, ProcedureError, hybrid_refusal};
 use crate::{EmbeddedReadView, GqlError, PreparedNativeRead, QueryResult};
@@ -73,6 +74,59 @@ fn returned_vertex_at<'a>(
         }
     }
     Ok(winner.filter(|row| row.visible_at(at)))
+}
+
+/// Resolve only an already admitted identity at the prepared source's cut.
+/// An edge's relation and BOTH winning endpoint rows must still be visible;
+/// membership in a provenance set never substitutes for those predicates.
+/// History/index probes poll without exposing hidden topology in the meter.
+fn admitted_record_at<'a>(
+    view: &'a EmbeddedReadView,
+    at: fgdb_types::CommitSeq,
+    scope: &PlannerPredicates,
+    element: ElementId,
+    poll: &mut impl FnMut() -> Result<(), QueryError>,
+) -> Result<Option<MetadataRecord<'a>>, QueryError> {
+    match element {
+        ElementId::Vertex(id) => Ok(returned_vertex_at(view, id, at, poll)?
+            .filter(|row| scope.allows_vertex(&row.labels))
+            .map(MetadataRecord::Vertex)),
+        ElementId::Edge(id) => {
+            let Some((block, row)) = view.snapshot.adjacency_index().statement_at_controlled(
+                &view.snapshot.blocks,
+                id,
+                at,
+                &mut |_| poll(),
+            )?
+            else {
+                return Ok(None);
+            };
+            let edge = &view.snapshot.blocks[block][row];
+            if !scope.allows_relation(edge.relation) {
+                return Ok(None);
+            }
+            for id in [edge.src, edge.dst] {
+                if returned_vertex_at(view, id, at, poll)?
+                    .is_none_or(|row| !scope.allows_vertex(&row.labels))
+                {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(MetadataRecord::Edge(
+                edge.relation,
+                source::edge_properties_at(&view.snapshot.block_props, block, row),
+            )))
+        }
+    }
+}
+
+fn admitted_element(
+    element: ElementId,
+    retrieved: &RefCell<BTreeSet<VId>>,
+    derived: &RefCell<BTreeSet<ElementId>>,
+) -> bool {
+    matches!(element, ElementId::Vertex(id) if retrieved.borrow().contains(&id))
+        || derived.borrow().contains(&element)
 }
 
 /// The compiler marks CALL outputs correlated with the following identity
@@ -164,6 +218,155 @@ fn identity_at(
     .map_err(|error| error.map_source(GqlError::Read))
 }
 
+/// The GLA supplies identity seeds only after proving an equality from the
+/// leading bag to this pattern's single root. A prepared source additionally
+/// requires every seed to be a hit of the immediately preceding CALL. The
+/// ordinary scoped closure owner retains bag/path/edge-identity semantics;
+/// only source admission narrows. A declined shape is a refusal, never an
+/// invitation to scan the prepared snapshot with a fresh allowance.
+#[allow(clippy::too_many_arguments)]
+fn incidence_at(
+    index: &AuthorizedBeaconIndex,
+    view: &EmbeddedReadView,
+    scope: &PlannerPredicates,
+    execution: &Live<'_, '_, '_>,
+    pattern: &PreparedGraphPattern<GraphValueRow>,
+    seeds: fgdb_gql::GraphSeeds<'_>,
+    policy: GqlQueryPolicy,
+    pending: &RefCell<Option<IdentityRows>>,
+    derived: &RefCell<BTreeSet<ElementId>>,
+) -> Option<CallResult> {
+    if !pattern.plan().operators().iter().any(|operator| {
+        matches!(
+            operator,
+            GlaOperator::ScanEdges { .. }
+                | GlaOperator::Expand { .. }
+                | GlaOperator::VarLengthExpand { .. }
+        )
+    }) {
+        // Keep the established flat identity path and its exact accounting.
+        return None;
+    }
+    Some((|| {
+        let source = pending.borrow_mut().take().ok_or_else(|| {
+            GqlQueryError::Source(source_refusal(
+                "prepared index incidence requires the preceding CALL's returned vertices",
+            ))
+        })?;
+        let fgdb_gql::GraphSeeds::Identities(identities) = seeds else {
+            return Err(GqlQueryError::Source(source_refusal(
+                "prepared index incidence requires returned-vertex identity roots",
+            )));
+        };
+        if source.roots != 1 {
+            return Err(GqlQueryError::Source(source_refusal(
+                "prepared index incidence requires one correlated CALL vertex root",
+            )));
+        }
+        for id in identities {
+            execution
+                .borrow_mut()
+                .poll()
+                .map_err(GqlQueryError::Interrupted)?;
+            if !source.vertices.contains(id) {
+                return Err(GqlQueryError::Source(source_refusal(
+                    "prepared index incidence roots must be returned by the preceding CALL",
+                )));
+            }
+        }
+        // The owner validates the complete shape even with zero seeds. It
+        // admits both endpoints and the relation BEFORE charging incidence,
+        // and records provenance inside that same cumulative source meter.
+        seeded::pattern_at_with_provenance(
+            &view.snapshot,
+            index.sequence,
+            pattern,
+            fgdb_gql::GraphSeeds::Identities(identities),
+            scope,
+            execution,
+            policy,
+            Some(derived),
+        )
+        .ok_or_else(|| {
+            GqlQueryError::Source(source_refusal(
+                "prepared index incidence requires a bounded single-root pattern",
+            ))
+        })?
+        .map_err(|error| error.map_source(GqlError::Read))
+    })())
+}
+
+/// Capability discovery must not change flat identity queries' admission:
+/// advertising seeded reads would itself make the GLA allocate/charge seeds
+/// before the host could decline them. Inspect only compiled definitions.
+fn has_incidence(query: &fgdb_gql::PreparedGraphSet) -> bool {
+    let mut incidence = false;
+    let result: Result<(), core::convert::Infallible> = query.admit_patterns(&mut |pattern| {
+        incidence |= pattern.plan().operators().iter().any(|operator| {
+            matches!(
+                operator,
+                GlaOperator::ScanEdges { .. }
+                    | GlaOperator::Expand { .. }
+                    | GlaOperator::VarLengthExpand { .. }
+            )
+        });
+        Ok(())
+    });
+    match result {
+        Ok(()) => incidence,
+        Err(never) => match never {},
+    }
+}
+
+/// This profile owns only pattern and materialized CALL sources; the outer
+/// adapters supply governed element reads. Keep the seeded capability absent
+/// on statements which already used the flat identity owner.
+struct PreparedSource<S, F> {
+    source: S,
+    seeded: F,
+    incidence: bool,
+}
+
+impl<S, F> fgdb_gql::GraphSetSource<GqlError, QueryError> for PreparedSource<S, F>
+where
+    S: fgdb_gql::GraphSetSource<GqlError, QueryError>,
+    F: FnMut(
+        &PreparedGraphPattern<GraphValueRow>,
+        fgdb_gql::GraphSeeds<'_>,
+        GqlQueryPolicy,
+    ) -> Option<CallResult>,
+{
+    fn pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
+    ) -> CallResult {
+        self.source.pattern(pattern, policy)
+    }
+
+    fn procedure(
+        &mut self,
+        call: &PreparedProcedureCall,
+        arguments: &[GraphValue],
+        policy: GqlQueryPolicy,
+    ) -> Option<CallResult> {
+        self.source.procedure(call, arguments, policy)
+    }
+
+    fn supports_seeded_patterns(&self) -> bool {
+        self.incidence
+    }
+
+    fn seeded_pattern(
+        &mut self,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        seeds: fgdb_gql::GraphSeeds<'_>,
+        policy: GqlQueryPolicy,
+    ) -> Option<CallResult> {
+        (self.seeded)(pattern, seeds, policy)
+    }
+}
+
 // Equality is about the logical corpus and numeric projection, not build knobs.
 // An exact call may use a link-bearing generation; ANN still uses its frozen
 // topology. An unused lane neither constrains nor revalidates its projection.
@@ -230,17 +433,19 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// rows spend signed delivery, so intermediate search k is not a row charge.
     ///
     /// All property reads use the index's source_sequence, even when it predates
-    /// the session frontier. Properties remain scope-masked. Only vertices
-    /// retrieved by a CALL in this execution may be dereferenced: caller-supplied
-    /// element identities cannot turn an index handle into a raw snapshot reader.
+    /// the session frontier. Properties remain scope-masked. Only CALL hits and
+    /// elements admitted by their correlated MATCH closure may be dereferenced:
+    /// caller-supplied identities cannot turn an index handle into a raw reader.
     ///
     /// This explicit source profile accepts compiled row and terminal aggregate
     /// pipelines over hybrid.search, including graph-only and mixed expansion.
     /// Graph membership and incidence use the typed prepared graph reader at
     /// the SAME saved sequence. Propertyless vertices remain traversable;
-    /// rejecting an endpoint does not remove it from paths. No graph directory
-    /// or text/vector index is rebuilt. Each CALL reports the saved population
-    /// plus admitted incidence visits to the enclosing source-record allowance.
+    /// rejecting an endpoint does not remove it from paths. The retrieval
+    /// corpus and text/vector indexes are reused; correlated MATCH uses the
+    /// pinned snapshot's ordinary graph lookup indexes. Each CALL reports the
+    /// saved population plus admitted incidence visits to the enclosing source
+    /// allowance; MATCH reports its admitted closure on that same allowance.
     /// New visits, incidences and bounded ranking workspace are scratch-admitted
     /// before retention; these are logical counts, not a total byte-memory cap.
     ///
@@ -253,10 +458,13 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// A failed property read or aggregate input is not hidden by LIMIT 0.
     ///
     /// CALL property/label reads and flat identity MATCHes use only that
-    /// CALL's returned vertices, preserving the compiler's ordinary correlated
-    /// relation and bag semantics. Uncorrelated patterns, incidence patterns,
-    /// other procedures and temporal wrappers still refuse; there is no
-    /// one-shot fallback. A nonnull graph_access
+    /// CALL's returned vertices. A bounded incidence MATCH may expand one of
+    /// those identity roots through the ordinary authorized closure owner;
+    /// reached vertices and edges retain masked properties and metadata at the
+    /// same saved cut. The compiler's ordinary correlated relation, bags, edge
+    /// identities and path semantics remain authoritative. Uncorrelated roots,
+    /// other procedures and temporal wrappers refuse; there is no one-shot
+    /// fallback. A nonnull graph_access
     /// override refuses: this explicit prepared source profile owns its native
     /// incidence path, rather than silently substituting a requested physical
     /// source. The normal execute method and its source choices are unchanged.
@@ -296,6 +504,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             // before insertion, and discard it with the enclosing execution.
             let retrieved = RefCell::new(BTreeSet::new());
             let identity = RefCell::new(None);
+            let derived = RefCell::new(BTreeSet::new());
             // The element callback's narrow source-error type cannot carry a
             // live QueryError. Retain the first interruption and return it
             // through the evaluator's control boundary or immediately after
@@ -316,28 +525,27 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                 if !scope.allows_property(key) {
                     return Ok(None);
                 }
-                let ElementId::Vertex(id) = element else {
+                if !admitted_element(element, &retrieved, &derived) {
                     return Err(source_refusal(
-                        "prepared index property reads require a retrieved vertex",
-                    ));
-                };
-                if !retrieved.borrow().contains(&id) {
-                    return Err(source_refusal(
-                        "prepared index property reads require a retrieved vertex",
+                        "prepared index property reads require a retrieved or matched element",
                     ));
                 }
-                let row = returned_vertex_at(view, id, index.sequence, &mut || {
+                let record = admitted_record_at(view, index.sequence, scope, element, &mut || {
                     execution.borrow_mut().poll()
                 })
                 .map_err(|error| {
                     element_failure.borrow_mut().get_or_insert(error);
                     source_refusal("prepared index property read interrupted")
                 })?;
-                Ok(row.and_then(|row| {
-                    row.props
+                Ok(record.and_then(|record| {
+                    let properties = match record {
+                        MetadataRecord::Vertex(row) => row.props.as_slice(),
+                        MetadataRecord::Edge(_, properties) => properties,
+                    };
+                    properties
                         .binary_search_by_key(&key, |(key, _)| *key)
                         .ok()
-                        .map(|position| row.props[position].1.clone())
+                        .map(|position| properties[position].1.clone())
                 }))
             };
             let mut metadata = |element,
@@ -346,19 +554,13 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                                 control: &mut dyn FnMut(
                 fgdb_gql::GlaExecutionEvent,
             ) -> Result<(), ()>| {
-                use crate::gql_exec::property_maps::{self, MetadataRecord};
                 use fgdb_gql::GraphElementMetadataError;
-                let ElementId::Vertex(id) = element else {
+                if !admitted_element(element, &retrieved, &derived) {
                     return Err(GraphElementMetadataError::Source(source_refusal(
-                        "prepared index metadata reads require a retrieved vertex",
-                    )));
-                };
-                if !retrieved.borrow().contains(&id) {
-                    return Err(GraphElementMetadataError::Source(source_refusal(
-                        "prepared index metadata reads require a retrieved vertex",
+                        "prepared index metadata reads require a retrieved or matched element",
                     )));
                 }
-                let row = returned_vertex_at(view, id, index.sequence, &mut || {
+                let record = admitted_record_at(view, index.sequence, scope, element, &mut || {
                     execution.borrow_mut().poll()
                 })
                 .map_err(|error| {
@@ -367,11 +569,11 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                         "prepared index metadata read interrupted",
                     ))
                 })?;
-                let Some(row) = row.filter(|row| scope.allows_vertex(&row.labels)) else {
+                let Some(record) = record else {
                     return Ok(None);
                 };
                 property_maps::metadata(
-                    MetadataRecord::Vertex(row),
+                    record,
                     kind,
                     catalog,
                     |label| scope.allows_label(label),
@@ -408,18 +610,27 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                             policy,
                             fgdb_gql::with_element_metadata(
                                 fgdb_gql::WithElementReads {
-                                    source: fgdb_gql::WithProcedures {
-                                        patterns:
-                                            |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
-                                                GraphValueRow,
-                                            >,
-                                             remaining| {
-                                                identity_at(
-                                                    index, view, scope, execution, pattern,
-                                                    remaining, &identity,
-                                                )
-                                            },
-                                        procedures: &mut procedures,
+                                    source: PreparedSource {
+                                        incidence: has_incidence(&bound),
+                                        source: fgdb_gql::WithProcedures {
+                                            patterns:
+                                                |pattern: &PreparedGraphPattern<GraphValueRow>,
+                                                 remaining| {
+                                                    identity_at(
+                                                        index, view, scope, execution, pattern,
+                                                        remaining, &identity,
+                                                    )
+                                                },
+                                            procedures: &mut procedures,
+                                        },
+                                        seeded: |pattern: &PreparedGraphPattern<GraphValueRow>,
+                                                 seeds: fgdb_gql::GraphSeeds<'_>,
+                                                 remaining| {
+                                            incidence_at(
+                                                index, view, scope, execution, pattern, seeds,
+                                                remaining, &identity, &derived,
+                                            )
+                                        },
                                     },
                                     elements: &mut elements,
                                 },
@@ -446,18 +657,27 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                             policy,
                             fgdb_gql::with_element_metadata(
                                 fgdb_gql::WithElementReads {
-                                    source: fgdb_gql::WithProcedures {
-                                        patterns:
-                                            |pattern: &fgdb_gql::algebra::PreparedGraphPattern<
-                                                GraphValueRow,
-                                            >,
-                                             remaining| {
-                                                identity_at(
-                                                    index, view, scope, execution, pattern,
-                                                    remaining, &identity,
-                                                )
-                                            },
-                                        procedures: &mut procedures,
+                                    source: PreparedSource {
+                                        incidence: has_incidence(bound.input()),
+                                        source: fgdb_gql::WithProcedures {
+                                            patterns:
+                                                |pattern: &PreparedGraphPattern<GraphValueRow>,
+                                                 remaining| {
+                                                    identity_at(
+                                                        index, view, scope, execution, pattern,
+                                                        remaining, &identity,
+                                                    )
+                                                },
+                                            procedures: &mut procedures,
+                                        },
+                                        seeded: |pattern: &PreparedGraphPattern<GraphValueRow>,
+                                                 seeds: fgdb_gql::GraphSeeds<'_>,
+                                                 remaining| {
+                                            incidence_at(
+                                                index, view, scope, execution, pattern, seeds,
+                                                remaining, &identity, &derived,
+                                            )
+                                        },
                                     },
                                     elements: &mut elements,
                                 },

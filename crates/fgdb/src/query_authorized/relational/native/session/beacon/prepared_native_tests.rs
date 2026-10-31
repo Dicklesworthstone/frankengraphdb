@@ -455,7 +455,7 @@ fn returned_identity_sources_cannot_authorize_unbound_or_later_pattern_roots() {
                 "({CALL}RETURN node.name AS name LIMIT 0) \
                 UNION ALL MATCH (other:Node) RETURN other.name AS name"
             ),
-            format!("{CALL}MATCH (node)-[]->(other) RETURN other.name AS name LIMIT 0"),
+            format!("{CALL}MATCH (other)-[]->(neighbor) RETURN neighbor.name AS name LIMIT 0"),
         ] {
             let prepared = session.prepare(&c.query(), &query, &params).unwrap();
             assert!(

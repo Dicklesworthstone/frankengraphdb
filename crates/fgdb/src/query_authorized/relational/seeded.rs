@@ -20,6 +20,25 @@ pub(super) fn pattern_at<Clock: FnMut() -> u64>(
     execution: &RefCell<Execution<'_, '_, Clock>>,
     policy: GqlQueryPolicy,
 ) -> Option<Governed<GraphValueRow>> {
+    pattern_at_with_provenance(snapshot, at, pattern, seeds, scope, execution, policy, None)
+}
+
+/// Prepared retrieval may lend property reads for this pattern's admitted
+/// visible closure. Retain those identities only after their ordinary source
+/// admission, and charge the additional provenance storage on this SAME
+/// statement allowance before insertion. Ordinary reads keep their unchanged
+/// admission/accounting by leaving the sink absent.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn pattern_at_with_provenance<Clock: FnMut() -> u64>(
+    snapshot: &Arc<Snapshot>,
+    at: CommitSeq,
+    pattern: &PreparedGraphPattern<GraphValueRow>,
+    seeds: fgdb_gql::GraphSeeds<'_>,
+    scope: &PlannerPredicates,
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    policy: GqlQueryPolicy,
+    provenance: Option<&RefCell<BTreeSet<ElementId>>>,
+) -> Option<Governed<GraphValueRow>> {
     // A hidden field must never choose roots or change native accounting.
     // Keep the ordinary masked source for that definition, before any read.
     if let fgdb_gql::GraphSeeds::Property { key, .. } = seeds
@@ -207,6 +226,28 @@ pub(super) fn pattern_at<Clock: FnMut() -> u64>(
             tables.admit_closure_edge(edge, scope, true, &mut control)?;
         }
         tables.seal();
+        if let Some(provenance) = provenance {
+            let mut provenance = provenance.borrow_mut();
+            for element in tables
+                .vertices
+                .iter()
+                .map(|(id, _)| ElementId::Vertex(*id))
+                .chain(
+                    tables
+                        .edges
+                        .iter()
+                        .map(|((id, ..), _)| ElementId::Edge(*id)),
+                )
+            {
+                for _ in 0..=provenance.len().checked_ilog2().unwrap_or(0) {
+                    control(SourceEvent::Work)?;
+                }
+                // Repeated elements still pay the full reservation: a prior
+                // CALL cannot warm this set to widen a later source's budget.
+                control(SourceEvent::ScratchEntry)?;
+                provenance.insert(element);
+            }
+        }
         tables.metadata(pattern.plan(), scope, &mut control)?;
         execute_tables(
             tables,

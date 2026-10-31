@@ -1,4 +1,7 @@
 //! Native CALL composition must reuse the exact authorized index and graph cut.
+#[path = "prepared_native_match_tests.rs"]
+mod match_tests;
+
 use super::*;
 use crate::{Database, DatabaseKeys, MemVfs, QueryValue, WriteBatch};
 use asupersync::lab::run_async_under_lab;

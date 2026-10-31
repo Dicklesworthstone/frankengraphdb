@@ -965,7 +965,7 @@ impl PreparedGraphSet {
     /// Visit every real graph leaf before execution, including conditional
     /// Apply bodies. This is admission, not source execution: a body is visited
     /// once here even when its owning Apply executes it for many outer rows.
-    pub(crate) fn admit_patterns<E>(
+    pub fn admit_patterns<E>(
         &self,
         visitor: &mut impl FnMut(&PreparedGraphPattern<GraphValueRow>) -> Result<(), E>,
     ) -> Result<(), E> {
