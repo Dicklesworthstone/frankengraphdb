@@ -799,15 +799,16 @@ impl PreparedGraphEdgeMergeText {
     /// owned leaf. As after `MATCH ... WITH`, that row is the whole scope.
     /// A RETURN after the pattern makes it a query step. A next write after
     /// it makes it a row step: the continuation carries the row's visible
-    /// columns and the relationship, as `WITH *` would. A mandatory MATCH
-    /// may first join the owned rows against the post-write graph. Its
-    /// complete relation is selected before this step begins merging edges.
+    /// columns and the relationship, as `WITH *` would. A native read may
+    /// first join the owned rows against the post-write graph. Its complete
+    /// relation is selected before this step begins merging edges.
     #[allow(clippy::type_complexity)]
     pub(crate) fn prepare_chained<'a, R>(
         statement: &'a str,
         declarations: &[(&str, GqlParameterType)],
         resolve: &mut R,
         from: ChainContinuation<'a>,
+        multipart: bool,
     ) -> Result<
         (
             Self,
@@ -828,7 +829,13 @@ impl PreparedGraphEdgeMergeText {
         // use the governed native projection assembled after endpoint padding
         // in bind_values, before this occurrence selects or creates a pattern.
         parser.call_element_reads = true;
-        let (source, schema) = if parser.is_word("MATCH") {
+        let mut multipart_source = None;
+        let (source, schema) = if multipart {
+            let (source, row) =
+                parser.multipart_write_prefix(statement, declarations, Some(from.row))?;
+            multipart_source = Some(source);
+            (None, row)
+        } else if parser.is_word("MATCH") {
             let (source, row) = parser.owned_match_row_prefix(statement, from.row)?;
             (Some(source), row)
         } else {
@@ -838,6 +845,25 @@ impl PreparedGraphEdgeMergeText {
         let (merged, continues) = Self::row_merge(&mut parser, &schema, None)?;
         let continuation =
             Self::chain_continuation(&mut parser, &schema, keep, &merged, continues)?;
+        if let Some(mut source) = multipart_source {
+            parser
+                .syntax
+                .element_catalog
+                .resolve(&mut *resolve, statement);
+            source.share_parameters(&parser.syntax.parameters, &parser.syntax.parameter_offsets);
+            source.append_element_keys(&mut parser.syntax.element_keys);
+            let mut input = source.resolve(&mut *resolve)?;
+            input.first.owned = Some(Box::new((columns, types)));
+            let (merge, returning) = Self::resolve_merge(
+                resolve,
+                merged,
+                EdgeMergeTextInput::Multipart {
+                    statement: statement.to_owned(),
+                    input: Box::new(input),
+                },
+            )?;
+            return Ok((merge, returning, continuation));
+        }
         let mut input = if let Some(mut source) = source {
             // MERGE, ON/SET actions and output expressions may add parameters
             // and property reads after MATCH. Resolve the complete shared

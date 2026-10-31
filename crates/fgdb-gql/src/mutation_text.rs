@@ -468,8 +468,10 @@ pub(crate) enum VertexMergeRowsTextInput {
     Unit,
     /// The previous write's rows, of these column types.
     Owned(Vec<crate::GraphSetColumnType>),
-    /// A statement's leading UNWIND.
+    /// A statement's leading UNWIND or a required MATCH over owned rows.
     Relation(Box<crate::set_text::BoundSetTextInput>),
+    /// A complete multipart read over the previous write's owned rows.
+    Multipart(Box<crate::set_text::multipart::BoundReadInput>),
 }
 
 /// The RETURN of a vertex MERGE step, resolved (fgdb-cpny9).

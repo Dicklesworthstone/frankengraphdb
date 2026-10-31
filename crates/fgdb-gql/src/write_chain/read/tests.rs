@@ -394,11 +394,10 @@ fn vertex_merge_tail_filters_final_properties_and_preserves_the_native_budget() 
 }
 
 #[test]
-fn terminal_read_keeps_dropped_scope_and_refuses_another_write_or_missing_return() {
+fn terminal_read_keeps_dropped_scope_and_refuses_a_missing_return() {
     for text in [
         "CREATE (n {p:1}) WITH n.p AS p MATCH (m) RETURN n.p",
         "CREATE (n) WITH n MATCH (m)",
-        "CREATE (n) WITH n OPTIONAL MATCH (m) MERGE (x) RETURN x",
     ] {
         assert!(
             PreparedGraphWriteChainText::is_chain(text).unwrap(),
@@ -424,6 +423,112 @@ fn terminal_read_keeps_dropped_scope_and_refuses_another_write_or_missing_return
     ] {
         assert!(
             !PreparedGraphWriteChainText::is_chain(text).unwrap(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn multipart_read_merge_binds_native_actions_and_reuses_the_parameter_table() {
+    use crate::{GqlParameterType, GraphWriteChainStep};
+
+    for source in [
+        "OPTIONAL MATCH (m {p:k})",
+        "CALL { WITH k MATCH (m {p:k}) RETURN m }",
+        "MATCH (m {p:k}) WITH n,k,m MATCH (m)",
+    ] {
+        for (write, columns, relationship) in [
+            (
+                "MERGE (x {p:k}) ON CREATE SET x.p=$created \
+                 ON MATCH SET x.p=$matched RETURN n,x",
+                ["n", "x"],
+                false,
+            ),
+            (
+                "MERGE (n)-[r:R {p:k}]->(m) ON CREATE SET r.p=$created \
+                 ON MATCH SET r.p=$matched RETURN n,r",
+                ["n", "r"],
+                true,
+            ),
+        ] {
+            let text = format!("CREATE (n {{p:$seed}}) WITH n UNWIND $keys AS k {source} {write}");
+            let calls = Cell::new(0);
+            let template = PreparedGraphWriteChainText::prepare_with_parameter_types(
+                &text,
+                RelationId(1),
+                &[
+                    ("seed", GqlParameterType::Int64),
+                    ("keys", GqlParameterType::List),
+                    ("created", GqlParameterType::Int64),
+                    ("matched", GqlParameterType::Int64),
+                ],
+                |kind, name: &str| {
+                    calls.set(calls.get() + 1);
+                    text_symbols(kind, name)
+                },
+            )
+            .expect(&text);
+            let prepared_calls = calls.get();
+            let parameters = |keys: Vec<GraphValue>| {
+                GqlParameters::new()
+                    .with_int64("seed", 1)
+                    .unwrap()
+                    .with_list("keys", keys)
+                    .unwrap()
+                    .with_int64("created", 2)
+                    .unwrap()
+                    .with_int64("matched", 3)
+                    .unwrap()
+            };
+            let arguments = parameters(vec![int(2), int(1), int(2)]);
+            let first = template.bind_parameters(&arguments).expect(&text);
+            let empty = template
+                .bind_parameters(&parameters(Vec::new()))
+                .expect(&text);
+            assert_eq!(calls.get(), prepared_calls, "{text}");
+            assert_eq!(
+                first,
+                template.bind_parameters(&arguments).unwrap(),
+                "{text}"
+            );
+            assert_ne!(first, empty, "{text}");
+            assert_eq!(first.columns(), &columns, "{text}");
+            assert_eq!(first.steps().len(), 2, "{text}");
+            assert!(
+                if relationship {
+                    matches!(
+                        first.steps()[1],
+                        GraphWriteChainStep::EdgeUpsertQuery { .. }
+                    )
+                } else {
+                    matches!(first.steps()[1], GraphWriteChainStep::VertexMergeQuery(_))
+                },
+                "{text}"
+            );
+            assert!(first.read_continuation().is_none(), "{text}");
+            assert!(
+                template
+                    .bind_parameters(&GqlParameters::new().with_int64("seed", 1).unwrap())
+                    .is_err(),
+                "{text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn multipart_merge_preserves_dropped_scope_and_read_only_call_boundaries() {
+    for text in [
+        "CREATE (n) WITH 1 AS k OPTIONAL MATCH (m) MERGE (x {p:n.p}) RETURN x",
+        "CREATE (n) WITH n CALL { WITH n MERGE (x) RETURN x } RETURN n",
+        "CREATE (n) WITH n CALL { WITH n CREATE (x) RETURN x } MERGE (y) RETURN y",
+    ] {
+        assert!(
+            PreparedGraphWriteChainText::is_chain(text).unwrap(),
+            "{text}"
+        );
+        assert!(
+            PreparedGraphWriteChainText::prepare(text, RelationId(1), text_symbols).is_err(),
             "{text}"
         );
     }

@@ -2564,7 +2564,8 @@ impl<'a> Parser<'a> {
 
     fn at_multipart_write(&self) -> bool {
         // A relationship MERGE between row vertices ends a read as the other
-        // writes do (ReadWriteKind::EdgeMerge); a vertex MERGE does not.
+        // writes do (ReadWriteKind::EdgeMerge). In a write chain, a vertex
+        // MERGE also consumes the complete carried row relation.
         self.write_prefix
             && !self.call_body
             && ([
@@ -2572,7 +2573,8 @@ impl<'a> Parser<'a> {
             ]
             .iter()
             .any(|write| self.is_word(write))
-                || self.at_relationship_merge().unwrap_or(false))
+                || self.at_relationship_merge().unwrap_or(false)
+                || (self.chain_write && self.is_word("MERGE")))
     }
 
     fn multipart_parts(

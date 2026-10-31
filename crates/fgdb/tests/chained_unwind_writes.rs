@@ -667,3 +667,307 @@ fn post_match_nested_lists_share_effect_limits_and_roll_back_late_failures() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn chained_multipart_vertex_merges_keep_optional_rows_and_feed_later_writes() {
+    let ((), report) = run_async_under_lab(0x6e65_7406, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        for (source, key) in [
+            ("OPTIONAL MATCH (seen:Entity {id:k})", "k"),
+            ("CALL { WITH k RETURN k AS selected }", "selected"),
+            ("MATCH (anchor) WITH anchor,k MATCH (anchor)", "k"),
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut txn = db.begin(&contexts.txn()).unwrap();
+            let mut seed = WriteBatch::new(R);
+            seed.create_vertex(
+                VId(99),
+                vec![ENTITY],
+                vec![
+                    (ID, CanonicalScalar::Int(99)),
+                    (SCORE, CanonicalScalar::Int(99)),
+                ],
+            );
+            txn.write(&mut db, seed).unwrap();
+            let statement = format!(
+                "CREATE (anchor:Root {{id:7}}) WITH anchor UNWIND [2,1,2] AS k \
+                 {source} MERGE (n:Entity {{id:{key}}}) \
+                 ON CREATE SET n.score={key} ON MATCH SET n.score=n.score+10 \
+                 WITH anchor,n,k CREATE (anchor)-[:R]->(n) RETURN k,n.id AS id"
+            );
+            let mut next = 1_000_u128;
+            let returned = txn
+                .query_write(
+                    &mut db,
+                    &cx,
+                    &statement,
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    writes(),
+                    |request| {
+                        next += 1;
+                        Ok::<_, Infallible>(match request.request {
+                            GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                            GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                        })
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                returned,
+                integers(&["k", "id"], &[&[2, 2], &[1, 1], &[2, 2]]),
+                "{statement}"
+            );
+            assert_eq!(
+                next, 1_006,
+                "one anchor, two merged vertices and three occurrence edges: {statement}"
+            );
+            let read = "MATCH (n:Entity) RETURN n.id AS id,n.score AS score ORDER BY id";
+            let expected = integers(&["id", "score"], &[&[1, 1], &[2, 12], &[99, 99]]);
+            assert_eq!(
+                txn.query(&db, &cx, read, &GqlParameters::new(), symbols, reads())
+                    .unwrap(),
+                expected,
+                "{statement}"
+            );
+            // The empty OPTIONAL witnesses retain all three incoming rows.
+            // The later CREATE also retains the duplicate merged identity.
+            assert_eq!(
+                txn.query(
+                    &db,
+                    &cx,
+                    "MATCH (:Root)-[:R]->(n:Entity) RETURN n.id AS id ORDER BY id",
+                    &GqlParameters::new(),
+                    symbols,
+                    reads(),
+                )
+                .unwrap(),
+                integers(&["id"], &[&[1], &[2], &[2]]),
+                "{statement}"
+            );
+            assert!(db.vertices().unwrap().is_empty());
+            assert!(db.edges().unwrap().is_empty());
+            assert_eq!(db.frontier().unwrap(), CommitSeq(0));
+            assert_eq!(
+                txn.finish(&mut db, &commit).await.unwrap(),
+                EmbeddedTxnCompletion::WriteCommitted {
+                    commit_seq: CommitSeq(1)
+                }
+            );
+            assert_eq!(
+                db.query(&cx, read, &GqlParameters::new(), symbols, reads())
+                    .unwrap(),
+                expected
+            );
+        }
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn chained_optional_call_relationship_merges_see_staged_rows_and_feed_a_later_match() {
+    let ((), report) = run_async_under_lab(0x6e65_7407, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut txn = db.begin(&contexts.txn()).unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in [1_u128, 2] {
+            seed.create_vertex(
+                VId(id),
+                vec![ROOT],
+                vec![(ID, CanonicalScalar::Int(id as i64))],
+            );
+        }
+        txn.write(&mut db, seed).unwrap();
+        let statement = "CREATE (a:Entity {id:10}) WITH a UNWIND [1,1,2] AS k \
+            OPTIONAL MATCH (b:Root {id:k}) CALL { WITH b RETURN b AS target } \
+            MERGE (a)-[r:R {id:k}]->(target) \
+            ON CREATE SET r.score=k ON MATCH SET r.score=r.score+10 \
+            WITH a,r,k MATCH (a)-[r:R]->(b) SET b.score=99 \
+            RETURN k,b.id AS id";
+        let mut next = 100_u128;
+        let returned = txn
+            .query_write(
+                &mut db,
+                &cx,
+                statement,
+                &GqlParameters::new(),
+                symbols,
+                R,
+                writes(),
+                |request| {
+                    next += 1;
+                    Ok::<_, Infallible>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                    })
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            returned,
+            integers(&["k", "id"], &[&[1, 1], &[1, 1], &[2, 2]])
+        );
+        assert_eq!(
+            next, 103,
+            "one source vertex and two distinct relationships"
+        );
+        let read = "MATCH (a:Entity)-[r:R]->(b:Root) \
+            RETURN a.id AS source,b.id AS target,r.score AS score,b.score AS seen \
+            ORDER BY target";
+        let expected = integers(
+            &["source", "target", "score", "seen"],
+            &[&[10, 1, 11, 99], &[10, 2, 2, 99]],
+        );
+        assert_eq!(
+            txn.query(&db, &cx, read, &GqlParameters::new(), symbols, reads())
+                .unwrap(),
+            expected
+        );
+        assert!(db.vertices().unwrap().is_empty());
+        assert!(db.edges().unwrap().is_empty());
+        assert_eq!(
+            txn.finish(&mut db, &commit).await.unwrap(),
+            EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: CommitSeq(1)
+            }
+        );
+        assert_eq!(
+            db.query(&cx, read, &GqlParameters::new(), symbols, reads())
+                .unwrap(),
+            expected
+        );
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn chained_multipart_merges_restore_the_prefix_and_share_creation_limits() {
+    let ((), report) = run_async_under_lab(0x6e65_7408, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut txn = db.begin(&contexts.txn()).unwrap();
+        let mut seed = WriteBatch::new(R);
+        for id in [1_u128, 2] {
+            seed.create_vertex(
+                VId(id),
+                vec![ROOT],
+                vec![(ID, CanonicalScalar::Int(id as i64))],
+            );
+        }
+        txn.write(&mut db, seed).unwrap();
+        let digest = txn.staged_effect_digest().unwrap();
+        let mut vertices = writes();
+        vertices.max_created_vertices = 2;
+        let mut edges = writes();
+        edges.max_created_edges = 2;
+        let mut next = 100_u128;
+        for (statement, policy) in [
+            (
+                "CREATE (a:Entity {id:10}) WITH a \
+                 OPTIONAL MATCH (b:Root {id:404}) MERGE (n:Entity {id:b.id})",
+                writes(),
+            ),
+            (
+                "CREATE (a:Entity {id:10}) WITH a \
+                 OPTIONAL MATCH (b:Root {id:404}) MERGE (a)-[:R]->(b)",
+                writes(),
+            ),
+            (
+                "CREATE (a:Entity {id:10}) WITH a UNWIND [1,2] AS k \
+                 OPTIONAL MATCH (b:Root {id:k}) \
+                 MERGE (n:Entity {id:k}) ON CREATE SET n.score=10/(2-k)",
+                writes(),
+            ),
+            (
+                "CREATE (a:Entity {id:10}) WITH a UNWIND [1,2] AS k \
+                 OPTIONAL MATCH (b:Root {id:k}) \
+                 MERGE (a)-[r:R]->(b) ON CREATE SET r.score=10/(2-k)",
+                writes(),
+            ),
+            (
+                "CREATE (a:Entity {id:10}) WITH a UNWIND [1,2] AS k \
+                 OPTIONAL MATCH (b:Root {id:k}) MERGE (n:Entity {id:k})",
+                vertices,
+            ),
+            (
+                "CREATE (a:Entity {id:10})-[:R]->(:Entity {id:11}) WITH a \
+                 UNWIND [1,2] AS k OPTIONAL MATCH (b:Root {id:k}) MERGE (a)-[:R]->(b)",
+                edges,
+            ),
+        ] {
+            let error = txn
+                .query_write(
+                    &mut db,
+                    &cx,
+                    statement,
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    policy,
+                    |request| {
+                        next += 1;
+                        Ok::<_, Infallible>(match request.request {
+                            GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                            GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                        })
+                    },
+                )
+                .unwrap_err();
+            assert!(
+                matches!(error, QueryWriteError::Chain(_)),
+                "the admitted relation must reach its native runtime refusal: {statement}: {error}"
+            );
+            assert_eq!(txn.staged_effect_digest().unwrap(), digest, "{statement}");
+            assert_eq!(
+                txn.query(
+                    &db,
+                    &cx,
+                    "MATCH (n) RETURN n.id AS id ORDER BY id",
+                    &GqlParameters::new(),
+                    symbols,
+                    reads(),
+                )
+                .unwrap(),
+                integers(&["id"], &[&[1], &[2]]),
+                "{statement}"
+            );
+            assert_eq!(
+                txn.query(
+                    &db,
+                    &cx,
+                    "MATCH ()-[r:R]->() RETURN r",
+                    &GqlParameters::new(),
+                    symbols,
+                    reads(),
+                )
+                .unwrap(),
+                QueryResult::Rows {
+                    columns: vec!["r".into()],
+                    rows: Vec::new(),
+                },
+                "{statement}"
+            );
+            assert_eq!(db.frontier().unwrap(), CommitSeq(0));
+        }
+        assert_eq!(
+            txn.finish(&mut db, &commit).await.unwrap(),
+            EmbeddedTxnCompletion::WriteCommitted {
+                commit_seq: CommitSeq(1)
+            }
+        );
+        assert_eq!(db.vertices().unwrap().len(), 2);
+        assert!(db.edges().unwrap().is_empty());
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

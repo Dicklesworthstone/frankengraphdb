@@ -2992,6 +2992,7 @@ impl PreparedGraphVertexMergeRowsText {
         declarations: &[(&str, GqlParameterType)],
         resolve: &mut R,
         from: Option<ChainContinuation<'a>>,
+        multipart: bool,
     ) -> Result<(Self, Option<ChainContinuation<'a>>), GraphVertexMergeTextError>
     where
         R: GraphSymbolResolver + ?Sized,
@@ -3007,12 +3008,24 @@ impl PreparedGraphVertexMergeRowsText {
         // rows. Its input schema stays separate from its output schema.
         let mut matched = None;
         let mut unwound_match = None;
+        let mut multipart_read = None;
         let mut matched_owned = None;
         let (mut parser, row, owned, leading) = match from {
             Some(from) => {
                 let (columns, types) = from.owned_columns();
                 let mut parser = parser.resume_after(from.boundary, &from.parameters, from.at)?;
-                if parser.is_word("MATCH") {
+                if multipart {
+                    // OPTIONAL, inline CALL and multiple MATCH clauses read
+                    // one complete relation over the preceding write's rows.
+                    // The chain host supplies its staged graph and then
+                    // applies the existing MERGE once per input occurrence.
+                    parser.chain_write = true;
+                    let (source, row) =
+                        parser.multipart_write_prefix(statement, declarations, Some(from.row))?;
+                    multipart_read = Some(source);
+                    matched_owned = Some(Box::new((columns, types)));
+                    (parser, row, None, None)
+                } else if parser.is_word("MATCH") {
                     let (source, row) = parser.owned_match_row_prefix(statement, from.row)?;
                     unwound_match = Some(source);
                     matched_owned = Some(Box::new((columns, types)));
@@ -3266,7 +3279,10 @@ impl PreparedGraphVertexMergeRowsText {
         // Owned, unit and row-only inputs construct their bound relation
         // directly. Graph-backed inputs below resolve the same slots through
         // their normal read preparation instead.
-        if owned.is_some() || leading.is_some() || matched.is_none() && unwound_match.is_none() {
+        if owned.is_some()
+            || leading.is_some()
+            || matched.is_none() && unwound_match.is_none() && multipart_read.is_none()
+        {
             parser
                 .syntax
                 .element_catalog
@@ -3280,52 +3296,64 @@ impl PreparedGraphVertexMergeRowsText {
                 );
             }
         }
-        let input = match (owned, leading, matched) {
-            (Some(types), _, _) => VertexMergeRowsTextInput::Owned(types),
-            (None, Some((leading, pipeline)), _) => {
-                VertexMergeRowsTextInput::Relation(Box::new(crate::set_text::BoundSetTextInput {
-                    selection: None,
-                    parameters: parameters.clone(),
-                    parameter_offsets: parameter_offsets.clone(),
-                    return_at: statement.len(),
-                    projection: None,
-                    quantifier: GraphSetQuantifier::All,
-                    pipeline,
-                    singleton: true,
-                    leading,
-                    correlations: Vec::new(),
-                    row_fields: Vec::new(),
-                    owned: None,
-                }))
-            }
-            // The MATCH rows are the ordinary read relation, as after `MATCH
-            // ... WITH ... CREATE`.
-            (None, None, Some((head, stages))) => {
-                let read = parser.finish_write_row_prefix(statement, head, stages)?;
-                VertexMergeRowsTextInput::Relation(Box::new(
-                    read.resolve(crate::graph_text::LentResolver(&mut *resolve))?,
-                ))
-            }
-            (None, None, None) => match unwound_match {
-                // The MERGE and its tail may add parameters and element keys
-                // after the read boundary; the read binds the complete table.
-                Some(mut source) => {
-                    source.syntax.parameters.clone_from(&parameters);
-                    source
-                        .syntax
-                        .parameter_offsets
-                        .clone_from(&parameter_offsets);
-                    source
-                        .syntax
-                        .element_keys
-                        .extend(parser.syntax.element_keys.iter().cloned());
-                    let mut input =
-                        source.resolve(crate::graph_text::LentResolver(&mut *resolve))?;
-                    input.owned = matched_owned;
-                    VertexMergeRowsTextInput::Relation(Box::new(input))
+        let input = if let Some(mut source) = multipart_read {
+            parser
+                .syntax
+                .element_catalog
+                .resolve(&mut *resolve, statement);
+            source.share_parameters(&parameters, &parameter_offsets);
+            source.append_element_keys(&mut parser.syntax.element_keys);
+            let mut input = source.resolve(&mut *resolve)?;
+            input.first.owned = matched_owned;
+            VertexMergeRowsTextInput::Multipart(Box::new(input))
+        } else {
+            match (owned, leading, matched) {
+                (Some(types), _, _) => VertexMergeRowsTextInput::Owned(types),
+                (None, Some((leading, pipeline)), _) => VertexMergeRowsTextInput::Relation(
+                    Box::new(crate::set_text::BoundSetTextInput {
+                        selection: None,
+                        parameters: parameters.clone(),
+                        parameter_offsets: parameter_offsets.clone(),
+                        return_at: statement.len(),
+                        projection: None,
+                        quantifier: GraphSetQuantifier::All,
+                        pipeline,
+                        singleton: true,
+                        leading,
+                        correlations: Vec::new(),
+                        row_fields: Vec::new(),
+                        owned: None,
+                    }),
+                ),
+                // The MATCH rows are the ordinary read relation, as after `MATCH
+                // ... WITH ... CREATE`.
+                (None, None, Some((head, stages))) => {
+                    let read = parser.finish_write_row_prefix(statement, head, stages)?;
+                    VertexMergeRowsTextInput::Relation(Box::new(
+                        read.resolve(crate::graph_text::LentResolver(&mut *resolve))?,
+                    ))
                 }
-                None => VertexMergeRowsTextInput::Unit,
-            },
+                (None, None, None) => match unwound_match {
+                    // The MERGE and its tail may add parameters and element keys
+                    // after the read boundary; the read binds the complete table.
+                    Some(mut source) => {
+                        source.syntax.parameters.clone_from(&parameters);
+                        source
+                            .syntax
+                            .parameter_offsets
+                            .clone_from(&parameter_offsets);
+                        source
+                            .syntax
+                            .element_keys
+                            .extend(parser.syntax.element_keys.iter().cloned());
+                        let mut input =
+                            source.resolve(crate::graph_text::LentResolver(&mut *resolve))?;
+                        input.owned = matched_owned;
+                        VertexMergeRowsTextInput::Relation(Box::new(input))
+                    }
+                    None => VertexMergeRowsTextInput::Unit,
+                },
+            }
         };
         Ok((
             Self {
@@ -3356,6 +3384,11 @@ impl PreparedGraphVertexMergeRowsText {
             VertexMergeRowsTextInput::Relation(input) => {
                 input.owned.as_deref().map(|(_, types)| types.as_slice())
             }
+            VertexMergeRowsTextInput::Multipart(input) => input
+                .first
+                .owned
+                .as_deref()
+                .map(|(_, types)| types.as_slice()),
             VertexMergeRowsTextInput::Unit => None,
         }
     }
@@ -3437,6 +3470,13 @@ impl PreparedGraphVertexMergeRowsText {
                 }
             }
             VertexMergeRowsTextInput::Relation(input) => {
+                GraphVertexMergeRowsInput::Relation(Box::new(project_merge_input(
+                    input.bind_values(&values)?,
+                    properties.iter_mut().map(|(_, value)| value),
+                    self.end,
+                )?))
+            }
+            VertexMergeRowsTextInput::Multipart(input) => {
                 GraphVertexMergeRowsInput::Relation(Box::new(project_merge_input(
                     input.bind_values(&values)?,
                     properties.iter_mut().map(|(_, value)| value),

@@ -18,7 +18,9 @@ enum MatchedWrite {
     Mutation,
     MultipartMutation,
     VertexMerge,
+    MultipartVertexMerge,
     EdgeMerge,
+    MultipartEdgeMerge,
 }
 
 impl PreparedGraphWriteChainText {
@@ -583,8 +585,8 @@ impl PreparedGraphWriteChainText {
     /// The write family owning a read prefix after an earlier write. CREATE
     /// keeps its established direct MATCH prefix and uses the complete native
     /// read relation for multipart, OPTIONAL and CALL prefixes. Mutations
-    /// share that relation while MERGE retains its mandatory MATCH profile. Everything else
-    /// remains a terminal read. This is framing only: the selected compiler
+    /// and MERGE share that relation before their native writes. Everything
+    /// else remains a terminal read. This is framing only: the selected compiler
     /// still admits the complete relation and write.
     /// Property keys, labels, aliases, map entries and STARTS/ENDS WITH are
     /// never clause boundaries.
@@ -633,9 +635,6 @@ impl PreparedGraphWriteChainText {
                             TokenKind::Punct(b'(')
                         ) || Self::named_merge_pattern(lexer.clone())?)
                     {
-                        if multipart {
-                            return Ok(None);
-                        }
                         // Both MERGE families read the complete MATCH
                         // relation. Inspect past the whole node pattern,
                         // including nested property values, before choosing
@@ -659,10 +658,11 @@ impl PreparedGraphWriteChainText {
                             script::next_script_token(&mut pattern)?.kind,
                             TokenKind::Punct(b'-' | b'<')
                         );
-                        return Ok(Some(if vertex {
-                            MatchedWrite::VertexMerge
-                        } else {
-                            MatchedWrite::EdgeMerge
+                        return Ok(Some(match (vertex, multipart) {
+                            (true, false) => MatchedWrite::VertexMerge,
+                            (true, true) => MatchedWrite::MultipartVertexMerge,
+                            (false, false) => MatchedWrite::EdgeMerge,
+                            (false, true) => MatchedWrite::MultipartEdgeMerge,
                         }));
                     }
                     if (word.eq_ignore_ascii_case("SET") || word.eq_ignore_ascii_case("REMOVE"))
@@ -985,6 +985,7 @@ impl PreparedGraphWriteChainText {
                 declarations,
                 &mut resolve,
                 None,
+                false,
             )?;
             steps.push(ChainTextStep::VertexMerge(Box::new(merge)));
             after
@@ -1078,8 +1079,18 @@ impl PreparedGraphWriteChainText {
                 next = after;
                 continue;
             }
-            let matched_vertex_merge = matches!(matched, Some(MatchedWrite::VertexMerge));
-            let matched_edge_merge = matches!(matched, Some(MatchedWrite::EdgeMerge));
+            let matched_vertex_merge = matches!(
+                matched,
+                Some(MatchedWrite::VertexMerge | MatchedWrite::MultipartVertexMerge)
+            );
+            let matched_edge_merge = matches!(
+                matched,
+                Some(MatchedWrite::EdgeMerge | MatchedWrite::MultipartEdgeMerge)
+            );
+            let multipart_merge = matches!(
+                matched,
+                Some(MatchedWrite::MultipartVertexMerge | MatchedWrite::MultipartEdgeMerge)
+            );
             let merge = matched_vertex_merge
                 || matched_edge_merge
                 || matches!(lexer.next()?.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("MERGE"));
@@ -1101,6 +1112,7 @@ impl PreparedGraphWriteChainText {
                     declarations,
                     &mut resolve,
                     Some(from),
+                    multipart_merge,
                 )?;
                 steps.push(ChainTextStep::VertexMerge(Box::new(merge)));
                 next = after;
@@ -1110,6 +1122,7 @@ impl PreparedGraphWriteChainText {
                     declarations,
                     &mut resolve,
                     from,
+                    multipart_merge,
                 )?;
                 match (returning, after) {
                     // A WITH head: a query step whose rows the next write reads.
@@ -1442,11 +1455,16 @@ impl PreparedGraphWriteChainText {
                 ChainTextStep::EdgeMerge(step) => {
                     let (merge, returning) = &**step;
                     let own = own(merge.parameter_schema())?;
-                    if let crate::mutation_text::EdgeMergeTextInput::Row { input, .. } =
-                        &merge.input
-                    {
-                        reads_previous(input.owned.as_deref(), &previous, merge.input.return_at())?;
-                    }
+                    let owned = match &merge.input {
+                        crate::mutation_text::EdgeMergeTextInput::Row { input, .. } => {
+                            input.owned.as_deref()
+                        }
+                        crate::mutation_text::EdgeMergeTextInput::Multipart { input, .. } => {
+                            input.first.owned.as_deref()
+                        }
+                        crate::mutation_text::EdgeMergeTextInput::Match(_) => None,
+                    };
+                    reads_previous(owned, &previous, merge.input.return_at())?;
                     let values = merge
                         .input
                         .checked_arguments(&own)
@@ -1478,11 +1496,16 @@ impl PreparedGraphWriteChainText {
                 ChainTextStep::EdgeMergeRows(step) => {
                     let (merge, keep) = &**step;
                     let own = own(merge.parameter_schema())?;
-                    if let crate::mutation_text::EdgeMergeTextInput::Row { input, .. } =
-                        &merge.input
-                    {
-                        reads_previous(input.owned.as_deref(), &previous, merge.input.return_at())?;
-                    }
+                    let owned = match &merge.input {
+                        crate::mutation_text::EdgeMergeTextInput::Row { input, .. } => {
+                            input.owned.as_deref()
+                        }
+                        crate::mutation_text::EdgeMergeTextInput::Multipart { input, .. } => {
+                            input.first.owned.as_deref()
+                        }
+                        crate::mutation_text::EdgeMergeTextInput::Match(_) => None,
+                    };
+                    reads_previous(owned, &previous, merge.input.return_at())?;
                     let values = merge
                         .input
                         .checked_arguments(&own)
