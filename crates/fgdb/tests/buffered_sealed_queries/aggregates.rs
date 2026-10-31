@@ -133,6 +133,37 @@ fn exact_numeric_distinct_collection_and_empty_results_survive_terminal_spilling
         let retained = cold.sealed_read_cache_pool().clone();
         let cases = [
             (
+                "CALL fnx.pagerank(label => 'Person',relation => 'R', \
+                 direction => 'directed',parallel => 'collapse',self_loops => 'drop', \
+                 alpha => 0.0,iterations => 1,weighted => false) YIELD score \
+                 RETURN COUNT(score) AS population,COUNT(DISTINCT score) AS distinct_scores, \
+                 MIN(score) AS least,MAX(score) AS greatest"
+                    .to_owned(),
+                // Alpha zero makes all five selected vertices score exactly
+                // 1/5, independently of topology and the execution engine.
+                vec![vec![
+                    QueryValue::Count(5),
+                    QueryValue::Count(1),
+                    QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Float(
+                        fgdb_types::CanonicalF64::new(0.2),
+                    ))),
+                    QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Float(
+                        fgdb_types::CanonicalF64::new(0.2),
+                    ))),
+                ]],
+            ),
+            (
+                format!(
+                    "{BFS} YIELD distance AS hops RETURN COUNT(*) AS reached, \
+                     SUM(hops) AS total,AVG(hops) AS mean"
+                ),
+                vec![vec![
+                    QueryValue::Count(3),
+                    QueryValue::Integer(3),
+                    QueryValue::Average(GraphExactAverage::new(1, 1).unwrap()),
+                ]],
+            ),
+            (
                 format!(
                     "{BFS} YIELD node,distance WHERE distance>0 \
                      RETURN MAX(distance) AS farthest, \

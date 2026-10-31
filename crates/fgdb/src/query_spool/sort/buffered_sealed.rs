@@ -107,7 +107,7 @@ fn admit_procedure_shape(
     relation: RelationId,
 ) -> bool {
     use fgdb_gql::ProcedureGraphDirection;
-    use fgdb_prism::{FnxGraphKind, FnxOutput, FnxSignatureRegistry};
+    use fgdb_prism::{FnxGraphKind, FnxSignatureRegistry};
 
     let call = source.call();
     if call.namespace() != "fnx" {
@@ -116,11 +116,10 @@ fn admit_procedure_shape(
     let Some(signature) = FnxSignatureRegistry::lookup(&format!("fnx.{}", call.name())) else {
         return false;
     };
-    if call
-        .outputs()
-        .first()
-        .is_none_or(|name| !FnxOutput::Vertex.is_named(name))
-    {
+    // This host feeds the external canonical bag stage, not the native
+    // unique-leading-vertex folding interface. Every registered YIELD order
+    // and repeated output row is valid; zero-column sources still refuse.
+    if call.outputs().is_empty() {
         return false;
     }
     for (index, name) in call.outputs().iter().enumerate() {

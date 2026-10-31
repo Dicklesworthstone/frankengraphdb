@@ -21,12 +21,11 @@ use fgdb_gql::{
     PreparedProcedureCall,
 };
 use fgdb_prism::{
-    FnxCallSpec, FnxExecutionError, FnxMemoryLimits, FnxOutput, FnxParameters, FnxReadError,
-    FnxReadOptions, FnxReadResult, FnxRowCursor, FnxSealedExecutionError, FnxSealedReadError,
-    FnxSelection, FnxSourceLimits, ParallelEdgePolicy, ProjectionBuildError, ProjectionEdge,
-    ProjectionError, ProjectionLimits, ProjectionSpec, SealedGraphView, SealedProjectionError,
-    SealedProjectionMask, SealedProjectionSpec, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView,
-    SortedVertexLookup,
+    FnxCallSpec, FnxExecutionError, FnxMemoryLimits, FnxParameters, FnxReadError, FnxReadOptions,
+    FnxReadResult, FnxRowCursor, FnxSealedExecutionError, FnxSealedReadError, FnxSelection,
+    FnxSourceLimits, ParallelEdgePolicy, ProjectionBuildError, ProjectionEdge, ProjectionError,
+    ProjectionLimits, ProjectionSpec, SealedGraphView, SealedProjectionError, SealedProjectionMask,
+    SealedProjectionSpec, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView, SortedVertexLookup,
 };
 use fgdb_strata::store::{BufferedEdge, BufferedScanError, BufferedScanEvent, BufferedValue};
 use fgdb_strata::tiered::buffer::BufferError;
@@ -230,11 +229,10 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
     ) -> Result<(FnxRowCursor, GqlExecutionStats, GlaExecutionStats), QueryFailure> {
         cx.with_restriction_async(async {
             let bound = bind_procedure(call, arguments)?;
-            if bound
-                .outputs()
-                .first()
-                .is_none_or(|column| column.field != FnxOutput::Vertex)
-            {
+            // Retain the requested field order and bag multiplicity. The
+            // external executor owns canonical ordering and pagination; this
+            // source does not promise a unique leading vertex identity.
+            if bound.outputs().is_empty() {
                 return Err(GqlQueryError::Source(GqlError::Procedure(
                     ProcedureError::ResultDomain,
                 )));

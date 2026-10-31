@@ -353,6 +353,30 @@ fn sealed_bfs_and_components_compose_with_properties_matches_and_grouping() {
                 0,
             ),
             (
+                format!("{BFS} YIELD distance AS hops RETURN hops"),
+                vec![vec![integer(0)], vec![integer(1)], vec![integer(2)]],
+                0,
+            ),
+            (
+                format!(
+                    "{BFS} YIELD distance AS hops,node AS person \
+                     RETURN hops,person ORDER BY hops DESC SKIP 1 LIMIT 1"
+                ),
+                vec![vec![integer(1), vertex(SECOND)]],
+                0,
+            ),
+            (
+                format!("{WCC} YIELD component AS group_id RETURN group_id"),
+                vec![
+                    vec![vertex(1)],
+                    vec![vertex(1)],
+                    vec![vertex(1)],
+                    vec![vertex(FOURTH)],
+                    vec![vertex(u128::MAX)],
+                ],
+                0,
+            ),
+            (
                 format!(
                     "{BFS} YIELD node,distance MATCH (node:Person) WHERE distance>0 \
                          RETURN node,node.p AS p,distance ORDER BY p DESC,node LIMIT 2"
@@ -527,6 +551,23 @@ fn compressed_bridge_pairs_preserve_shared_sources_and_typed_neighbor_compositio
                 ],
             ),
             (
+                format!(
+                    "{call} YIELD neighbor AS target,node AS origin \
+                     WITH target,origin SKIP 1 LIMIT 2 RETURN target,origin"
+                ),
+                // The source's pair order is (1,SECOND), (1,FOURTH),
+                // (1,MAX), (SECOND,THIRD). Reordered YIELD must sort by
+                // target before its WITH window can select these rows.
+                vec![
+                    vec![vertex(THIRD), vertex(SECOND)],
+                    vec![vertex(FOURTH), vertex(1)],
+                ],
+            ),
+            (
+                format!("{call} YIELD neighbor AS target RETURN target SKIP 1 LIMIT 2"),
+                vec![vec![vertex(THIRD)], vec![vertex(FOURTH)]],
+            ),
+            (
                 format!("{call} YIELD node,neighbor RETURN node,-neighbor.p AS value"),
                 // A unique-leading-vertex shortcut would keep the wrong
                 // secondary order within the three rows rooted at vertex 1.
@@ -575,6 +616,109 @@ fn compressed_bridge_pairs_preserve_shared_sources_and_typed_neighbor_compositio
                 .unwrap_or_else(|error| panic!("{text}: {error:?}"));
                 assert_eq!(answer.snapshot, CommitSeq(3));
                 assert_eq!(answer.rows, expected, "run_rows={run_rows}: {text}");
+                assert_eq!(spill_pool.used(), 0);
+            }
+        }
+        drop(cold);
+        assert_eq!(source_pool.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn neighbor_only_bridges_preserve_duplicate_targets_before_distinct_and_paging() {
+    let ((), report) = run_async_under_lab(0x6273_5111, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx) = (contexts.commit(), contexts.query());
+        let (vfs, mut writer) = fixture(&commit).await;
+        let mut links = WriteBatch::new(R);
+        links.add_edge(EId(BASE + 20), VId(THIRD), VId(u128::MAX), vec![]);
+        links.add_edge(EId(BASE + 21), VId(FOURTH), VId(u128::MAX), vec![]);
+        assert_eq!(writer.write(&commit, links).await.unwrap(), CommitSeq(3));
+        let source_pool = MemoryPool::new(16 * 1024 * 1024, 0).unwrap();
+        let spill_pool = MemoryPool::new(1024 * 1024, 0).unwrap();
+        let mut cold = view(&commit, &vfs, &source_pool).await;
+        let params = GqlParameters::new();
+        let call = "CALL fnx.bridges(label => 'Person',relation => 'R',direction => 'undirected',parallel => 'collapse',self_loops => 'keep')";
+        // The projected tree is 1--SECOND--THIRD--MAX--FOURTH. Its last
+        // two canonical endpoint pairs both project to the same neighbor.
+        for (text, expected) in [
+            (
+                format!("{call} YIELD neighbor AS target RETURN target"),
+                vec![
+                    vec![vertex(SECOND)],
+                    vec![vertex(THIRD)],
+                    vec![vertex(u128::MAX)],
+                    vec![vertex(u128::MAX)],
+                ],
+            ),
+            (
+                format!("{call} YIELD neighbor AS target RETURN DISTINCT target"),
+                vec![
+                    vec![vertex(SECOND)],
+                    vec![vertex(THIRD)],
+                    vec![vertex(u128::MAX)],
+                ],
+            ),
+            (
+                format!(
+                    "{call} YIELD neighbor AS target \
+                     WITH target SKIP 3 LIMIT 1 RETURN target"
+                ),
+                vec![vec![vertex(u128::MAX)]],
+            ),
+            (
+                format!(
+                    "{call} YIELD neighbor AS target WITH target,COUNT(*) AS occurrences \
+                     RETURN target,occurrences ORDER BY target"
+                ),
+                vec![
+                    vec![vertex(SECOND), integer(1)],
+                    vec![vertex(THIRD), integer(1)],
+                    vec![vertex(u128::MAX), integer(2)],
+                ],
+            ),
+            (
+                format!(
+                    "{call} YIELD neighbor AS target MATCH (target:Person) \
+                     RETURN target,target.p AS value ORDER BY target"
+                ),
+                vec![
+                    vec![vertex(SECOND), integer(20)],
+                    vec![vertex(THIRD), integer(30)],
+                    vec![vertex(u128::MAX), integer(50)],
+                    vec![vertex(u128::MAX), integer(50)],
+                ],
+            ),
+        ] {
+            assert_eq!(
+                resident_rows(
+                    writer
+                        .query(&cx, &text, &params, resolve, policy())
+                        .unwrap()
+                ),
+                expected,
+                "resident {text}",
+            );
+            let native = PreparedNativeRead::prepare(&text, &params, resolve).unwrap();
+            assert!(native.prepare_buffered_order(&params).is_err());
+            let prepared = native
+                .prepare_buffered_sealed_order(&params, R, memory(), sealing(), RAW)
+                .unwrap();
+            for run_rows in [1, 3] {
+                let actual = execute(
+                    &prepared,
+                    &mut cold,
+                    &cx,
+                    policy(),
+                    &spill_pool,
+                    run_rows,
+                    WORK,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error:?}"));
+                assert_eq!(actual.snapshot, CommitSeq(3));
+                assert_eq!(actual.rows, expected, "run_rows={run_rows}: {text}");
                 assert_eq!(spill_pool.used(), 0);
             }
         }
@@ -1102,7 +1246,7 @@ fn warm_construction_replays_admission_and_cannot_hide_limits_or_late_errors() {
             assert_eq!(source_pool.used(), baseline);
         }
         let late = format!(
-            "{BFS} YIELD node,distance \
+            "{BFS} YIELD distance \
                             RETURN 1/(2-distance) AS value ORDER BY value LIMIT 0"
         );
         let error = execute(
@@ -1597,7 +1741,6 @@ fn explicit_owner_admission_does_not_broaden_default_or_terminal_aggregate_paths
         "CALL fnx.pagerank(relation => 'R',bogus => 1) \
          YIELD vertex,score RETURN vertex,score",
         "CALL fnx.triangles(relation => 'R') YIELD vertex,score RETURN vertex,score",
-        "CALL fnx.pagerank(relation => 'R') YIELD score,vertex RETURN score,vertex",
         "CALL fnx.pagerank(relation => 'R') YIELD vertex AS a,node AS b RETURN a,b",
         "CALL fnx.single_source_shortest_path_length(args => [1],relation => 'R') \
          YIELD vertex,distance MATCH (distance) RETURN vertex,distance",
@@ -1616,6 +1759,8 @@ fn explicit_owner_admission_does_not_broaden_default_or_terminal_aggregate_paths
     for text in [
         "CALL fnx.pagerank(relation => 'R') \
          YIELD node AS person,score RETURN person,score",
+        "CALL fnx.pagerank(relation => 'R') YIELD score,vertex RETURN score,vertex",
+        "CALL fnx.pagerank(relation => 'R') YIELD score RETURN score",
         // Native evaluation of this valid argument shape remains deferred.
         "CALL fnx.single_source_shortest_path_length(\
          args => [1/0], relation => 'R') YIELD node,distance RETURN node,distance",
