@@ -99,10 +99,22 @@ fn compare_retained(mut cursor: FnxRowCursor, expected: &FnxResult, vertices: us
         .max();
     assert_eq!(cursor.max_integer(), maximum);
     let mut row = vec![FnxValue::Integer(u64::MAX)];
-    assert!(matches!(
-        cursor.next_row(&mut row, || Err(LiveRefusal(17))),
-        Err(FnxExecutionError::Cancelled(LiveRefusal(17)))
-    ));
+    if vertices == 0 {
+        let mut checkpoints = 0;
+        assert!(matches!(
+            cursor.next_row(&mut row, || {
+                checkpoints += 1;
+                Err(LiveRefusal(17))
+            }),
+            Ok(false)
+        ));
+        assert_eq!(checkpoints, 0);
+    } else {
+        assert!(matches!(
+            cursor.next_row(&mut row, || Err(LiveRefusal(17))),
+            Err(FnxExecutionError::Cancelled(LiveRefusal(17)))
+        ));
+    }
     assert!(row.is_empty());
     assert_eq!(cursor.remaining(), expected.rows.len());
     let mut examined = 0;

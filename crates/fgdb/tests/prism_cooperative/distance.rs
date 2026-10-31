@@ -177,10 +177,10 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
     runtime.block_on(async {
         let cx = contexts.query();
         let db = small_database(&contexts.commit(), 3, true).await;
-        // The literal source is 0 -> 1 -> 2. Incoming closeness uses the
-        // reachable-set correction; harmonic adds 1 and 1/2 in that order.
+        // The literal source is 0 -> 1 -> 2. At vertex 1, one reachable
+        // predecessor gives (1/1)*(1/2) = 1/2. At vertex 2, both other
+        // vertices are reachable: (2/3)*(2/2) = 2/3. Harmonic adds 1 and 1/2.
         let two_thirds = 2.0 / 3.0;
-        let four_ninths = two_thirds * two_thirds;
         for (direction, call, literal) in [
             (Directedness::Undirected, call(false), None),
             (Directedness::Undirected, call(true), None),
@@ -188,9 +188,9 @@ fn compressed_distance_centralities_admit_exact_work_workspace_and_output() {
                 "CALL fnx.load_centrality() YIELD score AS rank,vertex AS id",
                 &FnxParameters::new(),
             ).unwrap(), None),
-            (Directedness::Directed, call(false), Some([0.0, 0.5, four_ninths])),
+            (Directedness::Directed, call(false), Some([0.0, 0.5, two_thirds])),
             (Directedness::Directed, call(true), Some([0.0, 1.0, 1.5])),
-            (Directedness::Reversed, call(false), Some([four_ninths, 0.5, 0.0])),
+            (Directedness::Reversed, call(false), Some([two_thirds, 0.5, 0.0])),
             (Directedness::Reversed, call(true), Some([1.5, 1.0, 0.0])),
         ] {
             let opt = options(direction);

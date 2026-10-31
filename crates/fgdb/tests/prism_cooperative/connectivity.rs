@@ -2,7 +2,7 @@
 //! Reachability is an independent partition oracle, not another union-find.
 
 use super::*;
-use fgdb_prism::FnxValue;
+use fgdb_prism::{FnxValue, ProjectionError};
 
 fn modes() -> Vec<(FnxCallSpec, Directedness)> {
     vec![
@@ -961,8 +961,21 @@ fn cooperative_cdlp_retains_exact_admission_and_zero_iteration_graph_laws() {
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     runtime.block_on(async {
         let cx = contexts.query();
-        let db = stored(&contexts.commit(), 4, &[(0, 1), (1, 0), (1, 2)]).await;
+        let edges = [(0, 1), (1, 0), (1, 2)];
+        let db = stored(&contexts.commit(), 4, &edges).await;
         let call = FnxCallSpec::cdlp(3);
+        // The connected triple oscillates [0,1,2] -> [1,0,1] ->
+        // [0,1,0] -> [1,0,1]; the fourth vertex remains isolated.
+        let literal: Vec<_> = [1, 0, 1, 3]
+            .into_iter()
+            .enumerate()
+            .map(|(vertex, label)| {
+                vec![
+                    FnxValue::Vertex(identity(vertex, 4)),
+                    FnxValue::Vertex(identity(label, 4)),
+                ]
+            })
+            .collect();
         for direction in [
             Directedness::Directed,
             Directedness::Reversed,
@@ -973,6 +986,7 @@ fn cooperative_cdlp_retains_exact_admission_and_zero_iteration_graph_laws() {
             let expected = call
                 .execute_sealed(&cx, &graph, opt.execution_limits, memory())
                 .unwrap();
+            assert_eq!(expected.rows, literal);
             let bytes = call.outputs().len() * size_of::<String>()
                 + call
                     .outputs()
@@ -999,6 +1013,65 @@ fn cooperative_cdlp_retains_exact_admission_and_zero_iteration_graph_laws() {
             // mandatory label/reverse-projection footprint must refuse.
             let frontier_bytes =
                 4 * size_of::<usize>() + 2 * (size_of::<u64>() + size_of::<usize>());
+            let label_bytes = 4 * 4 * size_of::<usize>();
+            let directory_bytes = 4 * (size_of::<VId>() + size_of::<usize>());
+            let (minimum_bytes, incoming_bytes) = if direction == Directedness::Undirected {
+                assert_eq!(mem.max_kernel_workspace_bytes, label_bytes + frontier_bytes);
+                (label_bytes, 0)
+            } else {
+                let opposite_direction = if direction == Directedness::Directed {
+                    Directedness::Reversed
+                } else {
+                    Directedness::Directed
+                };
+                let mut opposite_options = options(opposite_direction);
+                let opposite = projection(&db, &cx, opposite_options).await;
+                assert_eq!(opposite.binding(), graph.binding());
+                assert_eq!(opposite.vertex_ids(), graph.vertex_ids());
+                let incoming = opposite.incoming_index_stats().map_or(0, |stats| {
+                    assert_eq!(stats.rows, 3);
+                    assert_eq!(stats.incidences, edges.len());
+                    stats.charged_workspace_bytes
+                });
+                let auxiliary = directory_bytes + incoming;
+                opposite_options.projection_limits.max_workspace_bytes = auxiliary;
+                let mandatory = projection(&db, &cx, opposite_options).await;
+                assert_eq!(mandatory.charged_workspace_bytes(), auxiliary);
+                assert_eq!(mandatory.binding(), opposite.binding());
+                assert_eq!(mandatory.digest(), opposite.digest());
+                assert_eq!(mandatory.vertex_ids(), opposite.vertex_ids());
+                assert_eq!(
+                    mandatory.incoming_index_stats(),
+                    opposite.incoming_index_stats()
+                );
+                for source in 0..4 {
+                    let mut row_literal: Vec<_> = edges
+                        .iter()
+                        .filter_map(|&(from, to)| {
+                            let (from, to) = if opposite_direction == Directedness::Reversed {
+                                (to, from)
+                            } else {
+                                (from, to)
+                            };
+                            (from == source).then_some((identity(to, 4), 1.0_f64.to_bits()))
+                        })
+                        .collect();
+                    row_literal.sort_unstable();
+                    assert_eq!(row(&mandatory, &cx, source, None, 1).0, row_literal);
+                    assert_eq!(row(&opposite, &cx, source, None, 1).0, row_literal);
+                }
+                let optional_degrees = 4 * size_of::<usize>();
+                assert_eq!(
+                    opposite.charged_workspace_bytes(),
+                    auxiliary + optional_degrees
+                );
+                let minimum = label_bytes + auxiliary;
+                assert_eq!(
+                    mem.max_kernel_workspace_bytes,
+                    minimum + optional_degrees + frontier_bytes
+                );
+                (minimum, incoming)
+            };
             let baseline_bytes = mem.max_kernel_workspace_bytes - frontier_bytes;
             let fallback_memory = FnxMemoryLimits {
                 max_kernel_workspace_bytes: baseline_bytes,
@@ -1017,10 +1090,25 @@ fn cooperative_cdlp_retains_exact_admission_and_zero_iteration_graph_laws() {
                 expected.certificate.estimated_work
             );
             assert_eq!(fallback.certificate.kernel_workspace_bytes, baseline_bytes);
+            assert_eq!(fallback.certificate.snapshot, expected.certificate.snapshot);
+            assert_eq!(
+                fallback.certificate.projection_digest,
+                expected.certificate.projection_digest
+            );
             assert_eq!(
                 fallback.certificate.witness.algorithm,
                 "cdlp_synchronous_minimum_vid_cursor"
             );
+            assert_eq!(fallback.certificate.witness.nodes_touched, 4 * 3);
+            assert_eq!(
+                fallback.certificate.witness.edges_scanned,
+                if direction == Directedness::Undirected {
+                    4 * 3
+                } else {
+                    2 * edges.len() * 3
+                }
+            );
+            assert_eq!(fallback.certificate.witness.queue_peak, 0);
             for allowance in [baseline_bytes, mem.max_kernel_workspace_bytes - 1] {
                 let actual = call
                     .execute_sealed_cooperative(
@@ -1037,6 +1125,60 @@ fn cooperative_cdlp_retains_exact_admission_and_zero_iteration_graph_laws() {
                     .await
                     .unwrap();
                 compare_execution(&actual, &fallback);
+            }
+            if direction != Directedness::Undirected {
+                // Preserve the former baseline-minus-one refusal input as a
+                // successful degree-cache fallback. No frontier fits at these
+                // allowances, so the complete sweep's witness stays identical.
+                for allowance in [baseline_bytes - 1, minimum_bytes] {
+                    let minimum_memory = FnxMemoryLimits {
+                        max_kernel_workspace_bytes: allowance,
+                        ..mem
+                    };
+                    let minimum_result = call
+                        .execute_sealed(&cx, &graph, limits, minimum_memory)
+                        .unwrap();
+                    assert_eq!(minimum_result.columns, expected.columns);
+                    assert_eq!(minimum_result.rows, literal);
+                    assert_eq!(
+                        minimum_result.certificate.result_digest,
+                        expected.certificate.result_digest
+                    );
+                    assert_eq!(
+                        minimum_result.certificate.snapshot,
+                        expected.certificate.snapshot
+                    );
+                    assert_eq!(
+                        minimum_result.certificate.projection_digest,
+                        expected.certificate.projection_digest
+                    );
+                    assert_eq!(
+                        minimum_result.certificate.estimated_work,
+                        expected.certificate.estimated_work
+                    );
+                    assert_eq!(
+                        minimum_result.certificate.witness,
+                        fallback.certificate.witness
+                    );
+                    assert_eq!(
+                        minimum_result.certificate.kernel_workspace_bytes,
+                        minimum_bytes
+                    );
+                    compare_execution(
+                        &call
+                            .execute_sealed_cooperative(
+                                &cx,
+                                &graph,
+                                limits,
+                                minimum_memory,
+                                quantum(1),
+                                yield_now,
+                            )
+                            .await
+                            .unwrap(),
+                        &minimum_result,
+                    );
+                }
             }
             for (limits, mem) in [
                 (
@@ -1070,7 +1212,7 @@ fn cooperative_cdlp_retains_exact_admission_and_zero_iteration_graph_laws() {
                 (
                     limits,
                     FnxMemoryLimits {
-                        max_kernel_workspace_bytes: baseline_bytes - 1,
+                        max_kernel_workspace_bytes: minimum_bytes - 1,
                         ..mem
                     },
                 ),
@@ -1081,6 +1223,26 @@ fn cooperative_cdlp_retains_exact_admission_and_zero_iteration_graph_laws() {
                     .await
                     .unwrap_err();
                 assert_eq!(format!("{cooperative:?}"), format!("{sync:?}"));
+                if mem.max_kernel_workspace_bytes == minimum_bytes - 1 {
+                    match direction {
+                        Directedness::Undirected => assert!(matches!(sync,
+                            FnxSealedExecutionError::Execution(FnxExecutionError::LimitExceeded {
+                                resource: "kernel workspace bytes", requested, limit,
+                            }) if requested == label_bytes && limit == label_bytes - 1)),
+                        Directedness::Directed => assert!(matches!(sync,
+                            FnxSealedExecutionError::Source(SealedProjectionError::Read(
+                                fgdb_strata::tiered::sealed::SealedError::Limit {
+                                    resource: "incoming workspace bytes", requested, limit,
+                                }
+                            )) if requested == incoming_bytes && limit == incoming_bytes - 1)),
+                        Directedness::Reversed => assert!(matches!(sync,
+                            FnxSealedExecutionError::Source(SealedProjectionError::Projection(
+                                ProjectionError::LimitExceeded {
+                                    resource: "workspace bytes", observed, limit,
+                                }
+                            )) if observed == directory_bytes && limit == directory_bytes - 1)),
+                    }
+                }
             }
         }
         let loops = stored(&contexts.commit(), 2, &[(0, 0), (0, 1)]).await;

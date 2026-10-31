@@ -101,9 +101,10 @@ pub(crate) fn has_continuation(tokens: &[TextToken<'_>]) -> bool {
                     previous.is_some_and(|previous| previous.punct(b'.') || previous.word("AS"));
                 if !name
                     && token.word("CALL")
-                    && tokens
-                        .get(index + 1)
-                        .is_some_and(|next| next.punct(b'{') || next.punct(b'('))
+                    && (matched
+                        || tokens
+                            .get(index + 1)
+                            .is_some_and(|next| next.punct(b'{') || next.punct(b'(')))
                 {
                     return true;
                 }

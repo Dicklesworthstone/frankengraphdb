@@ -2538,6 +2538,10 @@ impl<'a> Parser<'a> {
         schema: &mut RowSchema<'a>,
         at: usize,
     ) -> Result<ReadStageTemplate, GraphSetTextError> {
+        // CALL consumes real row identities after the graph boundary's hidden
+        // preimages end. Arguments and later carried fields use the existing
+        // governed element reader, as an inline CALL's exported identities do.
+        self.call_element_reads = true;
         let namespace = self.name()?;
         self.punct(b'.', "procedure name after the namespace")?;
         let name = self.name()?;
@@ -3046,8 +3050,10 @@ pub(super) fn bind_filter(
 mod tests {
     use crate::algebra::{GraphValue, GraphValueRow};
     use crate::{
-        GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy, PreparedGraphSetText,
+        GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol,
+        GraphSymbolKind, PreparedGraphSetText,
     };
+    use fgdb_delta_types::PropertyKeyId;
     use fgdb_types::CanonicalScalar;
 
     fn execute(statement: &str) -> Vec<GraphValueRow> {
@@ -3066,6 +3072,64 @@ mod tests {
 
     fn row(value: i64) -> GraphValueRow {
         GraphValueRow::from_owned_values(vec![GraphValue::Scalar(CanonicalScalar::Int(value))])
+    }
+
+    #[test]
+    fn matched_named_calls_compile_identity_and_property_arguments_in_the_row_scope() {
+        for statement in [
+            "MATCH (start) CALL fnx.single_source_shortest_path_length(args => [start]) \
+             YIELD node,distance RETURN start,node,distance",
+            "MATCH (start) WHERE start.p=10 \
+             CALL fnx.single_source_shortest_path_length(args => [start.p/10]) \
+             YIELD node,distance RETURN start,node,distance",
+            "MATCH (original) WITH original AS start \
+             CALL fnx.single_source_shortest_path_length(args => [start.p/10]) \
+             YIELD node,distance RETURN start,node,distance",
+        ] {
+            let mut properties = 0;
+            let prepared = PreparedGraphSetText::prepare(
+                statement,
+                |kind: GraphSymbolKind, name: &str| match (kind, name) {
+                    (GraphSymbolKind::Property, "p") => {
+                        properties += 1;
+                        Some(GraphSymbol::Property(PropertyKeyId(9)))
+                    }
+                    _ => None,
+                },
+            )
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+            assert_eq!(prepared.columns(), ["start", "node", "distance"]);
+            let bound = prepared.bind_parameters(&GqlParameters::new()).unwrap();
+            assert!(bound.reads_graph());
+            assert!(bound.calls_procedure());
+            assert_eq!(properties, usize::from(statement.contains(".p")));
+        }
+    }
+
+    #[test]
+    fn call_named_columns_and_nested_locals_do_not_become_procedure_clauses() {
+        for statement in [
+            "MATCH (n) RETURN n AS CALL",
+            "MATCH (n) RETURN n.CALL AS value",
+            "MATCH (n) RETURN [CALL IN [1] | CALL] AS values",
+        ] {
+            let prepared = PreparedGraphSetText::prepare(
+                statement,
+                |kind: GraphSymbolKind, name: &str| match (kind, name) {
+                    (GraphSymbolKind::Property, "CALL") => {
+                        Some(GraphSymbol::Property(PropertyKeyId(9)))
+                    }
+                    _ => None,
+                },
+            )
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+            assert!(
+                !prepared
+                    .bind_parameters(&GqlParameters::new())
+                    .unwrap()
+                    .calls_procedure()
+            );
+        }
     }
 
     #[test]

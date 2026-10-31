@@ -3523,7 +3523,9 @@ impl<'a> Parser<'a> {
         // first part still needs its explicit boundary before the next MATCH.
         // An UNWIND directly after a continuation reads that same row (TCK
         // Graph8 [4]: `OPTIONAL MATCH (n) UNWIND keys(n) AS x RETURN ...`).
-        let before_call = self.inline_call()?;
+        // Both named procedures and inline bodies consume the complete MATCH
+        // row. The row pipeline owns named CALL; Apply still owns inline CALL.
+        let before_call = self.is_word("CALL");
         let before_existence =
             self.returning_existence_projection()? || self.row_list_projection()?;
         let before_write = self.at_multipart_write();

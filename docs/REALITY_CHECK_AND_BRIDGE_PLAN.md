@@ -613,7 +613,8 @@ project, and the canonical ratchet is unchanged.
 The fourth tracker publication is exactly six attributable record IDs through
 the native helper. It preserves1,363 prior issues and adds the genuine
 `fgdb-rwtcx` record and original comment from the authenticated writer backup;
-all prior raw issue/label/dependency/comment/event rows survive. Its historical
+all prior issue identities and raw label/dependency/comment/event rows survive.
+Four existing issue rows have the reviewed progress timestamps updated. Its historical
 closed state is preserved as provenance, earning no new closure credit.
 `fgdb-016qw` remains unrecovered and the historical audit remains open. Current
 qualification and capability records carry explicit pending-runtime comments.

@@ -335,6 +335,38 @@ fn bfs_rows() -> Vec<Vec<GraphValue>> {
         .collect()
 }
 
+fn is_snapshot_or_source_work_limit(error: &NativeSpoolError, cap: u64) -> bool {
+    let NativeSpoolError::Procedure(inner) = error else {
+        return false;
+    };
+    match inner.as_ref() {
+        GqlQueryError::Rows(refusal) => {
+            refusal.dimension == GqlBudgetDimension::SnapshotRecords
+                && refusal.limit == cap
+                && refusal.observed > cap
+        }
+        GqlQueryError::Source(GqlError::Procedure(ProcedureError::Read(inner))) => matches!(
+            inner.as_ref(),
+            FnxReadError::SourceLimit {
+                resource: "work units",
+                limit,
+                requested,
+            } if *limit == u128::from(cap) && requested > limit
+        ),
+        GqlQueryError::Source(GqlError::Procedure(ProcedureError::BufferedSealedRead(inner))) => {
+            matches!(
+                inner.as_ref(),
+                FnxSealedReadError::Input(FnxReadError::SourceLimit {
+                    resource: "work units",
+                    limit,
+                    requested,
+                }) if *limit == u128::from(cap) && requested > limit
+            )
+        }
+        _ => false,
+    }
+}
+
 #[test]
 fn sealed_bfs_and_components_compose_with_properties_matches_and_grouping() {
     let ((), report) = run_async_under_lab(0x6273_5101, |root| async move {
@@ -490,7 +522,7 @@ fn sealed_bfs_and_components_compose_with_properties_matches_and_grouping() {
                 resident_rows(
                     writer
                         .query(&cx, &text, &params, resolve, policy())
-                        .unwrap()
+                        .unwrap_or_else(|error| panic!("{text}: {error:?}"))
                 ),
                 expected,
                 "resident {text}",
@@ -596,10 +628,22 @@ fn compressed_bridge_pairs_preserve_shared_sources_and_typed_neighbor_compositio
                 vec![vec![vertex(1), integer(10)], vec![vertex(SECOND), integer(20)]],
             ),
         ] {
+            let observed =
+                resident_rows(writer.query(&cx, &text, &params, resolve, policy()).unwrap());
             assert_eq!(
-                resident_rows(writer.query(&cx, &text, &params, resolve, policy()).unwrap()),
+                observed,
                 expected,
-                "resident {text}",
+                "resident {text}; literal integer cells: {:?}",
+                observed
+                    .iter()
+                    .map(|row| row
+                        .iter()
+                        .map(|value| match value {
+                            GraphValue::Scalar(CanonicalScalar::Int(value)) => Some(*value),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>())
+                    .collect::<Vec<_>>(),
             );
             let prepared = prepare(&text, &params);
             for run_rows in [1, 3] {
@@ -1478,28 +1522,10 @@ fn superseded_history_is_charged_before_compaction_even_under_limit_zero_and_reu
         // The policy's source-record cap also bounds the existing FnX source
         // work allowance. That earlier admission may refuse before the raw
         // receipt reaches GQL; either typed path must preserve the original cap.
-        let refused_original_cap = match &error {
-            NativeSpoolError::Procedure(inner) => match inner.as_ref() {
-                GqlQueryError::Rows(refusal) => {
-                    refusal.dimension == GqlBudgetDimension::SnapshotRecords
-                        && refusal.limit == before.records
-                        && refusal.observed > refusal.limit
-                }
-                GqlQueryError::Source(GqlError::Procedure(ProcedureError::BufferedSealedRead(
-                    inner,
-                ))) => matches!(
-                    inner.as_ref(),
-                    FnxSealedReadError::Input(FnxReadError::SourceLimit {
-                        resource: "work units",
-                        limit,
-                        requested,
-                    }) if *limit == u128::from(before.records) && requested > limit
-                ),
-                _ => false,
-            },
-            _ => false,
-        };
-        assert!(refused_original_cap, "{error:?}");
+        assert!(
+            is_snapshot_or_source_work_limit(&error, before.records),
+            "{error:?}",
+        );
         let visible = prepare(
             &format!("{BFS} YIELD node,distance RETURN node,distance ORDER BY node"),
             &params,
@@ -1541,8 +1567,34 @@ fn sealed_paths_share_limits_and_preserve_reached_errors_under_limit_zero() {
             .await
             .unwrap();
         assert_eq!(complete.rows.len(), 8);
-        let exact = GqlQueryPolicy::new(
+        // The snapshot-record receipt excludes separate source Work events.
+        // The existing CALL contract also uses this cap for native source
+        // work, so retaining the receipt alone must refuse, even on reuse.
+        let records_only = GqlQueryPolicy::new(
             complete.records,
+            8,
+            complete.evaluator_work,
+            complete.evaluator_scratch,
+        );
+        let error = execute(
+            &prepared,
+            &mut cold,
+            &cx,
+            records_only,
+            &spill_pool,
+            1,
+            complete.sort_work,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            is_snapshot_or_source_work_limit(&error, complete.records),
+            "{error:?}",
+        );
+        // Keep the original ordinary source allowance while admitting the
+        // measured evaluator, result and physical sort dimensions exactly.
+        let exact = GqlQueryPolicy::new(
+            policy().rows.max_snapshot_records().unwrap(),
             8,
             complete.evaluator_work,
             complete.evaluator_scratch,
@@ -1578,12 +1630,15 @@ fn sealed_paths_share_limits_and_preserve_reached_errors_under_limit_zero() {
                 3 => (policy(), complete.sort_work - 1),
                 _ => unreachable!(),
             };
-            assert!(
-                execute(&prepared, &mut cold, &cx, allowance, &spill_pool, 1, work)
-                    .await
-                    .is_err(),
-                "dimension {dimension}",
-            );
+            let error = execute(&prepared, &mut cold, &cx, allowance, &spill_pool, 1, work)
+                .await
+                .unwrap_err();
+            if dimension == 0 {
+                assert!(
+                    is_snapshot_or_source_work_limit(&error, complete.records - 1),
+                    "{error:?}",
+                );
+            }
             assert_eq!(spill_pool.used(), 0);
         }
         let late = format!(
