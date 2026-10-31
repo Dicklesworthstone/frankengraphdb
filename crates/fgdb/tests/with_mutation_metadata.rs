@@ -641,6 +641,153 @@ async fn apply_continuation(
 }
 
 #[test]
+fn renamed_post_write_fields_keep_authority_final_state_and_atomic_failure() {
+    run(async |commit, cx, txcx| {
+        for authorized in [false, true] {
+            let vfs = MemVfs::new().unwrap();
+            let path = vfs.database_dir();
+            let mut db = Database::create_with_vfs(commit, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            db.write(commit, fixture()).await.unwrap();
+            let before = db.frontier().unwrap();
+            let prefix = "MATCH (n:Item) WITH n SET n.p=n.p+10 \
+                          WITH n AS first WITH first AS kept";
+            let statement = format!("{prefix} RETURN kept.p AS p,kept.q AS q ORDER BY p");
+            assert!(
+                apply_continuation(
+                    &mut db,
+                    (commit, cx, txcx),
+                    &statement,
+                    &["p", "q"],
+                    authorized,
+                    1,
+                )
+                .await
+                .is_err(),
+                "authorized={authorized}",
+            );
+            assert_eq!(db.frontier().unwrap(), before);
+            assert_eq!(read_p(&db, cx), vec![vec![int(1)], vec![int(2)]]);
+            let failing = format!("{prefix} RETURN 1/(kept.p-12) AS bad LIMIT 0");
+            assert!(
+                apply_continuation(
+                    &mut db,
+                    (commit, cx, txcx),
+                    &failing,
+                    &["bad"],
+                    authorized,
+                    0,
+                )
+                .await
+                .is_err(),
+                "authorized={authorized}",
+            );
+            assert_eq!(db.frontier().unwrap(), before);
+            assert_eq!(read_p(&db, cx), vec![vec![int(1)], vec![int(2)]]);
+            let actual = apply_continuation(
+                &mut db,
+                (commit, cx, txcx),
+                &statement,
+                &["p", "q"],
+                authorized,
+                2,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("authorized={authorized}: {error}"));
+            assert_eq!(
+                actual,
+                (1..=2)
+                    .map(|id| vec![int(id + 10), if authorized { null() } else { int(id * 10) }])
+                    .collect::<Vec<_>>(),
+                "the hidden q stays masked after every alias; authorized={authorized}",
+            );
+            db.compact(commit).await.unwrap();
+            drop(db);
+            let db = Database::open_with_vfs(commit, vfs, &path, keys())
+                .await
+                .unwrap();
+            let persisted = db
+                .query(
+                    cx,
+                    "MATCH (n:Item) WITH n WITH n AS first WITH first AS kept \
+                     RETURN kept.p AS p,kept.q AS q ORDER BY p",
+                    &GqlParameters::new(),
+                    Catalog,
+                    query_policy(2),
+                )
+                .unwrap();
+            assert_eq!(
+                rows(persisted, &["p", "q"]),
+                vec![vec![int(11), int(10)], vec![int(12), int(20)]],
+            );
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+    });
+}
+
+#[test]
+fn renamed_identity_fields_feed_later_write_clauses() {
+    run(async |commit, cx, txcx| {
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        db.write(commit, fixture()).await.unwrap();
+        let result = apply(
+            &mut db,
+            commit,
+            cx,
+            txcx,
+            "MATCH (n:Item) WITH n SET n.q=9 WITH n AS kept \
+             WITH kept AS later SET later.p=later.p+later.q \
+             RETURN later.p AS p,later.q AS q ORDER BY p",
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows(result, &["p", "q"]),
+            vec![vec![int(10), int(9)], vec![int(11), int(9)]]
+        );
+        assert_eq!(read_p(&db, cx), vec![vec![int(10)], vec![int(11)]]);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn nullable_aliases_keep_unwritten_fields_and_skip_null_target_expressions() {
+    run(async |commit, cx, txcx| {
+        let mut db = Database::open_memory(commit, keys()).await.unwrap();
+        db.write(commit, fixture()).await.unwrap();
+        let result = apply(
+            &mut db,
+            commit,
+            cx,
+            txcx,
+            "MATCH (a:Item) OPTIONAL MATCH (b:Missing) WITH a,b \
+             SET a.p=a.p+10,b.p=1/0 \
+             WITH b AS absent,a AS kept WITH kept,absent \
+             RETURN kept.p AS p,kept.q AS q,absent.p AS missing_p,absent.q AS missing_q \
+             ORDER BY p",
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows(result, &["p", "q", "missing_p", "missing_q"]),
+            vec![
+                vec![int(11), int(10), null(), null()],
+                vec![int(12), int(20), null(), null()],
+            ],
+        );
+        assert_eq!(read_p(&db, cx), vec![vec![int(11)], vec![int(12)]]);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
 fn optional_and_unwind_continuations_return_final_scoped_maps_and_rollback() {
     run(async |commit, cx, txcx| {
         let prefixes = [

@@ -15,7 +15,7 @@ const MAX_FILTER_NESTING: usize = 64;
 pub(in crate::graph_text) type RowSchema<'a> = Vec<(Name<'a>, GraphSetColumnType)>;
 
 #[derive(Default)]
-struct ReadLocals<'a> {
+pub(in crate::graph_text::scoped::mutation) struct ReadLocals<'a> {
     scopes: Vec<ReadLocal<'a>>,
 }
 
@@ -29,7 +29,7 @@ struct ReadLocal<'a> {
 impl<'a> ReadLocals<'a> {
     // Inputs use the enclosing scope; only WHERE and the body see the locals.
     // A binder's declaration is not a read of an enclosing value.
-    fn observe(
+    pub(in crate::graph_text::scoped::mutation) fn observe(
         &mut self,
         token: Token<'a>,
         previous: Option<TokenKind<'a>>,
@@ -102,7 +102,7 @@ impl<'a> ReadLocals<'a> {
         Ok(false)
     }
 
-    fn shadows(&self, name: &str) -> bool {
+    pub(in crate::graph_text::scoped::mutation) fn shadows(&self, name: &str) -> bool {
         self.scopes
             .iter()
             .any(|scope| scope.active && scope.bindings.contains(&name))
@@ -164,16 +164,29 @@ pub(in crate::graph_text::scoped::mutation) fn ends_boundary_scope(
     .any(|clause| word.eq_ignore_ascii_case(clause))
 }
 
-/// The aliases of `carried` a later plain WITH projects under their own
-/// names (`WITH a, b AS b, a.p AS x` keeps `a` and `b`; `WITH *` keeps all),
-/// read from the token after its WITH. A grouping WITH keeps none: its rows
-/// are groups. Either kind still reads them in its own items.
-fn later_with_keeps<'a>(
+/// The aliases a later plain WITH projects unchanged, paired with their
+/// original boundary names. Renaming an identity does not change its fields:
+/// `WITH a AS b` carries `(b, a)`, and a subsequent `WITH b AS c` carries
+/// `(c, a)`. A grouping WITH keeps none here: its rows are groups. Either
+/// kind still reads the incoming bindings in its own items.
+pub(in crate::graph_text::scoped::mutation) fn later_with_keeps<'a>(
     lexer: Lexer<'a>,
-    carried: &[&'a str],
-) -> Result<Vec<&'a str>, GraphPatternTextError> {
-    let (kept, grouping) = later_with_items(lexer, carried)?;
-    Ok(if grouping { Vec::new() } else { kept })
+    carried: &[(&'a str, &'a str)],
+) -> Result<Vec<(&'a str, &'a str)>, GraphPatternTextError> {
+    let names: Vec<_> = carried.iter().map(|&(name, _)| name).collect();
+    let (kept, grouping) = later_with_items(lexer, &names)?;
+    Ok(if grouping {
+        Vec::new()
+    } else {
+        kept.into_iter()
+            .filter_map(|(source, alias)| {
+                carried
+                    .iter()
+                    .find(|&&(name, _)| name == source)
+                    .map(|&(_, original)| (alias, original))
+            })
+            .collect()
+    })
 }
 
 /// The aliases of `carried` a later grouping WITH keeps as bare grouping
@@ -184,15 +197,22 @@ fn later_grouping_keys<'a>(
     carried: &[&'a str],
 ) -> Result<Option<Vec<&'a str>>, GraphPatternTextError> {
     let (kept, grouping) = later_with_items(lexer, carried)?;
-    Ok(grouping.then_some(kept))
+    // Pattern-comprehension hoisting still requires a grouping key to keep
+    // its graph-scope name. Property aliases use the row owner separately.
+    Ok(grouping.then(|| {
+        kept.into_iter()
+            .filter_map(|(source, alias)| (source == alias).then_some(source))
+            .collect()
+    }))
 }
 
-/// The aliases of `carried` a later WITH projects under their own names, and
-/// whether an item calls an aggregate function.
+/// The source/alias pairs a later WITH projects as bare identities, and
+/// whether an item calls an aggregate function. Expressions do not carry an
+/// identity merely because their output happens to reuse its name.
 fn later_with_items<'a>(
     mut lexer: Lexer<'a>,
     carried: &[&'a str],
-) -> Result<(Vec<&'a str>, bool), GraphPatternTextError> {
+) -> Result<(Vec<(&'a str, &'a str)>, bool), GraphPatternTextError> {
     const ENDS: [&str; 19] = [
         "WHERE",
         "ORDER",
@@ -214,7 +234,7 @@ fn later_with_items<'a>(
         "DETACH",
         "REMOVE",
     ];
-    let mut kept: Vec<&'a str> = Vec::new();
+    let mut kept: Vec<(&'a str, &'a str)> = Vec::new();
     let mut item: Vec<TokenKind<'a>> = Vec::new();
     let mut depth = 0_usize;
     let mut first = true;
@@ -252,21 +272,24 @@ fn later_with_items<'a>(
             _ => false,
         };
         if ends || (depth == 0 && matches!(token.kind, TokenKind::Punct(b','))) {
-            let names: &[&'a str] = match item.as_slice() {
-                [TokenKind::Punct(b'*')] => carried,
-                [TokenKind::Word(name)] => core::slice::from_ref(name),
+            let pair = match item.as_slice() {
+                [TokenKind::Word(name)] => Some((*name, *name)),
                 [
                     TokenKind::Word(name),
                     TokenKind::Word(r#as),
                     TokenKind::Word(alias),
-                ] if r#as.eq_ignore_ascii_case("AS") && name == alias => {
-                    core::slice::from_ref(name)
-                }
-                _ => &[],
+                ] if r#as.eq_ignore_ascii_case("AS") => Some((*name, *alias)),
+                _ => None,
             };
-            for &name in names {
-                if carried.contains(&name) && !kept.contains(&name) {
-                    kept.push(name);
+            if let Some((source, alias)) = pair {
+                if carried.contains(&source) && !kept.contains(&(source, alias)) {
+                    kept.push((source, alias));
+                }
+            } else if matches!(item.as_slice(), [TokenKind::Punct(b'*')]) {
+                for &name in carried {
+                    if !kept.contains(&(name, name)) {
+                        kept.push((name, name));
+                    }
                 }
             }
             if ends {
@@ -284,6 +307,20 @@ fn later_with_items<'a>(
         }
         first = false;
         item.push(token.kind);
+    }
+}
+
+/// Resolve a name in the lookahead's current WITH scope to the name the
+/// boundary row actually owns. Missing names have been dropped or replaced.
+pub(in crate::graph_text::scoped::mutation) fn carried_alias<'a>(
+    carried: Option<&[(&'a str, &'a str)]>,
+    alias: &'a str,
+) -> Option<&'a str> {
+    match carried {
+        Some(kept) => kept
+            .iter()
+            .find_map(|&(name, original)| (name == alias).then_some(original)),
+        None => Some(alias),
     }
 }
 
@@ -654,11 +691,11 @@ impl<'a> Parser<'a> {
     /// stage or another MATCH part can see them, and `*` never does. A
     /// property or metadata value is a function of its graph identity, so
     /// hidden columns never change DISTINCT or multiplicity. A later plain
-    /// WITH that projects the element under its own name extends the scope
+    /// WITH that projects the unchanged identity extends the scope
     /// through its items, WHERE and pages to the next stage, and its row
-    /// carries the hidden columns (carry_boundary_reads). Reads past a stage
-    /// that drops, renames or groups the element, or through computed values,
-    /// stay refused as before; a page after the RETURN belongs
+    /// carries the hidden columns (carry_boundary_reads), including through
+    /// aliases. Reads past a stage that drops or groups the element, or through
+    /// computed values, stay refused as before; a page after the RETURN belongs
     /// to the set parser, which addresses the RETURN's own columns. `offset`
     /// is where this head's graph inputs start in its column space.
     pub(super) fn hoist_boundary_reads(
@@ -693,14 +730,13 @@ impl<'a> Parser<'a> {
         // end: the write reads the carried elements too, and the UNWIND keeps
         // their hidden columns for it (row_pipeline_prefix, fgdb-cpny9).
         let mut unwound = false;
-        // A later plain WITH that projects a carried element under its own
-        // name keeps that element's reads in scope (MATCH (a) WITH a WITH a
-        // RETURN a.p); row_pipeline_prefix carries their hidden columns
-        // through it. `carried` is the aliases every such WITH kept so far
-        // (`None` before the first); `pending` is a WITH's set, applied once
-        // its own items, which still read the incoming row, end.
-        let mut carried: Option<Vec<&'a str>> = None;
-        let mut pending: Option<Vec<&'a str>> = None;
+        // A later plain WITH keeps an identity's reads in scope under its
+        // projected aliases. Each alias maps back to this head's original
+        // name, so simultaneous swaps and repeated renames never capture a
+        // different element. `pending` takes effect only after that WITH's
+        // items, which still read the incoming row, end.
+        let mut carried: Option<Vec<(&'a str, &'a str)>> = None;
+        let mut pending: Option<Vec<(&'a str, &'a str)>> = None;
         // When the first later WITH groups, its bare keys (`WITH a, b,
         // count(*) AS c` keeps `a` and `b`), from the end of its items on. A
         // pattern the scope after it reads over those keys alone is a
@@ -733,7 +769,8 @@ impl<'a> Parser<'a> {
             }
             let incoming: Vec<&'a str> = head.outputs.iter().map(|(name, _)| name.text).collect();
             pending_grouping = later_grouping_keys(self.lexer.clone(), &incoming)?;
-            pending = Some(later_with_keeps(self.lexer.clone(), &incoming)?);
+            let aliases: Vec<_> = incoming.iter().map(|&name| (name, name)).collect();
+            pending = Some(later_with_keeps(self.lexer.clone(), &aliases)?);
         }
         let visible = head.outputs.len();
         // Existence predicates of the WHERE come first among the hidden
@@ -797,9 +834,15 @@ impl<'a> Parser<'a> {
             if let TokenKind::Word(word) = token.kind
                 && depth == 0
                 && !after_dot
-                && ["WHERE", "ORDER", "SKIP", "LIMIT", "RETURN", "WITH"]
-                    .iter()
-                    .any(|clause| word.eq_ignore_ascii_case(clause))
+                && !matches!(window[2], Some(TokenKind::Word(previous))
+                    if previous.eq_ignore_ascii_case("AS"))
+                && [
+                    "WHERE", "ORDER", "SKIP", "LIMIT", "RETURN", "WITH", "UNWIND", "CREATE",
+                    "MERGE", "SET", "DELETE", "DETACH", "REMOVE",
+                ]
+                .iter()
+                .any(|clause| word.eq_ignore_ascii_case(clause))
+                && (!word.eq_ignore_ascii_case("WITH") || ends_boundary_scope(word, window[2]))
                 && let Some(kept) = pending.take()
             {
                 carried = Some(kept);
@@ -915,10 +958,10 @@ impl<'a> Parser<'a> {
                         && word.eq_ignore_ascii_case("WITH")
                         && ends_boundary_scope(word, window[2]) =>
                 {
-                    let incoming: Vec<&'a str> = carried.clone().unwrap_or_else(|| {
+                    let incoming: Vec<(&'a str, &'a str)> = carried.clone().unwrap_or_else(|| {
                         head.outputs[..visible]
                             .iter()
-                            .map(|(name, _)| name.text)
+                            .map(|(name, _)| (name.text, name.text))
                             .collect()
                     });
                     // A WITH that receives no carried element has nothing to
@@ -930,7 +973,8 @@ impl<'a> Parser<'a> {
                     // and pages read are out of scope from here on.
                     before_return = false;
                     if carried.is_none() {
-                        pending_grouping = later_grouping_keys(lexer.clone(), &incoming)?;
+                        let names: Vec<_> = incoming.iter().map(|&(name, _)| name).collect();
+                        pending_grouping = later_grouping_keys(lexer.clone(), &names)?;
                     }
                     pending = Some(later_with_keeps(lexer.clone(), &incoming)?);
                 }
@@ -960,8 +1004,6 @@ impl<'a> Parser<'a> {
                         let column = hidden_boundary_column(head, token.at, offset + input)?;
                         scoped.push((word, None, column));
                     }
-                    let kept =
-                        |alias: &str| carried.as_ref().is_none_or(|kept| kept.contains(&alias));
                     // A label test `v:L` reads the column `labels(v)` or
                     // `type(v)` reads (label_test_operand, fgdb-qo3jv).
                     let label_test = if matches!(next, TokenKind::Punct(b':'))
@@ -970,7 +1012,10 @@ impl<'a> Parser<'a> {
                         [GraphPathFunction::Labels, GraphPathFunction::Type]
                             .into_iter()
                             .find(|&function| {
-                                boundary_metadata_binding(head, offset, word, function).is_some()
+                                carried_alias(carried.as_deref(), word).is_some_and(|alias| {
+                                    boundary_metadata_binding(head, offset, alias, function)
+                                        .is_some()
+                                })
                             })
                             .map(|function| {
                                 (
@@ -990,12 +1035,12 @@ impl<'a> Parser<'a> {
                     };
                     if let Some((source, function)) = metadata
                         && !read_locals.shadows(source.text)
-                        && kept(source.text)
+                        && let Some(alias) = carried_alias(carried.as_deref(), source.text)
                         && let Some(binding) =
-                            boundary_metadata_source(head, offset, imports, source.text, function)
-                        && !functions
-                            .iter()
-                            .any(|&(alias, known, _)| alias == source.text && known == function)
+                            boundary_metadata_source(head, offset, imports, alias, function)
+                        && !functions.iter().any(|&(known_alias, known, _)| {
+                            known_alias == alias && known == function
+                        })
                     {
                         let name = BOUNDARY_READ_NAMES
                             .iter()
@@ -1044,15 +1089,15 @@ impl<'a> Parser<'a> {
                             },
                             value,
                         ));
-                        functions.push((source.text, function, head.outputs.len() - 1));
+                        functions.push((alias, function, head.outputs.len() - 1));
                     }
                     if let Some(source) = property_map_source(word, token.at, &lexer)?
                         && !read_locals.shadows(source.text)
-                        && kept(source.text)
+                        && let Some(alias) = carried_alias(carried.as_deref(), source.text)
                         && let Some(binding) =
-                            boundary_property_source(head, offset, imports, source.text)
-                        && !reads.iter().any(|&(alias, key, _): &(_, Name<'_>, _)| {
-                            alias == source.text && key.text == "*"
+                            boundary_property_source(head, offset, imports, alias)
+                        && !reads.iter().any(|&(known, key, _): &(_, Name<'_>, _)| {
+                            known == alias && key.text == "*"
                         })
                     {
                         let name = BOUNDARY_READ_NAMES
@@ -1089,7 +1134,7 @@ impl<'a> Parser<'a> {
                             value,
                         ));
                         reads.push((
-                            source.text,
+                            alias,
                             Name {
                                 text: "*",
                                 at: source.at,
@@ -1102,7 +1147,7 @@ impl<'a> Parser<'a> {
                     let chained = matches!(window[0], Some(TokenKind::Punct(b'.')));
                     if let (Some(TokenKind::Word(alias)), false) = (window[1], chained)
                         && !read_locals.shadows(alias)
-                        && carried.as_ref().is_none_or(|kept| kept.contains(&alias))
+                        && let Some(alias) = carried_alias(carried.as_deref(), alias)
                         && let Some(source) = boundary_property_source(head, offset, imports, alias)
                         && !reads.iter().any(|&(read, key, _): &(_, Name<'_>, _)| {
                             read == alias && key.text == property
@@ -1851,10 +1896,11 @@ impl<'a> Parser<'a> {
     }
 
     /// After a plain WITH over a boundary row: the hidden reads of each
-    /// carried element it projects as a bare item under its own name stay
-    /// hidden columns, after its items, and become the new row's boundary
-    /// reads. Any other read ends here. A property or metadata value is a
-    /// function of its element, so a hidden column never changes DISTINCT.
+    /// unchanged identity stay hidden columns under every projected alias.
+    /// A duplicated identity shares one hidden value; swaps resolve against
+    /// the incoming column indices. Any other read ends here. A property or
+    /// metadata value is a function of its element, so a hidden column never
+    /// changes DISTINCT.
     #[allow(clippy::type_complexity)]
     fn carry_boundary_reads(
         &mut self,
@@ -1867,14 +1913,15 @@ impl<'a> Parser<'a> {
         projection: &mut Vec<ReadProjectionTemplate>,
         next_schema: &mut RowSchema<'a>,
     ) {
-        let kept: Vec<&'a str> = (schema[..visible].iter().enumerate())
-            .filter(|&(index, (name, _))| {
-                projection.iter().any(|item| {
-                    item.name == name.text
-                        && matches!(item.value, ReadValueTemplate::Column(column) if column == index)
-                })
+        let kept: Vec<(&'a str, &'a str)> = projection
+            .iter()
+            .zip(next_schema.iter())
+            .filter_map(|(item, (name, _))| {
+                let ReadValueTemplate::Column(column) = item.value else {
+                    return None;
+                };
+                (column < visible).then(|| (schema[column].0.text, name.text))
             })
-            .map(|(_, (name, _))| name.text)
             .collect();
         let width = next_schema.len();
         // A hidden name an item already took cannot be carried.
@@ -1898,14 +1945,24 @@ impl<'a> Parser<'a> {
             moved.push((column, to));
             to
         };
-        let reads: Vec<_> = (reads.into_iter())
-            .filter(|&(alias, _, column)| kept.contains(&alias) && carried[column])
-            .map(|(alias, key, column)| (alias, key, carry(column)))
-            .collect();
-        let functions: Vec<_> = (functions.into_iter())
-            .filter(|&(alias, _, column)| kept.contains(&alias) && carried[column])
-            .map(|(alias, function, column)| (alias, function, carry(column)))
-            .collect();
+        let mut next_reads = Vec::new();
+        for (source, key, column) in reads {
+            if carried[column] {
+                for &(_, alias) in kept.iter().filter(|&&(name, _)| name == source) {
+                    next_reads.push((alias, key, carry(column)));
+                }
+            }
+        }
+        let mut next_functions = Vec::new();
+        for (source, function, column) in functions {
+            if carried[column] {
+                for &(_, alias) in kept.iter().filter(|&&(name, _)| name == source) {
+                    next_functions.push((alias, function, carry(column)));
+                }
+            }
+        }
+        let reads = next_reads;
+        let functions = next_functions;
         if reads.is_empty() && functions.is_empty() {
             return;
         }
@@ -2182,7 +2239,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
             // A plain WITH reads the carried hidden reads itself, and keeps
-            // those of each element it projects under its own name, so a
+            // those of each unchanged element under its projected aliases, so a
             // later stage or the RETURN reads `a.p` through them (MATCH (a)
             // WITH a WITH a RETURN a.p, TCK WithOrderBy4 [7]).
             let boundary = self

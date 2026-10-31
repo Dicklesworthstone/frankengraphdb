@@ -1177,9 +1177,10 @@ impl<'a> Parser<'a> {
     }
 
     /// `alias.key` reads of a carried vertex or edge in the WITH's WHERE,
-    /// pages and terminal RETURN, or through the first UNWIND expression up
-    /// to its top-level AS. A later WITH/MATCH/CALL/set operation ends the
-    /// scope. Chained keys and other names are not carried property reads.
+    /// pages and terminal RETURN, including plain WITH identity aliases, or
+    /// through the first UNWIND expression up to its top-level AS. MATCH,
+    /// CALL and set operations end the scope. Chained keys, dropped bindings
+    /// and expression locals are not carried property reads.
     pub(super) fn write_tail_reads(
         &self,
         outputs: &[(Name<'a>, GraphSetColumnType)],
@@ -1210,11 +1211,31 @@ impl<'a> Parser<'a> {
         let mut depth = 0_usize;
         let mut unwind = false;
         let (mut setting, mut target) = (false, false);
+        let mut carried: Option<Vec<(&'a str, &'a str)>> = None;
+        let mut pending: Option<Vec<(&'a str, &'a str)>> = None;
+        let mut locals = return_projection::pipeline::ReadLocals::default();
         loop {
             let previous = back[2].map(|token| token.kind);
             let after_dot = matches!(previous, Some(TokenKind::Punct(b'.')));
             let after_alias = matches!(previous, Some(TokenKind::Word(word))
                 if word.eq_ignore_ascii_case("AS"));
+            locals.observe(token, previous, &lexer, depth)?;
+            if let TokenKind::Word(word) = token.kind
+                && depth == 0
+                && !after_dot
+                && !after_alias
+                && [
+                    "WHERE", "ORDER", "SKIP", "LIMIT", "RETURN", "WITH", "UNWIND", "CREATE",
+                    "MERGE", "SET", "DELETE", "DETACH", "REMOVE",
+                ]
+                .iter()
+                .any(|clause| word.eq_ignore_ascii_case(clause))
+                && (!word.eq_ignore_ascii_case("WITH")
+                    || return_projection::pipeline::ends_boundary_scope(word, previous))
+                && let Some(kept) = pending.take()
+            {
+                carried = Some(kept);
+            }
             if skip_set_targets && depth == 0 && !after_dot && !after_alias {
                 match token.kind {
                     TokenKind::Word(word) if word.eq_ignore_ascii_case("SET") => {
@@ -1226,7 +1247,11 @@ impl<'a> Parser<'a> {
                             "ON", "RETURN", "WITH", "CREATE", "MERGE", "REMOVE", "DELETE", "DETACH",
                         ]
                         .iter()
-                        .any(|clause| word.eq_ignore_ascii_case(clause)) =>
+                        .any(|clause| word.eq_ignore_ascii_case(clause))
+                            && (!word.eq_ignore_ascii_case("WITH")
+                                || return_projection::pipeline::ends_boundary_scope(
+                                    word, previous,
+                                )) =>
                     {
                         setting = false;
                         target = false;
@@ -1263,6 +1288,25 @@ impl<'a> Parser<'a> {
                         && depth == 0
                         && !after_dot
                         && !after_alias
+                        && word.eq_ignore_ascii_case("WITH")
+                        && return_projection::pipeline::ends_boundary_scope(word, previous) =>
+                {
+                    let incoming: Vec<_> = carried.clone().unwrap_or_else(|| {
+                        outputs
+                            .iter()
+                            .map(|(name, _)| (name.text, name.text))
+                            .collect()
+                    });
+                    pending = Some(return_projection::pipeline::later_with_keeps(
+                        lexer.clone(),
+                        &incoming,
+                    )?);
+                }
+                TokenKind::Word(word)
+                    if !unwind
+                        && depth == 0
+                        && !after_dot
+                        && !after_alias
                         && return_projection::pipeline::ends_boundary_scope(word, previous) =>
                 {
                     break;
@@ -1279,6 +1323,9 @@ impl<'a> Parser<'a> {
                                 ..
                             })
                         )
+                        && !locals.shadows(alias)
+                        && let Some(alias) =
+                            return_projection::pipeline::carried_alias(carried.as_deref(), alias)
                         && outputs.iter().any(|(name, kind)| {
                             name.text == alias
                                 && matches!(

@@ -613,6 +613,129 @@ fn reordered_row_bindings_carry_simultaneous_final_fields_through_an_alias() {
 }
 
 #[test]
+fn renamed_write_tails_read_unwritten_fields_through_repeated_identity_aliases() {
+    for tail in [
+        "WITH n AS kept",
+        "WITH 7 AS pad,n AS first WITH first AS kept",
+        "WITH n AS first,n AS second WITH second AS kept",
+        "WITH n AS first WITH first AS n WITH n AS kept",
+    ] {
+        let text = format!(
+            "MATCH (n) WITH n SET n.q=9 {tail} \
+             RETURN kept.p AS p,kept.q AS q ORDER BY p"
+        );
+        let query = prepare(&text);
+        let batch = execute(&query, policy(3), || Ok(())).unwrap();
+        assert_eq!(
+            rows(&batch),
+            vec![
+                vec![int(1), int(9)],
+                vec![int(2), int(9)],
+                vec![int(3), int(9)]
+            ],
+            "{text}",
+        );
+        assert_eq!(batch.mutation().stats().effects, 3, "{text}");
+        assert_eq!(batch.mutation().stats().selection.result_rows, 3, "{text}");
+    }
+}
+
+#[test]
+fn identity_alias_swaps_preserve_final_fields_and_bag_multiplicity() {
+    let query = prepare(
+        "MATCH (a),(b) WITH a,b SET a.q=a.p+10 \
+         WITH a AS b,b AS a WITH b AS updated,a AS peer, b AS duplicate \
+         RETURN updated.p AS p,updated.q AS q,peer.p AS peer, \
+         duplicate.p AS duplicate ORDER BY p,peer",
+    );
+    let batch = execute(&query, policy(9), || Ok(())).unwrap();
+    assert_eq!(
+        rows(&batch),
+        (1..=3)
+            .flat_map(|value| {
+                (1..=3).map(move |peer| vec![int(value), int(value + 10), int(peer), int(value)])
+            })
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(batch.mutation().stats().effects, 3);
+    assert_eq!(batch.mutation().stats().selection.result_rows, 9);
+}
+
+#[test]
+fn string_predicates_keep_the_incoming_identity_scope_within_with_items() {
+    let query = prepare(
+        "MATCH (n) WITH n SET n.q=9 WITH n AS kept \
+         WITH kept AS later,'x' STARTS WITH 'x' AS starts, \
+         'x' ENDS WITH 'x' AS ends,kept.p AS p,kept.q AS q \
+         RETURN later.p AS later_p,p,q,starts,ends ORDER BY p",
+    );
+    let batch = execute(&query, policy(3), || Ok(())).unwrap();
+    assert_eq!(
+        rows(&batch),
+        (1..=3)
+            .map(|value| {
+                vec![
+                    int(value),
+                    int(value),
+                    int(9),
+                    GraphValue::Scalar(CanonicalScalar::Bool(true)),
+                    GraphValue::Scalar(CanonicalScalar::Bool(true)),
+                ]
+            })
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(batch.mutation().stats().effects, 3);
+}
+
+#[test]
+fn renamed_write_tails_keep_local_scope_and_fail_before_exposing_proposals() {
+    let query = prepare(
+        "MATCH (n) WITH n SET n.q=9 WITH n AS kept \
+         RETURN kept.p AS p,[kept IN [{local_only:42}] | kept.local_only] AS local ORDER BY p",
+    );
+    assert_eq!(
+        rows(&execute(&query, policy(3), || Ok(())).unwrap()),
+        (1..=3)
+            .map(|value| vec![int(value), GraphValue::List(vec![int(42)].into())])
+            .collect::<Vec<_>>()
+    );
+    let query = prepare(
+        "MATCH (n) WITH n SET n.q=9 WITH n AS first WITH first AS kept \
+         RETURN 1/(kept.p-2) AS bad LIMIT 0",
+    );
+    assert!(matches!(
+        execute(&query, policy(0), || Ok(())),
+        Err(GqlQueryError::Source(GraphMutationQueryError::Returning(_)))
+    ));
+    let query = prepare(
+        "MATCH (n) WITH n SET n.q=9 WITH n AS first WITH first AS kept \
+         RETURN kept.p AS p,kept.q AS q ORDER BY p",
+    );
+    let mut checkpoints = 0;
+    let batch = execute(&query, policy(3), || {
+        checkpoints += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(batch.mutation().stats().effects, 3);
+    assert!(execute(&query, policy(2), || Ok(())).is_err());
+    assert!(checkpoints > 1);
+    for fail_at in 0..checkpoints {
+        let mut at = 0;
+        let result = execute(&query, policy(3), || {
+            let current = at;
+            at += 1;
+            if current == fail_at {
+                Err(fail_at)
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(result, Err(GqlQueryError::Interrupted(index)) if index == fail_at));
+    }
+}
+
+#[test]
 fn grouped_row_mutations_preserve_occurrences_and_compound_summary_slots() {
     let query = prepare(
         "MATCH (a),(b) WITH 7 AS pad,a AS source SET source.p=source.p+10 \
@@ -664,7 +787,9 @@ fn completed_projection_drops_input_scope_without_hiding_real_output_aliases() {
 #[test]
 fn unavailable_or_private_row_fields_refuse_without_panics_or_catalog_access() {
     for text in [
-        "MATCH (n) WITH n SET n.p=1 WITH n AS kept RETURN kept.q",
+        "MATCH (n) WITH n SET n.p=1 WITH n AS kept RETURN n.q",
+        "MATCH (n) WITH n SET n.p=1 WITH n AS kept WITH 0 AS kept RETURN kept.q",
+        "MATCH (n) WITH n SET n.p=1 WITH n AS kept WITH kept.p AS value RETURN kept.q",
         "MATCH (n) WITH n SET n.p=1 RETURN __fg_boundary_0",
         "MATCH (n) WITH n SET n.p=1 WITH __fg_boundary_0 AS leaked RETURN leaked",
         "MATCH (n) WITH n SET n.p=1 WITH 0 AS kept RETURN kept.p",
