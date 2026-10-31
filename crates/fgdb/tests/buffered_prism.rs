@@ -2,6 +2,7 @@
 //! Explicit historical graphs and the resident source are independent oracles.
 #![recursion_limit = "256"]
 
+#[path = "buffered_prism/selected_weight.rs"]
 mod selected_weight;
 
 use asupersync::lab::run_async_under_lab;
