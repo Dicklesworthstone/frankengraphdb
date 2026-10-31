@@ -321,14 +321,38 @@ fn map_arguments(
         fgdb_gql::unwind_write::GraphUnwindWriteText::requires_computed_map_input(text),
         Ok(true)
     ) {
-        // Keep computed whole maps intact until native script admission, even
-        // when their input rows happen to share a key set.
+        // Computed MATCH maps keep the native relation's complete input bag,
+        // including heterogeneous keys and simultaneous duplicate targets.
         return GqlMapArgumentText::lower_fields(text, params);
     }
     if matches!(
         fgdb_gql::unwind_write::GraphUnwindWriteText::parse_if_supported(text),
         Ok(Some(_))
     ) {
+        // The existing scalar batch compiler can retain its one-staging
+        // proof for uniform root-row maps. The shared map lowerer proves the
+        // key set and lexical sites; native parsing proves the flat profile.
+        // Collection-valued, heterogeneous, empty or dynamic inputs keep the
+        // complete map under the native row-relation owner.
+        let scalar_rows = params.parameter_types().all(|(name, kind)| {
+            if kind != GqlParameterType::List {
+                return true;
+            }
+            matches!(params.get(name), Some(fgdb_gql::GqlParameterValue::List(rows))
+                if !rows.values().is_empty() && rows.values().iter().all(|row| {
+                    matches!(row, fgdb_gql::algebra::GraphValue::Map { values, .. }
+                        if values.iter().all(|value| matches!(value, fgdb_gql::algebra::GraphValue::Scalar(_))))
+                }))
+        });
+        if scalar_rows
+            && let Some((lowered, arguments)) = GqlMapArgumentText::lower(text, params)
+            && matches!(
+                fgdb_gql::unwind_write::GraphUnwindWriteText::parse_if_supported(lowered.text()),
+                Ok(Some(_))
+            )
+        {
+            return Some((lowered, arguments));
+        }
         return None;
     }
     GqlMapArgumentText::lower(text, params)
@@ -1047,6 +1071,46 @@ mod write_return_tests {
                 ElementId::Edge(EId(1_000 + row as u128 * 10 + edge as u128))
             }
         })
+    }
+
+    #[test]
+    fn uniform_scalar_merge_maps_reach_the_existing_batch_owner() {
+        let text = "UNWIND $rows AS row MERGE (n:Copy {p:row.p}) SET n += row";
+        assert!(PreparedGraphWriteChainText::is_chain(text).unwrap());
+        let object = |value| GraphValue::map(vec![("p".into(), value)]).unwrap();
+        for (values, freezes) in [(vec![1, 2], true), (vec![1, 1], false)] {
+            let arguments = GqlParameters::new()
+                .with_list(
+                    "rows",
+                    values.into_iter().map(|value| object(int(value))).collect(),
+                )
+                .unwrap();
+            let (lowered, arguments) = map_arguments(text, &arguments).unwrap();
+            assert!(!PreparedGraphWriteChainText::is_chain(lowered.text()).unwrap());
+            let batch = fgdb_gql::unwind_write::GraphUnwindWriteText::parse(lowered.text())
+                .unwrap()
+                .bind(&arguments, R, symbols)
+                .unwrap();
+            assert_eq!(batch.program().freezes_vertex_upsert_input(), freezes);
+        }
+        for values in [
+            vec![],
+            vec![object(int(1)), GraphValue::map(vec![]).unwrap()],
+            vec![object(GraphValue::List(vec![int(1)].into_boxed_slice()))],
+        ] {
+            let arguments = GqlParameters::new().with_list("rows", values).unwrap();
+            assert!(map_arguments(text, &arguments).is_none());
+        }
+        let arguments = GqlParameters::new()
+            .with_list("rows", vec![object(int(1)), object(int(2))])
+            .unwrap();
+        for text in [
+            "UNWIND $rows AS row WITH row AS patch \
+             MERGE (n:Copy {p:patch.p}) SET n += patch",
+            "UNWIND $rows AS row MATCH (n:Copy {p:row.p}) SET n += row",
+        ] {
+            assert!(map_arguments(text, &arguments).is_none(), "{text}");
+        }
     }
 
     #[test]

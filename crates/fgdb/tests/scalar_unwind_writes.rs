@@ -2189,35 +2189,41 @@ fn a_distinct_key_upsert_batch_stages_once_and_keeps_the_sequential_answer() {
         }
 
         // A repeated key keeps the sequential program: the second row matches
-        // the vertex the first created.
-        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-        let mut txn = db.begin(&txcx).unwrap();
-        let issued = AtomicU64::new(0);
-        txn.query_write(
-            &mut db,
-            &cx,
+        // the vertex the first created. Whole scalar maps must retain this
+        // guard when they enter the existing scalar batch compiler.
+        for statement in [
             "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n.p = row.p",
-            &args(vec![
-                object(vec![("id", int(5)), ("p", int(1))]),
-                object(vec![("id", int(5)), ("p", int(2))]),
-            ]),
-            symbols,
-            R,
-            policy(100, 10),
-            |request| {
-                let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
-                Ok::<_, Infallible>(match request.request {
-                    GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
-                    GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
-                })
-            },
-        )
-        .unwrap();
-        txn.finish(&mut db, &commit).await.unwrap();
-        let vertices = db.vertices().unwrap();
-        assert_eq!(vertices.len(), 1);
-        assert_eq!(value(&vertices[0], P), int_value(2));
-        assert_eq!(issued.load(Ordering::Relaxed), 1);
+            "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n += row",
+        ] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut txn = db.begin(&txcx).unwrap();
+            let issued = AtomicU64::new(0);
+            txn.query_write(
+                &mut db,
+                &cx,
+                statement,
+                &args(vec![
+                    object(vec![("id", int(5)), ("p", int(1))]),
+                    object(vec![("id", int(5)), ("p", int(2))]),
+                ]),
+                symbols,
+                R,
+                policy(100, 10),
+                |request| {
+                    let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
+                    Ok::<_, Infallible>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                    })
+                },
+            )
+            .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+            txn.finish(&mut db, &commit).await.unwrap();
+            let vertices = db.vertices().unwrap();
+            assert_eq!(vertices.len(), 1);
+            assert_eq!(value(&vertices[0], P), int_value(2));
+            assert_eq!(issued.load(Ordering::Relaxed), 1);
+        }
 
         // So does a plain MERGE: the third row matches the first's vertex.
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
@@ -2247,6 +2253,100 @@ fn a_distinct_key_upsert_batch_stages_once_and_keeps_the_sequential_answer() {
         txn.finish(&mut db, &commit).await.unwrap();
         assert_eq!(db.vertices().unwrap().len(), 2);
         assert_eq!(issued.load(Ordering::Relaxed), 2);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn row_map_fallbacks_keep_heterogeneous_keys_collections_and_with_scope() {
+    let ((), report) = run_async_under_lab(0x7363_2a40, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        for statement in [
+            "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) SET n += row",
+            "UNWIND $rows AS row WITH row AS patch \
+             MERGE (n:Entity {id: patch.id}) SET n += patch",
+        ] {
+            for (collection, heterogeneous) in [(false, true), (true, true), (true, false)] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let p = if collection {
+                    list(vec![int(1), int(2)])
+                } else {
+                    int(7)
+                };
+                let second = if heterogeneous {
+                    object(vec![("id", int(5)), ("name", text("later"))])
+                } else {
+                    object(vec![("id", int(5)), ("p", list(vec![int(3)]))])
+                };
+                let issued = AtomicU64::new(0);
+                db.query_write(
+                    &contexts.txn(),
+                    &cx,
+                    &commit,
+                    statement,
+                    &args(vec![object(vec![("id", int(5)), ("p", p)]), second]),
+                    symbols,
+                    R,
+                    policy(100, 10),
+                    |request| {
+                        let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
+                        Ok::<_, Infallible>(match request.request {
+                            GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                            GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                        })
+                    },
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{statement}; collection={collection}: {error:?}"));
+                let vertices = db.vertices().unwrap();
+                assert_eq!(vertices.len(), 1);
+                assert_eq!(issued.load(Ordering::Relaxed), 1);
+                assert_eq!(vertices[0].labels, vec![ENTITY]);
+                assert_eq!(vertices[0].props.len(), if heterogeneous { 3 } else { 2 });
+                for (key, value) in &vertices[0].props {
+                    match *key {
+                        ID => assert_eq!(*value, CanonicalScalar::Int(5).into()),
+                        NAME => assert_eq!(
+                            *value,
+                            CanonicalScalar::ucs_basic_text("later").unwrap().into()
+                        ),
+                        P if collection => {
+                            let fgdb_types::CanonicalPropertyValue::List(values) = value else {
+                                panic!("the first row's list remains a typed list")
+                            };
+                            let expected = if heterogeneous {
+                                vec![
+                                    CanonicalScalar::Int(1).into(),
+                                    CanonicalScalar::Int(2).into(),
+                                ]
+                            } else {
+                                vec![CanonicalScalar::Int(3).into()]
+                            };
+                            assert_eq!(values.values(), expected);
+                        }
+                        P => assert_eq!(*value, CanonicalScalar::Int(7).into()),
+                        _ => panic!("an input row introduced an unexpected property"),
+                    }
+                }
+            }
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            db.query_write(
+                &contexts.txn(),
+                &cx,
+                &commit,
+                statement,
+                &args(vec![]),
+                symbols,
+                R,
+                policy(100, 10),
+                no_allocation,
+            )
+            .await
+            .unwrap();
+            assert!(db.vertices().unwrap().is_empty());
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
