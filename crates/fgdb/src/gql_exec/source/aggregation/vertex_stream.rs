@@ -1,6 +1,7 @@
 //! Actual pull scans over a pinned, already decoded database generation.
 //!
-//! Persistent property candidates or a bounded history spine supply ordered roots.
+//! Persistent property candidates, a bounded history spine or a cold patch merge
+//! supply ordered roots. An unkeyed cold scan does not build a property index.
 //! Equality keeps at most two roots. Literal membership and numeric ranges merge
 //! at most 64 value-bucket heads; wider memberships retain the history scan and
 //! wider ranges test historical membership one identity at a time. Neither
@@ -10,7 +11,9 @@
 //! change its generation. This is not paging an evidence artifact or materialized
 //! graph table, and it does not claim that the pinned generation is out of core.
 
-use crate::gql_exec::source::{IndexMap, SourceEvent, VertexHistoryScanCursor, numeric};
+use crate::gql_exec::source::{
+    IndexMap, SourceEvent, VertexHistoryScanCursor, VertexPatchScanCursor, numeric,
+};
 use crate::{Database, EmbeddedReadView, ReadError};
 use asupersync::fs::Vfs;
 use fgdb_delta_types::PropertyKeyId;
@@ -44,6 +47,7 @@ struct RootEquality {
 
 enum RootCandidates {
     Histories(VertexHistoryScanCursor),
+    Patches(VertexPatchScanCursor),
     // Resolve keys on first demand, never while opening a cursor. Numeric
     // equality has at most one exact key per canonical numeric domain.
     Pending {
@@ -81,9 +85,20 @@ impl SnapshotVertexSource<'_> {
         plan: &VertexScanPlan<Row>,
         allows_property: impl Fn(PropertyKeyId) -> bool,
     ) -> Self {
-        self.with_root_equality_predicates(plan.leading_root_predicates(), &allows_property)
+        let mut source = self
+            .with_root_equality_predicates(plan.leading_root_predicates(), &allows_property)
             .with_root_prefix(plan.leading_root_prefix(), &allows_property)
-            .with_root_membership(plan.leading_root_membership(), allows_property)
+            .with_root_membership(plan.leading_root_membership(), allows_property);
+        // Probe-heavy plans keep the indexed source: scanning every patch for
+        // each neighbor lookup would turn a linear traversal into quadratic
+        // work. Only a plain unkeyed cold root uses the bounded patch merge.
+        if matches!(source.candidates, RootCandidates::Histories(_))
+            && !plan.has_graph_probes()
+            && source.view.snapshot.property_index.get().is_none()
+        {
+            source.candidates = RootCandidates::Patches(VertexPatchScanCursor::default());
+        }
+        source
     }
 
     /// Membership is a private source bound only when its property is visible.
@@ -260,6 +275,16 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                             })
                         },
                     )?,
+                    RootCandidates::Patches(scan) => {
+                        scan.next(&self.view.snapshot.patches, self.as_of, &mut |event| {
+                            control(match event {
+                                SourceEvent::Work | SourceEvent::SnapshotRecord => {
+                                    VertexScanEvent::Work
+                                }
+                                SourceEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
+                            })
+                        })?
+                    }
                     RootCandidates::Range(range) => {
                         return range.next(
                             self.view.snapshot.property_index(),
@@ -301,7 +326,7 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<bool, VertexScanSourceError<ReadError, C>> {
         let key = match &self.candidates {
-            RootCandidates::Histories(_) => return Ok(true),
+            RootCandidates::Histories(_) | RootCandidates::Patches(_) => return Ok(true),
             RootCandidates::Pending { equality, .. } | RootCandidates::Indexed { equality, .. } => {
                 equality.key
             }
@@ -339,7 +364,7 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                         RootCandidates::Membership(membership) => membership
                             .accepts(value, control)
                             .map_err(VertexScanSourceError::Control)?,
-                        RootCandidates::Histories(_) => {
+                        RootCandidates::Histories(_) | RootCandidates::Patches(_) => {
                             unreachable!("unbounded admission accepts every source row")
                         }
                     });
@@ -365,6 +390,14 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
         self.cx.with_restriction(|| {
             control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
             let snapshot = &self.view.snapshot;
+            if let RootCandidates::Patches(scan) = &self.candidates
+                && let Some(row) = scan.current_row(&snapshot.patches, vid, self.as_of)
+            {
+                return Ok(row.map(|row| VertexScanRow {
+                    labels: &row.labels,
+                    properties: &row.props,
+                }));
+            }
             let history = match &self.candidates {
                 RootCandidates::Histories(scan) => scan.history(vid),
                 RootCandidates::Membership(membership) => membership.history(vid),
@@ -372,31 +405,28 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                 RootCandidates::Prefix(prefix) => prefix.history(vid),
                 _ => None,
             };
-            snapshot
-                .property_index()
-                .visible_row_with_history(
-                    &snapshot.patches,
-                    vid,
-                    self.as_of,
-                    history,
-                    &mut |event| {
-                        control(match event {
-                            // The cursor charges one candidate history BEFORE this
-                            // lookup. Version work is not a second candidate record.
-                            SourceEvent::Work | SourceEvent::SnapshotRecord => {
-                                VertexScanEvent::Work
-                            }
-                            SourceEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
-                        })
-                    },
-                )
-                .map(|row| {
-                    row.map(|row| VertexScanRow {
-                        labels: &row.labels,
-                        properties: &row.props,
-                    })
+            let mut observe = |event| {
+                control(match event {
+                    // The cursor charges one candidate history BEFORE this
+                    // lookup. Version work is not a second candidate record.
+                    SourceEvent::Work | SourceEvent::SnapshotRecord => VertexScanEvent::Work,
+                    SourceEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
                 })
-                .map_err(VertexScanSourceError::Control)
+            };
+            let row = snapshot.property_index().visible_row_with_history(
+                &snapshot.patches,
+                vid,
+                self.as_of,
+                history,
+                &mut observe,
+            );
+            row.map(|row| {
+                row.map(|row| VertexScanRow {
+                    labels: &row.labels,
+                    properties: &row.props,
+                })
+            })
+            .map_err(VertexScanSourceError::Control)
         })
     }
 

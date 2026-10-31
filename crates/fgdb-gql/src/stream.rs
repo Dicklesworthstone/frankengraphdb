@@ -81,6 +81,15 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
         Self::compile_with_projection(plan, None, Row::accepts_projection)
     }
 
+    /// Whether execution needs independently positioned graph reads. A host
+    /// can retain its indexed source for these plans while using a lazy patch
+    /// merge for a plain scan, without repeatedly seeking every source patch
+    /// for each correlated or independent probe.
+    #[must_use]
+    pub fn has_graph_probes(&self) -> bool {
+        self.tests.iter().any(|test| matches!(test, Test::Probe(_)))
+    }
+
     /// Infallible root predicates that precede every Boolean expression and
     /// existence probe. A source may use an exact candidate superset for one
     /// of these predicates, but must keep the ordinary visible-row checks.

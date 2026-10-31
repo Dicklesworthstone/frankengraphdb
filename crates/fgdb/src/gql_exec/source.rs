@@ -6,7 +6,7 @@ pub use aggregation::{SnapshotEdgeSource, SnapshotVertexSource};
 pub(crate) mod exact_counts;
 mod numeric;
 mod vertex_scan;
-use vertex_scan::VertexHistoryScanCursor;
+use vertex_scan::{VertexHistoryScanCursor, VertexPatchScanCursor};
 
 use crate::Snapshot;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
