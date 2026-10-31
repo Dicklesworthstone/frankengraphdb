@@ -3,6 +3,65 @@ use crate::recovery::tests::{WakeCounter, WireIo, fail_after_marker, served, set
 use asupersync::lab::run_async_under_lab;
 
 #[test]
+fn batched_and_historical_read_errors_retain_the_output_recovery_fence() {
+    let ((), report) = run_async_under_lab(0xba7c_1003, |root| async move {
+        for (name, failed, difference) in [
+            ("http-read-batch-success-fence", false, false),
+            ("http-read-batch-error-fence", true, false),
+            ("http-read-diff-error-fence", true, true),
+        ] {
+            let (server, token, _) = served(&root, name).await;
+            let db = &server.databases["test"];
+            let output = Arc::new(OutputAuthority::new());
+            let mut request = asupersync::http::h1::types::RequestBuilder::new(
+                Method::Post,
+                if difference {
+                    "/v1/databases/test/query-diff"
+                } else {
+                    "/v1/databases/test/query-batch"
+                },
+            )
+            .header(
+                "Authorization",
+                format!("Bearer {}", fgdb_protocol::json::hex(&token.encode())),
+            )
+            .build();
+            request.body = if difference {
+                br#"{"statement":"MATCH (n) RETURN n","before":"0","after":"99"}"#.to_vec()
+            } else if failed {
+                br#"{"statements":[{"statement":"RETURN 1 AS one"},{"statement":"RETURN $missing AS absent"}]}"#.to_vec()
+            } else {
+                br#"{"statements":[{"statement":"RETURN 1 AS one"},{"statement":"RETURN 2 AS two"}]}"#.to_vec()
+            };
+            let response = respond(&root, &server, request, &output).await;
+            if failed {
+                assert!(response.status >= 400, "{response:?}");
+                let body = std::str::from_utf8(&response.body).unwrap();
+                assert!(!body.contains("\"results\""), "{body}");
+                assert!(!body.contains("\"changes\""), "{body}");
+            } else {
+                assert_eq!(response.status, 200, "{response:?}");
+            }
+            fail_after_marker(&root, db, 61).await;
+            let (io, wire) = WireIo::new(vec![], false);
+            let mut io = GuardedIo::new(io, root.clone(), output);
+            let sent = AsyncWrite::poll_write(
+                Pin::new(&mut io),
+                &mut Context::from_waker(std::task::Waker::noop()),
+                &response.body,
+            );
+            assert!(
+                matches!(sent, Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::PermissionDenied)
+            );
+            assert_eq!(wire.writes.load(Ordering::Relaxed), 0);
+            settled(db).await;
+            server.join_database_workers(&root).await;
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn recovery_wakes_and_fences_http_headers_body_and_flush_without_replacement_bytes() {
     let ((), report) = run_async_under_lab(0x79a0_0401, |root| async move {
         for (name, writes, flush_pending) in [

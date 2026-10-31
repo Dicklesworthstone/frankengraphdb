@@ -25,11 +25,13 @@
 //!      Authorization: Bearer <hex capability token>
 //!      {"statement": "<gql>", "parameters": {"name": <json>, ...}}
 //!      {"statement": "<write script>", "argument_sets": [{"name": <json>}, ...]}
+//!      {"statements": [{"statement": "<read>", "parameters": {...}}, ...]}
 //! ```
 //!
 //! A query answers `{"v":1,"columns":[...],"rows":[[cell,...],...],"seq":N}`
 //! with the CLI robot contract's cells. A query-batch takes the same
-//! statement/argument_sets body as a write-batch and answers
+//! statement/argument_sets body as a write-batch, or a `statements` array of
+//! distinct read statements with their own parameter objects, and answers
 //! {"v":1,"results":[{"columns":[...],"rows":[...],"seq":N},...]}.
 //! Its 1–32 reads share one pinned generation and one cumulative signed
 //! allowance; each result names its own selected historical cut. Any failure
@@ -55,7 +57,7 @@ use crate::Server;
 use crate::commits::CommitWatcher;
 use crate::execute::{
     Answer, DifferenceAnswer, ReadBatchAnswer, Refusal, authorize_write, read, read_batch,
-    read_difference, write, write_batch, write_if_current,
+    read_difference, read_statement_batch, write, write_batch, write_if_current,
 };
 use crate::recovery::Generation;
 use asupersync::Cx;
@@ -398,8 +400,14 @@ fn body_fields(request: &Request) -> Result<std::collections::BTreeMap<String, J
 
 /// The statement and arguments of one request body.
 fn statement(request: &Request, mode: ExecuteMode) -> Result<Execute, Response> {
+    statement_fields(body_fields(request)?, mode)
+}
+
+fn statement_fields(
+    mut fields: std::collections::BTreeMap<String, Json>,
+    mode: ExecuteMode,
+) -> Result<Execute, Response> {
     let malformed = |detail: &str| refusal_response(ErrorCode::Protocol, detail);
-    let mut fields = body_fields(request)?;
     let Some(Json::String(statement)) = fields.remove("statement") else {
         return Err(malformed("body needs a \"statement\" string"));
     };
@@ -536,8 +544,13 @@ fn difference_statement(request: &Request) -> Result<ExecuteDiff, Response> {
 /// The batch uses exactly the native FGP value/schema limits, plus HTTP's
 /// existing whole-body JSON limits. No field can select raw graph identities.
 fn batch_statement(request: &Request) -> Result<ExecuteBatch, Response> {
+    batch_fields(body_fields(request)?)
+}
+
+fn batch_fields(
+    mut fields: std::collections::BTreeMap<String, Json>,
+) -> Result<ExecuteBatch, Response> {
     let malformed = |detail: &str| refusal_response(ErrorCode::Protocol, detail);
-    let mut fields = body_fields(request)?;
     let Some(Json::String(statement)) = fields.remove("statement") else {
         return Err(malformed("body needs a \"statement\" string"));
     };
@@ -585,6 +598,51 @@ fn batch_statement(request: &Request) -> Result<ExecuteBatch, Response> {
         .encode()
         .map_err(|error| malformed(&format!("invalid batch: {error}")))?;
     Ok(batch)
+}
+
+enum ReadBatchRequest {
+    Parameterized(ExecuteBatch),
+    Statements(Vec<Execute>),
+}
+
+fn read_batch_request(request: &Request) -> Result<ReadBatchRequest, Response> {
+    let malformed = |detail: &str| refusal_response(ErrorCode::Protocol, detail);
+    // Parse once so JSON nesting, token and value limits cover both shapes
+    // cumulatively. Neither shape can silently discard fields from the other.
+    let mut fields = body_fields(request)?;
+    let Some(statements) = fields.remove("statements") else {
+        return batch_fields(fields).map(ReadBatchRequest::Parameterized);
+    };
+    let Json::Array(statements) = statements else {
+        return Err(malformed(
+            "\"statements\" must be a nonempty array of objects",
+        ));
+    };
+    let maximum = fgdb::AuthorizedReadSession::<crate::Symbols, fn() -> u64>::MAX_BATCH_STATEMENTS;
+    if statements.is_empty() || statements.len() > maximum {
+        return Err(malformed(&format!(
+            "a read batch requires between 1 and {maximum} statements"
+        )));
+    }
+    if let Some(unknown) = fields.keys().next() {
+        return Err(malformed(&format!("unknown body field {unknown:?}")));
+    }
+    statements
+        .into_iter()
+        .map(|statement| {
+            let Json::Object(fields) = statement else {
+                return Err(malformed("each statement must be an object"));
+            };
+            let statement = statement_fields(fields, ExecuteMode::Read)?;
+            // Apply the same native name/value/depth bounds. A statement
+            // cannot select a write, stream or raw graph identity via framing.
+            statement
+                .encode()
+                .map_err(|error| malformed(&format!("invalid read statement: {error}")))?;
+            Ok(statement)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(ReadBatchRequest::Statements)
 }
 
 fn answer_response(answer: &Answer) -> Response {
@@ -935,11 +993,23 @@ pub(crate) async fn respond<'s>(
             Ok(generation) => generation,
             Err(Refusal { code, message }) => return refusal_response(code, &message),
         };
-        let statement = match batch_statement(&request) {
+        // Errors are protected output too. A late failure can retain
+        // data-dependent diagnostics; fence it even while the response waits.
+        if !output.pin_generation(generation.clone()) {
+            return refusal_response(ErrorCode::Execution, "connection unavailable");
+        }
+        let statement = match read_batch_request(&request) {
             Ok(statement) => statement,
             Err(response) => return response,
         };
-        let answer = read_batch(cx, db, &token, &statement).await;
+        let answer = match statement {
+            ReadBatchRequest::Parameterized(statement) => {
+                read_batch(cx, db, &token, &statement).await
+            }
+            ReadBatchRequest::Statements(statements) => {
+                read_statement_batch(cx, db, &token, &statements).await
+            }
+        };
         if let Err(error) = generation.check() {
             return refusal_response(error.code(), error.message());
         }
@@ -963,6 +1033,11 @@ pub(crate) async fn respond<'s>(
             Ok(generation) => generation,
             Err(Refusal { code, message }) => return refusal_response(code, &message),
         };
+        // A refused historical read can still expose data-dependent details.
+        // Its buffered error must expire with the same generation as a result.
+        if !output.pin_generation(generation.clone()) {
+            return refusal_response(ErrorCode::Execution, "connection unavailable");
+        }
         let statement = match difference_statement(&request) {
             Ok(statement) => statement,
             Err(response) => return response,

@@ -17,7 +17,7 @@ pub(crate) use prepared::{
 };
 #[cfg(test)]
 pub(crate) use prepared::{prepare_read, read_prepared};
-pub(crate) use read_batch::{ReadBatchAnswer, read_batch};
+pub(crate) use read_batch::{ReadBatchAnswer, read_batch, read_statement_batch};
 pub(crate) use subscription::{poll, subscribe};
 
 use crate::recovery::{Generation, Unavailable};
