@@ -602,6 +602,10 @@ pub struct NativeResultCertificate {
     pub facade_class: NativeReadClass,
     pub snapshot_identity: Digest,
     pub database_identity: Digest,
+    /// The one binding-time instant used by current-time constructors.
+    /// Replay restores this input and never asks a live clock for a replacement.
+    /// None preserves the complete legacy certificate and parameter transcripts.
+    pub statement_time: Option<fgdb_types::CanonicalTimestamp>,
     /// Every Prism procedure the read executed, in execution order
     /// (fgdb-3b1v7). Empty for a read without CALL.
     pub procedures: Vec<NativeProcedureEvidence>,
@@ -733,12 +737,15 @@ impl NativeProcedureEvidence {
 impl NativeResultCertificate {
     /// Portable envelope: plan identity and snapshot, parameter and result
     /// digests, history/database identities, facade class, and statement
-    /// text. A read without procedures is the v1 envelope byte for byte; a
-    /// read with procedures is v2, which appends their evidence.
+    /// text. Without statement time, v1/v2 envelopes remain byte-identical.
+    /// V3 carries the canonical captured timestamp and the procedure section
+    /// (which may be empty); it cannot describe an absent statement time.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = NATIVE_RESULT_CERTIFICATE_DOMAIN_V1.to_vec();
-        bytes.push(if self.procedures.is_empty() {
+        bytes.push(if self.statement_time.is_some() {
+            NATIVE_RESULT_CERTIFICATE_VERSION_V3
+        } else if self.procedures.is_empty() {
             NATIVE_RESULT_CERTIFICATE_VERSION_V1
         } else {
             NATIVE_RESULT_CERTIFICATE_VERSION_V2
@@ -752,7 +759,17 @@ impl NativeResultCertificate {
         bytes.push(self.facade_class as u8);
         bytes.extend_from_slice(&(self.statement.len() as u64).to_be_bytes());
         bytes.extend_from_slice(self.statement.as_bytes());
-        if !self.procedures.is_empty() {
+        if let Some(instant) = &self.statement_time {
+            // CanonicalTimestamp's constructors bound every component. This
+            // infallible envelope already allocates its complete output; the
+            // scalar codec supplies the unique timestamp representation.
+            let encoded = fgdb_types::CanonicalScalar::Timestamp(instant.clone())
+                .encode()
+                .expect("validated timestamp fits the canonical scalar profile");
+            bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(&encoded);
+        }
+        if self.statement_time.is_some() || !self.procedures.is_empty() {
             bytes.extend_from_slice(&(self.procedures.len() as u64).to_be_bytes());
             for procedure in &self.procedures {
                 bytes.extend_from_slice(&procedure.call_digest.0);
@@ -766,6 +783,11 @@ impl NativeResultCertificate {
 
 const NATIVE_RESULT_CERTIFICATE_VERSION_V1: u8 = 1;
 const NATIVE_RESULT_CERTIFICATE_VERSION_V2: u8 = 2;
+const NATIVE_RESULT_CERTIFICATE_VERSION_V3: u8 = 3;
+// The current scalar timestamp profile needs at most 342 bytes, including
+// its bounded zone identifier and artifact identity. Check a small envelope
+// ceiling before asking the scalar decoder to allocate anything.
+const MAX_CERTIFICATE_STATEMENT_TIME_BYTES: usize = 512;
 const NATIVE_PROCEDURE_KERNEL_DOMAIN_V1: &[u8] = b"fgdb:native-procedure-kernel:v1";
 const NATIVE_PROCEDURE_EVIDENCE_DOMAIN_V3: &[u8] = b"fgdb:native-procedure-evidence:v3";
 
@@ -788,6 +810,9 @@ pub enum CertificateDecodeError {
     /// A v2 procedure section that is empty (a read without procedures is
     /// v1) or shorter than its declared count.
     Procedures,
+    /// Missing, oversized, noncanonical or non-timestamp v3 context; named
+    /// zones also require the exact artifact resolver at decode.
+    StatementTime,
 }
 impl core::fmt::Display for CertificateDecodeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -799,19 +824,36 @@ impl core::fmt::Display for CertificateDecodeError {
             Self::Trailing(n) => write!(f, "{n} trailing certificate bytes"),
             Self::FacadeClass(tag) => write!(f, "certificate facade class {tag} unknown"),
             Self::Procedures => write!(f, "certificate procedure section invalid"),
+            Self::StatementTime => write!(f, "certificate statement-time context invalid"),
         }
     }
 }
 impl core::error::Error for CertificateDecodeError {}
 
 impl NativeResultCertificate {
-    /// Strict decode of the v1 or v2 envelope: exact magic, version, fixed
-    /// fields, statement length prefix, the v2 procedure section (at least
-    /// one entry), and zero trailing bytes.
+    /// Strict decode of the v1, v2 or v3 envelope. V3 requires a bounded
+    /// canonical timestamp and an explicit (possibly empty) procedure section.
+    /// Named-zone timestamps need [`Self::decode_with_resolver`].
     ///
     /// # Errors
     /// Typed [`CertificateDecodeError`] on any structural mismatch.
     pub fn decode(bytes: &[u8]) -> Result<Self, CertificateDecodeError> {
+        Self::decode_inner(bytes, None)
+    }
+
+    /// Decode using the exact content-addressed scalar artifacts. No host
+    /// timezone database or wall clock participates in certificate admission.
+    pub fn decode_with_resolver(
+        bytes: &[u8],
+        resolver: &dyn fgdb_types::CanonicalScalarResolver,
+    ) -> Result<Self, CertificateDecodeError> {
+        Self::decode_inner(bytes, Some(resolver))
+    }
+
+    fn decode_inner(
+        bytes: &[u8],
+        resolver: Option<&dyn fgdb_types::CanonicalScalarResolver>,
+    ) -> Result<Self, CertificateDecodeError> {
         let magic = NATIVE_RESULT_CERTIFICATE_DOMAIN_V1.len();
         let fixed = magic + 1 + 5 * 32 + 8 + 1 + 8;
         if bytes.len() < fixed {
@@ -825,6 +867,7 @@ impl NativeResultCertificate {
         at += 1;
         if version != NATIVE_RESULT_CERTIFICATE_VERSION_V1
             && version != NATIVE_RESULT_CERTIFICATE_VERSION_V2
+            && version != NATIVE_RESULT_CERTIFICATE_VERSION_V3
         {
             return Err(CertificateDecodeError::Version(version));
         }
@@ -867,8 +910,39 @@ impl NativeResultCertificate {
         let statement = core::str::from_utf8(&rest[..statement_len])
             .map_err(|_| CertificateDecodeError::Statement)?;
         at += statement_len;
+        let statement_time = if version == NATIVE_RESULT_CERTIFICATE_VERSION_V3 {
+            let length = bytes
+                .get(at..at + 8)
+                .map(|length| u64::from_be_bytes(length.try_into().expect("eight bytes")))
+                .ok_or(CertificateDecodeError::StatementTime)?;
+            at += 8;
+            let length = usize::try_from(length)
+                .ok()
+                .filter(|&length| length > 0 && length <= MAX_CERTIFICATE_STATEMENT_TIME_BYTES)
+                .ok_or(CertificateDecodeError::StatementTime)?;
+            let end = at
+                .checked_add(length)
+                .ok_or(CertificateDecodeError::StatementTime)?;
+            let encoded = bytes
+                .get(at..end)
+                .ok_or(CertificateDecodeError::StatementTime)?;
+            let scalar = match resolver {
+                Some(resolver) => {
+                    fgdb_types::CanonicalScalar::decode_with_resolver(encoded, resolver)
+                }
+                None => fgdb_types::CanonicalScalar::decode(encoded),
+            }
+            .map_err(|_| CertificateDecodeError::StatementTime)?;
+            let fgdb_types::CanonicalScalar::Timestamp(instant) = scalar else {
+                return Err(CertificateDecodeError::StatementTime);
+            };
+            at = end;
+            Some(instant)
+        } else {
+            None
+        };
         let mut procedures = Vec::new();
-        if version == NATIVE_RESULT_CERTIFICATE_VERSION_V2 {
+        if version >= NATIVE_RESULT_CERTIFICATE_VERSION_V2 {
             let count = bytes
                 .get(at..at + 8)
                 .map(|count| u64::from_be_bytes(count.try_into().expect("eight bytes")))
@@ -877,7 +951,10 @@ impl NativeResultCertificate {
             // Each entry is three digests; the count cannot exceed the bytes.
             let entries = usize::try_from(count)
                 .ok()
-                .filter(|&count| count > 0 && count <= (bytes.len() - at) / 96)
+                .filter(|&count| {
+                    (count > 0 || version == NATIVE_RESULT_CERTIFICATE_VERSION_V3)
+                        && count <= (bytes.len() - at) / 96
+                })
                 .ok_or(CertificateDecodeError::Procedures)?;
             for _ in 0..entries {
                 procedures.push(NativeProcedureEvidence {
@@ -902,6 +979,7 @@ impl NativeResultCertificate {
             facade_class,
             snapshot_identity,
             database_identity,
+            statement_time,
             procedures,
         })
     }
@@ -1179,6 +1257,7 @@ mod tests {
             facade_class: NativeReadClass::TemporalPattern,
             snapshot_identity: fgdb_crypto::Digest([6; 32]),
             database_identity: fgdb_crypto::Digest([5; 32]),
+            statement_time: None,
             procedures: Vec::new(),
         }
     }
@@ -1414,17 +1493,122 @@ mod tests {
     }
 
     #[test]
+    fn captured_statement_time_is_an_exact_v3_suffix_with_optional_procedures() {
+        use fgdb_types::{CanonicalScalar, CanonicalTimestamp};
+
+        let plain = sample_result_certificate();
+        let legacy = plain.canonical_bytes();
+        let version_at = super::NATIVE_RESULT_CERTIFICATE_DOMAIN_V1.len();
+        for procedures in [Vec::new(), vec![sample_procedure(20)]] {
+            let mut certificate = plain.clone();
+            let instant = CanonicalTimestamp::offset_only(-123_456_789, -3_600).unwrap();
+            let encoded = CanonicalScalar::Timestamp(instant.clone())
+                .encode()
+                .unwrap();
+            certificate.statement_time = Some(instant);
+            certificate.procedures = procedures;
+            let bytes = certificate.canonical_bytes();
+            assert_eq!(bytes[version_at], 3);
+            assert_eq!(&bytes[..version_at], &legacy[..version_at]);
+            assert_eq!(
+                &bytes[version_at + 1..legacy.len()],
+                &legacy[version_at + 1..]
+            );
+            assert_eq!(
+                &bytes[legacy.len()..legacy.len() + 8],
+                &(encoded.len() as u64).to_be_bytes()
+            );
+            assert_eq!(
+                &bytes[legacy.len() + 8..legacy.len() + 8 + encoded.len()],
+                encoded
+            );
+            assert_eq!(
+                bytes.len(),
+                legacy.len() + 8 + encoded.len() + 8 + certificate.procedures.len() * 96
+            );
+            let decoded = NativeResultCertificate::decode(&bytes).unwrap();
+            assert_eq!(decoded, certificate);
+            assert_eq!(decoded.canonical_bytes(), bytes);
+            for cut in 0..bytes.len() {
+                assert!(
+                    NativeResultCertificate::decode(&bytes[..cut]).is_err(),
+                    "cut={cut}"
+                );
+            }
+            let mut trailing = bytes;
+            trailing.push(0);
+            assert_eq!(
+                NativeResultCertificate::decode(&trailing),
+                Err(super::CertificateDecodeError::Trailing(1))
+            );
+        }
+    }
+
+    #[test]
+    fn v3_statement_time_rejects_wrong_domains_lengths_and_missing_artifacts() {
+        use super::CertificateDecodeError as E;
+        use fgdb_types::{CanonicalScalar, CanonicalTimestamp};
+
+        let mut certificate = sample_result_certificate();
+        let suffix = certificate.canonical_bytes().len();
+        certificate.statement_time = Some(CanonicalTimestamp::offset_only(0, 0).unwrap());
+        let bytes = certificate.canonical_bytes();
+        for length in [0_u64, 513, u64::MAX] {
+            let mut bad = bytes.clone();
+            bad[suffix..suffix + 8].copy_from_slice(&length.to_be_bytes());
+            assert_eq!(NativeResultCertificate::decode(&bad), Err(E::StatementTime));
+        }
+        for scalar in [CanonicalScalar::Null, CanonicalScalar::Int(1)] {
+            let encoded = scalar.encode().unwrap();
+            let mut bad = bytes[..suffix].to_vec();
+            bad.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+            bad.extend_from_slice(&encoded);
+            bad.extend_from_slice(&0_u64.to_be_bytes());
+            assert_eq!(NativeResultCertificate::decode(&bad), Err(E::StatementTime));
+        }
+        let artifact = crate::PinnedTzdb::new(vec![crate::TzdbZone {
+            identifier: "Test/Clock".into(),
+            initial_offset_seconds: 3_600,
+            transitions: Vec::new(),
+        }])
+        .unwrap();
+        certificate.statement_time = Some(
+            CanonicalTimestamp::zoned(123, 3_600, "Test/Clock", artifact.object_id(), &artifact)
+                .unwrap(),
+        );
+        let zoned = certificate.canonical_bytes();
+        assert_eq!(
+            NativeResultCertificate::decode(&zoned),
+            Err(E::StatementTime)
+        );
+        assert_eq!(
+            NativeResultCertificate::decode_with_resolver(&zoned, &artifact).unwrap(),
+            certificate
+        );
+        let changed = crate::PinnedTzdb::new(vec![crate::TzdbZone {
+            identifier: "Test/Clock".into(),
+            initial_offset_seconds: 7_200,
+            transitions: Vec::new(),
+        }])
+        .unwrap();
+        assert_eq!(
+            NativeResultCertificate::decode_with_resolver(&zoned, &changed),
+            Err(E::StatementTime)
+        );
+    }
+
+    #[test]
     fn result_certificate_decode_refuses_structural_damage_typed() {
         let bytes = sample_result_certificate().canonical_bytes();
         use super::CertificateDecodeError as E;
         // Unknown version refuses before any field is trusted. The version
         // byte immediately follows the 33-byte magic. (2 is the procedure
-        // evidence envelope, fgdb-3b1v7, so the first unknown one is 3.)
+        // evidence envelope, 3 binds statement time, so the first unknown is 4.)
         let mut version = bytes.clone();
-        version[super::NATIVE_RESULT_CERTIFICATE_DOMAIN_V1.len()] = 3;
+        version[super::NATIVE_RESULT_CERTIFICATE_DOMAIN_V1.len()] = 4;
         assert!(matches!(
             NativeResultCertificate::decode(&version),
-            Err(E::Version(3))
+            Err(E::Version(4))
         ));
         // Truncation at every prefix length refuses; no panic, no partial read.
         for cut in 0..bytes.len() {

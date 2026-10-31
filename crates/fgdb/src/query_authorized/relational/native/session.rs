@@ -484,12 +484,18 @@ fn text_at<R: GraphSymbolResolver>(
     );
     execution.borrow_mut().checkpoint()?;
     let prepared = prepared?;
-    let at = prepared.bound_snapshot_seq(selected.parameters(), selected_cut(view, execution))?;
+    let captured = view.capture_authorized_statement_parameters(
+        execution.borrow().cx,
+        selected.statement(),
+        selected.parameters(),
+    )?;
+    let parameters = captured.as_ref();
+    let at = prepared.bound_snapshot_seq(parameters, selected_cut(view, execution))?;
     check_selected_cut(execution, at)?;
     result_rows(
         native_at(
             &prepared,
-            selected.parameters(),
+            parameters,
             &view.snapshot,
             at,
             scope,
@@ -522,14 +528,20 @@ fn prepared_at(
         .map_err(selector_error)?;
     check_branch(&selected, branch)?;
     let params = prepared.parameters(selected.parameters())?;
+    let captured = view.capture_authorized_statement_parameters(
+        execution.borrow().cx,
+        prepared.native.statement(),
+        &params,
+    )?;
+    let params = captured.as_ref();
     let at = prepared
         .native
-        .bound_snapshot_seq(&params, selected_cut(view, execution))?;
+        .bound_snapshot_seq(params, selected_cut(view, execution))?;
     check_selected_cut(execution, at)?;
     result_rows(
         native_at(
             &prepared.native,
-            &params,
+            params,
             &view.snapshot,
             at,
             scope,

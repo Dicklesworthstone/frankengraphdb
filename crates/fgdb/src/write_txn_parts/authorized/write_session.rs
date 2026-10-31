@@ -226,6 +226,32 @@ fn chain_batch_limit(count: usize, limit: usize) -> Result<(), Fault> {
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
+fn statement_parameter_sets<'p>(
+    clock: Option<&crate::StatementClock>,
+    cx: &QueryCx,
+    required: bool,
+    arguments: &'p [GqlParameters],
+    limit: usize,
+) -> Result<Cow<'p, [GqlParameters]>, Fault> {
+    chain_batch_limit(arguments.len(), limit)?;
+    if !(required && clock.is_some())
+        && arguments
+            .iter()
+            .all(|params| params.statement_time().is_none())
+    {
+        return Ok(Cow::Borrowed(arguments));
+    }
+    let mut captured = Vec::new();
+    captured
+        .try_reserve(arguments.len())
+        .map_err(|_| admission(WriteTxnError::Authorization(Error::TooLarge)))?;
+    for params in arguments {
+        captured.push(super::statement_parameters(clock, cx, required, params)?.into_owned());
+    }
+    Ok(Cow::Owned(captured))
+}
+
 /// An entirely bound, same-session ingestion program. It cannot be constructed
 /// from a raw program, changed, or executed by another session. Reuse obtains a
 /// fresh live permit but performs no catalog lookup, value rebind or deep clone.
@@ -488,6 +514,9 @@ where
             };
             let (definition, schema) = cx.with_restriction(|| {
                 super::reserve_text(cx, &mut execution, text)?;
+                let sample =
+                    super::preparation_parameters(params, fgdb_gql::statement_time_required(text))?;
+                let params = sample.as_ref();
                 if super::is_chain_admitted(cx, &mut execution, text)? {
                     super::chain_statement_limit(state.max_statements)?;
                     let prepared = PreparedChain::prepare(
@@ -729,6 +758,17 @@ where
                 if !Arc::ptr_eq(&self.owner, &prepared.owner) {
                     return Err(admission(WriteTxnError::AuthorizedMutationRefused));
                 }
+                let captured = statement_parameter_sets(
+                    state.database.statement_clock.as_ref(),
+                    cx,
+                    prepared
+                        .schema
+                        .iter()
+                        .any(GqlParameterSpec::is_statement_time),
+                    arguments,
+                    state.max_statements,
+                )?;
+                let arguments = captured.as_ref();
                 let batch =
                     match &prepared.definition {
                         PreparedDefinition::Script(script) => {
@@ -800,6 +840,13 @@ where
                 clock: tracked_clock(&mut state.clock, &mut state.last_now_ms),
             };
             checkpoint(cx, &mut execution).map_err(admission)?;
+            let captured = super::statement_parameters(
+                state.database.statement_clock.as_ref(),
+                cx,
+                fgdb_gql::statement_time_required(text),
+                arguments,
+            )?;
+            let arguments = captured.as_ref();
             let bound = super::bind_native(
                 cx,
                 &mut execution,
@@ -929,6 +976,13 @@ where
                             super::reserve_text(cx, &mut execution, text)?;
                             super::is_chain_admitted(cx, &mut execution, text)
                         })?;
+                        let captured = super::statement_parameters(
+                            database.statement_clock.as_ref(),
+                            cx,
+                            fgdb_gql::statement_time_required(text),
+                            params,
+                        )?;
+                        let params = captured.as_ref();
                         if chain {
                             super::chain_statement_limit(*max_statements)?;
                             let chain = super::bind_chain_admitted(
@@ -960,13 +1014,21 @@ where
                         }
                     }
                     Request::TextBatch(text, arguments) => {
-                        let first = arguments.first().ok_or(Fault::BatchBinding(
-                            fgdb_gql::GraphWriteScriptBatchError::Empty,
-                        ))?;
                         let is_chain = cx.with_restriction(|| {
                             super::reserve_text(cx, &mut execution, text)?;
                             super::is_chain_admitted(cx, &mut execution, text)
                         })?;
+                        let captured = statement_parameter_sets(
+                            database.statement_clock.as_ref(),
+                            cx,
+                            fgdb_gql::statement_time_required(text),
+                            arguments,
+                            *max_statements,
+                        )?;
+                        let arguments = captured.as_ref();
+                        let first = arguments.first().ok_or(Fault::BatchBinding(
+                            fgdb_gql::GraphWriteScriptBatchError::Empty,
+                        ))?;
                         if is_chain {
                             chain_batch_limit(arguments.len(), *max_statements)?;
                             let prepared = cx.with_restriction(|| {
@@ -1038,14 +1100,28 @@ where
                         if !Arc::ptr_eq(owner, &prepared.owner) {
                             return Err(admission(WriteTxnError::AuthorizedMutationRefused));
                         }
+                        let captured = super::statement_parameters(
+                            database.statement_clock.as_ref(),
+                            cx,
+                            prepared
+                                .schema
+                                .iter()
+                                .any(GqlParameterSpec::is_statement_time),
+                            params,
+                        )?;
+                        let params = captured.as_ref();
                         match &prepared.definition {
                             PreparedDefinition::Script(script) => {
                                 statement_limit(script, *max_statements)?;
-                                SessionBound::Program(Input::Script(script, params).bind(
+                                let Bound::Script(program) = Input::Script(script, params).bind(
                                     cx,
                                     capability.predicates(),
                                     &mut execution,
-                                )?)
+                                )?
+                                else {
+                                    unreachable!("script input owns its bound program")
+                                };
+                                SessionBound::Program(Bound::Script(program))
                             }
                             PreparedDefinition::Chain(prepared) => {
                                 super::chain_statement_limit(*max_statements)?;
@@ -1066,14 +1142,30 @@ where
                         if !Arc::ptr_eq(owner, &prepared.owner) {
                             return Err(admission(WriteTxnError::AuthorizedMutationRefused));
                         }
+                        let captured = statement_parameter_sets(
+                            database.statement_clock.as_ref(),
+                            cx,
+                            prepared
+                                .schema
+                                .iter()
+                                .any(GqlParameterSpec::is_statement_time),
+                            arguments,
+                            *max_statements,
+                        )?;
+                        let arguments = captured.as_ref();
                         match &prepared.definition {
-                            PreparedDefinition::Script(script) => SessionBound::Program(
-                                Input::Batch(script, arguments, *max_statements).bind(
-                                    cx,
-                                    capability.predicates(),
-                                    &mut execution,
-                                )?,
-                            ),
+                            PreparedDefinition::Script(script) => {
+                                let Bound::Batch(batch) =
+                                    Input::Batch(script, arguments, *max_statements).bind(
+                                        cx,
+                                        capability.predicates(),
+                                        &mut execution,
+                                    )?
+                                else {
+                                    unreachable!("batch input owns its bound program")
+                                };
+                                SessionBound::Program(Bound::Batch(batch))
+                            }
                             PreparedDefinition::Chain(prepared) => {
                                 let chains = prepared.bind_batch(
                                     cx,

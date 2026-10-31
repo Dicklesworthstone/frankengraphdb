@@ -383,7 +383,7 @@ fn prepare_row_write(
             .ok_or_else(mode_refusal)?;
         // Validate representative types/constant expressions, then discard
         // their values. They can never become an execution's implicit defaults.
-        drop(template.bind(&parameters)?);
+        template.validate_parameters(&parameters)?;
         Ok::<_, Refusal>(template)
     });
     permit
@@ -514,11 +514,11 @@ async fn write_chain_prepared_batch(
             query
                 .checkpoint()
                 .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
-            let bound = query.with_restriction(|| {
+            let bound = (|| {
                 let parameters = convert::parameters(parameters, None)
                     .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
-                prepared.template.bind(&parameters)
-            });
+                prepared.template.bind_current(&query, db, &parameters)
+            })();
             // Expiry or generation fencing wins over a binding error as it
             // does for one prepared chain. Representative values are never
             // reused as defaults for a missing argument in a later record.
@@ -644,11 +644,11 @@ async fn write_returning_prepared(
         query
             .checkpoint()
             .map_err(|error| Refusal::new(ErrorCode::Cancelled, error.to_string()))?;
-        let bound = query.with_restriction(|| {
+        let bound = (|| {
             let parameters = convert::parameters(parameters, None)
                 .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
-            prepared.template.bind(&parameters)
-        });
+            prepared.template.bind_current(&query, db, &parameters)
+        })();
         permit
             .checkpoint_at(unix_millis())
             .map_err(|error| Refusal::new(warden_code(error), error.to_string()))?;
@@ -715,18 +715,23 @@ async fn write_prepared_inner(
     // Each argument set's map arguments must carry the keys the template was
     // lowered with; it binds through the fresh per-key arguments.
     let lowered = prepared.lowered.as_ref();
-    let derive = |parameters: fgdb_gql::GqlParameters| match lowered {
-        Some(lowered) => lowered.arguments(&parameters),
-        None => Ok(parameters),
+    let derive = |parameters: fgdb_gql::GqlParameters| {
+        let parameters = match lowered {
+            Some(lowered) => lowered
+                .arguments(&parameters)
+                .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?,
+            None => parameters,
+        };
+        db.statement_clock
+            .capture_for_template(&query, prepared.script.parameter_schema(), &parameters)
+            .map(std::borrow::Cow::into_owned)
+            .map_err(statement_time_refusal)
     };
     let parameters = match parameters {
         PreparedParameters::Single(parameters) => NativeParameters::Single(
             convert::parameters(parameters, None)
                 .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))
-                .and_then(|parameters| {
-                    derive(parameters)
-                        .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))
-                })?,
+                .and_then(derive)?,
         ),
         PreparedParameters::Batch(argument_sets) => {
             let mut converted = Vec::with_capacity(argument_sets.len());
@@ -742,7 +747,12 @@ async fn write_prepared_inner(
                 };
                 let parameters =
                     convert::parameters(parameters, None).map_err(|error| refusal(&error))?;
-                converted.push(derive(parameters).map_err(|error| refusal(&error))?);
+                converted.push(derive(parameters).map_err(|error| {
+                    Refusal::new(
+                        error.code,
+                        format!("argument set {index}: {}", error.message),
+                    )
+                })?);
             }
             NativeParameters::Batch(converted)
         }

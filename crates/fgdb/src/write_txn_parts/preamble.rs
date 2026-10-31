@@ -564,6 +564,8 @@ pub(crate) type EdgeMergeQueryResult<A> = Result<
 /// Failure to prepare an atomic write or stage/finish a bounded transaction.
 #[derive(Debug)]
 pub enum WriteTxnError {
+    /// The trusted host could not supply a bounded statement-time binding.
+    StatementTime(crate::StatementTimeError),
     /// Capability admission, target/field scope, or a live execution fence.
     Authorization(fgdb_warden::Error),
     /// A scoped mutation refused before publication. Native preparation/source
@@ -652,6 +654,7 @@ pub enum WriteTxnError {
 impl core::fmt::Display for WriteTxnError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::StatementTime(source) => source.fmt(formatter),
             Self::Authorization(source) => {
                 write!(formatter, "write authorization refused: {source}")
             }
@@ -729,6 +732,7 @@ impl core::fmt::Display for WriteTxnError {
 impl core::error::Error for WriteTxnError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
+            Self::StatementTime(source) => Some(source),
             Self::Authorization(source) => Some(source),
             Self::Interrupted(source) => Some(source.as_ref()),
             Self::BasisRebuild(source) => Some(source.as_ref()),

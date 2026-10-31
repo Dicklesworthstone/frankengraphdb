@@ -306,6 +306,8 @@ impl PreparedNativeRead {
         params: &GqlParameters,
         budget: GqlQueryPolicy,
     ) -> Result<QueryResult, QueryError> {
+        let captured = db.capture_statement_parameters(cx, self.statement(), params)?;
+        let params = captured.as_ref();
         let as_of = self.snapshot_seq(db, params)?;
         self.execute_at_seq(db, cx, params, budget, as_of, &mut Vec::new())
     }
@@ -478,6 +480,8 @@ impl<V: Vfs + Clone> Database<V> {
         resolver: impl GraphSymbolResolver,
         budget: GqlQueryPolicy,
     ) -> Result<(QueryResult, NativeResultCertificate), QueryError> {
+        let captured = self.capture_statement_parameters(cx, text, params)?;
+        let params = captured.as_ref();
         // A record field keying a pattern is the constant it holds
         // (fgdb-8srlm). The certificate keeps the caller's statement and
         // values; replay lowers them again, to the same plan.
@@ -521,6 +525,7 @@ impl<V: Vfs + Clone> Database<V> {
                 facade_class: prepared.facade_class(),
                 snapshot_identity,
                 database_identity: self.replay_database_identity(),
+                statement_time: params.statement_time().cloned(),
                 procedures: evidence
                     .iter()
                     .map(crate::gql_cert::NativeProcedureEvidence::from_fnx)
@@ -550,6 +555,25 @@ impl<V: Vfs + Clone> Database<V> {
         resolver: impl GraphSymbolResolver,
         budget: GqlQueryPolicy,
     ) -> Result<QueryResult, ReplayRefusal> {
+        // Statement time is retained execution input. A replay with ordinary
+        // caller arguments restores it from the certificate; an explicit
+        // conflicting context is refused before any graph observation.
+        let captured = match (&certificate.statement_time, params.statement_time()) {
+            (Some(certified), Some(supplied)) if certified != supplied => {
+                return Err(ReplayRefusal::ParameterValuesMismatch);
+            }
+            (None, Some(_)) => return Err(ReplayRefusal::ParameterValuesMismatch),
+            (Some(certified), None) => std::borrow::Cow::Owned(
+                params
+                    .clone()
+                    .with_statement_time(certified.clone())
+                    .map_err(|error| ReplayRefusal::Execution {
+                        reason: format!("certified statement time refused: {error}"),
+                    })?,
+            ),
+            _ => std::borrow::Cow::Borrowed(params),
+        };
+        let params = captured.as_ref();
         if crate::gql_cert::native_values_digest(params) != certificate.values_digest {
             return Err(ReplayRefusal::ParameterValuesMismatch);
         }
@@ -565,6 +589,14 @@ impl<V: Vfs + Clone> Database<V> {
                     reason: error.to_string(),
                 }
             })?;
+        if certificate.statement_time.is_none()
+            && prepared
+                .parameter_schema()
+                .iter()
+                .any(GqlParameterSpec::is_statement_time)
+        {
+            return Err(ReplayRefusal::ParameterValuesMismatch);
+        }
         if prepared.facade_class() != certificate.facade_class {
             return Err(ReplayRefusal::FacadeClassMismatch);
         }

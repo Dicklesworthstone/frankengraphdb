@@ -184,7 +184,7 @@ pub use query::{
     PreparedBufferedSealedOrder, PreparedNativeRead, ProcedureError, QueryError, QueryResult,
     QueryValue, QueryWriteError, ReadCacheLimits, ReadCacheStatus, ReadCacheUsage, RefreshReport,
     ReplayRefusal, ResidentIndex, ResidentIndexError, SealedProjectionOpenError, SealedQueryError,
-    SealedReadView,
+    SealedReadView, StatementClock, StatementTimeError,
 };
 pub use write_txn::{
     AuthorizedBoundWriteBatch, AuthorizedPreparedWrite, AuthorizedWriteSession,
@@ -2254,6 +2254,7 @@ pub struct EmbeddedReadView {
     // Privileged, immutable query pins from this same opened handle/cut.
     // Read-only opens and graph-only resident source views carry no registry.
     beacon_indexes: query::BeaconQueryIndexes,
+    statement_clock: Option<query::StatementClock>,
 }
 
 /// A non-owning reference to one authenticated embedded generation.
@@ -2268,6 +2269,7 @@ pub struct WeakEmbeddedReadView {
     snapshot: std::sync::Weak<Snapshot>,
     namespace: DatabaseSecurityNamespaceId,
     beacon_indexes: query::BeaconQueryIndexes,
+    statement_clock: Option<query::StatementClock>,
 }
 
 impl WeakEmbeddedReadView {
@@ -2278,6 +2280,7 @@ impl WeakEmbeddedReadView {
             snapshot,
             namespace: self.namespace,
             beacon_indexes: self.beacon_indexes.clone(),
+            statement_clock: self.statement_clock.clone(),
         })
     }
 }
@@ -2290,6 +2293,7 @@ impl EmbeddedReadView {
             snapshot: Arc::downgrade(&self.snapshot),
             namespace: self.namespace,
             beacon_indexes: self.beacon_indexes.clone(),
+            statement_clock: self.statement_clock.clone(),
         }
     }
 
@@ -2622,6 +2626,9 @@ pub struct Database<V: Vfs = UnixVfs> {
     /// Rebuildable resident search generations fed only after successful
     /// durable publication. Registrations belong to this opened lifetime.
     maintained_beacon: query::BeaconRegistry,
+    /// Explicit host calendar authority for per-statement temporal bindings.
+    /// It is neither durable state nor the runtime's monotonic timer.
+    statement_clock: Option<query::StatementClock>,
     coordinator: CommitCoordinator<V>,
     store: BlockStore<V>,
     /// The ONE mutable object in the directory (doctrine 5): the dual-slot
@@ -3045,6 +3052,7 @@ impl<V: Vfs + Clone> Database<V> {
                 snapshot: Arc::clone(&database.snapshot),
                 namespace: database.keys.namespace,
                 beacon_indexes: database.maintained_beacon.query_indexes().clone(),
+                statement_clock: database.statement_clock.clone(),
             }),
             Err(OpenError::Commit(CommitError::WriterAlreadyOpen)) if lagging.is_some() => {
                 Self::read_published(cx, &keys, lagging.expect("guarded")).await
@@ -3176,6 +3184,7 @@ impl<V: Vfs + Clone> Database<V> {
                 snapshot: Arc::new(snapshot),
                 namespace: keys.namespace,
                 beacon_indexes: query::BeaconQueryIndexes::default(),
+                statement_clock: None,
             })
         })
     }
@@ -3426,6 +3435,7 @@ impl<V: Vfs + Clone> Database<V> {
             handle_owner: Arc::new(()),
             standing_queries: Vec::new(),
             maintained_beacon: query::BeaconRegistry::default(),
+            statement_clock: None,
         })
     }
 
@@ -3457,6 +3467,7 @@ impl<V: Vfs + Clone> Database<V> {
             snapshot: Arc::clone(&self.snapshot),
             namespace: self.keys.namespace,
             beacon_indexes: self.maintained_beacon.query_indexes().clone(),
+            statement_clock: self.statement_clock.clone(),
         })
     }
 
@@ -3486,6 +3497,7 @@ impl<V: Vfs + Clone> Database<V> {
                 let keys = self.keys.clone();
                 let vfs = self.vfs.clone();
                 let read_caches = Arc::clone(&self.snapshot.read_caches);
+                let statement_clock = self.statement_clock.clone();
                 drop(self);
                 require_database_dir(cx, &vfs, &path).await?;
                 let mut recovered = Self::bind_with_vfs(cx, vfs, &path, keys, true).await?;
@@ -3493,6 +3505,7 @@ impl<V: Vfs + Clone> Database<V> {
                 // policy across recovery. Entries still require the exact
                 // snapshot allocation, so none can serve the rebuilt source.
                 Arc::make_mut(&mut recovered.snapshot).read_caches = read_caches;
+                recovered.statement_clock = statement_clock;
                 Ok(recovered)
             }
         }

@@ -527,6 +527,7 @@ impl ResidentIndex {
                 snapshot: Arc::clone(snapshot),
                 namespace: current.namespace,
                 beacon_indexes: QueryIndexes::default(),
+                statement_clock: current.statement_clock.clone(),
             })
         } else {
             None
@@ -645,6 +646,7 @@ impl<V: Vfs + Clone> Database<V> {
                         snapshot: Arc::clone(&self.snapshot),
                         namespace: self.keys.namespace,
                         beacon_indexes: QueryIndexes::default(),
+                        statement_clock: self.statement_clock.clone(),
                     })
                 } else {
                     None

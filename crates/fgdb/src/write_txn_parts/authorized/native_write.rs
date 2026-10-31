@@ -17,6 +17,47 @@ use fgdb_gql::{
 };
 use fgdb_warden::PlannerPredicates;
 
+#[allow(clippy::result_large_err)]
+fn statement_parameters<'p>(
+    clock: Option<&crate::StatementClock>,
+    cx: &QueryCx,
+    required: bool,
+    params: &'p GqlParameters,
+) -> Result<std::borrow::Cow<'p, GqlParameters>, Fault> {
+    crate::query::capture_authorized_statement_parameters(clock, cx, required, params).map_err(
+        |error| {
+            admission(match error {
+                crate::StatementTimeError::Cancelled(error) => WriteTxnError::Interrupted(error),
+                error => WriteTxnError::StatementTime(error),
+            })
+        },
+    )
+}
+
+/// PREPARE validates the ordinary arguments and native rights with a type
+/// representative. It never observes a calendar or retains this value; actual
+/// execution replaces the implicit slot under its fresh live permit.
+#[allow(clippy::result_large_err)]
+fn preparation_parameters(
+    params: &GqlParameters,
+    required: bool,
+) -> Result<std::borrow::Cow<'_, GqlParameters>, Fault> {
+    if !required {
+        return Ok(std::borrow::Cow::Borrowed(params));
+    }
+    let instant = fgdb_types::CanonicalTimestamp::offset_only(0, 0)
+        .expect("the UNIX epoch is a canonical UTC timestamp");
+    params
+        .clone()
+        .with_statement_time(instant)
+        .map(std::borrow::Cow::Owned)
+        .map_err(|error| {
+            admission(WriteTxnError::StatementTime(
+                crate::StatementTimeError::Parameter(error),
+            ))
+        })
+}
+
 /// Borrow a session's trusted catalog without reducing it to a symbol-only
 /// closure. Computed map keys and metadata need the same pinned reverse names
 /// and time-zone bundle as ordinary native preparation.
@@ -619,8 +660,15 @@ impl<V: Vfs + Clone> Database<V> {
         };
         let script = prepare(query_cx, &mut execution, text, params, relation, resolver)?;
         statement_limit(&script, max_statements)?;
+        let sample = preparation_parameters(
+            params,
+            script
+                .parameter_schema()
+                .iter()
+                .any(fgdb_gql::GqlParameterSpec::is_statement_time),
+        )?;
         let bound =
-            Input::Script(&script, params).bind(query_cx, verified.predicates(), &mut execution);
+            Input::Script(&script, &sample).bind(query_cx, verified.predicates(), &mut execution);
         checkpoint(query_cx, &mut execution).map_err(admission)?;
         drop(bound?);
         Ok(script)
@@ -708,6 +756,14 @@ impl<V: Vfs + Clone> Database<V> {
         };
         commit_cx
             .with_restriction_async(async {
+                checkpoint(query_cx, &mut execution).map_err(admission)?;
+                let captured = statement_parameters(
+                    self.statement_clock.as_ref(),
+                    query_cx,
+                    fgdb_gql::statement_time_required(text),
+                    params,
+                )?;
+                let params = captured.as_ref();
                 let chain = query_cx.with_restriction(|| {
                     reserve_text(query_cx, &mut execution, text)?;
                     let classified = fgdb_gql::PreparedGraphWriteChainText::is_chain(text);

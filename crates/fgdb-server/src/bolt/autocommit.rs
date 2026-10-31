@@ -411,10 +411,13 @@ impl<'s> Connection<'s> {
             query_cx
                 .checkpoint()
                 .map_err(|_| Failure::invalid("Bolt write preparation cancelled"))?;
-            let definition = query_cx.with_restriction(|| {
-                ReturningTemplate::prepare(db, query, parameters)?
-                    .filter(ReturningTemplate::returns_rows)
-                    .map(|template| template.bind(parameters))
+            let template = query_cx.with_restriction(|| {
+                ReturningTemplate::prepare(db, query, parameters)
+                    .map(|template| template.filter(ReturningTemplate::returns_rows))
+            });
+            let definition = template.and_then(|template| {
+                template
+                    .map(|template| template.bind_current(&query_cx, db, parameters))
                     .transpose()
             });
             permit

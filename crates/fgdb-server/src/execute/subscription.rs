@@ -438,9 +438,15 @@ pub(crate) async fn subscribe(
     permit.checkpoint_at(unix_millis()).map_err(authorization)?;
     let parameters = convert::parameters(&statement.parameters, None)
         .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
+    // Registration binds one instant into the maintained circuit. Tick replay
+    // and later polling never consult a moving host calendar.
+    let parameters = db
+        .statement_clock
+        .capture_parameters(&query, &statement.statement, &parameters)
+        .map_err(statement_time_refusal)?;
     let lowered = fgdb_gql::GqlMapArgumentText::lower_fields(&statement.statement, &parameters);
     let (text, parameters) = lowered.as_ref().map_or(
-        (statement.statement.as_str(), &parameters),
+        (statement.statement.as_str(), parameters.as_ref()),
         |(lowered, derived)| (lowered.text(), derived),
     );
     let prepared =

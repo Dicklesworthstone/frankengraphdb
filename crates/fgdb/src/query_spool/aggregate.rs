@@ -601,6 +601,10 @@ fn open<'q>(
     params: &GqlParameters,
     policy: GqlQueryPolicy,
 ) -> Result<Opened<'q>> {
+    let captured = view
+        .capture_statement_parameters(cx, prepared.statement(), params)
+        .map_err(|error| NativeAggregateSpoolError::Prepare(Box::new(error)))?;
+    let params = captured.as_ref();
     let BoundAggregate {
         definition,
         columns,

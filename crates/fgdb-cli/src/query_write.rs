@@ -159,13 +159,17 @@ impl PreparedQueryWrite {
 /// Prepare both native definitions before opening writable graph storage.
 /// Actual source rows necessarily bind later, inside the same transaction as
 /// their writes. No failed definition is retried as an ordinary write script.
-pub(super) fn prepare(options: &Options) -> Result<Option<PreparedQueryWrite>, Failure> {
+pub(super) fn prepare(
+    options: &Options,
+    cx: &QueryCx,
+) -> Result<Option<PreparedQueryWrite>, Failure> {
     options.query_write.validate(options.rows.is_some())?;
     prepare_statement(
         &options.text,
         &options.params,
         &options.query_write,
         options,
+        cx,
     )
 }
 
@@ -176,11 +180,22 @@ pub(super) fn prepare_statement(
     params: &GqlParameters,
     config: &QueryWriteOptions,
     options: &Options,
+    cx: &QueryCx,
 ) -> Result<Option<PreparedQueryWrite>, Failure> {
     config.validate(false)?;
     let Some(source) = config.source.as_deref() else {
         return Ok(None);
     };
+    // The source and its dependent write are one invocation. Bind one clock
+    // context before either definition, including a clock used only by the
+    // source; every emitted record then retains that same explicit instant.
+    let captured = super::statement_clock()
+        .capture_parameters(cx, statement, params)
+        .map_err(Failure::query)?;
+    let captured = super::statement_clock()
+        .capture_parameters(cx, source, &captured)
+        .map_err(Failure::query)?;
+    let params = captured.as_ref();
     // Preserve full resolver metadata (reverse names and pinned time zones),
     // not a closure that supplies only forward symbol resolution.
     let mut resolver = options;
@@ -205,7 +220,8 @@ pub(super) fn prepare_statement(
         &mut resolver,
     )
     .map_err(Failure::statement)?;
-    let query = PreparedGraphQueryWrite::prepare(source, script).map_err(Failure::statement)?;
+    let query = PreparedGraphQueryWrite::prepare_with_context(source, script, params)
+        .map_err(Failure::statement)?;
     Ok(Some(PreparedQueryWrite {
         query,
         // The same effect and creation caps as ordinary `write`; all native

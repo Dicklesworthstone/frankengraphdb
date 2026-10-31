@@ -1411,6 +1411,7 @@ fn json_value(json: &load::Json) -> Result<GraphValue, Failure> {
 /// or that repeats a --param, is a usage error, and so is an empty batch.
 fn prepare_rows(
     options: &Options,
+    cx: &fgdb_types::QueryCx,
 ) -> Result<(fgdb_gql::PreparedGraphWriteProgram, usize), Failure> {
     let bad = |detail: String| Failure::usage(format!("invalid --rows: {detail}"));
     let text = options.rows.as_deref().unwrap_or_default();
@@ -1566,7 +1567,13 @@ fn prepare_rows(
             };
             set.insert(key, value).map_err(Failure::query)?;
         }
-        sets.push(set);
+        set.clear_statement_time();
+        sets.push(
+            statement_clock()
+                .capture_parameters(cx, &options.text, &set)
+                .map_err(Failure::query)?
+                .into_owned(),
+        );
     }
     let batch = script
         .bind_parameter_sets_with_limit(&sets, PreparedGraphWriteScript::MAX_BATCH_STATEMENTS)
@@ -1765,6 +1772,19 @@ fn policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000)
 }
 
+/// The CLI explicitly supplies UNIX calendar time. The library and the
+/// runtime's monotonic timer never invent this authority. UTC is the CLI's
+/// default zone; explicit temporal constructor arguments keep their own zone.
+fn statement_clock() -> fgdb::StatementClock {
+    fgdb::StatementClock::new(|_| {
+        let elapsed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        let nanos = i128::try_from(elapsed.as_nanos()).ok()?;
+        fgdb_types::CanonicalTimestamp::offset_only(nanos, 0).ok()
+    })
+}
+
 /// Native execution limits, each a decimal u64 given at most once.
 /// An absent limit keeps [`policy`]'s default; zero is never an omission.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1902,6 +1922,15 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 if matches!(command, "query" | "write" | "diff" | "import-csv") {
                     refusal::unsupported_construct(&options.text)?;
                 }
+                // This is execution binding, before any graph is opened. One
+                // UNWIND statement shares one instant across every input row;
+                // --rows is a statement batch and captures each set below.
+                // Replay imports its certified instant and never samples here.
+                if matches!(command, "query" | "write" | "diff") && options.rows.is_none() {
+                    options.params = statement_clock().capture_parameters(
+                        &contexts.query(), &options.text, &options.params,
+                    ).map_err(Failure::query)?.into_owned();
+                }
                 // Every CSV record is read and bound before storage is opened,
                 // so a refused input cannot leave any trace in the database.
                 let import = if command == "import-csv" { Some(import::prepare(&options, &contexts.query())?) } else { None };
@@ -1919,11 +1948,11 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 // Query-fed writes prepare both definitions before writable open.
                 // Their actual input is read/bound later under the SAME transaction
                 // as the dependent writes, never in a separate read invocation.
-                let query_fed = if command == "write" { query_write::prepare(&options)? } else { None };
+                let query_fed = if command == "write" { query_write::prepare(&options, &contexts.query())? } else { None };
                 // A --rows batch is parsed, typed and bound before storage opens,
                 // like CSV, so a refused row leaves no trace in the database.
                 let batch = if command == "write" && options.rows.is_some() {
-                    Some(prepare_rows(&options)?)
+                    Some(prepare_rows(&options, &contexts.query())?)
                 } else {
                     None
                 };
@@ -2015,6 +2044,7 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                     return outcome;
                 }
                 let mut db = if command == "create" { Database::create(&contexts.commit(), &options.db, keys).await } else { Database::open(&contexts.commit(), &options.db, keys).await }.map_err(open_failure)?;
+                db.set_statement_clock(Some(statement_clock()));
                 if command == "create" {
                     let seq = db.frontier().map_err(Failure::io)?.0;
                     return if robot { emit(out, &format!(r#"{{"v":1,"event":"result","kind":"created","seq":{seq}}}"#)) } else { writeln!(out, "created (seq {seq})").map_err(Failure::io) };

@@ -407,6 +407,7 @@ async fn write_inner(
     statement: &Execute,
     deferred: Option<(&Generation, fgdb_types::CommitSeq)>,
 ) -> Result<Answer, Refusal> {
+    authorize_write(db, token)?;
     refuse_element_identity(&statement.statement)?;
     let _operation = match deferred {
         Some((generation, _)) => generation.enter(),
@@ -415,7 +416,10 @@ async fn write_inner(
     .map_err(Refusal::from)?;
     let parameters = convert::parameters(&statement.parameters, None)
         .map_err(|error| Refusal::new(ErrorCode::Statement, error.to_string()))?;
-    if let Some(returning) = Returning::prepare(db, &statement.statement, &parameters)? {
+    if let Some(template) = ReturningTemplate::prepare(db, &statement.statement, &parameters)? {
+        let contexts = PurposeContexts::narrow_runtime_root(cx);
+        let query = crate::query_cx(&contexts);
+        let returning = template.bind_current(&query, db, &parameters)?;
         if deferred.is_none() {
             return write_returning(cx, db, token, returning).await;
         }
@@ -743,6 +747,58 @@ impl ReturningTemplate {
         }
     }
 
+    fn parameter_schema(&self) -> std::borrow::Cow<'_, [fgdb_gql::GqlParameterSpec]> {
+        use std::borrow::Cow;
+        match &self.kind {
+            ReturningKind::Chain(template) => Cow::Owned(template.parameter_schema()),
+            ReturningKind::Insert(template) => Cow::Borrowed(template.parameter_schema()),
+            ReturningKind::Mutation(template) => Cow::Borrowed(template.parameter_schema()),
+            ReturningKind::Merge(template) => Cow::Borrowed(template.parameter_schema()),
+            ReturningKind::EdgeMerge(template) => Cow::Borrowed(template.parameter_schema()),
+            ReturningKind::EdgeUpsert(template) => Cow::Borrowed(template.parameter_schema()),
+        }
+    }
+
+    /// Called only after the transport has acquired Write authority. The
+    /// observation occurs outside the restricted compiler, and the bound
+    /// definition retains it through every input row and native retry.
+    pub(crate) fn bind_current(
+        &self,
+        cx: &fgdb_types::QueryCx,
+        db: &Served,
+        parameters: &fgdb_gql::GqlParameters,
+    ) -> Result<Returning, Refusal> {
+        let parameters = db
+            .statement_clock
+            .capture_for_template(cx, &self.parameter_schema(), parameters)
+            .map_err(statement_time_refusal)?;
+        cx.with_restriction(|| self.bind(&parameters))
+    }
+
+    /// PREPARE checks the representative domains without observing a clock or
+    /// retaining any operand. The epoch only inhabits the implicit timestamp
+    /// slot for this discarded validation binding.
+    fn validate_parameters(&self, parameters: &fgdb_gql::GqlParameters) -> Result<(), Refusal> {
+        let parameters = if self
+            .parameter_schema()
+            .iter()
+            .any(fgdb_gql::GqlParameterSpec::is_statement_time)
+        {
+            std::borrow::Cow::Owned(
+                parameters
+                    .clone()
+                    .with_statement_time(
+                        fgdb_types::CanonicalTimestamp::offset_only(0, 0)
+                            .expect("the Unix epoch is a canonical timestamp"),
+                    )
+                    .map_err(|error| returning_template_refusal(&error))?,
+            )
+        } else {
+            std::borrow::Cow::Borrowed(parameters)
+        };
+        self.bind(&parameters).map(drop)
+    }
+
     pub(crate) fn bind(&self, parameters: &fgdb_gql::GqlParameters) -> Result<Returning, Refusal> {
         let recipe = self.lowered.as_ref();
         let derived;
@@ -785,6 +841,7 @@ impl ReturningTemplate {
 }
 
 impl Returning {
+    #[cfg(test)]
     pub(crate) fn prepare(
         db: &Served,
         text: &str,
@@ -1143,6 +1200,18 @@ fn warden_code(error: fgdb_warden::Error) -> ErrorCode {
     }
 }
 
+fn statement_time_code(error: &fgdb::StatementTimeError) -> ErrorCode {
+    match error {
+        fgdb::StatementTimeError::Cancelled(_) => ErrorCode::Cancelled,
+        fgdb::StatementTimeError::Unavailable => ErrorCode::Execution,
+        fgdb::StatementTimeError::Parameter(_) => ErrorCode::Statement,
+    }
+}
+
+fn statement_time_refusal(error: fgdb::StatementTimeError) -> Refusal {
+    Refusal::new(statement_time_code(&error), error.to_string())
+}
+
 fn gql_budget<E, C>(error: &GqlQueryError<E, C>) -> bool {
     matches!(error, GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_))
 }
@@ -1171,6 +1240,7 @@ pub(crate) fn query_refusal(error: impl Into<SessionError>) -> Refusal {
     };
     let code = match &error {
         QueryError::Authorization(error) => warden_code(*error),
+        QueryError::StatementTime(error) => statement_time_code(error),
         QueryError::Read(_) => ErrorCode::Execution,
         QueryError::Pattern(e) if gql_budget(e) => ErrorCode::Budget,
         QueryError::Aggregate(e) if gql_budget(e) => ErrorCode::Budget,
@@ -1209,6 +1279,10 @@ pub(crate) fn write_refusal(error: &(dyn core::error::Error + 'static)) -> Refus
     let mut code = ErrorCode::Statement;
     let mut source = Some(error);
     while let Some(current) = source {
+        if let Some(clock) = current.downcast_ref::<fgdb::StatementTimeError>() {
+            code = statement_time_code(clock);
+            break;
+        }
         if matches!(
             current.downcast_ref::<fgdb_gql::GraphWriteScriptBatchError>(),
             Some(fgdb_gql::GraphWriteScriptBatchError::TooManyStatements { .. })
@@ -1233,6 +1307,10 @@ pub(crate) fn write_refusal(error: &(dyn core::error::Error + 'static)) -> Refus
         }
         if let Some(txn) = current.downcast_ref::<fgdb::WriteTxnError>() {
             match txn {
+                fgdb::WriteTxnError::Interrupted(_) => {
+                    code = ErrorCode::Cancelled;
+                    break;
+                }
                 fgdb::WriteTxnError::Authorization(warden) => {
                     code = warden_code(*warden);
                     break;
@@ -1302,3 +1380,6 @@ mod occurrence_upsert_tests;
 
 #[cfg(test)]
 mod returning_admission_tests;
+
+#[cfg(test)]
+pub(crate) mod statement_time_tests;

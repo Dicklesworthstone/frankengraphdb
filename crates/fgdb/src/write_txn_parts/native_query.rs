@@ -69,6 +69,8 @@ impl PreparedNativeRead {
         transaction
             .ensure_database(database)
             .map_err(|error| QueryError::Transaction(Box::new(error)))?;
+        let captured = database.capture_statement_parameters(cx, self.statement(), params)?;
+        let params = captured.as_ref();
         match self {
             Self::Pattern(prepared) => {
                 let query = prepared
