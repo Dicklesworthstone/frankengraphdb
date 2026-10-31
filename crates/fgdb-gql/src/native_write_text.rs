@@ -175,6 +175,23 @@ impl BoundNativeGraphWrite {
             Self::prepare_script(text, arguments, relation, resolve)
         }
         .map_err(|error| NativeGraphWriteBindError::ScriptPreparation(restored(lowered, error)))?;
+        let roots = script
+            .bind_native_parameter_rows_controlled(
+                arguments,
+                PreparedGraphWriteScript::MAX_BATCH_STATEMENTS,
+                |_, _| Ok::<_, core::convert::Infallible>(()),
+            )
+            .map_err(|error| match error {
+                crate::GraphWriteScriptBatchBindError::Binding(error) => {
+                    NativeGraphWriteBindError::Unwind(GraphUnwindWriteError::Binding(error))
+                }
+                crate::GraphWriteScriptBatchBindError::Interrupted { source, .. } => {
+                    match source {}
+                }
+            })?;
+        if let Some(batch) = roots {
+            return Ok(Self(BoundInput::Unwind(batch)));
+        }
         let program = script
             .bind_parameters(arguments)
             .map_err(|error| NativeGraphWriteBindError::ScriptBinding(restored(lowered, error)))?;
@@ -344,6 +361,245 @@ impl<R: crate::GraphSymbolResolver> crate::GraphSymbolResolver for ArgumentCatal
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn root_symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Label, "Person") => {
+                Some(GraphSymbol::Label(fgdb_delta_types::LabelId(1)))
+            }
+            (GraphSymbolKind::Property, "name") => {
+                Some(GraphSymbol::Property(fgdb_delta_types::PropertyKeyId(1)))
+            }
+            (GraphSymbolKind::Property, "age") => {
+                Some(GraphSymbol::Property(fgdb_delta_types::PropertyKeyId(2)))
+            }
+            _ => None,
+        }
+    }
+
+    fn root_arguments() -> GqlParameters {
+        use crate::algebra::GraphValue;
+        let rows = [100, 200]
+            .into_iter()
+            .map(|age| {
+                GraphValue::map(vec![
+                    (
+                        "age".into(),
+                        GraphValue::Scalar(fgdb_types::CanonicalScalar::Int(age)),
+                    ),
+                    (
+                        "friends".into(),
+                        GraphValue::List(
+                            vec![GraphValue::Scalar(
+                                fgdb_types::CanonicalScalar::ucs_basic_text("Bob").unwrap(),
+                            )]
+                            .into_boxed_slice(),
+                        ),
+                    ),
+                    (
+                        "name".into(),
+                        GraphValue::Scalar(
+                            fgdb_types::CanonicalScalar::ucs_basic_text("Ada").unwrap(),
+                        ),
+                    ),
+                ])
+                .unwrap()
+            })
+            .collect();
+        GqlParameters::new().with_list("rows", rows).unwrap()
+    }
+
+    #[test]
+    fn native_root_binding_uses_actual_columns_and_retains_inner_costs_and_caps() {
+        for carry in ["p,row", "row,p"] {
+            let text = format!(
+                "UNWIND $rows AS row MATCH (p:Person {{name:row.name}}) \
+                WITH {carry} UNWIND row.friends AS friend MATCH (f:Person {{name:friend}}) \
+                SET p.name='Renamed',f.age=row.age"
+            );
+            let script = BoundNativeGraphWrite::prepare_script(
+                &text,
+                &root_arguments(),
+                RelationId(1),
+                root_symbols,
+            )
+            .unwrap();
+            let mut events = Vec::new();
+            let batch = script
+                .bind_native_parameter_rows_controlled(&root_arguments(), 2, |at, count| {
+                    events.push((at, count));
+                    Ok::<_, usize>(())
+                })
+                .unwrap()
+                .unwrap();
+            assert_eq!(events, [(None, 2), (Some(0), 2), (Some(1), 2), (None, 2)]);
+            assert_eq!(batch.argument_sets(), 2);
+            assert_eq!(batch.program().statements().len(), 2);
+            assert!(batch.program().freezes_vertex_update_input());
+            let expected_column = usize::from(carry == "p,row");
+            for statement in batch.program().statements() {
+                assert!(matches!(statement, crate::GraphWriteStatement::Mutation(_)));
+                if let crate::GraphWriteStatement::Mutation(mutation) = statement {
+                    assert_eq!(
+                        mutation.input_relation().unwrap().columns()[expected_column],
+                        "row"
+                    );
+                    assert!(!mutation.writes_only_constants());
+                    assert!(mutation.writes_only_parameter_columns(&[expected_column]));
+                }
+            }
+            let capped = script.clone().with_native_parameter_limit(1);
+            let mut reached = 0;
+            assert!(matches!(
+                capped.bind_native_parameter_rows_controlled(&root_arguments(), 2, |_, _| {
+                    reached += 1;
+                    Ok::<_, usize>(())
+                }),
+                Err(crate::GraphWriteScriptBatchBindError::Binding(
+                    crate::GraphWriteScriptBatchError::TooManyStatements {
+                        limit: 1,
+                        observed: 2
+                    }
+                ))
+            ));
+            assert_eq!(
+                reached, 0,
+                "cap admission precedes allocation and callbacks"
+            );
+            for stop in 0..events.len() {
+                let mut at = 0;
+                let result =
+                    script.bind_native_parameter_rows_controlled(&root_arguments(), 2, |_, _| {
+                        let current = at;
+                        at += 1;
+                        if current == stop {
+                            Err(current)
+                        } else {
+                            Ok(())
+                        }
+                    });
+                assert!(matches!(result,
+                    Err(crate::GraphWriteScriptBatchBindError::Interrupted { source, .. }) if source == stop));
+            }
+            let extra = root_arguments().with_int64("unused", 1).unwrap();
+            assert!(
+                script
+                    .bind_native_parameter_rows_controlled(&extra, 2, |_, _| Ok::<_, ()>(()))
+                    .is_err()
+            );
+            let empty = GqlParameters::new().with_list("rows", vec![]).unwrap();
+            assert!(
+                script
+                    .bind_native_parameter_rows_controlled(&empty, 2, |_, _| Ok::<_, ()>(()))
+                    .unwrap()
+                    .is_none()
+            );
+            let empty_extra = empty.with_int64("unused", 1).unwrap();
+            assert!(
+                script
+                    .bind_native_parameter_rows_controlled(&empty_extra, 2, |_, _| Ok::<_, ()>(()),)
+                    .is_err()
+            );
+            let elements = GqlParameters::new()
+                .with_list(
+                    "rows",
+                    vec![
+                        crate::algebra::GraphValue::Vertex(fgdb_types::VId(1)),
+                        crate::algebra::GraphValue::map(vec![(
+                            "age".into(),
+                            crate::algebra::GraphValue::Vertex(fgdb_types::VId(2)),
+                        )])
+                        .unwrap(),
+                    ],
+                )
+                .unwrap();
+            let mut expanded = false;
+            assert!(
+                script
+                    .bind_native_parameter_rows_controlled(&elements, 2, |_, _| {
+                        expanded = true;
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                !expanded,
+                "element-valued parameter roots never gain frozen provenance"
+            );
+            let mut missing = GqlParameters::new();
+            missing
+                .insert("unused", crate::GqlParameterValue::Int64(1))
+                .unwrap();
+            assert!(
+                script
+                    .bind_native_parameter_rows_controlled(&missing, 2, |_, _| Ok::<_, ()>(()))
+                    .is_err()
+            );
+
+            for assignment in ["f.age=100", "f.age=f.age+row.age"] {
+                let other = text.replace("p.name='Renamed',f.age=row.age", assignment);
+                let prepared = BoundNativeGraphWrite::prepare_script(
+                    &other,
+                    &root_arguments(),
+                    RelationId(1),
+                    root_symbols,
+                )
+                .unwrap();
+                assert!(
+                    prepared
+                        .bind_native_parameter_rows_controlled(&root_arguments(), 2, |_, _| Ok::<
+                            _,
+                            (),
+                        >(
+                            ()
+                        ),)
+                        .unwrap()
+                        .is_none(),
+                    "{other}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_root_framing_declines_global_and_rebound_scopes() {
+        for prefix in [
+            "WITH p,row AS kept UNWIND kept.friends AS friend",
+            "WITH p,row.name AS row UNWIND row.friends AS friend",
+            "WITH p UNWIND [1] AS friend",
+            "WITH DISTINCT p,row UNWIND row.friends AS friend",
+            "WITH p,row ORDER BY p UNWIND row.friends AS friend",
+            "WITH p,row LIMIT 1 UNWIND row.friends AS friend",
+            "WITH row,count(*) AS p UNWIND row.friends AS friend",
+            "WITH p,row CALL { RETURN 1 AS x } UNWIND row.friends AS friend",
+            "WITH p,row UNWIND ROW.friends AS friend",
+        ] {
+            let text = format!(
+                "UNWIND $rows AS row MATCH (p:Person {{name:row.name}}) \
+                {prefix} MATCH (f:Person {{name:friend}}) SET f.age=row.age"
+            );
+            assert!(
+                GraphUnwindWriteText::native_frozen_parameter_root(&text).is_none(),
+                "{text}"
+            );
+        }
+        for suffix in [
+            " RETURN f",
+            "; MATCH (n) SET n.age=1",
+            " SET f.name='x'",
+            ",f.name=$other",
+        ] {
+            let text = format!(
+                "UNWIND $rows AS row MATCH (p) WITH p,row \
+                UNWIND row.friends AS friend MATCH (f) SET f.age=row.age{suffix}"
+            );
+            assert!(
+                GraphUnwindWriteText::native_frozen_parameter_root(&text).is_none(),
+                "{text}"
+            );
+        }
+    }
 
     #[test]
     fn definition_probe_and_binder_share_ordinary_script_preparation() {

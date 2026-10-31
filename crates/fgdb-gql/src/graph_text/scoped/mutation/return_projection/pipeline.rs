@@ -2538,10 +2538,14 @@ impl<'a> Parser<'a> {
         schema: &mut RowSchema<'a>,
         at: usize,
     ) -> Result<ReadStageTemplate, GraphSetTextError> {
-        // CALL consumes real row identities after the graph boundary's hidden
-        // preimages end. Arguments and later carried fields use the existing
-        // governed element reader, as an inline CALL's exported identities do.
-        self.call_element_reads = true;
+        // A write chain must read current identities after its earlier writes.
+        // Pure reads keep their graph-source projections: the public
+        // pattern/procedure API need not supply a separate point reader for
+        // the same immutable cut. Preserve any late-reader requirement the
+        // enclosing owner already established.
+        if self.chain_write {
+            self.call_element_reads = true;
+        }
         let namespace = self.name()?;
         self.punct(b'.', "procedure name after the namespace")?;
         let name = self.name()?;

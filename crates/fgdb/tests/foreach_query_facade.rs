@@ -424,6 +424,162 @@ fn parameterized_merge_upserts_publish_once_and_survive_reopen() {
 }
 
 #[test]
+fn mixed_merge_values_keep_selected_branches_frozen_clauses_and_late_rollback() {
+    let ((), report) = run_async_under_lab(0xf0ec_1011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&contexts.commit(), vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut seed = fgdb::WriteBatch::new(R);
+        seed.create_vertex(
+            VId(10),
+            vec![L],
+            vec![(P, CanonicalScalar::Int(1)), (Q, CanonicalScalar::Int(10))],
+        );
+        db.write(&contexts.commit(), seed).await.unwrap();
+        let pinned = db.read_session().unwrap();
+        let basis = db.frontier().unwrap();
+        let parameters = GqlParameters::new()
+            .with_list(
+                "rows",
+                [(1, 2, 1, 0), (2, 4, 0, 2)]
+                    .into_iter()
+                    .map(|(key, delta, match_divisor, create_divisor)| {
+                        GraphValue::map(vec![
+                            ("key".into(), int(key)),
+                            ("delta".into(), int(delta)),
+                            ("match_divisor".into(), int(match_divisor)),
+                            ("create_divisor".into(), int(create_divisor)),
+                        ])
+                        .unwrap()
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let original = parameters.canonical_bytes();
+        let mut next = 100_u128;
+        let result = db
+            .query_write(
+                &contexts.txn(),
+                &contexts.query(),
+                &contexts.commit(),
+                "FOREACH (row IN $rows | MERGE (n:F {p:row.key}) \
+                 ON MATCH SET n.q=n.q+row.delta/row.match_divisor \
+                 ON CREATE SET n.q=20/row.create_divisor+n.p \
+                 SET n.p=n.q+row.delta, n.q=n.p+row.delta) \
+                 MATCH (n:F) RETURN n.p AS key,n.q AS total ORDER BY key",
+                &parameters,
+                symbols,
+                R,
+                policy(2),
+                |_| {
+                    next += 1;
+                    Ok::<_, Infallible>(ElementId::Vertex(VId(next)))
+                },
+            )
+            .await
+            .unwrap();
+        // Each unselected ON branch contains a real divide-by-zero. The
+        // selected ON leaves q=12; common SET reads p and q before either
+        // sibling assignment is staged, so its q never reads the new p.
+        assert_eq!(
+            rows(result, &["key", "total"]),
+            vec![vec![int(14), int(3)], vec![int(16), int(6)]]
+        );
+        assert_eq!(next, 101);
+        assert_eq!(parameters.canonical_bytes(), original);
+        assert_eq!(db.frontier().unwrap().0, basis.0 + 1);
+        assert_eq!(db.delta_since(basis).unwrap().count(), 1);
+        assert_eq!(
+            pinned.vertices().unwrap()[0].props,
+            vec![
+                (P, CanonicalScalar::Int(1).into()),
+                (Q, CanonicalScalar::Int(10).into()),
+            ]
+        );
+        let expected = db.vertices().unwrap();
+        let published = db.frontier().unwrap();
+        drop(db);
+        let mut db = Database::open_with_vfs(&contexts.commit(), vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(db.vertices().unwrap(), expected);
+
+        let invalid = GqlParameters::new()
+            .with_list(
+                "rows",
+                vec![
+                    GraphValue::map(vec![("key".into(), int(3)), ("delta".into(), int(2))])
+                        .unwrap(),
+                    GraphValue::map(vec![
+                        ("key".into(), int(4)),
+                        (
+                            "delta".into(),
+                            GraphValue::map(vec![("bad".into(), int(9))]).unwrap(),
+                        ),
+                    ])
+                    .unwrap(),
+                ],
+            )
+            .unwrap();
+        let original_invalid = invalid.canonical_bytes();
+        let mut transaction = db.begin(&contexts.txn()).unwrap();
+        let mut prefix = fgdb::WriteBatch::new(R);
+        prefix.create_vertex(VId(77), vec![L], vec![(P, CanonicalScalar::Int(77))]);
+        transaction.write(&mut db, prefix).unwrap();
+        let digest = transaction.staged_effect_digest().unwrap();
+        let before = transaction.vertices(&db).unwrap();
+        let error = transaction
+            .query_write(
+                &mut db,
+                &contexts.query(),
+                "FOREACH (row IN $rows | MERGE (n:F {p:row.key}) \
+                 ON CREATE SET n.q=0 SET n.q=n.q+row.delta)",
+                &invalid,
+                symbols,
+                R,
+                policy(0),
+                |_| {
+                    next += 1;
+                    Ok::<_, Infallible>(ElementId::Vertex(VId(next)))
+                },
+            )
+            .expect_err("the second mixed RHS must reject a map as a scalar operand");
+        assert!(matches!(
+            error,
+            fgdb::QueryWriteError::Chain(fgdb_gql::GqlQueryError::Source(
+                fgdb_gql::GraphWriteChainError::VertexMerge(
+                    fgdb_gql::GraphVertexMergeRowsQueryError::Merge(
+                        fgdb_gql::GraphVertexMergeError::RowAction { clause: 1, .. }
+                    )
+                )
+            ))
+        ));
+        assert_eq!(
+            next, 103,
+            "the invalid row follows the first completed local MERGE"
+        );
+        assert_eq!(invalid.canonical_bytes(), original_invalid);
+        assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
+        assert_eq!(transaction.vertices(&db).unwrap(), before);
+        assert_eq!(db.frontier().unwrap(), published);
+        assert_eq!(db.vertices().unwrap(), expected);
+        assert_eq!(contexts.txn().outstanding_obligations(), 1);
+        transaction.abort();
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+        drop(db);
+        let reopened = Database::open_with_vfs(&contexts.commit(), vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(reopened.frontier().unwrap(), published);
+        assert_eq!(reopened.vertices().unwrap(), expected);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn nested_parameterized_graph_import_publishes_once_and_survives_reopen() {
     let ((), report) = run_async_under_lab(0xf0ec_1020, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

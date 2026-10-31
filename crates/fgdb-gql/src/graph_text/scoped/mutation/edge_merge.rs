@@ -1660,10 +1660,20 @@ impl PreparedGraphEdgeMergeText {
                                 .collect(),
                             value,
                         },
-                        VertexAction::Value { key, value } => EdgeAction::Value {
-                            key,
-                            value: crate::GraphEdgeMergeRowComputed(value),
-                        },
+                        VertexAction::Value { key, inputs, value } => {
+                            if inputs.is_some() {
+                                return Err(GraphEdgeMergeTextError::from(error(
+                                    self.input.return_at(),
+                                    GraphPatternTextErrorKind::Expected(
+                                        "a row value that does not read the MERGE relationship",
+                                    ),
+                                )));
+                            }
+                            EdgeAction::Value {
+                                key,
+                                value: crate::GraphEdgeMergeRowComputed(value),
+                            }
+                        }
                         VertexAction::Properties {
                             value,
                             replace,

@@ -458,7 +458,6 @@ fn prepared_identity_reads_refuse_unbound_roots_and_cross_sibling_provenance() {
             format!(
                 "({CALL}RETURN node.name AS name LIMIT 0) UNION ALL MATCH (node:Node) RETURN node.name AS name"
             ),
-            format!("{CALL}MATCH (node)-[]->(other) RETURN other.name AS name LIMIT 0"),
         ] {
             let prepared = session
                 .prepare(&c.query(), &query, &params)
@@ -476,6 +475,73 @@ fn prepared_identity_reads_refuse_unbound_roots_and_cross_sibling_provenance() {
                 assert!(!session.is_closed());
             }
         }
+        // A MATCH rooted in the actual yielded identity is now supported;
+        // retain the original LIMIT-zero statement. The original token has no
+        // relation grant, so even a nonempty eligible root sees no edge.
+        for (eligible, limit, expected) in [
+            (vec![HIGH], " LIMIT 0", Vec::<Vec<QueryValue>>::new()),
+            (vec![], " LIMIT 0", vec![]),
+            (vec![VId(1)], "", vec![]),
+        ] {
+            let query = format!("{CALL}MATCH (node)-[]->(other) RETURN other.name AS name{limit}");
+            let params = parameters(&eligible);
+            let prepared = session.prepare(&c.query(), &query, &params).unwrap();
+            assert_eq!(
+                rows(session.execute(&c.query(), &prepared, &params).unwrap()),
+                expected
+            );
+            assert_eq!(
+                rows(
+                    session
+                        .execute_beacon_index(&c.query(), &index, &prepared, &params)
+                        .unwrap()
+                ),
+                expected
+            );
+            assert!(!session.is_closed());
+        }
+        // Grant only the fixture edge's relation in a separate credential.
+        // Both owners must then return its independently known target name.
+        let mut edge_grant = grant(100);
+        edge_grant.relations = Scope::only([RelationId(1)]);
+        let edge_token = issuer.issue_at(&edge_grant, NOW).unwrap();
+        let mut edge_session = db
+            .authorized_read_session(
+                &c.query(),
+                &issuer,
+                &edge_token,
+                "main",
+                catalog,
+                policy(100),
+                || NOW,
+            )
+            .unwrap();
+        let edge_index = edge_session
+            .prepare_beacon_index(&c.query(), &options())
+            .unwrap();
+        let edge_params = parameters(&[VId(1)]);
+        let edge_query = format!("{CALL}MATCH (node)-[]->(other) RETURN other.name AS name");
+        let edge_read = edge_session
+            .prepare(&c.query(), &edge_query, &edge_params)
+            .unwrap();
+        let edge_expected = vec![vec![scalar(text("high"))]];
+        assert_eq!(
+            rows(
+                edge_session
+                    .execute(&c.query(), &edge_read, &edge_params)
+                    .unwrap()
+            ),
+            edge_expected
+        );
+        assert_eq!(
+            rows(
+                edge_session
+                    .execute_beacon_index(&c.query(), &edge_index, &edge_read, &edge_params)
+                    .unwrap()
+            ),
+            edge_expected
+        );
+        edge_session.close();
         let good = session
             .prepare(
                 &c.query(),

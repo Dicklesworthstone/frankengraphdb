@@ -46,6 +46,27 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     }
 }
 
+struct Catalog {
+    omit_p: bool,
+}
+
+impl fgdb_gql::GraphSymbolResolver for Catalog {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        symbols(kind, name)
+    }
+
+    fn reverse_catalog(&self) -> Option<fgdb_gql::ReverseSymbolCatalog> {
+        let mut catalog = fgdb_gql::ReverseSymbolCatalog::new();
+        catalog.insert_relation(R, "R");
+        catalog.insert_relation(S, "S");
+        if !self.omit_p {
+            catalog.insert_property(P, "p");
+        }
+        catalog.insert_property(Q, "q");
+        Some(catalog)
+    }
+}
+
 fn policy() -> GraphWriteProgramPolicy {
     GraphWriteProgramPolicy::new(
         GqlQueryPolicy::new(100_000, 100, 10_000_000, 1_000_000),
@@ -511,7 +532,7 @@ async fn write_text(
         commit,
         text,
         &GqlParameters::new(),
-        symbols,
+        Catalog { omit_p: false },
         R,
         policy(),
         |_| {
@@ -722,6 +743,61 @@ fn late_relationship_metadata_value_refusals_roll_back_prior_edges_and_endpoints
             );
             assert_eq!(txcx.outstanding_obligations(), 0);
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn missing_endpoint_property_name_refuses_before_a_second_relationship_allocation() {
+    let ((), report) = run_async_under_lab(0xe8a0_000a, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (commit, cx, txcx) = (contexts.commit(), contexts.query(), contexts.txn());
+        let mut db = database(&commit, false, false).await;
+        let before = (
+            db.frontier().unwrap(),
+            db.vertices().unwrap(),
+            db.edges().unwrap(),
+        );
+        let mut next = 900;
+        let error = db
+            .query_write(
+                &txcx,
+                &cx,
+                &commit,
+                "MATCH (a),(b) WHERE a.p=1 AND b.p=2 \
+                 FOREACH (x IN [1,2] | MERGE (a)-[r:R {q:x}]->(b) \
+                 ON CREATE SET r.p=properties(a).p, b.q=properties(a).p)",
+                &GqlParameters::new(),
+                Catalog { omit_p: true },
+                R,
+                policy(),
+                |_| {
+                    next += 1;
+                    Ok::<_, ()>(ElementId::Edge(EId(next)))
+                },
+            )
+            .await
+            .expect_err("a forward property symbol cannot name a complete metadata map");
+        assert!(matches!(
+            error,
+            fgdb::QueryWriteError::Chain(GqlQueryError::Source(
+                fgdb_gql::GraphWriteChainError::EdgeUpsert(
+                    fgdb_gql::GraphEdgeUpsertQueryError::Upsert(GraphEdgeUpsertError::Staging(
+                        fgdb::WriteTxnError::Read(fgdb::ReadError::UnmappedProperty(P))
+                    ))
+                )
+            ))
+        ));
+        assert_eq!(next, 901, "the first selected ON read refuses immediately");
+        assert_eq!(
+            (
+                db.frontier().unwrap(),
+                db.vertices().unwrap(),
+                db.edges().unwrap()
+            ),
+            before
+        );
+        assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

@@ -346,11 +346,13 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
         }
     };
     let failure = RefCell::new(None);
-    let signed_rows = scope.limits().max_rows;
+    let signed_rows = sink.signed_row_limit(scope);
     let mut limits = options.execution_limits;
-    limits.max_result_rows = limits
-        .max_result_rows
-        .min(usize::try_from(signed_rows).unwrap_or(usize::MAX));
+    if let Some(signed_rows) = signed_rows {
+        limits.max_result_rows = limits
+            .max_result_rows
+            .min(usize::try_from(signed_rows).unwrap_or(usize::MAX));
+    }
     // Raw cursor opens/pulls, reverse projections, kernel passes and result
     // hashing all retain this same fresh-time guard and cumulative host meter.
     let result =
@@ -376,7 +378,7 @@ pub(super) fn execute<Clock: FnMut() -> u64>(
         requested,
         ..
     })) = &result
-        && *requested as u128 > u128::from(signed_rows)
+        && signed_rows.is_some_and(|limit| *requested as u128 > u128::from(limit))
     {
         execution
             .borrow_mut()

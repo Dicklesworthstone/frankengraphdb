@@ -93,7 +93,7 @@ impl<'a> Parser<'a> {
             .collect();
         // A bound vertex, edge, or path with a literal-looking name retains its identity.
         // Integer operators cannot silently cast it into a scalar column.
-        let bare_variable = if self.starts_integer_case()? {
+        let bare_variable = if self.starts_integer_case(None)? {
             false
         } else if let TokenKind::Word(word) = self.current.kind {
             let next = self.lexer.clone().next()?;

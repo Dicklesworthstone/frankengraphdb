@@ -318,10 +318,9 @@ fn check_families(db: &Database<MemVfs>, cx: &QueryCx, graph: &ReferenceGraph, s
     assert!(graph.vertex(VId(8)).is_none() && graph.vertex(VId(107)).is_none());
     assert!(graph.edge(EId(90)).is_none() && graph.edge(EId(92)).is_none());
     assert!(!graph.vertex(VId(105)).unwrap().props.contains_key(&VALUE));
-    assert_eq!(
-        graph.vertex(VId(106)).unwrap().props.get(&VALUE),
-        Some(&CanonicalScalar::Null.into())
-    );
+    // VId106 was supplied an explicit NULL; like the missing VId105 key,
+    // it is absent after the public write, while every query still reads NULL.
+    assert!(!graph.vertex(VId(106)).unwrap().props.contains_key(&VALUE));
     for floor in [None, Some(0), Some(1000)] {
         let scopes = optional_rows(graph, floor);
         assert!(

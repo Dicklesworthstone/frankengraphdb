@@ -1941,18 +1941,37 @@ fn post_write_match_merges_share_limits_and_rollback_late_keys_and_output() {
                     |request| allocate(&next, request),
                 )
                 .unwrap_err();
-            assert!(
-                matches!(
-                    error,
+            // Element-dependent keys are projected into the fourth input
+            // cell. A NULL reaches tuple admission; division fails while
+            // producing that cell, before the tuple can be consumed.
+            let expected_error = matches!(
+                (&error, key),
+                (
                     GqlQueryError::Source(fgdb_gql::GraphWriteChainError::VertexMerge(
                         fgdb_gql::GraphVertexMergeRowsQueryError::Merge(
-                            fgdb_gql::GraphVertexMergeError::RowExpressionValue { row: 1, .. }
-                                | fgdb_gql::GraphVertexMergeError::RowExpression { row: 1, .. }
-                        )
-                    ))
-                ),
-                "{key}: {error:?}"
+                            fgdb_gql::GraphVertexMergeError::RowValue { row: 1, column: 3 },
+                        ),
+                    )),
+                    "CASE WHEN n.p=2 THEN null ELSE n.p END",
+                ) | (
+                    GqlQueryError::Source(fgdb_gql::GraphWriteChainError::VertexMerge(
+                        fgdb_gql::GraphVertexMergeRowsQueryError::Merge(
+                            fgdb_gql::GraphVertexMergeError::InputRelation(
+                                fgdb_gql::GraphSetExecutionError::Projection {
+                                    row: 1,
+                                    column: 3,
+                                    error: fgdb_gql::GraphIntegerError {
+                                        instruction: 4,
+                                        kind: fgdb_gql::GraphIntegerErrorKind::DivisionByZero,
+                                    },
+                                },
+                            ),
+                        ),
+                    )),
+                    "1/(n.p-2)",
+                )
             );
+            assert!(expected_error, "{key}: {error:?}");
             assert_eq!(transaction.staged_effect_digest().unwrap(), digest);
             assert_eq!(transaction.vertices(&database).unwrap().len(), 3);
             assert_eq!(database.frontier().unwrap(), basis);

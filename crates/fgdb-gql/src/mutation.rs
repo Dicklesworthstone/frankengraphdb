@@ -586,15 +586,29 @@ impl PreparedGraphMutation {
     /// column or graph state. An expression can still fail; normal execution
     /// must evaluate it and preserve its original row's error and budget charges.
     pub(crate) fn writes_only_constants(&self) -> bool {
+        self.writes_only_parameter_columns(&[])
+    }
+
+    /// Only the caller's proven immutable parameter columns may occur in an
+    /// RHS. Targets and actions keep the ordinary field-only profile checks.
+    pub(crate) fn writes_only_parameter_columns(&self, parameters: &[usize]) -> bool {
         self.actions.iter().all(|action| match action {
             GraphMutationAction::SetProperty { value, .. } => match value {
                 GraphMutationValue::Literal(_) => true,
                 GraphMutationValue::Expression(expression) => {
-                    expression.referenced_columns().next().is_none()
+                    expression
+                        .referenced_columns()
+                        .all(|column| parameters.contains(&column))
                         && expression.referenced_locals().next().is_none()
                 }
-                GraphMutationValue::Composite(value) => value.is_input_independent(),
-                GraphMutationValue::Column(_) => false,
+                GraphMutationValue::Composite(value) => {
+                    if parameters.is_empty() {
+                        value.is_input_independent()
+                    } else {
+                        value.is_input_independent_except(parameters)
+                    }
+                }
+                GraphMutationValue::Column(column) => parameters.contains(column),
             },
             GraphMutationAction::RemoveProperty { .. } | GraphMutationAction::SetLabel { .. } => {
                 true

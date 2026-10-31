@@ -420,6 +420,15 @@ enum ResultSink<'a> {
     Retained(&'a mut Option<FnxRowCursor>),
 }
 
+impl ResultSink<'_> {
+    fn signed_row_limit(&self, scope: &PlannerPredicates) -> Option<u64> {
+        // Mapped and retained rows stay inside a relational CALL. Only its
+        // final page/groups pass the enclosing signed delivery gate. Public
+        // standalone output also keeps its early kernel admission ceiling.
+        matches!(self, Self::Collected).then_some(scope.limits().max_rows)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_with_sink<Clock: FnMut() -> u64>(
     snapshot: &Arc<Snapshot>,
@@ -557,11 +566,13 @@ fn execute_with_sink<Clock: FnMut() -> u64>(
             }
         })
     })?;
-    let signed_rows = scope.limits().max_rows;
+    let signed_rows = sink.signed_row_limit(scope);
     let mut limits = options.execution_limits;
-    limits.max_result_rows = limits
-        .max_result_rows
-        .min(usize::try_from(signed_rows).unwrap_or(usize::MAX));
+    if let Some(signed_rows) = signed_rows {
+        limits.max_result_rows = limits
+            .max_result_rows
+            .min(usize::try_from(signed_rows).unwrap_or(usize::MAX));
+    }
     // The kernel's units are charged to the signed permit in runs, and the
     // caller meter still sees each one. Nothing else borrows either while the
     // kernel runs.
@@ -606,7 +617,7 @@ fn execute_with_sink<Clock: FnMut() -> u64>(
         requested,
         ..
     }) = &result
-        && *requested as u128 > u128::from(signed_rows)
+        && signed_rows.is_some_and(|limit| *requested as u128 > u128::from(limit))
     {
         execution
             .borrow_mut()

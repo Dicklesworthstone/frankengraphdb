@@ -421,9 +421,10 @@ where
                         params,
                         state.relation,
                         super::BorrowedCatalog(&mut state.resolver),
-                    )?;
+                    )?
+                    .with_native_parameter_limit(state.max_statements);
                     statement_limit(&script, state.max_statements)?;
-                    Input::Script(&script, params).bind(
+                    Input::Script(&script, params, state.max_statements).bind(
                         cx,
                         state.capability.predicates(),
                         &mut execution,
@@ -900,11 +901,13 @@ where
                         match &prepared.definition {
                             PreparedDefinition::Script(script) => {
                                 statement_limit(script, *max_statements)?;
-                                SessionBound::Program(Input::Script(script, params).bind(
-                                    cx,
-                                    capability.predicates(),
-                                    &mut execution,
-                                )?)
+                                SessionBound::Program(
+                                    Input::Script(script, params, *max_statements).bind(
+                                        cx,
+                                        capability.predicates(),
+                                        &mut execution,
+                                    )?,
+                                )
                             }
                             PreparedDefinition::Chain(prepared) => {
                                 super::chain_statement_limit(*max_statements)?;
@@ -953,7 +956,9 @@ where
                                 capability.predicates(),
                                 &mut execution,
                                 returning,
-                                receipt,
+                                |stats, steps| {
+                                    receipt(bound.receipt_stats(stats, returning), steps)
+                                },
                             ));
                         completion.await.map_err(|error| bound.error(error))
                     }

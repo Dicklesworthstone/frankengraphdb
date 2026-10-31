@@ -143,14 +143,14 @@ impl FrozenCreations {
         &self,
         vertex: VId,
         key: fgdb_delta_types::PropertyKeyId,
-    ) -> Option<Option<CanonicalPropertyValue>> {
+    ) -> Option<Option<&CanonicalPropertyValue>> {
         let &at = self.index.get(&vertex)?;
         Some(
             self.vertices[at]
                 .2
                 .iter()
                 .find(|(present, _)| *present == key)
-                .map(|(_, value)| value.clone()),
+                .map(|(_, value)| value),
         )
     }
 
@@ -1079,28 +1079,40 @@ impl WriteTxn {
             used,
             effects,
             || cx.checkpoint(),
-            |key, _control| {
+            |key, control| {
                 let state = state.borrow();
-                let stored = match state
+                if let Some(stored) = state
                     .2
                     .as_deref()
                     .and_then(|held| held.property(vertex, key))
                 {
-                    Some(stored) => stored,
-                    None => state
-                        .0
-                        .merged_vertex_property(state.1, vertex, key)
-                        .map_err(source)?,
-                };
-                match stored {
-                    None => Ok(GraphValue::Scalar(CanonicalScalar::Null)),
-                    Some(value) => GraphValue::from_property_value(&value).ok_or(
-                        GqlQueryError::Data(fgdb_gql::GraphIntegerError {
-                            instruction: 0,
-                            kind: fgdb_gql::GraphIntegerErrorKind::StoredValueBounds,
-                        }),
-                    ),
+                    control(fgdb_gql::GlaExecutionEvent::Work)?;
+                    return match stored {
+                        Some(value) => {
+                            GraphValue::admit_property_value(value, &mut |event| control(event))
+                        }
+                        None => Ok(GraphValue::Scalar(CanonicalScalar::Null)),
+                    };
                 }
+                // Keep the target at the current clause cut. Source and
+                // payload admission precede conversion, including a failed
+                // conversion; carried element reads below keep their separate
+                // frozen input provenance instead.
+                let control = std::cell::RefCell::new(control);
+                merge_row_property_with(
+                    state.0,
+                    state.1,
+                    ElementId::Vertex(vertex),
+                    key,
+                    &mut |event| control.borrow_mut()(event),
+                    source,
+                    |stored| match stored {
+                        Some(value) => GraphValue::admit_property_value(value, &mut |event| {
+                            control.borrow_mut()(event)
+                        }),
+                        None => Ok(GraphValue::Scalar(CanonicalScalar::Null)),
+                    },
+                )
             },
             |_, element, key, control| {
                 let mut state = state.borrow_mut();
@@ -1438,7 +1450,7 @@ pub(crate) fn vertex_merge_row_actions_controlled<E, A, C>(
                         })?;
                     batch.set_vertex_property(vertex, *key, Some(value));
                 }
-                GraphVertexMergeRowAction::Value { key, value } => {
+                GraphVertexMergeRowAction::Value { key, inputs, value } => {
                     let refusal = |source| {
                         GqlQueryError::Source(GraphVertexMergeError::RowAction {
                             row: at,
@@ -1447,6 +1459,36 @@ pub(crate) fn vertex_merge_row_actions_controlled<E, A, C>(
                             source,
                         })
                     };
+                    // Only the selected clause constructs this mixed frame.
+                    // Old row-only values retain their borrowed input and
+                    // accounting. Target fields read the current clause cut;
+                    // carried values retain their original source coordinates.
+                    let frame = inputs
+                        .as_ref()
+                        .map(|inputs| {
+                            charge(used, GlaExecutionEvent::ScratchEntry)?;
+                            let mut frame = Vec::with_capacity(inputs.len());
+                            for input in inputs {
+                                charge(used, GlaExecutionEvent::ScratchEntry)?;
+                                frame.push(match *input {
+                                    GraphVertexMergeRowInput::Property(key) => {
+                                        charge(used, GlaExecutionEvent::Work)?;
+                                        read(key, &mut |event| charge(used, event))?
+                                    }
+                                    GraphVertexMergeRowInput::Column(column) => row
+                                        .values()
+                                        .get(column)
+                                        .ok_or(GqlQueryError::Source(
+                                            GraphVertexMergeError::InputSchema { row: at, column },
+                                        ))?
+                                        .copy_with_control(&mut |event| charge(used, event))?,
+                                });
+                            }
+                            Ok::<_, GqlQueryError<GraphVertexMergeError<E, A>, C>>(
+                                fgdb_gql::algebra::GraphValueRow::from_owned_values(frame),
+                            )
+                        })
+                        .transpose()?;
                     let written = {
                         // Carried elements use the same input-cut reader as
                         // map assignments. Evaluation and point reads spend
@@ -1456,10 +1498,28 @@ pub(crate) fn vertex_merge_row_actions_controlled<E, A, C>(
                         let controls = std::cell::RefCell::new(&mut control);
                         value
                             .value_with_elements(
-                                row,
+                                frame.as_ref().unwrap_or(row),
                                 &mut |event| controls.borrow_mut()(event),
                                 &mut MergeRowMapReader(
                                     |column, element, key| {
+                                        let column = match (inputs.as_deref(), column) {
+                                            (Some(inputs), Some(column)) => {
+                                                match inputs.get(column) {
+                                                    Some(GraphVertexMergeRowInput::Column(
+                                                        original,
+                                                    )) => Some(*original),
+                                                    _ => {
+                                                        return Err(GqlQueryError::Source(
+                                                            GraphVertexMergeError::InputSchema {
+                                                                row: at,
+                                                                column,
+                                                            },
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                            (_, column) => column,
+                                        };
                                         read_row(column, element, key, &mut |event| {
                                             controls.borrow_mut()(event)
                                         })
@@ -1492,20 +1552,6 @@ pub(crate) fn vertex_merge_row_actions_controlled<E, A, C>(
         }
     }
     Ok(())
-}
-
-impl WriteTxn {
-    /// One final-state stored property of a vertex a MERGE step returned,
-    /// read through the governed point projection and witnessed, as
-    /// relationship MERGE RETURN reads its endpoints. A missing field is NULL.
-    pub(crate) fn merged_vertex_property<V: Vfs + Clone>(
-        &self,
-        database: &Database<V>,
-        vertex: VId,
-        key: fgdb_delta_types::PropertyKeyId,
-    ) -> Result<Option<CanonicalPropertyValue>, WriteTxnError> {
-        self.merge_return_property(database, ElementId::Vertex(vertex), key)
-    }
 }
 
 // Both cardinality owners stage the collector's ordinary insertion proposal
@@ -1548,4 +1594,155 @@ fn stage_vertex_merge_creation<V: Vfs + Clone, A>(
             error,
         )))
     })
+}
+
+#[cfg(test)]
+#[test]
+fn mixed_merge_target_payload_is_admitted_before_owner_frame_copy() {
+    use fgdb_gql::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue, GraphValueRow};
+    use fgdb_gql::{
+        GlaExecutionStats, GlaLimitDimension, GqlExecutionStats, GqlParameters, GqlQueryError,
+        GqlQueryPolicy, GraphSymbol, GraphSymbolKind, GraphVertexMergePolicy,
+        GraphVertexMergeRowAction, GraphVertexMergeStats, GraphWriteChainStep,
+        PreparedGraphWriteChainText,
+    };
+    const P: fgdb_delta_types::PropertyKeyId = fgdb_delta_types::PropertyKeyId(1);
+    const Q: fgdb_delta_types::PropertyKeyId = fgdb_delta_types::PropertyKeyId(2);
+    const SCRATCH: u64 = 32;
+    let ((), report) = asupersync::lab::run_async_under_lab(0xf0ec_1012, |root| async move {
+        let contexts = fgdb_types::PurposeContexts::narrow_runtime_root(&root);
+        let definition = PreparedGraphWriteChainText::prepare(
+            "WITH {key:1,result:7} AS row MERGE (n:F {p:row.key}) \
+             SET n.p=CASE WHEN false THEN n.q ELSE row.result END \
+             CREATE (:F {p:99})",
+            RelationId(1),
+            |kind, name: &str| match (kind, name) {
+                (GraphSymbolKind::Label, "F") => Some(GraphSymbol::Label(LabelId(1))),
+                (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+                (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
+                _ => None,
+            },
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let GraphWriteChainStep::VertexMerge(merge) = &definition.steps()[0] else {
+            panic!("the compiled first stage is the row MERGE");
+        };
+        let actions = &merge.actions().unwrap().after;
+        assert!(matches!(
+            &actions[..],
+            [GraphVertexMergeRowAction::Value {
+                inputs: Some(_),
+                ..
+            }]
+        ));
+        let input = GraphValueRow::from_owned_values(vec![
+            GraphValue::map(vec![
+                ("key".into(), GraphValue::Scalar(CanonicalScalar::Int(1))),
+                ("result".into(), GraphValue::Scalar(CanonicalScalar::Int(7))),
+            ])
+            .unwrap(),
+        ]);
+        // Each 64-byte payload quantum must consume scratch before the copy.
+        // A tiny value fits the same cap; this large bound cell alone exceeds
+        // it. The CASE result is always7, so output admission cannot explain
+        // the refusal. This owner-stage law deliberately excludes selection.
+        for payload_bytes in [1, (SCRATCH as usize + 1) * GRAPH_VALUE_PAYLOAD_UNIT_BYTES] {
+            let stored = CanonicalScalar::ucs_basic_text(&"x".repeat(payload_bytes)).unwrap();
+            let mut db = Database::<crate::MemVfs>::open_memory(
+                &contexts.commit(),
+                crate::DatabaseKeys::new(
+                    [0x91; 32],
+                    fgdb_types::DatabaseSecurityNamespaceId([0x92; 32]),
+                    [0x93; 32],
+                ),
+            )
+            .await
+            .unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            seed.create_vertex(
+                VId(1),
+                vec![LabelId(1)],
+                vec![(P, CanonicalScalar::Int(1)), (Q, stored.clone())],
+            );
+            db.write(&contexts.commit(), seed).await.unwrap();
+            let frontier = db.frontier().unwrap();
+            for held_target in [false, true] {
+                for scratch in [SCRATCH, 1_000_000] {
+                    let mut transaction = db.begin(&contexts.txn()).unwrap();
+                    let mut prefix = WriteBatch::new(RelationId(1));
+                    prefix.create_vertex(VId(77), vec![], vec![]);
+                    transaction.write(&mut db, prefix).unwrap();
+                    let before = transaction.staged_effect_digest().unwrap();
+                    let vertex = if held_target { VId(2) } else { VId(1) };
+                    let mut held = FrozenCreations::default();
+                    if held_target {
+                        let mut creation = WriteBatch::new(RelationId(1));
+                        creation.create_vertex(
+                            vertex,
+                            vec![LabelId(1)],
+                            vec![(P, CanonicalScalar::Int(1)), (Q, stored.clone())],
+                        );
+                        held.defer(creation);
+                    }
+                    let mut used = GraphVertexMergeStats {
+                        match_selection: GqlExecutionStats::default(),
+                        evaluator: GlaExecutionStats::default(),
+                        created_vertices: 0,
+                    };
+                    // The enclosing occurrence has already admitted its one
+                    // assignment. Exercise the real stage's owner callbacks,
+                    // including a genuinely deferred creation, without a mock.
+                    let mut effects = 1;
+                    let result = transaction
+                        .vertex_merge_row_actions::<crate::MemVfs, std::convert::Infallible>(
+                            &mut db,
+                            &contexts.query(),
+                            (RelationId(1), vertex),
+                            (0, &input),
+                            [actions, &[]],
+                            GraphVertexMergePolicy::new(GqlQueryPolicy::new(
+                                100, 100, 1_000_000, scratch,
+                            )),
+                            &mut used,
+                            (100, &mut effects),
+                            held_target.then_some(&mut held),
+                            &None,
+                        );
+                    if payload_bytes > GRAPH_VALUE_PAYLOAD_UNIT_BYTES && scratch == SCRATCH {
+                        assert!(
+                            matches!(&result, Err(GqlQueryError::Evaluator(error))
+                            if error.dimension == GlaLimitDimension::ScratchEntries
+                                && error.limit == SCRATCH && error.observed == u128::from(SCRATCH + 1)),
+                            "held={held_target}: {result:?}"
+                        );
+                        assert_eq!(transaction.staged_effect_digest().unwrap(), before);
+                        if held_target {
+                            assert_eq!(held.batches.len(), 1);
+                            assert_eq!(
+                                held.property(vertex, P),
+                                Some(Some(&CanonicalScalar::Int(1).into()))
+                            );
+                        }
+                    } else {
+                        result.unwrap();
+                        let actual = if held_target {
+                            held.property(vertex, P).unwrap().unwrap().clone()
+                        } else {
+                            transaction
+                                .vertex_property(&db, vertex, P)
+                                .unwrap()
+                                .unwrap()
+                        };
+                        assert_eq!(actual, CanonicalScalar::Int(7).into());
+                    }
+                    assert_eq!(db.frontier().unwrap(), frontier);
+                    transaction.abort();
+                }
+            }
+        }
+        assert_eq!(contexts.txn().outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }

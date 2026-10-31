@@ -999,8 +999,45 @@ mod independent_edges {
             let c = PurposeContexts::narrow_runtime_root(&root);
             let mut db = Database::open_memory(&c.commit(), keys()).await.unwrap();
             seed(&mut db, &c.commit()).await;
+            // Both live paths obey the native 64-statement ceiling. The
+            // ordered oracle adds one effect-free statement, so a 64-step
+            // candidate cannot be compared through that 65-step oracle.
+            // Retain the original 64-step candidate as an executed boundary
+            // and the original 128-step input as an explicit refusal.
+            let boundary = mixed_loops(64);
+            let mut over = boundary.statements().to_vec();
+            over.push(program(&["MATCH (n:Base) WHERE n.p=-1 SET n.p=0"]).statements()[0].clone());
+            for (statements, observed) in [
+                (over, 65),
+                (
+                    (0..128)
+                        .map(|index| typed_loop(RelationId(3 - index % 3), 10))
+                        .collect(),
+                    128,
+                ),
+            ] {
+                assert!(matches!(
+                    PreparedGraphWriteProgram::prepare(statements),
+                    Err(fgdb_gql::GraphMutationProgramBuildError::TooManyStatements {
+                        limit: 64,
+                        observed: actual
+                    }) if actual == observed
+                ));
+            }
+            let mut txn = db.begin(&c.txn()).unwrap();
+            let boundary_stats = txn
+                .execute_graph_write_program_governed(
+                    &mut db,
+                    &c.query(),
+                    &boundary,
+                    policy(),
+                    edge_identity,
+                )
+                .unwrap();
+            assert_eq!(boundary_stats.created_edges, 64);
+            txn.abort();
             let mut work = Vec::new();
-            for count in [32, 64, 128] {
+            for count in [16, 32, 63] {
                 let query = mixed_loops(count);
                 let mut pair = Vec::new();
                 let mut digests = Vec::new();

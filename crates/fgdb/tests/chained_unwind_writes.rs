@@ -674,10 +674,22 @@ fn chained_multipart_vertex_merges_keep_optional_rows_and_feed_later_writes() {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let commit = contexts.commit();
-        for (source, key) in [
-            ("OPTIONAL MATCH (seen:Entity {id:k})", "k"),
-            ("CALL { WITH k RETURN k AS selected }", "selected"),
-            ("MATCH (anchor) WITH anchor,k MATCH (anchor)", "k"),
+        for (source, key, returned_rows) in [
+            (
+                "OPTIONAL MATCH (seen:Entity {id:k})",
+                "k",
+                [[1, 1], [2, 2], [2, 2]],
+            ),
+            (
+                "CALL { WITH k RETURN k AS selected }",
+                "selected",
+                [[2, 2], [1, 1], [2, 2]],
+            ),
+            (
+                "MATCH (anchor) WITH anchor,k MATCH (anchor)",
+                "k",
+                [[1, 1], [2, 2], [2, 2]],
+            ),
         ] {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let mut txn = db.begin(&contexts.txn()).unwrap();
@@ -718,7 +730,16 @@ fn chained_multipart_vertex_merges_keep_optional_rows_and_feed_later_writes() {
                 .unwrap();
             assert_eq!(
                 returned,
-                integers(&["k", "id"], &[&[2, 2], &[1, 1], &[2, 2]]),
+                // Native joins canonicalize complete rows with duplicates
+                // adjacent; correlated CALL Apply retains incoming list rank.
+                // Each later write consumes that operator's actual order.
+                integers(
+                    &["k", "id"],
+                    &returned_rows
+                        .iter()
+                        .map(|row| row.as_slice())
+                        .collect::<Vec<_>>()
+                ),
                 "{statement}"
             );
             assert_eq!(

@@ -19,8 +19,9 @@ use std::cell::Cell;
 use std::sync::Arc;
 
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x6d; 32]);
+const EDGE_COUNT: &str = "MATCH (a)-[:R]->(b) RETURN count(*) AS n";
 const READS: [&str; 3] = [
-    "MATCH (a)-[:R]->(b) RETURN count(*) AS n",
+    "MATCH (a)-[:R]->(b) WHERE a <> b RETURN count(*) AS n",
     "MATCH (a)-[:R]->(b) RETURN a",
     "CALL fnx.pagerank(0.85,50,1e-9,true) YIELD vertex,score",
 ];
@@ -200,6 +201,15 @@ fn scoped_reuse_and_tiny_budgets_preserve_rows_charges_and_refusal_boundaries() 
         let authority =
             Authority::new(AuthKey::from_seed(0x6d), NS, "graph", SchemaEpoch(0), 1).unwrap();
         let token = authority.issue_at(&grant(), 100).unwrap();
+        // Preserve the original metadata-only count and distinguish it from
+        // the real scan whose retained core/lazy index the following law owns.
+        let metadata_count = footprint(&cold, &cx, &authority, &token, EDGE_COUNT, None);
+        assert!(metadata_count.0.succeeded());
+        assert_eq!(
+            footprint(&warm, &cx, &authority, &token, EDGE_COUNT, None),
+            metadata_count
+        );
+        assert_eq!(warm.read_cache_status(&cx).unwrap().admissions.entries, 0);
         let mut expected = Vec::new();
         let mut admission_before_index = 0;
         for (at, text) in READS.into_iter().enumerate() {
@@ -208,7 +218,7 @@ fn scoped_reuse_and_tiny_budgets_preserve_rows_charges_and_refusal_boundaries() 
             assert_eq!(footprint(&warm, &cx, &authority, &token, text, None), fresh);
             assert_eq!(footprint(&warm, &cx, &authority, &token, text, None), fresh);
             if at == 0 {
-                // COUNT retains a core without refilling its vertex table.
+                // The filtered count scans but does not fill its vertex table.
                 admission_before_index = warm
                     .read_cache_status(&cx)
                     .unwrap()

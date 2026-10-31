@@ -690,7 +690,7 @@ fn independent_procedure_text_summaries_preserve_exact_group_domains() {
 
     // The other public plural entrypoint keeps its ordinary-owner boundary:
     // an actual graph aggregate with no procedure is not this capability.
-    let graph = PreparedGraphPipelineAggregateText::prepare(
+    let graph = fgdb_gql::PreparedGraphAggregateText::prepare(
         "MATCH (v) RETURN COUNT(*) AS n",
         |_, _: &str| None,
     )
@@ -700,4 +700,18 @@ fn independent_procedure_text_summaries_preserve_exact_group_domains() {
     assert!(AsyncSpillAggregatePlan::compile(&graph).is_ok());
     assert!(AsyncSpillAggregatePlan::compile_with_single_procedure(&graph).is_err());
     assert!(AsyncSpillAggregatePlan::compile_with_independent_procedures(&graph).is_err());
+    // The relational overload receives an actual WITH pipeline, rather than
+    // asking that facade to parse the ordinary aggregate above.
+    let pipeline = PreparedGraphPipelineAggregateText::prepare(
+        "MATCH (v) WITH v RETURN COUNT(*) AS n",
+        |_, _: &str| None,
+    )
+    .unwrap()
+    .bind_relation_parameters(&parameters)
+    .unwrap();
+    assert!(AsyncSpillAggregatePlan::compile_relation(&pipeline).is_ok());
+    assert!(AsyncSpillAggregatePlan::compile_relation_with_single_procedure(&pipeline).is_err());
+    assert!(
+        AsyncSpillAggregatePlan::compile_relation_with_independent_procedures(&pipeline).is_err()
+    );
 }

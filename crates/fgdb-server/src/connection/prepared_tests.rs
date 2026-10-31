@@ -80,7 +80,19 @@ fn prepared_map_fields_rebind_across_native_delivery_modes_and_recovery() {
             let (mut session, template) =
                 ok(crate::execute::read_prepared_session(&root, db, &token, &definition).await);
             let parameters = ok(definition.arguments(&query, db, &token, &parameters));
-            let mut cursor = ok(session.stream_prepared(&query, &template, &parameters));
+            // The original property-only canonical order needs a blocking
+            // sort and remains a native source-profile refusal. Explicit root
+            // identity order admits that same typed map predicate lazily.
+            assert_eq!(
+                session
+                    .stream_prepared(&query, &template, &parameters)
+                    .err()
+                    .unwrap()
+                    .code,
+                ErrorCode::Statement
+            );
+            let ordered = ok(session.prepare(&query, &format!("{text} ORDER BY n"), &parameters));
+            let mut cursor = ok(session.stream_prepared(&query, &ordered, &parameters));
             let mut rows = Vec::new();
             while let Some(row) = ok(cursor.next().await) {
                 rows.push(row);

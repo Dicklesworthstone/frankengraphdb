@@ -3,10 +3,11 @@
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb::{Database, DatabaseKeys, MemVfs, QueryError, WriteBatch};
+use fgdb_beacon::expansion::{ExpansionDirection, ExpansionLimits, ExpansionSpec};
 use fgdb_beacon::read::{ReadError, ReadOptions, Rows, Search};
 use fgdb_beacon::{
-    BeaconError, DistanceMetric, ExactHybridQuery, ExactRrfProfile, HnswConfig, TextMatch,
-    VectorSearch,
+    BeaconError, DistanceMetric, ExactHybridQuery, ExactRrfProfile, GraphHybridQuery, HnswConfig,
+    TextMatch, VectorSearch,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_types::{
@@ -17,6 +18,7 @@ use fgdb_warden::{
     Authority, Error, Grant, LimitDimension, QueryLimits, Restriction, Rights, Scope,
 };
 use std::cell::Cell;
+use std::num::NonZeroU32;
 
 type Options = ReadOptions<PropertyKeyId, LabelId>;
 type SearchError = ReadError<fgdb::ReadError, QueryError>;
@@ -150,6 +152,143 @@ fn ids(rows: &Rows) -> Vec<VId> {
         Rows::Vector(rows) => rows.iter().map(|r| r.id).collect(),
         Rows::Hybrid(rows) => rows.iter().map(|r| r.id).collect(),
     }
+}
+
+#[test]
+fn advancing_beacon_clock_samples_remain_current_under_host_pacing() {
+    let ((), report) = run_async_under_lab(0xbeac_2011, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let db = database(&c.commit(), false).await;
+        let issuer = authority(2011);
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        for interval in [1, 16, 1 << 30] {
+            let cx = c
+                .query()
+                .with_host_clock_interval(NonZeroU32::new(interval).unwrap());
+            // Each real host read advances time. A direct sample used to
+            // advance the permit while leaving an older paced sample live.
+            // A subsequent ordinary charge then spuriously moved backwards.
+            for query in searches() {
+                let expected = db
+                    .beacon_search_authorized(
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        &options(),
+                        query,
+                        || NOW,
+                    )
+                    .unwrap();
+                let calls = Cell::new(0);
+                let actual = db
+                    .beacon_search_authorized(
+                        &cx,
+                        &issuer,
+                        &token,
+                        BRANCH,
+                        &options(),
+                        query,
+                        || {
+                            calls.set(calls.get() + 1);
+                            NOW + calls.get()
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(actual, expected);
+                assert!(calls.get() > 3);
+            }
+            let Search::Hybrid(retrieval) = searches()[3] else {
+                unreachable!()
+            };
+            let graph_query = GraphHybridQuery {
+                retrieval,
+                graph_candidates: 3,
+                graph_weight: 100,
+            };
+            let expansion = ExpansionSpec {
+                seeds: &[VId(1)],
+                relation: None,
+                direction: ExpansionDirection::Outgoing,
+                max_hops: 1,
+                include_seeds: true,
+                limits: ExpansionLimits::default(),
+            };
+            let expected = db
+                .beacon_search_graph_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    &options(),
+                    graph_query,
+                    expansion,
+                    || NOW,
+                )
+                .unwrap();
+            let calls = Cell::new(0);
+            let actual = db
+                .beacon_search_graph_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    &options(),
+                    graph_query,
+                    expansion,
+                    || {
+                        calls.set(calls.get() + 1);
+                        NOW + calls.get()
+                    },
+                )
+                .unwrap();
+            assert_eq!(actual, expected);
+            assert!(calls.get() > 3);
+
+            let statement = "CALL hybrid.search(text => 'red', text_property => 'body', candidates => 2, k => 2) YIELD node RETURN node";
+            let symbols = |kind, name: &str| match (kind, name) {
+                (fgdb_gql::GraphSymbolKind::Property, "body") => {
+                    Some(fgdb_gql::GraphSymbol::Property(T))
+                }
+                _ => None,
+            };
+            let policy = fgdb_gql::GqlQueryPolicy::new(1000, 1000, 1_000_000, 1_000_000);
+            let expected = db
+                .query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    statement,
+                    &fgdb_gql::GqlParameters::new(),
+                    symbols,
+                    policy,
+                    || NOW,
+                )
+                .unwrap();
+            let calls = Cell::new(0);
+            let actual = db
+                .query_authorized(
+                    &cx,
+                    &issuer,
+                    &token,
+                    BRANCH,
+                    statement,
+                    &fgdb_gql::GqlParameters::new(),
+                    symbols,
+                    policy,
+                    || {
+                        calls.set(calls.get() + 1);
+                        NOW + calls.get()
+                    },
+                )
+                .unwrap();
+            assert_eq!(actual, expected);
+            assert!(calls.get() > 3);
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

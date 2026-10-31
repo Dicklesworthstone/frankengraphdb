@@ -2140,7 +2140,7 @@ impl<'a> Parser<'a> {
                 },
             ));
         }
-        if self.starts_integer_case()? {
+        if self.starts_integer_case(self.routing_row(columns))? {
             if self.lets.is_some() && self.list_case_here(columns, depth, program, at)? {
                 return Ok(());
             }

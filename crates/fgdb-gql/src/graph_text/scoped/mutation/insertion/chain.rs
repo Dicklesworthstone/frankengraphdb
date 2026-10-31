@@ -93,6 +93,7 @@ impl PreparedGraphWriteChainText {
         // A SET, REMOVE or DELETE after a leading MATCH: a chain once
         // another independent write clause follows it.
         let mut mutated = false;
+        let mut field_updates_only = true;
         // A WITH or UNWIND stage after the leading MATCH, before any write:
         // the unique upsert reads a MATCH only, so a relationship MERGE's
         // ON/SET clauses there are the chain's row actions.
@@ -215,8 +216,18 @@ impl PreparedGraphWriteChainText {
                         // A MERGE's ON CREATE/ON MATCH SET clauses retain its
                         // upsert owner; DELETE within DETACH DELETE is still
                         // the same clause rather than a second mutation.
+                        // The parameter batch writer already owns a SET/REMOVE
+                        // field proposal: its frozen selection and original
+                        // row-major authorization must survive a trailing REMOVE.
+                        // A second SET, staged row source, later RETURN or any
+                        // other write still has the native chain's ownership.
+                        let frozen_parameter_remove = parameter_matched
+                            && !staged
+                            && field_updates_only
+                            && word.eq_ignore_ascii_case("REMOVE");
                         if mutated
                             && !merged
+                            && !frozen_parameter_remove
                             && !matches!(previous, Some(TokenKind::Word(prior))
                                 if word.eq_ignore_ascii_case("DELETE")
                                     && prior.eq_ignore_ascii_case("DETACH"))
@@ -224,6 +235,8 @@ impl PreparedGraphWriteChainText {
                             return Ok(true);
                         }
                         mutated = true;
+                        field_updates_only &=
+                            word.eq_ignore_ascii_case("SET") || word.eq_ignore_ascii_case("REMOVE");
                     } else if clause
                         && mutated
                         && (leading_rows || multipart_mutation)
@@ -1725,6 +1738,10 @@ mod tests {
             "MATCH (n:N) SET n.p=7 RETURN n.p",
             "MATCH (n:N) WITH n SET n.p=7 RETURN n.p",
             "UNWIND $rows AS row MATCH (n:N {id:row.id}) SET n.p=7",
+            "/* café */ UNWIND $rows AS row MATCH (n:N {p:row.a}) \
+             SET n.p=row.b REMOVE n:N",
+            "UNWIND $rows AS row MATCH (n:N {id:row.id}) \
+             REMOVE n.p REMOVE n.q",
             "UNWIND $rows AS row MATCH (n:N {id:row.id}) SET n.return=1",
             "UNWIND [1] AS k MATCH (n:N {id:k}) SET n.p='RETURN n'",
             "UNWIND [1] AS k MATCH (n:N {id:k}) SET n.p=7 /* RETURN n */",
@@ -1741,6 +1758,28 @@ mod tests {
         ] {
             assert!(
                 !PreparedGraphWriteChainText::is_chain(text).unwrap(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn frozen_parameter_fields_do_not_capture_sequential_or_returning_chains() {
+        for text in [
+            "MATCH (n:N) SET n.p=n.p+1 SET n.p=n.p*10 RETURN n.p",
+            "UNWIND $rows AS row MATCH (n:N {id:row.id}) \
+             SET n.p=n.p+1 SET n.p=n.p*10",
+            "UNWIND $rows AS row MATCH (n:N {id:row.id}) \
+             SET n.p=row.p REMOVE n.q RETURN n.p",
+            "UNWIND $rows AS row MATCH (n:N {id:row.id}) \
+             SET n.p=row.p REMOVE n.q SET n.p=n.p+1",
+            "UNWIND $rows AS row MATCH (n:N {id:row.id}) \
+             SET n.p=row.p WITH n REMOVE n.q",
+            "UNWIND $rows AS row MATCH (n:N {id:row.id}) \
+             DELETE n REMOVE n.p",
+        ] {
+            assert!(
+                PreparedGraphWriteChainText::is_chain(text).unwrap(),
                 "{text}"
             );
         }

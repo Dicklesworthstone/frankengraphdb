@@ -857,6 +857,17 @@ fn a_key_named_offset_is_read_never_paged() {
             vec![2, 3],
         ),
         (
+            "MATCH (n) WITH n.p AS offset MATCH (m) WHERE m.p=offset \
+             RETURN offset ORDER BY offset",
+            0,
+            vec![1, 2, 3],
+        ),
+        (
+            "MATCH (n) WITH n.p AS offset WHERE (offset > 1) RETURN offset ORDER BY offset",
+            0,
+            vec![2, 3],
+        ),
+        (
             "MATCH (n) WITH n.p AS offset RETURN offset + 1 AS o ORDER BY o DESC",
             0,
             vec![4, 3, 2],

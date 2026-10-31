@@ -253,6 +253,8 @@ fn complete_cold_relations_match_historical_queries_not_their_first_leaf() {
             "MATCH (a)-[r:R]->(b) RETURN a.p AS a, b.p AS b",
             "MATCH route = WALK (a)-[:R*0..2]->(b) RETURN route",
             "MATCH route = ANY SHORTEST (a)-[:R*0..2]->(b) RETURN route",
+            "MATCH route = ANY SHORTEST (a)-[:R*1..2]->(b) RETURN route",
+            "MATCH route = ANY SHORTEST (a)-[:R*1..2]->(b) RETURN route LIMIT 0",
             "MATCH route = TRAIL (a)-[:R*0..2]->(b) RETURN b.p AS p",
             "MATCH route = ACYCLIC (a)-[:R*0..2]->(b) RETURN DISTINCT b.p AS p",
             "MATCH route = SIMPLE (a)-[:R*0..2]->(b) WITH b.p AS p ORDER BY p DESC SKIP 1 LIMIT 3 RETURN p",
@@ -351,6 +353,45 @@ fn complete_cold_relations_match_historical_queries_not_their_first_leaf() {
                 (path_row(4, &[]), 1),
                 (path_row(1, &[(3, 4)]), 1),
             ]),
+        );
+        // Directed shortest routes with a lower bound of one cannot repeat
+        // an edge. The existing native shortest owner therefore admits this
+        // default path mode, including its complete-source LIMIT 0 variant.
+        // The parallel E2 loses to E1 at both cuts; only E3's new route changes.
+        let shortest = plan("MATCH route = ANY SHORTEST (a)-[:R*1..2]->(b) RETURN route");
+        assert_eq!(
+            attempt(
+                &cx,
+                &shortest,
+                &mut view,
+                &cx,
+                cuts[0],
+                cuts[1],
+                policy(1),
+                u64::MAX,
+            )
+            .await
+            .unwrap()
+            .0,
+            Bag::from([(path_row(1, &[(3, 4)]), 1)]),
+        );
+        let shortest_zero =
+            plan("MATCH route = ANY SHORTEST (a)-[:R*1..2]->(b) RETURN route LIMIT 0");
+        assert!(
+            attempt(
+                &cx,
+                &shortest_zero,
+                &mut view,
+                &cx,
+                cuts[0],
+                cuts[1],
+                policy(0),
+                u64::MAX,
+            )
+            .await
+            .unwrap()
+            .0
+            .is_empty()
         );
         let union = plan("MATCH (n) RETURN n.p AS p UNION ALL MATCH (m) RETURN m.p AS p");
         assert_eq!(
@@ -617,7 +658,7 @@ fn admission_precedes_binding_and_io_including_empty_and_source_free_results() {
             "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n.p AS p",
             "MATCH (n) RETURN COUNT(*) AS n",
             "MATCH route = WALK (a)-[:R*]->(b) RETURN route LIMIT 0",
-            "MATCH route = ANY SHORTEST (a)-[:R*1..2]->(b) RETURN route LIMIT 0",
+            "MATCH route = ANY SHORTEST (a)-[:R*2..2]->(b) RETURN route LIMIT 0",
             "MATCH route = WALK (a)-[:R*0..2]->(b)-[:R]->(c) RETURN route LIMIT 0",
         ] {
             let error = plan(text)

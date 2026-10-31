@@ -747,8 +747,6 @@ fn component_subscription_scope_and_projection_refusals_precede_registration() {
             "SUBSCRIBE TO CALL fnx.connected_components(\
              {relations:['R']}) YIELD node,component",
             "SUBSCRIBE TO CALL fnx.connected_components(\
-             {relations:['R'],parallel:'collapse',labels:['L']}) YIELD node,component",
-            "SUBSCRIBE TO CALL fnx.connected_components(\
              {relations:['R'],parallel:'collapse',direction:'directed'}) YIELD node,component",
             "SUBSCRIBE TO CALL fnx.connected_components(\
              {relations:['R'],parallel:'collapse',self_loops:'reject'}) YIELD node,component",
@@ -783,6 +781,38 @@ fn component_subscription_scope_and_projection_refusals_precede_registration() {
                 (1, vec![WireValue::Vertex(1), WireValue::Vertex(1)]),
                 (1, vec![WireValue::Vertex(1), WireValue::Vertex(2)]),
             ]
+        );
+        // Induced-label component circuits now have a native derivative.
+        // Keep the original statement as a positive: the original unlabelled
+        // graph contributes no rows, then labelling only V1 contributes its
+        // isolated component. V2 and its crossing edge remain excluded.
+        let selected = request(
+            "SUBSCRIBE TO CALL fnx.connected_components(\
+             {relations:['R'],parallel:'collapse',labels:['L']}) YIELD node,component",
+        );
+        let mut labelled = success(subscribe(&root, db, &token, &selected).await);
+        assert_eq!(db.subscriptions.load(Ordering::Acquire), 2);
+        let empty = success(poll(&root, db, &token, &mut labelled).await).unwrap();
+        assert!(empty.entries.is_empty());
+        labelled
+            .consumer
+            .acknowledge(empty.batch.receipt())
+            .unwrap();
+        let mut update = fgdb::WriteBatch::new(RelationId(1));
+        update.set_vertex_label(VId(1), LabelId(1), true);
+        let changed = db
+            .db
+            .write(&root)
+            .await
+            .unwrap()
+            .write(&contexts.commit(), update)
+            .await
+            .unwrap();
+        let delta = success(poll(&root, db, &token, &mut labelled).await).unwrap();
+        assert_eq!(delta.batch.frontier(), changed);
+        assert_eq!(
+            delta.entries,
+            vec![(1, vec![WireValue::Vertex(1), WireValue::Vertex(1)])]
         );
     });
     assert!(report.lab_test_passed(), "{report:?}");

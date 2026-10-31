@@ -429,17 +429,27 @@ fn snapshots_preserve_properties_parallel_edges_and_invisible_candidate_admissio
                 .await
                 .unwrap()
             {
-                let state = scan.state.as_ref().unwrap();
-                state.check_retained_bytes().unwrap();
-                if candidate.eid == EId(0) {
-                    assert_eq!(state.order_bytes, 0, "first load retains no memo");
-                    assert!(state.orders.iter().all(Option::is_none));
-                }
-                if candidate.eid == EId(4) {
-                    assert!(
-                        state.order_bytes > 0,
-                        "interleaved unfinished blocks reuse orders"
-                    );
+                match scan.state.as_ref() {
+                    Some(state) => {
+                        assert_ne!(candidate.eid, EId(u128::MAX));
+                        state.check_retained_bytes().unwrap();
+                        if candidate.eid == EId(0) {
+                            assert_eq!(state.order_bytes, 0, "first load retains no memo");
+                            assert!(state.orders.iter().all(Option::is_none));
+                        }
+                        if candidate.eid == EId(4) {
+                            assert!(
+                                state.order_bytes > 0,
+                                "interleaved unfinished blocks reuse orders"
+                            );
+                        }
+                    }
+                    None => {
+                        // The last candidate owns its value independently;
+                        // an empty merge releases its heads before delivery.
+                        assert_eq!(candidate.eid, EId(u128::MAX));
+                        assert!(scan.is_finished());
+                    }
                 }
                 returned.push(candidate.eid);
                 if let Some(row) = candidate.row {

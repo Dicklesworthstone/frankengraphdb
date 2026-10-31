@@ -27,9 +27,15 @@ const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x61; 32]);
 const BRANCH: &str = "main";
 const P: PropertyKeyId = PropertyKeyId(1);
 const W: PropertyKeyId = PropertyKeyId(2);
+/// All live vertices have L, so the current owner can prove this count from
+/// exact relation and universal-label metadata without admitting records.
+const EDGE_COUNT: &str = "MATCH (a:L)-[:R]->(b:L) RETURN count(*) AS n";
 /// Whole-graph statements that read edges: one admitted set serves them all.
 const EDGE_READS: [&str; 5] = [
-    "MATCH (a:L)-[:R]->(b:L) RETURN count(*) AS n",
+    // Every seeded R edge has w, including the single-version and changed
+    // fixtures. Its presence preserves EDGE_COUNT's rows while requiring a
+    // real property read; independent cardinalities cannot answer this probe.
+    "MATCH (a:L)-[r:R]->(b:L) WHERE r.w IS NOT NULL RETURN count(*) AS n",
     "MATCH (a:L)-[:R]->(b) RETURN a.p AS p, count(*) AS d ORDER BY d DESC, p ASC LIMIT 3",
     "MATCH (a:L)-[:R]->(b:L)-[:R]->(c:L) RETURN count(*) AS n",
     "MATCH (a:L)-[:R]->(b:M) RETURN b.p AS p ORDER BY p",
@@ -446,7 +452,7 @@ fn work_runs_admit_and_refuse_native_reads_at_the_per_unit_thresholds() {
         ];
         for text in EDGE_READS
             .into_iter()
-            .chain([VERTEX_READ])
+            .chain([VERTEX_READ, EDGE_COUNT])
             .chain(VERTEX_COUNTS.map(|(text, _)| text))
         {
             for limit in limits {
@@ -591,6 +597,7 @@ fn a_single_version_scan_retains_a_constant_size_tape() {
         let text = EDGE_READS[0];
         let first = read(&db, &cx, &token, text, || 100).unwrap();
         assert_eq!(read(&db, &cx, &token, text, || 100).unwrap(), first);
+        assert_eq!(read(&db, &cx, &token, EDGE_COUNT, || 100).unwrap(), first);
         assert_eq!(
             first,
             db.query(&cx, text, &GqlParameters::new(), symbols, policy())
@@ -681,11 +688,15 @@ fn current_metadata_counts_keep_exact_rows_node_limits_and_scoped_admission() {
             .unwrap();
         let too_small = token.attenuate(Restriction::MaxNodes(7)).unwrap();
         let exact = token.attenuate(Restriction::MaxNodes(8)).unwrap();
-        let key = AdmissionKey {
-            at: db.frontier().unwrap(),
-            edges: false,
-        };
-        for (text, count) in VERTEX_COUNTS {
+        for (text, count, edges) in VERTEX_COUNTS
+            .map(|(text, count)| (text, count, false))
+            .into_iter()
+            .chain([(EDGE_COUNT, 8, true)])
+        {
+            let key = AdmissionKey {
+                at: db.frontier().unwrap(),
+                edges,
+            };
             let expected = QueryResult::Rows {
                 columns: vec!["n".into()],
                 rows: vec![vec![crate::QueryValue::Count(count)]],
@@ -730,6 +741,39 @@ fn current_metadata_counts_keep_exact_rows_node_limits_and_scoped_admission() {
                     .lookup(&db.snapshot, key)
                     .is_none()
             );
+        }
+        // Neither an actual property predicate nor a proper endpoint-label
+        // subset can borrow the whole-relation cardinality. M contains 3, 4,
+        // 5 and 6; only E3 (3->4), E4 (4->5) and E5 (5->5) join two M vertices.
+        for (text, count) in [
+            (EDGE_READS[0], 8),
+            ("MATCH (a:M)-[:R]->(b:M) RETURN count(*) AS n", 3),
+        ] {
+            let fresh = database(&c.commit()).await;
+            let expected = QueryResult::Rows {
+                columns: vec!["n".into()],
+                rows: vec![vec![crate::QueryValue::Count(count)]],
+            };
+            let before = scans();
+            assert_eq!(read(&fresh, &cx, &token, text, || 100).unwrap(), expected);
+            assert_eq!(scans(), before + 1, "{text}: records must be admitted");
+            assert!(
+                fresh
+                    .snapshot
+                    .read_caches
+                    .admitted
+                    .lookup(
+                        &fresh.snapshot,
+                        AdmissionKey {
+                            at: fresh.frontier().unwrap(),
+                            edges: true,
+                        },
+                    )
+                    .is_some(),
+                "{text}: the ordinary edge source populated its core"
+            );
+            assert_eq!(read(&fresh, &cx, &token, text, || 100).unwrap(), expected);
+            assert_eq!(scans(), before + 1, "{text}: the ordinary core reuses");
         }
         assert_eq!(c.outstanding_obligations(), 0);
     });

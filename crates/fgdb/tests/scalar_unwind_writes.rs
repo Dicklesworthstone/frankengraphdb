@@ -2279,9 +2279,8 @@ fn row_map_fallbacks_keep_heterogeneous_keys_collections_and_with_scope() {
                 let second = if heterogeneous {
                     object(vec![("id", int(5)), ("name", text("later"))])
                 } else {
-                    // A native trailing SET proposes its completed row bag
-                    // simultaneously. Distinct targets can receive different
-                    // lists; unequal proposals for one target must refuse.
+                    // Distinct targets retain each row's typed list. The
+                    // duplicate-target owner boundary is checked below.
                     object(vec![("id", int(6)), ("p", list(vec![int(3)]))])
                 };
                 let issued = AtomicU64::new(0);
@@ -2357,61 +2356,113 @@ fn row_map_fallbacks_keep_heterogeneous_keys_collections_and_with_scope() {
                     }
                 );
             }
-            // Keep the original duplicate-target, different-list input as a
-            // precise native simultaneous-assignment refusal. Its MERGE
-            // creation must roll back with the rejected SET.
-            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-            let mut prefix = WriteBatch::new(R);
-            prefix.create_vertex(
-                VId(99),
-                vec![LabelId(2)],
-                vec![(P, CanonicalScalar::Int(9))],
-            );
-            db.write(&commit, prefix).await.unwrap();
-            let before = db.vertices().unwrap();
-            let frontier = db.frontier().unwrap();
-            let issued = AtomicU64::new(0);
-            let result = db
-                .query_write(
-                    &contexts.txn(),
-                    &cx,
-                    &commit,
-                    statement,
-                    &args(vec![
-                        object(vec![("id", int(5)), ("p", list(vec![int(1), int(2)]))]),
-                        object(vec![("id", int(5)), ("p", list(vec![int(3)]))]),
-                    ]),
-                    symbols,
-                    R,
-                    policy(100, 10),
-                    |request| {
-                        let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
-                        Ok::<_, Infallible>(match request.request {
-                            GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
-                            GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
-                        })
-                    },
-                )
-                .await;
-            assert!(
-                matches!(
-                    result,
-                    Err(QueryWriteError::Chain(GqlQueryError::Source(
-                        GraphWriteChainError::Mutation(GraphMutationQueryError::Mutation(
-                            GraphMutationError::ConflictingAssignment {
-                                first_row: 0,
-                                first_action: 0,
-                                row: 1,
-                                action: 0
-                            }
-                        ))
-                    )))
-                ),
-                "{statement}: {result:?}"
-            );
-            assert_eq!(issued.load(Ordering::Relaxed), 1);
-            assert_eq!(db.frontier().unwrap(), frontier);
-            assert_eq!(db.vertices().unwrap(), before);
+            // Keep the original duplicate lists in BOTH owner profiles.
+            // Common MERGE SET runs per occurrence; an explicit WITH instead
+            // hands the completed bag to one simultaneous native mutation.
+            let simultaneous = if statement.contains("WITH row AS patch") {
+                "UNWIND $rows AS row WITH row AS patch \
+                 MERGE (n:Entity {id: patch.id}) WITH n,patch SET n += patch"
+            } else {
+                "UNWIND $rows AS row MERGE (n:Entity {id: row.id}) \
+                 WITH n,row SET n += row"
+            };
+            let duplicates = args(vec![
+                object(vec![("id", int(5)), ("p", list(vec![int(1), int(2)]))]),
+                object(vec![("id", int(5)), ("p", list(vec![int(3)]))]),
+            ]);
+            let original = duplicates.canonical_bytes();
+            for (statement, simultaneous) in [(statement, false), (simultaneous, true)] {
+                let vfs = MemVfs::new().unwrap();
+                let path = vfs.database_dir();
+                let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+                    .await
+                    .unwrap();
+                let mut prefix = WriteBatch::new(R);
+                prefix.create_vertex(
+                    VId(99),
+                    vec![LabelId(2)],
+                    vec![(P, CanonicalScalar::Int(9))],
+                );
+                db.write(&commit, prefix).await.unwrap();
+                let before = db.vertices().unwrap();
+                let pinned = db.read_session().unwrap();
+                let frontier = db.frontier().unwrap();
+                let issued = AtomicU64::new(0);
+                let result = db
+                    .query_write(
+                        &contexts.txn(),
+                        &cx,
+                        &commit,
+                        statement,
+                        &duplicates,
+                        symbols,
+                        R,
+                        policy(100, 10),
+                        |request| {
+                            let next = u128::from(issued.fetch_add(1, Ordering::Relaxed)) + 1;
+                            Ok::<_, Infallible>(match request.request {
+                                GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
+                                GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(next)),
+                            })
+                        },
+                    )
+                    .await;
+                if simultaneous {
+                    assert!(
+                        matches!(
+                            result,
+                            Err(QueryWriteError::Chain(GqlQueryError::Source(
+                                GraphWriteChainError::Mutation(GraphMutationQueryError::Mutation(
+                                    GraphMutationError::ConflictingAssignment {
+                                        first_row: 0,
+                                        first_action: 0,
+                                        row: 1,
+                                        action: 0
+                                    }
+                                ))
+                            )))
+                        ),
+                        "{statement}: {result:?}"
+                    );
+                    assert_eq!(db.frontier().unwrap(), frontier);
+                    assert_eq!(db.vertices().unwrap(), before);
+                } else {
+                    result.unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+                    assert_eq!(db.frontier().unwrap(), CommitSeq(frontier.0 + 1));
+                    assert_eq!(db.delta_since(frontier).unwrap().count(), 1);
+                    assert_eq!(db.vertices().unwrap().len(), 2);
+                    let merged = db.vertex(VId(1)).unwrap().unwrap();
+                    assert_eq!(merged.labels, vec![ENTITY]);
+                    assert_eq!(
+                        merged.props,
+                        vec![
+                            (ID, CanonicalScalar::Int(5).into()),
+                            (
+                                P,
+                                fgdb_types::CanonicalPropertyValue::List(
+                                    fgdb_types::CanonicalList::try_new(vec![
+                                        CanonicalScalar::Int(3).into(),
+                                    ])
+                                    .unwrap(),
+                                ),
+                            ),
+                        ]
+                    );
+                    assert_eq!(db.vertex(VId(99)).unwrap().as_ref(), before.first());
+                }
+                assert_eq!(issued.load(Ordering::Relaxed), 1);
+                assert_eq!(duplicates.canonical_bytes(), original);
+                assert_eq!(pinned.vertices().unwrap(), before);
+                assert_eq!(contexts.txn().outstanding_obligations(), 0);
+                let expected = db.vertices().unwrap();
+                let frontier = db.frontier().unwrap();
+                drop(db);
+                let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+                    .await
+                    .unwrap();
+                assert_eq!(reopened.frontier().unwrap(), frontier);
+                assert_eq!(reopened.vertices().unwrap(), expected);
+            }
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             db.query_write(
                 &contexts.txn(),

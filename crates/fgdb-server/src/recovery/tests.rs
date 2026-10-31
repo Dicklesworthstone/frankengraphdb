@@ -238,7 +238,22 @@ fn served_cache_limits_and_retained_bytes_follow_authoritative_recovery() {
             "MATCH (n) RETURN count(*) AS n",
             &fgdb_gql::GqlParameters::new(),
         )
-        .unwrap_or_else(|_| panic!("initial authorized count must populate the admission cache"));
+        .unwrap_or_else(|_| panic!("initial authorized metadata count must succeed"));
+        assert_eq!(
+            server
+                .database_read_cache_status(&root, "test")
+                .await
+                .unwrap()
+                .admissions
+                .entries,
+            0
+        );
+        old.query(
+            &contexts.query(),
+            "MATCH (n) RETURN n",
+            &fgdb_gql::GqlParameters::new(),
+        )
+        .unwrap_or_else(|_| panic!("initial graph scan must populate the admission cache"));
         let before = server
             .database_read_cache_status(&root, "test")
             .await
@@ -274,8 +289,15 @@ fn served_cache_limits_and_retained_bytes_follow_authoritative_recovery() {
                 "MATCH (n) RETURN count(*) AS n",
                 &fgdb_gql::GqlParameters::new(),
             )
+            .unwrap_or_else(|_| panic!("recovered authorized metadata count must succeed"));
+        current
+            .query(
+                &contexts.query(),
+                "MATCH (n) RETURN n",
+                &fgdb_gql::GqlParameters::new(),
+            )
             .unwrap_or_else(|_| {
-                panic!("recovered authorized count must populate its new snapshot entry")
+                panic!("recovered graph scan must populate its new snapshot entry")
             });
         let after = server
             .database_read_cache_status(&root, "test")

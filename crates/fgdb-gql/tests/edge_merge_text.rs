@@ -767,6 +767,7 @@ mod matched_chain {
     fn matched_relationship_merge_keeps_its_native_owner_and_continuations() {
         for text in [
             "CREATE (a) WITH a MATCH (b) MERGE (a)-[:R]->(b)",
+            "CREATE (a) WITH a OPTIONAL MATCH (b) MERGE (a)-[:R]->(b)",
             "CREATE (a) WITH a MATCH (b) MERGE (a)<-[r:R]-(b) RETURN r",
             "CREATE (a) WITH a MATCH (b) MERGE (a)-[r:R]-(b) RETURN b.p, r.p",
             "CREATE (a) WITH a UNWIND [1, 1, 2] AS k MATCH (b {p:k}) \
@@ -788,6 +789,16 @@ mod matched_chain {
             let bound = template.bind_parameters(&GqlParameters::new()).expect(text);
             assert_eq!(template.returns_rows(), bound.returns_rows(), "{text}");
             assert!(bound.steps().len() >= 2, "{text}");
+            if text == "CREATE (a) WITH a OPTIONAL MATCH (b) MERGE (a)-[:R]->(b)" {
+                assert!(matches!(
+                    bound.steps(),
+                    [
+                        fgdb_gql::GraphWriteChainStep::Query(_),
+                        fgdb_gql::GraphWriteChainStep::EdgeMerge(_)
+                            | fgdb_gql::GraphWriteChainStep::EdgeUpsert(_),
+                    ]
+                ));
+            }
         }
         // Whole-pattern MERGE may declare a new endpoint, including a name
         // dropped by WITH. It must retain that declaration rather than revive
@@ -808,17 +819,13 @@ mod matched_chain {
             };
             assert_eq!(merge.unbound_columns().count(), 1, "{text}");
         }
-        // A carried scalar cannot become a vertex. Nullable OPTIONAL MATCH
-        // still needs its own supported input profile.
-        for text in [
-            "CREATE (a) WITH a.p AS a MATCH (b) MERGE (a)-[:R]->(b)",
-            "CREATE (a) WITH a OPTIONAL MATCH (b) MERGE (a)-[:R]->(b)",
-        ] {
-            assert!(
-                PreparedGraphWriteChainText::prepare(text, R, symbols).is_err(),
-                "{text}"
-            );
-        }
+        // A carried scalar cannot become a vertex. The supported OPTIONAL
+        // case above has at least the staged a available to its MATCH.
+        let text = "CREATE (a) WITH a.p AS a MATCH (b) MERGE (a)-[:R]->(b)";
+        assert!(
+            PreparedGraphWriteChainText::prepare(text, R, symbols).is_err(),
+            "{text}"
+        );
     }
 
     #[test]

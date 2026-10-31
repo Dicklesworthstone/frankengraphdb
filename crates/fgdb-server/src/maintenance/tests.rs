@@ -473,99 +473,131 @@ fn idle_wait_is_woken_by_drain_or_direct_context_cancellation() {
 #[test]
 fn configured_driver_compacts_and_scrubs_without_advancing_the_frontier() {
     let report = run_timed_under_lab(0x79a0_0020, |root| async move {
-        let (server, token, path) = served(&root, "periodic-maintenance").await;
-        let database = &server.databases["test"];
-        let contexts = PurposeContexts::narrow_runtime_root(&root);
-        database
-            .db
-            .write(&root)
-            .await
-            .unwrap()
-            .write(&contexts.commit(), vertex(1))
-            .await
-            .unwrap();
-        let (mut pinned, at) = crate::execute::read_session(&root, database, &token)
-            .await
-            .unwrap_or_else(|error| panic!("{}", error.message));
-        assert_eq!(at, CommitSeq(1));
-        let before = std::fs::read(path.join("manifest.root")).unwrap();
-        server
-            .run_maintenance(&root, "test", MaintenanceSchedule::default(), |_| {
-                panic!("disabled maintenance must not run")
-            })
-            .await
-            .unwrap();
-        assert!(
+        for consolidate in [false, true] {
+            let name = if consolidate {
+                "periodic-maintenance-publication"
+            } else {
+                "periodic-maintenance-noop"
+            };
+            let (server, token, path) = served(&root, name).await;
+            let database = &server.databases["test"];
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            database
+                .db
+                .write(&root)
+                .await
+                .unwrap()
+                .write(&contexts.commit(), vertex(1))
+                .await
+                .unwrap();
+            let (mut pinned, at) = crate::execute::read_session(&root, database, &token)
+                .await
+                .unwrap_or_else(|error| panic!("{}", error.message));
+            assert_eq!(at, CommitSeq(1));
+            if consolidate {
+                // Two small ordinary patches have a mergeable boundary. Keep the
+                // original one-patch case as a real zero-publication compaction.
+                database
+                    .db
+                    .write(&root)
+                    .await
+                    .unwrap()
+                    .write(&contexts.commit(), vertex(2))
+                    .await
+                    .unwrap();
+            }
+            let frontier = CommitSeq(1 + u64::from(consolidate));
+            let before = std::fs::read(path.join("manifest.root")).unwrap();
             server
-                .run_maintenance(&root, "missing", MaintenanceSchedule::default(), |_| {
-                    panic!("unknown databases must not run maintenance")
+                .run_maintenance(&root, "test", MaintenanceSchedule::default(), |_| {
+                    panic!("disabled maintenance must not run")
                 })
                 .await
-                .is_err()
-        );
-
-        let schedule =
-            MaintenanceSchedule::new(Some(Duration::from_secs(2)), Some(Duration::from_secs(2)))
                 .unwrap();
-        schedule.validate(&root).unwrap();
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let recorded = Arc::clone(&events);
-        let shutdown = server.shutdown();
-        let clock = root.clone();
-        let started = root.now();
-        let mut driver = Box::pin(
-            server.run_maintenance(&root, "test", schedule, move |event| {
-                let mut events = recorded.lock().unwrap();
-                events.push((clock.now(), event));
-                if events.len() == 2 {
-                    shutdown.trigger();
-                }
-            }),
-        );
-        assert!(
-            driver
-                .as_mut()
-                .poll(&mut Context::from_waker(Waker::noop()))
-                .is_pending()
-        );
-        assert!(events.lock().unwrap().is_empty());
-        assert_eq!(std::fs::read(path.join("manifest.root")).unwrap(), before);
-        driver.await.unwrap();
-        {
-            let events = events.lock().unwrap();
-            assert_eq!(events.len(), 2);
-            assert!(events[0].0 >= started.saturating_add_nanos(2_000_000_000));
-            assert!(matches!(&events[0].1, MaintenanceEvent::Compaction(Ok(()))));
-            let MaintenanceEvent::Scrub(Ok(summary)) = &events[1].1 else {
-                panic!("expected a successful scrub after compaction: {events:?}");
-            };
-            assert_eq!(summary.objects, 1);
-            assert_eq!(summary.clean.len() + summary.repaired.len(), 1);
-            assert!(summary.metadata_objects >= 2);
-            assert!(summary.lost.is_empty());
-            assert!(summary.block_lost.is_empty());
-            assert!(summary.metadata_lost.is_empty());
-        }
-        assert_ne!(std::fs::read(path.join("manifest.root")).unwrap(), before);
-        let (view, generation) = database.db.read_view(&root).await.unwrap();
-        assert_eq!(view.frontier(), CommitSeq(1));
-        assert!(view.vertex(VId(1)).unwrap().is_some());
-        generation.check().unwrap();
-        let (answer, snapshot) = pinned
-            .query_with_snapshot(
-                &contexts.query(),
-                "MATCH (n) RETURN n",
-                &fgdb_gql::GqlParameters::new(),
+            assert!(
+                server
+                    .run_maintenance(&root, "missing", MaintenanceSchedule::default(), |_| {
+                        panic!("unknown databases must not run maintenance")
+                    })
+                    .await
+                    .is_err()
+            );
+
+            let schedule = MaintenanceSchedule::new(
+                Some(Duration::from_secs(2)),
+                Some(Duration::from_secs(2)),
             )
-            .ok()
             .unwrap();
-        assert_eq!(snapshot, CommitSeq(1));
-        assert!(matches!(answer, fgdb::QueryResult::Rows { rows, .. } if rows.len() == 1));
-        assert_eq!(
-            server.database_status(&root, "test"),
-            Some(DatabaseStatus::Ready { generation: 1 })
-        );
-        server.finish_shutdown(&root).await;
+            schedule.validate(&root).unwrap();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let recorded = Arc::clone(&events);
+            let shutdown = server.shutdown();
+            let clock = root.clone();
+            let started = root.now();
+            let mut driver =
+                Box::pin(
+                    server.run_maintenance(&root, "test", schedule, move |event| {
+                        let mut events = recorded.lock().unwrap();
+                        events.push((clock.now(), event));
+                        if events.len() == 2 {
+                            shutdown.trigger();
+                        }
+                    }),
+                );
+            assert!(
+                driver
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+            assert!(events.lock().unwrap().is_empty());
+            assert_eq!(std::fs::read(path.join("manifest.root")).unwrap(), before);
+            driver.await.unwrap();
+            {
+                let events = events.lock().unwrap();
+                assert_eq!(events.len(), 2);
+                assert!(events[0].0 >= started.saturating_add_nanos(2_000_000_000));
+                assert!(matches!(&events[0].1, MaintenanceEvent::Compaction(Ok(()))));
+                let MaintenanceEvent::Scrub(Ok(summary)) = &events[1].1 else {
+                    panic!("expected a successful scrub after compaction: {events:?}");
+                };
+                assert_eq!(summary.objects, frontier.0 as usize);
+                assert_eq!(
+                    summary.clean.len() + summary.repaired.len(),
+                    frontier.0 as usize
+                );
+                assert!(summary.metadata_objects >= 2);
+                assert!(summary.lost.is_empty());
+                assert!(summary.block_lost.is_empty());
+                assert!(summary.metadata_lost.is_empty());
+            }
+            let after = std::fs::read(path.join("manifest.root")).unwrap();
+            if consolidate {
+                assert_ne!(after, before);
+            } else {
+                assert_eq!(after, before, "already packed compaction publishes no slot");
+            }
+            let (view, generation) = database.db.read_view(&root).await.unwrap();
+            assert_eq!(view.frontier(), frontier);
+            assert!(view.vertex(VId(1)).unwrap().is_some());
+            assert_eq!(view.vertex(VId(2)).unwrap().is_some(), consolidate);
+            generation.check().unwrap();
+            let (answer, snapshot) = pinned
+                .query_with_snapshot(
+                    &contexts.query(),
+                    "MATCH (n) RETURN n",
+                    &fgdb_gql::GqlParameters::new(),
+                )
+                .ok()
+                .unwrap();
+            assert_eq!(snapshot, CommitSeq(1));
+            assert!(matches!(answer, fgdb::QueryResult::Rows { rows, .. } if rows.len() == 1));
+            assert_eq!(
+                server.database_status(&root, "test"),
+                Some(DatabaseStatus::Ready { generation: 1 })
+            );
+            server.finish_shutdown(&root).await;
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

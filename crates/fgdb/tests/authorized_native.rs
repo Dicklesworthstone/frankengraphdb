@@ -2323,6 +2323,66 @@ fn temporal_aggregate_relations_share_historical_scope_and_one_live_permit() {
         for query in &queries {
             assert_eq!(query.facade_class(), NativeReadClass::TemporalAggregate);
         }
+        // Two private CALL input rows may form one delivered aggregate, but
+        // the public standalone result still exceeds this same signed cap.
+        let mut standalone = fgdb_prism::FnxReadOptions::whole_graph(Some(basis));
+        standalone.selection.relation = Some(RelationId(1));
+        standalone.projection.directedness = fgdb_prism::Directedness::Directed;
+        standalone.projection.parallel_edges = fgdb_prism::ParallelEdgePolicy::CollapseUnit;
+        assert!(matches!(
+            db.execute_fnx_authorized(
+                &cx,
+                &issuer,
+                &token,
+                BRANCH,
+                &fgdb_prism::FnxCallSpec::weakly_connected_components(),
+                standalone,
+                || 100,
+            ),
+            Err(fgdb_prism::FnxReadError::Cancelled(
+                QueryError::Authorization(Error::LimitExceeded(LimitDimension::Rows))
+            ))
+        ));
+        let grouped = "UNWIND [1,2] AS copies MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at \
+            RETURN n.p AS p,COUNT(*) AS rows GROUP BY n.p";
+        let grouped_query = PreparedNativeRead::prepare(grouped, &old, symbols).unwrap();
+        assert_eq!(
+            grouped_query.facade_class(),
+            NativeReadClass::TemporalAggregate
+        );
+        // Visible p values10/30 produce two final groups. Keeping the original
+        // signed1/native1000 limits must refuse their delivery, not the inputs.
+        assert!(matches!(
+            grouped_query.execute_authorized(
+                &db,
+                &cx,
+                &issuer,
+                &token,
+                BRANCH,
+                &old,
+                policy(),
+                || 100,
+            ),
+            Err(QueryError::Authorization(Error::LimitExceeded(
+                LimitDimension::Rows
+            )))
+        ));
+        assert!(matches!(
+            db.query_authorized(
+                &cx,
+                &issuer,
+                &token,
+                BRANCH,
+                grouped,
+                &old,
+                symbols,
+                policy(),
+                || 100,
+            ),
+            Err(QueryError::Authorization(Error::LimitExceeded(
+                LimitDimension::Rows
+            )))
+        ));
         let mut change = WriteBatch::new(RelationId(1));
         change.set_vertex_label(VId(1), LabelId(1), false);
         let after = db.write(&commit, change).await.unwrap();

@@ -764,15 +764,25 @@ fn terminal_call_aggregates_preserve_bags_order_and_pages_without_a_corpus_resca
         let parameters = GqlParameters::new();
         let prefix = "CALL hybrid.search(text => 'needle', text_property => 'body', \
             candidates => 3, k => 3) YIELD node ";
-        for suffix in [
-            "MATCH (node) RETURN COUNT(*) AS n",
-            "RETURN COUNT(node.x) AS n",
-            "RETURN SUM(node.x) AS total, COLLECT(node.x) AS xs",
-            "UNWIND [1, 1] AS duplicate RETURN COUNT(node.x) AS n, COLLECT(node.x) AS xs",
-            "WITH node.x AS x WHERE x > 50 RETURN COUNT(*) AS n, COLLECT(x) AS xs",
-            "WITH node.x AS x ORDER BY x DESC SKIP 1 LIMIT 1 RETURN COUNT(*) AS n, SUM(x) AS total",
-            "RETURN node.x AS x, COUNT(*) AS n ORDER BY x",
-            "RETURN COUNT(node.x) AS n LIMIT 0",
+        for (suffix, graph_input) in [
+            ("MATCH (node) RETURN COUNT(*) AS n", true),
+            ("RETURN COUNT(node.x) AS n", true),
+            ("RETURN SUM(node.x) AS total, COLLECT(node.x) AS xs", true),
+            (
+                "UNWIND [1, 1] AS duplicate RETURN COUNT(node.x) AS n, COLLECT(node.x) AS xs",
+                true,
+            ),
+            (
+                "WITH node.x AS x WHERE x > 50 RETURN COUNT(*) AS n, COLLECT(x) AS xs",
+                true,
+            ),
+            (
+                "WITH node.x AS x ORDER BY x DESC SKIP 1 LIMIT 1 RETURN COUNT(*) AS n, SUM(x) AS total",
+                true,
+            ),
+            ("RETURN node.x AS x, COUNT(*) AS n ORDER BY x", true),
+            ("RETURN COUNT(node.x) AS n LIMIT 0", true),
+            ("UNWIND [1, 1] AS duplicate RETURN COUNT(*) AS n", false),
         ] {
             let statement = format!("{prefix}{suffix}");
             let crate::PreparedNativeRead::PipelineAggregate(prepared) =
@@ -781,10 +791,9 @@ fn terminal_call_aggregates_preserve_bags_order_and_pages_without_a_corpus_resca
                 panic!("CALL aggregate must retain its relational input: {statement}");
             };
             let bound = prepared.bind_relation_parameters(&parameters).unwrap();
-            // UNWIND carries the yielded element to the ordinary element
-            // reader; it introduces no explicit or implied graph pattern.
-            // All other suffixes here bind node through the graph source.
-            let graph_input = !suffix.starts_with("UNWIND");
+            // A terminal node.x demand implies MATCH (node), including after
+            // the leading UNWIND. COUNT(*) over the duplicate bag has no
+            // element demand and keeps the genuine singleton source.
             assert_eq!(prepared.graph_source_count(), usize::from(graph_input));
             let incumbent = unseeded_aggregate(&db, &c.query(), &bound, basis, policy()).unwrap();
             let actual = db

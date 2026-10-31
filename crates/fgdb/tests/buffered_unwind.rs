@@ -33,6 +33,8 @@ use std::task::{Context, Poll};
 const WORK: u64 = 1_000_000_000;
 const SCRATCH_BYTES: usize = 512 * 1024;
 const PAYLOAD_BYTES: usize = 8400;
+const SOURCE_CACHE_FRAMES: usize = 1;
+const SOURCE_CACHE_EXTENT_BYTES: usize = 16 * 1024;
 const UNWIND_MARKER: &str = "unwind-output-witness-";
 const BINARY_LEFT_MARKER: &str = "set-left-merge-witness";
 const BINARY_RIGHT_MARKER: &str = "set-right-merge-witness";
@@ -145,14 +147,53 @@ async fn view(cx: &CommitCx, vfs: &MemVfs, pool: &MemoryPool) -> BufferedReadVie
             max_vertex_patches: 512,
             max_work: WORK as usize,
             buffer: BufferLimits {
-                max_frames: 1,
+                max_frames: SOURCE_CACHE_FRAMES,
                 max_ghost_entries: 2,
-                max_extent_bytes: 16 * 1024,
+                max_extent_bytes: SOURCE_CACHE_EXTENT_BYTES,
             },
         },
     )
     .await
     .unwrap()
+}
+
+async fn reclaim_source_cache(
+    cold: &mut BufferedReadView<MemVfs>,
+    cx: &QueryCx,
+    pool: &MemoryPool,
+    baseline: usize,
+) {
+    // The single cached extent belongs to the view, not to the completed or
+    // dropped query. Bound it by the declared payload and buffer metadata,
+    // then exercise the existing deterministic scratch-reclamation policy.
+    let cache_ceiling = SOURCE_CACHE_FRAMES
+        * (SOURCE_CACHE_EXTENT_BYTES
+            + std::mem::size_of::<fgdb_strata::tiered::buffer::ExtentKey>()
+            + std::mem::size_of::<fgdb_strata::tiered::memory::TrackedBytes>()
+            + 2 * std::mem::size_of::<usize>());
+    assert!(pool.used() >= baseline);
+    assert!(pool.used() - baseline <= cache_ceiling);
+    let pressure = pool.reserve(cx, pool.available()).unwrap();
+    let result = cold
+        .vertex_property_at(cx, VId(1), PropertyKeyId(1), CommitSeq(1))
+        .await;
+    // The native property reader first reserves its authenticated-object
+    // decoding workspace. Even reclaiming every eligible frame cannot fund
+    // this request while pressure is live, so no new source extent is read.
+    let object_workspace = fgdb_strata::MAX_BLOCK_ENTRIES as usize * 64 * 64 + 65_536;
+    assert!(object_workspace > cache_ceiling);
+    assert!(
+        matches!(
+            result,
+            Err(fgdb::BufferedReadError::Buffer(
+                fgdb_strata::tiered::buffer::BufferError::Memory(
+                    fgdb::MemoryError::ResourceExhausted { requested, .. }
+                )
+            )) if requested == object_workspace
+        ),
+        "cache pressure must reach the native scratch refusal: {result:?}"
+    );
+    drop(pressure);
 }
 
 // The graph uses real MemVfs storage. This adapter only exposes scratch write
@@ -412,6 +453,7 @@ fn collected_graph_lists_keep_selected_order_duplicates_nulls_scope_and_history(
                 assert_eq!(spool.snapshot_seq(), CommitSeq(cut));
                 assert_eq!(spool.row_count(), expected.len() as u64);
                 assert_eq!(contents(&spool, &mut destination, &cx).await, expected);
+                reclaim_source_cache(&mut cold, &cx, &source_pool, baseline).await;
                 assert_eq!(source_pool.used(), baseline, "{text}");
                 assert_eq!(spill_pool.used(), 0, "{text}");
             }
@@ -549,6 +591,7 @@ fn collected_bodies_finish_before_pages_and_keep_cumulative_refusal_boundaries()
                     if error.kind == GraphIntegerErrorKind::DivisionByZero),
                 "{text}: {error:?}"
             );
+            reclaim_source_cache(&mut cold, &cx, &source_pool, baseline).await;
             assert_eq!(source_pool.used(), baseline);
             assert_eq!(spill_pool.used(), 0);
         }
@@ -623,6 +666,7 @@ fn collected_bodies_finish_before_pages_and_keep_cumulative_refusal_boundaries()
                     _ => unreachable!(),
                 }
             }
+            reclaim_source_cache(&mut cold, &cx, &source_pool, baseline).await;
             assert_eq!(source_pool.used(), baseline);
             assert_eq!(pool.used(), 0, "trial {trial}");
         }
@@ -742,6 +786,7 @@ fn dropping_suspended_collected_output_refunds_rows_frames_and_list_storage() {
         assert!(spill_pool.used() > 0);
         drop(future);
         assert!([&scratch, &destination, &auxiliary][blocked].is_poisoned());
+        reclaim_source_cache(&mut cold, &cx, &source_pool, baseline).await;
         assert_eq!(source_pool.used(), baseline);
         assert_eq!(spill_pool.used(), 0);
         drop(cold);

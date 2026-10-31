@@ -784,6 +784,7 @@ mod publication_metadata {
         Flip,
         Truncate,
         Missing,
+        LegacySegmentBoundary,
         Oversized,
     }
 
@@ -1023,8 +1024,14 @@ mod publication_metadata {
                     Damage::Flip,
                     Damage::Truncate,
                     Damage::Missing,
+                    Damage::LegacySegmentBoundary,
                     Damage::Oversized,
                 ] {
+                    if matches!(damage, Damage::LegacySegmentBoundary)
+                        && object.kind != Kind::Segment
+                    {
+                        continue;
+                    }
                     if matches!(damage, Damage::Oversized)
                         && !matches!(object.kind, Kind::Segment | Kind::VertexPatch)
                     {
@@ -1039,10 +1046,15 @@ mod publication_metadata {
                         }
                         Damage::Truncate => object.bytes[..object.bytes.len() / 2].to_vec(),
                         Damage::Missing => Vec::new(),
+                        // Keep the old V1-size input: V2's descriptor ceiling
+                        // admits its length, then its wrong identity refuses.
+                        Damage::LegacySegmentBoundary => {
+                            vec![0; fgdb_strata::root_segment::SEGMENT_BYTES + 1]
+                        }
                         Damage::Oversized => vec![
                             0;
                             if object.kind == Kind::Segment {
-                                fgdb_strata::root_segment::SEGMENT_BYTES + 1
+                                fgdb_strata::root_segment::MAX_SEGMENT_BYTES + 1
                             } else {
                                 fgdb_strata::MAX_BLOCK_ENTRIES as usize * 64 + 1
                             }

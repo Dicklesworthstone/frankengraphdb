@@ -9,7 +9,8 @@ use fgdb_gql::scan_stream::ScanState;
 use fgdb_gql::spill_aggregate::AsyncSpillAggregatePlan;
 use fgdb_gql::spill_set::{AsyncSpillSetPlan, AsyncSpillSetSourcePlan};
 use fgdb_gql::{
-    GraphAggregateValue, GraphExactAverage, PreparedGraphAggregateText, PreparedGraphSetText,
+    GraphAggregateValue, GraphExactAverage, GraphTemporalSetTextErrorKind,
+    PreparedGraphAggregateText, PreparedGraphSetText, PreparedTemporalGraphSetText,
 };
 use fgdb_strata::tiered::memory::{SpillFile, SpillLimits};
 use std::io::{self, Cursor, Seek, SeekFrom};
@@ -438,8 +439,19 @@ fn vertex_probe_sources_feed_ordered_stages_finite_paths_and_exact_aggregates() 
                     )]
                 );
             }
-            let text = format!(
+            let duplicate = format!(
                 "{head} RETURN a.p AS value UNION ALL MATCH (x) FOR SYSTEM_TIME AS OF SEQ {cut} WHERE NOT EXISTS {{ MATCH (x)-[:R]->(y) WHERE y.p={end} }} RETURN x.p AS value ORDER BY value DESC"
+            );
+            // One temporal selector governs the entire set, including both
+            // UNION operands. Keep the original two-selector statement as an
+            // explicit refusal rather than silently accepting duplicate cuts.
+            assert!(matches!(
+                PreparedTemporalGraphSetText::prepare(&duplicate, resolve),
+                Err(error)
+                    if error.kind == GraphTemporalSetTextErrorKind::DuplicateSystemTimeClause
+            ));
+            let text = format!(
+                "{head} RETURN a.p AS value UNION ALL MATCH (x) WHERE NOT EXISTS {{ MATCH (x)-[:R]->(y) WHERE y.p={end} }} RETURN x.p AS value ORDER BY value DESC"
             );
             assert_eq!(
                 ordered(&mut view, &cx, &text, policy()).await.unwrap().0,

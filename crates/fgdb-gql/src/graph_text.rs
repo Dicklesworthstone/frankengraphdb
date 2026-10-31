@@ -719,7 +719,37 @@ impl<'a> Lexer<'a> {
         let mut lexer = self.clone();
         match lexer.next().map(|token| token.kind) {
             Ok(TokenKind::Digits(_) | TokenKind::Parameter(_) | TokenKind::Punct(b'(')) => true,
-            Ok(TokenKind::Word(_)) => {
+            Ok(TokenKind::Word(function))
+                if !RESERVED_NAMES
+                    .iter()
+                    .any(|clause| function.eq_ignore_ascii_case(clause))
+                    && ![
+                        "CALL",
+                        "WITH",
+                        "UNWIND",
+                        "CREATE",
+                        "INSERT",
+                        "MERGE",
+                        "SET",
+                        "REMOVE",
+                        "DELETE",
+                        "DETACH",
+                        "FOREACH",
+                        "GROUP",
+                        "HAVING",
+                        "UNION",
+                        "INTERSECT",
+                        "EXCEPT",
+                        "WHEN",
+                        "THEN",
+                        "ELSE",
+                        "END",
+                    ]
+                    .iter()
+                    .any(|clause| function.eq_ignore_ascii_case(clause)) =>
+            {
+                // `AS offset MATCH (...)` declares an alias before the next
+                // clause, not an OFFSET whose page is a function named MATCH.
                 matches!(
                     lexer.next().map(|token| token.kind),
                     Ok(TokenKind::Punct(b'('))

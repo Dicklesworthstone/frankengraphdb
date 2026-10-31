@@ -729,8 +729,20 @@ fn cold_shortest_paths_choose_real_routes_across_history_edge_filters_and_pinned
             4,
         )
         .await;
-        for text in [
+        // A directed shortest path with minimum one cannot need a repeated
+        // edge, so the native compiler elides DIFFERENT EDGES. Keep the
+        // original shape as an executed empty page, with full source intake.
+        case(
+            &db,
+            &mut latest,
+            &cx,
             "MATCH p = ANY SHORTEST (a)-[:R*1..3]->(b) RETURN p LIMIT 0",
+            Vec::new(),
+            4,
+        )
+        .await;
+        for text in [
+            "MATCH p = ANY SHORTEST (a)-[:R*2..3]->(b) RETURN p LIMIT 0",
             "MATCH REPEATABLE ELEMENTS p = ALL SHORTEST (a)-[:R*0..3]->(b) RETURN p LIMIT 0",
             "MATCH REPEATABLE ELEMENTS p = ANY SHORTEST (a)-[:R*]->(b) RETURN p LIMIT 0",
         ] {

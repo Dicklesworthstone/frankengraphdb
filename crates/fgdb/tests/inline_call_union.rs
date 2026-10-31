@@ -3,7 +3,9 @@
 
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
-use fgdb::{Database, DatabaseKeys, MemVfs, PreparedNativeRead, QueryResult, WriteBatch};
+use fgdb::{
+    Database, DatabaseKeys, MemVfs, PreparedNativeRead, QueryResult, QueryValue, WriteBatch,
+};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertRequest};
 use fgdb_gql::{
@@ -51,7 +53,21 @@ fn values(result: QueryResult) -> Vec<i128> {
     };
     assert_eq!(columns, ["p"]);
     rows.into_iter()
-        .map(|row| row[0].as_integer().unwrap())
+        .map(|row| {
+            assert_eq!(row.len(), 1);
+            let number = match &row[0] {
+                QueryValue::Value(fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(
+                    number,
+                ))) => Some(i128::from(*number)),
+                _ => None,
+            };
+            assert!(
+                number.is_some(),
+                "expected a stored Int property: {:?}",
+                row[0]
+            );
+            number.unwrap()
+        })
         .collect()
 }
 

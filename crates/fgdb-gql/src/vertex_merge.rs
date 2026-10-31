@@ -500,10 +500,12 @@ pub enum GraphVertexMergeRowAction {
         inputs: Vec<GraphVertexMergeRowInput>,
         value: crate::GraphIntegerExpression,
     },
-    /// `v.key = value` whose right-hand side reads the row and not the
-    /// merged vertex (`prop.name`, `xs + [y]`).
+    /// `v.key = value` through the shared value evaluator. None reads the
+    /// original row; Some binds target properties and carried columns into
+    /// one clause-local frame, including map entries beside target reads.
     Value {
         key: fgdb_delta_types::PropertyKeyId,
+        inputs: Option<Vec<GraphVertexMergeRowInput>>,
         value: GraphVertexMergeRowComputed,
     },
     /// `n = m` or `n += m` over a row map, including `n = a` and

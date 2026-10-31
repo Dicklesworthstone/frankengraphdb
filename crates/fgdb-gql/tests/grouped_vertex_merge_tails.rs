@@ -333,10 +333,21 @@ fn matched_input(
             source: patterns,
             elements: |element, key| {
                 point_calls.borrow_mut().push((element, key));
-                assert_eq!((element, key), (ElementId::Vertex(V), P));
-                value.map(|number| {
-                    Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(number)))
-                })
+                assert_eq!(key, P);
+                if element == ElementId::Vertex(V) {
+                    value.map(|number| {
+                        Some(CanonicalPropertyValue::Scalar(CanonicalScalar::Int(number)))
+                    })
+                } else {
+                    // Fresh MATCH identities and the imported audit identity
+                    // share the governed point reader, but their values and
+                    // failure ownership remain distinct.
+                    let at = vertices
+                        .iter()
+                        .position(|&vertex| element == ElementId::Vertex(vertex))
+                        .expect("only the three literal MATCH vertices or the audit may be read");
+                    Ok(Some(properties[at].clone()))
+                }
             },
         };
         merge.select_governed_with_source::<&'static str, (), usize>(
@@ -409,6 +420,10 @@ fn post_write_match_merge_source_reads_owned_properties_and_late_parameters() {
             !points.is_empty(),
             "the unrematched carried identity uses the point reader"
         );
+        assert!(points.contains(&(ElementId::Vertex(V), P)));
+        for id in [2, 3] {
+            assert!(points.contains(&(ElementId::Vertex(VId((1_u128 << 100) + id)), P)));
+        }
         assert_eq!(result.rows.snapshot_records, 3);
         assert_eq!(result.rows.result_rows, 4);
         assert_eq!(merge.property_keys().collect::<Vec<_>>(), vec![Q]);
@@ -497,6 +512,9 @@ fn post_write_match_merge_source_preserves_reader_refusals_and_cancellation() {
         )))
     ));
     assert_eq!(patterns, 1);
+    // WITH hoists the carried audit property before the later UNWIND/MERGE.
+    // MATCH supplies its own n.p hidden cell there; audit's refusal stops the
+    // boundary before any later matched-vertex point read can be reached.
     assert_eq!(points, vec![(ElementId::Vertex(V), P)]);
     let missing = matched_input(merge, policy(4), None, &mut || Ok(())).0;
     assert!(matches!(

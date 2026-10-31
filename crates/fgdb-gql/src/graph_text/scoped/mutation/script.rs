@@ -551,6 +551,7 @@ impl PreparedGraphWriteScript {
             script: script.to_owned(),
             program,
             spans: spans.into_boxed_slice(),
+            native_parameter_limit: Self::MAX_BATCH_STATEMENTS,
         })
     }
 }

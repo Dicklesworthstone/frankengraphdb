@@ -1210,10 +1210,34 @@ pub(crate) fn write_refusal(error: &(dyn core::error::Error + 'static)) -> Refus
     let mut source = Some(error);
     while let Some(current) = source {
         if matches!(
+            current.downcast_ref::<fgdb_gql::GraphWriteProgramError<
+                fgdb::WriteTxnError,
+                fgdb::WriteTxnError,
+                fgdb::WriteTxnError,
+            >>(),
+            Some(fgdb_gql::GraphWriteProgramError::CreationBudget { .. })
+        ) || matches!(
+            current.downcast_ref::<fgdb_gql::GraphMutationProgramError<
+                fgdb::WriteTxnError,
+                fgdb::WriteTxnError,
+            >>(),
+            Some(fgdb_gql::GraphMutationProgramError::Budget { .. })
+        ) {
+            code = ErrorCode::Budget;
+            break;
+        }
+        if matches!(
             current.downcast_ref::<fgdb_gql::GraphWriteScriptBatchError>(),
             Some(fgdb_gql::GraphWriteScriptBatchError::TooManyStatements { .. })
         ) {
             code = ErrorCode::Budget;
+            break;
+        }
+        if current
+            .downcast_ref::<fgdb_gql::GraphIntegerError>()
+            .is_some()
+        {
+            code = ErrorCode::Execution;
             break;
         }
         if let Some(warden) = current.downcast_ref::<fgdb_warden::Error>() {

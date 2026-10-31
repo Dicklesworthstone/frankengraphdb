@@ -412,7 +412,26 @@ fn inline_read_call_and_leading_optional_read_parts_feed_set() {
 fn a_carried_binding_named_set_does_not_invent_an_earlier_write() {
     let text = "CALL { MATCH (n) RETURN n AS set } WITH set MATCH (set) \
                 SET set.p=1 RETURN set ORDER BY set";
-    assert!(!PreparedGraphWriteChainText::is_chain(text).unwrap());
+    // The real SET followed by RETURN uses the chain's multipart mutation
+    // owner; the carried name itself does not introduce another write.
+    assert!(PreparedGraphWriteChainText::is_chain(text).unwrap());
+    let chain = PreparedGraphWriteChainText::prepare(text, R, symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+    assert!(matches!(
+        chain.steps(),
+        [GraphWriteChainStep::MutationQuery(_)]
+    ));
+    for single_owner in [
+        "CALL { MATCH (n) RETURN n AS set } WITH set MATCH (set) RETURN set ORDER BY set",
+        "CALL { MATCH (n) RETURN n AS set } WITH set MATCH (set) SET set.p=1",
+    ] {
+        assert!(
+            !PreparedGraphWriteChainText::is_chain(single_owner).unwrap(),
+            "{single_owner}"
+        );
+    }
     let query = prepare(text);
     let batch = execute_multipart(&query, policy(3), None, &[], || Ok(())).unwrap();
     assert_eq!(batch.mutation().stats().effects, 3);

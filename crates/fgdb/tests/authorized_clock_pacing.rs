@@ -243,9 +243,13 @@ fn session_statements_share_paced_samples() {
         let db = chain(&contexts.commit(), 400).await;
         let issuer = authority(703);
         const K: u32 = 16;
+        const METADATA_COUNT: &str = "MATCH (a:L)-[:R]->(b) RETURN count(*) AS n";
         let paced_cx = cx.with_host_clock_interval(interval(K));
         for text in [
-            "MATCH (a:L)-[:R]->(b) RETURN count(*) AS n",
+            // Every vertex has p, so these rows equal METADATA_COUNT's. The
+            // property predicate requires source records rather than exact
+            // relation/universal-label metadata: enough real charges to pace.
+            "MATCH (a:L)-[:R]->(b) WHERE a.p IS NOT NULL RETURN count(*) AS n",
             "MATCH (a:L)-[:R]->(b) RETURN a.p AS p",
         ] {
             let per_charge = session_samples(&db, &cx, &issuer, text);
@@ -258,6 +262,38 @@ fn session_statements_share_paced_samples() {
                 paced <= per_charge.div_ceil(K as usize) + 3,
                 "{text}: {paced} paced samples for {per_charge} charges at K = {K}"
             );
+        }
+        // The original count may use metadata, but still charges its complete
+        // live node population and samples authorization, first charge and
+        // delivery. Its smaller physical input does not need a scan's charge
+        // count to preserve the same pacing and expiry contract.
+        let expected = fgdb::QueryResult::Rows {
+            columns: vec!["n".into()],
+            rows: vec![vec![fgdb::QueryValue::Count(399)]],
+        };
+        let (result, per_charge) = session_sampled(&db, &cx, &issuer, METADATA_COUNT, |_| LIVE);
+        assert_eq!(result.unwrap(), expected);
+        let (result, paced) = session_sampled(&db, &paced_cx, &issuer, METADATA_COUNT, |_| LIVE);
+        assert_eq!(result.unwrap(), expected);
+        assert!(
+            paced <= per_charge.div_ceil(K as usize) + 3,
+            "{METADATA_COUNT}: {paced} paced samples for {per_charge} charges at K = {K}"
+        );
+        let delivery_cx = cx.with_host_clock_interval(interval(1 << 30));
+        let (result, samples) =
+            session_sampled(&db, &delivery_cx, &issuer, METADATA_COUNT, |_| LIVE);
+        assert_eq!(result.unwrap(), expected);
+        assert_eq!(samples, 3, "authorization, first charge and fresh delivery");
+        for stop in 1..=samples {
+            let (result, seen) =
+                session_sampled(&db, &delivery_cx, &issuer, METADATA_COUNT, |at| {
+                    if at == stop { EXPIRED } else { LIVE }
+                });
+            assert!(
+                matches!(result, Err(QueryError::Authorization(Error::Expired))),
+                "{METADATA_COUNT}, sample {stop}: {result:?}"
+            );
+            assert_eq!(seen, stop, "nothing samples after expiry at {stop}");
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

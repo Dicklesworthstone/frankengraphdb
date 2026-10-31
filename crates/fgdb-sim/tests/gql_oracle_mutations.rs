@@ -67,7 +67,13 @@ fn create_vertex(
             vid: id,
             birth_ordinal: id.0 as u64,
             labels,
-            props: props.into_iter().map(|(k, v)| (k, v.into())).collect(),
+            // Model the public CREATE operation before applying its durable
+            // delta: NULL denotes absence, not a stored property value.
+            props: props
+                .into_iter()
+                .filter(|(_, value)| !matches!(value, CanonicalScalar::Null))
+                .map(|(k, v)| (k, v.into()))
+                .collect(),
             valid_time: None,
         })
         .unwrap();
@@ -87,7 +93,11 @@ fn create_edge(
             relation: R,
             dst,
             canonical_key: None,
-            props: props.into_iter().map(|(k, v)| (k, v.into())).collect(),
+            props: props
+                .into_iter()
+                .filter(|(_, value)| !matches!(value, CanonicalScalar::Null))
+                .map(|(k, v)| (k, v.into()))
+                .collect(),
             valid_time: None,
         })
         .unwrap();
@@ -108,7 +118,9 @@ fn property(
             elem,
             property: key,
             before,
-            after: after.map(CanonicalPropertyValue::from),
+            after: after
+                .filter(|value| !matches!(value, CanonicalScalar::Null))
+                .map(CanonicalPropertyValue::from),
         })
         .unwrap();
 }
@@ -455,6 +467,11 @@ fn generated_native_mutations_match_reference_and_reopen() {
                 .await
                 .unwrap();
             let (vertices, edges, cases) = generated(seed);
+            assert!(vertices.iter().any(|(_, _, props)| {
+                props
+                    .iter()
+                    .any(|(_, value)| matches!(value, CanonicalScalar::Null))
+            }));
             let mut model = ReferenceGraph::new();
             let mut batch = WriteBatch::new(R);
             for (id, labels, props) in vertices {

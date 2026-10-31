@@ -1,6 +1,6 @@
 # Reality Check and Bridge Plan
 
-**Latest audit: 2026-10-30.** Initial canonical `main` was
+**Latest audit: 2026-10-31; original snapshot: 2026-10-30.** Initial canonical `main` was
 `01c2042f4a72ed171111bab9b283f5a4f2e42768` (tree
 `ea849fed1921382f72dc97b16708a50b61ac8d5d`); concurrent integration advanced it
 through `3180b133d8be96e1a6036f2b13bc609a99231b1e` (tree
@@ -715,6 +715,80 @@ the verifier exits1 because the interrupted transcript lacks the required
 aggregate verdict. It is incomplete evidence, never qualification. The warm
 Rust compiler was not signaled and its source inputs remain unchanged. The
 next clean committed-tree run must execute every original gate plus Node.
+
+The complete warm workspace diagnostic then terminates with 13,520 passed,
+65 failed and 33 existing ignored tests across 1,092 native summaries. Those
+failures are retained, rather than hidden behind the earlier focused passes.
+The next repair wave addresses real connected-code defects: final signed
+delivery versus private analytic intermediates, governed mixed-property/map
+MERGE frames, three fresh-clock Beacon paths, parser/owner dispatch and native
+protocol error families. Updated fixtures retain their original queries and
+limits alongside accurate positive and genuine negative controls. No test is
+ignored and no production quota or gate is increased to obtain a pass.
+
+On the resulting dirty source, workspace/all-feature/all-target Clippy exits
+zero. The full GQL package executes 3,408 tests with one failed reader-trace
+oracle; the exact source-derived trace is corrected and awaits fresh execution.
+A 24-target embedded batch executes 418 passed, four failed and three existing
+ignored tests. All 21 authorization cases pass, including historical aggregate
+scope and one-live-permit enforcement. The remaining four failures include a
+real anonymous MATCH correlation defect: the unchanged TCK-shaped query
+produces 36 vertices from 12 instead of the required 312. The multipart owner
+now excludes reserved generated anonymous spellings from imported-name
+correlation. New real-database controls distinguish fresh cross products from
+explicit named correlation, checking allocations, graph state and one commit.
+
+Clippy again exits zero after those changes, with identical before/after dirty
+source hashes. This is compilation evidence, not a full runtime verdict. A
+fresh complete 32-part UBS diagnostic over the preceding source cut also
+finishes with the unchanged 277-critical fingerprint and an unchanged passing
+ratchet. Later source edits require another canonical scan. Full current
+workspace execution, every mandatory gate, a clean committed exact-tree proof
+and successful proof verification remain open; no source-dependent Bead closes
+on these diagnostic results. The broader vision gaps and performance claims
+above remain unchanged.
+
+Further runtime reaches and repairs a missing native field-update owner. A
+post-MATCH UNWIND with parameter-dependent SET previously reduced all root rows
+simultaneously, rejecting a valid repeated-target update. The bounded binder now
+proves immutable root provenance from token scope and the actual compiled column,
+binds the same prepared native relation per root, and uses the existing frozen
+field program: all selections finish at entry, then effects stage in original
+root order. Ordinary simultaneous conflicts remain. Global operators, rebinding,
+graph-dependent RHS values and unsupported profiles retain their original owner.
+Current-host, retained-prepared and hard caps all apply, with the complete
+expanded binding bill charged before allocation.
+
+The private native completion owner preserves one source statement in FGP
+stats-only output. Raw program instances, work/source/effect counters and explicit
+parameter-batch counts remain expanded. Paired native1/raw2/batch2 controls make
+that distinction observable. The original FGP statement now passes, as do direct
+and prepared reversed-root, carry-column, cap, arithmetic rollback and scope
+controls. A separate embedded test checks six order/carry combinations, a changed
+MATCH key, exact literal values, zero allocation, one commit, unchanged parameters,
+pinned history and reopen. Its initial retirement-metadata oracle was wrong:
+current-root historical rows know their seq2 retirement, while the earlier pin
+retains open intervals. Both exact forms are now checked before and after reopen.
+
+Fresh focused terminal results are: complete GQL library **1,853/0**, complete
+FGP no-return target **15/0**, and embedded document target **7/0**, all unfiltered.
+The GQL run retains every original nested-UNWIND query and scalar-hole rejection;
+only the proven field profile now expects two internal instances. Edge writes,
+literal-only and graph-RHS controls still require the original single owner.
+Complete Strata is **302/0 with eight existing ignored tests**, and the spine
+differential is **26/0**, including exact first-stage Healthy cancellation and
+sixth-sync `manifest.root` recovery fencing. No original quota, data assertion or
+ignored-test policy was relaxed.
+
+A second fresh complete 32-part scanner diagnostic covers all 2,429 Rust files
+with zero partial/UNRUN partitions, the same 277 complete critical identities and
+an unchanged passing ratchet. Its frozen source excludes three later explicit
+corrections: the historical test, routing test and typed impossible-state refusal.
+That refusal replaces an `unreachable!` warning, not a critical finding. Full
+current workspace runtime and every mandatory gate still need a clean committed
+exact-tree proof and successful verifier; all source-dependent qualification
+tasks remain open. These focused results establish no performance, release or
+G1–G4 qualification.
 
 The longer bridge above remains open work. The checklist consumer is the
 owner and this execution session; it is the explicitly requested TODO list,

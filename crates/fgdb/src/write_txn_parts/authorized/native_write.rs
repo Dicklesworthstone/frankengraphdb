@@ -508,15 +508,20 @@ fn bind_native_admitted<Clock: FnMut() -> u64>(
                 });
             let lowered = lowered.as_ref().map(|(lowered, _)| lowered);
             let script = prepare_admitted(cx, execution, text, params, relation, resolver)
-                .map_err(|fault| restored(lowered, fault))?;
-            statement_limit(&script, max_statements)?;
-            let super::Bound::Script(program) = Input::Script(&script, params)
-                .bind(cx, scope, execution)
                 .map_err(|fault| restored(lowered, fault))?
-            else {
-                unreachable!("script input always returns an owned script program")
-            };
-            return Ok(super::Bound::Script(program));
+                .with_native_parameter_limit(max_statements);
+            statement_limit(&script, max_statements)?;
+            let bound = Input::Script(&script, params, max_statements)
+                .bind(cx, scope, execution)
+                .map_err(|fault| restored(lowered, fault))?;
+            return Ok(match bound {
+                super::Bound::Script(program) => super::Bound::Script(program),
+                super::Bound::Batch(batch) => super::Bound::Batch(batch),
+                super::Bound::NativeRoots(batch) => super::Bound::NativeRoots(batch),
+                super::Bound::Borrowed(_) => {
+                    return Err(admission(WriteTxnError::UnsupportedAtomicMutation));
+                }
+            });
         };
         checkpoint(cx, execution).map_err(admission)?;
         // Every supported UNWIND mutation contains MERGE or MATCH. Refuse a
@@ -615,10 +620,14 @@ impl<V: Vfs + Clone> Database<V> {
             permit,
             clock,
         };
-        let script = prepare(query_cx, &mut execution, text, params, relation, resolver)?;
+        let script = prepare(query_cx, &mut execution, text, params, relation, resolver)?
+            .with_native_parameter_limit(max_statements);
         statement_limit(&script, max_statements)?;
-        let bound =
-            Input::Script(&script, params).bind(query_cx, verified.predicates(), &mut execution);
+        let bound = Input::Script(&script, params, max_statements).bind(
+            query_cx,
+            verified.predicates(),
+            &mut execution,
+        );
         checkpoint(query_cx, &mut execution).map_err(admission)?;
         drop(bound?);
         Ok(script)

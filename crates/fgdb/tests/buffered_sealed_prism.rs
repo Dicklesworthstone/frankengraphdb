@@ -538,7 +538,10 @@ fn cooperative_buffered_calls_preserve_historical_answers_across_quanta() {
                         })
                         .collect();
                     assert_eq!(synchronous.analytics.rows, expected);
-                    let bytes = 4 * (std::mem::size_of::<f64>() + if incoming { std::mem::size_of::<usize>() } else { 0 });
+                    // Four scores are the entire kernel allocation when the
+                    // projection retains its optional incoming-degree table.
+                    // Outgoing degree uses the mandatory row directory.
+                    let bytes = 4 * std::mem::size_of::<f64>();
                     assert_eq!(synchronous.analytics.certificate.kernel_workspace_bytes, bytes);
                     let exact = FnxMemoryLimits { max_kernel_workspace_bytes: bytes, ..memory() };
                     let bounded = view.execute_fnx_sealed(&cx, &procedure, opt, exact, sealing(), RAW).await.unwrap();
@@ -550,6 +553,70 @@ fn cooperative_buffered_calls_preserve_historical_answers_across_quanta() {
                             fgdb_prism::FnxExecutionError::LimitExceeded { resource: "kernel workspace bytes", requested, limit }
                         ))) if requested == bytes && limit == bytes - 1
                     ));
+                    if incoming {
+                        let fallback_bytes =
+                            4 * (std::mem::size_of::<f64>() + std::mem::size_of::<usize>());
+                        // The original 64/63-byte allowances both admit the
+                        // cached path; its exact boundary is now 32/31.
+                        for admitted in [fallback_bytes, fallback_bytes - 1] {
+                            let answer = view.execute_fnx_sealed(
+                                &cx, &procedure, opt,
+                                FnxMemoryLimits { max_kernel_workspace_bytes: admitted, ..memory() },
+                                sealing(), RAW,
+                            ).await.unwrap();
+                            assert_eq!(answer.analytics.rows, expected);
+                        }
+                        // Leave exactly the mandatory four identities and
+                        // outgoing degrees in the projection budget. There
+                        // is no spare backing for the optional incoming table.
+                        let mut fallback_options = opt;
+                        fallback_options.projection_limits.max_workspace_bytes =
+                            4 * (std::mem::size_of::<VId>() + std::mem::size_of::<usize>());
+                        let mut fallback = cold(&contexts, &vfs, pool()).await;
+                        fallback.set_sealed_read_cache_pool(
+                            &cx, MemoryPool::new(0, 0).unwrap(),
+                        ).unwrap();
+                        let exact = FnxMemoryLimits {
+                            max_kernel_workspace_bytes: fallback_bytes, ..memory()
+                        };
+                        let answer = fallback.execute_fnx_sealed(
+                            &cx, &procedure, fallback_options, exact, sealing(), RAW,
+                        ).await.unwrap();
+                        assert_eq!(answer.analytics.rows, expected);
+                        assert_eq!(answer.analytics.certificate.kernel_workspace_bytes, fallback_bytes);
+                        let below = FnxMemoryLimits {
+                            max_kernel_workspace_bytes: fallback_bytes - 1, ..memory()
+                        };
+                        assert!(matches!(
+                            fallback.execute_fnx_sealed(
+                                &cx, &procedure, fallback_options, below, sealing(), RAW,
+                            ).await,
+                            Err(FnxSealedReadError::Execution(FnxSealedExecutionError::Execution(
+                                fgdb_prism::FnxExecutionError::LimitExceeded {
+                                    resource: "kernel workspace bytes", requested, limit
+                                }
+                            ))) if requested == fallback_bytes && limit == fallback_bytes - 1
+                        ));
+                        for q in [1, 7, 257] {
+                            let answer = fallback.execute_fnx_sealed_cooperative(
+                                &cx, &procedure, fallback_options, exact, sealing(), RAW,
+                                NonZeroUsize::new(q).unwrap(),
+                            ).await.unwrap();
+                            assert_eq!(answer.analytics.rows, expected);
+                            assert_eq!(answer.analytics.certificate.kernel_workspace_bytes, fallback_bytes);
+                            assert!(matches!(
+                                fallback.execute_fnx_sealed_cooperative(
+                                    &cx, &procedure, fallback_options, below, sealing(), RAW,
+                                    NonZeroUsize::new(q).unwrap(),
+                                ).await,
+                                Err(FnxSealedReadError::Execution(FnxSealedExecutionError::Execution(
+                                    fgdb_prism::FnxExecutionError::LimitExceeded {
+                                        resource: "kernel workspace bytes", requested, limit
+                                    }
+                                ))) if requested == fallback_bytes && limit == fallback_bytes - 1
+                            ));
+                        }
+                    }
                 }
                 assert_eq!(
                     synchronous.analytics.certificate.result_digest,
@@ -589,7 +656,7 @@ fn cooperative_buffered_calls_preserve_historical_answers_across_quanta() {
                     drop(future);
                     same_answer(&actual, &synchronous);
                     if directed_degree {
-                        let bytes = synchronous.analytics.certificate.kernel_workspace_bytes;
+                        let bytes = 4 * std::mem::size_of::<f64>();
                         let below = FnxMemoryLimits { max_kernel_workspace_bytes: bytes - 1, ..memory() };
                         assert!(matches!(
                             view.execute_fnx_sealed_cooperative(&cx, &procedure, opt, below, sealing(), RAW, NonZeroUsize::new(q).unwrap()).await,

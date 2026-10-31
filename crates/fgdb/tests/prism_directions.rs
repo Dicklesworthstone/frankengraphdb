@@ -138,13 +138,90 @@ const CC: &str = "CALL fnx.connected_components() YIELD vertex,component";
 const WCC: &str = "CALL fnx.weakly_connected_components() YIELD vertex,component";
 const SCC: &str = "CALL fnx.strongly_connected_components() YIELD vertex,component";
 
-fn exact_sealed_limits(
+async fn exact_sealed_limits(
     procedure: &FnxCallSpec,
     query: &QueryCx,
     graph: &SealedGraphView,
-    limits: FnxExecutionLimits,
+    options: FnxReadOptions,
     expected: &FnxResult,
+    db: &Database<MemVfs>,
 ) {
+    let limits = options.execution_limits;
+    let n = graph.node_count();
+    let integer = size_of::<usize>();
+    assert_eq!(graph.selection(), options.selection);
+    assert_eq!(graph.spec(), options.projection);
+    // These kernels retain a temporary opposite projection and/or an
+    // optional active frontier. Derive mandatory arrays from their layouts,
+    // and incoming-index construction backing from the actual source owner,
+    // independently of the kernel certificate being tested.
+    let layout = match procedure.algorithm() {
+        FnxAlgorithm::Cdlp { max_iter } => Some((
+            n * if max_iter == 0 { integer } else { 4 * integer },
+            n != 0 && max_iter != 0 && graph.spec().directedness != Directedness::Undirected,
+            if n != 0 && max_iter >= 2 {
+                n * integer + 2 * n.div_ceil(64) * (size_of::<u64>() + integer)
+            } else {
+                0
+            },
+        )),
+        FnxAlgorithm::DirectedClusteringCoefficient => Some((
+            (n * (4 * integer + size_of::<u8>())).max(n * (2 * integer + size_of::<f64>())),
+            n != 0,
+            0,
+        )),
+        FnxAlgorithm::Foundation(FoundationAlgorithm::BetweennessCentrality) => Some((
+            n * (2 * integer + 3 * size_of::<f64>()),
+            n != 0 && graph.spec().directedness != Directedness::Undirected,
+            0,
+        )),
+        _ => None,
+    };
+    let workspace = if let Some((arrays, reverse, frontier)) = layout {
+        // The affected fixtures have five or six selected identities. Below
+        // the producer's 512-vertex threshold, no optional ordinal prefix
+        // contributes another allocation to the temporary projection.
+        assert!(n < 512, "this declared layout is for the small fixtures");
+        let (directory, index) = if reverse {
+            let mut opposite_options = options;
+            assert_ne!(graph.spec().directedness, Directedness::Undirected);
+            opposite_options.projection.directedness =
+                if graph.spec().directedness == Directedness::Directed {
+                    Directedness::Reversed
+                } else {
+                    Directedness::Directed
+                };
+            let opposite = project(db, query, opposite_options).await;
+            assert_eq!(opposite.binding(), graph.binding());
+            assert_eq!(opposite.selection(), graph.selection());
+            assert_eq!(opposite.vertex_ids(), graph.vertex_ids());
+            assert_eq!(
+                opposite.scan_incidence_bound(),
+                graph.scan_incidence_bound()
+            );
+            let index = if opposite.spec().directedness == Directedness::Reversed {
+                let stats = opposite.incoming_index_stats().unwrap();
+                assert_eq!(stats.incidences, graph.scan_incidence_bound());
+                stats.charged_workspace_bytes
+            } else {
+                assert!(opposite.incoming_index_stats().is_none());
+                0
+            };
+            (n * (size_of::<VId>() + integer), index)
+        } else {
+            (0, 0)
+        };
+        let mandatory = arrays + directory + index;
+        let optional = if reverse { n * integer } else { 0 } + frontier;
+        assert_eq!(
+            expected.certificate.kernel_workspace_bytes,
+            mandatory + optional,
+            "full allowance retains the declared optional backing"
+        );
+        Some((arrays, directory, index, mandatory, optional))
+    } else {
+        None
+    };
     let result_bytes = procedure.outputs().len() * size_of::<String>()
         + procedure
             .outputs()
@@ -168,7 +245,7 @@ fn exact_sealed_limits(
             .unwrap(),
         *expected
     );
-    for (limits, memory) in [
+    for (dimension, (limits, memory)) in [
         (
             FnxExecutionLimits {
                 max_estimated_work: exact.max_estimated_work - 1,
@@ -197,13 +274,97 @@ fn exact_sealed_limits(
                 ..memory
             },
         ),
-    ] {
-        assert!(
-            procedure
-                .execute_sealed(query, graph, limits, memory)
-                .is_err()
-        );
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let result = procedure.execute_sealed(query, graph, limits, memory);
+        if dimension == 2 && workspace.is_some_and(|(_, _, _, _, optional)| optional != 0) {
+            let actual = result.unwrap();
+            same_workspace_answer(&actual, expected);
+            let (_, _, _, mandatory, _) = workspace.unwrap();
+            assert!(actual.certificate.kernel_workspace_bytes >= mandatory);
+            assert!(actual.certificate.kernel_workspace_bytes <= memory.max_kernel_workspace_bytes);
+            assert!(
+                actual.certificate.kernel_workspace_bytes
+                    < expected.certificate.kernel_workspace_bytes
+            );
+        } else {
+            assert!(
+                result.is_err(),
+                "minus-one dimension {dimension}: {result:?}"
+            );
+        }
     }
+    if let Some((arrays, directory, index, mandatory, _)) = workspace {
+        let exact_memory = FnxMemoryLimits {
+            max_kernel_workspace_bytes: mandatory,
+            ..memory
+        };
+        let actual = procedure
+            .execute_sealed(query, graph, exact, exact_memory)
+            .unwrap();
+        same_workspace_answer(&actual, expected);
+        assert_eq!(actual.certificate.kernel_workspace_bytes, mandatory);
+        if mandatory != 0 {
+            let below = procedure.execute_sealed(
+                query,
+                graph,
+                exact,
+                FnxMemoryLimits {
+                    max_kernel_workspace_bytes: mandatory - 1,
+                    ..memory
+                },
+            );
+            let expected_refusal = if index != 0 {
+                matches!(&below, Err(FnxSealedExecutionError::Source(
+                    SealedProjectionError::Read(SealedError::Limit {
+                        resource: "incoming workspace bytes", requested, limit,
+                    })
+                )) if *requested == index && *limit == index - 1)
+            } else if directory != 0 {
+                matches!(&below, Err(FnxSealedExecutionError::Source(
+                    SealedProjectionError::Projection(ProjectionError::LimitExceeded {
+                        resource: "workspace bytes", observed, limit,
+                    })
+                )) if *observed == directory && *limit == directory - 1)
+            } else {
+                matches!(&below, Err(FnxSealedExecutionError::Execution(
+                    FnxExecutionError::LimitExceeded {
+                        resource: "kernel workspace bytes", requested, limit,
+                    }
+                )) if *requested == arrays && *limit == arrays - 1)
+            };
+            assert!(expected_refusal, "mandatory workspace minus one: {below:?}");
+        }
+    }
+}
+
+fn same_workspace_answer(actual: &FnxResult, expected: &FnxResult) {
+    assert_eq!(actual.columns, expected.columns);
+    assert_eq!(actual.rows, expected.rows);
+    let actual = &actual.certificate;
+    let expected = &expected.certificate;
+    assert_eq!(actual.registry_version, expected.registry_version);
+    assert_eq!(
+        actual.implementation_revision,
+        expected.implementation_revision
+    );
+    assert_eq!(actual.execution_kernel, expected.execution_kernel);
+    assert_eq!(actual.kernel_source_digest, expected.kernel_source_digest);
+    assert_eq!(actual.numeric_profile, expected.numeric_profile);
+    assert_eq!(actual.snapshot, expected.snapshot);
+    assert_eq!(actual.projection_digest, expected.projection_digest);
+    assert_eq!(actual.call_digest, expected.call_digest);
+    assert_eq!(actual.result_digest, expected.result_digest);
+    assert_eq!(actual.adapter, expected.adapter);
+    assert_eq!(actual.vertices, expected.vertices);
+    assert_eq!(actual.edges, expected.edges);
+    assert_eq!(actual.input_edges, expected.input_edges);
+    assert_eq!(actual.estimated_work, expected.estimated_work);
+    // Optional reverse-directory/frontier backing may change the kernel's
+    // actual witness and certificate digest. Logical answers and all selected
+    // source identities above remain exact; this is not RSS or a perf win.
 }
 
 #[test]
@@ -250,7 +411,7 @@ fn sealed_cdlp_matches_decoded_calls_across_history_directions_and_reductions() 
                                 assert_eq!(row[0], row[1], "zero rounds retain each stable VId");
                             }
                         }
-                        exact_sealed_limits(&procedure, &query, &graph, opt.execution_limits, &actual);
+                        exact_sealed_limits(&procedure, &query, &graph, opt, &actual, &db).await;
                         if iterations == 2 && reduction == ParallelEdgePolicy::Sum {
                             let hosted = db.call_fnx_sealed(&query, &text, &FnxParameters::new(),
                                 opt, memory(), SealedLimits::default()).await.unwrap();
@@ -407,13 +568,7 @@ fn sealed_directed_clustering_matches_decoded_history_reductions_and_exact_limit
                                 ])
                             );
                         }
-                        exact_sealed_limits(
-                            &procedure,
-                            &query,
-                            &graph,
-                            opt.execution_limits,
-                            &actual,
-                        );
+                        exact_sealed_limits(&procedure, &query, &graph, opt, &actual, &db).await;
                         if reduction == ParallelEdgePolicy::Sum {
                             let hosted = db
                                 .call_fnx_sealed(
@@ -456,7 +611,7 @@ fn sealed_directed_clustering_matches_decoded_history_reductions_and_exact_limit
                     .iter()
                     .all(|row| row[0] == FnxValue::Score(0.0))
             );
-            exact_sealed_limits(&procedure, &query, &graph, opt.execution_limits, &isolated);
+            exact_sealed_limits(&procedure, &query, &graph, opt, &isolated, &db).await;
 
             opt.selection.relation = Some(RelationId(1));
             opt.selection.vertex_label = Some(LabelId(999));
@@ -707,7 +862,7 @@ fn sealed_betweenness_matches_decoded_history_reductions_and_exact_limits() {
                     actual.certificate.execution_kernel,
                     "fgdb-prism/sealed-betweenness-brandes-v2"
                 );
-                exact_sealed_limits(&procedure, &query, &graph, opt.execution_limits, &actual);
+                exact_sealed_limits(&procedure, &query, &graph, opt, &actual, &db).await;
                 let hosted = db
                     .call_fnx_sealed(
                         &query,
@@ -849,7 +1004,7 @@ fn sealed_betweenness_matches_decoded_history_reductions_and_exact_limits() {
             );
             assert_eq!(actual.certificate.adapter, AdapterPath::CompressedCursor);
             assert_eq!(actual.certificate.snapshot, graph.binding());
-            exact_sealed_limits(&procedure, &query, &graph, opt.execution_limits, &actual);
+            exact_sealed_limits(&procedure, &query, &graph, opt, &actual, &db).await;
             let hosted = db
                 .call_fnx_sealed(
                     &query,
@@ -1216,7 +1371,7 @@ fn completed_components_omit_compressed_tails_across_history_and_cooperative_qua
                         graph.adjacency_entry_count()
                     );
                 }
-                exact_sealed_limits(&call, &query, &graph, opt.execution_limits, &actual);
+                exact_sealed_limits(&call, &query, &graph, opt, &actual, &db).await;
                 let mut prior = None;
                 for quantum in [1, 7, 257] {
                     let cooperative = call
@@ -2003,20 +2158,9 @@ fn sealed_incoming_degree_directory_matches_independent_history_counts_and_scan_
                             scanned.certificate.kernel_workspace_bytes,
                             actual.certificate.kernel_workspace_bytes + extra
                         );
-                        exact_sealed_limits(
-                            &procedure,
-                            &query,
-                            &graph,
-                            opt.execution_limits,
-                            &actual,
-                        );
-                        exact_sealed_limits(
-                            &procedure,
-                            &query,
-                            &fallback,
-                            opt.execution_limits,
-                            &scanned,
-                        );
+                        exact_sealed_limits(&procedure, &query, &graph, opt, &actual, &db).await;
+                        exact_sealed_limits(&procedure, &query, &fallback, opt, &scanned, &db)
+                            .await;
                         retained.push((graph, opt.execution_limits, actual));
                     }
                 }

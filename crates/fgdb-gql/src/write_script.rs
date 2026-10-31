@@ -245,6 +245,7 @@ pub struct PreparedGraphWriteScript {
     pub(crate) script: String,
     pub(crate) program: PreparedGraphWriteProgramTemplate,
     pub(crate) spans: Box<[Range<usize>]>,
+    pub(crate) native_parameter_limit: usize,
 }
 impl core::fmt::Debug for PreparedGraphWriteScript {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -256,6 +257,142 @@ impl core::fmt::Debug for PreparedGraphWriteScript {
     }
 }
 impl PreparedGraphWriteScript {
+    /// Retain a host's smaller statement-instance ceiling across prepared
+    /// native root-row bindings. This can only narrow the existing batch cap.
+    #[must_use]
+    pub fn with_native_parameter_limit(mut self, limit: usize) -> Self {
+        self.native_parameter_limit = self.native_parameter_limit.min(limit);
+        self
+    }
+
+    /// Bind a closed native post-MATCH UNWIND field update root by root.
+    /// The original prepared relation and actions are reused; all selections
+    /// finish at entry before the existing frozen program stages any effect.
+    /// None leaves an unsupported shape with its ordinary simultaneous owner.
+    /// Controls precede expanded allocation, each root, and final acceptance;
+    /// their second argument is the complete statement-instance bill.
+    pub fn bind_native_parameter_rows_controlled<C>(
+        &self,
+        arguments: &GqlParameters,
+        max_statements: usize,
+        mut checkpoint: impl FnMut(Option<usize>, usize) -> Result<(), C>,
+    ) -> Result<Option<BoundGraphWriteScriptBatch>, GraphWriteScriptBatchBindError<C>> {
+        use GraphWriteScriptBatchBindError as Error;
+        if !matches!(
+            self.statements(),
+            [GraphWriteTemplateStatement::Mutation(_)]
+        ) {
+            return Ok(None);
+        }
+        let Some((parameter, root)) =
+            crate::unwind_write::GraphUnwindWriteText::native_frozen_parameter_root(&self.script)
+        else {
+            return Ok(None);
+        };
+        if !matches!(self.parameter_schema(), [spec]
+            if spec.name == parameter && spec.parameter_type == crate::GqlParameterType::List)
+        {
+            return Ok(None);
+        }
+        // Check the full original parameter map before deriving singleton
+        // maps. In particular, an extra argument must not disappear here.
+        let bound = self.bind_parameters(arguments).map_err(|source| {
+            Error::Binding(GraphWriteScriptBatchError::Arguments {
+                argument_set: 0,
+                source,
+            })
+        })?;
+        let [crate::GraphWriteStatement::Mutation(mutation)] = bound.statements() else {
+            return Ok(None);
+        };
+        let Some(column) = mutation
+            .input_relation()
+            .and_then(|input| input.columns().iter().position(|name| name == root))
+        else {
+            return Ok(None);
+        };
+        if mutation.writes_only_constants() {
+            return Ok(None);
+        }
+        if !(mutation.is_vertex_update_only()
+            || mutation.is_edge_update_only()
+            || mutation.is_mixed_update_only())
+            || !mutation.writes_only_parameter_columns(&[column])
+        {
+            return Ok(None);
+        }
+        let Some(crate::GqlParameterValue::List(rows)) = arguments.get(parameter) else {
+            return Ok(None);
+        };
+        // Singleton and empty inputs need no distinct ordering provenance.
+        // Stored parameter values cannot contain graph identities, so a map
+        // access on the admitted root column cannot become an element read.
+        if rows.values().len() <= 1 || !rows.values().iter().all(|row| row.is_stored_value()) {
+            return Ok(None);
+        }
+        let count = rows.values().len();
+        let limit = max_statements
+            .min(self.native_parameter_limit)
+            .min(Self::MAX_BATCH_STATEMENTS);
+        if count > limit {
+            return Err(Error::Binding(
+                GraphWriteScriptBatchError::TooManyStatements {
+                    limit,
+                    observed: count as u128,
+                },
+            ));
+        }
+        checkpoint(None, count).map_err(|source| Error::Interrupted {
+            argument_set: None,
+            source,
+        })?;
+        let mut statements = Vec::with_capacity(count);
+        let mut columns = Vec::with_capacity(count);
+        for (argument_set, row) in rows.values().iter().enumerate() {
+            checkpoint(Some(argument_set), count).map_err(|source| Error::Interrupted {
+                argument_set: Some(argument_set),
+                source,
+            })?;
+            // A singleton of an already-admitted list, with the same name,
+            // preserves every value/name/transcript bound of that argument.
+            let singleton = GqlParameters::new()
+                .with_list(parameter, vec![row.clone()])
+                .expect("one stored member of the admitted list preserves parameter bounds");
+            let program = self.bind_parameters(&singleton).map_err(|source| {
+                Error::Binding(GraphWriteScriptBatchError::Arguments {
+                    argument_set,
+                    source,
+                })
+            })?;
+            columns.push(column);
+            statements.extend(program.into_statements().into_vec());
+        }
+        let mut program =
+            PreparedGraphWriteProgram::prepare_with_statement_limit(statements, limit)
+                .map_err(|source| Error::Binding(GraphWriteScriptBatchError::Definition(source)))?;
+        if !program.freeze_parameter_field_update_input(&columns) {
+            return Err(Error::Binding(GraphWriteScriptBatchError::Arguments {
+                argument_set: 0,
+                source: GraphWriteScriptError {
+                    statement: Some(0),
+                    offset: 0,
+                    kind: GraphWriteScriptErrorKind::Syntax(GraphPatternTextErrorKind::Expected(
+                        "closed parameter-root field assignments",
+                    )),
+                },
+            }));
+        }
+        checkpoint(None, count).map_err(|source| Error::Interrupted {
+            argument_set: None,
+            source,
+        })?;
+        Ok(Some(BoundGraphWriteScriptBatch {
+            program,
+            argument_sets: count,
+            spans: self.spans.clone(),
+        }))
+    }
+
     #[must_use]
     pub fn script(&self) -> &str {
         &self.script

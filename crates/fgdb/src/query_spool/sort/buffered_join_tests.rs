@@ -78,6 +78,20 @@ async fn fixture(cx: &CommitCx) -> MemVfs {
     drop(db);
     vfs
 }
+fn read_limits() -> BufferedReadLimits {
+    BufferedReadLimits {
+        max_root_bytes: 8192,
+        max_source_bytes: 16_000_000,
+        max_blocks: 128,
+        max_vertex_patches: 128,
+        max_work: WORK as usize,
+        buffer: BufferLimits {
+            max_frames: 1,
+            max_ghost_entries: 2,
+            max_extent_bytes: 16 * 1024,
+        },
+    }
+}
 async fn view(cx: &CommitCx, vfs: &MemVfs, pool: &MemoryPool) -> BufferedReadView<MemVfs> {
     Database::open_buffered_read_view_with_vfs(
         cx,
@@ -85,18 +99,7 @@ async fn view(cx: &CommitCx, vfs: &MemVfs, pool: &MemoryPool) -> BufferedReadVie
         vfs.database_dir(),
         keys(),
         pool.clone(),
-        BufferedReadLimits {
-            max_root_bytes: 8192,
-            max_source_bytes: 16_000_000,
-            max_blocks: 128,
-            max_vertex_patches: 128,
-            max_work: WORK as usize,
-            buffer: BufferLimits {
-                max_frames: 1,
-                max_ghost_entries: 2,
-                max_extent_bytes: 16 * 1024,
-            },
-        },
+        read_limits(),
     )
     .await
     .unwrap()
@@ -542,7 +545,49 @@ fn cold_variable_path_existence_keeps_historical_properties_modes_and_external_b
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
         let vfs = fixture(&contexts.commit()).await;
-        let source_pool = MemoryPool::new(1_000_000, 0).unwrap();
+        // The reader's format-wide workspace is reserved before payload I/O.
+        // Preserve the original 1M request as a real refusal, even when zero
+        // source bytes would independently refuse the first graph payload.
+        let object_workspace = 16 * 1024 * 64 + 65_536;
+        for max_source_bytes in [read_limits().max_source_bytes, 0] {
+            let insufficient = MemoryPool::new(1_000_000, 0).unwrap();
+            let mut limits = read_limits();
+            limits.max_source_bytes = max_source_bytes;
+            let refusal = Database::open_buffered_read_view_with_vfs(
+                &contexts.commit(),
+                vfs.clone(),
+                vfs.database_dir(),
+                keys(),
+                insufficient.clone(),
+                limits,
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(
+                refusal,
+                crate::BufferedOpenError::Read(crate::BufferedReadError::Memory(
+                    fgdb_strata::tiered::memory::MemoryError::ResourceExhausted {
+                        requested,
+                        available,
+                        limit: 1_000_000,
+                    }
+                )) if requested == object_workspace && available < requested
+            ));
+            assert_eq!(insufficient.used(), 0);
+        }
+        // Incoming/birth-refault admission and winner/decode reads can each
+        // hold two independent full workspaces. Keep the native opening bound
+        // plus one extent frame. For this four-edge, four-vertex-version
+        // fixture, 256 fixed 512-byte metadata slots also cover lifecycle maps,
+        // root/incidence merge heads, and the outer plus at most three probe
+        // records. Completed payloads shrink to their actual capacities; no
+        // decoder or retained owner is uncharged to fit this positive case.
+        let limits = read_limits();
+        let source_bytes = 2 * object_workspace
+            + limits.metadata_bytes().unwrap()
+            + (limits.max_blocks + limits.max_vertex_patches) * 512
+            + limits.buffer.max_frames * limits.buffer.max_extent_bytes;
+        let source_pool = MemoryPool::new(source_bytes, 0).unwrap();
         let spill_pool = MemoryPool::new(1_000_000, 0).unwrap();
         let mut view = view(&contexts.commit(), &vfs, &source_pool).await;
         let baseline = source_pool.used();

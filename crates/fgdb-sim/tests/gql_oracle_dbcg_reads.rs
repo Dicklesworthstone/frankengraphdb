@@ -472,10 +472,9 @@ fn hidden_order_properties_match_storage_scan_oracle() {
                     let absent = vertices.iter().find(|v| v.vid == missing).unwrap();
                     let null = vertices.iter().find(|v| v.vid == explicit).unwrap();
                     assert!(!absent.props.iter().any(|(found, _)| *found == key));
-                    assert!(
-                        null.props.iter().any(|(found, value)| *found == key
-                            && *value == CanonicalScalar::Null.into())
-                    );
+                    // The original explicit-NULL input remains in the seed;
+                    // public writes normalize it to the same absent key.
+                    assert!(!null.props.iter().any(|(found, _)| *found == key));
                 }
                 for edge_pattern in [false, true] {
                     let input: Vec<[HiddenOrderCell; 3]> = if edge_pattern {

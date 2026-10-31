@@ -7,8 +7,9 @@ use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::unwind_write::{GraphUnwindRowError, GraphUnwindWriteError};
 use fgdb_gql::{
-    GqlMapParameter, GqlParameterValue, GqlParameters, GqlQueryPolicy, GraphAggregateValue,
-    GraphSymbol, GraphSymbolKind, GraphWriteProgramPolicy,
+    GqlMapParameter, GqlParameterValue, GqlParameters, GqlQueryError, GqlQueryPolicy,
+    GraphAggregateValue, GraphMutationError, GraphMutationQueryError, GraphSymbol, GraphSymbolKind,
+    GraphWriteChainError, GraphWriteProgramPolicy,
 };
 use fgdb_types::{
     CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EmbeddedTxnCompletion,
@@ -522,7 +523,18 @@ fn late_computed_map_type_failure_preserves_the_outer_transaction_prefix() {
                 |_| -> Result<ElementId, Infallible> { panic!("map updates allocate no identity") },
             )
             .unwrap_err();
-        assert!(matches!(error, QueryWriteError::Mutation(_)), "{error:?}");
+        assert!(
+            matches!(
+                error,
+                QueryWriteError::Chain(GqlQueryError::Source(GraphWriteChainError::Mutation(
+                    GraphMutationQueryError::Mutation(GraphMutationError::InvalidPropertyMap {
+                        row: 1,
+                        binding: 0
+                    })
+                )))
+            ),
+            "the second row's invalid map must retain its native error: {error:?}"
+        );
         assert_eq!(txn.staged_effect_digest().unwrap(), digest);
         assert_eq!(
             txn.query(
@@ -664,6 +676,133 @@ fn document_shape_and_late_row_type_refusals_never_enter_catalog_or_publish() {
             }
             assert_eq!(db.frontier().unwrap(), CommitSeq(0));
             assert!(db.vertices_at(CommitSeq(0)).unwrap().is_empty());
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn post_match_field_updates_preserve_root_order_and_frozen_selection_through_reopen() {
+    use fgdb::WriteBatch;
+    let ((), report) = run_async_under_lab(0x646f_6307, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let (cx, commit, txcx) = (contexts.query(), contexts.commit(), contexts.txn());
+        for (scores, carry) in [
+            ([100, 200], ""),
+            ([200, 100], ""),
+            ([100, 200], "WITH p,row"),
+            ([200, 100], "WITH p,row"),
+            ([100, 200], "WITH row,p"),
+            ([200, 100], "WITH row,p"),
+        ] {
+            let vfs = MemVfs::new().unwrap();
+            let dir = vfs.database_dir();
+            let mut db = Database::create_with_vfs(&commit, vfs.clone(), &dir, keys())
+                .await
+                .unwrap();
+            let mut seed = WriteBatch::new(R);
+            for (vertex, id, score) in [(VId(1), 1, 10), (VId(2), 2, 20)] {
+                seed.create_vertex(
+                    vertex,
+                    vec![LabelId(1)],
+                    vec![
+                        (PropertyKeyId(1), CanonicalScalar::Int(id)),
+                        (PropertyKeyId(2), CanonicalScalar::Int(score)),
+                    ],
+                );
+            }
+            db.write(&commit, seed).await.unwrap();
+            let original = db.vertices().unwrap();
+            let pinned = db.read_session().unwrap();
+            let parameters = GqlParameters::new()
+                .with_list(
+                    "rows",
+                    scores
+                        .iter()
+                        .map(|score| {
+                            object(vec![
+                                ("id", int(1)),
+                                ("score", int(*score)),
+                                ("friends", list(vec![int(2)])),
+                            ])
+                        })
+                        .collect(),
+                )
+                .unwrap();
+            let parameter_bytes = parameters.canonical_bytes();
+            let text = format!(
+                "UNWIND $rows AS row MATCH (p:Entity {{id:row.id}}) \
+                 {carry} UNWIND row.friends AS friend \
+                 MATCH (f:Entity {{id:friend}}) SET p.id=99,f.score=row.score"
+            );
+            let mut allocations = 0_u64;
+            let result = db
+                .query_write(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    &text,
+                    &parameters,
+                    symbols,
+                    R,
+                    writes(),
+                    |_| {
+                        allocations += 1;
+                        Err::<ElementId, _>("field updates allocate no identity")
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(matches!(&result, QueryResult::Write { .. }));
+            if let QueryResult::Write {
+                receipt,
+                completion,
+            } = result
+            {
+                // Raw program statistics retain both instances, even when a
+                // native server completion reports one source statement.
+                assert_eq!(receipt.stats().completed_statements, 2);
+                assert_eq!(
+                    completion,
+                    Some(EmbeddedTxnCompletion::WriteCommitted {
+                        commit_seq: CommitSeq(2),
+                    })
+                );
+            }
+            assert_eq!(allocations, 0);
+            assert_eq!(parameters.canonical_bytes(), parameter_bytes);
+            assert_eq!(db.frontier().unwrap(), CommitSeq(2));
+            assert!(db.edges().unwrap().is_empty());
+            let wanted = expected(&[[2, scores[1]], [99, 10]]);
+            assert_eq!(
+                db.query(&cx, READ, &GqlParameters::new(), symbols, reads())
+                    .unwrap(),
+                wanted,
+                "{text}: {scores:?}"
+            );
+            // Both parameter roots matched id=1 before either changed it.
+            // Re-matching after the first update would leave scores[0].
+            // The new root knows when both old rows retired. The earlier
+            // pinned root still carries their original open intervals.
+            let mut historical = original.clone();
+            for vertex in &mut historical {
+                vertex.retired_at = Some(CommitSeq(2));
+            }
+            assert_eq!(db.vertices_at(CommitSeq(1)).unwrap(), historical);
+            assert_eq!(pinned.vertices().unwrap(), original);
+            drop(db);
+            let db = Database::open_with_vfs(&commit, vfs, &dir, keys())
+                .await
+                .unwrap();
+            assert_eq!(db.frontier().unwrap(), CommitSeq(2));
+            assert_eq!(
+                db.query(&cx, READ, &GqlParameters::new(), symbols, reads())
+                    .unwrap(),
+                wanted
+            );
+            assert_eq!(db.vertices_at(CommitSeq(1)).unwrap(), historical);
+            assert_eq!(pinned.vertices().unwrap(), original);
             assert_eq!(txcx.outstanding_obligations(), 0);
         }
     });

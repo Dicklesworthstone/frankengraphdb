@@ -4,6 +4,7 @@
 //! registered exactly once even when multiple WHEN clauses share a selector.
 
 use super::*;
+use crate::GraphSetColumnType;
 
 fn bound(
     program: &mut Vec<ParsedOp>,
@@ -17,11 +18,28 @@ impl<'a> Parser<'a> {
     /// Preserve a bound vertex/property named `case` when followed by its
     /// ordinary suffix. CASE syntax is selected by an actual following operand
     /// or WHEN, not by replacing every occurrence of a keyword-looking name.
-    pub(in crate::graph_text) fn starts_integer_case(&self) -> Result<bool, GraphPatternTextError> {
+    pub(in crate::graph_text) fn starts_integer_case(
+        &self,
+        row: Option<&[(Name<'a>, GraphSetColumnType)]>,
+    ) -> Result<bool, GraphPatternTextError> {
         if !self.is_word("CASE") {
             return Ok(false);
         }
-        let next = self.lexer.clone().next()?;
+        let mut lexer = self.lexer.clone();
+        let next = lexer.next()?;
+        if matches!(next.kind, TokenKind::Punct(b'['))
+            && let TokenKind::Word(word) = self.current.kind
+            && (row.is_some_and(|schema| {
+                schema[..self.visible_width(schema)]
+                    .iter()
+                    .any(|(name, _)| name.text == word)
+            }) || self.syntax.variables.iter().any(|name| name.text == word))
+        {
+            // Variable names are case-sensitive. A known binding owns its
+            // postfix; a CASE keyword with a composite subject still takes
+            // the value route below instead of becoming an unknown name.
+            return Ok(false);
+        }
         Ok(match next.kind {
             TokenKind::Word(word) => ![
                 "AS", "THEN", "ELSE", "END", "AND", "OR", "RETURN", "SET", "REMOVE", "GROUP",
@@ -33,6 +51,24 @@ impl<'a> Parser<'a> {
             | TokenKind::Parameter(_)
             | TokenKind::Quoted(_)
             | TokenKind::Punct(b'(' | b'+' | b'-') => true,
+            TokenKind::Punct(b'[' | b'{') => {
+                // A composite CASE subject reaches WHEN after its complete
+                // value. A binding's ordinary `case[0]` suffix instead ends
+                // at its expression/page boundary and remains an identifier.
+                let mut groups = 1_usize;
+                loop {
+                    match lexer.next()?.kind {
+                        TokenKind::Punct(b'(' | b'[' | b'{') => groups += 1,
+                        TokenKind::Punct(b')' | b']' | b'}') => groups -= 1,
+                        TokenKind::End => return Ok(false),
+                        _ => {}
+                    }
+                    if groups == 0 {
+                        break matches!(lexer.next()?.kind,
+                            TokenKind::Word(word) if word.eq_ignore_ascii_case("WHEN"));
+                    }
+                }
+            }
             _ => false,
         })
     }

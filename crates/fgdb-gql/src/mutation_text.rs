@@ -520,10 +520,12 @@ pub(crate) enum VertexMergeRowActionTemplate {
         program: Vec<MutationIntegerTemplateOp>,
         at: usize,
     },
-    /// `v.key = value` whose right-hand side reads the row and not the
-    /// merged vertex, by the shared value compiler.
+    /// `v.key = value` through the shared value compiler, over the original
+    /// row or a mixed frame of target properties and carried columns.
     Value {
         key: PropertyKeyId,
+        /// None retains the original row; Some binds a mixed target/row frame.
+        inputs: Option<Vec<crate::GraphVertexMergeRowInput>>,
         value: Box<crate::set_text::ReadValueTemplate>,
         at: usize,
     },

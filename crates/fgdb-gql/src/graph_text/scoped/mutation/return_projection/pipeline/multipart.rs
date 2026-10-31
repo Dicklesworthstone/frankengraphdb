@@ -3436,6 +3436,12 @@ impl<'a> Parser<'a> {
         let mut inputs = Vec::new();
         let mut keys = Vec::new();
         for (left, &(name, kind)) in incoming.iter().enumerate() {
+            // Private spellings can be reused by a fresh anonymous pattern
+            // after a write or WITH. They carry row values, not aliases that
+            // correlate the next MATCH (TCK Create3 [3]).
+            if name.text.starts_with(Self::ANONYMOUS_PREFIX) {
+                continue;
+            }
             // An imported name cannot silently become an independent local
             // inside EXISTS/OPTIONAL. This subset correlates root vertices;
             // the ordinary scoped compiler can then capture that root value.

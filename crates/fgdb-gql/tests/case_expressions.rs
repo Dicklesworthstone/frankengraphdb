@@ -932,6 +932,30 @@ fn simple_case_composite_selectors_use_numeric_peer_and_three_valued_equality() 
 }
 
 #[test]
+fn a_binding_named_case_keeps_its_subscript_inside_an_outer_case() {
+    for text in [
+        "WITH [7] AS case RETURN case[0] AS value",
+        "WITH [7] AS case RETURN CASE case[0] WHEN 7 THEN case[0] ELSE 1/0 END AS value",
+        "WITH [7] AS case RETURN CASE case[0]+1 WHEN 8 THEN 7 ELSE 1/0 END AS value",
+        "WITH [7] AS case RETURN CASE [1] WHEN [1.0] THEN 7 ELSE 1/0 END AS value",
+        "WITH [7] AS case RETURN CASE {key:1} WHEN {key:1.0} THEN 7 ELSE 1/0 END AS value",
+    ] {
+        let query = prepare(text);
+        let result = run(
+            &query,
+            &[],
+            &[],
+            &Props::new(),
+            policy(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+        assert_eq!(result.value.len(), 1, "{text}");
+        assert_eq!(integer(&result.value[0].values()[0]), Some(7), "{text}");
+    }
+}
+
+#[test]
 fn simple_case_value_selectors_keep_later_arms_lazy_and_every_refusal_terminal() {
     let query = prepare_value_case(
         "UNWIND $values AS value \

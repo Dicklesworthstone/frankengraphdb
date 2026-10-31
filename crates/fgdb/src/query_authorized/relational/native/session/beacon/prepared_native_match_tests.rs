@@ -251,9 +251,54 @@ fn match_properties_and_incidence_stay_at_the_index_cut_after_compaction() {
 fn incidence_never_lends_uncorrelated_or_stale_root_authority_even_on_empty_inputs() {
     let ((), report) = run_async_under_lab(0xbeac_6504, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
+        let quiet = weighted_database(&c.commit(), false).await;
         let db = weighted_database(&c.commit(), true).await;
         let authority = authority();
         let token = authority.issue_at(&grant(), NOW).unwrap();
+        let tails = [
+            "MATCH (other)-[:R]->(neighbor) RETURN neighbor LIMIT 0",
+            "MATCH (node)-[:R]->(neighbor), (other) RETURN other LIMIT 0",
+            "RETURN node AS v UNION ALL MATCH (other)-[:R]->(neighbor) RETURN neighbor AS v",
+        ];
+        let mut ordinary = quiet
+            .authorized_read_session(
+                &c.query(),
+                &authority,
+                &token,
+                "main",
+                MatchCatalog,
+                host(),
+                || NOW,
+            )
+            .unwrap();
+        for eligible in [vec![VId(0)], vec![]] {
+            let params = arguments(&eligible);
+            for (case, tail) in tails.iter().copied().enumerate() {
+                let query = format!("{RETRIEVE}{tail}");
+                let prepared = ordinary.prepare(&c.query(), &query, &params).unwrap();
+                let result = ordinary
+                    .execute(&c.query(), &prepared, &params)
+                    .unwrap_or_else(|error| {
+                        panic!("quiet ordinary {query}, eligible={eligible:?}: {error:?}")
+                    });
+                let mut expected = Vec::new();
+                if case == 2 {
+                    // Five visible R edges, including both parallel edges and
+                    // the loop. The left UNION arm contributes its one hit.
+                    let mut vertices = vec![VId(0), VId(1), VId(1), VId(1), HIGH];
+                    if !eligible.is_empty() {
+                        vertices.insert(0, VId(0));
+                    }
+                    expected = vertices
+                        .into_iter()
+                        .map(|id| vec![QueryValue::Value(GraphValue::Vertex(id))])
+                        .collect();
+                }
+                assert_eq!(rows(result), expected, "{query}, eligible={eligible:?}");
+                assert!(!ordinary.is_closed());
+            }
+        }
+        ordinary.close();
         let mut session = db
             .authorized_read_session(
                 &c.query(),
@@ -270,14 +315,26 @@ fn incidence_never_lends_uncorrelated_or_stale_root_authority_even_on_empty_inpu
             .unwrap();
         for eligible in [vec![VId(0)], vec![]] {
             let params = arguments(&eligible);
-            for tail in [
-                "MATCH (other)-[:R]->(neighbor) RETURN neighbor LIMIT 0",
-                "MATCH (node)-[:R]->(neighbor), (other) RETURN other LIMIT 0",
-                "RETURN node AS v UNION ALL MATCH (other)-[:R]->(neighbor) RETURN neighbor AS v",
-            ] {
+            for (case, tail) in tails.iter().copied().enumerate() {
                 let query = format!("{RETRIEVE}{tail}");
                 let prepared = session.prepare(&c.query(), &query, &params).unwrap();
-                assert!(session.execute(&c.query(), &prepared, &params).is_ok());
+                let result = session.execute(&c.query(), &prepared, &params);
+                if case == 2 {
+                    // The noisy graph adds 128 visible self-loops. Its
+                    // unbounded UNION exceeds the unchanged 16-row native
+                    // allowance even when CALL returns no eligible hit.
+                    assert!(
+                        matches!(&result, Err(QueryError::Set(GqlQueryError::Rows(error)))
+                            if error.dimension == fgdb_gql::GqlBudgetDimension::ResultRows
+                                && error.limit == 16 && error.observed == 17),
+                        "noisy ordinary {query}, eligible={eligible:?}: {result:?}",
+                    );
+                } else {
+                    assert!(
+                        result.is_ok(),
+                        "noisy ordinary {query}, eligible={eligible:?}: {result:?}",
+                    );
+                }
                 let scans = crate::query::authorized::SCANS.with(Cell::get);
                 assert!(
                     session

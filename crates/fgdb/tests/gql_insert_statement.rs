@@ -11,7 +11,7 @@ use fgdb_gql::{
     PreparedGraphWriteScript,
 };
 use fgdb_types::{
-    CanonicalPropertyValue, CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId,
+    CanonicalPropertyValue, CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId,
     EmbeddedTxnCompletion, PurposeContexts, QueryCx, VId,
 };
 use std::collections::VecDeque;
@@ -597,7 +597,39 @@ fn chained_creates_read_the_previous_writes_rows() {
         };
         assert_eq!(receipt.stats().created_vertices, 2);
         assert_eq!(receipt.stats().created_edges, 1);
-        assert_eq!(receipt.steps().len(), 2);
+        // Each CREATE is a native clause boundary, including the edge-only
+        // clause after the second vertex. Receipts retain that exact order.
+        let people = labelled(&db, PERSON);
+        let a = people
+            .iter()
+            .find(|vertex| vertex.props == vec![(P, CanonicalScalar::Int(7).into())])
+            .unwrap()
+            .vid;
+        let b = people
+            .iter()
+            .find(|vertex| vertex.props == vec![(P, CanonicalScalar::Int(8).into())])
+            .unwrap()
+            .vid;
+        let links = db
+            .edges()
+            .unwrap()
+            .into_iter()
+            .filter(|edge| edge.entry.src == b && edge.entry.dst == a)
+            .collect::<Vec<_>>();
+        assert_eq!(links.len(), 1);
+        assert!(matches!(
+            receipt.steps(),
+            [
+                GraphWriteStepReceipt::Insert { vertices: first, edges: first_edges },
+                GraphWriteStepReceipt::Insert { vertices: second, edges: second_edges },
+                GraphWriteStepReceipt::Insert { vertices: last, edges },
+            ] if first.as_slice() == [a].as_slice()
+                && second.as_slice() == [b].as_slice()
+                && first_edges.is_empty()
+                && second_edges.is_empty()
+                && last.is_empty()
+                && edges.as_slice() == [links[0].entry.eid].as_slice()
+        ));
         let written = labelled(&db, PERSON)
             .into_iter()
             .flat_map(|vertex| vertex.props)
@@ -672,6 +704,84 @@ fn chained_creates_read_the_previous_writes_rows() {
         .unwrap();
         assert_eq!(db.vertices().unwrap().len(), v + v + 2 * v * v);
         assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn fresh_anonymous_matches_multiply_rows_and_named_matches_correlate() {
+    let ((), report) = run_async_under_lab(0x1a5e_a110, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        // Two initial vertices give two first rows and four visible vertices
+        // after the first CREATE. A fresh MATCH makes 2*4 final writes; an
+        // explicitly carried a matches once per row and makes only two.
+        for (text, created) in [
+            ("MATCH () CREATE () WITH * MATCH () CREATE ()", 10_usize),
+            ("MATCH (a) CREATE () WITH * MATCH () CREATE ()", 10),
+            ("MATCH (a) CREATE () WITH * MATCH (b) CREATE ()", 10),
+            ("MATCH (a) CREATE () WITH * MATCH (a) CREATE ()", 4),
+        ] {
+            let mut db = fresh(&commit, true).await;
+            let before_vertices = db.vertices().unwrap();
+            let before_edges = db.edges().unwrap();
+            assert_eq!(before_vertices.len(), 2);
+            let frontier = db.frontier().unwrap();
+            let (mut vertices, mut edges) = reserve(&mut db, &cx, created, 0);
+            let allocated: Vec<_> = vertices.iter().copied().collect();
+            let result = db
+                .query_write(
+                    &txcx,
+                    &cx,
+                    &commit,
+                    text,
+                    &GqlParameters::new(),
+                    symbols,
+                    R,
+                    policy(),
+                    |request| {
+                        match request.request {
+                            GraphInsertRequest::Vertex { .. } => vertices.pop_front(),
+                            GraphInsertRequest::Edge { .. } => edges.pop_front(),
+                        }
+                        .ok_or("query requested an unreserved identity")
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(vertices.is_empty() && edges.is_empty(), "{text}");
+            assert!(matches!(&result, QueryResult::Write { .. }), "{text}");
+            if let QueryResult::Write {
+                receipt,
+                completion,
+            } = result
+            {
+                assert_eq!(receipt.stats().created_vertices, created as u64, "{text}");
+                assert_eq!(receipt.stats().created_edges, 0, "{text}");
+                assert_eq!(
+                    completion,
+                    Some(EmbeddedTxnCompletion::WriteCommitted {
+                        commit_seq: CommitSeq(frontier.0 + 1),
+                    }),
+                    "{text}"
+                );
+            }
+            let after = db.vertices().unwrap();
+            assert_eq!(after.len(), 2 + created, "{text}");
+            assert!(before_vertices.iter().all(|v| after.contains(v)), "{text}");
+            for vertex in after.iter().filter(|v| !before_vertices.contains(v)) {
+                assert!(allocated.contains(&ElementId::Vertex(vertex.vid)), "{text}");
+                assert!(
+                    vertex.labels.is_empty() && vertex.props.is_empty(),
+                    "{text}"
+                );
+            }
+            assert_eq!(db.edges().unwrap(), before_edges, "{text}");
+            assert_eq!(db.frontier().unwrap(), CommitSeq(frontier.0 + 1), "{text}");
+            assert_eq!(txcx.outstanding_obligations(), 0, "{text}");
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -1297,6 +1407,7 @@ fn vertex_merge_steps_apply_on_and_set_clauses_per_row() {
         let txcx = contexts.txn();
         let mut db = fresh(&commit, false).await;
         let mut next = 100u128;
+        let allocations = std::sync::atomic::AtomicUsize::new(0);
         let mut write = async |db: &mut Database<MemVfs>, text: &str| {
             db.query_write(
                 &txcx,
@@ -1308,6 +1419,7 @@ fn vertex_merge_steps_apply_on_and_set_clauses_per_row() {
                 R,
                 policy(),
                 |request| {
+                    allocations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     next += 1;
                     Ok::<_, &'static str>(match request.request {
                         GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(next)),
@@ -1443,16 +1555,63 @@ fn vertex_merge_steps_apply_on_and_set_clauses_per_row() {
             .into_boxed_slice(),
         ));
         assert_eq!(rows(labelled), [vec![person.clone()], vec![person]]);
-        // An anonymous MERGE with clauses and a SET of a row element refuse
-        // and publish nothing.
+        // Anonymous ON clauses still need a named MERGE vertex; a dropped
+        // alias cannot be restored by the native carried-target SET owner.
         let frontier = db.frontier().unwrap();
+        let before = db.vertices().unwrap();
         for refused in [
             "MATCH (person:Person) MERGE (:Copy {p: 4}) ON CREATE SET person.q = 1",
-            "MATCH (person:Person) MERGE (c:Copy {p: 4}) SET person.q = 1",
+            "MATCH (person:Person) WITH person.born AS born \
+             MERGE (c:Copy {p: 4}) SET person.q = 1",
         ] {
             assert!(write(&mut db, refused).await.is_err(), "{refused}");
+            assert_eq!(db.frontier().unwrap(), frontier);
+            assert_eq!(db.vertices().unwrap(), before);
         }
-        assert_eq!(db.frontier().unwrap(), frontier);
+        // A named MERGE followed by SET of its carried input is supported by
+        // the ordinary native mutation clause. It updates all four people,
+        // preserves their identities/born fields and leaves the Copy alone.
+        let before_edges = db.edges().unwrap();
+        let before_allocations = allocations.load(std::sync::atomic::Ordering::Relaxed);
+        let updated = write(
+            &mut db,
+            "MATCH (person:Person) MERGE (c:Copy {p: 4}) SET person.q = 1",
+        )
+        .await
+        .unwrap();
+        assert!(matches!(updated, QueryResult::Write { .. }));
+        assert_eq!(
+            allocations.load(std::sync::atomic::Ordering::Relaxed),
+            before_allocations
+        );
+        assert_eq!(db.frontier().unwrap().0, frontier.0 + 1);
+        assert_eq!(db.delta_since(frontier).unwrap().count(), 1);
+        assert_eq!(db.edges().unwrap(), before_edges);
+        let after = db.vertices().unwrap();
+        assert_eq!(after.len(), before.len());
+        let mut people = 0;
+        for (original, actual) in before.iter().zip(&after) {
+            assert_eq!(actual.vid, original.vid);
+            assert_eq!(actual.labels, original.labels);
+            if original.labels.contains(&PERSON) {
+                people += 1;
+                let mut expected = original.props.clone();
+                expected.retain(|(key, _)| *key != Q);
+                expected.push((Q, stored(1)));
+                expected.sort_by_key(|(key, _)| *key);
+                assert_eq!(actual.props, expected);
+            } else {
+                assert_eq!(actual, original);
+            }
+        }
+        assert_eq!(people, 4);
+        assert_eq!(
+            merged(&db, 4),
+            (
+                vec![COPY],
+                vec![(P, stored(4)), (Q, stored(9)), (NAME, stored(1))]
+            )
+        );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

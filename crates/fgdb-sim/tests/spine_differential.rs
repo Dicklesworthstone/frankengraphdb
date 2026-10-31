@@ -2157,15 +2157,122 @@ fn compaction_root_slot_cancellation_fences_the_borrowed_handle() {
             .write(cx, vfs_fault_batch())
             .await
             .expect("seed commit reaches frontier one");
+        let pinned = seeded
+            .read_session()
+            .expect("retain the original history cut");
+        let historical = seeded.vertices_at(CommitSeq(1)).unwrap();
         drop(seeded);
 
-        // Compaction performs no Chronicle write. Its only eligible sync on
-        // this VFS is the replacement root slot, so the first delay is the
-        // exact cancellation boundary and the observed path independently
-        // prevents this witness from drifting to another operation.
-        let vfs = FaultVfs::unix_with_clock(
+        // Preserve the original single packed patch as a genuine no-op. An
+        // eligible sync would consume the delay and leave a recorded event;
+        // no replacement root or recovery fence belongs to this input.
+        let no_op_vfs = FaultVfs::unix_with_clock(
             FaultPlan {
                 latency: Trigger::Nth(1),
+                latency_micros: 60_000_000,
+                ..FaultPlan::faultless()
+            },
+            root.clone(),
+        );
+        let mut no_op = Database::open_with_vfs(cx, no_op_vfs.clone(), &dir, engine_keys())
+            .await
+            .expect("packed database opens");
+        let before = std::fs::read(dir.join(ROOT_FILE_NAME)).unwrap();
+        no_op
+            .compact(cx)
+            .await
+            .expect("packed compaction is a no-op");
+        assert_eq!(std::fs::read(dir.join(ROOT_FILE_NAME)).unwrap(), before);
+        assert_eq!(no_op.frontier().unwrap(), CommitSeq(1));
+        assert_eq!(
+            no_op.state(),
+            DatabaseState::Healthy {
+                published_frontier: CommitSeq(1)
+            }
+        );
+        assert!(no_op_vfs.pending_latency_paths().is_empty());
+        assert!(
+            no_op_vfs.events().is_empty(),
+            "no-op performs no eligible sync"
+        );
+        drop(no_op);
+
+        // A second ordinary small patch has a mergeable packing boundary.
+        // Commit it before attaching fresh fault plans, so their ordinals
+        // count compaction I/O rather than a preceding write.
+        let mut seeded = Database::open(cx, &dir, engine_keys()).await.unwrap();
+        let mut second = WriteBatch::new(KNOWS);
+        second.create_vertex(VId(2), vec![], vec![]);
+        seeded
+            .write(cx, second)
+            .await
+            .expect("commit the second patch");
+        let frontier = seeded.frontier().unwrap();
+        assert_eq!(frontier, CommitSeq(2));
+        assert_eq!(seeded.vertices_at(CommitSeq(1)).unwrap(), historical);
+        drop(seeded);
+
+        // The same two-patch input first writes an unreferenced compacted
+        // patch. Cancellation there must leave the published generation
+        // callable: root publication has not begun.
+        let before_root_vfs = FaultVfs::unix_with_clock(
+            FaultPlan {
+                latency: Trigger::At(1),
+                latency_micros: 60_000_000,
+                ..FaultPlan::faultless()
+            },
+            root.clone(),
+        );
+        let mut before_root =
+            Database::open_with_vfs(cx, before_root_vfs.clone(), &dir, engine_keys())
+                .await
+                .expect("pre-publication control opens");
+        let root_bytes = std::fs::read(dir.join(ROOT_FILE_NAME)).unwrap();
+        let current = before_root.vertices().unwrap();
+        let mut compaction = Box::pin(before_root.compact(cx));
+        let pending = poll_fn(|task_cx| {
+            if let Poll::Ready(result) = compaction.as_mut().poll(task_cx) {
+                return Poll::Ready(Err(format!(
+                    "compaction completed before staging cancellation: {result:?}"
+                )));
+            }
+            let pending = before_root_vfs.pending_latency_paths();
+            if pending.is_empty() {
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(pending))
+            }
+        })
+        .await
+        .expect("compaction must suspend while syncing the new patch");
+        assert_eq!(
+            pending,
+            vec![dir.join("strata-blocks/.block-publication.staging.0")]
+        );
+        drop(compaction);
+        assert!(before_root_vfs.pending_latency_paths().is_empty());
+        assert!(before_root_vfs.events().is_empty());
+        assert_eq!(std::fs::read(dir.join(ROOT_FILE_NAME)).unwrap(), root_bytes);
+        assert_eq!(
+            before_root.state(),
+            DatabaseState::Healthy {
+                published_frontier: frontier
+            }
+        );
+        assert_eq!(before_root.frontier().unwrap(), frontier);
+        assert_eq!(before_root.vertices().unwrap(), current);
+        assert_eq!(before_root.vertices_at(CommitSeq(1)).unwrap(), historical);
+        assert_eq!(pinned.vertices().unwrap(), historical);
+        drop(before_root);
+
+        // This fixture consolidates two tiny vertex patches into one, with
+        // no edge blocks or root segments. Its eligible syncs are the patch
+        // inode and directory, the root and manifest inodes and directory,
+        // then manifest.root. Only the sixth reaches slot publication; the
+        // exact path below independently guards this source-derived ordinal.
+        let vfs = FaultVfs::unix_with_clock(
+            FaultPlan {
+                latency: Trigger::At(6),
                 latency_micros: 60_000_000,
                 ..FaultPlan::faultless()
             },
@@ -2216,8 +2323,8 @@ fn compaction_root_slot_cancellation_fences_the_borrowed_handle() {
         let DatabaseState::NeedsAuthoritativeRecovery(fence) = state else {
             return;
         };
-        assert_eq!(fence.durable_frontier, CommitSeq(1));
-        assert_eq!(fence.published_frontier, CommitSeq(1));
+        assert_eq!(fence.durable_frontier, frontier);
+        assert_eq!(fence.published_frontier, frontier);
         assert_eq!(fence.failed_stage, DerivedPublicationStage::PublishRootSlot);
         assert_recovery_fence(
             DerivedPublicationStage::PublishRootSlot,
@@ -2257,7 +2364,7 @@ fn compaction_root_slot_cancellation_fences_the_borrowed_handle() {
         assert_eq!(
             recovered.state(),
             DatabaseState::Healthy {
-                published_frontier: CommitSeq(1)
+                published_frontier: frontier
             }
         );
         assert!(
@@ -2267,6 +2374,9 @@ fn compaction_root_slot_cancellation_fences_the_borrowed_handle() {
                 .is_some(),
             "authoritative recovery must preserve the committed vertex"
         );
+        assert!(recovered.vertex(VId(2)).unwrap().is_some());
+        assert_eq!(recovered.vertices_at(CommitSeq(1)).unwrap(), historical);
+        assert_eq!(pinned.vertices().unwrap(), historical);
     });
 }
 
