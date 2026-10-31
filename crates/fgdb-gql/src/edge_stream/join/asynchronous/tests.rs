@@ -57,6 +57,7 @@ struct Counts {
     records: AtomicUsize,
     peak: AtomicUsize,
     guards: AtomicUsize,
+    output_columns: AtomicUsize,
 }
 #[derive(Clone)]
 struct Image {
@@ -333,10 +334,11 @@ impl AsyncEdgeJoinSource for Source {
     fn reserve_join_output<C>(
         &self,
         records: &[Record],
-        _: usize,
+        columns: usize,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Guard, EdgeScanSourceError<Self::Error, C>> {
         assert_eq!(records.len(), 2);
+        self.counts.output_columns.store(columns, Ordering::SeqCst);
         self.guard(control)
     }
 }
@@ -582,6 +584,71 @@ fn early_close_keeps_only_the_delivered_output_reservation() {
     assert_eq!(row.values()[0], GraphValue::Edge(EId(0)));
     drop(row);
     assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn private_join_keys_reserve_the_complete_projection_until_visible_output_is_dropped() {
+    for (head, keys, extra, visible_keys, columns) in [
+        (
+            "MATCH (a)-[r:R]->(b)-[s:R]->(c)",
+            "r, s",
+            "r AS root_id, s AS next_id",
+            "root_id, next_id",
+            4,
+        ),
+        (
+            "MATCH (a)-[r:R]-(b)-[s:R]->(c)",
+            "r, a, s",
+            "r AS root_id, a AS source_id, s AS next_id",
+            "root_id, source_id, next_id",
+            5,
+        ),
+    ] {
+        let hidden = format!("{head} RETURN c.p AS cp, r.p AS rp ORDER BY {keys}");
+        let visible =
+            format!("{head} RETURN c.p AS cp, r.p AS rp, {extra} ORDER BY {visible_keys}");
+        let mut complete = AsyncEdgeJoinCursor::new(Source::new(63), plan(&visible), policy(), ok);
+        let mut expected = Vec::new();
+        while let Some(row) = run(complete.next()) {
+            expected.push(row.unwrap().values()[..2].to_vec());
+        }
+        let source = Source::new(63);
+        let counts = source.counts.clone();
+        let mut cursor = AsyncEdgeJoinCursor::new(source, plan(&hidden), policy(), ok);
+        let mut actual = Vec::new();
+        while let Some(row) = run(cursor.next()) {
+            actual.push(row.unwrap().values().to_vec());
+        }
+        assert_eq!(actual, expected, "{hidden}");
+        assert!(
+            actual
+                .iter()
+                .any(|row| row[0] == GraphValue::Scalar(CanonicalScalar::Null))
+        );
+        assert_eq!(cursor.evaluator_stats(), complete.evaluator_stats());
+        assert_eq!(cursor.row_stats(), complete.row_stats());
+        assert_eq!(counts.output_columns.load(Ordering::SeqCst), columns);
+        assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
+        assert_eq!(counts.records.load(Ordering::SeqCst), 0);
+
+        let source = Source::new(63);
+        let counts = source.counts.clone();
+        let mut cursor = AsyncEdgeJoinCursor::new(source, plan(&hidden), policy(), ok);
+        let row = run(cursor.next()).unwrap().unwrap();
+        assert_eq!(row.values().len(), 2);
+        assert_eq!(counts.output_columns.load(Ordering::SeqCst), columns);
+        let reads = counts.roots.load(Ordering::SeqCst) + counts.seeks.load(Ordering::SeqCst);
+        cursor.close();
+        assert!(run(cursor.next()).is_none());
+        assert_eq!(counts.records.load(Ordering::SeqCst), 0);
+        assert_eq!(counts.guards.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            reads,
+            counts.roots.load(Ordering::SeqCst) + counts.seeks.load(Ordering::SeqCst)
+        );
+        drop(row);
+        assert_eq!(counts.guards.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[test]

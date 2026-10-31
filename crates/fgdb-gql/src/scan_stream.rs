@@ -274,6 +274,51 @@ impl ScanSortTail {
     }
 }
 
+/// Prove that explicit ascending keys begin with one source's complete unique
+/// traversal identity. The source compiler supplies the identity recipe; this
+/// shared check validates only the bounded projection/order metadata.
+///
+/// Hidden cells remain part of the complete, governed projection until the
+/// caller trims the visible prefix. They cannot establish visible-row
+/// DISTINCT: repeated public values must retain their ALL multiplicity.
+pub(crate) fn identity_ordered_projection(
+    projection: &crate::algebra::GlaOperator,
+    ordering: &crate::algebra::GlaOperator,
+    visible_columns: Option<usize>,
+    distinct: bool,
+    prefix_width: usize,
+    mut identity_at: impl FnMut(usize, &crate::algebra::ValueProjection) -> bool,
+) -> bool {
+    use crate::algebra::{GlaOperator, MAX_PATTERN_VERTICES};
+
+    let GlaOperator::ProjectValues { columns } = projection else {
+        return false;
+    };
+    let GlaOperator::OrderByValueColumns { columns: keys } = ordering else {
+        return false;
+    };
+    let visible = visible_columns.unwrap_or(columns.len());
+    if distinct
+        || columns.is_empty()
+        || columns.len() > MAX_PATTERN_VERTICES
+        || visible == 0
+        || visible > columns.len()
+        || prefix_width == 0
+        || keys.len() < prefix_width
+        || keys.len() > columns.len()
+        || keys.iter().enumerate().any(|(index, key)| {
+            key.column >= columns.len()
+                || keys[..index].iter().any(|prior| prior.column == key.column)
+        })
+    {
+        return false;
+    }
+    keys.iter()
+        .take(prefix_width)
+        .enumerate()
+        .all(|(index, key)| !key.descending && identity_at(index, &columns[key.column]))
+}
+
 // Both physical cursors implement the same lifecycle. Reuse its existing type
 // so consumers of the native vertex stream retain their state comparisons.
 pub use crate::stream::VertexScanState as ScanState;
@@ -519,6 +564,62 @@ mod sort_tail_tests {
         let mut plan = GlaPlan::from_operators(operators);
         plan.visible_columns = visible;
         plan
+    }
+
+    #[test]
+    fn private_identity_order_rejects_invalid_keys_and_hidden_distinct_at_limit_zero() {
+        let make = |keys: Vec<GraphValueOrder>, distinct: bool| {
+            let mut operators = vec![
+                GlaOperator::ScanVertices,
+                GlaOperator::ProjectValues {
+                    columns: vec![
+                        ValueProjection::Property {
+                            slot: BindingSlot(0),
+                            key: PropertyKeyId(1),
+                        },
+                        ValueProjection::Vertex {
+                            slot: BindingSlot(0),
+                        },
+                    ],
+                },
+            ];
+            if distinct {
+                operators.push(GlaOperator::Distinct);
+            }
+            operators.extend([
+                GlaOperator::OrderByValueColumns {
+                    columns: keys.into(),
+                },
+                GlaOperator::Limit {
+                    offset: 0,
+                    count: Some(0),
+                },
+            ]);
+            let mut plan = GlaPlan::<GraphValueRow>::from_operators(operators);
+            plan.visible_columns = Some(1);
+            plan
+        };
+        for keys in [
+            vec![GraphValueOrder::ascending(1)],
+            vec![
+                GraphValueOrder::ascending(1).with_nulls_first(true),
+                GraphValueOrder::descending(0),
+            ],
+        ] {
+            let plan = make(keys.clone(), false);
+            assert!(VertexScanPlan::compile(&plan).is_ok());
+            assert!(VertexScanPlan::compile(&make(keys, true)).is_err());
+        }
+        for keys in [
+            vec![],
+            vec![GraphValueOrder::descending(1)],
+            vec![GraphValueOrder::ascending(0), GraphValueOrder::ascending(1)],
+            vec![GraphValueOrder::ascending(1), GraphValueOrder::ascending(1)],
+            vec![GraphValueOrder::ascending(1), GraphValueOrder::ascending(2)],
+            vec![GraphValueOrder::ascending(2)],
+        ] {
+            assert!(VertexScanPlan::compile(&make(keys, false)).is_err());
+        }
     }
 
     #[test]

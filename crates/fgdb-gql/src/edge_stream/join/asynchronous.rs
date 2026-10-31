@@ -502,6 +502,7 @@ impl<S: AsyncEdgeJoinSource, F> AsyncEdgeJoinCursor<S, F> {
                 meter.event(GlaExecutionEvent::Work)?;
             }
             frame.traversal.resume = true;
+            let row = self.plan.inner.retain_visible(row);
             return Ok(Some(AsyncEdgeJoinOutput { row, guard }));
         }
     }

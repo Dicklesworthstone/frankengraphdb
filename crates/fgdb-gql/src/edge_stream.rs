@@ -2,7 +2,8 @@
 //!
 //! The leading edge identity proves whole-row order and uniqueness for a
 //! directed root. Undirected roots additionally require the source vertex to
-//! distinguish both orientations of a non-self edge.
+//! distinguish both orientations of a non-self edge. An explicit ascending
+//! traversal-identity order may keep those keys private for ALL output.
 //! No adjacency/result bag, sorting, DISTINCT set or unread suffix is built.
 //! This is a physical specialization of compiler-owned GLA, not a text parser.
 
@@ -69,8 +70,10 @@ impl core::error::Error for EdgeScanBuildError {}
 /// followed by slot zero's vertex identity when the root is undirected.
 /// Remaining columns may contain either
 /// endpoint, their properties, edge properties or this one-edge path/functions.
-/// This prefix permits DISTINCT and ALL without storing a seen-set. Other order,
-/// hidden sort columns, optional/variable-length expansions, and catalog-name output
+/// This prefix permits DISTINCT and ALL without storing a seen-set. Explicit
+/// ascending traversal-identity ordering also admits ALL projections with
+/// hidden identity keys, trimmed only after their complete governed projection.
+/// Other ordering, optional/variable-length expansions, and catalog-name output
 /// refuse before a source is driven. Boolean filters use the ordinary engine.
 /// Correlated and independent fixed-hop EXISTS/NOT EXISTS use indexed,
 /// short-circuit probes; nested/optional probe bodies remain unavailable.
@@ -80,6 +83,7 @@ pub struct EdgeScanPlan {
     direction: GlaDirection,
     instructions: Arc<[GlaOperator]>,
     projection: Arc<GlaOperator>,
+    visible_columns: Option<usize>,
     offset: u64,
     count: Option<u64>,
     joined: Option<Arc<join::JoinPlan>>,
@@ -183,17 +187,7 @@ impl EdgeScanPlan {
                         }
                         _ => false,
                     };
-                    if (output == LocalOutput::OrderedRows
-                        && (!matches!(
-                            columns.first(),
-                            Some(ValueProjection::Path {
-                                function: GraphPathFunction::Edge,
-                                ..
-                            })
-                        ) || (*direction == GlaDirection::Undirected
-                            && !matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0))))
-                        || !columns.iter().all(column_valid)
-                    {
+                    if !columns.iter().all(column_valid) {
                         return Err(bad());
                     }
                     break;
@@ -205,17 +199,66 @@ impl EdgeScanPlan {
         }
         let projection = Arc::new(ops[at].clone());
         at += 1;
-        if matches!(ops.get(at), Some(GlaOperator::Distinct)) {
+        let distinct = matches!(ops.get(at), Some(GlaOperator::Distinct));
+        if distinct {
             if output == LocalOutput::AggregateInput {
                 return Err(EdgeScanBuildError { operator: at });
             }
             at += 1;
         }
-        if (plan.visible_columns.is_some() && output != LocalOutput::SortInput)
-            || !matches!(ops.get(at), Some(GlaOperator::OrderByValues))
-                && !(output == LocalOutput::SortInput
-                    && matches!(ops.get(at), Some(GlaOperator::OrderByValueColumns { .. })))
-        {
+        let Some(order) = ops.get(at) else {
+            return Err(EdgeScanBuildError { operator: at });
+        };
+        let GlaOperator::ProjectValues { columns } = projection.as_ref() else {
+            unreachable!("the source compiler checked every projection cell")
+        };
+        let edge_identity = |column: &ValueProjection| {
+            matches!(
+                column,
+                ValueProjection::Path {
+                    function: GraphPathFunction::Edge,
+                    ..
+                }
+            )
+        };
+        let canonical_prefix = columns.first().is_some_and(edge_identity)
+            && (*direction != GlaDirection::Undirected
+                || matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0));
+        let explicit_prefix = output == LocalOutput::OrderedRows
+            && crate::scan_stream::identity_ordered_projection(
+                &projection,
+                order,
+                plan.visible_columns,
+                distinct,
+                if *direction == GlaDirection::Undirected {
+                    2
+                } else {
+                    1
+                },
+                |index, column| {
+                    if index == 0 {
+                        edge_identity(column)
+                    } else {
+                        matches!(column, ValueProjection::Vertex { slot } if slot.ordinal() == 0)
+                    }
+                },
+            );
+        let ordered = match output {
+            LocalOutput::OrderedRows => {
+                explicit_prefix
+                    || (plan.visible_columns.is_none()
+                        && canonical_prefix
+                        && matches!(order, GlaOperator::OrderByValues))
+            }
+            LocalOutput::AggregateInput => {
+                plan.visible_columns.is_none() && matches!(order, GlaOperator::OrderByValues)
+            }
+            LocalOutput::SortInput => matches!(
+                order,
+                GlaOperator::OrderByValues | GlaOperator::OrderByValueColumns { .. }
+            ),
+        };
+        if !ordered {
             return Err(EdgeScanBuildError { operator: at });
         }
         at += 1;
@@ -233,6 +276,11 @@ impl EdgeScanPlan {
             direction: *direction,
             instructions: instructions.into(),
             projection,
+            visible_columns: if output == LocalOutput::OrderedRows {
+                plan.visible_columns
+            } else {
+                None
+            },
             offset: if output == LocalOutput::SortInput {
                 0
             } else {
@@ -949,6 +997,13 @@ impl EdgeScanPlan {
         }
         Ok(Some(paths))
     }
+    fn retain_visible(&self, row: GraphValueRow) -> GraphValueRow {
+        match self.visible_columns {
+            Some(width) => row.into_prefix(width),
+            None => row,
+        }
+    }
+
     fn project<E: From<crate::GraphIntegerError>>(
         &self,
         row: &Binding<'_>,
@@ -956,6 +1011,7 @@ impl EdgeScanPlan {
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<GraphValueRow, E> {
         collect_one::<GraphValueRow, E>(&self.projection, row, paths, control)
+            .map(|row| self.retain_visible(row))
     }
 }
 fn collect_one<Row: GlaOutput, E: From<crate::GraphIntegerError>>(

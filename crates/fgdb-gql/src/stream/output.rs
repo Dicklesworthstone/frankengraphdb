@@ -1,7 +1,8 @@
 //! Sealed row projections for the shared pull operator. A leading vertex
 //! identity makes canonical whole-row ordering and DISTINCT streamable without
-//! a retained seen-set. Property-only output and alternate ordering refuse;
-//! returning a different row order to avoid sorting would change semantics.
+//! a retained seen-set. Explicit ascending identity order also admits ALL
+//! property-only output; its full hidden key is accounted before trimming.
+//! Default property order and unproved explicit ordering still refuse.
 
 use super::{VertexScanEvent, VertexScanRow, seek};
 use crate::GlaExecutionEvent;
@@ -10,7 +11,8 @@ use crate::algebra_exec::ProjectedRows;
 use fgdb_types::VId;
 
 /// Closed pull-output shapes. The compiler proves that source identity order
-/// is exactly the requested whole-row order and makes every row unique.
+/// is exactly the requested order. Canonical DISTINCT output retains a unique
+/// visible identity; explicit identity-ordered ALL output may contain duplicates.
 /// VId has no allocation; GraphValueRow shares the ordinary GLA property
 /// collector, including nulls, canonical scalar variants and payload charges.
 pub trait VertexScanOutput: GlaOutput + sealed::Projection + Send {}
@@ -30,7 +32,7 @@ impl super::VertexScanPlan<GraphValueRow> {
     /// budget that input and apply the returned tail before exposing results.
     /// Hidden key cells belong to these complete evaluation rows; the consumer
     /// removes them only after ordering and the query window.
-    /// Ordinary compile(), and its ordered/unique-output proof, are unchanged.
+    /// Ordinary compile() separately proves the complete requested result order.
     pub fn compile_sort_input(
         plan: &crate::algebra::GlaPlan<GraphValueRow>,
     ) -> Result<(Self, crate::scan_stream::ScanSortTail), super::VertexScanBuildError> {
@@ -39,20 +41,21 @@ impl super::VertexScanPlan<GraphValueRow> {
         // DISTINCT is intentionally deferred along with ordering. The row
         // collector emits every source occurrence; only the blocking consumer
         // may deduplicate complete rows before applying the retained window.
-        let mut input = Self::compile_with_projection(plan, Some(&tail), |projection, order| {
-            let GlaOperator::ProjectValues { columns } = projection else {
-                return false;
-            };
-            matches!(
-                order,
-                GlaOperator::OrderByValues | GlaOperator::OrderByValueColumns { .. }
-            ) && columns.iter().all(|column| match column {
-                ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. } => {
-                    slot.ordinal() == 0
-                }
-                _ => false,
-            })
-        })?;
+        let mut input =
+            Self::compile_with_projection(plan, Some(&tail), false, |projection, order| {
+                let GlaOperator::ProjectValues { columns } = projection else {
+                    return false;
+                };
+                matches!(
+                    order,
+                    GlaOperator::OrderByValues | GlaOperator::OrderByValueColumns { .. }
+                ) && columns.iter().all(|column| match column {
+                    ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. } => {
+                        slot.ordinal() == 0
+                    }
+                    _ => false,
+                })
+            })?;
         input.offset = 0;
         input.count = None;
         Ok((input, tail))
@@ -142,6 +145,14 @@ mod sealed {
 
     pub trait Projection: Sized {
         fn accepts_projection(projection: &GlaOperator, order: &GlaOperator) -> bool;
+        fn accepts_explicit_projection(
+            _projection: &GlaOperator,
+            _order: &GlaOperator,
+            _visible_columns: Option<usize>,
+            _distinct: bool,
+        ) -> bool {
+            false
+        }
         fn project<E: From<crate::GraphIntegerError>>(
             vid: VId,
             row: VertexScanRow<'_>,
@@ -164,6 +175,30 @@ mod sealed {
         }
     }
     impl Projection for GraphValueRow {
+        fn accepts_explicit_projection(
+            projection: &GlaOperator,
+            order: &GlaOperator,
+            visible_columns: Option<usize>,
+            distinct: bool,
+        ) -> bool {
+            let GlaOperator::ProjectValues { columns } = projection else {
+                return false;
+            };
+            columns.iter().all(|column| match column {
+                ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. } => {
+                    slot.ordinal() == 0
+                }
+                _ => false,
+            }) && crate::scan_stream::identity_ordered_projection(
+                projection,
+                order,
+                visible_columns,
+                distinct,
+                1,
+                |_, column| matches!(column, ValueProjection::Vertex { slot } if slot.ordinal() == 0),
+            )
+        }
+
         fn accepts_projection(projection: &GlaOperator, order: &GlaOperator) -> bool {
             let GlaOperator::ProjectValues { columns } = projection else {
                 return false;
@@ -389,6 +424,168 @@ mod projected_tests {
             .unwrap()
             .row_pull()
             .unwrap()
+    }
+
+    fn prepared_ordered_values(text: &str) -> crate::algebra::PreparedGraphPattern<GraphValueRow> {
+        crate::PreparedGraphText::prepare(text, |kind, name| {
+            if kind == crate::GraphSymbolKind::Property && name == "p" {
+                Some(crate::GraphSymbol::Property(P))
+            } else {
+                None
+            }
+        })
+        .unwrap()
+        .bind_parameters(&crate::GqlParameters::new())
+        .unwrap()
+    }
+
+    #[test]
+    fn private_vertex_order_keys_preserve_eager_order_duplicates_nulls_and_pagination() {
+        for absent in [false, true] {
+            for ordering in ["n ASC", "n ASC, value DESC NULLS FIRST"] {
+                for (skip, limit) in [(0, 3), (1, 1), (3, 2), (0, 0)] {
+                    let text = format!(
+                        "MATCH (n) RETURN ALL n.p AS value ORDER BY {ordering} SKIP {skip} LIMIT {limit}"
+                    );
+                    let prepared = prepared_ordered_values(&text);
+                    let identity = prepared.plan().canonical_bytes();
+                    let mut source = Source::new([30, 10, 30]);
+                    if absent {
+                        source.rows[1].1.clear();
+                    } else {
+                        source.rows[1].1[0].1 = CanonicalScalar::Null.into();
+                    }
+                    let eager = prepared
+                        .plan()
+                        .execute_governed_with_element_properties(
+                            source.rows.len() as u64,
+                            source.rows.iter().map(|row| row.0),
+                            [],
+                            |_, _| Ok::<_, ()>(true),
+                            |id, key| {
+                                Ok(source.rows.iter().find(|row| row.0 == id).and_then(|row| {
+                                    row.1
+                                        .iter()
+                                        .find(|(stored, _)| *stored == key)
+                                        .map(|(_, value)| value)
+                                }))
+                            },
+                            |_, _| Ok(None),
+                            wide(),
+                            || Ok::<_, ()>(()),
+                        )
+                        .unwrap();
+                    let expected: Vec<_> = [
+                        CanonicalScalar::Int(30),
+                        CanonicalScalar::Null,
+                        CanonicalScalar::Int(30),
+                    ]
+                    .into_iter()
+                    .skip(skip)
+                    .take(limit)
+                    .map(|value| vec![GraphValue::Scalar(value)])
+                    .collect();
+                    let reads = source.reads.clone();
+                    let mut cursor = VertexScanCursor::new(
+                        source,
+                        VertexScanPlan::compile(prepared.plan()).unwrap(),
+                        wide(),
+                        || Ok::<_, ()>(()),
+                    );
+                    assert_eq!(reads.load(Ordering::SeqCst), 0);
+                    let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                    assert_eq!(actual, eager.value, "{text}");
+                    assert_eq!(
+                        actual
+                            .iter()
+                            .map(|row| row.values().to_vec())
+                            .collect::<Vec<_>>(),
+                        expected,
+                        "{text}"
+                    );
+                    assert_eq!(cursor.row_stats().result_rows, actual.len() as u64);
+                    assert_eq!(cursor.state(), VertexScanState::Exhausted);
+                    assert_eq!(prepared.plan().canonical_bytes(), identity);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn private_vertex_keys_keep_complete_projection_accounting_and_lazy_failure_boundaries() {
+        let hidden = prepared_ordered_values("MATCH (n) RETURN n.p AS value ORDER BY n");
+        let visible = prepared_ordered_values(
+            "MATCH (n) RETURN n.p AS value, n AS identity ORDER BY identity",
+        );
+        let plan = VertexScanPlan::compile(hidden.plan()).unwrap();
+        let mut baseline = VertexScanCursor::new(
+            Source::new([30, 10, 30]),
+            VertexScanPlan::compile(visible.plan()).unwrap(),
+            wide(),
+            || Ok::<_, ()>(()),
+        );
+        let visible_rows = baseline.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        let stats = baseline.evaluator_stats();
+        let exact = GqlQueryPolicy::new(3, 3, stats.work_units, stats.scratch_entries);
+        let mut cursor =
+            VertexScanCursor::new(Source::new([30, 10, 30]), plan.clone(), exact, || {
+                Ok::<_, ()>(())
+            });
+        let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(cursor.evaluator_stats(), stats);
+        assert_eq!(cursor.row_stats(), baseline.row_stats());
+        for (row, complete) in rows.iter().zip(&visible_rows) {
+            assert_eq!(row.values(), &complete.values()[..1]);
+        }
+        for (policy, dimension) in [
+            (
+                GqlQueryPolicy::new(3, 3, stats.work_units - 1, stats.scratch_entries),
+                GlaLimitDimension::WorkUnits,
+            ),
+            (
+                GqlQueryPolicy::new(3, 3, stats.work_units, stats.scratch_entries - 1),
+                GlaLimitDimension::ScratchEntries,
+            ),
+        ] {
+            let mut cursor =
+                VertexScanCursor::new(Source::new([30, 10, 30]), plan.clone(), policy, || {
+                    Ok::<_, ()>(())
+                });
+            let error = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap_err();
+            assert!(
+                matches!(error, GqlQueryError::Evaluator(error) if error.dimension == dimension)
+            );
+            assert_eq!(cursor.state(), VertexScanState::Failed);
+            assert!(cursor.next().is_none());
+        }
+
+        let mut source = Source::new([30, 10, 30]);
+        source.fail = Some(VId(9));
+        let reads = source.reads.clone();
+        let drops = source.drops.clone();
+        let mut cursor = VertexScanCursor::new(source, plan, wide(), || Ok::<_, ()>(()));
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        assert_eq!(cursor.next().unwrap().unwrap().values().len(), 1);
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        cursor.close();
+        assert!(cursor.next().is_none());
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn private_vertex_keys_refuse_unproved_order_and_visible_distinct_before_open() {
+        for text in [
+            "MATCH (n) RETURN n.p AS value",
+            "MATCH (n) RETURN n.p AS value ORDER BY value",
+            "MATCH (n) RETURN n.p AS value ORDER BY n DESC",
+            "MATCH (n) RETURN n.p AS value ORDER BY value, n",
+        ] {
+            assert!(
+                VertexScanPlan::compile(prepared_ordered_values(text).plan()).is_err(),
+                "{text}"
+            );
+        }
     }
 
     #[test]

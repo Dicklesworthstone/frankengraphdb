@@ -591,6 +591,124 @@ fn directed_join_identity_prefix_needs_no_synthetic_source_vertex_column() {
 }
 
 #[test]
+fn private_join_keys_match_eager_and_independent_property_occurrences_in_every_direction() {
+    let directions = [
+        GlaDirection::Forward,
+        GlaDirection::Reverse,
+        GlaDirection::Undirected,
+    ];
+    for shape in 0..3 {
+        for root in directions {
+            for next in directions {
+                for (skip, limit) in [(0, 1000), (1, 3), (0, 0)] {
+                    let full = statement(shape, [root, next], false, skip, limit);
+                    let head = full.split_once(" RETURN ").unwrap().0;
+                    let keys = if root == GlaDirection::Undirected {
+                        "r, a, s"
+                    } else {
+                        "r, s"
+                    };
+                    let text = format!(
+                        "{head} RETURN ALL s.p AS sp, r.p AS rp \
+                         ORDER BY {keys}, sp DESC NULLS FIRST SKIP {skip} LIMIT {limit}"
+                    );
+                    let query = prepare(&text);
+                    let mut fixture = Fixture::small(63);
+                    for (&id, (_, _, properties)) in &mut fixture.edges {
+                        properties[0].1 = if id == EId(u128::MAX) {
+                            CanonicalScalar::Null.into()
+                        } else {
+                            CanonicalScalar::Int(7).into()
+                        };
+                    }
+                    let expected: Vec<_> =
+                        oracle(&fixture, shape, [root, next], false, skip, limit)
+                            .into_iter()
+                            .map(|row| vec![row[6].clone(), row[5].clone()])
+                            .collect();
+                    let eager = query
+                        .plan()
+                        .execute_governed_with_element_properties(
+                            fixture.edges.len() as u64,
+                            fixture.vertices.iter().copied(),
+                            fixture.edges.iter().map(|(&id, (a, b, _))| (id, *a, R, *b)),
+                            |_, _| Ok::<_, ()>(true),
+                            |_, _| Ok(None),
+                            |id, _| Ok(Some(&fixture.edges[&id].2[0].1)),
+                            policy(),
+                            || Ok::<_, ()>(()),
+                        )
+                        .unwrap();
+                    assert_eq!(plain(&eager.value), expected, "{text}");
+                    let roots = fixture.roots.clone();
+                    let mut cursor = EdgeScanCursor::new(
+                        fixture,
+                        EdgeScanPlan::compile(query.plan()).unwrap(),
+                        policy(),
+                        || Ok::<_, ()>(()),
+                    );
+                    assert_eq!(roots.load(Ordering::SeqCst), 0);
+                    let rows = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                    assert_eq!(plain(&rows), expected, "{text}");
+                    assert!(rows.iter().all(|row| row.values().len() == 2));
+                    assert_eq!(cursor.row_stats().result_rows, rows.len() as u64);
+                    assert_eq!(cursor.state(), EdgeScanState::Exhausted);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn private_join_keys_admit_repeatable_occurrences_but_refuse_incomplete_traversal_order() {
+    for text in [
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN s.p AS value ORDER BY r",
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN s.p AS value ORDER BY s, r",
+        "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN s.p AS value ORDER BY r, s DESC",
+        "MATCH (a)-[r:R]-(b)-[s:R]->(c) RETURN s.p AS value ORDER BY r, s",
+        "MATCH (a)-[r:R]-(b)-[s:R]->(c) RETURN s.p AS value ORDER BY r, s, a",
+        "MATCH (a)-[r:R]-(b)-[s:R]->(c) RETURN s.p AS value ORDER BY r, a DESC, s",
+    ] {
+        assert!(
+            EdgeScanPlan::compile(prepare(text).plan()).is_err(),
+            "{text}"
+        );
+    }
+    let text = "MATCH REPEATABLE ELEMENTS (a)-[r:R]-(b)-[s:R]-(a) \
+                RETURN r.p AS first, s.p AS second ORDER BY r, a, s";
+    let query = prepare(text);
+    let fixture = Fixture::from_edges([(u128::MAX, 0, u128::MAX)]);
+    let eager = query
+        .plan()
+        .execute_governed_with_element_properties(
+            1,
+            fixture.vertices.iter().copied(),
+            fixture.edges.iter().map(|(&id, (a, b, _))| (id, *a, R, *b)),
+            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok(None),
+            |id, _| Ok(Some(&fixture.edges[&id].2[0].1)),
+            policy(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    let actual = EdgeScanCursor::new(
+        fixture,
+        EdgeScanPlan::compile(query.plan()).unwrap(),
+        policy(),
+        || Ok::<_, ()>(()),
+    )
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
+    assert_eq!(actual, eager.value);
+    assert_eq!(actual.len(), 2);
+    assert_eq!(
+        actual[0], actual[1],
+        "orientation occurrences remain duplicates"
+    );
+    assert_eq!(actual[0].values().len(), 2);
+}
+
+#[test]
 fn unsupported_sources_bad_order_and_invalid_plan_prefixes_never_silently_change_semantics() {
     let text = statement(0, [GlaDirection::Forward; 2], false, 0, 5);
     for invalid in [

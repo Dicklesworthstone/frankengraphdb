@@ -6,7 +6,9 @@
 //! strictly increasing order. Historical candidates may have no visible row.
 //! Existing Select predicates, vertex-local Boolean/property comparisons,
 //! identity tests, identity-led projection, DISTINCT/ALL, canonical order and
-//! SKIP/LIMIT are admitted. Binding predicates use the ordinary GLA evaluator,
+//! SKIP/LIMIT are admitted. Explicit ascending root-identity order also admits
+//! ALL property-only output with private identity keys. Binding predicates use
+//! the ordinary GLA evaluator,
 //! including its eager operands and governed scalar-expression scratch.
 //! Correlated/independent fixed-hop EXISTS/NOT EXISTS share the probe kernel;
 //! their private bindings neither multiply nor change the ordered outer row.
@@ -74,11 +76,14 @@ pub struct VertexScanPlan<Row = VId> {
     offset: u64,
     count: Option<u64>,
     projection: Arc<GlaOperator>,
+    // Public rows trim only after the complete governed projection. Blocking
+    // consumers retain every evaluation cell for their own terminal clauses.
+    visible_columns: Option<usize>,
     output: core::marker::PhantomData<fn() -> Row>,
 }
 impl<Row: VertexScanOutput> VertexScanPlan<Row> {
     pub fn compile(plan: &GlaPlan<Row>) -> Result<Self, VertexScanBuildError> {
-        Self::compile_with_projection(plan, None, Row::accepts_projection)
+        Self::compile_with_projection(plan, None, true, Row::accepts_projection)
     }
 
     /// Whether execution needs independently positioned graph reads. A host
@@ -148,10 +153,12 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
     // Private to this operator family. A checked global numeric aggregate may
     // consume an unordered value projection; ordinary row streams still prove
     // the requested canonical order through their sealed output profile.
-    // Only a compiler-checked blocking sort tail can retain hidden key cells.
+    // Complete explicit source-identity orders may retain private key cells;
+    // blocking sort inputs preserve all evaluation cells for their own tail.
     fn compile_with_projection(
         plan: &GlaPlan<Row>,
         sort_tail: Option<&crate::scan_stream::ScanSortTail>,
+        public_rows: bool,
         accepts_projection: impl FnOnce(&GlaOperator, &GlaOperator) -> bool,
     ) -> Result<Self, VertexScanBuildError> {
         let operators = plan.operators();
@@ -206,15 +213,26 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
         }
         let projection_at = at;
         at += 1;
-        if matches!(operators.get(at), Some(GlaOperator::Distinct)) {
+        let distinct = matches!(operators.get(at), Some(GlaOperator::Distinct));
+        if distinct {
             at += 1;
         }
-        // A unique leading identity establishes both whole-row uniqueness and
-        // order even when later cells are properties. No global set is needed.
-        if (plan.visible_columns.is_some() && sort_tail.is_none())
-            || !operators
-                .get(at)
-                .is_some_and(|order| accepts_projection(&operators[projection_at], order))
+        let Some(order) = operators.get(at) else {
+            return Err(VertexScanBuildError { operator: at });
+        };
+        // The old canonical profile keeps its unique visible identity. An
+        // explicit identity order may instead keep that key private, provided
+        // the ALL projection preserves every source occurrence.
+        let explicit_identity = public_rows
+            && Row::accepts_explicit_projection(
+                &operators[projection_at],
+                order,
+                plan.visible_columns,
+                distinct,
+            );
+        if !explicit_identity
+            && ((plan.visible_columns.is_some() && sort_tail.is_none())
+                || !accepts_projection(&operators[projection_at], order))
         {
             return Err(VertexScanBuildError { operator: at });
         }
@@ -231,6 +249,11 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
             offset: *offset,
             count: *count,
             projection: Arc::new(operators[projection_at].clone()),
+            visible_columns: if public_rows {
+                plan.visible_columns
+            } else {
+                None
+            },
             output: core::marker::PhantomData,
         })
     }
@@ -341,7 +364,7 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
         } else {
             meter.event(VertexScanEvent::Work)?;
         }
-        Ok(Some((value, guard)))
+        Ok(Some((value.retain_visible(self.visible_columns), guard)))
     }
 }
 

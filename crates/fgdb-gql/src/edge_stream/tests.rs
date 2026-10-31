@@ -485,6 +485,103 @@ fn directed_edge_identity_alone_orders_properties_parallel_edges_and_self_loops(
 }
 
 #[test]
+fn private_edge_order_keys_preserve_property_rows_orientation_and_parallel_multiplicity() {
+    for direction in [
+        GlaDirection::Forward,
+        GlaDirection::Reverse,
+        GlaDirection::Undirected,
+    ] {
+        let edge = match direction {
+            GlaDirection::Forward => "(a)-[r:R]->(b)",
+            GlaDirection::Reverse => "(a)<-[r:R]-(b)",
+            GlaDirection::Undirected => "(a)-[r:R]-(b)",
+        };
+        let order = if direction == GlaDirection::Undirected {
+            "r, a"
+        } else {
+            "r"
+        };
+        for (skip, limit) in [(0, 100), (1, 3), (99, 4), (0, 0)] {
+            let text = format!(
+                "MATCH {edge} RETURN ALL b.p AS target, r.p AS weight, a.p AS source \
+                 ORDER BY {order}, weight DESC NULLS FIRST SKIP {skip} LIMIT {limit}"
+            );
+            let query = prepared(&text);
+            let mut fixture = Fixture::new();
+            // Equal payloads on parallel identities retain ALL occurrences.
+            fixture.edges.get_mut(&EId(2)).unwrap().3 = fixture.edges[&EId(1)].3.clone();
+            let expected: Vec<_> = oracle(&fixture, direction, 0, skip, limit)
+                .into_iter()
+                .map(|row| vec![row[5].clone(), row[3].clone(), row[4].clone()])
+                .collect();
+            let eager = query
+                .plan()
+                .execute_governed_with_element_properties(
+                    fixture.edges.len() as u64,
+                    fixture.vertices.keys().copied(),
+                    fixture
+                        .edges
+                        .iter()
+                        .map(|(&id, (a, r, b, _))| (id, *a, *r, *b)),
+                    |_, _| Ok::<_, ()>(true),
+                    |id, _| Ok(fixture.stored(id)),
+                    |id, _| Ok(fixture.edges[&id].3.first().map(|(_, value)| value)),
+                    policy(),
+                    || Ok::<_, ()>(()),
+                )
+                .unwrap();
+            assert_eq!(plain(&eager.value), expected, "{text}");
+            let visits = fixture.visits.clone();
+            let mut cursor = EdgeScanCursor::new(
+                fixture,
+                EdgeScanPlan::compile(query.plan()).unwrap(),
+                policy(),
+                || Ok::<_, ()>(()),
+            );
+            assert_eq!(visits.load(Ordering::SeqCst), 0);
+            let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(plain(&actual), expected, "{text}");
+            assert!(actual.iter().all(|row| row.values().len() == 3));
+            assert_eq!(cursor.row_stats().result_rows, actual.len() as u64);
+            assert_eq!(cursor.state(), EdgeScanState::Exhausted);
+        }
+    }
+}
+
+#[test]
+fn private_edge_keys_require_ascending_complete_orientation_before_any_pull() {
+    for text in [
+        "MATCH (a)-[r:R]->(b) RETURN r.p AS weight ORDER BY r DESC",
+        "MATCH (a)-[r:R]->(b) RETURN r.p AS weight ORDER BY weight, r",
+        "MATCH (a)-[r:R]-(b) RETURN r.p AS weight ORDER BY r",
+        "MATCH (a)-[r:R]-(b) RETURN r.p AS weight ORDER BY r, b",
+        "MATCH (a)-[r:R]-(b) RETURN r.p AS weight ORDER BY r, a DESC",
+    ] {
+        assert!(
+            EdgeScanPlan::compile(prepared(text).plan()).is_err(),
+            "{text}"
+        );
+    }
+    let query = prepared("MATCH (a)-[r:R]->(b) RETURN r.p AS weight ORDER BY r");
+    let mut fixture = Fixture::new();
+    fixture.fail = Some(EId(1));
+    let visits = fixture.visits.clone();
+    let drops = fixture.drops.clone();
+    let mut cursor = EdgeScanCursor::new(
+        fixture,
+        EdgeScanPlan::compile(query.plan()).unwrap(),
+        policy(),
+        || Ok::<_, ()>(()),
+    );
+    assert_eq!(cursor.next().unwrap().unwrap().values().len(), 1);
+    assert_eq!(visits.load(Ordering::SeqCst), 1);
+    cursor.close();
+    assert!(cursor.next().is_none());
+    assert_eq!(visits.load(Ordering::SeqCst), 1);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn omitted_orientation_cannot_change_undirected_order_or_distinct_semantics() {
     for quantifier in ["ALL", "DISTINCT"] {
         for projection in ["r", "r, b", "r, r.p AS weight, a"] {

@@ -1010,12 +1010,16 @@ fn vertex_driver<'q, C: FnMut() -> u64>(
 
 impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {
     /// Open a prepared vertex or fixed-edge stream under this session's policy
-    /// and capability. Vertex projection must lead with its unique VId. Directed
-    /// edge projection must lead with the captured root EId; undirected roots
-    /// also require the root-source VId to distinguish orientations. Connected
-    /// fixed joins then name each appended EId in traversal order.
+    /// and capability. Canonical vertex projections lead with their unique VId;
+    /// directed edge projections lead with the captured root EId. Undirected
+    /// roots also require the root-source VId to distinguish orientations, and
+    /// connected fixed joins then name each appended EId in traversal order.
     /// These prefixes prove native canonical ordering and ALL/DISTINCT semantics
-    /// without a result bag or seen-set. Remaining edge columns may project
+    /// without a result bag or seen-set. ALL projections may keep these identities
+    /// private when an explicit ascending ORDER BY names the complete prefix:
+    /// `RETURN n.name ORDER BY n`, or `RETURN r.weight ORDER BY r` on a directed
+    /// edge. Private keys stay governed and never enter public columns or rows.
+    /// Remaining edge columns may project
     /// endpoints, masked vertex/edge properties and admitted fixed-path values.
     /// Both orientations of an undirected edge remain separate occurrences;
     /// a self-loop is emitted once. SKIP/LIMIT act on accepted occurrences.

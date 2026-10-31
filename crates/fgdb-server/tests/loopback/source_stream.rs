@@ -489,6 +489,128 @@ fn native_source_stream_preserves_scoped_rows_across_exact_credit_windows() {
 }
 
 #[test]
+fn private_identity_keys_stream_scoped_properties_without_entering_schema_or_wire_rows() {
+    run(async |cx| {
+        let (addr, shutdown, mut task) = start(cx, "native-private-identity-keys").await;
+        let mut owner = Client::connect(cx, addr, token(&grant(Rights::ReadWrite)))
+            .await
+            .unwrap();
+        owner.select(cx, "social").await.unwrap();
+        seed(cx, &mut owner).await;
+        owner
+            .execute(
+                cx,
+                ExecuteMode::Write,
+                "CREATE (a:Person {age:7,name:'left'}), (b:Person {age:7,name:'middle'}), \
+                 (c:Person {age:7,name:'right'}), (h:Company {age:999}), \
+                 (a)-[:KNOWS {age:3,name:'masked'}]->(b), \
+                 (a)-[:KNOWS {age:3}]->(b), (b)-[:KNOWS {age:3}]->(c), \
+                 (a)-[:WORKS_AT {age:999}]->(b), (a)-[:KNOWS {age:999}]->(h)",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let mut scope = grant(Rights::Read);
+        scope.labels = Scope::only([LabelId(1)]);
+        scope.relations = Scope::only([RelationId(1)]);
+        scope.properties = Scope::only([PropertyKeyId(2)]);
+        let mut reader = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        reader.select(cx, "social").await.unwrap();
+        for (statement, columns, count) in [
+            (
+                "MATCH (n) RETURN n.age AS age, n.name AS hidden ORDER BY n",
+                vec!["age", "hidden"],
+                15,
+            ),
+            (
+                "MATCH (a)-[r]->(b) RETURN r.age AS weight, a.age AS age, b.name AS hidden ORDER BY r",
+                vec!["weight", "age", "hidden"],
+                3,
+            ),
+            (
+                "MATCH (a)-[r]->(b)-[s]->(c) RETURN r.age AS weight, s.age AS next_weight, c.name AS hidden ORDER BY r, s",
+                vec!["weight", "next_weight", "hidden"],
+                2,
+            ),
+            (
+                "MATCH (a)-[r]-(b) RETURN r.age AS weight, a.age AS age, b.name AS hidden ORDER BY r, a",
+                vec!["weight", "age", "hidden"],
+                6,
+            ),
+        ] {
+            let eager = reader
+                .execute(cx, ExecuteMode::Read, statement, vec![])
+                .await
+                .unwrap();
+            let streamed = reader
+                .execute(cx, ExecuteMode::ReadStream, statement, vec![])
+                .await
+                .unwrap();
+            assert_eq!(streamed, eager, "{statement}");
+            assert_eq!(streamed.columns, columns, "{statement}");
+            assert_eq!(streamed.rows.len(), count, "{statement}");
+            assert!(streamed.rows.iter().all(|row| {
+                row.len() == columns.len()
+                    && row.last() == Some(&WireValue::Null)
+                    && row
+                        .iter()
+                        .all(|value| !matches!(value, WireValue::Vertex(_) | WireValue::Edge(_)))
+            }));
+            assert_eq!(streamed.outcome, Outcome::Rows { seq: 2 });
+        }
+        reader.close(cx).await.unwrap();
+
+        // This graph exceeds the signed node allowance. Delivering a private
+        // key projection's first credit window therefore proves genuine source
+        // pulls, and cancellation must release it before the next request.
+        scope.limits.max_nodes = 4;
+        let mut reader = Client::connect(cx, addr, token(&scope)).await.unwrap();
+        reader.select(cx, "social").await.unwrap();
+        let mut callbacks = 0;
+        let error = reader
+            .execute_streaming(
+                cx,
+                ExecuteMode::ReadStream,
+                "MATCH (n:Person) RETURN n.age AS age ORDER BY n",
+                vec![],
+                |columns| {
+                    assert_eq!(columns, ["age"]);
+                    Ok(())
+                },
+                |row| {
+                    assert_eq!(row.len(), 1);
+                    callbacks += 1;
+                    Err(ClientError::Protocol("stop private identity stream"))
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ClientError::Protocol("stop private identity stream")
+        ));
+        assert_eq!(callbacks, 1);
+        reader.ping(cx, 73).await.unwrap();
+        let one = reader
+            .execute(
+                cx,
+                ExecuteMode::ReadStream,
+                "MATCH (n:Person) RETURN n.age AS age ORDER BY n LIMIT 1",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(one.columns, ["age"]);
+        assert_eq!(one.rows.len(), 1);
+        assert_eq!(one.rows[0].len(), 1);
+        reader.close(cx).await.unwrap();
+        owner.close(cx).await.unwrap();
+        shutdown.trigger();
+        task.join(cx).await.unwrap();
+    });
+}
+
+#[test]
 fn native_source_stream_cancellation_and_late_budget_keep_the_connection_usable() {
     run(async |cx| {
         let (addr, shutdown, mut task) = start(cx, "native-source-stream-stops").await;

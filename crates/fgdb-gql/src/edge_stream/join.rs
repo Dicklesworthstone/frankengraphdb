@@ -1,6 +1,7 @@
 //! Depth-first, resumable indexed joins in the existing edge cursor.
 //! The complete traversal-identity output prefix proves canonical whole-row
-//! order and uniqueness. Each level retains only its last EId and chosen edge;
+//! order and uniqueness. Explicit identity ordering may keep that prefix
+//! private while preserving ALL occurrences. Each level retains only its last EId and chosen edge;
 //! no prefix's neighbor bag or complete match table is ever materialized.
 
 use super::*;
@@ -194,23 +195,6 @@ fn compile_output(
                 terminal = true;
             }
             GlaOperator::ProjectValues { columns } => {
-                let edge_column = |column: Option<&ValueProjection>, step: usize| {
-                    matches!(column, Some(ValueProjection::Path { capture, function: GraphPathFunction::Edge })
-                        if captures.get(*capture as usize).is_some_and(|parts| parts.len() == 1 && parts[0] == step))
-                };
-                // A directed root EId fixes both endpoints, so its source
-                // vertex need not occupy a public result column. An undirected
-                // root needs that orientation discriminator before appended
-                // edge identities. Every appended EId then fixes one traversal
-                // step, even when that step itself is undirected or a self-loop.
-                let directed_prefix = *direction != GlaDirection::Undirected
-                    && (0..width - 1).all(|step| edge_column(columns.get(step), step));
-                let oriented_prefix = edge_column(columns.first(), 0)
-                    && matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0)
-                    && (1..width - 1).all(|step| edge_column(columns.get(step + 1), step));
-                if output == Output::OrderedRows && !directed_prefix && !oriented_prefix {
-                    return Err(bad());
-                }
                 for column in columns {
                     let valid = match column {
                         ValueProjection::Vertex { slot }
@@ -248,7 +232,8 @@ fn compile_output(
     }
     let projection = Arc::new(ops[at].clone());
     at += 1;
-    if matches!(ops.get(at), Some(GlaOperator::Distinct)) {
+    let distinct = matches!(ops.get(at), Some(GlaOperator::Distinct));
+    if distinct {
         // A numeric reducer consumes occurrences, not projected support.
         // Its private unordered input cannot implement DISTINCT by omission.
         if output == Output::AggregateInput {
@@ -256,12 +241,63 @@ fn compile_output(
         }
         at += 1;
     }
-    let ordering_supported = match ops.get(at) {
-        Some(GlaOperator::OrderByValues) => true,
-        Some(GlaOperator::OrderByValueColumns { .. }) => output == Output::SortInput,
-        _ => false,
+    let Some(order) = ops.get(at) else {
+        return Err(EdgeScanBuildError { operator: at });
     };
-    if (plan.visible_columns.is_some() && output != Output::SortInput) || !ordering_supported {
+    let GlaOperator::ProjectValues { columns } = projection.as_ref() else {
+        unreachable!("the source compiler checked every projection cell")
+    };
+    let edge_column = |column: Option<&ValueProjection>, step: usize| {
+        matches!(column, Some(ValueProjection::Path { capture, function: GraphPathFunction::Edge })
+            if captures.get(*capture as usize).is_some_and(|parts| parts.len() == 1 && parts[0] == step))
+    };
+    // A root EId fixes directed endpoints. An undirected root additionally
+    // needs its source VId before every appended EId. Captured paths name the
+    // exact traversal step; repeated root identities cannot stand for a later
+    // edge, even when one source row happens to use the same EId twice.
+    let directed_prefix = *direction != GlaDirection::Undirected
+        && (0..width - 1).all(|step| edge_column(columns.get(step), step));
+    let oriented_prefix = edge_column(columns.first(), 0)
+        && matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0)
+        && (1..width - 1).all(|step| edge_column(columns.get(step + 1), step));
+    let explicit_prefix = output == Output::OrderedRows
+        && ((*direction != GlaDirection::Undirected
+            && crate::scan_stream::identity_ordered_projection(
+                &projection,
+                order,
+                plan.visible_columns,
+                distinct,
+                width - 1,
+                |index, column| edge_column(Some(column), index),
+            ))
+            || crate::scan_stream::identity_ordered_projection(
+                &projection,
+                order,
+                plan.visible_columns,
+                distinct,
+                width,
+                |index, column| match index {
+                    0 => edge_column(Some(column), 0),
+                    1 => matches!(column, ValueProjection::Vertex { slot } if slot.ordinal() == 0),
+                    _ => edge_column(Some(column), index - 1),
+                },
+            ));
+    let ordering_supported = match output {
+        Output::OrderedRows => {
+            explicit_prefix
+                || (plan.visible_columns.is_none()
+                    && (directed_prefix || oriented_prefix)
+                    && matches!(order, GlaOperator::OrderByValues))
+        }
+        Output::AggregateInput => {
+            plan.visible_columns.is_none() && matches!(order, GlaOperator::OrderByValues)
+        }
+        Output::SortInput => matches!(
+            order,
+            GlaOperator::OrderByValues | GlaOperator::OrderByValueColumns { .. }
+        ),
+    };
+    if !ordering_supported {
         return Err(EdgeScanBuildError { operator: at });
     }
     at += 1;
@@ -279,6 +315,11 @@ fn compile_output(
         direction: *direction,
         instructions: Arc::from([]),
         projection,
+        visible_columns: if output == Output::OrderedRows {
+            plan.visible_columns
+        } else {
+            None
+        },
         offset: if output == Output::SortInput {
             0
         } else {
@@ -553,7 +594,9 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
             meter.event(GlaExecutionEvent::Work)?;
         }
         traversal.resume = true;
-        return Ok(core::task::Poll::Ready(Some(row)));
+        return Ok(core::task::Poll::Ready(Some(
+            cursor.plan.retain_visible(row),
+        )));
     }
 }
 
