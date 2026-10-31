@@ -320,6 +320,29 @@ fn column<'a>(
     Err(invalid())
 }
 
+// The external selected-product host appends an order-preserving signed
+// representation of an unsigned occurrence ordinal. Read only that exact
+// native scalar shape; the caller validates the complete tagged frame before
+// exposing any visible payload. This adds no alternate scalar wire format.
+pub(super) fn trailing_ordinal(bytes: &[u8], width: usize, work: &mut Work<'_>) -> Result<u64> {
+    let at = width.checked_sub(1).ok_or_else(invalid)?;
+    let cell = column(bytes, width, at, work)?;
+    if cell.tag != 0 {
+        return Err(invalid());
+    }
+    let scalar = cell.scalar()?;
+    if scalar.first() != Some(&0x02) {
+        return Err(invalid());
+    }
+    work.charge(scalar.len())?;
+    match fgdb_types::CanonicalScalar::decode(scalar).map_err(|_| invalid())? {
+        fgdb_types::CanonicalScalar::Int(value) => {
+            Ok(u64::from_be_bytes(value.to_be_bytes()) ^ (1_u64 << 63))
+        }
+        _ => Err(invalid()),
+    }
+}
+
 // Equality of selected typed cells, without the sorter's whole-row tie-break.
 // Caller supplies authenticated frames already validated by the completed sort.
 pub(super) fn equal_columns(

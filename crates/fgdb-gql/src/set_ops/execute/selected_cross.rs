@@ -91,7 +91,32 @@ fn requires_atom<E>(
     Ok(stack[0])
 }
 
-fn required_keys<E>(
+// Structural admission owns no rows and allocates no key vector. Reuse the
+// same checked Boolean proof as governed extraction below; fixed IR bounds
+// limit this metadata inspection even when no equality is necessary.
+pub(super) fn has_required_key(
+    width: usize,
+    code: &[GraphSetPredicateOp],
+    columns: Option<&[usize]>,
+) -> bool {
+    for op in code {
+        let Some(key) = equality(op, width, columns) else {
+            continue;
+        };
+        match requires_atom(
+            code,
+            |op| equality(op, width, columns) == Some(key),
+            &mut |_| Ok::<_, core::convert::Infallible>(()),
+        ) {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(never) => match never {},
+        }
+    }
+    false
+}
+
+pub(super) fn required_keys<E>(
     width: usize,
     code: &[GraphSetPredicateOp],
     columns: Option<&[usize]>,
@@ -123,7 +148,7 @@ fn required_keys<E>(
     Ok(keys)
 }
 
-fn eligible<E>(
+pub(super) fn eligible<E>(
     row: &GraphValueRow,
     keys: &[Key],
     right: bool,

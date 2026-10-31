@@ -10,6 +10,9 @@ use fgdb_gql::spill_set::{SpillSetCrossPlan, SpillSetRowError};
 use fgdb_strata::tiered::memory::MemoryPool;
 use fgdb_types::CanonicalScalarResolver;
 
+#[path = "cross_keys.rs"]
+mod keyed;
+
 pub(super) fn position(spool: &NativeResultSpool) -> RunInput {
     RunInput::new(
         Run {
@@ -26,14 +29,23 @@ pub(super) fn decode(
     work: &mut Work<'_>,
     resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
 ) -> Result<SpoolRow> {
+    decode_borrowed(bytes.as_ref(), pool, work, resolver)
+}
+
+fn decode_borrowed(
+    bytes: &[u8],
+    pool: &MemoryPool,
+    work: &mut Work<'_>,
+    resolver: Option<&(dyn CanonicalScalarResolver + Send + Sync)>,
+) -> Result<SpoolRow> {
     work.charge(bytes.len())?;
-    let reserved = codec::decoded(bytes.as_ref(), work.cx)?;
+    let reserved = codec::decoded(bytes, work.cx)?;
     let charge = pool
         .reserve(work.cx, reserved)
         .map_err(SpillError::Memory)?;
     let row = match resolver {
-        Some(resolver) => GraphValueRow::decode_canonical_with_resolver(bytes.as_ref(), resolver),
-        None => GraphValueRow::decode_stored(bytes.as_ref()),
+        Some(resolver) => GraphValueRow::decode_canonical_with_resolver(bytes, resolver),
+        None => GraphValueRow::decode_stored(bytes),
     }
     .map_err(NativeSpoolError::Decode)?;
     Ok(SpoolRow::buffered((row, charge)))
@@ -94,6 +106,41 @@ where
         resolver,
     )
     .await?;
+    // Structural eligibility is fixed before examining values. Complete both
+    // original children first; a keyed-path refusal never retries the product.
+    if plan.supports_keyed_selection() {
+        let mut work = Work {
+            cx,
+            used: prior_work,
+            limit: max_sort_work,
+        };
+        let mut control = |event| host.native_event(event);
+        let evaluator = host::ControlledStats {
+            stats: evaluator,
+            control: &mut control,
+        };
+        let result = keyed::execute(
+            plan,
+            &left,
+            &right,
+            snapshot,
+            snapshot_records,
+            evaluator,
+            policy,
+            scratch,
+            destination,
+            auxiliary,
+            run_rows,
+            max_runs,
+            page_bytes,
+            max_row_bytes,
+            max_input_rows,
+            &mut work,
+            resolver,
+        )
+        .await?;
+        return Ok((result, work.used));
+    }
     // Both children have completed, even if the product is empty or an
     // enclosing clause asks for no output. A selected product never retains
     // L*R rows: admit accepted occurrences below instead. Plain products keep

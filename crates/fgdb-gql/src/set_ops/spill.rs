@@ -165,10 +165,12 @@ impl AsyncSpillSetSourcePlan {
 ///
 /// Complete the left child, then the right child exactly once, including when
 /// either is empty or an enclosing page is zero. Each child retains its own
-/// order, DISTINCT, grouping and page. Visit every right occurrence for each
-/// left occurrence in that order; neither child nor this product is implicitly
-/// canonicalized. A compiler-proved native selection tests borrowed pairs and
-/// copies only TRUE occurrences. Other correlations remain later row filters.
+/// order, DISTINCT, grouping and page. Preserve the original left-major,
+/// right-major occurrence sequence; neither child nor this product gains an
+/// implicit result ordering. A compiler-proved native selection tests borrowed
+/// pairs and copies only TRUE occurrences. Necessary equalities may restrict
+/// candidate groups if private sorting restores the exact original occurrence
+/// sequence before exposing output. Other correlations remain later row filters.
 /// The enclosing Identity stage owns this node's ORDER BY/SKIP/LIMIT.
 ///
 /// Plain output concatenates the original children; a selected product may
@@ -665,8 +667,9 @@ impl AsyncSpillSetPlan {
     }
     /// Total bounded physical barriers, including both binary descendants and
     /// their two canonicalization passes plus merge, Cartesian descendants and
-    /// product/copy passes, and every aggregate's input, reduction, canonical
-    /// group order and checked row conversion.
+    /// product/copy passes or keyed occurrence restoration, and every
+    /// aggregate's input, reduction, canonical group order and checked row
+    /// conversion.
     /// Internal aggregate partitions/argument support have their own finite
     /// limits; aggregate_count() gives their number of independent reducers.
     /// This is a static plan bound, not an Apply invocation-count bound. Hosts
@@ -684,7 +687,14 @@ impl AsyncSpillSetPlan {
                 .left()
                 .stage_count()
                 .saturating_add(cross.right().stage_count())
-                .saturating_add(2),
+                // Keyed selection tags and sorts both original children,
+                // emits candidates through the native predicate, restores
+                // occurrence order, strips private tags, then copies output.
+                .saturating_add(if cross.supports_keyed_selection() {
+                    8
+                } else {
+                    2
+                }),
             AsyncSpillSetSourcePlan::RowJoin(join) => join
                 .left()
                 .stage_count()

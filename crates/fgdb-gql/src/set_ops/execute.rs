@@ -25,6 +25,39 @@ pub(super) fn copy_cross_pair<E>(
     selected_cross::copy_pair(left, right, None, control)
 }
 
+/// Allocation-free structural admission over the checked, bounded predicate.
+/// Runtime hosts still extract and retain every actual key under their meter.
+pub(super) fn selected_cross_has_probe_keys(
+    left_width: usize,
+    code: &[GraphSetPredicateOp],
+    columns: Option<&[usize]>,
+) -> bool {
+    selected_cross::has_required_key(left_width, code, columns)
+}
+
+/// The resident necessary-equality proof, shared with bounded external hosts.
+/// Positions refer to original children even through a column-only projection.
+/// Every retained key is admitted by ScratchEntry before its allocation.
+pub(super) fn selected_cross_probe_keys<E>(
+    left_width: usize,
+    code: &[GraphSetPredicateOp],
+    columns: Option<&[usize]>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Vec<(usize, usize)>, E> {
+    selected_cross::required_keys(left_width, code, columns, control)
+}
+
+/// Use the resident equality-witness law without redefining composite NULL
+/// semantics. The caller has validated the row schema and every key position.
+pub(super) fn selected_cross_probe_eligible<E>(
+    row: &GraphValueRow,
+    keys: &[(usize, usize)],
+    right: bool,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<bool, E> {
+    selected_cross::eligible(row, keys, right, control)
+}
+
 struct Meter<Checkpoint> {
     policy: GqlQueryPolicy,
     checkpoint: Checkpoint,

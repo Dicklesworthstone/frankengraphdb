@@ -96,23 +96,123 @@ impl SpillSetCrossPlan {
         self.selection.is_some()
     }
 
+    /// Fixed admission for equality-key replay with private occurrence tags.
+    /// Both original children still complete before the host extracts keys
+    /// under its execution control. This bounded metadata inspection owns no
+    /// input rows and never retries after an execution or resource refusal.
+    /// Widths must admit one private child ordinal and two output ordinals;
+    /// wider or unkeyed selections retain the ordinary nested traversal.
+    pub fn supports_keyed_selection(&self) -> bool {
+        let Some(selection) = &self.selection else {
+            return false;
+        };
+        for width in [
+            self.left().column_types().len(),
+            self.right().column_types().len(),
+        ] {
+            if width == 0
+                || width
+                    .checked_add(1)
+                    .is_none_or(|tagged| tagged > MAX_PATTERN_VERTICES)
+            {
+                return false;
+            }
+        }
+        if self.columns().is_empty()
+            || self
+                .columns()
+                .len()
+                .checked_add(2)
+                .is_none_or(|tagged| tagged > MAX_PATTERN_VERTICES)
+        {
+            return false;
+        }
+        super::super::execute::selected_cross_has_probe_keys(
+            self.left().column_types().len(),
+            &selection.code,
+            selection.columns.as_deref(),
+        )
+    }
+
+    /// Necessary equality keys in original left/right child positions.
+    /// The same resident proof keeps AND requirements, intersects OR arms,
+    /// and discards NOT. A projected column is mapped before classification.
+    /// These are candidate keys, never additional typed equality conditions.
+    /// Reserve metadata before each ScratchEntry returns and retain its guard
+    /// through all awaited sorting and probing. Refusal is terminal.
+    pub fn probe_keys_with_control<E>(
+        &self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Vec<(usize, usize)>, SpillSetRowError<E>> {
+        let Some(selection) = &self.selection else {
+            return Ok(Vec::new());
+        };
+        super::super::execute::selected_cross_probe_keys(
+            self.left().column_types().len(),
+            &selection.code,
+            selection.columns.as_deref(),
+            control,
+        )
+        .map_err(SpillSetRowError::Control)
+    }
+
+    /// Validate one original child occurrence before eligibility can discard
+    /// it, including rows with NULL keys or no matching peer. Side zero is
+    /// left and side one is right; another side is a typed schema refusal.
+    pub fn validate_input_with_control<E>(
+        &self,
+        row: &GraphValueRow,
+        side: usize,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<(), SpillSetRowError<E>> {
+        control(GlaExecutionEvent::Work).map_err(SpillSetRowError::Control)?;
+        let input = match side {
+            0 => self.left(),
+            1 => self.right(),
+            _ => {
+                return Err(SpillSetRowError::Native(
+                    GraphSetExecutionError::InputSchema { operand: side },
+                ));
+            }
+        };
+        if row.len() != input.column_types().len() {
+            return Err(SpillSetRowError::Native(
+                GraphSetExecutionError::InputSchema { operand: side },
+            ));
+        }
+        for (kind, value) in input.column_types().iter().zip(row.values()) {
+            control(GlaExecutionEvent::Work).map_err(SpillSetRowError::Control)?;
+            if !kind.accepts(value) {
+                return Err(SpillSetRowError::Native(
+                    GraphSetExecutionError::InputSchema { operand: side },
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn validate_pair_with_control<E>(
         &self,
         left: &GraphValueRow,
         right: &GraphValueRow,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<(), SpillSetRowError<E>> {
-        let mut event = |event| control(event).map_err(SpillSetRowError::Control);
-        for (operand, input, row) in [(0, self.left(), left), (1, self.right(), right)] {
-            event(GlaExecutionEvent::Work)?;
-            if row.len() != input.column_types().len() {
-                return Err(SpillSetRowError::Native(
-                    GraphSetExecutionError::InputSchema { operand },
-                ));
-            }
-            for (kind, value) in input.column_types().iter().zip(row.values()) {
-                event(GlaExecutionEvent::Work)?;
-                if !kind.accepts(value) {
+        self.validate_input_with_control(left, 0, control)?;
+        self.validate_input_with_control(right, 1, control)
+    }
+
+    fn validate_probe_keys_with_control<E>(
+        &self,
+        keys: &[(usize, usize)],
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<(), SpillSetRowError<E>> {
+        for &(left, right) in keys {
+            control(GlaExecutionEvent::Work).map_err(SpillSetRowError::Control)?;
+            for (operand, column, width) in [
+                (0, left, self.left().column_types().len()),
+                (1, right, self.right().column_types().len()),
+            ] {
+                if column >= width {
                     return Err(SpillSetRowError::Native(
                         GraphSetExecutionError::InputSchema { operand },
                     ));
@@ -120,6 +220,51 @@ impl SpillSetCrossPlan {
             }
         }
         Ok(())
+    }
+
+    /// Whether this occurrence can witness every necessary equality. The
+    /// resident law excludes both top-level NULL and non-reflexive composite
+    /// values such as lists or maps containing NULL. It preserves numeric
+    /// peers, graph values, empty lists and canonical NaN. Validate the complete
+    /// original row and every key bound before considering early exclusion.
+    pub fn probe_eligible_with_control<E>(
+        &self,
+        row: &GraphValueRow,
+        side: usize,
+        keys: &[(usize, usize)],
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, SpillSetRowError<E>> {
+        self.validate_input_with_control(row, side, control)?;
+        self.validate_probe_keys_with_control(keys, control)?;
+        super::super::execute::selected_cross_probe_eligible(row, keys, side == 1, control)
+            .map_err(SpillSetRowError::Control)
+    }
+
+    /// Compare only the complete candidate tuple, ascending with NULL last.
+    /// Language orderability is a SUPERSET of native equality: Decimal, Int
+    /// and Float can share a group without matching the original predicate.
+    /// Every candidate must still pass select_pair_with_control, including
+    /// composite keys. Payload columns and occurrence ordinals never break a
+    /// tuple tie. Keys must come from THIS plan's probe_keys_with_control.
+    pub fn compare_probe_keys_with_control<E>(
+        &self,
+        left: &GraphValueRow,
+        right: &GraphValueRow,
+        keys: &[(usize, usize)],
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<core::cmp::Ordering, SpillSetRowError<E>> {
+        self.validate_pair_with_control(left, right, control)?;
+        self.validate_probe_keys_with_control(keys, control)?;
+        for &(a, b) in keys {
+            control(GlaExecutionEvent::Work).map_err(SpillSetRowError::Control)?;
+            let order = left.values()[a]
+                .compare_orderability_with_control(&right.values()[b], control)
+                .map_err(SpillSetRowError::Control)?;
+            if order != core::cmp::Ordering::Equal {
+                return Ok(order);
+            }
+        }
+        Ok(core::cmp::Ordering::Equal)
     }
 
     /// Test a borrowed candidate with the native eager three-valued predicate,

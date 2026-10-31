@@ -443,5 +443,381 @@ fn selected_product_spills_only_matches_when_candidate_count_exceeds_private_row
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
+fn value_sequence(name: &str, values: &[GraphValue]) -> PreparedGraphSet {
+    PreparedGraphSet::singleton()
+        .unwind(
+            name.into(),
+            GraphSetValue::List(values.iter().cloned().map(GraphSetValue::Value).collect()),
+        )
+        .unwrap()
+}
+
+fn tuple_sequence<const N: usize>(name: &str, values: &[[i64; N]]) -> PreparedGraphSet {
+    let lists: Vec<_> = values
+        .iter()
+        .map(|row| GraphValue::List(row.iter().copied().map(scalar).collect()))
+        .collect();
+    value_sequence(name, &lists)
+        .project(
+            (0..N)
+                .map(|column| {
+                    GraphSetProjection::new(
+                        format!("{name}{column}"),
+                        GraphSetValue::Index {
+                            list: Box::new(GraphSetValue::Column(0)),
+                            index: Box::new(GraphSetValue::Value(scalar(column as i64))),
+                        },
+                    )
+                })
+                .collect(),
+            GraphSetQuantifier::All,
+        )
+        .unwrap()
+}
+
+fn is_keyed(query: &PreparedGraphSet) -> bool {
+    let compiled = AsyncSpillSetPlan::compile(query).unwrap();
+    matches!(compiled.source(), AsyncSpillSetSourcePlan::Cross(plan)
+        if plan.supports_keyed_selection())
+}
+
+#[test]
+fn keyed_product_restores_occurrences_before_parent_pages_and_collect() {
+    let ((), report) = run_async_under_lab(0xc01d_3151, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = fixture(&contexts.commit()).await;
+        let pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let mut view = view(&contexts.commit(), &vfs, &pool).await;
+        let raw = tuple_sequence("l", &[[2, 0], [1, 1], [2, 2]])
+            .cross_join(tuple_sequence("r", &[[2, 0], [1, 1], [2, 2]]))
+            .unwrap();
+        let query = raw.clone().filter(&[equality(0, 2)]).unwrap();
+        let ordinary = raw
+            .filter(&[
+                equality(0, 2),
+                GraphSetPredicateOp::Not,
+                GraphSetPredicateOp::Not,
+            ])
+            .unwrap();
+        assert!(is_keyed(&query));
+        assert!(!is_keyed(&ordinary));
+        let literal = [
+            [Some(2), Some(0), Some(2), Some(0)],
+            [Some(2), Some(0), Some(2), Some(2)],
+            [Some(1), Some(1), Some(1), Some(1)],
+            [Some(2), Some(2), Some(2), Some(0)],
+            [Some(2), Some(2), Some(2), Some(2)],
+        ];
+        let expected = frames(&literal);
+        for input in [&query, &ordinary] {
+            assert_eq!(
+                execute(input, 2, &mut view, &cx, policy(5), 16, WORK)
+                    .await
+                    .unwrap()
+                    .0,
+                expected
+            );
+            let page = input.clone().with_page(1, Some(3));
+            assert_eq!(
+                execute(&page, 2, &mut view, &cx, policy(3), 16, WORK)
+                    .await
+                    .unwrap()
+                    .0,
+                expected[1..4]
+            );
+            let collected = input
+                .clone()
+                .group_by(
+                    &[],
+                    &[
+                        fgdb_gql::GraphAggregate::collect("left_ids", 1),
+                        fgdb_gql::GraphAggregate::collect("right_ids", 3),
+                    ],
+                )
+                .unwrap();
+            let expected_collection = GraphValueRow::from_owned_values(vec![
+                GraphValue::List([0, 0, 1, 2, 2].into_iter().map(scalar).collect()),
+                GraphValue::List([0, 2, 1, 0, 2].into_iter().map(scalar).collect()),
+            ])
+            .canonical_bytes()
+            .unwrap();
+            assert_eq!(
+                execute(&collected, 2, &mut view, &cx, policy(1), 16, WORK)
+                    .await
+                    .unwrap()
+                    .0,
+                [expected_collection]
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn keyed_product_semantic_groups_keep_numeric_and_composite_residual_equality() {
+    use fgdb_types::{CanonicalDecimal, CanonicalF64, VId};
+    let ((), report) = run_async_under_lab(0xc01d_3152, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = fixture(&contexts.commit()).await;
+        let pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let mut view = view(&contexts.commit(), &vfs, &pool).await;
+        let float = || GraphValue::Scalar(CanonicalScalar::Float(CanonicalF64::new(7.0)));
+        let decimal = || {
+            GraphValue::Scalar(CanonicalScalar::Decimal(
+                CanonicalDecimal::from_scaled_half_even(7, 0).unwrap(),
+            ))
+        };
+        let list = |value| GraphValue::List(vec![value].into_boxed_slice());
+        let map = |value| GraphValue::Map {
+            keys: vec![Box::<str>::from("k")].into_boxed_slice(),
+            values: vec![value].into_boxed_slice(),
+        };
+        // Class numbers are independently specified TRUE equality classes.
+        // Decimal candidates share language order with Int/Float but MUST NOT
+        // match them, including recursively inside maps and lists.
+        let fixtures = vec![
+            (map(scalar(7)), Some(0)),
+            (scalar(7), Some(1)),
+            (list(scalar(7)), Some(2)),
+            (float(), Some(1)),
+            (map(float()), Some(0)),
+            (decimal(), Some(3)),
+            (list(decimal()), Some(4)),
+            (map(decimal()), Some(5)),
+            (list(GraphValue::Scalar(CanonicalScalar::Null)), None),
+            (list(float()), Some(2)),
+            (GraphValue::Scalar(CanonicalScalar::Null), None),
+            (
+                GraphValue::Vertices(vec![VId(7)].into_boxed_slice()),
+                Some(6),
+            ),
+            (list(GraphValue::Vertex(VId(7))), Some(6)),
+        ];
+        let left: Vec<_> = fixtures.iter().map(|(value, _)| value.clone()).collect();
+        let right: Vec<_> = fixtures
+            .iter()
+            .rev()
+            .map(|(value, _)| value.clone())
+            .collect();
+        let raw = value_sequence("l", &left)
+            .cross_join(value_sequence("r", &right))
+            .unwrap();
+        let keyed = raw.clone().filter(&[equality(0, 1)]).unwrap();
+        let ordinary = raw
+            .filter(&[
+                equality(0, 1),
+                GraphSetPredicateOp::Not,
+                GraphSetPredicateOp::Not,
+            ])
+            .unwrap();
+        assert!(is_keyed(&keyed));
+        assert!(!is_keyed(&ordinary));
+        let mut expected = Vec::new();
+        for (left, class) in &fixtures {
+            for (right, other) in fixtures.iter().rev() {
+                if class.is_some() && class == other {
+                    expected.push(
+                        GraphValueRow::from_owned_values(vec![left.clone(), right.clone()])
+                            .canonical_bytes()
+                            .unwrap(),
+                    );
+                }
+            }
+        }
+        for query in [&keyed, &ordinary] {
+            assert_eq!(
+                execute(query, 2, &mut view, &cx, policy(100), 100, WORK)
+                    .await
+                    .unwrap()
+                    .0,
+                expected
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn keyed_product_repeated_tuple_components_and_residuals_keep_exact_pairs() {
+    let ((), report) = run_async_under_lab(0xc01d_3153, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = fixture(&contexts.commit()).await;
+        let pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let mut view = view(&contexts.commit(), &vfs, &pool).await;
+        let raw = tuple_sequence("l", &[[2, 1], [1, 3], [2, 4]])
+            .cross_join(tuple_sequence(
+                "r",
+                &[[2, 2, 3], [2, 1, 9], [1, 1, 4], [2, 2, 5]],
+            ))
+            .unwrap();
+        let code = [
+            equality(0, 2),
+            equality(0, 3),
+            GraphSetPredicateOp::And,
+            GraphSetPredicateOp::Compare {
+                left: GraphSetOperand::Column(1),
+                comparison: IntegerComparison::Less,
+                right: GraphSetOperand::Column(4),
+            },
+            GraphSetPredicateOp::And,
+        ];
+        let keyed = raw.clone().filter(&code).unwrap();
+        let mut opaque = code.to_vec();
+        opaque.extend([GraphSetPredicateOp::Not, GraphSetPredicateOp::Not]);
+        let ordinary = raw.filter(&opaque).unwrap();
+        assert!(is_keyed(&keyed));
+        assert!(!is_keyed(&ordinary));
+        let expected = frames(&[
+            [Some(2), Some(1), Some(2), Some(2), Some(3)],
+            [Some(2), Some(1), Some(2), Some(2), Some(5)],
+            [Some(1), Some(3), Some(1), Some(1), Some(4)],
+            [Some(2), Some(4), Some(2), Some(2), Some(5)],
+        ]);
+        for query in [&keyed, &ordinary] {
+            assert_eq!(
+                execute(query, 2, &mut view, &cx, policy(4), 16, WORK)
+                    .await
+                    .unwrap()
+                    .0,
+                expected
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn keyed_product_candidate_work_scales_with_keys_instead_of_the_cartesian_bag() {
+    let ((), report) = run_async_under_lab(0xc01d_3154, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = fixture(&contexts.commit()).await;
+        let pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let mut view = view(&contexts.commit(), &vfs, &pool).await;
+        let mut previous = None;
+        for size in [64, 128] {
+            let left: Vec<_> = (0..size).rev().map(Some).collect();
+            let right: Vec<_> = (0..size).map(Some).collect();
+            let raw = sequence("l", &left)
+                .cross_join(sequence("r", &right))
+                .unwrap();
+            let keyed = raw.clone().filter(&[equality(0, 1)]).unwrap();
+            let ordinary = raw
+                .filter(&[
+                    equality(0, 1),
+                    GraphSetPredicateOp::Not,
+                    GraphSetPredicateOp::Not,
+                ])
+                .unwrap();
+            assert!(is_keyed(&keyed));
+            assert!(!is_keyed(&ordinary));
+            let allowance = policy(size as u64);
+            let fast = execute(
+                &keyed,
+                2,
+                &mut view,
+                &cx,
+                allowance,
+                (size * 2) as u64,
+                WORK,
+            )
+            .await
+            .unwrap();
+            let slow = execute(
+                &ordinary,
+                2,
+                &mut view,
+                &cx,
+                allowance,
+                (size * 2) as u64,
+                WORK,
+            )
+            .await
+            .unwrap();
+            let expected = frames(
+                &left
+                    .iter()
+                    .map(|value| [*value, *value])
+                    .collect::<Vec<_>>(),
+            );
+            assert_eq!(fast.0, expected);
+            assert_eq!(slow.0, expected);
+            assert!(fast.2.work_units * 2 < slow.2.work_units);
+            if let Some((fast_before, slow_before)) = previous {
+                assert!(fast.2.work_units <= fast_before * 3);
+                assert!(slow.2.work_units > slow_before * 3);
+            }
+            previous = Some((fast.2.work_units, slow.2.work_units));
+            // These are native candidate-work counters, not timing claims:
+            // authenticated ordering/transfer work has a separate allowance.
+            eprintln!(
+                "selected cross size={size}: keyed native={} ordinary native={} keyed physical={} ordinary physical={}",
+                fast.2.work_units, slow.2.work_units, fast.3, slow.3
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn keyed_product_private_ordinals_do_not_reduce_the_public_row_size_allowance() {
+    let ((), report) = run_async_under_lab(0xc01d_3155, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let vfs = fixture(&contexts.commit()).await;
+        let pool = MemoryPool::new(32_000_000, 0).unwrap();
+        let mut view = view(&contexts.commit(), &vfs, &pool).await;
+        let query = sequence("l", &[Some(7)])
+            .cross_join(sequence("r", &[Some(7)]))
+            .unwrap()
+            .filter(&[equality(0, 1)])
+            .unwrap();
+        assert!(is_keyed(&query));
+        let expected = frames(&[[Some(7), Some(7)]]);
+        let limit = expected[0].len();
+        let prepared =
+            PreparedBufferedOrder::from_prepared_relation(&query, Some(CommitSeq(2))).unwrap();
+        for max_row_bytes in [limit, limit - 1] {
+            let scratch_pool = MemoryPool::new(2_000_000, 0).unwrap();
+            let (mut scratch, _) = file(&cx, &scratch_pool).await;
+            let (mut destination, _) = file(&cx, &scratch_pool).await;
+            let (mut auxiliary, _) = file(&cx, &scratch_pool).await;
+            let result = prepared
+                .spool_in_view(
+                    &mut view,
+                    &cx,
+                    policy(1),
+                    &mut scratch,
+                    &mut destination,
+                    &mut auxiliary,
+                    2,
+                    64,
+                    2,
+                    128,
+                    127,
+                    max_row_bytes,
+                    2,
+                    WORK,
+                )
+                .await;
+            if max_row_bytes == limit {
+                let (spool, _) = result.unwrap();
+                assert_eq!(contents(&spool, &mut destination, &cx).await, expected);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(NativeSpoolError::RowTooLarge { bytes, limit: actual })
+                        if bytes == limit && actual == max_row_bytes
+                ));
+            }
+            assert_eq!(scratch_pool.used(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 #[path = "buffered_language_order_tests.rs"]
 mod language_order_tests;
