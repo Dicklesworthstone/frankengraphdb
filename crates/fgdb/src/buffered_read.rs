@@ -3,12 +3,13 @@
 //! no resident Snapshot or BlockWriter is constructed by this path.
 
 use super::*;
+use fgdb_delta_types::PropertyKeyId;
 use fgdb_strata::store::BufferedPartition;
 pub use fgdb_strata::store::{BufferedEdge, BufferedReadError, BufferedReadLimits, BufferedValue};
 pub use fgdb_strata::tiered::buffer::{BufferLimits, BufferStats};
 use fgdb_strata::tiered::edge_scan::{BufferedEdgeDirection, BufferedEdgeIncidenceScan};
 pub use fgdb_strata::tiered::memory::{MemoryError, MemoryPool};
-use fgdb_types::QueryCx;
+use fgdb_types::{CanonicalPropertyValue, QueryCx};
 
 mod query;
 pub use query::{BufferedQueryCursor, BufferedQueryError, BufferedQueryRow};
@@ -195,6 +196,31 @@ impl<V: Vfs + Clone> BufferedReadView<V> {
         as_of: CommitSeq,
     ) -> Result<Option<BufferedValue<VertexRow>>, BufferedReadError> {
         self.partition.vertex_at(cx, vid, as_of).await
+    }
+
+    /// Read one current vertex property while retaining its resident charge.
+    /// The complete immutable patch remains authenticated; unrelated property
+    /// payloads are not decoded into the returned value.
+    pub async fn vertex_property(
+        &mut self,
+        cx: &QueryCx,
+        vid: VId,
+        key: PropertyKeyId,
+    ) -> Result<Option<BufferedValue<CanonicalPropertyValue>>, BufferedReadError> {
+        self.vertex_property_at(cx, vid, key, self.frontier()).await
+    }
+
+    /// Read one property at an exact historical cut of this view. A missing
+    /// vertex or key returns None; a stored NULL remains a present value.
+    /// The returned value keeps its reservation after this view is dropped.
+    pub async fn vertex_property_at(
+        &mut self,
+        cx: &QueryCx,
+        vid: VId,
+        key: PropertyKeyId,
+        as_of: CommitSeq,
+    ) -> Result<Option<BufferedValue<CanonicalPropertyValue>>, BufferedReadError> {
+        self.partition.vertex_property_at(cx, vid, key, as_of).await
     }
 
     pub async fn edge(

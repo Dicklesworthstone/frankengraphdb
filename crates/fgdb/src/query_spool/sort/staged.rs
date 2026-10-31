@@ -3,7 +3,7 @@
 //! DISTINCT/window and expression-failure precedence survive composition.
 
 use super::*;
-use crate::{BufferedEdge, BufferedReadView, BufferedValue, VertexRow};
+use crate::{BufferedEdge, BufferedReadView, BufferedValue};
 use fgdb_delta_types::{ElementId, PropertyKeyId};
 use fgdb_gql::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue};
 use fgdb_gql::spill_set::{
@@ -12,18 +12,18 @@ use fgdb_gql::spill_set::{
 use fgdb_gql::{GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded};
 use fgdb_types::CanonicalScalarResolver;
 
-// A property lends its scalar while owning the authenticated cold record and
-// that record's byte grant. The evaluator reserves its destination copy before
-// cloning; neither a property table nor an uncharged scalar crosses the seam.
+// A property lends its value while owning the authenticated decoded payload
+// and its byte grant. The evaluator reserves its destination copy before
+// cloning; neither a property table nor an uncharged value crosses the seam.
 pub(super) enum PinnedProperty {
-    Vertex(BufferedValue<VertexRow>, usize),
+    Vertex(BufferedValue<fgdb_types::CanonicalPropertyValue>),
     Edge(BufferedValue<BufferedEdge>, usize),
 }
 
 impl std::borrow::Borrow<fgdb_types::CanonicalPropertyValue> for PinnedProperty {
     fn borrow(&self) -> &fgdb_types::CanonicalPropertyValue {
         match self {
-            Self::Vertex(record, at) => &record.props[*at].1,
+            Self::Vertex(value) => value.as_ref(),
             Self::Edge(record, at) => &record.props[*at].1,
         }
     }
@@ -93,17 +93,11 @@ impl<V: Vfs + Clone> AsyncSpillElementSource for ElementSource<'_, '_, V> {
         let read = async move {
             match element {
                 ElementId::Vertex(vid) => {
-                    let record = view
-                        .vertex_at(cx, vid, as_of)
+                    let value = view
+                        .vertex_property_at(cx, vid, key, as_of)
                         .await
                         .map_err(|error| NativeSpoolError::BufferedRead(Box::new(error)))?;
-                    Ok(record.and_then(|record| {
-                        record
-                            .props
-                            .binary_search_by_key(&key, |(key, _)| *key)
-                            .ok()
-                            .map(|at| PinnedProperty::Vertex(record, at))
-                    }))
+                    Ok(value.map(PinnedProperty::Vertex))
                 }
                 ElementId::Edge(eid) => {
                     let record = view

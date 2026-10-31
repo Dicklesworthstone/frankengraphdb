@@ -737,6 +737,7 @@ pub(crate) fn decode_admitted_patch_topology(
 enum PatchPropertyAccess {
     Decode,
     DecodeVertex(VId),
+    DecodeProperty(VId, PropertyKeyId),
     SkipAdmitted,
 }
 
@@ -776,10 +777,16 @@ fn decode_patch_fields(
         let decode_properties = match properties {
             PatchPropertyAccess::Decode => true,
             PatchPropertyAccess::DecodeVertex(selected) => selected == vid,
-            PatchPropertyAccess::SkipAdmitted => false,
+            PatchPropertyAccess::DecodeProperty(_, _) | PatchPropertyAccess::SkipAdmitted => false,
+        };
+        let selected_key = match properties {
+            PatchPropertyAccess::DecodeProperty(selected, key) if selected == vid => Some(key),
+            _ => None,
         };
         let mut props = if decode_properties {
             Vec::with_capacity(prop_count.min(MAX_PATCH_ROWS) as usize)
+        } else if selected_key.is_some() && prop_count != 0 {
+            Vec::with_capacity(1)
         } else {
             Vec::new()
         };
@@ -795,6 +802,9 @@ fn decode_patch_fields(
                     return Err(VertexPatchError::NonCanonicalProps { at });
                 }
                 previous_key = Some(key);
+                if selected_key == Some(key) {
+                    props.push((key, decode_property_value(at, encoded, resolver)?));
+                }
             }
         }
         let row = VertexRow {
@@ -975,6 +985,33 @@ pub(crate) fn read_admitted_patch_for_vertex(
         expected,
         resolver,
         PatchPropertyAccess::DecodeVertex(vid),
+    )
+}
+
+/// Read one property from each version of one completely admitted identity.
+///
+/// Authentication, framing, labels, lifetimes and the complete property-key
+/// order remain checked. Only the selected value is decoded; all other value
+/// bytes inherit their semantic validation from complete root admission.
+/// Keep versions without the key, because a newer absent property must clear
+/// an older value. These partial rows are private to the buffered resolver and
+/// must never be exposed as complete vertex rows.
+pub(crate) fn read_admitted_patch_for_vertex_property(
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    bytes: &[u8],
+    expected: VertexPatchVersion,
+    resolver: Option<&dyn CanonicalScalarResolver>,
+    vid: VId,
+    key: PropertyKeyId,
+) -> Result<VertexPatchRows, VertexPatchError> {
+    read_patch_fields(
+        k_oid,
+        namespace,
+        bytes,
+        expected,
+        resolver,
+        PatchPropertyAccess::DecodeProperty(vid, key),
     )
 }
 
@@ -1509,6 +1546,14 @@ mod admitted_topology_tests {
                     decode_patch_fields(&bytes, None, PatchPropertyAccess::DecodeVertex(vid)),
                     Err(error.clone()),
                 );
+                assert_eq!(
+                    decode_patch_fields(
+                        &bytes,
+                        None,
+                        PatchPropertyAccess::DecodeProperty(vid, PropertyKeyId(41)),
+                    ),
+                    Err(error.clone()),
+                );
             }
         }
     }
@@ -1535,6 +1580,222 @@ mod admitted_topology_tests {
             read_admitted_patch_for_vertex(&key, namespace, &bytes, id, None, VId(u128::MAX),),
             Err(VertexPatchError::IdentityMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn selected_property_matches_complete_histories_including_absence_and_null() {
+        let key = [0x53; 32];
+        let namespace = DatabaseSecurityNamespaceId([0x71; 32]);
+        let values = format_values()
+            .into_iter()
+            .map(|(_, value)| value)
+            .chain([CanonicalScalar::Null.into()]);
+        for value in values {
+            let expected = rows(value);
+            let mut birth = expected[0].clone();
+            birth.retired_at = None;
+            let mut successor = expected[1].clone();
+            successor.retired_at = None;
+            let encoded: Vec<_> = [
+                vec![birth],
+                vec![expected[0].clone(), successor],
+                vec![expected[1].clone(), expected[2].clone()],
+            ]
+            .iter()
+            .map(|rows| {
+                let bytes = encode_patch(rows).unwrap();
+                let id = VertexPatchVersion(vertex_patch_id(&key, namespace, &bytes));
+                (bytes, id)
+            })
+            .collect();
+            let complete: Vec<_> = encoded
+                .iter()
+                .map(|(bytes, id)| read_patch(&key, namespace, bytes, *id).unwrap())
+                .collect();
+            for vid in [VId(0), VId(101), VId(u128::MAX)] {
+                for property in [PropertyKeyId(41), PropertyKeyId(59), PropertyKeyId(99)] {
+                    let selected: Vec<_> = encoded
+                        .iter()
+                        .zip(&complete)
+                        .map(|((bytes, id), complete)| {
+                            let selected = read_admitted_patch_for_vertex_property(
+                                &key, namespace, bytes, *id, None, vid, property,
+                            )
+                            .unwrap();
+                            assert_eq!(span_of_rows(&selected), span_of_rows(complete));
+                            assert_eq!(selected.len(), complete.len());
+                            for (selected, complete) in selected.iter().zip(complete.iter()) {
+                                let mut expected = complete.clone();
+                                let selected_identity = expected.vid == vid;
+                                expected.props.retain(|(candidate, _)| {
+                                    selected_identity && *candidate == property
+                                });
+                                assert_eq!(*selected, expected);
+                                assert!(selected.props.len() <= 1);
+                                if selected.vid != vid {
+                                    assert_eq!(selected.props.capacity(), 0);
+                                }
+                            }
+                            selected
+                        })
+                        .collect();
+                    for cut in [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, u64::MAX] {
+                        let mut expected = merge_vertex(&complete, vid, CommitSeq(cut));
+                        if let Some(row) = &mut expected {
+                            row.props.retain(|(candidate, _)| *candidate == property);
+                        }
+                        assert_eq!(
+                            merge_vertex(&selected, vid, CommitSeq(cut)),
+                            expected,
+                            "identity {vid:?}, property {property:?}, cut {cut}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selected_property_skips_other_values_of_the_same_vertex() {
+        let resolver = Resolver::default();
+        let bound = CanonicalScalar::Text(
+            CanonicalText::new_non_binary(
+                "already admitted but not requested",
+                NonBinaryTextBinding::new(
+                    ObjectId([1; 32]),
+                    ObjectId([2; 32]),
+                    ObjectId([3; 32]),
+                    ObjectId([4; 32]),
+                ),
+                &resolver,
+            )
+            .unwrap(),
+        );
+        let expected = rows(bound.into());
+        let bytes = encode_patch(&expected).unwrap();
+        let complete = decode_patch_with_resolver(&bytes, &resolver).unwrap();
+        let after_admission = resolver.calls.get();
+        let key = [0x53; 32];
+        let namespace = DatabaseSecurityNamespaceId([0x71; 32]);
+        let id = VertexPatchVersion(vertex_patch_id(&key, namespace, &bytes));
+        for property in [PropertyKeyId(59), PropertyKeyId(99)] {
+            let selected = read_admitted_patch_for_vertex_property(
+                &key,
+                namespace,
+                &bytes,
+                id,
+                None,
+                VId(101),
+                property,
+            )
+            .unwrap();
+            assert_eq!(resolver.calls.get(), after_admission);
+            for (selected, complete) in selected.iter().zip(complete.iter()) {
+                let expected: Vec<_> = complete
+                    .props
+                    .iter()
+                    .filter(|(candidate, _)| *candidate == property)
+                    .cloned()
+                    .collect();
+                assert_eq!(selected.props, expected);
+            }
+        }
+        assert!(
+            read_admitted_patch_for_vertex_property(
+                &key,
+                namespace,
+                &bytes,
+                id,
+                None,
+                VId(101),
+                PropertyKeyId(41),
+            )
+            .is_err(),
+            "the selected value still requires its real pinned artifacts",
+        );
+        let selected = read_admitted_patch_for_vertex_property(
+            &key,
+            namespace,
+            &bytes,
+            id,
+            Some(&resolver),
+            VId(101),
+            PropertyKeyId(41),
+        )
+        .unwrap();
+        assert_eq!(selected[0].props.as_slice(), &complete[0].props[..1]);
+        assert!(resolver.calls.get() > after_admission);
+    }
+
+    #[test]
+    fn selected_property_keeps_complete_framing_key_order_and_authentication() {
+        let key = [0x53; 32];
+        let namespace = DatabaseSecurityNamespaceId([0x71; 32]);
+        let expected = rows(CanonicalScalar::Int(7).into());
+        let bytes = encode_patch(&expected).unwrap();
+        let id = VertexPatchVersion(vertex_patch_id(&key, namespace, &bytes));
+        for property in [PropertyKeyId(41), PropertyKeyId(59), PropertyKeyId(99)] {
+            let access = PatchPropertyAccess::DecodeProperty(VId(101), property);
+            for end in 0..bytes.len() {
+                assert!(matches!(
+                    decode_patch_fields(&bytes[..end], None, access),
+                    Err(VertexPatchError::Truncated { .. }),
+                ));
+            }
+            let mut appended = bytes.clone();
+            appended.push(0x91);
+            assert_eq!(
+                decode_patch_fields(&appended, None, access),
+                Err(VertexPatchError::TrailingBytes { extra: 1 }),
+            );
+            // Header + fixed row fields + two labels + property count.
+            let first_key = 10 + 16 + 8 + 8 + 8 + 4 + 2 * 8 + 4;
+            let second_key = first_key
+                + 8
+                + 4
+                + encode_property_value(0, &expected[0].props[0].1)
+                    .unwrap()
+                    .len();
+            let mut duplicate = bytes.clone();
+            duplicate[second_key..second_key + 8].copy_from_slice(&41_u64.to_le_bytes());
+            assert_eq!(
+                decode_patch_fields(&duplicate, None, access),
+                Err(VertexPatchError::NonCanonicalProps { at: 0 }),
+            );
+            let mut changed = bytes.clone();
+            // Authentication still covers a second property's value, even
+            // when the requested key is the first property or is absent.
+            changed[second_key + 8 + 4 + 1] ^= 1;
+            assert!(matches!(
+                read_admitted_patch_for_vertex_property(
+                    &key,
+                    namespace,
+                    &changed,
+                    id,
+                    None,
+                    VId(101),
+                    property,
+                ),
+                Err(VertexPatchError::IdentityMismatch { .. }),
+            ));
+            for (wrong_key, wrong_namespace) in [
+                ([0x54; 32], namespace),
+                (key, DatabaseSecurityNamespaceId([0x72; 32])),
+            ] {
+                assert!(matches!(
+                    read_admitted_patch_for_vertex_property(
+                        &wrong_key,
+                        wrong_namespace,
+                        &bytes,
+                        id,
+                        None,
+                        VId(101),
+                        property,
+                    ),
+                    Err(VertexPatchError::IdentityMismatch { .. }),
+                ));
+            }
+        }
     }
 
     #[test]

@@ -236,3 +236,70 @@ fn undersized_prepaid_reservation_refuses_without_an_unaccounted_owner() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn selected_property_retention_keeps_exact_capacity_and_refunds_every_refusal() {
+    let ((), report) = run_async_under_lab(0x7c607, |root| async move {
+        let cx = PurposeContexts::narrow_runtime_root(&root).query();
+        let parent = MemoryPool::new(WORKSPACE, 0).unwrap();
+        let pool = parent.child(WORKSPACE, 0).unwrap();
+        let property = || {
+            let mut bytes = Vec::with_capacity(8192);
+            bytes.extend_from_slice(b"selected value");
+            let mut children = Vec::with_capacity(16);
+            children.push(CanonicalScalar::bytes(bytes).unwrap().into());
+            CanonicalPropertyValue::List(CanonicalList::try_new(children).unwrap())
+        };
+        let charge = pool.reserve(&cx, WORKSPACE).unwrap();
+        let value = property();
+        let expected = size_of::<CanonicalPropertyValue>()
+            + value
+                .owned_heap_bytes_controlled(&mut okay)
+                .unwrap()
+                .unwrap();
+        assert!(expected > 8192);
+        let mut count = 0;
+        let value = BufferedValue::from_reserved(value, charge)
+            .retain_scan_property(&mut || {
+                assert_eq!(pool.used(), WORKSPACE);
+                assert_eq!(parent.used(), WORKSPACE);
+                count += 1;
+                Ok::<_, BufferedScanError<usize>>(())
+            })
+            .unwrap();
+        assert_eq!(value.charged_bytes(), expected);
+        assert_eq!(pool.used(), expected);
+        assert_eq!(parent.used(), expected);
+        assert_eq!(value.as_ref(), &property());
+        drop(value);
+        assert_eq!(parent.used(), 0);
+
+        for stop in 1..=count {
+            let charge = pool.reserve(&cx, WORKSPACE).unwrap();
+            let value = BufferedValue::from_reserved(property(), charge);
+            let mut at = 0;
+            let result = value.retain_scan_property(&mut || {
+                assert_eq!(pool.used(), WORKSPACE);
+                at += 1;
+                if at == stop {
+                    Err(BufferedScanError::Control(stop))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(matches!(result, Err(BufferedScanError::Control(value)) if value == stop));
+            assert_eq!(at, stop);
+            assert_eq!(pool.used(), 0);
+            assert_eq!(parent.used(), 0);
+        }
+        let charge = pool.reserve(&cx, 64).unwrap();
+        let value = BufferedValue::from_reserved(property(), charge);
+        assert!(matches!(
+            value.retain_scan_property(&mut okay),
+            Err(BufferedScanError::Read(BufferedReadError::SizeOverflow)),
+        ));
+        assert_eq!(pool.used(), 0);
+        assert_eq!(parent.used(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

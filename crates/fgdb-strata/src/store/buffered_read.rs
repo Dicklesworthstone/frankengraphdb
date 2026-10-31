@@ -28,8 +28,8 @@ use crate::tiered::memory::{MemoryCharge, MemoryError, MemoryPool};
 use crate::vertex::{VertexPatchRows, VertexRow};
 use crate::{AdjacencyEntry, PartitionRootVersion};
 use asupersync::fs::Vfs;
-use fgdb_delta_types::RelationId;
-use fgdb_types::{CommitCx, CommitSeq, EId, QueryCx, StorageReadCx, VId};
+use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_types::{CanonicalPropertyValue, CommitCx, CommitSeq, EId, QueryCx, StorageReadCx, VId};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 
@@ -967,6 +967,48 @@ impl<V: Vfs> BufferedPartition<V> {
         Ok(rows)
     }
 
+    // A partial row stays inside the point-property resolver. The complete
+    // admitted extent is authenticated before its descriptor/span is reused.
+    fn decode_vertex_property_patch(
+        &self,
+        at: usize,
+        bytes: &[u8],
+        vid: VId,
+        key: PropertyKeyId,
+    ) -> Result<VertexPatchRows, BufferedReadError> {
+        let descriptor = self.patches[at];
+        let reference = &self.root.vertex_patches[at];
+        let rows = crate::vertex::read_admitted_patch_for_vertex_property(
+            self.store.k_oid.expose(),
+            self.store.namespace,
+            bytes,
+            crate::vertex::VertexPatchVersion(reference.patch_id),
+            self.store.decode_resolver(),
+            vid,
+            key,
+        )
+        .map_err(|error| StoreError::MalformedRoot(crate::root::RootError::Patch { at, error }))?;
+        let actual = crate::vertex::span_of_rows(&rows);
+        let declared = (reference.first_seq, reference.last_seq);
+        if actual != Some(declared) {
+            return Err(
+                StoreError::MalformedRoot(crate::root::RootError::PatchRangeMismatch {
+                    at,
+                    declared,
+                    actual: actual.unwrap_or((CommitSeq(0), CommitSeq(0))),
+                })
+                .into(),
+            );
+        }
+        if rows.len() != descriptor.rows
+            || rows.first().map(|row| (row.vid, row.created_at)) != descriptor.first
+            || rows.last().map(|row| row.vid) != descriptor.last
+        {
+            return Err(BufferError::InvalidLoad.into());
+        }
+        Ok(rows)
+    }
+
     /// Resolve one vertex through an admitted interval directory. Every patch
     /// that can restate its history remains a candidate; publication ordinal
     /// breaks equal-version ties independently of directory traversal order.
@@ -1014,6 +1056,80 @@ impl<V: Vfs> BufferedPartition<V> {
             .filter(|(row, _)| row.visible_at(as_of))
             .map(|(value, _)| {
                 BufferedValue::from_reserved(value, result_charge).retain_scan_vertex(&mut || {
+                    cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+                    advance(&mut work, 1, self.limits.max_work)?;
+                    Ok::<(), BufferedScanError<core::convert::Infallible>>(())
+                })
+            })
+            .transpose()
+            .map_err(|error| match error {
+                BufferedScanError::Read(error) => error,
+                BufferedScanError::Control(never) => match never {},
+            })
+    }
+
+    /// Resolve one property without materializing the selected vertex's other
+    /// values. The complete admitted patch is still authenticated and checked;
+    /// every candidate version participates in the ordinary historical winner
+    /// rule, including a newer row that omits this key or retires the vertex.
+    ///
+    /// None means the vertex is not visible or the winning row has no such
+    /// property. A stored NULL remains a present value. The returned scalar,
+    /// List or Map owns its exact retained reservation independently of this
+    /// reader; no partial vertex row escapes.
+    pub async fn vertex_property_at(
+        &mut self,
+        cx: &QueryCx,
+        vid: VId,
+        key: PropertyKeyId,
+        as_of: CommitSeq,
+    ) -> Result<Option<BufferedValue<CanonicalPropertyValue>>, BufferedReadError> {
+        self.begin(cx, as_of)?;
+        let result_charge = self.buffer.reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)?;
+        let mut result: Option<(
+            CommitSeq,
+            usize,
+            Option<CommitSeq>,
+            Option<CanonicalPropertyValue>,
+        )> = None;
+        let mut work = 0;
+        let mut candidates = self.patch_directory.candidates(vid);
+        while let Some(at) = self.patch_directory.next(&mut candidates, &mut || {
+            cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+            advance(&mut work, 1, self.limits.max_work)
+        })? {
+            let descriptor = self.patches[at];
+            if self.root.vertex_patches[at].first_seq > as_of || !descriptor.may_contain(vid) {
+                continue;
+            }
+            advance(&mut work, descriptor.rows, self.limits.max_work)?;
+            let _workspace = self.buffer.reserve_scratch(cx, OBJECT_WORKSPACE_BYTES)?;
+            let bytes = self.pin(cx, descriptor.extent, Admission::Normal).await?;
+            let rows = self.decode_vertex_property_patch(at, bytes.as_ref(), vid, key)?;
+            for row in &rows {
+                if row.vid == vid
+                    && row.created_at <= as_of
+                    && result.as_ref().is_none_or(|(created, old_at, _, _)| {
+                        (*created, *old_at) <= (row.created_at, at)
+                    })
+                {
+                    // Replacing the whole candidate, including None, prevents
+                    // a missing newer property from reviving an older value.
+                    let value = row
+                        .props
+                        .iter()
+                        .find(|(candidate, _)| *candidate == key)
+                        .map(|(_, value)| value.clone());
+                    result = Some((row.created_at, at, row.retired_at, value));
+                }
+            }
+        }
+        cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
+        result
+            .filter(|(_, _, retired, _)| retired.is_none_or(|retired| as_of < retired))
+            .and_then(|(_, _, _, value)| value)
+            .map(|value| {
+                BufferedValue::from_reserved(value, result_charge).retain_scan_property(&mut || {
                     cx.checkpoint().map_err(BufferedReadError::Interrupted)?;
                     advance(&mut work, 1, self.limits.max_work)?;
                     Ok::<(), BufferedScanError<core::convert::Infallible>>(())
@@ -1676,6 +1792,190 @@ mod tests {
             assert_eq!(found.as_ref(), &vec![entry]);
             drop(found);
             drop(view);
+            assert_eq!(pool.used(), 0);
+        });
+        assert!(report.invariant_violations.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn selected_property_point_reads_preserve_history_admission_and_affine_ownership() {
+        const VID: VId = VId((1_u128 << 80) + 101);
+        let dir = std::env::temp_dir().join(format!(
+            "fgdb-cold-selected-property-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_, report) = run_async_under_lab(0xb0_15, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let query = contexts.query();
+            let store = BlockStore::open(
+                &commit,
+                &dir,
+                [0x29; 32],
+                DatabaseSecurityNamespaceId([0x30; 32]),
+            )
+            .await
+            .unwrap();
+            let birth = VertexRow {
+                vid: VID,
+                birth_ordinal: 1,
+                created_at: CommitSeq(1),
+                retired_at: None,
+                labels: vec![fgdb_delta_types::LabelId(1)],
+                props: vec![
+                    (PropertyKeyId(1), CanonicalScalar::Int(7).into()),
+                    (
+                        PropertyKeyId(2),
+                        CanonicalScalar::bytes(vec![0x71; 2048]).unwrap().into(),
+                    ),
+                ],
+            };
+            let mut retired_birth = birth.clone();
+            retired_birth.retired_at = Some(CommitSeq(3));
+            let mut successor = birth.clone();
+            successor.created_at = CommitSeq(3);
+            successor.props.remove(0);
+            let mut retired_successor = successor.clone();
+            retired_successor.retired_at = Some(CommitSeq(5));
+            let nullable = VertexRow {
+                vid: VId(u128::MAX),
+                birth_ordinal: 2,
+                created_at: CommitSeq(1),
+                retired_at: None,
+                labels: vec![],
+                props: vec![(PropertyKeyId(1), CanonicalScalar::Null.into())],
+            };
+            let encoded: Vec<_> = [
+                vec![birth, nullable],
+                vec![retired_birth],
+                vec![successor],
+                vec![retired_successor],
+            ]
+            .iter()
+            .map(|rows| {
+                (
+                    crate::vertex::encode_patch(rows).unwrap(),
+                    crate::vertex::span_of_rows(rows).unwrap(),
+                )
+            })
+            .collect();
+            let mut patches = Vec::new();
+            for (bytes, (first_seq, last_seq)) in &encoded {
+                let patch = store.put_patch(&commit, bytes).await.unwrap();
+                patches.push(crate::root::PatchRef {
+                    patch_id: patch.0,
+                    first_seq: *first_seq,
+                    last_seq: *last_seq,
+                });
+            }
+            let id = store
+                .put_root(
+                    &commit,
+                    &PartitionRoot {
+                        graph: GraphId(1),
+                        branch: BranchId(1),
+                        partition: 0,
+                        published_at: CommitSeq(5),
+                        blocks: vec![],
+                        vertex_patches: patches,
+                    },
+                )
+                .await
+                .unwrap();
+            let pool = MemoryPool::new(8 * 1024 * 1024, 0).unwrap();
+            let limits = BufferedReadLimits {
+                max_root_bytes: 64 * 1024,
+                max_source_bytes: 1024 * 1024,
+                max_blocks: 0,
+                max_vertex_patches: 4,
+                max_work: 10_000,
+                buffer: BufferLimits {
+                    max_frames: 1,
+                    max_ghost_entries: 1,
+                    max_extent_bytes: 16 * 1024,
+                },
+            };
+            let mut view = store
+                .open_buffered_root(&query, id, pool.clone(), limits)
+                .await
+                .unwrap();
+
+            // The selected decoder preserves the same declared span and
+            // routing descriptor refusal, not just keyed payload identity.
+            view.root.vertex_patches[0].first_seq = CommitSeq(2);
+            let error = view
+                .decode_vertex_property_patch(0, &encoded[0].0, VID, PropertyKeyId(1))
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                BufferedReadError::Store(error)
+                    if matches!(*error, StoreError::MalformedRoot(
+                        crate::root::RootError::PatchRangeMismatch { at: 0, .. }
+                    ))
+            ));
+            view.root.vertex_patches[0].first_seq = CommitSeq(1);
+            view.patches[0].rows += 1;
+            assert!(matches!(
+                view.decode_vertex_property_patch(0, &encoded[0].0, VID, PropertyKeyId(1)),
+                Err(BufferedReadError::Buffer(BufferError::InvalidLoad)),
+            ));
+            view.patches[0].rows -= 1;
+
+            let before = (view.stats().hits, view.stats().misses, pool.used());
+            view.limits.max_work = 0;
+            assert!(matches!(
+                view.vertex_property_at(&query, VID, PropertyKeyId(1), CommitSeq(1))
+                    .await,
+                Err(BufferedReadError::Limit {
+                    resource: "buffered source work",
+                    requested: 1,
+                    limit: 0,
+                }),
+            ));
+            assert_eq!(
+                (view.stats().hits, view.stats().misses, pool.used()),
+                before
+            );
+            view.limits.max_work = limits.max_work;
+
+            for cut in [1, 3, 1, 4, 5, 0] {
+                for vid in [VID, VId(u128::MAX), VId(42)] {
+                    for key in [PropertyKeyId(1), PropertyKeyId(2), PropertyKeyId(99)] {
+                        let full = view.vertex_at(&query, vid, CommitSeq(cut)).await.unwrap();
+                        let expected = full.as_ref().and_then(|row| {
+                            row.props
+                                .iter()
+                                .find(|(candidate, _)| *candidate == key)
+                                .map(|(_, value)| value.clone())
+                        });
+                        let selected = view
+                            .vertex_property_at(&query, vid, key, CommitSeq(cut))
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            selected.as_ref().map(|value| value.as_ref()),
+                            expected.as_ref()
+                        );
+                        if vid == VID && cut == 1 && key == PropertyKeyId(1) {
+                            assert!(
+                                selected.as_ref().unwrap().charged_bytes() + 2048
+                                    <= full.as_ref().unwrap().charged_bytes()
+                            );
+                        }
+                    }
+                }
+            }
+            let selected = view
+                .vertex_property_at(&query, VID, PropertyKeyId(1), CommitSeq(1))
+                .await
+                .unwrap()
+                .unwrap();
+            let charge = selected.charged_bytes();
+            drop(view);
+            assert_eq!(pool.used(), charge);
+            assert_eq!(selected.as_ref(), &CanonicalScalar::Int(7).into());
+            drop(selected);
             assert_eq!(pool.used(), 0);
         });
         assert!(report.invariant_violations.is_empty(), "{report:?}");

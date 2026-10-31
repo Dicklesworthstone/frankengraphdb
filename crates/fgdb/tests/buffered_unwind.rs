@@ -1,6 +1,9 @@
 //! Graph-backed and source-free UNWIND/set operations through external stages.
 //! Literal expectations describe the fixture, independently of either executor.
 
+#[path = "buffered_unwind/selective_properties.rs"]
+mod selective_properties;
+
 use asupersync::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use asupersync::lab::run_async_under_lab;
 use fgdb::{

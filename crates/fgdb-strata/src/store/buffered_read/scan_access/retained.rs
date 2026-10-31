@@ -87,6 +87,25 @@ impl BufferedValue<VertexRow> {
     }
 }
 
+impl BufferedValue<CanonicalPropertyValue> {
+    /// Retain only the selected immutable property's actual recursive capacity.
+    /// History replacements and all patch decoder temporaries have finished.
+    pub(crate) fn retain_scan_property<C>(
+        self,
+        control: &mut impl FnMut() -> Result<(), BufferedScanError<C>>,
+    ) -> Result<Self, BufferedScanError<C>> {
+        control()?;
+        let bytes = add(
+            size_of::<CanonicalPropertyValue>(),
+            self.value
+                .owned_heap_bytes_controlled(control)?
+                .ok_or(BufferedReadError::SizeOverflow)?,
+        )?;
+        control()?;
+        Ok(retain(self, bytes)?)
+    }
+}
+
 impl BufferedValue<BufferedEdge> {
     /// Called after resolving the complete edge history and before retaining
     /// it through endpoint reads or another nested traversal. In-flight winner
