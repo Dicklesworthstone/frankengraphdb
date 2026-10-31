@@ -28,24 +28,31 @@ fn text(value: &str) -> CanonicalScalar {
 fn drain<C>(
     source: &mut PrefixCandidates,
     index: &PropertyEqualityIndex,
+    patches: &[VertexPatchRows],
     after: &mut Option<VId>,
     output: &mut Vec<VId>,
     control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
 ) -> Result<(), C> {
     loop {
-        match source.next(index, *after, control)? {
+        match source.next(index, patches, *after, control)? {
             SourceStep::Item(vid) => {
                 assert!(after.is_none_or(|previous| previous < vid));
                 assert_eq!(
                     source.history(vid).is_some(),
-                    matches!(source.frontier, Frontier::Histories(_)),
+                    matches!(
+                        source.frontier,
+                        Frontier::Histories(_) | Frontier::HistoricalMatches { .. }
+                    ),
                     "the fallback reuses its current history without another root search",
                 );
                 assert!(source.history(VId(vid.0 ^ 1)).is_none());
                 *after = Some(vid);
                 output.push(vid);
             }
-            SourceStep::Skipped(_) => unreachable!("prefix histories use the ordinary residual"),
+            SourceStep::Skipped(vid) => {
+                assert!(after.is_none_or(|previous| previous < vid));
+                *after = Some(vid);
+            }
             SourceStep::Exhausted => return Ok(()),
         }
     }
@@ -58,14 +65,30 @@ fn every_prefix_refusal_preserves_the_full_ordered_retry_at_the_capacity_boundar
         let mut changed = Vec::new();
         for at in 0..distinct {
             for copy in 0..2 {
-                let vid = VId((at * 2 + copy) as u128);
+                let vid = VId((at * 4 + copy * 2 + 1) as u128);
                 first.push(row(vid, 1, text(&format!("Ad{at}"))));
                 if copy == 0 {
-                    changed.push(row(vid, 2, text(&format!("Ad{}", (at + 1) % distinct))));
+                    changed.push(row(
+                        vid,
+                        2,
+                        if at == 0 {
+                            text("outside now")
+                        } else {
+                            text(&format!("Ad{}", (at + 1) % distinct))
+                        },
+                    ));
                 }
             }
         }
-        first.push(row(VId(u128::MAX), 1, text("outside")));
+        for id in [0, 2, 4, u128::MAX] {
+            first.push(row(VId(id), 1, text("outside")));
+        }
+        // Future and retired matches belong to the posting union regardless
+        // of the cut at which the enclosing cursor will resolve their winner.
+        let mut retired = row(VId(6), 1, text("Ad0"));
+        retired.retired_at = Some(CommitSeq(2));
+        changed.push(retired);
+        changed.push(row(VId(8), 99, text("Ad1")));
         let patches = vec![patch(first), patch(changed)];
         let index = PropertyEqualityIndex::build(&patches);
         let indexed = distinct <= range::MAX_RANGE_HEADS;
@@ -73,8 +96,7 @@ fn every_prefix_refusal_preserves_the_full_ordered_retry_at_the_capacity_boundar
             .iter()
             .flat_map(|patch| patch.iter())
             .filter(|row| {
-                !indexed
-                    || matches!(row.props[0].1.as_scalar(), Some(CanonicalScalar::Text(value))
+                matches!(row.props[0].1.as_scalar(), Some(CanonicalScalar::Text(value))
                 if value.as_str().starts_with("Ad"))
             })
             .map(|row| row.vid)
@@ -85,11 +107,18 @@ fn every_prefix_refusal_preserves_the_full_ordered_retry_at_the_capacity_boundar
         let mut total = 0;
         let mut scratch = 0;
         let mut full = Vec::new();
-        drain(&mut source, &index, &mut None, &mut full, &mut |event| {
-            total += 1;
-            scratch += usize::from(matches!(event, VertexScanEvent::ScratchEntry));
-            Ok::<_, usize>(())
-        })
+        drain(
+            &mut source,
+            &index,
+            &patches,
+            &mut None,
+            &mut full,
+            &mut |event| {
+                total += 1;
+                scratch += usize::from(matches!(event, VertexScanEvent::ScratchEntry));
+                Ok::<_, usize>(())
+            },
+        )
         .unwrap();
         assert_eq!(full, expected);
         assert_eq!(
@@ -106,16 +135,28 @@ fn every_prefix_refusal_preserves_the_full_ordered_retry_at_the_capacity_boundar
             let mut after = None;
             let mut output = Vec::new();
             let mut seen = 0;
-            let result = drain(&mut source, &index, &mut after, &mut output, &mut |_| {
-                seen += 1;
-                if seen == stop { Err(stop) } else { Ok(()) }
-            });
+            let result = drain(
+                &mut source,
+                &index,
+                &patches,
+                &mut after,
+                &mut output,
+                &mut |_| {
+                    seen += 1;
+                    if seen == stop { Err(stop) } else { Ok(()) }
+                },
+            );
             assert_eq!(result, Err(stop), "distinct={distinct}, stop={stop}");
             assert_eq!(seen, stop);
             assert_eq!(output, expected[..output.len()]);
-            drain(&mut source, &index, &mut after, &mut output, &mut |_| {
-                Ok::<_, usize>(())
-            })
+            drain(
+                &mut source,
+                &index,
+                &patches,
+                &mut after,
+                &mut output,
+                &mut |_| Ok::<_, usize>(()),
+            )
             .unwrap();
             assert_eq!(output, expected, "distinct={distinct}, stop={stop}");
         }
@@ -137,17 +178,32 @@ fn wide_prefix_traversal_is_linear_against_repeated_successor_descent() {
         let mut source = PrefixCandidates::new(KEY, "Ad").unwrap();
         let mut output = Vec::new();
         let (mut work, mut scratch) = (0_usize, 0_usize);
-        drain(&mut source, &index, &mut None, &mut output, &mut |event| {
-            match event {
-                VertexScanEvent::Work => work += 1,
-                VertexScanEvent::ScratchEntry => scratch += 1,
-            }
-            Ok::<_, ()>(())
-        })
+        drain(
+            &mut source,
+            &index,
+            &patches,
+            &mut None,
+            &mut output,
+            &mut |event| {
+                match event {
+                    VertexScanEvent::Work => work += 1,
+                    VertexScanEvent::ScratchEntry => scratch += 1,
+                }
+                Ok::<_, ()>(())
+            },
+        )
         .unwrap();
         assert_eq!(output, expected);
         assert_eq!(scratch, usize::from(index.histories.height()));
-        assert!(work <= 3 * count + 512, "count={count}, work={work}");
+        // The source now proves prefix membership before admitting a history.
+        // One version with one property costs three checks; the unchanged
+        // traversal bound remains three units per identity plus setup.
+        let membership_work = 3 * count;
+        let traversal_work = work - membership_work;
+        assert!(
+            traversal_work <= 3 * count + 512,
+            "count={count}, work={work}"
+        );
         let mut old_rows = Vec::new();
         let mut old_work = 0_usize;
         let mut after = None;
@@ -163,7 +219,10 @@ fn wide_prefix_traversal_is_linear_against_repeated_successor_descent() {
         }
         assert_eq!(old_rows, expected);
         if count >= 4096 {
-            assert!(old_work > 3 * work, "old={old_work}, linear={work}");
+            assert!(
+                old_work > 3 * traversal_work,
+                "old={old_work}, linear={traversal_work}"
+            );
         }
     }
 }
@@ -199,9 +258,14 @@ fn prefix_unknown_types_and_unicode_successors_preserve_the_storage_domain() {
             .map(|(at, _)| VId(at as u128))
             .collect();
         let mut output = Vec::new();
-        drain(&mut source, &index, &mut None, &mut output, &mut |_| {
-            Ok::<_, ()>(())
-        })
+        drain(
+            &mut source,
+            &index,
+            &patches,
+            &mut None,
+            &mut output,
+            &mut |_| Ok::<_, ()>(()),
+        )
         .unwrap();
         assert_eq!(output, expected, "prefix={prefix:?}");
     }
@@ -218,9 +282,14 @@ fn prefix_unknown_types_and_unicode_successors_preserve_the_storage_domain() {
         let index = PropertyEqualityIndex::build(&patches);
         let mut source = PrefixCandidates::new(KEY, "A").unwrap();
         let mut output = Vec::new();
-        drain(&mut source, &index, &mut None, &mut output, &mut |_| {
-            Ok::<_, ()>(())
-        })
+        drain(
+            &mut source,
+            &index,
+            &patches,
+            &mut None,
+            &mut output,
+            &mut |_| Ok::<_, ()>(()),
+        )
         .unwrap();
         assert_eq!(output, vec![VId(1)]);
         assert!(matches!(source.frontier, Frontier::Buckets(_)));

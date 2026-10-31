@@ -102,13 +102,20 @@ fn numeric_history_and_other_properties_do_not_disable_selective_prefixes() {
     let mut output = Vec::new();
     let mut work = 0;
     let mut scratch = 0;
-    drain(&mut source, &index, &mut None, &mut output, &mut |event| {
-        match event {
-            VertexScanEvent::Work => work += 1,
-            VertexScanEvent::ScratchEntry => scratch += 1,
-        }
-        Ok::<_, ()>(())
-    })
+    drain(
+        &mut source,
+        &index,
+        &patches,
+        &mut None,
+        &mut output,
+        &mut |event| {
+            match event {
+                VertexScanEvent::Work => work += 1,
+                VertexScanEvent::ScratchEntry => scratch += 1,
+            }
+            Ok::<_, ()>(())
+        },
+    )
     .unwrap();
     assert_eq!(output, expected);
     assert_eq!(output, vec![VId(0), VId(3000)]);
@@ -155,10 +162,17 @@ fn each_mixed_or_collated_control_refusal_keeps_a_complete_retry() {
         let mut complete = PrefixCandidates::new(KEY, "Ab").unwrap();
         let mut total = 0;
         let mut output = Vec::new();
-        drain(&mut complete, &index, &mut None, &mut output, &mut |_| {
-            total += 1;
-            Ok::<_, usize>(())
-        })
+        drain(
+            &mut complete,
+            &index,
+            &patches,
+            &mut None,
+            &mut output,
+            &mut |_| {
+                total += 1;
+                Ok::<_, usize>(())
+            },
+        )
         .unwrap();
         assert_eq!(output, expected);
         assert_eq!(
@@ -175,17 +189,29 @@ fn each_mixed_or_collated_control_refusal_keeps_a_complete_retry() {
             let mut output = Vec::new();
             let mut seen = 0;
             assert_eq!(
-                drain(&mut source, &index, &mut after, &mut output, &mut |_| {
-                    seen += 1;
-                    if seen == stop { Err(stop) } else { Ok(()) }
-                }),
+                drain(
+                    &mut source,
+                    &index,
+                    &patches,
+                    &mut after,
+                    &mut output,
+                    &mut |_| {
+                        seen += 1;
+                        if seen == stop { Err(stop) } else { Ok(()) }
+                    }
+                ),
                 Err(stop),
             );
             assert_eq!(seen, stop);
             assert_eq!(output, expected[..output.len()]);
-            drain(&mut source, &index, &mut after, &mut output, &mut |_| {
-                Ok::<_, usize>(())
-            })
+            drain(
+                &mut source,
+                &index,
+                &patches,
+                &mut after,
+                &mut output,
+                &mut |_| Ok::<_, usize>(()),
+            )
             .unwrap();
             assert_eq!(
                 output, expected,
